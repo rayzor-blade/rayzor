@@ -2562,9 +2562,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                             }
 
                             if matches!(return_type.as_ref(), IrType::Void) {
-                                self.context
-                                    .void_type()
-                                    .fn_type(&param_types, *varargs)
+                                self.context.void_type().fn_type(&param_types, *varargs)
                             } else {
                                 let ret_ty = self.translate_type(return_type)?;
                                 ret_ty.fn_type(&param_types, *varargs)
@@ -2827,7 +2825,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         } else {
                             // For pointers/floats, bitcast to i64
                             self.builder
-                                .build_bitcast(captured_val, i64_type, "env_cast")
+                                .build_bit_cast(captured_val, i64_type, "env_cast")
                                 .map_err(|e| format!("Failed to bitcast env val: {}", e))?
                         };
 

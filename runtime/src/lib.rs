@@ -38,6 +38,8 @@ pub mod generic_vec;
 // Export Haxe core type runtime modules
 pub mod anon_object; // Anonymous object runtime (Arc-based, COW)
 pub mod concurrency; // Concurrency primitives (Thread, Arc, Mutex, Channel)
+pub mod ereg; // EReg regular expressions (regex crate)
+pub mod exception;
 pub mod haxe_array; // Dynamic Array API
 pub mod haxe_math; // Math functions
 pub mod haxe_string; // Comprehensive String API
@@ -45,9 +47,7 @@ pub mod haxe_sys; // System/IO functions
 pub mod reflect; // Reflect + Type API for anonymous objects
 pub mod safety; // Safety validation and error reporting
 pub mod type_system; // Runtime type information for Dynamic values
-pub mod vec_plugin; // Pointer-based Vec API
-pub mod ereg; // EReg regular expressions (regex crate)
-pub mod exception; // Exception handling (setjmp/longjmp)
+pub mod vec_plugin; // Pointer-based Vec API // Exception handling (setjmp/longjmp)
 
 pub mod plugin_impl; // Plugin registration
 

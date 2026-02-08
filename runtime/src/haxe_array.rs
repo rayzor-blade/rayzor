@@ -1032,11 +1032,7 @@ pub extern "C" fn haxe_array_filter(
 /// Callback signature: fn(env_ptr: *mut u8, a: i64, b: i64) -> i32
 /// Returns negative if a < b, 0 if equal, positive if a > b.
 #[no_mangle]
-pub extern "C" fn haxe_array_sort(
-    arr: *mut HaxeArray,
-    fn_ptr: usize,
-    env_ptr: *mut u8,
-) {
+pub extern "C" fn haxe_array_sort(arr: *mut HaxeArray, fn_ptr: usize, env_ptr: *mut u8) {
     if arr.is_null() || fn_ptr == 0 {
         return;
     }

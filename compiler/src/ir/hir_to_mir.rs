@@ -4256,11 +4256,9 @@ impl<'a> HirToMirContext<'a> {
             IrType::Ptr(Box::new(IrType::I8)),
         )?;
         let zero_offset = self.builder.build_const(IrValue::I64(0))?;
-        let tag_gep = self.builder.build_gep(
-            ptr,
-            vec![zero_offset],
-            IrType::Ptr(Box::new(IrType::I8)),
-        )?;
+        let tag_gep =
+            self.builder
+                .build_gep(ptr, vec![zero_offset], IrType::Ptr(Box::new(IrType::I8)))?;
         let tag_ptr = self
             .builder
             .build_bitcast(tag_gep, IrType::Ptr(Box::new(IrType::I32)))?;
@@ -5167,19 +5165,15 @@ impl<'a> HirToMirContext<'a> {
                     // Check for interface dispatch: if object has interface type,
                     // load the method function pointer from the fat pointer and call indirectly
                     if let Some(iface_sym) = self.get_interface_symbol(object.ty) {
-                        let method_name_interned = self
-                            .symbol_table
-                            .get_symbol(*field)
-                            .map(|s| s.name);
+                        let method_name_interned =
+                            self.symbol_table.get_symbol(*field).map(|s| s.name);
 
                         if let Some(method_name_i) = method_name_interned {
                             // Find the method's index in the interface
                             let method_index = self
                                 .interface_method_names
                                 .get(&iface_sym)
-                                .and_then(|names| {
-                                    names.iter().position(|n| *n == method_name_i)
-                                });
+                                .and_then(|names| names.iter().position(|n| *n == method_name_i));
 
                             if let Some(idx) = method_index {
                                 // Lower the object (fat pointer)
@@ -5192,21 +5186,18 @@ impl<'a> HirToMirContext<'a> {
                                     .collect();
 
                                 // Load object pointer from fat_ptr[0]
-                                let obj_ptr = self.builder.build_load(
-                                    fat_ptr,
-                                    IrType::I64,
-                                )?;
+                                let obj_ptr = self.builder.build_load(fat_ptr, IrType::I64)?;
 
                                 // Load function pointer from fat_ptr[(idx+1)*8]
                                 let fn_offset = self
                                     .builder
                                     .build_const(IrValue::I64(((idx + 1) * 8) as i64))?;
-                                let fn_slot = self
-                                    .builder
-                                    .build_ptr_add(fat_ptr, fn_offset, IrType::Ptr(Box::new(IrType::U8)))?;
-                                let fn_ptr = self
-                                    .builder
-                                    .build_load(fn_slot, IrType::I64)?;
+                                let fn_slot = self.builder.build_ptr_add(
+                                    fat_ptr,
+                                    fn_offset,
+                                    IrType::Ptr(Box::new(IrType::U8)),
+                                )?;
+                                let fn_ptr = self.builder.build_load(fn_slot, IrType::I64)?;
 
                                 // Build call args: self (obj_ptr) + user args
                                 let mut call_args = vec![obj_ptr];
@@ -6018,7 +6009,8 @@ impl<'a> HirToMirContext<'a> {
                                             if field_count == 0 {
                                                 // If enum has parameterized variants, all variants must be boxed
                                                 if self.enum_is_boxed(parent_enum_id) {
-                                                    return self.build_boxed_enum_tag_only(idx as i32);
+                                                    return self
+                                                        .build_boxed_enum_tag_only(idx as i32);
                                                 }
                                                 // Pure discriminant enum - return index directly
                                                 return self
@@ -6118,10 +6110,8 @@ impl<'a> HirToMirContext<'a> {
                         let receiver_type = receiver.ty;
 
                         if let Some(iface_sym) = self.get_interface_symbol(receiver_type) {
-                            let method_name_interned = self
-                                .symbol_table
-                                .get_symbol(*symbol)
-                                .map(|s| s.name);
+                            let method_name_interned =
+                                self.symbol_table.get_symbol(*symbol).map(|s| s.name);
 
                             if let Some(method_name_i) = method_name_interned {
                                 let method_index = self
@@ -6136,9 +6126,15 @@ impl<'a> HirToMirContext<'a> {
                                     let fat_ptr_raw = self.lower_expression(receiver)?;
 
                                     // The fat pointer may be stored as I64 - bitcast to Ptr if needed
-                                    let fat_ptr_ty = self.builder.get_register_type(fat_ptr_raw).unwrap_or(IrType::I64);
+                                    let fat_ptr_ty = self
+                                        .builder
+                                        .get_register_type(fat_ptr_raw)
+                                        .unwrap_or(IrType::I64);
                                     let fat_ptr = if !matches!(fat_ptr_ty, IrType::Ptr(_)) {
-                                        self.builder.build_bitcast(fat_ptr_raw, IrType::Ptr(Box::new(IrType::I64)))?
+                                        self.builder.build_bitcast(
+                                            fat_ptr_raw,
+                                            IrType::Ptr(Box::new(IrType::I64)),
+                                        )?
                                     } else {
                                         fat_ptr_raw
                                     };
@@ -6150,21 +6146,18 @@ impl<'a> HirToMirContext<'a> {
                                         .collect();
 
                                     // Load object pointer from fat_ptr[0]
-                                    let obj_ptr = self.builder.build_load(
-                                        fat_ptr,
-                                        IrType::I64,
-                                    )?;
+                                    let obj_ptr = self.builder.build_load(fat_ptr, IrType::I64)?;
 
                                     // Load function pointer from fat_ptr[(idx+1)*8]
                                     let fn_offset = self
                                         .builder
                                         .build_const(IrValue::I64(((idx + 1) * 8) as i64))?;
-                                    let fn_slot = self
-                                        .builder
-                                        .build_ptr_add(fat_ptr, fn_offset, IrType::Ptr(Box::new(IrType::U8)))?;
-                                    let fn_ptr = self
-                                        .builder
-                                        .build_load(fn_slot, IrType::I64)?;
+                                    let fn_slot = self.builder.build_ptr_add(
+                                        fat_ptr,
+                                        fn_offset,
+                                        IrType::Ptr(Box::new(IrType::U8)),
+                                    )?;
+                                    let fn_ptr = self.builder.build_load(fn_slot, IrType::I64)?;
 
                                     // Build call args: self (obj_ptr) + user args
                                     let mut call_args = vec![obj_ptr];
@@ -10110,21 +10103,22 @@ impl<'a> HirToMirContext<'a> {
                     vec![],
                     IrType::Ptr(Box::new(IrType::Void)),
                 );
-                let jmp_buf = self
-                    .builder
-                    .build_call_direct(push_fn, vec![], IrType::Ptr(Box::new(IrType::Void)));
+                let jmp_buf = self.builder.build_call_direct(
+                    push_fn,
+                    vec![],
+                    IrType::Ptr(Box::new(IrType::Void)),
+                );
 
                 let setjmp_fn = self.get_or_register_extern_function(
                     "_setjmp",
                     vec![IrType::Ptr(Box::new(IrType::Void))],
                     IrType::I32,
                 );
-                let jmp_buf_reg = jmp_buf.unwrap_or_else(|| {
-                    self.builder.build_const(IrValue::I64(0)).expect("const")
-                });
-                let setjmp_result = self
-                    .builder
-                    .build_call_direct(setjmp_fn, vec![jmp_buf_reg], IrType::I32);
+                let jmp_buf_reg = jmp_buf
+                    .unwrap_or_else(|| self.builder.build_const(IrValue::I64(0)).expect("const"));
+                let setjmp_result =
+                    self.builder
+                        .build_call_direct(setjmp_fn, vec![jmp_buf_reg], IrType::I32);
 
                 let zero = self.builder.build_const(IrValue::I32(0)).expect("const");
                 let setjmp_reg = setjmp_result.unwrap_or(zero);
@@ -10141,8 +10135,7 @@ impl<'a> HirToMirContext<'a> {
                     vec![],
                     IrType::Void,
                 );
-                self.builder
-                    .build_call_direct(pop_fn, vec![], IrType::Void);
+                self.builder.build_call_direct(pop_fn, vec![], IrType::Void);
 
                 if let Some(finally_body) = &finally_expr {
                     self.lower_expression(finally_body);
@@ -10169,14 +10162,11 @@ impl<'a> HirToMirContext<'a> {
                 let exception_id = self
                     .builder
                     .build_call_direct(get_exc_fn, vec![], IrType::I64)
-                    .unwrap_or_else(|| {
-                        self.builder.build_const(IrValue::I64(0)).expect("const")
-                    });
+                    .unwrap_or_else(|| self.builder.build_const(IrValue::I64(0)).expect("const"));
 
                 // Execute first matching catch handler
                 if let Some(handler) = catch_handlers.first() {
-                    self.symbol_map
-                        .insert(handler.exception_var, exception_id);
+                    self.symbol_map.insert(handler.exception_var, exception_id);
                     self.lower_expression(&handler.body);
                 }
 
@@ -14550,9 +14540,7 @@ impl<'a> HirToMirContext<'a> {
                 for pat in &case.patterns[1..] {
                     if let Some(prev) = result {
                         if let Some(pat_match) = self.lower_pattern_test(scrut_val, pat) {
-                            result = self
-                                .builder
-                                .build_binop(BinaryOp::Or, prev, pat_match);
+                            result = self.builder.build_binop(BinaryOp::Or, prev, pat_match);
                         }
                     }
                 }
@@ -14688,10 +14676,10 @@ impl<'a> HirToMirContext<'a> {
                     .build_bitcast(tag_gep, IrType::Ptr(Box::new(IrType::I32)))?;
                 let tag_val = self.builder.build_load(tag_ptr, IrType::I32)?;
 
-                let expected_tag =
-                    self.builder.build_int(variant_discriminant, IrType::I32)?;
-                let tag_matches =
-                    self.builder.build_cmp(CompareOp::Eq, tag_val, expected_tag)?;
+                let expected_tag = self.builder.build_int(variant_discriminant, IrType::I32)?;
+                let tag_matches = self
+                    .builder
+                    .build_cmp(CompareOp::Eq, tag_val, expected_tag)?;
 
                 // If no fields to match, just return tag comparison
                 if fields.is_empty() || fields.iter().all(|f| matches!(f, HirPattern::Wildcard)) {
@@ -14703,25 +14691,21 @@ impl<'a> HirToMirContext<'a> {
 
                 for (i, field_pattern) in fields.iter().enumerate() {
                     // Field at byte offset 8 + i*8
-                    let field_offset =
-                        self.builder.build_int((8 + i * 8) as i64, IrType::I64)?;
+                    let field_offset = self.builder.build_int((8 + i * 8) as i64, IrType::I64)?;
                     let field_gep = self.builder.build_gep(
                         enum_ptr,
                         vec![field_offset],
                         IrType::Ptr(Box::new(IrType::I8)),
                     )?;
-                    let field_ptr = self.builder.build_bitcast(
-                        field_gep,
-                        IrType::Ptr(Box::new(IrType::I64)),
-                    )?;
+                    let field_ptr = self
+                        .builder
+                        .build_bitcast(field_gep, IrType::Ptr(Box::new(IrType::I64)))?;
                     let field_val = self.builder.build_load(field_ptr, IrType::I64)?;
 
                     let field_match = self.lower_pattern_test(field_val, field_pattern)?;
-                    all_fields_match = self.builder.build_binop(
-                        BinaryOp::And,
-                        all_fields_match,
-                        field_match,
-                    )?;
+                    all_fields_match =
+                        self.builder
+                            .build_binop(BinaryOp::And, all_fields_match, field_match)?;
                 }
 
                 Some(all_fields_match)
@@ -14954,9 +14938,7 @@ impl<'a> HirToMirContext<'a> {
                 let mut result = self.lower_pattern_test(scrutinee, &patterns[0])?;
                 for pat in &patterns[1..] {
                     let pat_match = self.lower_pattern_test(scrutinee, pat)?;
-                    result = self
-                        .builder
-                        .build_binop(BinaryOp::Or, result, pat_match)?;
+                    result = self.builder.build_binop(BinaryOp::Or, result, pat_match)?;
                 }
                 Some(result)
             }
@@ -15030,9 +15012,9 @@ impl<'a> HirToMirContext<'a> {
             vec![],
             IrType::Ptr(Box::new(IrType::Void)),
         );
-        let jmp_buf = self
-            .builder
-            .build_call_direct(push_fn, vec![], IrType::Ptr(Box::new(IrType::Void)));
+        let jmp_buf =
+            self.builder
+                .build_call_direct(push_fn, vec![], IrType::Ptr(Box::new(IrType::Void)));
 
         // Call _setjmp(jmp_buf) -> i32 (0 = normal, 1 = exception caught)
         let setjmp_fn = self.get_or_register_extern_function(
@@ -15045,9 +15027,9 @@ impl<'a> HirToMirContext<'a> {
                 .build_const(IrValue::I64(0))
                 .expect("failed to create const")
         });
-        let setjmp_result = self
-            .builder
-            .build_call_direct(setjmp_fn, vec![jmp_buf_reg], IrType::I32);
+        let setjmp_result =
+            self.builder
+                .build_call_direct(setjmp_fn, vec![jmp_buf_reg], IrType::I32);
 
         // Branch: setjmp_result == 0 → normal_path, else → landing_pad
         let zero = self
@@ -15072,8 +15054,7 @@ impl<'a> HirToMirContext<'a> {
             vec![],
             IrType::Void,
         );
-        self.builder
-            .build_call_direct(pop_fn, vec![], IrType::Void);
+        self.builder.build_call_direct(pop_fn, vec![], IrType::Void);
 
         if let Some(fb) = finally_block {
             self.builder.build_branch(fb);
@@ -15094,11 +15075,8 @@ impl<'a> HirToMirContext<'a> {
             .build_call_direct(pop_fn2, vec![], IrType::Void);
 
         // Get the exception value
-        let get_exc_fn = self.get_or_register_extern_function(
-            "rayzor_get_exception",
-            vec![],
-            IrType::I64,
-        );
+        let get_exc_fn =
+            self.get_or_register_extern_function("rayzor_get_exception", vec![], IrType::I64);
         let exception_id = self
             .builder
             .build_call_direct(get_exc_fn, vec![], IrType::I64)
@@ -15842,21 +15820,28 @@ impl<'a> HirToMirContext<'a> {
             .cloned()?;
         let method_count = vtable.len();
         let fat_ptr_size = (1 + method_count) * 8; // object_ptr + N function pointers
-        // Allocate fat pointer using tracked_alloc for proper lifecycle
+                                                   // Allocate fat pointer using tracked_alloc for proper lifecycle
         let malloc_fn = self.get_or_register_extern_function(
             "rayzor_tracked_alloc",
             vec![IrType::I64],
             IrType::Ptr(Box::new(IrType::U8)),
         );
-        let size_reg = self.builder.build_const(IrValue::I64(fat_ptr_size as i64))?;
-        let fat_ptr = self
+        let size_reg = self
             .builder
-            .build_call_direct(malloc_fn, vec![size_reg], IrType::Ptr(Box::new(IrType::U8)))?;
+            .build_const(IrValue::I64(fat_ptr_size as i64))?;
+        let fat_ptr = self.builder.build_call_direct(
+            malloc_fn,
+            vec![size_reg],
+            IrType::Ptr(Box::new(IrType::U8)),
+        )?;
 
         // Store object pointer at offset 0
         // Need to bitcast obj_reg to i64 if it's a pointer
         let obj_as_i64 = {
-            let obj_ty = self.builder.get_register_type(obj_reg).unwrap_or(IrType::I64);
+            let obj_ty = self
+                .builder
+                .get_register_type(obj_reg)
+                .unwrap_or(IrType::I64);
             if matches!(obj_ty, IrType::Ptr(_)) {
                 self.builder.build_bitcast(obj_reg, IrType::I64)?
             } else {
@@ -15873,9 +15858,11 @@ impl<'a> HirToMirContext<'a> {
                 let offset_val = self
                     .builder
                     .build_const(IrValue::I64(((i + 1) * 8) as i64))?;
-                let slot_ptr = self
-                    .builder
-                    .build_ptr_add(fat_ptr, offset_val, IrType::Ptr(Box::new(IrType::U8)))?;
+                let slot_ptr = self.builder.build_ptr_add(
+                    fat_ptr,
+                    offset_val,
+                    IrType::Ptr(Box::new(IrType::U8)),
+                )?;
                 self.builder.build_store(slot_ptr, fn_ref);
             }
         }
@@ -17003,16 +16990,14 @@ impl<'a> HirToMirContext<'a> {
         let fields: Vec<IrField> = interface
             .methods
             .iter()
-            .map(|method| {
-                IrField {
-                    name: method.name.to_string(),
-                    ty: IrType::Ptr(Box::new(IrType::Function {
-                        params: vec![IrType::Any],
-                        return_type: Box::new(IrType::Any),
-                        varargs: false,
-                    })),
-                    offset: None,
-                }
+            .map(|method| IrField {
+                name: method.name.to_string(),
+                ty: IrType::Ptr(Box::new(IrType::Function {
+                    params: vec![IrType::Any],
+                    return_type: Box::new(IrType::Any),
+                    varargs: false,
+                })),
+                offset: None,
             })
             .collect();
 
@@ -17030,8 +17015,7 @@ impl<'a> HirToMirContext<'a> {
         self.builder.module.add_type(typedef);
 
         // Store method ordering for vtable construction
-        let method_names: Vec<InternedString> =
-            interface.methods.iter().map(|m| m.name).collect();
+        let method_names: Vec<InternedString> = interface.methods.iter().map(|m| m.name).collect();
         self.interface_method_names
             .insert(interface.symbol_id, method_names);
     }

@@ -71,10 +71,7 @@ fn parse_flags(flags_str: &str) -> (bool, String) {
 /// Create a new EReg from pattern and flags strings.
 /// Returns opaque pointer (Box<HaxeEReg> as *mut u8).
 #[no_mangle]
-pub extern "C" fn haxe_ereg_new(
-    pattern: *const HaxeString,
-    opts: *const HaxeString,
-) -> *mut u8 {
+pub extern "C" fn haxe_ereg_new(pattern: *const HaxeString, opts: *const HaxeString) -> *mut u8 {
     unsafe {
         let pattern_str = hs_to_str(pattern);
         let opts_str = hs_to_str(opts);
@@ -86,7 +83,7 @@ pub extern "C" fn haxe_ereg_new(
             Ok(r) => r,
             Err(_) => {
                 // On invalid regex, create one that never matches
-                Regex::new("(?!.)").unwrap()
+                Regex::new("(?:$^)").unwrap()
             }
         };
 
@@ -184,11 +181,7 @@ pub extern "C" fn haxe_ereg_matched_right(ereg: *mut u8) -> *mut u8 {
 
 /// Write match position and length to out-params.
 #[no_mangle]
-pub extern "C" fn haxe_ereg_matched_pos(
-    ereg: *mut u8,
-    out_pos: *mut i32,
-    out_len: *mut i32,
-) {
+pub extern "C" fn haxe_ereg_matched_pos(ereg: *mut u8, out_pos: *mut i32, out_len: *mut i32) {
     if ereg.is_null() || out_pos.is_null() || out_len.is_null() {
         return;
     }
@@ -234,9 +227,7 @@ pub extern "C" fn haxe_ereg_match_sub(
             let mut capture_ranges = Vec::new();
             for i in 0..caps.len() {
                 // Adjust offsets to be relative to the full input string
-                capture_ranges.push(
-                    caps.get(i).map(|m| (m.start() + start, m.end() + start)),
-                );
+                capture_ranges.push(caps.get(i).map(|m| (m.start() + start, m.end() + start)));
             }
             ereg_ref.last_captures = Some(capture_ranges);
             ereg_ref.last_input = Some(full_input.to_string());
@@ -251,10 +242,7 @@ pub extern "C" fn haxe_ereg_match_sub(
 
 /// Split string by regex. Returns a HaxeArray of HaxeString pointers.
 #[no_mangle]
-pub extern "C" fn haxe_ereg_split(
-    ereg: *mut u8,
-    s: *const HaxeString,
-) -> *mut HaxeArray {
+pub extern "C" fn haxe_ereg_split(ereg: *mut u8, s: *const HaxeString) -> *mut HaxeArray {
     if ereg.is_null() || s.is_null() {
         let arr = Box::new(HaxeArray {
             ptr: ptr::null_mut(),

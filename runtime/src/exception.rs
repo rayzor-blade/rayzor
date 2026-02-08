@@ -23,10 +23,10 @@ struct ExceptionState {
 }
 
 thread_local! {
-    static STATE: RefCell<ExceptionState> = RefCell::new(ExceptionState {
+    static STATE: RefCell<ExceptionState> = const { RefCell::new(ExceptionState {
         handlers: Vec::new(),
         current_exception: 0,
-    });
+    }) };
 }
 
 /// Push a new exception handler. Returns a pointer to the jmp_buf

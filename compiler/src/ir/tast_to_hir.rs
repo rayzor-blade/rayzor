@@ -3059,9 +3059,11 @@ impl<'a> TastToHirContext<'a> {
                 HirPattern::Wildcard
             }
             // Pattern placeholder from TAST (constructor patterns with params like Ok(_))
-            TypedExpressionKind::PatternPlaceholder { pattern, variable_bindings, .. } => {
-                self.lower_parser_pattern_to_hir_with_bindings(pattern, variable_bindings)
-            }
+            TypedExpressionKind::PatternPlaceholder {
+                pattern,
+                variable_bindings,
+                ..
+            } => self.lower_parser_pattern_to_hir_with_bindings(pattern, variable_bindings),
             // Null expression is used as placeholder for wildcard patterns
             TypedExpressionKind::Null => HirPattern::Wildcard,
             _ => HirPattern::Wildcard,
@@ -3097,7 +3099,9 @@ impl<'a> TastToHirContext<'a> {
                             .unwrap_or(TypeId::invalid());
                         let fields: Vec<HirPattern> = params
                             .iter()
-                            .map(|p| self.lower_parser_pattern_to_hir_with_bindings(p, variable_bindings))
+                            .map(|p| {
+                                self.lower_parser_pattern_to_hir_with_bindings(p, variable_bindings)
+                            })
                             .collect();
                         return HirPattern::Constructor {
                             enum_type,
@@ -3114,7 +3118,9 @@ impl<'a> TastToHirContext<'a> {
                 let name_interned = self.string_interner.intern(name);
 
                 // First check pre-resolved bindings from AST lowering (most reliable)
-                if let Some((_, sym_id)) = variable_bindings.iter().find(|(n, _)| *n == name_interned) {
+                if let Some((_, sym_id)) =
+                    variable_bindings.iter().find(|(n, _)| *n == name_interned)
+                {
                     return HirPattern::Variable {
                         name: name_interned,
                         symbol: *sym_id,

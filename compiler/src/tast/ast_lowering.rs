@@ -9825,7 +9825,8 @@ impl<'a> AstLowering<'a> {
                 let var_bindings = self.bind_pattern_variables(first_pattern)?;
 
                 // For constructor patterns, create the constructor expression
-                let case_expr = self.create_constructor_expression_with_bindings(first_pattern, var_bindings)?;
+                let case_expr =
+                    self.create_constructor_expression_with_bindings(first_pattern, var_bindings)?;
 
                 // Lower case body as expression in the new scope with bound variables
                 let body_expr = self.lower_expression(&case.body)?;
@@ -9887,7 +9888,8 @@ impl<'a> AstLowering<'a> {
                 let var_bindings = self.bind_pattern_variables(first_pattern)?;
 
                 // For constructor patterns, create the constructor expression
-                let case_expr = self.create_constructor_expression_with_bindings(first_pattern, var_bindings)?;
+                let case_expr =
+                    self.create_constructor_expression_with_bindings(first_pattern, var_bindings)?;
 
                 // Lower case body in the new scope with bound variables
                 let body = self.lower_expression_to_statement(&case.body)?;
@@ -9959,7 +9961,10 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Bind pattern variables in the current scope
-    fn bind_pattern_variables(&mut self, pattern: &parser::Pattern) -> Result<Vec<(InternedString, SymbolId)>, LoweringError> {
+    fn bind_pattern_variables(
+        &mut self,
+        pattern: &parser::Pattern,
+    ) -> Result<Vec<(InternedString, SymbolId)>, LoweringError> {
         use parser::Pattern;
         match pattern {
             Pattern::Var(var_name) => {
