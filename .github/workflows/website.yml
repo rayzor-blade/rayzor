@@ -35,7 +35,8 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
-      - name: Download benchmark artifacts
+      # Download artifacts from the triggering Benchmarks workflow run
+      - name: Download benchmark artifacts (workflow_run)
         if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
         uses: actions/download-artifact@v4
         with:
@@ -44,42 +45,61 @@ jobs:
           merge-multiple: true
           path: artifacts
 
+      # For push/dispatch triggers, fetch artifacts from the latest successful Benchmarks run
+      - name: Download benchmark artifacts (latest)
+        if: github.event_name != 'workflow_run'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "Fetching artifacts from latest successful Benchmarks workflow run..."
+          RUN_ID=$(gh api repos/${{ github.repository }}/actions/workflows/benchmarks.yml/runs \
+            --jq '.workflow_runs[] | select(.conclusion=="success" and .head_branch=="main") | .id' \
+            | head -1)
+
+          if [ -z "$RUN_ID" ]; then
+            echo "No successful Benchmarks run found — skipping artifact download"
+            exit 0
+          fi
+
+          echo "Using Benchmarks run: $RUN_ID"
+          mkdir -p artifacts
+
+          for NAME in benchmark-charts benchmark-results; do
+            ARTIFACT_ID=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts" \
+              --jq ".artifacts[] | select(.name==\"$NAME\") | .id" | head -1)
+            if [ -n "$ARTIFACT_ID" ]; then
+              echo "Downloading $NAME (artifact $ARTIFACT_ID)..."
+              gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" \
+                > "/tmp/$NAME.zip"
+              mkdir -p "artifacts/$NAME"
+              unzip -o "/tmp/$NAME.zip" -d "artifacts/$NAME"
+            else
+              echo "Artifact $NAME not found in run $RUN_ID"
+            fi
+          done
+
       - name: Prepare site
         run: |
           mkdir -p _site
           cp -r website/* _site/
-          
-          echo "=== Debug: Checking for artifacts ==="
-          ls -la artifacts/ 2>/dev/null || echo "No artifacts directory found"
-          
-          # Only include benchmark artifacts from workflow - no repo fallback
+
+          # Copy benchmark charts and results into site
           if [ -d "artifacts/benchmark-charts" ]; then
-            echo "Found benchmark charts artifact, copying to site..."
+            echo "Copying benchmark charts to site..."
             mkdir -p _site/benchmarks
             cp -r artifacts/benchmark-charts/* _site/benchmarks/ 2>/dev/null || true
-            echo "Charts artifact copied, checking contents:"
-            ls -la _site/benchmarks/ || true
           else
-            echo "No benchmark charts artifact found - benchmarks will not be available"
+            echo "No benchmark charts found — benchmarks page will be unavailable"
           fi
-          
+
           if [ -d "artifacts/benchmark-results" ]; then
-            echo "Found benchmark results artifact, copying to site..."
+            echo "Copying benchmark results to site..."
             mkdir -p _site/benchmarks
             cp -r artifacts/benchmark-results _site/benchmarks/results 2>/dev/null || true
-            echo "Results artifact copied"
-          else
-            echo "No benchmark results artifact found"
           fi
-          
-          echo "=== Final site structure ==="
-          ls -la _site/
-          if [ -d "_site/benchmarks" ]; then
-            echo "Benchmarks directory contents:"
-            ls -la _site/benchmarks/
-          else
-            echo "No benchmarks directory in final site - will be 404"
-          fi
+
+          echo "=== Site structure ==="
+          find _site -type f | head -30
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
