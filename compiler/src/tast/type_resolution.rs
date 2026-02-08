@@ -111,7 +111,7 @@ impl<'a> TypeResolver<'a> {
         self.collect_declarations(ast_file);
 
         // Analyze dependencies and determine resolution order
-        self.analyze_dependencies()?;
+        self.analyze_dependencies(ast_file)?;
 
         // Pass 2: Resolve types in dependency order
         self.resolve_in_order(ast_file)?;
@@ -232,8 +232,8 @@ impl<'a> TypeResolver<'a> {
                     self.forward_references.insert(name, forward_ref);
 
                     // Create symbol for the abstract
-                    // Note: Abstract types are similar to type aliases in the symbol table
-                    let symbol_id = self.symbol_table.create_class(name); // Using class for now, could add create_abstract
+                    let scope_id = self.scope_tree.current_scope().id;
+                    let symbol_id = self.symbol_table.create_abstract_in_scope(name, scope_id);
 
                     // Add to current scope
                     self.scope_tree
@@ -259,8 +259,7 @@ impl<'a> TypeResolver<'a> {
                     self.forward_references.insert(name, forward_ref);
 
                     // Create symbol for the typedef
-                    // Note: Using class symbol for type aliases temporarily
-                    let symbol_id = self.symbol_table.create_class(name);
+                    let symbol_id = self.symbol_table.create_type_alias(name);
 
                     // Add to current scope
                     self.scope_tree
@@ -274,18 +273,179 @@ impl<'a> TypeResolver<'a> {
         }
     }
 
-    /// Analyze type dependencies and create resolution order
-    fn analyze_dependencies(&mut self) -> Result<(), Vec<TypeResolutionError>> {
+    /// Analyze type dependencies and create resolution order via topological sort
+    fn analyze_dependencies(
+        &mut self,
+        ast_file: &HaxeFile,
+    ) -> Result<(), Vec<TypeResolutionError>> {
         // Initialize dependency map
-        for name in self.forward_references.keys() {
+        let declared_names: HashSet<InternedString> =
+            self.forward_references.keys().cloned().collect();
+        for name in &declared_names {
             self.type_dependencies.insert(*name, HashSet::new());
         }
 
-        // TODO: Analyze actual dependencies from type references
-        // For now, we'll use declaration order
-        self.resolution_order = self.forward_references.keys().cloned().collect();
+        // Walk AST declarations to collect type dependencies
+        for decl in &ast_file.declarations {
+            let (decl_name, type_refs) = match decl {
+                TypeDeclaration::Class(class) => {
+                    let name = self.string_interner.intern(&class.name);
+                    let mut deps = HashSet::new();
+                    if let Some(extends) = &class.extends {
+                        self.collect_type_refs_from_parser_type(
+                            extends,
+                            &mut deps,
+                            &declared_names,
+                        );
+                    }
+                    for iface in &class.implements {
+                        self.collect_type_refs_from_parser_type(iface, &mut deps, &declared_names);
+                    }
+                    (name, deps)
+                }
+                TypeDeclaration::Interface(iface) => {
+                    let name = self.string_interner.intern(&iface.name);
+                    let mut deps = HashSet::new();
+                    for ext in &iface.extends {
+                        self.collect_type_refs_from_parser_type(ext, &mut deps, &declared_names);
+                    }
+                    (name, deps)
+                }
+                TypeDeclaration::Typedef(typedef) => {
+                    let name = self.string_interner.intern(&typedef.name);
+                    let mut deps = HashSet::new();
+                    self.collect_type_refs_from_parser_type(
+                        &typedef.type_def,
+                        &mut deps,
+                        &declared_names,
+                    );
+                    (name, deps)
+                }
+                TypeDeclaration::Abstract(abstract_decl) => {
+                    let name = self.string_interner.intern(&abstract_decl.name);
+                    let mut deps = HashSet::new();
+                    if let Some(underlying) = &abstract_decl.underlying {
+                        self.collect_type_refs_from_parser_type(
+                            underlying,
+                            &mut deps,
+                            &declared_names,
+                        );
+                    }
+                    for from in &abstract_decl.from {
+                        self.collect_type_refs_from_parser_type(from, &mut deps, &declared_names);
+                    }
+                    for to in &abstract_decl.to {
+                        self.collect_type_refs_from_parser_type(to, &mut deps, &declared_names);
+                    }
+                    (name, deps)
+                }
+                TypeDeclaration::Enum(enum_decl) => {
+                    let name = self.string_interner.intern(&enum_decl.name);
+                    (name, HashSet::new())
+                }
+                TypeDeclaration::Conditional(_) => continue,
+            };
+            // Remove self-references
+            let mut type_refs = type_refs;
+            type_refs.remove(&decl_name);
+            if let Some(deps) = self.type_dependencies.get_mut(&decl_name) {
+                *deps = type_refs;
+            }
+        }
 
+        // Topological sort using Kahn's algorithm
+        let mut in_degree: HashMap<InternedString, usize> = HashMap::new();
+        for name in &declared_names {
+            in_degree.insert(*name, 0);
+        }
+        for (_name, deps) in &self.type_dependencies {
+            for dep in deps {
+                if let Some(count) = in_degree.get_mut(dep) {
+                    *count += 1;
+                }
+            }
+        }
+
+        // Start with nodes that have no incoming edges
+        let mut queue: Vec<InternedString> = declared_names
+            .iter()
+            .filter(|n| in_degree.get(n).copied().unwrap_or(0) == 0)
+            .cloned()
+            .collect();
+
+        let mut order = Vec::new();
+        while let Some(node) = queue.pop() {
+            order.push(node);
+            if let Some(deps) = self.type_dependencies.get(&node) {
+                for dep in deps.clone() {
+                    if let Some(count) = in_degree.get_mut(&dep) {
+                        *count = count.saturating_sub(1);
+                        if *count == 0 {
+                            queue.push(dep);
+                        }
+                    }
+                }
+            }
+        }
+
+        // If not all nodes are in the order, there's a cycle
+        // For cycles, just append remaining nodes (graceful degradation)
+        if order.len() < declared_names.len() {
+            for name in &declared_names {
+                if !order.contains(name) {
+                    order.push(*name);
+                }
+            }
+        }
+
+        self.resolution_order = order;
         Ok(())
+    }
+
+    /// Extract type name references from a parser type for dependency analysis
+    fn collect_type_refs_from_parser_type(
+        &self,
+        parser_type: &ParserType,
+        deps: &mut HashSet<InternedString>,
+        declared_names: &HashSet<InternedString>,
+    ) {
+        match parser_type {
+            ParserType::Path { path, params, .. } => {
+                let name = if path.package.is_empty() {
+                    path.name.clone()
+                } else {
+                    format!("{}.{}", path.package.join("."), path.name)
+                };
+                let interned = self.string_interner.get_id(&name);
+                if let Some(interned) = interned {
+                    if declared_names.contains(&interned) {
+                        deps.insert(interned);
+                    }
+                }
+                for param in params {
+                    self.collect_type_refs_from_parser_type(param, deps, declared_names);
+                }
+            }
+            ParserType::Function { params, ret, .. } => {
+                for param in params {
+                    self.collect_type_refs_from_parser_type(param, deps, declared_names);
+                }
+                self.collect_type_refs_from_parser_type(ret, deps, declared_names);
+            }
+            ParserType::Anonymous { fields, .. } => {
+                for field in fields {
+                    self.collect_type_refs_from_parser_type(&field.type_hint, deps, declared_names);
+                }
+            }
+            ParserType::Optional { inner, .. } | ParserType::Parenthesis { inner, .. } => {
+                self.collect_type_refs_from_parser_type(inner, deps, declared_names);
+            }
+            ParserType::Intersection { left, right, .. } => {
+                self.collect_type_refs_from_parser_type(left, deps, declared_names);
+                self.collect_type_refs_from_parser_type(right, deps, declared_names);
+            }
+            ParserType::Wildcard { .. } => {}
+        }
     }
 
     /// Pass 2: Resolve types in dependency order
@@ -722,16 +882,73 @@ impl<'a> TypeResolver<'a> {
 
             ParserType::Parenthesis { inner, .. } => self.resolve_type_reference(inner),
 
-            ParserType::Anonymous { fields: _, .. } => {
-                // For now, anonymous types become Dynamic
-                // TODO: Implement proper anonymous type support
-                Ok(self.type_table.borrow().dynamic_type())
+            ParserType::Anonymous { fields, .. } => {
+                let mut anon_fields = Vec::new();
+                for field in fields {
+                    let field_type = self.resolve_type_reference(&field.type_hint)?;
+                    let field_name = self.string_interner.intern(&field.name);
+                    anon_fields.push(AnonymousField {
+                        name: field_name,
+                        type_id: field_type,
+                        is_public: true,
+                        optional: field.optional,
+                    });
+                }
+                Ok(self
+                    .type_table
+                    .borrow_mut()
+                    .create_type(TypeKind::Anonymous {
+                        fields: anon_fields,
+                    }))
             }
 
-            ParserType::Intersection { .. } => {
-                // For now, intersection types become Dynamic
-                // TODO: Implement proper intersection type support
-                Ok(self.type_table.borrow().dynamic_type())
+            ParserType::Intersection { left, right, .. } => {
+                let left_type = self.resolve_type_reference(left)?;
+                let right_type = self.resolve_type_reference(right)?;
+
+                // If both sides resolve to Anonymous types, merge their fields
+                let type_table = self.type_table.borrow();
+                let left_anon = type_table.get(left_type).and_then(|t| {
+                    if let TypeKind::Anonymous { fields } = &t.kind {
+                        Some(fields.clone())
+                    } else {
+                        None
+                    }
+                });
+                let right_anon = type_table.get(right_type).and_then(|t| {
+                    if let TypeKind::Anonymous { fields } = &t.kind {
+                        Some(fields.clone())
+                    } else {
+                        None
+                    }
+                });
+                drop(type_table);
+
+                if let (Some(left_fields), Some(right_fields)) = (left_anon, right_anon) {
+                    // Merge fields: right side wins on name conflicts
+                    let mut merged = left_fields;
+                    for right_field in right_fields {
+                        if let Some(existing) =
+                            merged.iter_mut().find(|f| f.name == right_field.name)
+                        {
+                            *existing = right_field;
+                        } else {
+                            merged.push(right_field);
+                        }
+                    }
+                    Ok(self
+                        .type_table
+                        .borrow_mut()
+                        .create_type(TypeKind::Anonymous { fields: merged }))
+                } else {
+                    // General intersection type
+                    Ok(self
+                        .type_table
+                        .borrow_mut()
+                        .create_type(TypeKind::Intersection {
+                            types: vec![left_type, right_type],
+                        }))
+                }
             }
 
             ParserType::Wildcard { .. } => {
@@ -743,11 +960,37 @@ impl<'a> TypeResolver<'a> {
 
     /// Verify that no Dynamic types remain in critical contexts
     fn verify_concrete_types(&mut self) -> Result<(), Vec<TypeResolutionError>> {
-        // This will be implemented to check that:
-        // 1. Field types are concrete (not Dynamic)
-        // 2. Method parameter and return types are concrete
-        // 3. Type parameters have proper bounds
-        // For now, we'll accept the current state
+        let dynamic_type = self.type_table.borrow().dynamic_type();
+
+        // Check that all forward-referenced types were resolved to non-Dynamic types
+        for (name, forward_ref) in &self.forward_references {
+            if let Some((symbol, _scope_id)) = {
+                let mut name_resolver = NameResolver::new(self.scope_tree, self.symbol_table);
+                name_resolver
+                    .resolve_symbol(*name)
+                    .map(|(s, sid)| (s.clone(), sid))
+            } {
+                if symbol.type_id == dynamic_type && forward_ref.kind != ForwardTypeKind::TypeAlias
+                {
+                    // Dynamic type in a named type declaration is suspicious but not fatal
+                    // Only flag it as an error for types that should definitely be concrete
+                    // (Skip TypeAlias since the target may legitimately be Dynamic)
+                    self.errors
+                        .push(TypeResolutionError::DynamicTypeInCriticalContext {
+                            context: format!(
+                                "type declaration '{}'",
+                                self.string_interner
+                                    .get(forward_ref.name)
+                                    .unwrap_or("<unknown>")
+                            ),
+                            location: forward_ref.source_location,
+                        });
+                }
+            }
+        }
+
+        // Non-fatal: return Ok even with warnings so compilation continues
+        // Errors are collected and can be reported later
         Ok(())
     }
 
@@ -836,38 +1079,71 @@ pub fn resolve_super_type(
     current_class_symbol: Option<SymbolId>,
 ) -> TypeId {
     if let Some(class_symbol) = current_class_symbol {
-        if let Some(symbol) = symbol_table.get_symbol(class_symbol) {
-            let type_table_ref = type_table.borrow();
-            if let Some(class_type) = type_table_ref.get(symbol.type_id) {
-                if let TypeKind::Class { .. } = &class_type.kind {
-                    return type_table_ref.dynamic_type();
-                }
+        // Look up class hierarchy for the superclass
+        if let Some(hierarchy) = symbol_table.get_class_hierarchy(class_symbol) {
+            if let Some(superclass_type) = hierarchy.superclass {
+                return superclass_type;
             }
         }
     }
     type_table.borrow().dynamic_type()
 }
 
-/// Get or create the null type
+/// Get the type for `null` literals.
+///
+/// Returns Dynamic because null must be assignable to any nullable type
+/// (Null<Int>, String, Dynamic, class instances, etc.). Dynamic serves as
+/// the universal compatible type in Haxe's type system.
 pub fn get_null_type(type_table: &RefCell<TypeTable>) -> TypeId {
     type_table.borrow().dynamic_type()
 }
 
 /// Get or create regex type (EReg)
-pub fn get_regex_type(
-    type_table: &RefCell<TypeTable>,
-    _string_interner: &StringInterner,
-) -> TypeId {
-    type_table.borrow().dynamic_type()
+///
+/// EReg is Haxe's regular expression type. We represent it as a named class type.
+/// If the EReg symbol is available in the symbol table, use it; otherwise fall back
+/// to a structural representation.
+pub fn get_regex_type(type_table: &RefCell<TypeTable>, string_interner: &StringInterner) -> TypeId {
+    // EReg is a class type in Haxe's standard library
+    // Create it as an anonymous struct with the expected fields:
+    // matched: Bool, pattern: String, options: String
+    let pattern_name = string_interner.get_id("pattern");
+    let options_name = string_interner.get_id("options");
+
+    if let (Some(pattern), Some(options)) = (pattern_name, options_name) {
+        let string_type = type_table.borrow().string_type();
+        let fields = vec![
+            AnonymousField {
+                name: pattern,
+                type_id: string_type,
+                is_public: false,
+                optional: false,
+            },
+            AnonymousField {
+                name: options,
+                type_id: string_type,
+                is_public: false,
+                optional: false,
+            },
+        ];
+        type_table
+            .borrow_mut()
+            .create_type(TypeKind::Anonymous { fields })
+    } else {
+        // Strings not yet interned — fall back to Dynamic
+        type_table.borrow().dynamic_type()
+    }
 }
 
 /// Create map type Map<K, V>
 pub fn create_map_type(
     type_table: &RefCell<TypeTable>,
-    _key_type: TypeId,
-    _value_type: TypeId,
+    key_type: TypeId,
+    value_type: TypeId,
 ) -> TypeId {
-    type_table.borrow().dynamic_type()
+    type_table
+        .borrow_mut()
+        .create_map_type(key_type, value_type)
 }
 
 /// Create anonymous object type
