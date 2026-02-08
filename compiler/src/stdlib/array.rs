@@ -24,6 +24,9 @@ pub fn build_array_type(builder: &mut MirBuilder) {
     build_array_length(builder);
     build_array_slice(builder);
     build_array_join(builder);
+    build_array_map(builder);
+    build_array_filter(builder);
+    build_array_sort(builder);
 }
 
 /// Declare Array extern runtime functions
@@ -131,6 +134,41 @@ fn declare_array_externs(builder: &mut MirBuilder) {
         .param("arr", ptr_void.clone())
         .param("index", i64_ty.clone())
         .returns(IrType::Bool)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // haxe_array_map(out: *mut HaxeArray, arr: *const HaxeArray, fn_ptr: usize, env_ptr: *mut u8)
+    let func_id = builder
+        .begin_function("haxe_array_map")
+        .param("out", ptr_void.clone())
+        .param("arr", ptr_void.clone())
+        .param("fn_ptr", i64_ty.clone())
+        .param("env_ptr", ptr_void.clone())
+        .returns(void_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // haxe_array_filter(out: *mut HaxeArray, arr: *const HaxeArray, fn_ptr: usize, env_ptr: *mut u8)
+    let func_id = builder
+        .begin_function("haxe_array_filter")
+        .param("out", ptr_void.clone())
+        .param("arr", ptr_void.clone())
+        .param("fn_ptr", i64_ty.clone())
+        .param("env_ptr", ptr_void.clone())
+        .returns(void_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // haxe_array_sort(arr: *mut HaxeArray, fn_ptr: usize, env_ptr: *mut u8)
+    let func_id = builder
+        .begin_function("haxe_array_sort")
+        .param("arr", ptr_void.clone())
+        .param("fn_ptr", i64_ty.clone())
+        .param("env_ptr", ptr_void.clone())
+        .returns(void_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
     builder.mark_as_extern(func_id);
@@ -328,4 +366,145 @@ fn build_array_join(builder: &mut MirBuilder) {
         let null_val = builder.const_value(crate::ir::IrValue::Null);
         builder.ret(Some(null_val));
     }
+}
+
+/// Build: fn array_map(arr: Any, closure: Any) -> Ptr(Void)
+/// Applies callback to each element, returns new array.
+/// Closure struct layout: { fn_ptr: i64, env_ptr: i64 }
+fn build_array_map(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+
+    let func_id = builder
+        .begin_function("array_map")
+        .param("arr", IrType::Any)
+        .param("closure", IrType::Any)
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+    let closure = builder.get_param(1);
+
+    // Cast arr from Any to Ptr for extern call
+    let arr_ptr = builder.cast(arr, IrType::Any, ptr_void.clone());
+
+    // Cast closure from Any to Ptr to load fields
+    let closure_ptr = builder.cast(closure, IrType::Any, ptr_u8.clone());
+
+    // Load fn_ptr from closure[0]
+    let fn_ptr = builder.load(closure_ptr, IrType::I64);
+
+    // Load env_ptr from closure[8]
+    let offset_8 = builder.const_i64(8);
+    let env_slot = builder.ptr_add(closure_ptr, offset_8, ptr_u8.clone());
+    let env_ptr = builder.load(env_slot, IrType::I64);
+    let env_ptr_cast = builder.cast(env_ptr, IrType::I64, ptr_void.clone());
+
+    // Allocate out array struct (32 bytes)
+    let malloc_func = builder
+        .get_function_by_name("malloc")
+        .expect("malloc extern not found");
+    let size = builder.const_i64(HAXE_ARRAY_STRUCT_SIZE as i64);
+    let out_ptr = builder
+        .call(malloc_func, vec![size])
+        .expect("malloc should return a pointer");
+
+    // Call haxe_array_map(out, arr, fn_ptr, env_ptr)
+    let map_func = builder
+        .get_function_by_name("haxe_array_map")
+        .expect("haxe_array_map extern not found");
+    builder.call(map_func, vec![out_ptr, arr_ptr, fn_ptr, env_ptr_cast]);
+
+    builder.ret(Some(out_ptr));
+}
+
+/// Build: fn array_filter(arr: Any, closure: Any) -> Ptr(Void)
+/// Keeps elements where callback returns true, returns new array.
+fn build_array_filter(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+
+    let func_id = builder
+        .begin_function("array_filter")
+        .param("arr", IrType::Any)
+        .param("closure", IrType::Any)
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+    let closure = builder.get_param(1);
+
+    let arr_ptr = builder.cast(arr, IrType::Any, ptr_void.clone());
+    let closure_ptr = builder.cast(closure, IrType::Any, ptr_u8.clone());
+
+    let fn_ptr = builder.load(closure_ptr, IrType::I64);
+
+    let offset_8 = builder.const_i64(8);
+    let env_slot = builder.ptr_add(closure_ptr, offset_8, ptr_u8.clone());
+    let env_ptr = builder.load(env_slot, IrType::I64);
+    let env_ptr_cast = builder.cast(env_ptr, IrType::I64, ptr_void.clone());
+
+    let malloc_func = builder
+        .get_function_by_name("malloc")
+        .expect("malloc extern not found");
+    let size = builder.const_i64(HAXE_ARRAY_STRUCT_SIZE as i64);
+    let out_ptr = builder
+        .call(malloc_func, vec![size])
+        .expect("malloc should return a pointer");
+
+    let filter_func = builder
+        .get_function_by_name("haxe_array_filter")
+        .expect("haxe_array_filter extern not found");
+    builder.call(filter_func, vec![out_ptr, arr_ptr, fn_ptr, env_ptr_cast]);
+
+    builder.ret(Some(out_ptr));
+}
+
+/// Build: fn array_sort(arr: Any, closure: Any) -> Void
+/// Sorts array in-place using comparator callback.
+fn build_array_sort(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+
+    let func_id = builder
+        .begin_function("array_sort")
+        .param("arr", IrType::Any)
+        .param("closure", IrType::Any)
+        .returns(IrType::Void)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+    let closure = builder.get_param(1);
+
+    let arr_ptr = builder.cast(arr, IrType::Any, ptr_void.clone());
+    let closure_ptr = builder.cast(closure, IrType::Any, ptr_u8.clone());
+
+    let fn_ptr = builder.load(closure_ptr, IrType::I64);
+
+    let offset_8 = builder.const_i64(8);
+    let env_slot = builder.ptr_add(closure_ptr, offset_8, ptr_u8.clone());
+    let env_ptr = builder.load(env_slot, IrType::I64);
+    let env_ptr_cast = builder.cast(env_ptr, IrType::I64, ptr_void.clone());
+
+    let sort_func = builder
+        .get_function_by_name("haxe_array_sort")
+        .expect("haxe_array_sort extern not found");
+    builder.call(sort_func, vec![arr_ptr, fn_ptr, env_ptr_cast]);
+
+    builder.ret(None);
 }

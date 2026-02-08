@@ -166,6 +166,11 @@ register_symbol!("haxe_array_copy", crate::haxe_array::haxe_array_copy);
 register_symbol!("haxe_array_slice", crate::haxe_array::haxe_array_slice);
 register_symbol!("haxe_array_join", crate::haxe_array::haxe_array_join);
 
+// Higher-order methods
+register_symbol!("haxe_array_map", crate::haxe_array::haxe_array_map);
+register_symbol!("haxe_array_filter", crate::haxe_array::haxe_array_filter);
+register_symbol!("haxe_array_sort", crate::haxe_array::haxe_array_sort);
+
 // Memory
 register_symbol!("haxe_array_free", crate::haxe_array::haxe_array_free);
 

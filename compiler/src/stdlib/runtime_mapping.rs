@@ -1428,6 +1428,12 @@ impl StdlibMapping {
             // Array.join(sep: String) -> String
             // Joins array elements with separator, returns new string
             map_method!(instance "Array", "join" => "array_join", params: 1, returns: primitive),
+            // Higher-order methods
+            // map/filter take a closure, sort takes a comparator closure
+            // All use MIR wrappers that extract fn_ptr + env_ptr from closure struct
+            map_method!(instance "Array", "map" => "array_map", params: 1, returns: primitive),
+            map_method!(instance "Array", "filter" => "array_filter", params: 1, returns: primitive),
+            map_method!(instance "Array", "sort" => "array_sort", params: 1, returns: void),
         ];
 
         self.register_from_tuples(mappings);

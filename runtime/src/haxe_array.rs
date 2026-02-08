@@ -909,3 +909,163 @@ pub extern "C" fn haxe_array_join(
         result_ptr
     }
 }
+
+// ============================================================================
+// Higher-Order Array Methods
+// ============================================================================
+
+/// Map: apply callback to each element, collect results into a new array.
+/// Callback signature: fn(env_ptr: *mut u8, element: i64) -> i64
+#[no_mangle]
+pub extern "C" fn haxe_array_map(
+    out: *mut HaxeArray,
+    arr: *const HaxeArray,
+    fn_ptr: usize,
+    env_ptr: *mut u8,
+) {
+    if arr.is_null() || out.is_null() || fn_ptr == 0 {
+        // Initialize empty output array
+        if !out.is_null() {
+            haxe_array_new(out, 8);
+        }
+        return;
+    }
+
+    unsafe {
+        let arr_ref = &*arr;
+        let len = arr_ref.len;
+        let elem_size = arr_ref.elem_size;
+
+        // Initialize output array with same length capacity
+        let out_cap = len.max(INITIAL_CAPACITY);
+        let out_total = out_cap * 8; // result elements are always i64 (8 bytes)
+        let layout = Layout::from_size_align_unchecked(out_total, 8);
+        let out_ptr = alloc(layout);
+        if out_ptr.is_null() {
+            panic!("Failed to allocate memory for Array.map result");
+        }
+
+        // Cast fn_ptr to callable function pointer
+        let callback: extern "C" fn(*mut u8, i64) -> i64 = std::mem::transmute(fn_ptr);
+
+        for i in 0..len {
+            // Read element as i64
+            let elem = if elem_size == 8 {
+                *(arr_ref.ptr.add(i * elem_size) as *const i64)
+            } else if elem_size == 4 {
+                *(arr_ref.ptr.add(i * elem_size) as *const i32) as i64
+            } else {
+                0i64
+            };
+
+            // Call the callback
+            let result = callback(env_ptr, elem);
+
+            // Store result
+            *(out_ptr.add(i * 8) as *mut i64) = result;
+        }
+
+        (*out).ptr = out_ptr;
+        (*out).len = len;
+        (*out).cap = out_cap;
+        (*out).elem_size = 8;
+    }
+}
+
+/// Filter: keep elements where callback returns non-zero.
+/// Callback signature: fn(env_ptr: *mut u8, element: i64) -> i64 (0 = false, non-zero = true)
+#[no_mangle]
+pub extern "C" fn haxe_array_filter(
+    out: *mut HaxeArray,
+    arr: *const HaxeArray,
+    fn_ptr: usize,
+    env_ptr: *mut u8,
+) {
+    if arr.is_null() || out.is_null() || fn_ptr == 0 {
+        if !out.is_null() {
+            haxe_array_new(out, 8);
+        }
+        return;
+    }
+
+    unsafe {
+        let arr_ref = &*arr;
+        let len = arr_ref.len;
+        let elem_size = arr_ref.elem_size;
+
+        // Allocate output with same capacity as input (worst case: all pass)
+        let out_cap = len.max(INITIAL_CAPACITY);
+        let out_total = out_cap * 8;
+        let layout = Layout::from_size_align_unchecked(out_total, 8);
+        let out_ptr = alloc(layout);
+        if out_ptr.is_null() {
+            panic!("Failed to allocate memory for Array.filter result");
+        }
+
+        let callback: extern "C" fn(*mut u8, i64) -> i64 = std::mem::transmute(fn_ptr);
+
+        let mut out_len = 0usize;
+        for i in 0..len {
+            let elem = if elem_size == 8 {
+                *(arr_ref.ptr.add(i * elem_size) as *const i64)
+            } else if elem_size == 4 {
+                *(arr_ref.ptr.add(i * elem_size) as *const i32) as i64
+            } else {
+                0i64
+            };
+
+            let keep = callback(env_ptr, elem);
+            if keep != 0 {
+                *(out_ptr.add(out_len * 8) as *mut i64) = elem;
+                out_len += 1;
+            }
+        }
+
+        (*out).ptr = out_ptr;
+        (*out).len = out_len;
+        (*out).cap = out_cap;
+        (*out).elem_size = 8;
+    }
+}
+
+/// Sort: in-place sort using comparator callback.
+/// Callback signature: fn(env_ptr: *mut u8, a: i64, b: i64) -> i32
+/// Returns negative if a < b, 0 if equal, positive if a > b.
+#[no_mangle]
+pub extern "C" fn haxe_array_sort(
+    arr: *mut HaxeArray,
+    fn_ptr: usize,
+    env_ptr: *mut u8,
+) {
+    if arr.is_null() || fn_ptr == 0 {
+        return;
+    }
+
+    unsafe {
+        let arr_ref = &mut *arr;
+        let len = arr_ref.len;
+        if len <= 1 {
+            return;
+        }
+
+        let callback: extern "C" fn(*mut u8, i64, i64) -> i32 = std::mem::transmute(fn_ptr);
+
+        // Simple insertion sort for now (stable, in-place)
+        // Elements are i64 (8 bytes each)
+        let data = arr_ref.ptr as *mut i64;
+        for i in 1..len {
+            let key = *data.add(i);
+            let mut j = i as isize - 1;
+            while j >= 0 {
+                let cmp = callback(env_ptr, *data.add(j as usize), key);
+                if cmp > 0 {
+                    *data.add((j + 1) as usize) = *data.add(j as usize);
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
+            *data.add((j + 1) as usize) = key;
+        }
+    }
+}

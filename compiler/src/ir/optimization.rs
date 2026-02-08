@@ -683,6 +683,18 @@ impl InstructionExt for IrInstruction {
                 replace(value);
                 replace(size);
             }
+            IrInstruction::PtrAdd { ptr, offset, .. } => {
+                replace(ptr);
+                replace(offset);
+            }
+            IrInstruction::MakeClosure {
+                captured_values, ..
+            } => {
+                for val in captured_values {
+                    replace(val);
+                }
+            }
+            IrInstruction::ClosureFunc { closure, .. } => replace(closure),
             IrInstruction::ExtractValue { aggregate, .. } => replace(aggregate),
             IrInstruction::InsertValue {
                 aggregate, value, ..
@@ -711,10 +723,10 @@ impl InstructionExt for IrInstruction {
                 }
                 // outputs contains IrType, not IrId, so no replacement needed
             }
+            IrInstruction::ClosureEnv { closure, .. } => replace(closure),
             // Instructions with no uses to replace
             IrInstruction::Const { .. }
             | IrInstruction::Jump { .. }
-            | IrInstruction::ClosureEnv { .. }
             | IrInstruction::BorrowImmutable { .. }
             | IrInstruction::BorrowMutable { .. }
             | IrInstruction::EndBorrow { .. }

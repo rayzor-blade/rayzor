@@ -1648,7 +1648,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 2 | Interface dispatch (vtables) | P0 | High | 🟢 Complete | polymorphism, stdlib |
 | 3 | try/catch exception handling | P0 | High | 🟢 Complete | error handling |
 | 4 | Closures as first-class values | P0 | High | 🟢 Complete | callbacks, HOFs |
-| 5 | Array.map/filter/sort (higher-order) | P0 | Medium | 🔴 Not started | functional patterns |
+| 5 | Array.map/filter/sort (higher-order) | P0 | Medium | 🟢 Complete | functional patterns |
 | 6 | String interpolation | P0 | Low | 🟢 Complete | basic string formatting |
 | 7 | for-in range (`0...n`) | P0 | Low | 🟡 Partial | basic loops |
 | 8 | Static extensions (`using`) | P1 | Medium | 🔴 Not started | idiomatic Haxe |
@@ -1971,7 +1971,7 @@ trace((5).triple());  // 15
 5. ✅ **Interface dispatch** (16.2) — fat pointer vtables
 
 #### Tier 2: Idiomatic Haxe (blocks Haxe-style code)
-6. **Higher-order Array methods** (16.5) — map/filter/sort after closures land
+6. ✅ **Higher-order Array methods** (16.5) — map/filter/sort with closure callbacks
 7. **Static extensions** (16.8) — `using` keyword
 8. **Generics end-to-end** (16.10, existing 1.x) — unblock generic containers
 9. **EReg** (16.12) — regex support
