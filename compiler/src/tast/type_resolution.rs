@@ -774,3 +774,178 @@ impl TypeTable {
         self.get(type_id)?.symbol_id()
     }
 }
+
+// ============================================================================
+// Type resolution helpers for AST lowering
+// ============================================================================
+
+/// Resolve type alias to its target type
+pub fn resolve_type_alias(
+    type_table: &RefCell<TypeTable>,
+    symbol_table: &SymbolTable,
+    alias_symbol: SymbolId,
+) -> TypeId {
+    if let Some(symbol) = symbol_table.get_symbol(alias_symbol) {
+        let type_table_ref = type_table.borrow();
+        if let Some(alias_type) = type_table_ref.get(symbol.type_id) {
+            if let TypeKind::TypeAlias { target_type, .. } = &alias_type.kind {
+                return *target_type;
+            }
+        }
+    }
+    type_table.borrow().dynamic_type()
+}
+
+/// Resolve abstract type to its underlying type
+pub fn resolve_abstract_type(
+    type_table: &RefCell<TypeTable>,
+    symbol_table: &SymbolTable,
+    abstract_symbol: SymbolId,
+) -> TypeId {
+    if let Some(symbol) = symbol_table.get_symbol(abstract_symbol) {
+        let type_table_ref = type_table.borrow();
+        if let Some(abstract_type) = type_table_ref.get(symbol.type_id) {
+            if let TypeKind::Abstract { underlying, .. } = &abstract_type.kind {
+                if let Some(underlying_type) = underlying {
+                    return *underlying_type;
+                }
+            }
+        }
+    }
+    type_table.borrow().dynamic_type()
+}
+
+/// Resolve 'this' type in class context
+pub fn resolve_this_type(
+    type_table: &RefCell<TypeTable>,
+    symbol_table: &SymbolTable,
+    current_class_symbol: Option<SymbolId>,
+) -> TypeId {
+    if let Some(class_symbol) = current_class_symbol {
+        if let Some(symbol) = symbol_table.get_symbol(class_symbol) {
+            return symbol.type_id;
+        }
+    }
+    type_table.borrow().dynamic_type()
+}
+
+/// Resolve 'super' type in class context
+pub fn resolve_super_type(
+    type_table: &RefCell<TypeTable>,
+    symbol_table: &SymbolTable,
+    current_class_symbol: Option<SymbolId>,
+) -> TypeId {
+    if let Some(class_symbol) = current_class_symbol {
+        if let Some(symbol) = symbol_table.get_symbol(class_symbol) {
+            let type_table_ref = type_table.borrow();
+            if let Some(class_type) = type_table_ref.get(symbol.type_id) {
+                if let TypeKind::Class { .. } = &class_type.kind {
+                    return type_table_ref.dynamic_type();
+                }
+            }
+        }
+    }
+    type_table.borrow().dynamic_type()
+}
+
+/// Get or create the null type
+pub fn get_null_type(type_table: &RefCell<TypeTable>) -> TypeId {
+    type_table.borrow().dynamic_type()
+}
+
+/// Get or create regex type (EReg)
+pub fn get_regex_type(
+    type_table: &RefCell<TypeTable>,
+    _string_interner: &StringInterner,
+) -> TypeId {
+    type_table.borrow().dynamic_type()
+}
+
+/// Create map type Map<K, V>
+pub fn create_map_type(
+    type_table: &RefCell<TypeTable>,
+    _key_type: TypeId,
+    _value_type: TypeId,
+) -> TypeId {
+    type_table.borrow().dynamic_type()
+}
+
+/// Create anonymous object type
+pub fn create_anonymous_object_type(
+    type_table: &RefCell<TypeTable>,
+    fields: Vec<(InternedString, TypeId)>,
+) -> TypeId {
+    let anonymous_fields: Vec<_> = fields
+        .into_iter()
+        .map(|(name, type_id)| AnonymousField {
+            name,
+            type_id,
+            is_public: true,
+            optional: false,
+        })
+        .collect();
+
+    type_table.borrow_mut().create_type(TypeKind::Anonymous {
+        fields: anonymous_fields,
+    })
+}
+
+/// Infer object literal type from fields
+pub fn infer_object_literal_type(
+    type_table: &RefCell<TypeTable>,
+    fields: &[(InternedString, TypeId)],
+) -> TypeId {
+    if fields.is_empty() {
+        type_table.borrow().dynamic_type()
+    } else {
+        let anonymous_fields: Vec<_> = fields
+            .iter()
+            .map(|(name, type_id)| AnonymousField {
+                name: *name,
+                type_id: *type_id,
+                is_public: true,
+                optional: false,
+            })
+            .collect();
+        type_table.borrow_mut().create_type(TypeKind::Anonymous {
+            fields: anonymous_fields,
+        })
+    }
+}
+
+/// Create union type for conditional/switch expressions
+pub fn create_union_type(type_table: &RefCell<TypeTable>, branch_types: Vec<TypeId>) -> TypeId {
+    if branch_types.is_empty() {
+        return type_table.borrow().void_type();
+    }
+
+    if branch_types.len() == 1 {
+        return branch_types[0];
+    }
+
+    let mut unique_types = Vec::new();
+    for t in branch_types {
+        if !unique_types.contains(&t) {
+            unique_types.push(t);
+        }
+    }
+
+    type_table.borrow_mut().create_union_type(unique_types)
+}
+
+/// Resolve field type from class
+pub fn resolve_field_type(
+    symbol_table: &SymbolTable,
+    type_table: &RefCell<TypeTable>,
+    class_fields: &[(InternedString, SymbolId, bool)],
+    field_name: InternedString,
+) -> TypeId {
+    for (name, symbol_id, _is_static) in class_fields {
+        if *name == field_name {
+            if let Some(field_symbol) = symbol_table.get_symbol(*symbol_id) {
+                return field_symbol.type_id;
+            }
+        }
+    }
+    type_table.borrow().dynamic_type()
+}

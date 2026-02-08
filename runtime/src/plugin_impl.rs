@@ -1178,6 +1178,10 @@ register_symbol!(
 // ============================================================================
 // Anonymous Object Functions (Arc-based, COW)
 // ============================================================================
+register_symbol!(
+    "rayzor_ensure_shape",
+    crate::anon_object::rayzor_ensure_shape
+);
 register_symbol!("rayzor_anon_new", crate::anon_object::rayzor_anon_new);
 register_symbol!("rayzor_anon_clone", crate::anon_object::rayzor_anon_clone);
 register_symbol!("rayzor_anon_drop", crate::anon_object::rayzor_anon_drop);

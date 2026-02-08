@@ -2697,6 +2697,16 @@ impl<'a> HirToMirContext<'a> {
                             value_reg
                         };
 
+                        // Clone anonymous object handles for COW semantics.
+                        // Object literals create fresh handles, so skip cloning for those.
+                        // All other sources (variables, calls, field access) need their own handle.
+                        let final_value =
+                            if !matches!(&init_expr.kind, HirExprKind::ObjectLiteral { .. }) {
+                                self.maybe_clone_anonymous(final_value, init_expr.ty)
+                            } else {
+                                final_value
+                            };
+
                         self.bind_pattern_with_type(pattern, final_value, var_type, *is_mutable);
 
                         // Register heap-allocated value for drop tracking
@@ -2804,6 +2814,16 @@ impl<'a> HirToMirContext<'a> {
 
                     // Store to lvalue
                     if let Some(value) = final_value {
+                        // Clone anonymous object handles for COW semantics on reassignment.
+                        // Skip for object literals (fresh handles) and compound assignments.
+                        let value = if op.is_none()
+                            && !matches!(&rhs.kind, HirExprKind::ObjectLiteral { .. })
+                        {
+                            self.maybe_clone_anonymous(value, rhs.ty)
+                        } else {
+                            value
+                        };
+
                         self.lower_lvalue_write(lhs, value);
 
                         // Register heap-allocated value for drop tracking
@@ -9749,7 +9769,7 @@ impl<'a> HirToMirContext<'a> {
 
             HirExprKind::Map { entries } => self.lower_map_literal(entries),
 
-            HirExprKind::ObjectLiteral { fields } => self.lower_object_literal(fields),
+            HirExprKind::ObjectLiteral { fields } => self.lower_object_literal(fields, expr.ty),
 
             HirExprKind::ArrayComprehension { .. } => {
                 // Array comprehensions are desugared to loops
@@ -11229,6 +11249,37 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// Clone an anonymous object handle if the value type is Anonymous.
+    /// This ensures each variable gets its own Box<Arc<AnonObject>> for proper COW semantics.
+    /// Returns the cloned handle, or the original value if not anonymous.
+    fn maybe_clone_anonymous(&mut self, value: IrId, value_ty: TypeId) -> IrId {
+        use crate::tast::TypeKind;
+
+        let is_anon = {
+            let type_table = self.type_table.borrow();
+            matches!(
+                type_table.get(value_ty).map(|t| &t.kind),
+                Some(TypeKind::Anonymous { .. })
+            )
+        };
+
+        if !is_anon {
+            return value;
+        }
+
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let clone_func_id =
+            self.get_or_register_extern_function("rayzor_anon_clone", vec![ptr_u8.clone()], ptr_u8);
+
+        self.builder
+            .build_call_direct(
+                clone_func_id,
+                vec![value],
+                IrType::Ptr(Box::new(IrType::U8)),
+            )
+            .unwrap_or(value)
+    }
+
     /// Insert automatic unboxing if needed when reading from Dynamic
     /// Returns the (potentially unboxed) value
     fn maybe_unbox_value(
@@ -11972,11 +12023,13 @@ impl<'a> HirToMirContext<'a> {
                     }
 
                     // ANONYMOUS OBJECT FIELD STORE
-                    // If object is an anonymous type, use rayzor_anon_set_field_by_index
+                    // If object is an anonymous type (or typedef alias to one),
+                    // use rayzor_anon_set_field_by_index
                     {
+                        let resolved_obj_ty = self.resolve_through_aliases(object.ty);
                         let is_anon = {
                             let type_table = self.type_table.borrow();
-                            if let Some(ty_info) = type_table.get(object.ty) {
+                            if let Some(ty_info) = type_table.get(resolved_obj_ty) {
                                 matches!(ty_info.kind, TypeKind::Anonymous { .. })
                             } else {
                                 false
@@ -11993,7 +12046,7 @@ impl<'a> HirToMirContext<'a> {
                             if let Some(field_name) = field_name {
                                 let sorted_index = {
                                     let type_table = self.type_table.borrow();
-                                    if let Some(ty_info) = type_table.get(object.ty) {
+                                    if let Some(ty_info) = type_table.get(resolved_obj_ty) {
                                         if let TypeKind::Anonymous {
                                             fields: anon_fields,
                                         } = &ty_info.kind
@@ -12564,11 +12617,13 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // ANONYMOUS OBJECT FIELD ACCESS
-        // If receiver is an anonymous type, use rayzor_anon_get_field_by_index
+        // If receiver is an anonymous type (or a typedef alias to one),
+        // use rayzor_anon_get_field_by_index
         {
+            let resolved_receiver_ty = self.resolve_through_aliases(receiver_ty);
             let type_table = self.type_table.borrow();
             let is_anon = matches!(
-                type_table.get(receiver_ty).map(|t| &t.kind),
+                type_table.get(resolved_receiver_ty).map(|t| &t.kind),
                 Some(TypeKind::Anonymous { .. })
             );
 
@@ -12583,7 +12638,8 @@ impl<'a> HirToMirContext<'a> {
                 if let Some(field_name) = field_name {
                     // Get all anonymous fields, sort them, and find both the sorted index
                     // AND the actual field type (not the possibly-Dynamic expr type)
-                    let sorted_result = if let Some(ty_info) = type_table.get(receiver_ty) {
+                    let sorted_result = if let Some(ty_info) = type_table.get(resolved_receiver_ty)
+                    {
                         if let TypeKind::Anonymous {
                             fields: anon_fields,
                         } = &ty_info.kind
@@ -15286,30 +15342,73 @@ impl<'a> HirToMirContext<'a> {
         Some(map_ptr)
     }
 
-    fn lower_object_literal(&mut self, fields: &[(InternedString, HirExpr)]) -> Option<IrId> {
+    fn lower_object_literal(
+        &mut self,
+        fields: &[(InternedString, HirExpr)],
+        expr_type: TypeId,
+    ) -> Option<IrId> {
         // Object literal: { field1: val1, field2: val2, ... }
         //
         // Lowering strategy using Arc-based anonymous objects:
         // 1. Resolve field names and sort alphabetically for canonical ordering
-        // 2. Get or create a shape ID for this field set
-        // 3. Call rayzor_anon_new(shape_id, field_count) → Arc<AnonObject> handle
-        // 4. For each field: call rayzor_anon_set_field_by_index(handle, index, value)
-        // 5. Return the handle pointer (PtrU8)
+        // 2. Check typedef type for optional fields missing from the literal
+        // 3. Get or create a shape ID for the complete field set
+        // 4. Call rayzor_anon_new(shape_id, field_count) → Arc<AnonObject> handle
+        // 5. For each field: call rayzor_anon_set_field_by_index(handle, index, value)
+        // 6. Return the handle pointer (PtrU8)
 
-        let field_count = fields.len();
-
-        // Resolve field names and build sorted (name, index_in_original, expr) list
-        let mut named_fields: Vec<(String, usize)> = Vec::with_capacity(field_count);
+        // Resolve field names from the literal
+        let mut literal_field_names: Vec<(String, usize)> = Vec::with_capacity(fields.len());
         for (i, (interned_name, _expr)) in fields.iter().enumerate() {
             let name = self
                 .string_interner
                 .get(*interned_name)
                 .unwrap_or("<unknown>")
                 .to_string();
-            named_fields.push((name, i));
+            literal_field_names.push((name, i));
+        }
+
+        // Check if the expression type (resolved through aliases) has additional
+        // optional fields not present in the literal
+        let resolved_ty = self.resolve_through_aliases(expr_type);
+        let mut optional_defaults: Vec<String> = Vec::new();
+        {
+            let type_table = self.type_table.borrow();
+            if let Some(ty_info) = type_table.get(resolved_ty) {
+                if let TypeKind::Anonymous {
+                    fields: anon_fields,
+                } = &ty_info.kind
+                {
+                    let literal_names: std::collections::HashSet<&str> = literal_field_names
+                        .iter()
+                        .map(|(n, _)| n.as_str())
+                        .collect();
+                    for af in anon_fields {
+                        if af.optional {
+                            if let Some(fname) = self.string_interner.get(af.name) {
+                                if !literal_names.contains(fname) {
+                                    optional_defaults.push(fname.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build sorted (name, source) list — source is either an index into literal fields
+        // or None for optional defaults
+        let mut named_fields: Vec<(String, Option<usize>)> = literal_field_names
+            .into_iter()
+            .map(|(name, idx)| (name, Some(idx)))
+            .collect();
+        for opt_name in &optional_defaults {
+            named_fields.push((opt_name.clone(), None));
         }
         // Sort by field name for canonical ordering (matches runtime shape table)
         named_fields.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let total_field_count = named_fields.len();
 
         // Build shape key as comma-joined sorted field names
         let shape_key: String = named_fields
@@ -15327,6 +15426,39 @@ impl<'a> HirToMirContext<'a> {
             id
         };
 
+        // Build shape descriptor string: "name1:type_id1,name2:type_id2,..."
+        // Type IDs: 0=Void, 1=Null, 2=Bool, 3=Int, 4=Float, 5=String
+        let descriptor = {
+            let mut parts = Vec::with_capacity(named_fields.len());
+            for (name, source) in &named_fields {
+                let runtime_type_id = match source {
+                    Some(orig_idx) => {
+                        let field_type = fields[*orig_idx].1.ty;
+                        self.runtime_type_id(field_type)
+                    }
+                    None => 1, // null for optional defaults
+                };
+                parts.push(format!("{}:{}", name, runtime_type_id));
+            }
+            parts.join(",")
+        };
+
+        // Register rayzor_ensure_shape extern: (shape_id: u32, descriptor: HaxeString*) -> void
+        let ensure_shape_id = self.get_or_register_extern_function(
+            "rayzor_ensure_shape",
+            vec![IrType::I32, IrType::String],
+            IrType::Void,
+        );
+
+        // Emit: rayzor_ensure_shape(shape_id, descriptor) — idempotent, registers once
+        let shape_id_const = self.builder.build_const(IrValue::I32(shape_id as i32))?;
+        let desc_str = self.builder.build_const(IrValue::String(descriptor))?;
+        self.builder.build_call_direct(
+            ensure_shape_id,
+            vec![shape_id_const, desc_str],
+            IrType::Void,
+        );
+
         // Register rayzor_anon_new extern: (shape_id: u32, field_count: u32) -> *mut u8
         let anon_new_id = self.get_or_register_extern_function(
             "rayzor_anon_new",
@@ -15341,9 +15473,11 @@ impl<'a> HirToMirContext<'a> {
             IrType::Void,
         );
 
-        // Emit: handle = rayzor_anon_new(shape_id, field_count)
+        // Emit: handle = rayzor_anon_new(shape_id, total_field_count)
         let shape_id_val = self.builder.build_const(IrValue::I32(shape_id as i32))?;
-        let field_count_val = self.builder.build_const(IrValue::I32(field_count as i32))?;
+        let field_count_val = self
+            .builder
+            .build_const(IrValue::I32(total_field_count as i32))?;
         let handle = self.builder.build_call_direct(
             anon_new_id,
             vec![shape_id_val, field_count_val],
@@ -15351,20 +15485,31 @@ impl<'a> HirToMirContext<'a> {
         )?;
 
         // Lower each field value and store at its sorted index
-        for (sorted_idx, (_, orig_idx)) in named_fields.iter().enumerate() {
-            let field_expr = &fields[*orig_idx].1;
-            let field_val = self.lower_expression(field_expr)?;
-
-            // Convert field value to u64 for storage
-            // The runtime stores all values as u64 in the Inline vec
-            let val_as_i64 = self.coerce_to_i64(field_val, field_expr.ty)?;
-
+        for (sorted_idx, (_, source)) in named_fields.iter().enumerate() {
             let idx_val = self.builder.build_const(IrValue::I32(sorted_idx as i32))?;
-            self.builder.build_call_direct(
-                anon_set_id,
-                vec![handle, idx_val, val_as_i64],
-                IrType::Void,
-            );
+
+            match source {
+                Some(orig_idx) => {
+                    // Literal field — lower the expression
+                    let field_expr = &fields[*orig_idx].1;
+                    let field_val = self.lower_expression(field_expr)?;
+                    let val_as_i64 = self.coerce_to_i64(field_val, field_expr.ty)?;
+                    self.builder.build_call_direct(
+                        anon_set_id,
+                        vec![handle, idx_val, val_as_i64],
+                        IrType::Void,
+                    );
+                }
+                None => {
+                    // Optional field with default value (0/null)
+                    let zero = self.builder.build_const(IrValue::I64(0))?;
+                    self.builder.build_call_direct(
+                        anon_set_id,
+                        vec![handle, idx_val, zero],
+                        IrType::Void,
+                    );
+                }
+            }
         }
 
         Some(handle)
@@ -15412,6 +15557,41 @@ impl<'a> HirToMirContext<'a> {
             IrType::Ptr(_) => self.builder.build_cast(value, IrType::I64, ir_type.clone()),
             _ => self.builder.build_cast(value, IrType::I64, ir_type.clone()),
         }
+    }
+
+    /// Map a compiler TypeId to the runtime's type_id constant.
+    /// Used for anonymous object shape descriptors.
+    /// Runtime type IDs: 0=Void, 1=Null, 2=Bool, 3=Int, 4=Float, 5=String
+    fn runtime_type_id(&self, type_id: TypeId) -> u32 {
+        use crate::tast::TypeKind;
+        let type_table = self.type_table.borrow();
+        match type_table.get(type_id).map(|t| &t.kind) {
+            Some(TypeKind::Void) => 0,
+            Some(TypeKind::Bool) => 2,
+            Some(TypeKind::Int) => 3,
+            Some(TypeKind::Float) => 4,
+            Some(TypeKind::String) => 5,
+            Some(TypeKind::TypeAlias { target_type, .. }) => {
+                let target = *target_type;
+                drop(type_table);
+                self.runtime_type_id(target)
+            }
+            _ => 0, // default to void/unknown
+        }
+    }
+
+    /// Resolve a TypeId through TypeAlias chains to find the underlying type.
+    /// Returns the resolved TypeId (following aliases), or the original if not an alias.
+    fn resolve_through_aliases(&self, type_id: TypeId) -> TypeId {
+        let type_table = self.type_table.borrow();
+        let mut current = type_id;
+        for _ in 0..10 {
+            match type_table.get(current).map(|t| &t.kind) {
+                Some(TypeKind::TypeAlias { target_type, .. }) => current = *target_type,
+                _ => break,
+            }
+        }
+        current
     }
 
     fn lower_string_interpolation(&mut self, parts: &[HirStringPart]) -> Option<IrId> {

@@ -25,10 +25,7 @@
 //! for failed expressions to maintain type safety.
 
 use crate::tast::node::HasSourceLocation;
-use crate::tast::{
-    core::*, node::MemoryEffects, node::*,
-    type_resolution_improvements::TypeResolutionImprovements, *,
-};
+use crate::tast::{core::*, node::MemoryEffects, node::*, type_resolution, *};
 use parser::{
     AbstractDecl, BinaryOp, ClassDecl, ClassField, ClassFieldKind, EnumConstructor, EnumDecl, Expr,
     ExprKind, Function, FunctionParam, HaxeFile, Import, InterfaceDecl, Metadata, Modifier,
@@ -696,6 +693,18 @@ impl<'a> AstLowering<'a> {
             }
         }
         flags
+    }
+
+    /// Resolve a TypeId through TypeAlias chains to find the underlying type.
+    fn resolve_alias_chain(type_table: &TypeTable, type_id: TypeId) -> TypeId {
+        let mut current = type_id;
+        for _ in 0..10 {
+            match type_table.get(current).map(|t| &t.kind) {
+                Some(TypeKind::TypeAlias { target_type, .. }) => current = *target_type,
+                _ => break,
+            }
+        }
+        current
     }
 
     /// Get the current class symbol if we're in a class context
@@ -4412,7 +4421,7 @@ impl<'a> AstLowering<'a> {
                             .create_enum_type(symbol_id, type_arg_ids)),
                         crate::tast::SymbolKind::TypeAlias => {
                             // For type aliases, we need to get the target type
-                            let target_type = TypeResolutionImprovements::resolve_type_alias(
+                            let target_type = type_resolution::resolve_type_alias(
                                 self.context.type_table,
                                 self.context.symbol_table,
                                 symbol_id,
@@ -4521,11 +4530,63 @@ impl<'a> AstLowering<'a> {
             Type::Intersection { left, right, .. } => {
                 let left_type_id = self.lower_type(left)?;
                 let right_type_id = self.lower_type(right)?;
-                Ok(self.context.type_table.borrow_mut().create_type(
-                    crate::tast::core::TypeKind::Intersection {
-                        types: vec![left_type_id, right_type_id],
-                    },
-                ))
+
+                // If both sides resolve to Anonymous types, merge their fields
+                // into a single Anonymous type (right side wins on name conflicts)
+                let merged = {
+                    let type_table = self.context.type_table.borrow();
+                    let left_resolved = Self::resolve_alias_chain(&type_table, left_type_id);
+                    let right_resolved = Self::resolve_alias_chain(&type_table, right_type_id);
+                    let left_anon = type_table.get(left_resolved).and_then(|t| {
+                        if let TypeKind::Anonymous { fields } = &t.kind {
+                            Some(fields.clone())
+                        } else {
+                            None
+                        }
+                    });
+                    let right_anon = type_table.get(right_resolved).and_then(|t| {
+                        if let TypeKind::Anonymous { fields } = &t.kind {
+                            Some(fields.clone())
+                        } else {
+                            None
+                        }
+                    });
+                    match (left_anon, right_anon) {
+                        (Some(left_fields), Some(right_fields)) => {
+                            // Merge: start with left fields, override/add right fields
+                            let mut merged_fields = left_fields;
+                            for rf in right_fields {
+                                if let Some(existing) =
+                                    merged_fields.iter_mut().find(|f| f.name == rf.name)
+                                {
+                                    *existing = rf;
+                                } else {
+                                    merged_fields.push(rf);
+                                }
+                            }
+                            Some(merged_fields)
+                        }
+                        _ => None,
+                    }
+                };
+
+                if let Some(merged_fields) = merged {
+                    Ok(self
+                        .context
+                        .type_table
+                        .borrow_mut()
+                        .create_type(TypeKind::Anonymous {
+                            fields: merged_fields,
+                        }))
+                } else {
+                    Ok(self
+                        .context
+                        .type_table
+                        .borrow_mut()
+                        .create_type(TypeKind::Intersection {
+                            types: vec![left_type_id, right_type_id],
+                        }))
+                }
             }
             Type::Wildcard { .. } => {
                 // Wildcard types are used in type parameters, return Unknown type
@@ -5861,7 +5922,7 @@ impl<'a> AstLowering<'a> {
                 // Find current class context
                 let this_type = if let Some(current_class) = self.context.class_context_stack.last()
                 {
-                    TypeResolutionImprovements::resolve_this_type(
+                    type_resolution::resolve_this_type(
                         &self.context.type_table,
                         self.context.symbol_table,
                         Some(*current_class),
@@ -5875,7 +5936,7 @@ impl<'a> AstLowering<'a> {
                 // Find current class context and get super type
                 let super_type =
                     if let Some(current_class) = self.context.class_context_stack.last() {
-                        TypeResolutionImprovements::resolve_super_type(
+                        type_resolution::resolve_super_type(
                             &self.context.type_table,
                             self.context.symbol_table,
                             Some(*current_class),
@@ -8581,7 +8642,7 @@ impl<'a> AstLowering<'a> {
                     LiteralValue::Char(_) => Ok(type_table.string_type()), // Haxe treats char as string
                     LiteralValue::Regex(_) | LiteralValue::RegexWithFlags { .. } => {
                         // EReg type in Haxe
-                        Ok(TypeResolutionImprovements::get_regex_type(
+                        Ok(type_resolution::get_regex_type(
                             &self.context.type_table,
                             self.context.string_interner,
                         ))
@@ -8715,16 +8776,16 @@ impl<'a> AstLowering<'a> {
                         .create_array_type(dyn_type))
                 }
             }
-            TypedExpressionKind::Null => Ok(TypeResolutionImprovements::get_null_type(
-                &self.context.type_table,
-            )),
+            TypedExpressionKind::Null => {
+                Ok(type_resolution::get_null_type(&self.context.type_table))
+            }
             TypedExpressionKind::This { this_type } => Ok(*this_type),
             TypedExpressionKind::Super { super_type } => Ok(*super_type),
             TypedExpressionKind::ObjectLiteral { fields } => {
                 // For anonymous objects, infer type from fields
                 let field_types: Vec<(InternedString, TypeId)> =
                     fields.iter().map(|f| (f.name, f.value.expr_type)).collect();
-                Ok(TypeResolutionImprovements::create_anonymous_object_type(
+                Ok(type_resolution::create_anonymous_object_type(
                     &self.context.type_table,
                     field_types,
                 ))
@@ -8943,7 +9004,7 @@ impl<'a> AstLowering<'a> {
                     let first = &entries[0];
                     (first.key.expr_type, first.value.expr_type)
                 };
-                Ok(TypeResolutionImprovements::create_map_type(
+                Ok(type_resolution::create_map_type(
                     &self.context.type_table,
                     key_type,
                     value_type,
@@ -8966,7 +9027,7 @@ impl<'a> AstLowering<'a> {
                 ..
             } => {
                 // Map comprehension creates a Map<K, V> type
-                Ok(TypeResolutionImprovements::create_map_type(
+                Ok(type_resolution::create_map_type(
                     &self.context.type_table,
                     *key_type,
                     *value_type,
@@ -10318,7 +10379,7 @@ impl<'a> AstLowering<'a> {
                     expr_type: {
                         // Extract field types for type inference
 
-                        TypeResolutionImprovements::infer_object_literal_type(
+                        type_resolution::infer_object_literal_type(
                             &self.context.type_table,
                             &field_types,
                         )

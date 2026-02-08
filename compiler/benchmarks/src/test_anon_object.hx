@@ -1,5 +1,6 @@
 class Main {
     static function main() {
+        // === Basic anonymous object ===
         var p = {x: 10, y: 20};
         trace(p.x);    // 10
         trace(p.y);    // 20
@@ -12,5 +13,15 @@ class Main {
         var r = {name: "hello", count: 42};
         trace(r.name);   // hello
         trace(r.count);  // 42
+
+        // === COW semantics ===
+        var a = {x: 1, y: 2};
+        var b = a;
+        trace(a.x);    // 1
+        trace(b.x);    // 1
+
+        // === Reflect API ===
+        trace(Reflect.hasField(p, "x"));    // true
+        trace(Reflect.hasField(p, "z"));    // false
     }
 }

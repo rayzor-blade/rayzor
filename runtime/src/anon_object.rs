@@ -93,6 +93,75 @@ pub extern "C" fn rayzor_register_shape(
     shape_id
 }
 
+/// Ensure a shape is registered at the given shape_id.
+///
+/// descriptor_hs: HaxeString pointer containing "name1:type1,name2:type2,..."
+/// (sorted alphabetically by name)
+/// Type IDs: 0=Void, 1=Null, 2=Bool, 3=Int, 4=Float, 5=String
+///
+/// Idempotent: if shape_id is already registered, this is a no-op.
+#[no_mangle]
+pub extern "C" fn rayzor_ensure_shape(shape_id: u32, descriptor_hs: *mut u8) {
+    ensure_shape_table();
+
+    // Fast path: check if already registered (read lock only)
+    {
+        let table = SHAPE_TABLE.read().unwrap();
+        if let Some(ref t) = *table {
+            if (shape_id as usize) < t.len() && !t[shape_id as usize].field_names.is_empty() {
+                return;
+            }
+        }
+    }
+
+    // Extract string data from HaxeString pointer
+    if descriptor_hs.is_null() {
+        return;
+    }
+    let hs = unsafe { &*(descriptor_hs as *const crate::haxe_string::HaxeString) };
+    if hs.ptr.is_null() || hs.len == 0 {
+        return;
+    }
+    let desc_str = unsafe {
+        std::str::from_utf8_unchecked(std::slice::from_raw_parts(hs.ptr as *const u8, hs.len))
+    };
+
+    let mut field_names = Vec::new();
+    let mut field_types = Vec::new();
+
+    for part in desc_str.split(',') {
+        if part.is_empty() {
+            continue;
+        }
+        if let Some((name, type_str)) = part.split_once(':') {
+            field_names.push(name.to_string());
+            field_types.push(type_str.parse::<u32>().unwrap_or(0));
+        } else {
+            field_names.push(part.to_string());
+            field_types.push(0);
+        }
+    }
+
+    let shape = ShapeDescriptor {
+        field_names,
+        field_types,
+    };
+
+    // Write lock to register
+    let mut table = SHAPE_TABLE.write().unwrap();
+    let table = table.as_mut().unwrap();
+
+    // Grow table if needed
+    while table.len() <= shape_id as usize {
+        table.push(ShapeDescriptor {
+            field_names: Vec::new(),
+            field_types: Vec::new(),
+        });
+    }
+
+    table[shape_id as usize] = shape;
+}
+
 /// Get shape descriptor by ID (internal helper)
 fn get_shape(shape_id: u32) -> Option<ShapeDescriptor> {
     let table = SHAPE_TABLE.read().unwrap();
@@ -207,11 +276,26 @@ pub extern "C" fn rayzor_anon_has_field(ptr: *mut u8, name_ptr: *const u8, name_
         let name =
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(name_ptr, name_len as usize));
 
+        eprintln!(
+            "[DEBUG has_field] shape_id={}, name='{}', data_kind={}",
+            arc_ref.shape_id,
+            name,
+            match &arc_ref.data {
+                AnonData::Inline(f) => format!("Inline(len={})", f.len()),
+                AnonData::Map(m) => format!("Map(len={})", m.len()),
+            }
+        );
+
         match &arc_ref.data {
             AnonData::Inline(_) => {
                 if let Some(shape) = get_shape(arc_ref.shape_id) {
+                    eprintln!("[DEBUG has_field] shape fields: {:?}", shape.field_names);
                     shape.field_names.iter().any(|n| n == name)
                 } else {
+                    eprintln!(
+                        "[DEBUG has_field] get_shape({}) returned None!",
+                        arc_ref.shape_id
+                    );
                     false
                 }
             }

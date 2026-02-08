@@ -31,7 +31,6 @@ pub mod type_diagnostics;
 pub mod type_flow_guard;
 pub mod type_resolution;
 pub mod type_resolution_helpers;
-pub mod type_resolution_improvements;
 // pub mod type_inference;
 
 #[cfg(test)]
