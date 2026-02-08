@@ -11197,12 +11197,30 @@ impl<'a> HirToMirContext<'a> {
                 self.builder.build_string(string_content)
             }
             HirLiteral::Bool(b) => self.builder.build_bool(*b),
-            HirLiteral::Regex { .. } => {
-                self.add_error(
-                    "Regex literals not yet supported in MIR",
-                    SourceLocation::unknown(),
+            HirLiteral::Regex { pattern, flags } => {
+                // ~/pattern/flags => haxe_ereg_new("pattern", "flags")
+                let pattern_str = self
+                    .string_interner
+                    .get(*pattern)
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                let flags_str = self
+                    .string_interner
+                    .get(*flags)
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                let pattern_val = self.builder.build_string(pattern_str)?;
+                let flags_val = self.builder.build_string(flags_str)?;
+                let ereg_new = self.get_or_register_extern_function(
+                    "haxe_ereg_new",
+                    vec![IrType::String, IrType::String],
+                    IrType::Ptr(Box::new(IrType::U8)),
                 );
-                None
+                self.builder.build_call_direct(
+                    ereg_new,
+                    vec![pattern_val, flags_val],
+                    IrType::Ptr(Box::new(IrType::U8)),
+                )
             }
         }
     }

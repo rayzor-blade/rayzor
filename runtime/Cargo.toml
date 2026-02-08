@@ -14,6 +14,7 @@ libc = "0.2"
 chrono = "0.4"
 log = "0.4"
 parking_lot = "0.12"
+regex = "1"
 
 [build-dependencies]
 cc = { version = "1", optional = true }

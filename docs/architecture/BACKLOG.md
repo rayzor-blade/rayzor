@@ -1651,11 +1651,11 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 5 | Array.map/filter/sort (higher-order) | P0 | Medium | 🟢 Complete | functional patterns |
 | 6 | String interpolation | P0 | Low | 🟢 Complete | basic string formatting |
 | 7 | for-in range (`0...n`) | P0 | Low | 🟡 Partial | basic loops |
-| 8 | Static extensions (`using`) | P1 | Medium | 🔴 Not started | idiomatic Haxe |
+| 8 | Static extensions (`using`) | P1 | Medium | 🟢 Complete | idiomatic Haxe |
 | 9 | Safe cast (`cast(expr, Type)`) | P1 | Medium | 🔴 Not started | type-safe downcasting |
 | 10 | Generics instantiation end-to-end | P1 | High | 🟡 Partial | generic classes/functions |
 | 11 | Property get/set dispatch | P1 | Medium | 🟡 Mostly done | encapsulation |
-| 12 | EReg (regex runtime) | P1 | Medium | 🔴 Not started | text processing |
+| 12 | EReg (regex runtime) | P1 | Medium | 🟢 Complete | text processing |
 | 13 | Enum methods + statics | P1 | Medium | 🔴 Not started | rich enums |
 | 14 | Abstract types (operator overloading) | P1 | High | 🟡 Partial | custom types |
 | 15 | Dynamic type operations | P1 | Medium | 🟡 Partial | interop, JSON |
@@ -1806,26 +1806,20 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [ ] `do...while` loop
 - [ ] Labeled break/continue (`break label`)
 
-### 16.8 Static Extensions (`using`) 🔴
+### 16.8 Static Extensions (`using`) 🟢
 
 **Priority:** P1
-**Current State:** Not implemented. The `using` keyword is not processed.
+**Status:** ✅ Complete (2026-02-08)
 
-**What's Missing:**
-- [ ] `using MyTools;` imports static extension methods
-- [ ] Method resolution: `x.myMethod()` where `myMethod` is `static function myMethod(x:MyType)`
-- [ ] Multiple `using` imports in scope
-- [ ] Extension methods on basic types (Int, String, Array)
-- [ ] Priority: local methods > extensions > implicit conversions
+**What Works:**
+- `using MyTools;` imports static extension methods at file level
+- Method resolution: `x.myMethod()` rewrites to `MyTools.myMethod(x)` when `MyTools` has matching static method
+- Multiple `using` imports in scope
+- Extension methods on basic types (Int, String, Array)
+- Priority: local methods > extensions (placeholder check triggers extension lookup)
+- Multi-argument extension methods (`x.add(3)` → `IntTools.add(x, 3)`)
 
-**Acceptance Criteria:**
-```haxe
-class IntTools {
-    static public function triple(v:Int):Int { return v * 3; }
-}
-using IntTools;
-trace((5).triple());  // 15
-```
+**Implementation:** Already existed in ast_lowering.rs — `lower_using()` registers using modules, `find_static_extension_method()` resolves calls, method call desugaring converts to `StaticMethodCall` with receiver prepended as first argument.
 
 ### 16.9 Safe Cast 🔴
 
@@ -1865,17 +1859,28 @@ trace((5).triple());  // 15
 - [ ] Reflect.field/setField on Dynamic objects
 - [ ] JSON parsing returns Dynamic
 
-### 16.12 EReg (Regular Expressions) 🔴
+### 16.12 EReg (Regular Expressions) 🟢
 
 **Priority:** P1
-**Current State:** No EReg runtime implementation exists.
+**Status:** Complete
 
-**What's Missing:**
-- [ ] `~/pattern/flags` literal syntax (parser)
-- [ ] `EReg` class with `match()`, `matched()`, `matchedPos()`, `matchedLeft/Right()`
-- [ ] `replace()`, `split()` methods
-- [ ] Regex flags: `g` (global), `i` (case-insensitive), `m` (multiline), `s` (dotall)
-- [ ] Runtime backed by Rust `regex` crate
+**Implemented:**
+
+- [x] `~/pattern/flags` literal syntax (parser → TAST → HIR → MIR)
+- [x] `new EReg(pattern, flags)` constructor
+- [x] `match()`, `matched()`, `matchedLeft()`, `matchedRight()` instance methods
+- [x] `replace()` with global/non-global modes
+- [x] `split()` — non-global splits at first match
+- [x] `matchSub()` with optional length param (2-arg and 3-arg overloads)
+- [x] `EReg.escape()` static method
+- [x] Regex flags: `g` (global), `i` (case-insensitive), `m` (multiline), `s` (dotall)
+- [x] Runtime backed by Rust `regex` crate (runtime/src/ereg.rs)
+- [x] Regex literal properly typed as EReg class for method resolution
+
+**Deferred:**
+
+- `matchedPos()` — returns anonymous object `{pos:Int, len:Int}`, needs MIR wrapper
+- `map()` — needs passing Haxe closure to runtime
 
 ### 16.13 Enum Methods and Statics 🔴
 
@@ -1972,9 +1977,9 @@ trace((5).triple());  // 15
 
 #### Tier 2: Idiomatic Haxe (blocks Haxe-style code)
 6. ✅ **Higher-order Array methods** (16.5) — map/filter/sort with closure callbacks
-7. **Static extensions** (16.8) — `using` keyword
+7. ✅ **Static extensions** (16.8) — `using` keyword
 8. **Generics end-to-end** (16.10, existing 1.x) — unblock generic containers
-9. **EReg** (16.12) — regex support
+9. ✅ **EReg** (16.12) — regex support (match, replace, split, escape, regex literals)
 10. **Abstract types** (16.10) — user-defined abstracts
 
 #### Tier 3: Completeness (polish and compatibility)

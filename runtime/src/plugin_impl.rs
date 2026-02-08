@@ -1368,6 +1368,20 @@ register_symbol!(
 );
 
 // ============================================================================
+// EReg Functions (Regular Expressions)
+// ============================================================================
+register_symbol!("haxe_ereg_new", crate::ereg::haxe_ereg_new);
+register_symbol!("haxe_ereg_match", crate::ereg::haxe_ereg_match);
+register_symbol!("haxe_ereg_matched", crate::ereg::haxe_ereg_matched);
+register_symbol!("haxe_ereg_matched_left", crate::ereg::haxe_ereg_matched_left);
+register_symbol!("haxe_ereg_matched_right", crate::ereg::haxe_ereg_matched_right);
+register_symbol!("haxe_ereg_matched_pos", crate::ereg::haxe_ereg_matched_pos);
+register_symbol!("haxe_ereg_match_sub", crate::ereg::haxe_ereg_match_sub);
+register_symbol!("haxe_ereg_split", crate::ereg::haxe_ereg_split);
+register_symbol!("haxe_ereg_replace", crate::ereg::haxe_ereg_replace);
+register_symbol!("haxe_ereg_escape", crate::ereg::haxe_ereg_escape);
+
+// ============================================================================
 // TinyCC Runtime API (rayzor.runtime.CC) — registered above
 
 /// Rayzor Runtime Plugin

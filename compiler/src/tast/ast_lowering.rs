@@ -8641,7 +8641,15 @@ impl<'a> AstLowering<'a> {
                     LiteralValue::String(_) => Ok(type_table.string_type()),
                     LiteralValue::Char(_) => Ok(type_table.string_type()), // Haxe treats char as string
                     LiteralValue::Regex(_) | LiteralValue::RegexWithFlags { .. } => {
-                        // EReg type in Haxe
+                        // EReg type in Haxe — resolve as proper class type
+                        drop(type_table);
+                        let ereg_name = self.context.string_interner.intern("EReg");
+                        if let Some(symbol_id) = self.resolve_symbol_in_scope_hierarchy(ereg_name) {
+                            if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
+                                return Ok(symbol.type_id);
+                            }
+                        }
+                        // Fallback to structural type
                         Ok(type_resolution::get_regex_type(
                             &self.context.type_table,
                             self.context.string_interner,
