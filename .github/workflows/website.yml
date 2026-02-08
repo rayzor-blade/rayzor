@@ -10,6 +10,8 @@ on:
     workflows: ["Benchmarks"]
     types:
       - completed
+    branches:
+      - main
 
 permissions:
   contents: read
@@ -47,32 +49,36 @@ jobs:
           mkdir -p _site
           cp -r website/* _site/
           
-          # Include benchmark artifacts if downloaded
+          echo "=== Debug: Checking for artifacts ==="
+          ls -la artifacts/ 2>/dev/null || echo "No artifacts directory found"
+          
+          # Only include benchmark artifacts from workflow - no repo fallback
           if [ -d "artifacts/benchmark-charts" ]; then
             echo "Found benchmark charts artifact, copying to site..."
             mkdir -p _site/benchmarks
             cp -r artifacts/benchmark-charts/* _site/benchmarks/ 2>/dev/null || true
+            echo "Charts artifact copied, checking contents:"
+            ls -la _site/benchmarks/ || true
+          else
+            echo "No benchmark charts artifact found - benchmarks will not be available"
           fi
           
           if [ -d "artifacts/benchmark-results" ]; then
             echo "Found benchmark results artifact, copying to site..."
             mkdir -p _site/benchmarks
             cp -r artifacts/benchmark-results _site/benchmarks/results 2>/dev/null || true
+            echo "Results artifact copied"
+          else
+            echo "No benchmark results artifact found"
           fi
           
-          # Fallback: Include existing benchmark results if available in repo
-          if [ -d "compiler/benchmarks/charts" ]; then
-            mkdir -p _site/benchmarks
-            # Only copy if there are actual content files (not just .keep)
-            if find compiler/benchmarks/charts -maxdepth 1 -name '*.html' -o -name '*.json' -o -name '*.png' -o -name '*.svg' | grep -q .; then
-              echo "No artifacts found, using repo benchmark charts..."
-              cp -r compiler/benchmarks/charts/* _site/benchmarks/ 2>/dev/null || true
-            fi
-            # Copy results directory if it exists and has content
-            if [ -d "compiler/benchmarks/results" ] && [ "$(ls -A compiler/benchmarks/results 2>/dev/null)" ]; then
-              echo "Using repo benchmark results..."
-              cp -r compiler/benchmarks/results _site/benchmarks/results 2>/dev/null || true
-            fi
+          echo "=== Final site structure ==="
+          ls -la _site/
+          if [ -d "_site/benchmarks" ]; then
+            echo "Benchmarks directory contents:"
+            ls -la _site/benchmarks/
+          else
+            echo "No benchmarks directory in final site - will be 404"
           fi
 
       - name: Upload artifact
