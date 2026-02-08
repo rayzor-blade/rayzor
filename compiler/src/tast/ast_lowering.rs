@@ -6712,14 +6712,8 @@ impl<'a> AstLowering<'a> {
                                     }
                                 };
 
-                                let kind = TypedExpressionKind::StaticMethodCall {
-                                    class_symbol,
-                                    method_symbol,
-                                    arguments: arg_exprs,
-                                    type_arguments: Vec::new(),
-                                };
-
                                 // Get method return type by extracting it from the Function type
+                                // (must be done before arg_exprs is moved into StaticMethodCall)
                                 let expr_type = if let Some(symbol) =
                                     self.context.symbol_table.get_symbol(method_symbol)
                                 {
@@ -6727,9 +6721,25 @@ impl<'a> AstLowering<'a> {
                                     if let Some(method_type) = type_table.get(symbol.type_id) {
                                         match &method_type.kind {
                                             crate::tast::core::TypeKind::Function {
+                                                params,
                                                 return_type,
                                                 ..
-                                            } => *return_type,
+                                            } => {
+                                                let ret = *return_type;
+                                                // If return type is a TypeParameter, infer from arguments
+                                                if type_table.is_type_parameter(ret) {
+                                                    let mut inferred = ret;
+                                                    for (i, param_ty) in params.iter().enumerate() {
+                                                        if *param_ty == ret && i < arg_exprs.len() {
+                                                            inferred = arg_exprs[i].expr_type;
+                                                            break;
+                                                        }
+                                                    }
+                                                    inferred
+                                                } else {
+                                                    ret
+                                                }
+                                            }
                                             _ => symbol.type_id,
                                         }
                                     } else {
@@ -6737,6 +6747,13 @@ impl<'a> AstLowering<'a> {
                                     }
                                 } else {
                                     self.context.type_table.borrow().dynamic_type()
+                                };
+
+                                let kind = TypedExpressionKind::StaticMethodCall {
+                                    class_symbol,
+                                    method_symbol,
+                                    arguments: arg_exprs,
+                                    type_arguments: Vec::new(),
                                 };
 
                                 let usage = VariableUsage::Copy;
@@ -6920,9 +6937,25 @@ impl<'a> AstLowering<'a> {
                                 if let Some(method_type) = type_table.get(sym.type_id) {
                                     match &method_type.kind {
                                         crate::tast::core::TypeKind::Function {
+                                            params,
                                             return_type,
                                             ..
-                                        } => *return_type,
+                                        } => {
+                                            let ret = *return_type;
+                                            // If return type is a TypeParameter, infer from arguments
+                                            if type_table.is_type_parameter(ret) {
+                                                let mut inferred = ret;
+                                                for (i, param_ty) in params.iter().enumerate() {
+                                                    if *param_ty == ret && i < arg_exprs.len() {
+                                                        inferred = arg_exprs[i].expr_type;
+                                                        break;
+                                                    }
+                                                }
+                                                inferred
+                                            } else {
+                                                ret
+                                            }
+                                        }
                                         _ => sym.type_id,
                                     }
                                 } else {
@@ -8851,20 +8884,28 @@ impl<'a> AstLowering<'a> {
                 ..
             } => {
                 // Extract return type from function signature
-                match &function.expr_type {
-                    type_id => {
-                        // Try to get function type information
-                        let type_table = self.context.type_table.borrow();
-                        match type_table.get(*type_id) {
-                            Some(function_type) => match &function_type.kind {
-                                crate::tast::core::TypeKind::Function { return_type, .. } => {
-                                    Ok(*return_type)
+                let type_table = self.context.type_table.borrow();
+                match type_table.get(function.expr_type) {
+                    Some(function_type) => match &function_type.kind {
+                        crate::tast::core::TypeKind::Function {
+                            params,
+                            return_type,
+                            ..
+                        } => {
+                            let ret = *return_type;
+                            // If return type is a TypeParameter, infer concrete type from arguments
+                            if type_table.is_type_parameter(ret) {
+                                for (i, param_ty) in params.iter().enumerate() {
+                                    if *param_ty == ret && i < arguments.len() {
+                                        return Ok(arguments[i].expr_type);
+                                    }
                                 }
-                                _ => Ok(type_table.dynamic_type()),
-                            },
-                            None => Ok(type_table.dynamic_type()),
+                            }
+                            Ok(ret)
                         }
-                    }
+                        _ => Ok(type_table.dynamic_type()),
+                    },
+                    None => Ok(type_table.dynamic_type()),
                 }
             }
             TypedExpressionKind::New { class_type, .. } => Ok(*class_type),
@@ -8941,14 +8982,31 @@ impl<'a> AstLowering<'a> {
                 // Extract return type from method signature and substitute type parameters
                 self.infer_method_call_return_type(*method_symbol, receiver.expr_type)
             }
-            TypedExpressionKind::StaticMethodCall { method_symbol, .. } => {
+            TypedExpressionKind::StaticMethodCall {
+                method_symbol,
+                arguments,
+                ..
+            } => {
                 // Extract return type from static method signature
                 if let Some(symbol) = self.context.symbol_table.get_symbol(*method_symbol) {
                     let type_table = self.context.type_table.borrow();
                     if let Some(method_type) = type_table.get(symbol.type_id) {
                         match &method_type.kind {
-                            crate::tast::core::TypeKind::Function { return_type, .. } => {
-                                Ok(*return_type)
+                            crate::tast::core::TypeKind::Function {
+                                params,
+                                return_type,
+                                ..
+                            } => {
+                                let ret = *return_type;
+                                // If return type is a TypeParameter, infer from arguments
+                                if type_table.is_type_parameter(ret) {
+                                    for (i, param_ty) in params.iter().enumerate() {
+                                        if *param_ty == ret && i < arguments.len() {
+                                            return Ok(arguments[i].expr_type);
+                                        }
+                                    }
+                                }
+                                Ok(ret)
                             }
                             _ => Ok(type_table.dynamic_type()),
                         }
