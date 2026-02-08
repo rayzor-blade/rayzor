@@ -15,6 +15,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
   pages: write
   id-token: write
 
@@ -35,22 +36,46 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
-      # Download artifacts from the triggering Benchmarks workflow run
-      - name: Download benchmark artifacts (workflow_run)
-        if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success'
-        uses: actions/download-artifact@v4
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          run-id: ${{ github.event.workflow_run.id }}
-          merge-multiple: true
-          path: artifacts
-
-      # For push/dispatch triggers, fetch artifacts from the latest successful Benchmarks run
-      - name: Download benchmark artifacts (latest)
-        if: github.event_name != 'workflow_run'
+      # Download benchmark artifacts - always try to get the latest successful run
+      - name: Download benchmark artifacts
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          echo "=== Downloading benchmark artifacts ==="
+          echo "Event: ${{ github.event_name }}"
+          
+          # First try workflow_run specific artifacts if triggered by benchmarks
+          if [ "${{ github.event_name }}" = "workflow_run" ] && [ "${{ github.event.workflow_run.conclusion }}" = "success" ]; then
+            echo "Attempting to download from triggering workflow run: ${{ github.event.workflow_run.id }}"
+            
+            # Try direct artifact download from triggering run
+            mkdir -p artifacts
+            for NAME in benchmark-charts benchmark-results; do
+              ARTIFACT_ID=$(gh api "repos/${{ github.repository }}/actions/runs/${{ github.event.workflow_run.id }}/artifacts" \
+                --jq ".artifacts[] | select(.name==\"$NAME\") | .id" | head -1)
+              if [ -n "$ARTIFACT_ID" ]; then
+                echo "Downloading $NAME from triggering run (artifact $ARTIFACT_ID)..."
+                gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" \
+                  > "/tmp/$NAME.zip"
+                mkdir -p "artifacts/$NAME"
+                unzip -o "/tmp/$NAME.zip" -d "artifacts/$NAME"
+              else
+                echo "Artifact $NAME not found in triggering run"
+              fi
+            done
+            
+            # Check if we actually got chart files (not just an empty directory)
+            if find artifacts/benchmark-charts -maxdepth 1 -name '*.html' 2>/dev/null | grep -q .; then
+              echo "Successfully downloaded benchmark charts from triggering workflow run"
+              find artifacts -type f | head -20
+              exit 0
+            else
+              echo "No chart HTML found in triggering run artifacts, falling back to latest successful run"
+              rm -rf artifacts
+            fi
+          fi
+          
+          # Fallback: fetch artifacts from the latest successful Benchmarks run
           echo "Fetching artifacts from latest successful Benchmarks workflow run..."
           RUN_ID=$(gh api repos/${{ github.repository }}/actions/workflows/benchmarks.yml/runs \
             --jq '.workflow_runs[] | select(.conclusion=="success" and .head_branch=="main") | .id' \
@@ -61,14 +86,14 @@ jobs:
             exit 0
           fi
 
-          echo "Using Benchmarks run: $RUN_ID"
+          echo "Using latest Benchmarks run: $RUN_ID"
           mkdir -p artifacts
 
           for NAME in benchmark-charts benchmark-results; do
             ARTIFACT_ID=$(gh api "repos/${{ github.repository }}/actions/runs/$RUN_ID/artifacts" \
               --jq ".artifacts[] | select(.name==\"$NAME\") | .id" | head -1)
             if [ -n "$ARTIFACT_ID" ]; then
-              echo "Downloading $NAME (artifact $ARTIFACT_ID)..."
+              echo "Downloading $NAME (artifact $ARTIFACT_ID) from run $RUN_ID..."
               gh api "repos/${{ github.repository }}/actions/artifacts/$ARTIFACT_ID/zip" \
                 > "/tmp/$NAME.zip"
               mkdir -p "artifacts/$NAME"
@@ -83,23 +108,50 @@ jobs:
           mkdir -p _site
           cp -r website/* _site/
 
+          echo "=== Debug: Available artifacts ==="
+          ls -la artifacts/ 2>/dev/null || echo "No artifacts directory"
+          if [ -d "artifacts" ]; then
+            find artifacts -type f | head -20
+          fi
+
           # Copy benchmark charts and results into site
           if [ -d "artifacts/benchmark-charts" ]; then
             echo "Copying benchmark charts to site..."
+            ls -la artifacts/benchmark-charts/
             mkdir -p _site/benchmarks
             cp -r artifacts/benchmark-charts/* _site/benchmarks/ 2>/dev/null || true
+            echo "Charts copied, verifying:"
+            ls -la _site/benchmarks/
           else
             echo "No benchmark charts found — benchmarks page will be unavailable"
+            echo "Available directories in artifacts:"
+            ls -la artifacts/ 2>/dev/null || echo "No artifacts directory exists"
           fi
 
           if [ -d "artifacts/benchmark-results" ]; then
             echo "Copying benchmark results to site..."
             mkdir -p _site/benchmarks
             cp -r artifacts/benchmark-results _site/benchmarks/results 2>/dev/null || true
+          else
+            echo "No benchmark results found"
           fi
 
-          echo "=== Site structure ==="
+          echo "=== Final site structure ==="
           find _site -type f | head -30
+          
+          echo "=== Benchmarks directory check ==="
+          if [ -d "_site/benchmarks" ]; then
+            echo "Benchmarks directory exists:"
+            ls -la _site/benchmarks/
+            if [ -f "_site/benchmarks/index.html" ]; then
+              echo "index.html exists in benchmarks - should be accessible"
+              head -5 _site/benchmarks/index.html
+            else
+              echo "WARNING: No index.html in benchmarks directory!"
+            fi
+          else
+            echo "ERROR: No benchmarks directory in final site!"
+          fi
 
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
