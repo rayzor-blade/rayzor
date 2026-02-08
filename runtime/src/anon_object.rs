@@ -276,26 +276,11 @@ pub extern "C" fn rayzor_anon_has_field(ptr: *mut u8, name_ptr: *const u8, name_
         let name =
             std::str::from_utf8_unchecked(std::slice::from_raw_parts(name_ptr, name_len as usize));
 
-        eprintln!(
-            "[DEBUG has_field] shape_id={}, name='{}', data_kind={}",
-            arc_ref.shape_id,
-            name,
-            match &arc_ref.data {
-                AnonData::Inline(f) => format!("Inline(len={})", f.len()),
-                AnonData::Map(m) => format!("Map(len={})", m.len()),
-            }
-        );
-
         match &arc_ref.data {
             AnonData::Inline(_) => {
                 if let Some(shape) = get_shape(arc_ref.shape_id) {
-                    eprintln!("[DEBUG has_field] shape fields: {:?}", shape.field_names);
                     shape.field_names.iter().any(|n| n == name)
                 } else {
-                    eprintln!(
-                        "[DEBUG has_field] get_shape({}) returned None!",
-                        arc_ref.shape_id
-                    );
                     false
                 }
             }
