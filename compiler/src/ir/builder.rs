@@ -340,7 +340,18 @@ impl IrBuilder {
                             | (IrType::F64 | IrType::F32, IrType::I32 | IrType::I64)
                     );
                     if needs_cast {
-                        if let Some(cast_id) = self.build_cast(*arg_id, arg_ty, param_ty.clone()) {
+                        // F64↔I64: use bitcast (bit-preserving) for type erasure boundaries
+                        // Other cases: use cast (value conversion)
+                        let use_bitcast = matches!(
+                            (&arg_ty, param_ty),
+                            (IrType::F64, IrType::I64) | (IrType::I64, IrType::F64)
+                        );
+                        let cast_id = if use_bitcast {
+                            self.build_bitcast(*arg_id, param_ty.clone())
+                        } else {
+                            self.build_cast(*arg_id, arg_ty, param_ty.clone())
+                        };
+                        if let Some(cast_id) = cast_id {
                             *arg_id = cast_id;
                         }
                     }
@@ -413,7 +424,14 @@ impl IrBuilder {
                 } else {
                     debug!("DEBUG: CallDirect type mismatch - function returns {:?}, expected {:?}, inserting cast",
                               actual_return_type, ty);
-                    // Insert cast from actual type to expected type
+                    // I64↔F64: use bitcast (bit-preserving) for type erasure boundaries
+                    let use_bitcast = matches!(
+                        (&actual_return_type, &ty),
+                        (IrType::I64, IrType::F64) | (IrType::F64, IrType::I64)
+                    );
+                    if use_bitcast {
+                        return self.build_bitcast(dest_reg, ty);
+                    }
                     return self.build_cast(dest_reg, actual_return_type.clone(), ty);
                 }
             }

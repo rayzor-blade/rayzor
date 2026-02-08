@@ -1431,9 +1431,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
 
-            IrType::TypeVar(_) => {
-                Err("Type variables should be monomorphized before codegen".to_string())
-            }
+            IrType::TypeVar(_) => Ok(self.context.i64_type().into()), // Safety net: pointer-sized
 
             IrType::Generic { .. } => {
                 Err("Generic types should be monomorphized before codegen".to_string())

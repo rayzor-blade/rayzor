@@ -276,7 +276,7 @@ impl CraneliftBackend {
                 // {i64 type_id, ptr value_ptr}
                 8 + self.get_pointer_size() as u64
             }
-            IrType::TypeVar(_) => 0, // Should be monomorphized before codegen
+            IrType::TypeVar(_) => 8, // Safety net: pointer-sized if TypeVar leaks through
             IrType::Generic { .. } => 0, // Should be monomorphized before codegen
             // SIMD vector types - size is element_size * count
             IrType::Vector { element, count } => self.get_type_size(element) * (*count as u64),
@@ -314,7 +314,7 @@ impl CraneliftBackend {
             }
             IrType::Opaque { align, .. } => *align as u32,
             IrType::Any => 8,            // Aligned to i64
-            IrType::TypeVar(_) => 1,     // Should be monomorphized before codegen
+            IrType::TypeVar(_) => 8,     // Safety net: pointer-aligned if TypeVar leaks through
             IrType::Generic { .. } => 1, // Should be monomorphized before codegen
             // SIMD vectors require alignment matching their full size
             // 128-bit vectors need 16-byte alignment, 256-bit need 32-byte

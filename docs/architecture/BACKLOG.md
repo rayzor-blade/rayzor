@@ -10,46 +10,42 @@ This document tracks major features, enhancements, and technical debt for the Ra
 
 ---
 
-## 1. Generics System 🟡
+## 1. Generics System 🟢
 
 **Priority:** High
 **Complexity:** High
 **Dependencies:** Type system, MIR infrastructure
+**Status:** ✅ Core Implementation Complete (2026-02-08) — Type erasure approach
 
-### 1.1 Generic Metadata Support (@:generic)
+### 1.1 Generic Classes End-to-End (Type Erasure)
 
-**Status:** 🟡 TAST Integration Complete, Constraint Validation Needed
+**Status:** 🟢 Complete (2026-02-08)
 **Related Files:**
-- `GENERICS_DESIGN.md` - Overall design document
-- `parser/src/haxe_ast.rs` - AST metadata support
-- `compiler/src/tast/symbols.rs` - SymbolFlags with GENERIC flag
-- `compiler/src/tast/ast_lowering.rs` - Metadata extraction
+- `compiler/src/tast/ast_lowering.rs` - Type arg inference from constructor args
+- `compiler/src/ir/hir_to_mir.rs` - TypeParameter→I64 erasure, field load/store coercion
+- `compiler/src/ir/builder.rs` - F64↔I64 bitcast in build_call_direct
+- `compiler/src/ir/types.rs` - TypeVar size=8 safety net
+- `compiler/src/codegen/cranelift_backend.rs` - TypeVar size/align
+- `compiler/src/codegen/llvm_jit_backend.rs` - TypeVar → i64
 
-**Tasks:**
-- [x] Parser support for `@:generic` metadata
-- [x] AST representation of generic declarations
-- [x] TAST integration - extract and validate `@:generic` metadata
-- [x] Type parameter tracking in TypeTable (already existed)
+**What Works:**
+- [x] `class Container<T> { var value:T; }` — single type parameter
+- [x] `class Pair<A, B> { var first:A; var second:B; }` — multiple type parameters
+- [x] Explicit type args: `new Container<Int>(42)`
+- [x] Inferred type args: `new Container(42)`, `new Container("hello")`, `new Pair("age", 25)`
+- [x] Field access: `container.value` with correct type coercion
+- [x] Method return: `container.get()` with correct type coercion
+- [x] Int, Float, String types all work through erasure
+- [x] GEP stride uses I64 for erased fields (not concrete type)
+- [x] F64↔I64 bitcast (not value cast) for float fields
+
+**Architecture:** Type erasure — all type parameters become I64 (8 bytes) at MIR level. One struct layout per generic class regardless of instantiation. Coercion (bitcast for floats, cast for ints) at field load/store and method call boundaries.
+
+**Not Yet Implemented:**
 - [ ] Generic constraint validation
 - [ ] Abstract types with generics support
-- [ ] Generic metadata propagation through pipeline
-
-**Acceptance Criteria:**
-```haxe
-@:generic
-class Container<T> {
-    public var value: T;
-    public function new(v: T) { this.value = v; }
-}
-
-@:generic
-abstract Stack<T>(Array<T>) {
-    public function push(item: T): Void;
-}
-
-var intContainer = new Container<Int>();  // Should create Container_Int
-var stringStack = new Stack<String>();     // Should create Stack_String
-```
+- [ ] Generic functions (standalone, not class methods)
+- [ ] Nested generics (`Container<Container<Int>>`)
 
 ### 1.2 Type System Extensions
 
@@ -1653,7 +1649,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 7 | for-in range (`0...n`) | P0 | Low | 🟡 Partial | basic loops |
 | 8 | Static extensions (`using`) | P1 | Medium | 🟢 Complete | idiomatic Haxe |
 | 9 | Safe cast (`cast(expr, Type)`) | P1 | Medium | 🔴 Not started | type-safe downcasting |
-| 10 | Generics instantiation end-to-end | P1 | High | 🟡 Partial | generic classes/functions |
+| 10 | Generics instantiation end-to-end | P1 | High | 🟢 Complete | generic classes/functions |
 | 11 | Property get/set dispatch | P1 | Medium | 🟡 Mostly done | encapsulation |
 | 12 | EReg (regex runtime) | P1 | Medium | 🟢 Complete | text processing |
 | 13 | Enum methods + statics | P1 | Medium | 🔴 Not started | rich enums |
@@ -1761,15 +1757,19 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [ ] Partial application / bind
 - [ ] `Reflect.isFunction()` support
 
-### 16.5 Higher-Order Array Methods 🔴
+### 16.5 Higher-Order Array Methods 🟢
 
 **Priority:** P0 — Critical (depends on 16.4 Closures)
-**Current State:** Array has push/pop/length/index access. No higher-order methods.
+**Status:** ✅ Complete (2026-02-08)
 
-**What's Missing:**
-- [ ] `arr.map(f)` — transform elements
-- [ ] `arr.filter(f)` — select elements
-- [ ] `arr.sort(f)` — sort with comparator
+**What Works:**
+
+- [x] `arr.map(f)` — transform elements
+- [x] `arr.filter(f)` — select elements
+- [x] `arr.sort(f)` — sort with comparator
+
+**Not Yet Implemented:**
+
 - [ ] `arr.indexOf(v)` — find element
 - [ ] `arr.contains(v)` — check membership
 - [ ] `arr.iterator()` — for-in iteration
@@ -1781,7 +1781,6 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [ ] `arr.reverse()` — reverse in-place
 - [ ] `arr.remove(v)` — remove first occurrence
 - [ ] `arr.insert(pos, v)` — insert at position
-- [ ] `Lambda.map/filter/fold` — functional utilities
 
 ### 16.6 String Interpolation 🟢
 

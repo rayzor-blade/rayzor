@@ -606,6 +606,10 @@ pub struct AstLowering<'a> {
     pub pending_usings: Vec<String>,
     /// Whether we're currently lowering a static method body (no `this` available)
     in_static_method: bool,
+    /// Ordered type parameter TypeIds for each generic class (class_symbol → [TypeParam TypeIds])
+    class_type_params: HashMap<SymbolId, Vec<TypeId>>,
+    /// Constructor symbol for each class (class_symbol → constructor SymbolId)
+    class_constructor_symbols: HashMap<SymbolId, SymbolId>,
 }
 
 /// Result of type parameter substitution for generic method return types
@@ -1113,6 +1117,8 @@ impl<'a> AstLowering<'a> {
             using_modules: Vec::new(),
             pending_usings: Vec::new(),
             in_static_method: false,
+            class_type_params: HashMap::new(),
+            class_constructor_symbols: HashMap::new(),
         }
     }
 
@@ -2642,7 +2648,18 @@ impl<'a> AstLowering<'a> {
             );
             type_param_map.insert(tp.name, type_id);
         }
-        self.context.push_type_parameters(type_param_map);
+        self.context
+            .push_type_parameters(type_param_map.clone());
+
+        // Store ordered type parameter TypeIds for generic type inference
+        if !type_param_map.is_empty() {
+            let ordered_tp_ids: Vec<TypeId> = type_params
+                .iter()
+                .filter_map(|tp| type_param_map.get(&tp.name).copied())
+                .collect();
+            self.class_type_params
+                .insert(class_symbol, ordered_tp_ids);
+        }
 
         // Process extends clause
         let extends = if let Some(extends_type) = &class_decl.extends {
@@ -2744,6 +2761,10 @@ impl<'a> AstLowering<'a> {
                             methods_list.push((method_name, method_symbol, is_static));
                         }
                     }
+                } else {
+                    // Store constructor symbol for generic type inference
+                    self.class_constructor_symbols
+                        .insert(class_symbol, method_symbol);
                 }
             }
         }
@@ -3923,6 +3944,84 @@ impl<'a> AstLowering<'a> {
             source_location: self.context.create_location(),
             metadata: FunctionMetadata::default(),
         })
+    }
+
+    /// Infer generic type arguments from constructor argument types.
+    /// When `new Container(42)` is written without explicit `<Int>`, this matches
+    /// constructor param types (TypeParameter) against argument types to infer type args.
+    fn infer_type_args_from_constructor(
+        &self,
+        class_type_id: TypeId,
+        args: &[TypedExpression],
+    ) -> Option<TypeId> {
+        // Get class symbol
+        let class_symbol = {
+            let tt = self.context.type_table.borrow();
+            let ti = tt.get(class_type_id)?;
+            match &ti.kind {
+                crate::tast::core::TypeKind::Class { symbol_id, .. } => *symbol_id,
+                _ => return None,
+            }
+        };
+
+        // Check if class has type parameters
+        let type_param_ids = self.class_type_params.get(&class_symbol)?;
+        if type_param_ids.is_empty() {
+            return None;
+        }
+
+        // Get constructor symbol and its function type
+        let ctor_symbol = self.class_constructor_symbols.get(&class_symbol)?;
+        let ctor_type_id = self.context.symbol_table.get_symbol(*ctor_symbol)?.type_id;
+        let param_type_ids = {
+            let tt = self.context.type_table.borrow();
+            let ti = tt.get(ctor_type_id)?;
+            match &ti.kind {
+                crate::tast::core::TypeKind::Function { params, .. } => params.clone(),
+                _ => return None,
+            }
+        };
+
+        // Match TypeParameter params against argument types
+        let mut tp_to_concrete: HashMap<TypeId, TypeId> = HashMap::new();
+        {
+            let tt = self.context.type_table.borrow();
+            for (i, param_ty) in param_type_ids.iter().enumerate() {
+                if i >= args.len() {
+                    break;
+                }
+                if let Some(param_info) = tt.get(*param_ty) {
+                    if matches!(
+                        param_info.kind,
+                        crate::tast::core::TypeKind::TypeParameter { .. }
+                    ) {
+                        tp_to_concrete.insert(*param_ty, args[i].expr_type);
+                    }
+                }
+            }
+        }
+
+        if tp_to_concrete.is_empty() {
+            return None;
+        }
+
+        // Build ordered type_args matching the class's type parameter order
+        let type_args: Vec<TypeId> = type_param_ids
+            .iter()
+            .map(|tp_id| {
+                tp_to_concrete
+                    .get(tp_id)
+                    .copied()
+                    .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type())
+            })
+            .collect();
+
+        Some(
+            self.context
+                .type_table
+                .borrow_mut()
+                .create_class_type(class_symbol, type_args),
+        )
     }
 
     /// Lower a function from a class field (includes field metadata)
@@ -5559,7 +5658,9 @@ impl<'a> AstLowering<'a> {
                         base_class_type_id
                     }
                 } else {
-                    base_class_type_id
+                    // No explicit type args — try to infer from constructor argument types
+                    self.infer_type_args_from_constructor(base_class_type_id, &arg_exprs)
+                        .unwrap_or(base_class_type_id)
                 };
 
                 // Extract and intern the class name for extern stdlib classes

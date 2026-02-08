@@ -8856,10 +8856,19 @@ impl<'a> HirToMirContext<'a> {
                             };
                             debug!("[FUNCTION_MAP] Result: {:?}", result);
 
-                            // NOTE: Receiver temps are tracked above (args[0] for method calls).
-                            // For method chains like z.mul(z).add(c), the intermediate result
-                            // of z.mul(z) is tracked as a temp and freed after add() returns.
-                            // The receiver temp tracking above handles this case.
+                            // Type erasure coercion for generic method returns:
+                            // If expr.ty is a TypeParameter (erased to I64), resolve to the
+                            // concrete type using the receiver's type arguments and coerce.
+                            if let Some(call_result) = result {
+                                if actual_return_type == IrType::I64 && !args.is_empty() {
+                                    if let Some(concrete_ty_id) = self.resolve_type_param_from_receiver(expr.ty, args[0].ty) {
+                                        let concrete_ir_type = self.convert_type(concrete_ty_id);
+                                        if concrete_ir_type != IrType::I64 {
+                                            return self.coerce_from_i64(call_result, concrete_ty_id);
+                                        }
+                                    }
+                                }
+                            }
 
                             return result;
                         } else {
@@ -9197,6 +9206,15 @@ impl<'a> HirToMirContext<'a> {
                     let symbol_id = match &type_ref.kind {
                         crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
                         crate::tast::TypeKind::Abstract { symbol_id, .. } => Some(*symbol_id),
+                        crate::tast::TypeKind::GenericInstance { base_type, .. } => {
+                            // Unwrap GenericInstance to find base class symbol_id
+                            if let Some(base_info) = type_table.get(*base_type) {
+                                match &base_info.kind {
+                                    crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                                    _ => None,
+                                }
+                            } else { None }
+                        }
                         _ => None,
                     };
                     let is_abs = matches!(type_ref.kind, crate::tast::TypeKind::Abstract { .. });
@@ -9237,12 +9255,23 @@ impl<'a> HirToMirContext<'a> {
                 if class_name.is_none() {
                     let type_table = self.type_table.borrow();
                     class_name = if let Some(type_ref) = type_table.get(*class_type) {
-                        if let crate::tast::TypeKind::Class { symbol_id, .. } = &type_ref.kind {
-                            self.symbol_table
-                                .get_symbol(*symbol_id)
-                                .and_then(|sym| self.string_interner.get(sym.name))
-                        } else {
-                            None
+                        match &type_ref.kind {
+                            crate::tast::TypeKind::Class { symbol_id, .. } => {
+                                self.symbol_table
+                                    .get_symbol(*symbol_id)
+                                    .and_then(|sym| self.string_interner.get(sym.name))
+                            }
+                            crate::tast::TypeKind::GenericInstance { base_type, .. } => {
+                                // Unwrap GenericInstance to get base class name
+                                if let Some(base_info) = type_table.get(*base_type) {
+                                    if let crate::tast::TypeKind::Class { symbol_id, .. } = &base_info.kind {
+                                        self.symbol_table
+                                            .get_symbol(*symbol_id)
+                                            .and_then(|sym| self.string_interner.get(sym.name))
+                                    } else { None }
+                                } else { None }
+                            }
+                            _ => None,
                         }
                     } else {
                         None
@@ -9457,10 +9486,22 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
 
+                // If not found and this is a GenericInstance, try the base class TypeId
+                if !has_constructor {
+                    let type_table = self.type_table.borrow();
+                    if let Some(type_info) = type_table.get(*class_type) {
+                        if let crate::tast::TypeKind::GenericInstance { base_type, .. } = &type_info.kind {
+                            if self.constructor_map.contains_key(base_type) {
+                                constructor_type_id = *base_type;
+                                has_constructor = true;
+                            }
+                        }
+                    }
+                }
+
                 // If no constructor exists and we have exactly one argument, treat as value wrap
                 // This handles abstract types that weren't properly detected above
                 if !has_constructor && args.len() == 1 {
-                    // debug!("No constructor found for TypeId={:?}, single argument - treating as value wrap", class_type);
                     let result = self.lower_expression(&args[0]);
                     return result;
                 }
@@ -11056,23 +11097,10 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Type parameters and dynamic types
-            Some(TypeKind::TypeParameter { symbol_id, .. }) => {
-                // Type parameters like T, U, etc. - convert to IrType::TypeVar for monomorphization
-                // Look up the symbol name to get the type parameter name
-                let type_param_name = self
-                    .symbol_table
-                    .get_symbol(*symbol_id)
-                    .and_then(|sym| self.string_interner.get(sym.name))
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| format!("T{}", symbol_id.as_raw()));
-
-                debug!(
-                    "Converting TypeParameter {:?} to TypeVar(\"{}\")",
-                    symbol_id, type_param_name
-                );
-                IrType::TypeVar(type_param_name)
-            }
+            // Type parameters — type erasure: all type params are pointer-sized (8 bytes)
+            // This allows ONE struct layout per generic class for all instantiations.
+            // Coercion to/from concrete types happens at generic boundaries (field access, calls).
+            Some(TypeKind::TypeParameter { .. }) => IrType::I64,
             Some(TypeKind::Dynamic) => {
                 // Dynamic type is used as a placeholder for unresolved generic type parameters
                 // in stdlib (e.g., ArrayIterator<T>.next() where T is unresolved).
@@ -12643,9 +12671,27 @@ impl<'a> HirToMirContext<'a> {
 
                             // Use GEP to get field pointer, then store
                             if let Some(field_ptr) =
-                                self.builder.build_gep(obj_reg, vec![index_const], field_ty)
+                                self.builder.build_gep(obj_reg, vec![index_const], field_ty.clone())
                             {
-                                self.builder.build_store(field_ptr, value);
+                                // Type erasure coercion: if field is I64 (erased type param)
+                                // but value is a concrete type, coerce before storing
+                                let store_value = if field_ty == IrType::I64 {
+                                    if let Some(val_ty) = self.builder.get_register_type(value) {
+                                        if val_ty != IrType::I64 {
+                                            match val_ty {
+                                                IrType::F64 | IrType::F32 => {
+                                                    self.builder.build_bitcast(value, IrType::I64)
+                                                        .unwrap_or(value)
+                                                }
+                                                _ => {
+                                                    self.builder.build_cast(value, val_ty, IrType::I64)
+                                                        .unwrap_or(value)
+                                                }
+                                            }
+                                        } else { value }
+                                    } else { value }
+                                } else { value };
+                                self.builder.build_store(field_ptr, store_value);
                             }
                         }
                     } else {
@@ -12723,6 +12769,11 @@ impl<'a> HirToMirContext<'a> {
         receiver_ty: TypeId,
         field_ty: TypeId,
     ) -> Option<IrId> {
+        // Type erasure: if field_ty is a TypeParameter, resolve to concrete type
+        // using the receiver's type arguments (e.g., Container<Float>.value → Float)
+        let resolved_field_ty = self.resolve_type_param_from_receiver(field_ty, receiver_ty);
+        let field_ty = resolved_field_ty.unwrap_or(field_ty);
+
         // SPECIAL CASE: Auto-unbox Dynamic for field access
         // If receiver is Dynamic, automatically unbox to get the actual object pointer
         let (obj, receiver_ty) = {
@@ -13241,6 +13292,25 @@ impl<'a> HirToMirContext<'a> {
         // Get the type of the field
         let field_ir_ty = self.convert_type(field_ty);
 
+        // Type erasure: if the field's declared type is TypeParameter, use I64 for GEP stride
+        // (all type-erased fields are stored as I64 regardless of concrete type)
+        let field_is_type_param = {
+            let declared_type_id = self.symbol_table.get_symbol(field).map(|s| s.type_id);
+            if let Some(decl_id) = declared_type_id {
+                let type_table = self.type_table.borrow();
+                type_table.get(decl_id).map_or(false, |ti| {
+                    matches!(ti.kind, crate::tast::TypeKind::TypeParameter { .. })
+                })
+            } else {
+                false
+            }
+        };
+        let gep_element_ty = if field_is_type_param {
+            IrType::I64
+        } else {
+            field_ir_ty.clone()
+        };
+
         // @:cstruct: use byte-offset PtrAdd instead of index-based GEP
         // Check both class_type_id (from field_index_map) and receiver_ty (expression type)
         let cstruct_type = if self.is_cstruct_class(class_type_id) {
@@ -13337,10 +13407,18 @@ impl<'a> HirToMirContext<'a> {
         // obj is a pointer to the struct, indices are [field_index]
         let field_ptr = self
             .builder
-            .build_gep(obj, vec![index_const], field_ir_ty.clone())?;
+            .build_gep(obj, vec![index_const], gep_element_ty.clone())?;
 
         // Load the value from the field pointer
-        let field_value = self.builder.build_load(field_ptr, field_ir_ty.clone())?;
+        let field_value = self.builder.build_load(field_ptr, gep_element_ty.clone())?;
+
+        // Type erasure coercion: if field was loaded as I64 (erased type param),
+        // coerce to the concrete type expected by the caller
+        if field_is_type_param && field_ir_ty != IrType::I64 {
+            let coerced = self.coerce_from_i64(field_value, field_ty)?;
+            self.builder.set_register_type(coerced, field_ir_ty);
+            return Some(coerced);
+        }
 
         // Register the type of the loaded value for use in later instructions (e.g., Cmp)
         self.builder.set_register_type(field_value, field_ir_ty);
@@ -13603,7 +13681,13 @@ impl<'a> HirToMirContext<'a> {
         let field_value = self.builder.build_load(field_ptr, field_ir_ty.clone())?;
 
         // Register the type of the loaded value
-        self.builder.set_register_type(field_value, field_ir_ty);
+        self.builder.set_register_type(field_value, field_ir_ty.clone());
+
+        // Type erasure coercion: if field is I64 (erased type param) but expr expects concrete type
+        let expected_ir_ty = self.convert_type(field_ty);
+        if field_ir_ty == IrType::I64 && expected_ir_ty != IrType::I64 {
+            return self.coerce_from_i64(field_value, field_ty);
+        }
 
         Some(field_value)
     }
@@ -16089,6 +16173,45 @@ impl<'a> HirToMirContext<'a> {
         }
 
         Some(handle)
+    }
+
+    /// Resolve a TypeParameter TypeId to its concrete type using the receiver's type arguments.
+    /// For example, if expr.ty is TypeParameter(T) and receiver is Container<Float>,
+    /// returns Some(Float_TypeId).
+    fn resolve_type_param_from_receiver(&self, type_param_id: TypeId, receiver_type_id: TypeId) -> Option<TypeId> {
+        let type_table = self.type_table.borrow();
+
+        // Check if type_param_id is actually a TypeParameter
+        let param_info = type_table.get(type_param_id)?;
+        let param_symbol = match &param_info.kind {
+            crate::tast::TypeKind::TypeParameter { symbol_id, .. } => *symbol_id,
+            _ => return None,
+        };
+
+        // Get receiver's class info with concrete type_args
+        let recv_info = type_table.get(receiver_type_id)?;
+        let (class_symbol, concrete_args) = match &recv_info.kind {
+            crate::tast::TypeKind::Class { symbol_id, type_args } => (*symbol_id, type_args.clone()),
+            _ => return None,
+        };
+        drop(type_table);
+
+        // Find the type parameter's name
+        let param_name = self.symbol_table.get_symbol(param_symbol)?.name;
+
+        // Find the class declaration in HIR to get type parameter order
+        for (_tid, decl) in self.current_hir_types.iter() {
+            if let crate::ir::hir::HirTypeDecl::Class(c) = decl {
+                if c.symbol_id == class_symbol {
+                    for (i, tp) in c.type_params.iter().enumerate() {
+                        if tp.name == param_name {
+                            return concrete_args.get(i).copied();
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Coerce a value to i64 for anonymous object field storage.

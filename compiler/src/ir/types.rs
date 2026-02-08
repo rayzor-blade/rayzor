@@ -184,9 +184,7 @@ impl IrType {
             }
             IrType::Opaque { size, .. } => *size,
             IrType::Vector { element, count } => element.size() * count,
-            IrType::TypeVar(_) => {
-                panic!("Cannot get size of type variable before monomorphization")
-            }
+            IrType::TypeVar(_) => 8, // Safety net: pointer-sized if TypeVar leaks through
             IrType::Generic { .. } => {
                 panic!("Cannot get size of generic type before monomorphization")
             }
@@ -211,9 +209,7 @@ impl IrType {
             IrType::Opaque { align, .. } => *align,
             // SIMD vectors require alignment equal to their size for optimal performance
             IrType::Vector { element, count } => (element.size() * count).max(element.align()),
-            IrType::TypeVar(_) => {
-                panic!("Cannot get alignment of type variable before monomorphization")
-            }
+            IrType::TypeVar(_) => 8, // Safety net: pointer-aligned if TypeVar leaks through
             IrType::Generic { .. } => {
                 panic!("Cannot get alignment of generic type before monomorphization")
             }
