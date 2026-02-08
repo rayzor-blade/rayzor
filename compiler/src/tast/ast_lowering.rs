@@ -9814,10 +9814,10 @@ impl<'a> AstLowering<'a> {
                 self.context.current_scope = case_scope;
 
                 // Bind pattern variables in the new scope
-                self.bind_pattern_variables(first_pattern)?;
+                let var_bindings = self.bind_pattern_variables(first_pattern)?;
 
                 // For constructor patterns, create the constructor expression
-                let case_expr = self.create_constructor_expression(first_pattern)?;
+                let case_expr = self.create_constructor_expression_with_bindings(first_pattern, var_bindings)?;
 
                 // Lower case body as expression in the new scope with bound variables
                 let body_expr = self.lower_expression(&case.body)?;
@@ -9876,10 +9876,10 @@ impl<'a> AstLowering<'a> {
                 self.context.current_scope = case_scope;
 
                 // Bind pattern variables in the new scope
-                self.bind_pattern_variables(first_pattern)?;
+                let var_bindings = self.bind_pattern_variables(first_pattern)?;
 
                 // For constructor patterns, create the constructor expression
-                let case_expr = self.create_constructor_expression(first_pattern)?;
+                let case_expr = self.create_constructor_expression_with_bindings(first_pattern, var_bindings)?;
 
                 // Lower case body in the new scope with bound variables
                 let body = self.lower_expression_to_statement(&case.body)?;
@@ -9951,7 +9951,7 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Bind pattern variables in the current scope
-    fn bind_pattern_variables(&mut self, pattern: &parser::Pattern) -> Result<(), LoweringError> {
+    fn bind_pattern_variables(&mut self, pattern: &parser::Pattern) -> Result<Vec<(InternedString, SymbolId)>, LoweringError> {
         use parser::Pattern;
         match pattern {
             Pattern::Var(var_name) => {
@@ -9969,26 +9969,29 @@ impl<'a> AstLowering<'a> {
                     .expect("Current scope should exist")
                     .add_symbol(var_symbol, interned_name);
 
-                Ok(())
+                Ok(vec![(interned_name, var_symbol)])
             }
             Pattern::Constructor { params, .. } => {
                 // Recursively bind variables in constructor parameters
+                let mut bindings = Vec::new();
                 for param in params {
-                    self.bind_pattern_variables(param)?;
+                    bindings.extend(self.bind_pattern_variables(param)?);
                 }
-                Ok(())
+                Ok(bindings)
             }
             Pattern::Array(patterns) => {
                 // Bind variables in each array element pattern
+                let mut bindings = Vec::new();
                 for pattern in patterns {
-                    self.bind_pattern_variables(pattern)?;
+                    bindings.extend(self.bind_pattern_variables(pattern)?);
                 }
-                Ok(())
+                Ok(bindings)
             }
             Pattern::ArrayRest { elements, rest, .. } => {
                 // Bind variables in element patterns
+                let mut bindings = Vec::new();
                 for pattern in elements {
-                    self.bind_pattern_variables(pattern)?;
+                    bindings.extend(self.bind_pattern_variables(pattern)?);
                 }
 
                 // Bind the rest variable if present
@@ -10003,15 +10006,17 @@ impl<'a> AstLowering<'a> {
                         .get_scope_mut(self.context.current_scope)
                         .expect("Current scope should exist")
                         .add_symbol(var_symbol, interned_name);
+                    bindings.push((interned_name, var_symbol));
                 }
-                Ok(())
+                Ok(bindings)
             }
             Pattern::Object { fields, .. } => {
                 // Bind variables in each field pattern
+                let mut bindings = Vec::new();
                 for (_, field_pattern) in fields {
-                    self.bind_pattern_variables(field_pattern)?;
+                    bindings.extend(self.bind_pattern_variables(field_pattern)?);
                 }
-                Ok(())
+                Ok(bindings)
             }
             Pattern::Type { var, .. } => {
                 // Bind the typed variable
@@ -10025,25 +10030,26 @@ impl<'a> AstLowering<'a> {
                     .get_scope_mut(self.context.current_scope)
                     .expect("Current scope should exist")
                     .add_symbol(var_symbol, interned_name);
-                Ok(())
+                Ok(vec![(interned_name, var_symbol)])
             }
             Pattern::Or(patterns) => {
                 // For OR patterns, all branches must bind the same variables
                 // This is a complex case - for now just bind variables from the first branch
+                let mut bindings = Vec::new();
                 if let Some(first_pattern) = patterns.first() {
-                    self.bind_pattern_variables(first_pattern)?;
+                    bindings = self.bind_pattern_variables(first_pattern)?;
                 }
                 // TODO: Validate that all branches bind the same variables
-                Ok(())
+                Ok(bindings)
             }
             Pattern::Const(_) | Pattern::Null | Pattern::Underscore => {
                 // These patterns don't bind variables
-                Ok(())
+                Ok(vec![])
             }
             Pattern::Extractor { .. } => {
                 // Extractors are complex - for now skip binding
                 // TODO: Implement extractor pattern variable binding
-                Ok(())
+                Ok(vec![])
             }
         }
     }
@@ -10097,6 +10103,15 @@ impl<'a> AstLowering<'a> {
         &mut self,
         pattern: &parser::Pattern,
     ) -> Result<TypedExpression, LoweringError> {
+        self.create_constructor_expression_with_bindings(pattern, vec![])
+    }
+
+    /// Create a constructor expression with pre-resolved variable bindings
+    fn create_constructor_expression_with_bindings(
+        &mut self,
+        pattern: &parser::Pattern,
+        variable_bindings: Vec<(InternedString, SymbolId)>,
+    ) -> Result<TypedExpression, LoweringError> {
         use parser::Pattern;
         match pattern {
             Pattern::Constructor { path, params } => {
@@ -10135,12 +10150,39 @@ impl<'a> AstLowering<'a> {
                     })
                 } else {
                     // Constructor with parameters - use pattern placeholder for complex patterns
-                    self.create_pattern_placeholder(pattern)
+                    self.create_pattern_placeholder_with_bindings(pattern, variable_bindings)
                 }
             }
             Pattern::ArrayRest { .. } | Pattern::Object { .. } | Pattern::Type { .. } => {
                 // Complex patterns that need later compilation
-                self.create_pattern_placeholder(pattern)
+                self.create_pattern_placeholder_with_bindings(pattern, variable_bindings)
+            }
+            Pattern::Var(name) => {
+                // Check if this identifier is actually an enum variant (e.g., "None")
+                // The parser produces Var for bare identifiers like `case None:`
+                let interned_name = self.context.intern_string(name);
+                if let Some(variant_sym_id) =
+                    self.resolve_enum_constructor_from_discriminant(interned_name)
+                {
+                    let ct = self
+                        .context
+                        .symbol_table
+                        .get_symbol(variant_sym_id)
+                        .map(|s| s.type_id)
+                        .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type());
+                    Ok(TypedExpression {
+                        kind: TypedExpressionKind::Variable {
+                            symbol_id: variant_sym_id,
+                        },
+                        expr_type: ct,
+                        usage: VariableUsage::Borrow,
+                        lifetime_id: LifetimeId::from_raw(1),
+                        source_location: SourceLocation::new(0, 0, 0, 0),
+                        metadata: ExpressionMetadata::default(),
+                    })
+                } else {
+                    self.lower_pattern_to_expression(pattern)
+                }
             }
             _ => {
                 // For simple patterns, fall back to regular pattern conversion
@@ -10154,11 +10196,21 @@ impl<'a> AstLowering<'a> {
         &mut self,
         pattern: &parser::Pattern,
     ) -> Result<TypedExpression, LoweringError> {
+        self.create_pattern_placeholder_with_bindings(pattern, vec![])
+    }
+
+    /// Create a pattern placeholder with pre-resolved variable bindings
+    fn create_pattern_placeholder_with_bindings(
+        &mut self,
+        pattern: &parser::Pattern,
+        variable_bindings: Vec<(InternedString, SymbolId)>,
+    ) -> Result<TypedExpression, LoweringError> {
         let source_location = SourceLocation::new(0, 0, 0, 0); // TODO: get actual pattern location
         Ok(TypedExpression {
             kind: TypedExpressionKind::PatternPlaceholder {
                 pattern: pattern.clone(),
                 source_location,
+                variable_bindings,
             },
             expr_type: self.context.type_table.borrow().dynamic_type(),
             usage: VariableUsage::Borrow,
@@ -10181,10 +10233,30 @@ impl<'a> AstLowering<'a> {
                 self.lower_expression(expr)
             }
             Pattern::Var(name) => {
-                // Variable patterns bind a new variable in the case body
-                // For pattern matching, we need to create a wildcard match
-                // The actual variable binding happens in the case body scope
+                // Check if this identifier is actually an enum variant (e.g., "None")
                 let interned_name = self.context.intern_string(name);
+                if let Some(variant_sym_id) =
+                    self.resolve_enum_constructor_from_discriminant(interned_name)
+                {
+                    let ct = self
+                        .context
+                        .symbol_table
+                        .get_symbol(variant_sym_id)
+                        .map(|s| s.type_id)
+                        .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type());
+                    return Ok(TypedExpression {
+                        kind: TypedExpressionKind::Variable {
+                            symbol_id: variant_sym_id,
+                        },
+                        expr_type: ct,
+                        usage: VariableUsage::Borrow,
+                        lifetime_id: LifetimeId::from_raw(1),
+                        source_location: SourceLocation::new(0, 0, 0, 0),
+                        metadata: ExpressionMetadata::default(),
+                    });
+                }
+
+                // Variable patterns bind a new variable in the case body
                 let var_symbol = self.context.symbol_table.create_variable(interned_name);
 
                 // Register in current scope for the case body

@@ -2504,31 +2504,90 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 arg_ownership: _,
                 is_tail_call: _,
             } => {
-                let func_ptr_val = self.get_value(*func_ptr)?.into_pointer_value();
+                // func_ptr is a pointer to a closure struct: { fn_ptr: i64, env_ptr: i64 }
+                let closure_ptr = self.get_value(*func_ptr)?.into_pointer_value();
+                let i64_type = self.context.i64_type();
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
 
-                // Get argument values
-                let arg_values: Result<Vec<_>, _> = args
-                    .iter()
-                    .map(|&id| self.get_value(id).map(|v| v.into()))
-                    .collect();
-                let arg_values = arg_values?;
+                // Load function pointer from closure offset 0
+                let fn_ptr_i64 = self
+                    .builder
+                    .build_load(i64_type, closure_ptr, "cl_fn_ptr")
+                    .map_err(|e| format!("Failed to load closure fn_ptr: {}", e))?
+                    .into_int_value();
+                let fn_ptr_val = self
+                    .builder
+                    .build_int_to_ptr(fn_ptr_i64, ptr_type, "cl_fn_ptr_as_ptr")
+                    .map_err(|e| format!("Failed to inttoptr fn_ptr: {}", e))?;
 
-                // Build indirect call
+                // Load environment pointer from closure offset 8
+                let env_slot = unsafe {
+                    self.builder
+                        .build_gep(
+                            self.context.i8_type(),
+                            closure_ptr,
+                            &[i64_type.const_int(8, false)],
+                            "cl_env_slot",
+                        )
+                        .map_err(|e| format!("Failed to GEP closure env: {}", e))?
+                };
+                let env_ptr_i64 = self
+                    .builder
+                    .build_load(i64_type, env_slot, "cl_env_ptr")
+                    .map_err(|e| format!("Failed to load closure env_ptr: {}", e))?;
+
+                // Build argument list: env_ptr first, then user args
+                let mut call_args: Vec<BasicMetadataValueEnum> = Vec::new();
+                call_args.push(env_ptr_i64.into());
+                for &arg_id in args.iter() {
+                    let arg_val = self.get_value(arg_id)?;
+                    call_args.push(arg_val.into());
+                }
+
+                // Build function type with env_ptr prepended
+                let fn_type = {
+                    match signature {
+                        IrType::Function {
+                            params,
+                            return_type,
+                            varargs,
+                        } => {
+                            // Build param types: env_ptr (i64) + user params
+                            let mut param_types: Vec<BasicMetadataTypeEnum> =
+                                Vec::with_capacity(params.len() + 1);
+                            param_types.push(i64_type.into()); // env_ptr
+                            for p in params {
+                                let llvm_ty = self.translate_type(p)?;
+                                param_types.push(llvm_ty.into());
+                            }
+
+                            if matches!(return_type.as_ref(), IrType::Void) {
+                                self.context
+                                    .void_type()
+                                    .fn_type(&param_types, *varargs)
+                            } else {
+                                let ret_ty = self.translate_type(return_type)?;
+                                ret_ty.fn_type(&param_types, *varargs)
+                            }
+                        }
+                        _ => {
+                            return Err(format!(
+                                "Invalid signature type for CallIndirect: {:?}",
+                                signature
+                            ))
+                        }
+                    }
+                };
+
                 let call_site = self
                     .builder
-                    .build_indirect_call(
-                        self.translate_function_type(signature)?,
-                        func_ptr_val,
-                        &arg_values,
-                        "indirect_call",
-                    )
+                    .build_indirect_call(fn_type, fn_ptr_val, &call_args, "indirect_call")
                     .map_err(|e| format!("Failed to build indirect call: {}", e))?;
 
                 if let Some(dest) = dest {
                     if let Some(result_val) = call_site.try_as_basic_value().left() {
                         self.value_map.insert(*dest, result_val);
                     } else {
-                        // Void function but dest expected - insert placeholder
                         let placeholder = self.context.i8_type().const_int(0, false).into();
                         self.value_map.insert(*dest, placeholder);
                     }
@@ -2712,14 +2771,178 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
                 self.value_map.insert(*dest, result);
             }
-            IrInstruction::MakeClosure { .. } => {
-                return Err("MakeClosure not yet implemented".to_string());
+            IrInstruction::MakeClosure {
+                dest,
+                func_id,
+                captured_values,
+            } => {
+                // Get function pointer for the lambda
+                let llvm_func = self.function_map.get(func_id).ok_or_else(|| {
+                    format!("Lambda function {:?} not found in function_map", func_id)
+                })?;
+                let func_addr = llvm_func.as_global_value().as_pointer_value();
+
+                let ptr_type = self.context.ptr_type(AddressSpace::default());
+                let i64_type = self.context.i64_type();
+
+                // Allocate environment for captured values (if any)
+                let env_ptr = if !captured_values.is_empty() {
+                    let env_size = (captured_values.len() * 8) as u64;
+
+                    // Get or declare malloc
+                    let malloc_fn = match self.module.get_function("malloc") {
+                        Some(f) => f,
+                        None => {
+                            let malloc_fn_type = ptr_type.fn_type(&[i64_type.into()], false);
+                            self.module.add_function("malloc", malloc_fn_type, None)
+                        }
+                    };
+
+                    let size_arg = i64_type.const_int(env_size, false);
+                    let env_addr = self
+                        .builder
+                        .build_call(malloc_fn, &[size_arg.into()], "env_malloc")
+                        .map_err(|e| format!("Failed to malloc env: {}", e))?
+                        .try_as_basic_value()
+                        .left()
+                        .ok_or("malloc did not return a value")?
+                        .into_pointer_value();
+
+                    // Store each captured value into the environment
+                    for (i, captured_id) in captured_values.iter().enumerate() {
+                        let captured_val = self.get_value(*captured_id)?;
+                        let offset = (i * 8) as u64;
+
+                        // All env slots are i64 — extend smaller ints
+                        let val_as_i64 = if captured_val.is_int_value() {
+                            let int_val = captured_val.into_int_value();
+                            if int_val.get_type().get_bit_width() < 64 {
+                                self.builder
+                                    .build_int_s_extend(int_val, i64_type, "env_extend")
+                                    .map_err(|e| format!("Failed to extend env val: {}", e))?
+                                    .into()
+                            } else {
+                                int_val.into()
+                            }
+                        } else {
+                            // For pointers/floats, bitcast to i64
+                            self.builder
+                                .build_bitcast(captured_val, i64_type, "env_cast")
+                                .map_err(|e| format!("Failed to bitcast env val: {}", e))?
+                        };
+
+                        let slot_ptr = if offset == 0 {
+                            env_addr
+                        } else {
+                            unsafe {
+                                self.builder
+                                    .build_gep(
+                                        self.context.i8_type(),
+                                        env_addr,
+                                        &[i64_type.const_int(offset, false)],
+                                        &format!("env_slot_{}", i),
+                                    )
+                                    .map_err(|e| format!("Failed to GEP env slot: {}", e))?
+                            }
+                        };
+
+                        self.builder
+                            .build_store(slot_ptr, val_as_i64)
+                            .map_err(|e| format!("Failed to store env val: {}", e))?;
+                    }
+
+                    env_addr
+                } else {
+                    // No captures - null environment pointer
+                    ptr_type.const_null()
+                };
+
+                // Allocate closure struct: { fn_ptr: ptr, env_ptr: ptr }
+                let malloc_fn = match self.module.get_function("malloc") {
+                    Some(f) => f,
+                    None => {
+                        let malloc_fn_type = ptr_type.fn_type(&[i64_type.into()], false);
+                        self.module.add_function("malloc", malloc_fn_type, None)
+                    }
+                };
+
+                let closure_size = i64_type.const_int(16, false);
+                let closure_ptr = self
+                    .builder
+                    .build_call(malloc_fn, &[closure_size.into()], "closure_malloc")
+                    .map_err(|e| format!("Failed to malloc closure: {}", e))?
+                    .try_as_basic_value()
+                    .left()
+                    .ok_or("malloc did not return a value")?
+                    .into_pointer_value();
+
+                // Store function pointer at offset 0
+                let func_as_ptr = self
+                    .builder
+                    .build_ptr_to_int(func_addr, i64_type, "func_as_i64")
+                    .map_err(|e| format!("Failed to ptrtoint func: {}", e))?;
+                self.builder
+                    .build_store(closure_ptr, func_as_ptr)
+                    .map_err(|e| format!("Failed to store fn_ptr: {}", e))?;
+
+                // Store environment pointer at offset 8
+                let env_slot = unsafe {
+                    self.builder
+                        .build_gep(
+                            self.context.i8_type(),
+                            closure_ptr,
+                            &[i64_type.const_int(8, false)],
+                            "closure_env_slot",
+                        )
+                        .map_err(|e| format!("Failed to GEP env slot: {}", e))?
+                };
+                let env_as_i64 = self
+                    .builder
+                    .build_ptr_to_int(env_ptr, i64_type, "env_as_i64")
+                    .map_err(|e| format!("Failed to ptrtoint env: {}", e))?;
+                self.builder
+                    .build_store(env_slot, env_as_i64)
+                    .map_err(|e| format!("Failed to store env_ptr: {}", e))?;
+
+                self.value_map.insert(*dest, closure_ptr.into());
             }
-            IrInstruction::ClosureFunc { .. } => {
-                return Err("ClosureFunc not yet implemented".to_string());
+            IrInstruction::ClosureFunc { dest, closure } => {
+                // Load function pointer from closure offset 0
+                let closure_val = self.get_value(*closure)?.into_pointer_value();
+                let func_ptr_val = self
+                    .builder
+                    .build_load(self.context.i64_type(), closure_val, "closure_func")
+                    .map_err(|e| format!("Failed to load closure func: {}", e))?;
+                self.value_map.insert(*dest, func_ptr_val);
             }
-            IrInstruction::ClosureEnv { .. } => {
-                return Err("ClosureEnv not yet implemented".to_string());
+            IrInstruction::ClosureEnv { dest, closure } => {
+                // Load environment pointer from closure offset 8
+                let closure_val = self.get_value(*closure)?.into_pointer_value();
+                let i64_type = self.context.i64_type();
+                let env_slot = unsafe {
+                    self.builder
+                        .build_gep(
+                            self.context.i8_type(),
+                            closure_val,
+                            &[i64_type.const_int(8, false)],
+                            "closure_env_gep",
+                        )
+                        .map_err(|e| format!("Failed to GEP closure env: {}", e))?
+                };
+                let env_val = self
+                    .builder
+                    .build_load(i64_type, env_slot, "closure_env")
+                    .map_err(|e| format!("Failed to load closure env: {}", e))?;
+                // Convert i64 back to pointer
+                let env_ptr = self
+                    .builder
+                    .build_int_to_ptr(
+                        env_val.into_int_value(),
+                        self.context.ptr_type(AddressSpace::default()),
+                        "env_ptr",
+                    )
+                    .map_err(|e| format!("Failed to inttoptr env: {}", e))?;
+                self.value_map.insert(*dest, env_ptr.into());
             }
             IrInstruction::DebugLoc { .. } => {
                 // Debug locations are metadata, skip for now

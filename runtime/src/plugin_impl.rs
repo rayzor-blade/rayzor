@@ -1346,6 +1346,23 @@ register_symbol!("rayzor_tensor_data", crate::tensor::rayzor_tensor_data);
 register_symbol!("rayzor_tensor_free", crate::tensor::rayzor_tensor_free);
 
 // ============================================================================
+// Exception Handling (setjmp/longjmp)
+// ============================================================================
+register_symbol!(
+    "rayzor_exception_push_handler",
+    crate::exception::rayzor_exception_push_handler
+);
+register_symbol!(
+    "rayzor_exception_pop_handler",
+    crate::exception::rayzor_exception_pop_handler
+);
+register_symbol!("rayzor_throw", crate::exception::rayzor_throw);
+register_symbol!(
+    "rayzor_get_exception",
+    crate::exception::rayzor_get_exception
+);
+
+// ============================================================================
 // TinyCC Runtime API (rayzor.runtime.CC) — registered above
 
 /// Rayzor Runtime Plugin

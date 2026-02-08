@@ -1633,6 +1633,361 @@ Two optimizations applied to the shared LLVM codegen (benefits both JIT and AOT)
 
 ---
 
+## 16. Haxe Language Feature Gap Analysis 🔴
+
+**Priority:** Critical — these gaps block real-world Haxe code from compiling
+**Last Audit:** 2026-02-08 (cross-referenced against https://haxe.org/manual/introduction.html)
+
+### Gap Priority Matrix
+
+Features are ranked by **impact** (how much real Haxe code they block) and **complexity** (implementation effort). P0 = must-have for any non-trivial program, P1 = needed for idiomatic Haxe, P2 = advanced/nice-to-have.
+
+| # | Feature | Priority | Complexity | Status | Blocks |
+|---|---------|----------|------------|--------|--------|
+| 1 | Enum variants + pattern matching (ADTs) | P0 | High | 🟢 Complete | switch, Option, Result |
+| 2 | Interface dispatch (vtables) | P0 | High | 🟢 Complete | polymorphism, stdlib |
+| 3 | try/catch exception handling | P0 | High | 🟢 Complete | error handling |
+| 4 | Closures as first-class values | P0 | High | 🟢 Complete | callbacks, HOFs |
+| 5 | Array.map/filter/sort (higher-order) | P0 | Medium | 🔴 Not started | functional patterns |
+| 6 | String interpolation | P0 | Low | 🟢 Complete | basic string formatting |
+| 7 | for-in range (`0...n`) | P0 | Low | 🟡 Partial | basic loops |
+| 8 | Static extensions (`using`) | P1 | Medium | 🔴 Not started | idiomatic Haxe |
+| 9 | Safe cast (`cast(expr, Type)`) | P1 | Medium | 🔴 Not started | type-safe downcasting |
+| 10 | Generics instantiation end-to-end | P1 | High | 🟡 Partial | generic classes/functions |
+| 11 | Property get/set dispatch | P1 | Medium | 🟡 Mostly done | encapsulation |
+| 12 | EReg (regex runtime) | P1 | Medium | 🔴 Not started | text processing |
+| 13 | Enum methods + statics | P1 | Medium | 🔴 Not started | rich enums |
+| 14 | Abstract types (operator overloading) | P1 | High | 🟡 Partial | custom types |
+| 15 | Dynamic type operations | P1 | Medium | 🟡 Partial | interop, JSON |
+| 16 | Type parameters on functions | P1 | Medium | 🟡 Partial | generic functions |
+| 17 | Null safety (`Null<T>`) | P2 | Medium | 🔴 Not started | null checks |
+| 18 | Structural subtyping | P2 | Medium | 🔴 Not started | structural interfaces |
+| 19 | `@:forward` on abstracts | P2 | Medium | 🔴 Not started | delegation |
+| 20 | Macros (compile-time) | P2 | Very High | 🔴 Not started | metaprogramming |
+| 21 | Map literal syntax | P2 | Low | 🔴 Not started | `["key" => val]` |
+| 22 | Array comprehension | P2 | Medium | 🔴 Not started | `[for (x in arr) x*2]` |
+| 23 | `Std.is()` / `Std.downcast()` (RTTI) | P2 | Medium | 🔴 Not started | runtime type checks |
+
+---
+
+### 16.1 Enum Variants + Pattern Matching (ADTs) 🟢
+
+**Priority:** P0 — Critical
+**Status:** ✅ Complete (2026-02-08)
+
+**What Works:**
+- Enum declaration parsing and TAST lowering
+- Simple discriminant enums (`Color.Red` = integer)
+- Boxed parameterized variants (`Option.Some(42)` = heap [tag][value])
+- Enum RTTI for trace (`trace(Color.Red)` → "Red")
+- `switch` on enum values with `case Some(v):` destructuring
+- Wildcard `_` and variable binding in patterns
+- `default` / catch-all case
+- Or-patterns (`case A | B:`)
+- Multiple patterns per case
+- Bitcast i64→Ptr for boxed enum scrutinee in pattern tests
+
+**Not Yet Implemented:**
+
+- [ ] Guard expressions in match arms (`case v if v > 0:`)
+- [ ] Exhaustiveness checking (warn on missing cases)
+- [ ] `EnumValue` API (`Type.enumIndex()`, `Type.enumParameters()`)
+- [ ] Nested pattern matching (`case Pair(Some(x), _):`)
+
+### 16.2 Interface Dispatch (Vtables) 🟢
+
+**Priority:** P0 — Critical
+**Status:** ✅ Complete (2026-02-08)
+
+**What Works:**
+- Fat pointer vtable: `{obj_ptr: i64, fn_ptr_0: i64, ...}` per interface assignment
+- `interface_method_names` + `interface_vtables` maps built during type registration
+- Two-pass type registration (interfaces first, then classes) for correct ordering
+- `wrap_in_interface_fat_ptr()` allocates and populates fat pointer at assignment
+- Interface dispatch in Variable callee path via `CallIndirect`
+- `build_function_ref()` for vtable fn_ptr construction
+- Works for Let bindings and Assign statements
+
+**Not Yet Implemented:**
+
+- [ ] Multiple interface implementation (`class Foo implements Bar implements Baz`)
+- [ ] Interface inheritance (`interface A extends B`)
+- [ ] `Std.is(obj, IMyInterface)` runtime check
+- [ ] Fat pointer lifecycle management (free on scope exit)
+
+### 16.3 Try/Catch Exception Handling 🟢
+
+**Priority:** P0 — Critical
+**Status:** ✅ Complete (2026-02-08)
+
+**Implementation:** setjmp/longjmp with thread-local handler stack.
+
+**What Works:**
+- `runtime/src/exception.rs`: Thread-local `ExceptionState` with handler stack
+- `rayzor_exception_push_handler()`, `rayzor_exception_pop_handler()`, `rayzor_throw()`, `rayzor_get_exception()`
+- Expression-level `HirExprKind::TryCatch` handler with full setjmp/longjmp pattern
+- Statement-level `lower_try_catch()` also implemented
+- `throw expr` → `CallDirect` to `rayzor_throw()` (no backend changes needed)
+- Catch block with `Dynamic` type matching
+- Normal control flow preserved (try without throw skips catch)
+
+**Not Yet Implemented:**
+
+- [ ] Typed catch matching (`catch (e:String)` vs `catch (e:Int)`)
+- [ ] Multiple catch blocks with type discrimination
+- [ ] Finally block execution
+- [ ] Exception propagation through uncaught functions (cross-function unwinding)
+- [ ] `haxe.Exception` base class
+- [ ] Stack trace capture on throw
+
+### 16.4 Closures as First-Class Values 🟢
+
+**Priority:** P0 — Critical
+**Status:** ✅ Complete (2026-02-08)
+
+**What Works:**
+- Lambda parsing (`() -> expr`, `(x) -> expr`)
+- Store closure in variable (`var f = (x) -> x * 2;`)
+- Call stored closure (`f(10)`) via `CallIndirect`
+- Closure environment capture (env_ptr always first param, even without captures)
+- Closure struct: `{fn_ptr: i64, env_ptr: i64}` — 16 bytes on heap
+- Cranelift backend: `MakeClosure`, `ClosureFunc`, `ClosureEnv`, `CallIndirect`
+- LLVM backend: Full closure support (MakeClosure, ClosureFunc, ClosureEnv, CallIndirect)
+- Indirect call parameter type inference from callee's function type
+
+**Not Yet Implemented:**
+
+- [ ] Pass closure as function argument (`arr.map((x) -> x * 2)`)
+- [ ] Partial application / bind
+- [ ] `Reflect.isFunction()` support
+
+### 16.5 Higher-Order Array Methods 🔴
+
+**Priority:** P0 — Critical (depends on 16.4 Closures)
+**Current State:** Array has push/pop/length/index access. No higher-order methods.
+
+**What's Missing:**
+- [ ] `arr.map(f)` — transform elements
+- [ ] `arr.filter(f)` — select elements
+- [ ] `arr.sort(f)` — sort with comparator
+- [ ] `arr.indexOf(v)` — find element
+- [ ] `arr.contains(v)` — check membership
+- [ ] `arr.iterator()` — for-in iteration
+- [ ] `arr.join(sep)` — string join
+- [ ] `arr.concat(other)` — concatenate
+- [ ] `arr.copy()` — shallow copy
+- [ ] `arr.splice(pos, len)` — remove range
+- [ ] `arr.slice(pos, end)` — sub-array
+- [ ] `arr.reverse()` — reverse in-place
+- [ ] `arr.remove(v)` — remove first occurrence
+- [ ] `arr.insert(pos, v)` — insert at position
+- [ ] `Lambda.map/filter/fold` — functional utilities
+
+### 16.6 String Interpolation 🟢
+
+**Priority:** P0 — Low complexity, high impact
+**Status:** ✅ Complete (already implemented — parser, AST, TAST, HIR desugaring all work)
+
+**What Works:**
+- Single-quote string interpolation: `'Hello $name, you are ${age + 1} years old'`
+- Simple variable interpolation: `$varName`
+- Expression interpolation: `${expr}`
+- Desugared to string concatenation during AST lowering
+
+### 16.7 For-in Range Iteration 🟡
+
+**Priority:** P0
+**Current State:** `for (v in iterable)` works for arrays. `0...n` range syntax is partially supported.
+
+**What's Missing:**
+- [ ] `IntIterator` (`0...10` creates IntIterator with hasNext/next)
+- [ ] `for (i in 0...10)` full support
+- [ ] Custom iterator protocol (`hasNext()` + `next()`)
+- [ ] `do...while` loop
+- [ ] Labeled break/continue (`break label`)
+
+### 16.8 Static Extensions (`using`) 🔴
+
+**Priority:** P1
+**Current State:** Not implemented. The `using` keyword is not processed.
+
+**What's Missing:**
+- [ ] `using MyTools;` imports static extension methods
+- [ ] Method resolution: `x.myMethod()` where `myMethod` is `static function myMethod(x:MyType)`
+- [ ] Multiple `using` imports in scope
+- [ ] Extension methods on basic types (Int, String, Array)
+- [ ] Priority: local methods > extensions > implicit conversions
+
+**Acceptance Criteria:**
+```haxe
+class IntTools {
+    static public function triple(v:Int):Int { return v * 3; }
+}
+using IntTools;
+trace((5).triple());  // 15
+```
+
+### 16.9 Safe Cast 🔴
+
+**Priority:** P1
+**Current State:** `cast(expr, Type)` syntax not implemented. Unsafe `cast expr` may partially work.
+
+**What's Missing:**
+- [ ] `cast(expr, Type)` — returns null on failure (safe cast)
+- [ ] `cast expr` — unchecked cast (unsafe, for FFI/interop)
+- [ ] Runtime type check before cast
+- [ ] Integration with RTTI system
+
+### 16.10 Abstract Types 🟡
+
+**Priority:** P1
+**Current State:** Parser handles abstract declarations. `@:coreType` extern abstracts work (SIMD4f, CString). Operator overloading via `@:op` partially works.
+
+**What's Missing:**
+- [ ] User-defined abstract types with underlying type (`abstract MyInt(Int)`)
+- [ ] Implicit conversions (`@:from`, `@:to`)
+- [ ] `@:op(A + B)` on non-extern abstracts
+- [ ] Abstract enum (`abstract Color(Int) { var Red = 0; var Blue = 1; }`)
+- [ ] `@:forward` — delegate methods to underlying type
+- [ ] `@:enum` abstracts
+- [ ] `this` in abstract methods refers to underlying value
+
+### 16.11 Dynamic Type 🟡
+
+**Priority:** P1
+**Current State:** `Dynamic` type exists in type system. Boxing/unboxing works for basic types. Anonymous objects use Dynamic for field types.
+
+**What's Missing:**
+- [ ] `Dynamic` field access (`obj.anyField` without compile-time check)
+- [ ] `Dynamic` method calls
+- [ ] `Dynamic` arithmetic operations
+- [ ] `Dynamic` → typed coercion at assignment
+- [ ] Reflect.field/setField on Dynamic objects
+- [ ] JSON parsing returns Dynamic
+
+### 16.12 EReg (Regular Expressions) 🔴
+
+**Priority:** P1
+**Current State:** No EReg runtime implementation exists.
+
+**What's Missing:**
+- [ ] `~/pattern/flags` literal syntax (parser)
+- [ ] `EReg` class with `match()`, `matched()`, `matchedPos()`, `matchedLeft/Right()`
+- [ ] `replace()`, `split()` methods
+- [ ] Regex flags: `g` (global), `i` (case-insensitive), `m` (multiline), `s` (dotall)
+- [ ] Runtime backed by Rust `regex` crate
+
+### 16.13 Enum Methods and Statics 🔴
+
+**Priority:** P1
+**Current State:** Enums are data-only. No methods or static members.
+
+**What's Missing:**
+- [ ] Methods on enum types
+- [ ] Static methods on enums
+- [ ] `Type.getEnumConstructs()` — list variant names
+- [ ] `Type.createEnum()` — create variant by name/index
+
+### 16.14 Null Safety 🔴
+
+**Priority:** P2
+**Current State:** No null safety enforcement. Null is a valid value for any reference type.
+
+**What's Missing:**
+- [ ] `Null<T>` wrapper type
+- [ ] Null-check operator `?.` (optional chaining)
+- [ ] Null coalescing `??`
+- [ ] Compile-time null flow analysis
+- [ ] `@:notNull` metadata
+
+### 16.15 Structural Subtyping 🔴
+
+**Priority:** P2
+**Current State:** Typedef structure types partially work. Anonymous object shapes work.
+
+**What's Missing:**
+- [ ] Structural type compatibility (pass `{x:Int, y:Int, z:Int}` where `{x:Int, y:Int}` expected)
+- [ ] Structural interfaces (any object with matching fields satisfies the type)
+- [ ] Compile-time structural matching
+
+### 16.16 Map Literal Syntax 🔴
+
+**Priority:** P2
+**Current State:** IntMap/StringMap exist as runtime types. No literal syntax.
+
+**What's Missing:**
+- [ ] `["key1" => val1, "key2" => val2]` map literal syntax
+- [ ] Type inference for map key/value types
+- [ ] `for (key => value in map)` iteration
+
+### 16.17 Array Comprehension 🔴
+
+**Priority:** P2
+**Current State:** Not implemented.
+
+**What's Missing:**
+- [ ] `[for (x in arr) x * 2]` — array comprehension
+- [ ] `[for (x in arr) if (x > 0) x]` — filtered comprehension
+- [ ] Nested comprehensions
+
+### 16.18 RTTI (Runtime Type Information) 🟡
+
+**Priority:** P2
+**Current State:** Basic enum RTTI exists. Type IDs assigned. Anonymous object shapes registered.
+
+**What's Missing:**
+- [ ] `Std.is(value, Type)` — runtime type checking
+- [ ] `Std.downcast(value, Type)` — safe downcast
+- [ ] `Type.getClass(obj)` — get class of object
+- [ ] `Type.getClassName(cls)` — get class name as string
+- [ ] `Type.getInstanceFields(cls)` — list fields
+- [ ] `Type.getSuperClass(cls)` — class hierarchy
+- [ ] `Type.typeof(value)` — get ValueType enum
+- [ ] Full class metadata at runtime
+
+### 16.19 Macros (Compile-Time) 🔴
+
+**Priority:** P2 — Very high complexity, low near-term priority
+**Current State:** Macro parser infrastructure exists (113 unit tests). No execution.
+
+**What's Missing:**
+- [ ] Compile-time expression evaluation
+- [ ] `macro` keyword functions
+- [ ] Expression reification (`macro $v`, `macro $a{expr}`)
+- [ ] `Context` and `Compiler` APIs
+- [ ] Build macros (`@:build`, `@:autoBuild`)
+- [ ] `#if` / `#else` conditional compilation (preprocessor)
+
+---
+
+### Updated Implementation Priority Order (2026-02-08)
+
+#### Tier 1: Language Fundamentals (blocks real programs) ✅ COMPLETE
+
+1. ✅ **Enum variants + pattern matching** (16.1) — unlocks Option/Result, switch expressions
+2. ✅ **Closures as first-class values** (16.4) — unlocks callbacks, HOFs, Array.map
+3. ✅ **String interpolation** (16.6) — already implemented
+4. ✅ **try/catch exception handling** (16.3) — setjmp/longjmp based
+5. ✅ **Interface dispatch** (16.2) — fat pointer vtables
+
+#### Tier 2: Idiomatic Haxe (blocks Haxe-style code)
+6. **Higher-order Array methods** (16.5) — map/filter/sort after closures land
+7. **Static extensions** (16.8) — `using` keyword
+8. **Generics end-to-end** (16.10, existing 1.x) — unblock generic containers
+9. **EReg** (16.12) — regex support
+10. **Abstract types** (16.10) — user-defined abstracts
+
+#### Tier 3: Completeness (polish and compatibility)
+11. **Safe cast** (16.9)
+12. **Dynamic type ops** (16.11)
+13. **Null safety** (16.14)
+14. **RTTI** (16.18)
+15. **Map literals** (16.16)
+16. **Array comprehension** (16.17)
+17. **Macros** (16.19)
+
+---
+
 ## Known Issues
 
 ### Deref Coercion for Wrapper Types
@@ -1703,7 +2058,7 @@ trace("The point is: " + p);    // ✅ (calls toString())
 - **Async state machines** build on generics and memory safety
 - Implementation should follow dependency order to avoid rework
 
-**Last Updated:** 2026-01-31 (Inline C / TinyCC Runtime API Complete)
+**Last Updated:** 2026-02-07 (Haxe Language Feature Gap Analysis)
 
 ## Recent Progress (Session 2026-01-31 - Inline C / TinyCC Runtime API)
 

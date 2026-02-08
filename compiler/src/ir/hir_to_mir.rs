@@ -237,6 +237,13 @@ pub struct HirToMirContext<'a> {
 
     /// Next shape ID to allocate (incremented each time a new shape is registered)
     next_anon_shape_id: u32,
+
+    /// Interface method ordering: maps interface SymbolId → ordered list of method names
+    interface_method_names: BTreeMap<SymbolId, Vec<InternedString>>,
+
+    /// Interface vtables: maps (class SymbolId, interface SymbolId) → method SymbolIds
+    /// Each entry's method order matches the interface's method_names order
+    interface_vtables: BTreeMap<(SymbolId, SymbolId), Vec<SymbolId>>,
 }
 
 /// TCC runtime function IDs for __c__ inline code lowering
@@ -374,6 +381,8 @@ impl<'a> HirToMirContext<'a> {
             current_function_symbol: None,
             anonymous_shapes: BTreeMap::new(),
             next_anon_shape_id: 0,
+            interface_method_names: BTreeMap::new(),
+            interface_vtables: BTreeMap::new(),
         };
 
         // Pre-declare malloc so it's available for heap allocations during lowering
@@ -1360,8 +1369,17 @@ impl<'a> HirToMirContext<'a> {
 
         // IMPORTANT: Register type metadata FIRST before lowering any functions
         // This populates field_index_map which is needed for field access
+        // Two-pass: register interfaces first so interface_method_names is populated
+        // before classes try to build vtables.
         for (type_id, type_decl) in &hir_module.types {
-            self.register_type_metadata(*type_id, type_decl);
+            if matches!(type_decl, HirTypeDecl::Interface(_)) {
+                self.register_type_metadata(*type_id, type_decl);
+            }
+        }
+        for (type_id, type_decl) in &hir_module.types {
+            if !matches!(type_decl, HirTypeDecl::Interface(_)) {
+                self.register_type_metadata(*type_id, type_decl);
+            }
         }
 
         // CRITICAL: Two-pass lowering to avoid non-deterministic function ordering issues
@@ -2697,6 +2715,13 @@ impl<'a> HirToMirContext<'a> {
                             value_reg
                         };
 
+                        // Wrap class instance in interface fat pointer if needed
+                        let final_value = if let Some(target_ty) = var_type {
+                            self.maybe_wrap_for_interface(final_value, init_expr.ty, target_ty)
+                        } else {
+                            final_value
+                        };
+
                         // Clone anonymous object handles for COW semantics.
                         // Object literals create fresh handles, so skip cloning for those.
                         // All other sources (variables, calls, field access) need their own handle.
@@ -2814,6 +2839,21 @@ impl<'a> HirToMirContext<'a> {
 
                     // Store to lvalue
                     if let Some(value) = final_value {
+                        // Wrap class instance in interface fat pointer if assigning to interface var
+                        let value = if let HirLValue::Variable(sym) = lhs {
+                            if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
+                                if sym_info.type_id != TypeId::invalid() {
+                                    self.maybe_wrap_for_interface(value, rhs.ty, sym_info.type_id)
+                                } else {
+                                    value
+                                }
+                            } else {
+                                value
+                            }
+                        } else {
+                            value
+                        };
+
                         // Clone anonymous object handles for COW semantics on reassignment.
                         // Skip for object literals (fresh handles) and compound assignments.
                         let value = if op.is_none()
@@ -2951,9 +2991,27 @@ impl<'a> HirToMirContext<'a> {
 
             HirStatement::Throw(expr) => {
                 if let Some(exception_reg) = self.lower_expression(expr) {
-                    // Emit throw instruction
-                    self.builder.build_throw(exception_reg);
-                    // After throw, code is unreachable
+                    // Cast exception to i64 for uniform storage
+                    let reg_type = self
+                        .builder
+                        .get_register_type(exception_reg)
+                        .unwrap_or(IrType::I64);
+                    let exc_as_i64 = if reg_type != IrType::I64 {
+                        self.builder
+                            .build_cast(exception_reg, reg_type, IrType::I64)
+                            .unwrap_or(exception_reg)
+                    } else {
+                        exception_reg
+                    };
+
+                    // Call rayzor_throw(exception_value) — this longjmps, never returns
+                    let throw_fn = self.get_or_register_extern_function(
+                        "rayzor_throw",
+                        vec![IrType::I64],
+                        IrType::Void,
+                    );
+                    self.builder
+                        .build_call_direct(throw_fn, vec![exc_as_i64], IrType::Void);
                     self.builder.build_unreachable();
                 }
             }
@@ -4161,6 +4219,56 @@ impl<'a> HirToMirContext<'a> {
         None
     }
 
+    /// Resolve an enum TypeId to its SymbolId
+    fn resolve_enum_symbol(&self, enum_type: TypeId) -> Option<SymbolId> {
+        self.symbol_table
+            .get_symbol_from_type(enum_type)
+            .or_else(|| {
+                let type_table = self.type_table.borrow();
+                if let Some(type_info) = type_table.get(enum_type) {
+                    match &type_info.kind {
+                        crate::tast::TypeKind::GenericInstance { base_type, .. } => {
+                            return self.symbol_table.get_symbol_from_type(*base_type);
+                        }
+                        crate::tast::TypeKind::Enum { symbol_id, .. } => {
+                            return Some(*symbol_id);
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            })
+    }
+
+    /// Allocate a boxed enum struct with only a tag (no fields).
+    /// Used for parameterless variants of enums that have other parameterized variants.
+    /// Layout: [tag:i32][pad:i32] = 8 bytes, returned as ptr bitcast to i64.
+    fn build_boxed_enum_tag_only(&mut self, tag_idx: i32) -> Option<IrId> {
+        let size_const = self.builder.build_const(IrValue::I64(8))?;
+        let alloc_func = self.get_or_register_extern_function(
+            "malloc",
+            vec![IrType::I64],
+            IrType::Ptr(Box::new(IrType::I8)),
+        );
+        let ptr = self.builder.build_call_direct(
+            alloc_func,
+            vec![size_const],
+            IrType::Ptr(Box::new(IrType::I8)),
+        )?;
+        let zero_offset = self.builder.build_const(IrValue::I64(0))?;
+        let tag_gep = self.builder.build_gep(
+            ptr,
+            vec![zero_offset],
+            IrType::Ptr(Box::new(IrType::I8)),
+        )?;
+        let tag_ptr = self
+            .builder
+            .build_bitcast(tag_gep, IrType::Ptr(Box::new(IrType::I32)))?;
+        let tag_val = self.builder.build_const(IrValue::I32(tag_idx))?;
+        self.builder.build_store(tag_ptr, tag_val)?;
+        self.builder.build_bitcast(ptr, IrType::I64)
+    }
+
     /// Resolve the concrete IrTypes and TypeIds for an enum variant's fields.
     /// Handles generic type parameter substitution (e.g., Result<Int,String>.Ok → [(I32, IntTypeId)]).
     fn get_enum_variant_field_types(
@@ -4615,7 +4723,10 @@ impl<'a> HirToMirContext<'a> {
                                     // Find the index of this variant
                                     for (idx, variant_id) in variants.iter().enumerate() {
                                         if *variant_id == *symbol {
-                                            // Return the discriminant as an i64 constant (matches Haxe Int convention)
+                                            // If enum has parameterized variants, all variants must be boxed
+                                            if self.enum_is_boxed(parent_enum_id) {
+                                                return self.build_boxed_enum_tag_only(idx as i32);
+                                            }
                                             return self
                                                 .builder
                                                 .build_const(IrValue::I64(idx as i64));
@@ -4675,7 +4786,10 @@ impl<'a> HirToMirContext<'a> {
                                         .unwrap_or("<unknown>");
                                     // Compare by name since the field symbol might be different from the variant symbol
                                     if *variant_id == *field || variant_name == field_name {
-                                        // Return the discriminant as an i64 constant (matches Haxe Int convention)
+                                        // If enum has parameterized variants, all variants must be boxed
+                                        if self.enum_is_boxed(*symbol) {
+                                            return self.build_boxed_enum_tag_only(idx as i32);
+                                        }
                                         return self.builder.build_const(IrValue::I64(idx as i64));
                                     }
                                 }
@@ -5046,6 +5160,78 @@ impl<'a> HirToMirContext<'a> {
                                         .build_const(IrValue::I64(layout.alignment as i64));
                                 }
                                 _ => {}
+                            }
+                        }
+                    }
+
+                    // Check for interface dispatch: if object has interface type,
+                    // load the method function pointer from the fat pointer and call indirectly
+                    if let Some(iface_sym) = self.get_interface_symbol(object.ty) {
+                        let method_name_interned = self
+                            .symbol_table
+                            .get_symbol(*field)
+                            .map(|s| s.name);
+
+                        if let Some(method_name_i) = method_name_interned {
+                            // Find the method's index in the interface
+                            let method_index = self
+                                .interface_method_names
+                                .get(&iface_sym)
+                                .and_then(|names| {
+                                    names.iter().position(|n| *n == method_name_i)
+                                });
+
+                            if let Some(idx) = method_index {
+                                // Lower the object (fat pointer)
+                                let fat_ptr = self.lower_expression(object)?;
+
+                                // Lower arguments
+                                let arg_regs: Vec<_> = args
+                                    .iter()
+                                    .filter_map(|a| self.lower_expression(a))
+                                    .collect();
+
+                                // Load object pointer from fat_ptr[0]
+                                let obj_ptr = self.builder.build_load(
+                                    fat_ptr,
+                                    IrType::I64,
+                                )?;
+
+                                // Load function pointer from fat_ptr[(idx+1)*8]
+                                let fn_offset = self
+                                    .builder
+                                    .build_const(IrValue::I64(((idx + 1) * 8) as i64))?;
+                                let fn_slot = self
+                                    .builder
+                                    .build_ptr_add(fat_ptr, fn_offset, IrType::Ptr(Box::new(IrType::U8)))?;
+                                let fn_ptr = self
+                                    .builder
+                                    .build_load(fn_slot, IrType::I64)?;
+
+                                // Build call args: self (obj_ptr) + user args
+                                let mut call_args = vec![obj_ptr];
+                                call_args.extend(arg_regs);
+
+                                // Build signature: (self: Ptr, args...) -> return_type
+                                let param_types = {
+                                    let mut types = vec![IrType::Ptr(Box::new(IrType::Void))]; // self
+                                    for arg in args {
+                                        types.push(self.convert_type(arg.ty));
+                                    }
+                                    types
+                                };
+                                let return_type = Box::new(self.convert_type(expr.ty));
+                                let func_signature = IrType::Function {
+                                    params: param_types,
+                                    return_type,
+                                    varargs: false,
+                                };
+
+                                return self.builder.build_call_indirect(
+                                    fn_ptr,
+                                    call_args,
+                                    func_signature,
+                                );
                             }
                         }
                     }
@@ -5830,7 +6016,11 @@ impl<'a> HirToMirContext<'a> {
                                                 .get_enum_variant_field_count(parent_enum_id, idx);
 
                                             if field_count == 0 {
-                                                // No parameters - return discriminant directly
+                                                // If enum has parameterized variants, all variants must be boxed
+                                                if self.enum_is_boxed(parent_enum_id) {
+                                                    return self.build_boxed_enum_tag_only(idx as i32);
+                                                }
+                                                // Pure discriminant enum - return index directly
                                                 return self
                                                     .builder
                                                     .build_const(IrValue::I64(idx as i64));
@@ -5919,6 +6109,91 @@ impl<'a> HirToMirContext<'a> {
                         is_method,
                         args.len()
                     );
+
+                    // INTERFACE DISPATCH:
+                    // When is_method=true, args[0] is the receiver. If the receiver has
+                    // an interface type, dispatch through the fat pointer vtable.
+                    if *is_method && !args.is_empty() {
+                        let receiver = &args[0];
+                        let receiver_type = receiver.ty;
+
+                        if let Some(iface_sym) = self.get_interface_symbol(receiver_type) {
+                            let method_name_interned = self
+                                .symbol_table
+                                .get_symbol(*symbol)
+                                .map(|s| s.name);
+
+                            if let Some(method_name_i) = method_name_interned {
+                                let method_index = self
+                                    .interface_method_names
+                                    .get(&iface_sym)
+                                    .and_then(|names| {
+                                        names.iter().position(|n| *n == method_name_i)
+                                    });
+
+                                if let Some(idx) = method_index {
+                                    // Lower the receiver (fat pointer)
+                                    let fat_ptr_raw = self.lower_expression(receiver)?;
+
+                                    // The fat pointer may be stored as I64 - bitcast to Ptr if needed
+                                    let fat_ptr_ty = self.builder.get_register_type(fat_ptr_raw).unwrap_or(IrType::I64);
+                                    let fat_ptr = if !matches!(fat_ptr_ty, IrType::Ptr(_)) {
+                                        self.builder.build_bitcast(fat_ptr_raw, IrType::Ptr(Box::new(IrType::I64)))?
+                                    } else {
+                                        fat_ptr_raw
+                                    };
+
+                                    // Lower the actual arguments (skip args[0] which is receiver)
+                                    let arg_regs: Vec<_> = args[1..]
+                                        .iter()
+                                        .filter_map(|a| self.lower_expression(a))
+                                        .collect();
+
+                                    // Load object pointer from fat_ptr[0]
+                                    let obj_ptr = self.builder.build_load(
+                                        fat_ptr,
+                                        IrType::I64,
+                                    )?;
+
+                                    // Load function pointer from fat_ptr[(idx+1)*8]
+                                    let fn_offset = self
+                                        .builder
+                                        .build_const(IrValue::I64(((idx + 1) * 8) as i64))?;
+                                    let fn_slot = self
+                                        .builder
+                                        .build_ptr_add(fat_ptr, fn_offset, IrType::Ptr(Box::new(IrType::U8)))?;
+                                    let fn_ptr = self
+                                        .builder
+                                        .build_load(fn_slot, IrType::I64)?;
+
+                                    // Build call args: self (obj_ptr) + user args
+                                    let mut call_args = vec![obj_ptr];
+                                    call_args.extend(arg_regs);
+
+                                    // Build signature: (self: Ptr, args...) -> return_type
+                                    let param_types = {
+                                        let mut types = vec![IrType::Ptr(Box::new(IrType::Void))]; // self
+                                        for arg in args[1..].iter() {
+                                            types.push(self.convert_type(arg.ty));
+                                        }
+                                        types
+                                    };
+                                    let return_type = Box::new(self.convert_type(expr.ty));
+                                    let func_signature = IrType::Function {
+                                        params: param_types,
+                                        return_type,
+                                        varargs: false,
+                                    };
+
+                                    return self.builder.build_call_indirect(
+                                        fn_ptr,
+                                        call_args,
+                                        func_signature,
+                                    );
+                                }
+                            }
+                        }
+                    }
 
                     // EXTERN CLASS METHOD HANDLING:
                     // When MethodCall is desugared to Call with Variable callee,
@@ -6210,10 +6485,6 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
                         }
-                        debug!(
-                            "[TRACE] Lowering trace argument, expr kind: {:?}",
-                            std::mem::discriminant(&arg.kind)
-                        );
                         let arg_reg = self.lower_expression(arg)?;
                         debug!(
                             "[TRACE] After lowering, arg_reg={}, checking type...",
@@ -8886,10 +9157,22 @@ impl<'a> HirToMirContext<'a> {
                 // but the lambda functions in arguments will have been created
                 let func_ptr = self.lower_expression(callee)?;
 
-                // Build function signature from arguments and return type
-                // TODO: This should come from the type table lookup of callee.ty
-                // For now, we infer parameter types as I32 and get return type from expr.ty
-                let param_types = vec![IrType::I32; arg_regs.len()];
+                // Build function signature from callee type or argument types
+                let param_types: Vec<IrType> = {
+                    // Try to get param types from callee's function type
+                    let type_table = self.type_table.borrow();
+                    let callee_type = type_table.get(callee.ty);
+                    if let Some(type_ref) = callee_type {
+                        if let crate::tast::TypeKind::Function { params, .. } = &type_ref.kind {
+                            params.iter().map(|p| self.convert_type(*p)).collect()
+                        } else {
+                            // Fallback: infer from actual argument types
+                            args.iter().map(|a| self.convert_type(a.ty)).collect()
+                        }
+                    } else {
+                        args.iter().map(|a| self.convert_type(a.ty)).collect()
+                    }
+                };
                 let return_type = Box::new(self.convert_type(expr.ty));
 
                 let func_signature = IrType::Function {
@@ -9809,11 +10092,103 @@ impl<'a> HirToMirContext<'a> {
                 self.lower_inline_code(target, code, args)
             }
 
-            HirExprKind::TryCatch { try_expr, .. } => {
-                // Lower try-catch as an expression: lower the try body as the value.
-                // Exception handling is managed at the statement level;
-                // at the expression level, just lower the try body.
-                self.lower_expression(try_expr)
+            HirExprKind::TryCatch {
+                try_expr,
+                catch_handlers,
+                finally_expr,
+            } => {
+                // Exception handling via setjmp/longjmp (expression form).
+                // try { body } catch (e) { handler } finally { cleanup }
+
+                let normal_path_block = self.builder.create_block()?;
+                let landing_pad_block = self.builder.create_block()?;
+                let continuation_block = self.builder.create_block()?;
+
+                // --- Setup: push handler and call _setjmp ---
+                let push_fn = self.get_or_register_extern_function(
+                    "rayzor_exception_push_handler",
+                    vec![],
+                    IrType::Ptr(Box::new(IrType::Void)),
+                );
+                let jmp_buf = self
+                    .builder
+                    .build_call_direct(push_fn, vec![], IrType::Ptr(Box::new(IrType::Void)));
+
+                let setjmp_fn = self.get_or_register_extern_function(
+                    "_setjmp",
+                    vec![IrType::Ptr(Box::new(IrType::Void))],
+                    IrType::I32,
+                );
+                let jmp_buf_reg = jmp_buf.unwrap_or_else(|| {
+                    self.builder.build_const(IrValue::I64(0)).expect("const")
+                });
+                let setjmp_result = self
+                    .builder
+                    .build_call_direct(setjmp_fn, vec![jmp_buf_reg], IrType::I32);
+
+                let zero = self.builder.build_const(IrValue::I32(0)).expect("const");
+                let setjmp_reg = setjmp_result.unwrap_or(zero);
+                let cmp = self.builder.build_cmp(CompareOp::Eq, setjmp_reg, zero)?;
+                self.builder
+                    .build_cond_branch(cmp, normal_path_block, landing_pad_block);
+
+                // --- normal_path: execute try body ---
+                self.builder.switch_to_block(normal_path_block);
+                self.lower_expression(try_expr);
+
+                let pop_fn = self.get_or_register_extern_function(
+                    "rayzor_exception_pop_handler",
+                    vec![],
+                    IrType::Void,
+                );
+                self.builder
+                    .build_call_direct(pop_fn, vec![], IrType::Void);
+
+                if let Some(finally_body) = &finally_expr {
+                    self.lower_expression(finally_body);
+                }
+
+                self.builder.build_branch(continuation_block);
+
+                // --- landing_pad: exception was thrown ---
+                self.builder.switch_to_block(landing_pad_block);
+
+                let pop_fn2 = self.get_or_register_extern_function(
+                    "rayzor_exception_pop_handler",
+                    vec![],
+                    IrType::Void,
+                );
+                self.builder
+                    .build_call_direct(pop_fn2, vec![], IrType::Void);
+
+                let get_exc_fn = self.get_or_register_extern_function(
+                    "rayzor_get_exception",
+                    vec![],
+                    IrType::I64,
+                );
+                let exception_id = self
+                    .builder
+                    .build_call_direct(get_exc_fn, vec![], IrType::I64)
+                    .unwrap_or_else(|| {
+                        self.builder.build_const(IrValue::I64(0)).expect("const")
+                    });
+
+                // Execute first matching catch handler
+                if let Some(handler) = catch_handlers.first() {
+                    self.symbol_map
+                        .insert(handler.exception_var, exception_id);
+                    self.lower_expression(&handler.body);
+                }
+
+                if let Some(finally_body) = &finally_expr {
+                    self.lower_expression(finally_body);
+                }
+
+                self.builder.build_branch(continuation_block);
+
+                // --- continuation ---
+                self.builder.switch_to_block(continuation_block);
+                None // try/catch as statement has no return value
             }
 
             _ => {
@@ -11771,9 +12146,28 @@ impl<'a> HirToMirContext<'a> {
                 variant,
                 fields,
             } => {
-                // Use scrutinee type if available (has concrete generic args), otherwise fall back to pattern's enum_type
-                let effective_type = scrutinee_type.unwrap_or(*enum_type);
+                // Use scrutinee type if valid (has concrete generic args), otherwise fall back to pattern's enum_type
+                let effective_type = scrutinee_type
+                    .filter(|t| *t != TypeId::invalid())
+                    .unwrap_or(*enum_type);
                 let field_types = self.get_enum_variant_field_types(effective_type, *variant);
+
+                // Resolve whether this enum is boxed
+                let enum_symbol = self.resolve_enum_symbol(effective_type);
+                let is_boxed = enum_symbol.map_or(false, |s| self.enum_is_boxed(s));
+                if !is_boxed || fields.is_empty() {
+                    // Unboxed enum or no fields to bind
+                    return;
+                }
+
+                // Boxed enum: bitcast value (i64) to pointer for GEP
+                let enum_ptr = match self
+                    .builder
+                    .build_bitcast(value, IrType::Ptr(Box::new(IrType::I8)))
+                {
+                    Some(p) => p,
+                    None => return,
+                };
 
                 // Extract fields from enum data area and bind sub-patterns
                 for (i, field_pattern) in fields.iter().enumerate() {
@@ -11784,7 +12178,7 @@ impl<'a> HirToMirContext<'a> {
                     let field_offset = (8 + i * 8) as i64;
                     if let Some(offset_val) = self.builder.build_int(field_offset, IrType::I64) {
                         if let Some(field_ptr) = self.builder.build_gep(
-                            value,
+                            enum_ptr,
                             vec![offset_val],
                             IrType::Ptr(Box::new(IrType::I8)),
                         ) {
@@ -14127,18 +14521,24 @@ impl<'a> HirToMirContext<'a> {
             // Generate pattern test block
             self.builder.switch_to_block(test_block);
 
-            // For now, simplified pattern matching:
-            // - Variable patterns always match
-            // - Wildcard always matches
-            // - Literal patterns use equality
-            // - Constructor patterns need runtime type checking (TODO)
-
             let pattern_matches = if case.patterns.is_empty() {
                 // No pattern means default case
                 self.builder.build_bool(true)
-            } else {
-                // Test first pattern (simplified - should test all patterns with OR logic)
+            } else if case.patterns.len() == 1 {
                 self.lower_pattern_test(scrut_val, &case.patterns[0])
+            } else {
+                // Multiple patterns per case: OR them all together
+                let mut result = self.lower_pattern_test(scrut_val, &case.patterns[0]);
+                for pat in &case.patterns[1..] {
+                    if let Some(prev) = result {
+                        if let Some(pat_match) = self.lower_pattern_test(scrut_val, pat) {
+                            result = self
+                                .builder
+                                .build_binop(BinaryOp::Or, prev, pat_match);
+                        }
+                    }
+                }
+                result
             };
 
             let pattern_matches = match pattern_matches {
@@ -14239,89 +14639,71 @@ impl<'a> HirToMirContext<'a> {
                 variant,
                 fields,
             } => {
-                // Constructor pattern: check enum tag and extract fields
-                //
-                // Enum layout (simplified):
-                // struct Enum { tag: i32, data: [fields...] }
-                //
-                // Strategy:
-                // 1. Extract tag from scrutinee (index 0)
-                // 2. Compare tag with variant discriminant
-                // 3. If match, extract fields and test sub-patterns
-                // 4. Return combined result
-
-                // Extract tag field from enum (index 0)
-                let Some(zero_idx) = self.builder.build_int(0, IrType::I64) else {
-                    return None;
-                };
-
-                let Some(tag_ptr) = self.builder.build_gep(
-                    scrutinee,
-                    vec![zero_idx],
-                    IrType::Ptr(Box::new(IrType::I32)),
-                ) else {
-                    return None;
-                };
-
-                let Some(tag_val) = self.builder.build_load(tag_ptr, IrType::I32) else {
-                    return None;
-                };
-
-                // Look up variant discriminant from enum metadata
+                // Constructor pattern: check enum tag and optionally extract fields.
+                // Resolve whether this enum uses boxed or unboxed representation.
+                let enum_symbol = self.resolve_enum_symbol(*enum_type);
+                let is_boxed = enum_symbol.map_or(false, |s| self.enum_is_boxed(s));
                 let variant_discriminant = self
                     .resolve_enum_variant_discriminant(*enum_type, *variant)
                     .unwrap_or(0);
 
-                let Some(expected_tag) = self.builder.build_int(variant_discriminant, IrType::I32)
-                else {
-                    return None;
-                };
+                if !is_boxed {
+                    // Unboxed enum: scrutinee IS the discriminant (i64)
+                    let expected = self.builder.build_int(variant_discriminant, IrType::I64)?;
+                    return self.builder.build_cmp(CompareOp::Eq, scrutinee, expected);
+                }
 
-                // Compare tags
-                let Some(tag_matches) =
-                    self.builder.build_cmp(CompareOp::Eq, tag_val, expected_tag)
-                else {
-                    return None;
-                };
+                // Boxed enum: scrutinee is ptr-as-i64, bitcast to pointer
+                let enum_ptr = self
+                    .builder
+                    .build_bitcast(scrutinee, IrType::Ptr(Box::new(IrType::I8)))?;
 
-                // If no fields to match, or all fields are wildcards, just return tag comparison
+                // Load tag at offset 0
+                let zero_offset = self.builder.build_int(0, IrType::I64)?;
+                let tag_gep = self.builder.build_gep(
+                    enum_ptr,
+                    vec![zero_offset],
+                    IrType::Ptr(Box::new(IrType::I8)),
+                )?;
+                let tag_ptr = self
+                    .builder
+                    .build_bitcast(tag_gep, IrType::Ptr(Box::new(IrType::I32)))?;
+                let tag_val = self.builder.build_load(tag_ptr, IrType::I32)?;
+
+                let expected_tag =
+                    self.builder.build_int(variant_discriminant, IrType::I32)?;
+                let tag_matches =
+                    self.builder.build_cmp(CompareOp::Eq, tag_val, expected_tag)?;
+
+                // If no fields to match, just return tag comparison
                 if fields.is_empty() || fields.iter().all(|f| matches!(f, HirPattern::Wildcard)) {
                     return Some(tag_matches);
                 }
 
-                // For fields, we need to extract and test each one
-                // Combine all field tests with AND logic
+                // Extract and test each field using byte offsets
                 let mut all_fields_match = tag_matches;
 
                 for (i, field_pattern) in fields.iter().enumerate() {
-                    // Extract field from enum data area (starts at index 1)
-                    let Some(field_idx) = self.builder.build_int((i + 1) as i64, IrType::I64)
-                    else {
-                        return None;
-                    };
+                    // Field at byte offset 8 + i*8
+                    let field_offset =
+                        self.builder.build_int((8 + i * 8) as i64, IrType::I64)?;
+                    let field_gep = self.builder.build_gep(
+                        enum_ptr,
+                        vec![field_offset],
+                        IrType::Ptr(Box::new(IrType::I8)),
+                    )?;
+                    let field_ptr = self.builder.build_bitcast(
+                        field_gep,
+                        IrType::Ptr(Box::new(IrType::I64)),
+                    )?;
+                    let field_val = self.builder.build_load(field_ptr, IrType::I64)?;
 
-                    let Some(field_ptr) = self.builder.build_gep(
-                        scrutinee,
-                        vec![field_idx],
-                        IrType::Ptr(Box::new(IrType::Any)),
-                    ) else {
-                        return None;
-                    };
-
-                    let Some(field_val) = self.builder.build_load(field_ptr, IrType::Any) else {
-                        return None;
-                    };
-
-                    // Recursively test field pattern
-                    let Some(field_match) = self.lower_pattern_test(field_val, field_pattern)
-                    else {
-                        return None;
-                    };
-
-                    // Combine with AND
-                    all_fields_match =
-                        self.builder
-                            .build_binop(BinaryOp::And, all_fields_match, field_match)?;
+                    let field_match = self.lower_pattern_test(field_val, field_pattern)?;
+                    all_fields_match = self.builder.build_binop(
+                        BinaryOp::And,
+                        all_fields_match,
+                        field_match,
+                    )?;
                 }
 
                 Some(all_fields_match)
@@ -14548,12 +14930,17 @@ impl<'a> HirToMirContext<'a> {
 
             HirPattern::Or(patterns) => {
                 // Or pattern: test each pattern with OR logic
-                // TODO: Implement proper OR pattern logic
-                if let Some(first) = patterns.first() {
-                    self.lower_pattern_test(scrutinee, first)
-                } else {
-                    self.builder.build_bool(false)
+                if patterns.is_empty() {
+                    return self.builder.build_bool(false);
                 }
+                let mut result = self.lower_pattern_test(scrutinee, &patterns[0])?;
+                for pat in &patterns[1..] {
+                    let pat_match = self.lower_pattern_test(scrutinee, pat)?;
+                    result = self
+                        .builder
+                        .build_binop(BinaryOp::Or, result, pat_match)?;
+                }
+                Some(result)
             }
 
             HirPattern::Guard { pattern, condition } => {
@@ -14573,34 +14960,43 @@ impl<'a> HirToMirContext<'a> {
         catches: &[HirCatchClause],
         finally: Option<&HirBlock>,
     ) {
-        // Exception handling lowering:
-        // try { ... } catch (e: T) { ... } finally { ... }
+        // Exception handling via setjmp/longjmp:
         //
-        // Becomes:
+        //   try_entry (current block):
+        //     %jmp_buf = call rayzor_exception_push_handler()  // returns *mut u8
+        //     %result = call _setjmp(%jmp_buf)                 // returns 0 normally, 1 on longjmp
+        //     br %result == 0, normal_path, landing_pad
         //   normal_path:
         //     <try block>
-        //     br continuation
+        //     call rayzor_exception_pop_handler()
+        //     br finally / continuation
         //   landing_pad:
-        //     %exc = landingpad
-        //     <match exception type>
-        //     br to appropriate catch or unwind
-        //   catch_N:
+        //     call rayzor_exception_pop_handler()
+        //     %exc = call rayzor_get_exception()
+        //     br catch_0
+        //   catch_0:
         //     <catch block>
-        //     br finally_block
+        //     br finally / continuation
         //   finally_block:
         //     <finally code>
         //     br continuation
         //   continuation:
         //     <rest of code>
 
+        let normal_path_block = match self.builder.create_block() {
+            Some(b) => b,
+            None => return,
+        };
+
         let landing_pad_block = match self.builder.create_block() {
             Some(b) => b,
             None => return,
         };
 
-        let finally_block = match self.builder.create_block() {
-            Some(b) => b,
-            None => return,
+        let finally_block = if finally.is_some() {
+            self.builder.create_block()
+        } else {
+            None
         };
 
         let continuation_block = match self.builder.create_block() {
@@ -14608,62 +15004,132 @@ impl<'a> HirToMirContext<'a> {
             None => return,
         };
 
-        // Lower the try block with landing pad as the exception target
+        // --- try_entry block (current block) ---
+
+        // Call rayzor_exception_push_handler() -> *mut u8 (jmp_buf pointer)
+        let push_fn = self.get_or_register_extern_function(
+            "rayzor_exception_push_handler",
+            vec![],
+            IrType::Ptr(Box::new(IrType::Void)),
+        );
+        let jmp_buf = self
+            .builder
+            .build_call_direct(push_fn, vec![], IrType::Ptr(Box::new(IrType::Void)));
+
+        // Call _setjmp(jmp_buf) -> i32 (0 = normal, 1 = exception caught)
+        let setjmp_fn = self.get_or_register_extern_function(
+            "_setjmp",
+            vec![IrType::Ptr(Box::new(IrType::Void))],
+            IrType::I32,
+        );
+        let jmp_buf_reg = jmp_buf.unwrap_or_else(|| {
+            self.builder
+                .build_const(IrValue::I64(0))
+                .expect("failed to create const")
+        });
+        let setjmp_result = self
+            .builder
+            .build_call_direct(setjmp_fn, vec![jmp_buf_reg], IrType::I32);
+
+        // Branch: setjmp_result == 0 → normal_path, else → landing_pad
+        let zero = self
+            .builder
+            .build_const(IrValue::I32(0))
+            .expect("failed to create const");
+        let setjmp_reg = setjmp_result.unwrap_or(zero);
+        let cmp = self
+            .builder
+            .build_cmp(CompareOp::Eq, setjmp_reg, zero)
+            .expect("failed to build cmp");
+        self.builder
+            .build_cond_branch(cmp, normal_path_block, landing_pad_block);
+
+        // --- normal_path block: execute try body ---
+        self.builder.switch_to_block(normal_path_block);
         self.lower_block(try_block);
 
-        // If try block completes normally, go to finally (if present) or continuation
-        if finally.is_some() {
-            self.builder.build_branch(finally_block);
+        // Pop handler on normal exit
+        let pop_fn = self.get_or_register_extern_function(
+            "rayzor_exception_pop_handler",
+            vec![],
+            IrType::Void,
+        );
+        self.builder
+            .build_call_direct(pop_fn, vec![], IrType::Void);
+
+        if let Some(fb) = finally_block {
+            self.builder.build_branch(fb);
         } else {
             self.builder.build_branch(continuation_block);
         }
 
-        // Build landing pad block
+        // --- landing_pad block: exception was thrown ---
         self.builder.switch_to_block(landing_pad_block);
 
-        // Create landing pad instruction to receive the exception
-        // For now, we'll use a generic exception type (pointer to exception object)
-        let exception_id = match self.builder.alloc_reg() {
-            Some(id) => id,
-            None => return,
-        };
+        // Pop handler (the longjmp already happened, but we need to remove it from the stack)
+        let pop_fn2 = self.get_or_register_extern_function(
+            "rayzor_exception_pop_handler",
+            vec![],
+            IrType::Void,
+        );
+        self.builder
+            .build_call_direct(pop_fn2, vec![], IrType::Void);
 
-        // Build catch blocks and dispatch logic
-        let mut catch_blocks = Vec::new();
-        for _catch in catches {
-            if let Some(catch_block) = self.builder.create_block() {
-                catch_blocks.push(catch_block);
+        // Get the exception value
+        let get_exc_fn = self.get_or_register_extern_function(
+            "rayzor_get_exception",
+            vec![],
+            IrType::I64,
+        );
+        let exception_id = self
+            .builder
+            .build_call_direct(get_exc_fn, vec![], IrType::I64)
+            .unwrap_or_else(|| {
+                self.builder
+                    .build_const(IrValue::I64(0))
+                    .expect("failed to create const")
+            });
+
+        // For now, dispatch to first catch block (we support catch (e:Dynamic) only)
+        // TODO: Add type-based dispatch for multiple catch clauses
+        if !catches.is_empty() {
+            let catch_block = match self.builder.create_block() {
+                Some(b) => b,
+                None => return,
+            };
+            self.builder.build_branch(catch_block);
+
+            // --- catch block ---
+            self.builder.switch_to_block(catch_block);
+
+            // Bind the exception variable
+            self.symbol_map
+                .insert(catches[0].exception_var, exception_id);
+
+            // Lower the catch block body
+            self.lower_block(&catches[0].body);
+
+            if let Some(fb) = finally_block {
+                self.builder.build_branch(fb);
+            } else {
+                self.builder.build_branch(continuation_block);
+            }
+        } else {
+            // No catch clauses — go directly to finally or continuation
+            if let Some(fb) = finally_block {
+                self.builder.build_branch(fb);
+            } else {
+                self.builder.build_branch(continuation_block);
             }
         }
 
-        // For each catch clause, check if exception matches
-        for (i, catch) in catches.iter().enumerate() {
-            if let Some(catch_block_id) = catch_blocks.get(i).copied() {
-                self.builder.switch_to_block(catch_block_id);
-
-                // Bind the exception variable
-                // The exception_id register holds the exception value from the landing pad
-                // In a full implementation, this would extract specific exception fields
-                // based on the catch type, but for now we bind the entire exception object
-                self.symbol_map.insert(catch.exception_var, exception_id);
-
-                // Lower the catch block body
-                self.lower_block(&catch.body);
-
-                // After catch, go to finally or continuation
-                if finally.is_some() {
-                    self.builder.build_branch(finally_block);
-                } else {
-                    self.builder.build_branch(continuation_block);
-                }
-            }
-        }
-
-        // Build finally block if present
+        // --- finally block (if present) ---
         if let Some(finally_body) = finally {
-            self.builder.switch_to_block(finally_block);
-            self.lower_block(finally_body);
-            self.builder.build_branch(continuation_block);
+            if let Some(fb) = finally_block {
+                self.builder.switch_to_block(fb);
+                self.lower_block(finally_body);
+                self.builder.build_branch(continuation_block);
+            }
         }
 
         // Continue with rest of code
@@ -14822,19 +15288,20 @@ impl<'a> HirToMirContext<'a> {
             None
         };
 
-        // Build parameters: [env*,] lambda_params...
+        // Build parameters: env* is ALWAYS first param (CallIndirect always prepends env_ptr)
         let mut func_params = Vec::new();
         let mut next_reg_id = 0u32;
 
-        if env_layout.is_some() {
-            func_params.push(IrParameter {
-                name: "env".to_string(),
-                ty: IrType::Ptr(Box::new(IrType::Void)),
-                reg: IrId::new(next_reg_id),
-                by_ref: false,
-            });
-            next_reg_id += 1;
-        }
+        // Always add env_ptr as first parameter - even for capture-less lambdas.
+        // Cranelift's CallIndirect always loads env_ptr from closure struct and
+        // prepends it as the first argument, so the function signature must match.
+        func_params.push(IrParameter {
+            name: "env".to_string(),
+            ty: IrType::Ptr(Box::new(IrType::Void)),
+            reg: IrId::new(next_reg_id),
+            by_ref: false,
+        });
+        next_reg_id += 1;
 
         for param in params {
             let param_type = self.convert_type(param.ty);
@@ -14874,7 +15341,7 @@ impl<'a> HirToMirContext<'a> {
         LambdaContext {
             func_id,
             entry_block,
-            param_offset: if env_layout.is_some() { 1 } else { 0 },
+            param_offset: 1, // env_ptr is always first param
             env_layout,
         }
     }
@@ -15340,6 +15807,110 @@ impl<'a> HirToMirContext<'a> {
         }
 
         Some(map_ptr)
+    }
+
+    /// Wrap a class instance in an interface fat pointer.
+    /// Fat pointer layout: { object_ptr: i64, fn_ptr_0: i64, fn_ptr_1: i64, ... }
+    /// One slot per interface method, in the interface's method order.
+    fn wrap_in_interface_fat_ptr(
+        &mut self,
+        obj_reg: IrId,
+        class_symbol: SymbolId,
+        interface_symbol: SymbolId,
+    ) -> Option<IrId> {
+        let vtable = self
+            .interface_vtables
+            .get(&(class_symbol, interface_symbol))
+            .cloned()?;
+        let method_count = vtable.len();
+        let fat_ptr_size = (1 + method_count) * 8; // object_ptr + N function pointers
+        // Allocate fat pointer using tracked_alloc for proper lifecycle
+        let malloc_fn = self.get_or_register_extern_function(
+            "rayzor_tracked_alloc",
+            vec![IrType::I64],
+            IrType::Ptr(Box::new(IrType::U8)),
+        );
+        let size_reg = self.builder.build_const(IrValue::I64(fat_ptr_size as i64))?;
+        let fat_ptr = self
+            .builder
+            .build_call_direct(malloc_fn, vec![size_reg], IrType::Ptr(Box::new(IrType::U8)))?;
+
+        // Store object pointer at offset 0
+        // Need to bitcast obj_reg to i64 if it's a pointer
+        let obj_as_i64 = {
+            let obj_ty = self.builder.get_register_type(obj_reg).unwrap_or(IrType::I64);
+            if matches!(obj_ty, IrType::Ptr(_)) {
+                self.builder.build_bitcast(obj_reg, IrType::I64)?
+            } else {
+                obj_reg
+            }
+        };
+        self.builder.build_store(fat_ptr, obj_as_i64);
+
+        // Store function pointers for each interface method
+        for (i, method_sym) in vtable.iter().enumerate() {
+            let func_id_opt = self.function_map.get(method_sym).copied();
+            if let Some(func_id) = func_id_opt {
+                let fn_ref = self.builder.build_function_ref(func_id)?;
+                let offset_val = self
+                    .builder
+                    .build_const(IrValue::I64(((i + 1) * 8) as i64))?;
+                let slot_ptr = self
+                    .builder
+                    .build_ptr_add(fat_ptr, offset_val, IrType::Ptr(Box::new(IrType::U8)))?;
+                self.builder.build_store(slot_ptr, fn_ref);
+            }
+        }
+
+        Some(fat_ptr)
+    }
+
+    /// Check if a type is an interface type and return its SymbolId
+    fn get_interface_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
+        let type_table = self.type_table.borrow();
+        let type_ref = type_table.get(type_id)?;
+        if let TypeKind::Interface { symbol_id, .. } = &type_ref.kind {
+            Some(*symbol_id)
+        } else {
+            None
+        }
+    }
+
+    /// Check if a type is a class type and return its SymbolId
+    fn get_class_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
+        let type_table = self.type_table.borrow();
+        let type_ref = type_table.get(type_id)?;
+        if let TypeKind::Class { symbol_id, .. } = &type_ref.kind {
+            Some(*symbol_id)
+        } else {
+            None
+        }
+    }
+
+    /// If value_type is a class and target_type is an interface the class implements,
+    /// wrap the value in a fat pointer. Otherwise return the value unchanged.
+    fn maybe_wrap_for_interface(
+        &mut self,
+        value_reg: IrId,
+        value_type: TypeId,
+        target_type: TypeId,
+    ) -> IrId {
+        let iface_sym = match self.get_interface_symbol(target_type) {
+            Some(s) => s,
+            None => return value_reg,
+        };
+        let class_sym = match self.get_class_symbol(value_type) {
+            Some(s) => s,
+            None => return value_reg,
+        };
+
+        // Check if we have a vtable for this (class, interface) pair
+        if !self.interface_vtables.contains_key(&(class_sym, iface_sym)) {
+            return value_reg;
+        }
+
+        self.wrap_in_interface_fat_ptr(value_reg, class_sym, iface_sym)
+            .unwrap_or(value_reg)
     }
 
     fn lower_object_literal(
@@ -16356,6 +16927,41 @@ impl<'a> HirToMirContext<'a> {
 
         self.builder.module.add_type(typedef);
 
+        // Build interface vtables for each implemented interface.
+        // For each interface method, find the matching class method by name.
+        for &iface_type_id in &class.implements {
+            let iface_symbol = {
+                let type_table = self.type_table.borrow();
+                type_table.get(iface_type_id).and_then(|t| {
+                    if let TypeKind::Interface { symbol_id, .. } = &t.kind {
+                        Some(*symbol_id)
+                    } else {
+                        None
+                    }
+                })
+            };
+
+            if let Some(iface_sym) = iface_symbol {
+                if let Some(method_names) = self.interface_method_names.get(&iface_sym).cloned() {
+                    let mut vtable_entries = Vec::new();
+                    for iface_method_name in &method_names {
+                        // Find the class method that matches this interface method name
+                        let class_method_sym = class
+                            .methods
+                            .iter()
+                            .find(|m| m.function.name == *iface_method_name)
+                            .map(|m| m.function.symbol_id);
+
+                        if let Some(method_sym) = class_method_sym {
+                            vtable_entries.push(method_sym);
+                        }
+                    }
+                    self.interface_vtables
+                        .insert((class.symbol_id, iface_sym), vtable_entries);
+                }
+            }
+        }
+
         // IMPORTANT: Pre-register constructor mapping so that 'new' expressions
         // in function bodies can find the constructor before it's actually lowered.
         // The constructor will be lowered later in the second pass.
@@ -16374,7 +16980,6 @@ impl<'a> HirToMirContext<'a> {
 
     fn register_interface_metadata(&mut self, type_id: TypeId, interface: &HirInterface) {
         // Interfaces are represented as method tables
-        // For now, register as struct with method pointers
         let typedef_id = self.builder.module.alloc_typedef_id();
 
         let fields: Vec<IrField> = interface
@@ -16384,7 +16989,7 @@ impl<'a> HirToMirContext<'a> {
                 IrField {
                     name: method.name.to_string(),
                     ty: IrType::Ptr(Box::new(IrType::Function {
-                        params: vec![IrType::Any], // Placeholder
+                        params: vec![IrType::Any],
                         return_type: Box::new(IrType::Any),
                         varargs: false,
                     })),
@@ -16405,6 +17010,12 @@ impl<'a> HirToMirContext<'a> {
         };
 
         self.builder.module.add_type(typedef);
+
+        // Store method ordering for vtable construction
+        let method_names: Vec<InternedString> =
+            interface.methods.iter().map(|m| m.name).collect();
+        self.interface_method_names
+            .insert(interface.symbol_id, method_names);
     }
 
     fn register_abstract_metadata(&mut self, type_id: TypeId, abstract_decl: &HirAbstract) {

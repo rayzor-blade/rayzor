@@ -1242,6 +1242,10 @@ pub enum TypedExpressionKind {
     PatternPlaceholder {
         pattern: parser::Pattern,
         source_location: SourceLocation,
+        /// Variable bindings created by bind_pattern_variables in ast_lowering.
+        /// Maps pattern variable names to their SymbolIds so TAST→HIR can use
+        /// the same SymbolIds as the case body (avoiding SymbolId mismatch).
+        variable_bindings: Vec<(InternedString, SymbolId)>,
     },
 
     /// Array comprehension: [for (i in 0...10) i * 2]

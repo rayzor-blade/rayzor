@@ -609,6 +609,14 @@ impl IrBuilder {
         Some(dest)
     }
 
+    /// Build a function reference (get a function pointer)
+    pub fn build_function_ref(&mut self, func_id: super::IrFunctionId) -> Option<IrId> {
+        let dest = self.alloc_reg()?;
+        self.set_register_type(dest, IrType::I64);
+        self.add_instruction(IrInstruction::FunctionRef { dest, func_id })?;
+        Some(dest)
+    }
+
     /// Build a select (ternary) instruction
     pub fn build_select(
         &mut self,

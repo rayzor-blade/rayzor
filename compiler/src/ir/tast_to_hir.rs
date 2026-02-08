@@ -1958,6 +1958,7 @@ impl<'a> TastToHirContext<'a> {
             TypedExpressionKind::PatternPlaceholder {
                 pattern,
                 source_location,
+                ..
             } => {
                 // Complex patterns (object, type, enum constructor, array rest) are
                 // not yet compiled to decision trees. For now, lower as a wildcard
@@ -3058,8 +3059,8 @@ impl<'a> TastToHirContext<'a> {
                 HirPattern::Wildcard
             }
             // Pattern placeholder from TAST (constructor patterns with params like Ok(_))
-            TypedExpressionKind::PatternPlaceholder { pattern, .. } => {
-                self.lower_parser_pattern_to_hir(pattern)
+            TypedExpressionKind::PatternPlaceholder { pattern, variable_bindings, .. } => {
+                self.lower_parser_pattern_to_hir_with_bindings(pattern, variable_bindings)
             }
             // Null expression is used as placeholder for wildcard patterns
             TypedExpressionKind::Null => HirPattern::Wildcard,
@@ -3069,6 +3070,15 @@ impl<'a> TastToHirContext<'a> {
 
     /// Convert a parser::Pattern to HirPattern for switch case matching
     fn lower_parser_pattern_to_hir(&mut self, pattern: &parser::Pattern) -> HirPattern {
+        self.lower_parser_pattern_to_hir_with_bindings(pattern, &[])
+    }
+
+    /// Convert a parser::Pattern to HirPattern using pre-resolved variable bindings
+    fn lower_parser_pattern_to_hir_with_bindings(
+        &mut self,
+        pattern: &parser::Pattern,
+        variable_bindings: &[(InternedString, SymbolId)],
+    ) -> HirPattern {
         match pattern {
             parser::Pattern::Constructor { path, params } => {
                 let name_interned = self.string_interner.intern(&path.name);
@@ -3087,7 +3097,7 @@ impl<'a> TastToHirContext<'a> {
                             .unwrap_or(TypeId::invalid());
                         let fields: Vec<HirPattern> = params
                             .iter()
-                            .map(|p| self.lower_parser_pattern_to_hir(p))
+                            .map(|p| self.lower_parser_pattern_to_hir_with_bindings(p, variable_bindings))
                             .collect();
                         return HirPattern::Constructor {
                             enum_type,
@@ -3102,8 +3112,16 @@ impl<'a> TastToHirContext<'a> {
             parser::Pattern::Var(name) => {
                 // Variable patterns bind the matched value
                 let name_interned = self.string_interner.intern(name);
-                // Look up the symbol - try current scope first, then search all symbols
-                // (bind_pattern_variables in ast_lowering may have created it in a case scope)
+
+                // First check pre-resolved bindings from AST lowering (most reliable)
+                if let Some((_, sym_id)) = variable_bindings.iter().find(|(n, _)| *n == name_interned) {
+                    return HirPattern::Variable {
+                        name: name_interned,
+                        symbol: *sym_id,
+                    };
+                }
+
+                // Fall back to scope-based lookup
                 let found = self
                     .symbol_table
                     .lookup_symbol(self.current_scope, name_interned)
