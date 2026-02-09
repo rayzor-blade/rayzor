@@ -1313,8 +1313,8 @@ impl StdlibMapping {
             map_method!(static "String", "fromCharCode" => "haxe_string_from_char_code", params: 1, returns: primitive,
                 types: &[I32] => PtrString),
             // Properties (treated as getters with 0 params)
-            map_method!(instance "String", "length" => "string_length", params: 0, returns: primitive,
-                types: &[PtrString] => I32),
+            map_method!(instance "String", "length" => "haxe_string_length", params: 0, returns: primitive,
+                types: &[PtrString] => I64),
             // Instance methods - character access
             // charAt returns String pointer (empty string for out of bounds)
             // Uses MIR wrapper that forwards to haxe_string_char_at_ptr
