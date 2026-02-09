@@ -1755,14 +1755,22 @@ fn cmd_dump(
             for func in module.functions.values() {
                 if func.name == "main" {
                     // Count total instructions
-                    let total_insts: usize = func.cfg.blocks.values().map(|b| b.instructions.len()).sum();
+                    let total_insts: usize =
+                        func.cfg.blocks.values().map(|b| b.instructions.len()).sum();
                     let total_blocks = func.cfg.blocks.len();
                     // Check if $4 is defined (second malloc result)
                     let has_ir4 = func.cfg.blocks.values().any(|b| {
-                        b.instructions.iter().any(|inst| inst.dest() == Some(compiler::ir::IrId::new(4)))
+                        b.instructions
+                            .iter()
+                            .any(|inst| inst.dest() == Some(compiler::ir::IrId::new(4)))
                     });
-                    eprintln!("  After '{}': main has {} blocks, {} instructions, $4 defined: {}",
-                        pass.name(), total_blocks, total_insts, has_ir4);
+                    eprintln!(
+                        "  After '{}': main has {} blocks, {} instructions, $4 defined: {}",
+                        pass.name(),
+                        total_blocks,
+                        total_insts,
+                        has_ir4
+                    );
                 }
             }
             for func in module.functions.values() {

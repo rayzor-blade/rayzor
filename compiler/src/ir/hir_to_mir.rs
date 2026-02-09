@@ -294,6 +294,11 @@ struct LoopContext {
     /// Maps symbol IDs to their exit block phi registers
     /// When breaking, we need to add incoming edges to these phi nodes
     exit_phi_nodes: BTreeMap<SymbolId, IrId>,
+    /// Maps symbol IDs to their update block phi registers (for range/for loops).
+    /// When continuing, we need to add incoming edges to these phi nodes
+    /// so that the update block can merge values from both the continue path
+    /// and the normal body-end path.
+    continue_phi_nodes: BTreeMap<SymbolId, IrId>,
 }
 
 #[derive(Debug)]
@@ -2982,8 +2987,29 @@ impl<'a> HirToMirContext<'a> {
 
             HirStatement::Continue(label) => {
                 if let Some(loop_ctx) = self.find_loop_context(label.as_ref()) {
-                    // Copy continue_block before mutable borrow
+                    // Copy fields before mutable borrow
                     let continue_block = loop_ctx.continue_block;
+                    let continue_phi_nodes = loop_ctx.continue_phi_nodes.clone();
+
+                    // Add incoming edges for update block phi nodes (if any).
+                    // This is analogous to how break adds edges for exit phi nodes.
+                    if !continue_phi_nodes.is_empty() {
+                        if let Some(current_block) = self.builder.current_block() {
+                            for (symbol_id, upd_phi_reg) in &continue_phi_nodes {
+                                let current_value = self
+                                    .symbol_map
+                                    .get(symbol_id)
+                                    .copied()
+                                    .unwrap_or(*upd_phi_reg);
+                                self.builder.add_phi_incoming(
+                                    continue_block,
+                                    *upd_phi_reg,
+                                    current_block,
+                                    current_value,
+                                );
+                            }
+                        }
+                    }
 
                     // CRITICAL: Save drop state before cleanup (same reason as break above).
                     // Continue emits Free instructions for the current scope, but these
@@ -3048,8 +3074,9 @@ impl<'a> HirToMirContext<'a> {
                 condition,
                 body,
                 label,
+                continue_update,
             } => {
-                self.lower_while_loop(condition, body, label.as_ref());
+                self.lower_while_loop(condition, body, label.as_ref(), continue_update.as_ref());
             }
 
             HirStatement::DoWhile {
@@ -8755,7 +8782,6 @@ impl<'a> HirToMirContext<'a> {
                     // IMPORTANT: When matching by bare name, also verify the function belongs to
                     // the receiver's class (via qualified name). Without this, common names like
                     // "get", "set", "toString" could match wrong stdlib functions.
-                    if func_id_opt.is_none() && *is_method {}
                     if func_id_opt.is_none() && *is_method {
                         if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
                             if let Some(method_name) = self.string_interner.get(sym_info.name) {
@@ -8947,26 +8973,46 @@ impl<'a> HirToMirContext<'a> {
 
                             // Type erasure coercion for generic method returns:
                             // The function returns I64 (type-erased), but the concrete
-                            // return type may differ. Two paths:
-                            // 1. AST already resolved expr.ty to concrete (nested generics)
-                            // 2. expr.ty is still TypeParameter → resolve via receiver
-                            if let Some(call_result) = result {
-                                if actual_return_type == IrType::I64 {
-                                    let expected_ir_type = self.convert_type(expr.ty);
-                                    if expected_ir_type != IrType::I64 {
-                                        // Path 1: AST resolved type (e.g., Box<Int> → Ptr)
-                                        return self.coerce_from_i64(call_result, expr.ty);
-                                    }
-                                    // Path 2: expr.ty is still TypeParameter → resolve via receiver's type_args
-                                    if !args.is_empty() {
-                                        if let Some(concrete_ty_id) = self
-                                            .resolve_type_param_from_receiver(expr.ty, args[0].ty)
-                                        {
-                                            let concrete_ir_type =
-                                                self.convert_type(concrete_ty_id);
-                                            if concrete_ir_type != IrType::I64 {
-                                                return self
-                                                    .coerce_from_i64(call_result, concrete_ty_id);
+                            // return type may differ. Only apply to methods on generic classes —
+                            // non-generic classes (Thread, Bytes, etc.) must NOT be coerced.
+                            let receiver_is_generic = if !args.is_empty() {
+                                let type_table = self.type_table.borrow();
+                                type_table
+                                    .get(args[0].ty)
+                                    .map(|ti| match &ti.kind {
+                                        TypeKind::Class { type_args, .. } => !type_args.is_empty(),
+                                        TypeKind::GenericInstance { .. } => true,
+                                        TypeKind::TypeParameter { .. } => true,
+                                        _ => false,
+                                    })
+                                    .unwrap_or(false)
+                            } else {
+                                false
+                            };
+
+                            if receiver_is_generic {
+                                if let Some(call_result) = result {
+                                    if actual_return_type == IrType::I64 {
+                                        let expected_ir_type = self.convert_type(expr.ty);
+                                        if expected_ir_type != IrType::I64 {
+                                            // Path 1: AST resolved type (e.g., Box<Int> → Ptr)
+                                            return self.coerce_from_i64(call_result, expr.ty);
+                                        }
+                                        // Path 2: expr.ty is still TypeParameter → resolve via receiver's type_args
+                                        if !args.is_empty() {
+                                            if let Some(concrete_ty_id) = self
+                                                .resolve_type_param_from_receiver(
+                                                    expr.ty, args[0].ty,
+                                                )
+                                            {
+                                                let concrete_ir_type =
+                                                    self.convert_type(concrete_ty_id);
+                                                if concrete_ir_type != IrType::I64 {
+                                                    return self.coerce_from_i64(
+                                                        call_result,
+                                                        concrete_ty_id,
+                                                    );
+                                                }
                                             }
                                         }
                                     }
@@ -10613,7 +10659,13 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Lower while loop
-    fn lower_while_loop(&mut self, condition: &HirExpr, body: &HirBlock, label: Option<&SymbolId>) {
+    fn lower_while_loop(
+        &mut self,
+        condition: &HirExpr,
+        body: &HirBlock,
+        label: Option<&SymbolId>,
+        continue_update: Option<&HirBlock>,
+    ) {
         debug!("[lower_while_loop] ENTERED");
         let Some(cond_block) = self.builder.create_block() else {
             debug!("[lower_while_loop] FAILED to create cond_block");
@@ -10626,6 +10678,12 @@ impl<'a> HirToMirContext<'a> {
         let Some(exit_block) = self.builder.create_block() else {
             debug!("[lower_while_loop] FAILED to create exit_block");
             return;
+        };
+        // Create update block if there's a continue_update (for range/for loops)
+        let update_block = if continue_update.is_some() {
+            self.builder.create_block()
+        } else {
+            None
         };
         debug!(
             "[lower_while_loop] Created blocks: cond={:?}, body={:?}, exit={:?}",
@@ -10735,14 +10793,52 @@ impl<'a> HirToMirContext<'a> {
         }
         // debug!("Created {} phi nodes", phi_nodes.len());
 
+        // Create phi nodes in update_block for all loop variables (if update block exists).
+        // These are needed because the update block can be reached from both:
+        //   1. Normal body end (variables may have been modified in body)
+        //   2. Continue statements (variables at their pre-body-modification values)
+        // Without these phis, we'd use the wrong value on one of the paths.
+        let mut continue_phi_nodes: BTreeMap<SymbolId, IrId> = BTreeMap::new();
+        if let Some(upd_block) = update_block {
+            // Temporarily switch to the update block to create phi nodes
+            // (We'll switch back and lower the body first)
+            let saved_block = self.builder.current_block();
+            self.builder.switch_to_block(upd_block);
+            for (symbol_id, (_, var_type)) in &loop_var_initial_values {
+                if let Some(upd_phi_reg) = self.builder.build_phi(upd_block, var_type.clone()) {
+                    // Register as a local
+                    if let Some(func) = self.builder.current_function_mut() {
+                        func.locals.insert(
+                            upd_phi_reg,
+                            super::IrLocal {
+                                name: format!("update_phi_{}", symbol_id.as_raw()),
+                                ty: var_type.clone(),
+                                mutable: true,
+                                source_location: super::IrSourceLocation::unknown(),
+                                allocation: super::AllocationHint::Register,
+                            },
+                        );
+                    }
+                    continue_phi_nodes.insert(*symbol_id, upd_phi_reg);
+                }
+            }
+            // Switch back to entry block
+            if let Some(saved) = saved_block {
+                self.builder.switch_to_block(saved);
+            }
+        }
+
         // Push loop context (exit phi nodes will be added after condition evaluation)
         // We need to evaluate the condition FIRST to know which block we're actually in
         // (short-circuit operators like && create additional blocks)
+        // When there's a continue_update block, continue should jump there (not cond_block)
+        // so the loop counter increment always executes.
         self.loop_stack.push(LoopContext {
-            continue_block: cond_block,
+            continue_block: update_block.unwrap_or(cond_block),
             break_block: exit_block,
             label: label.cloned(),
             exit_phi_nodes: BTreeMap::new(), // Will be populated after condition eval
+            continue_phi_nodes: continue_phi_nodes.clone(),
         });
 
         // Evaluate condition - this may create additional blocks for short-circuit operators!
@@ -10836,28 +10932,85 @@ impl<'a> HirToMirContext<'a> {
             return;
         };
 
-        // Add phi incoming edges for updated values from loop body
-        for (symbol_id, phi_reg) in &phi_nodes {
-            // Get the current value of the variable after the loop body
-            let back_edge_value = if let Some(&updated_reg) = self.symbol_map.get(symbol_id) {
-                // If the variable was updated, use the new value
-                updated_reg
-            } else {
-                // If not updated, use the phi node itself (the value from the previous iteration)
-                *phi_reg
-            };
-
-            // ALWAYS add the back-edge, even if the variable wasn't modified
-            // This is required for SSA correctness - every phi node must have an incoming
-            // value from each predecessor block
-            self.builder
-                .add_phi_incoming(cond_block, *phi_reg, body_end_block, back_edge_value);
+        if update_block.is_some() {
+            // When there's an update block, add incoming edges to the UPDATE block's
+            // phis from the body end. The update block will then provide the back-edge
+            // to cond_block.
+            for (symbol_id, upd_phi_reg) in &continue_phi_nodes {
+                let body_end_value = if let Some(&updated_reg) = self.symbol_map.get(symbol_id) {
+                    updated_reg
+                } else if let Some(&cond_phi) = phi_nodes.get(symbol_id) {
+                    cond_phi
+                } else {
+                    continue;
+                };
+                self.builder.add_phi_incoming(
+                    update_block.unwrap(),
+                    *upd_phi_reg,
+                    body_end_block,
+                    body_end_value,
+                );
+            }
+        } else {
+            // Plain while loop: add back-edge directly from body to cond_block.
+            for (symbol_id, phi_reg) in &phi_nodes {
+                let back_edge_value = if let Some(&updated_reg) = self.symbol_map.get(symbol_id) {
+                    updated_reg
+                } else {
+                    *phi_reg
+                };
+                self.builder.add_phi_incoming(
+                    cond_block,
+                    *phi_reg,
+                    body_end_block,
+                    back_edge_value,
+                );
+            }
         }
 
-        // Branch back to condition if body didn't terminate
+        // Branch to update block (or directly to cond_block) if body didn't terminate
         if !self.is_terminated() {
             self.exit_drop_scope(); // Free loop body allocations before next iteration
-            self.builder.build_branch(cond_block);
+            if let Some(upd_block) = update_block {
+                self.builder.build_branch(upd_block);
+            } else {
+                self.builder.build_branch(cond_block);
+            }
+        }
+
+        // Lower the update block (e.g., i++ for range loops)
+        if let (Some(upd_block), Some(upd_body)) = (update_block, continue_update) {
+            self.builder.switch_to_block(upd_block);
+
+            // Point symbol_map to the update block's phi nodes so the update code
+            // uses the merged values (from both body-end and continue paths).
+            for (symbol_id, upd_phi_reg) in &continue_phi_nodes {
+                self.symbol_map.insert(*symbol_id, *upd_phi_reg);
+            }
+
+            self.lower_block(upd_body);
+
+            // Get the block we're in after lowering the update
+            let update_end_block = self.builder.current_block().unwrap_or(upd_block);
+
+            // Add phi incoming edges from the update block end to cond_block
+            for (symbol_id, phi_reg) in &phi_nodes {
+                let back_edge_value = if let Some(&updated_reg) = self.symbol_map.get(symbol_id) {
+                    updated_reg
+                } else {
+                    *phi_reg
+                };
+                self.builder.add_phi_incoming(
+                    cond_block,
+                    *phi_reg,
+                    update_end_block,
+                    back_edge_value,
+                );
+            }
+
+            if !self.is_terminated() {
+                self.builder.build_branch(cond_block);
+            }
         }
 
         // Pop loop context
@@ -12203,14 +12356,12 @@ impl<'a> HirToMirContext<'a> {
                 self.builder.build_cast(i64_val, IrType::I64, IrType::I32)
             }
             IrType::I64 => {
-                debug!("[EXTERN UNBOXING] Unboxing Ptr(U8) return to I64");
-                let unbox_func_id = self.get_or_register_extern_function(
-                    "haxe_unbox_int_ptr",
-                    vec![ptr_u8],
-                    IrType::I64,
-                );
+                // I64 expected type comes from TypeParameter via type erasure.
+                // The Ptr(U8) IS the raw i64 value (not a boxed DynamicValue*).
+                // Just cast ptr→i64 instead of trying to dereference as DynamicValue.
+                debug!("[EXTERN UNBOXING] Type-erased Ptr(U8) to I64 — casting (not unboxing)");
                 self.builder
-                    .build_call_direct(unbox_func_id, vec![value], IrType::I64)
+                    .build_cast(value, IrType::Ptr(Box::new(IrType::U8)), IrType::I64)
             }
             IrType::Bool => {
                 debug!("[EXTERN UNBOXING] Unboxing Ptr(U8) return to Bool");
@@ -14427,6 +14578,7 @@ impl<'a> HirToMirContext<'a> {
             break_block: exit_block,
             label: label.cloned(),
             exit_phi_nodes: BTreeMap::new(),
+            continue_phi_nodes: BTreeMap::new(),
         });
 
         // Lower the body statements
@@ -14646,6 +14798,7 @@ impl<'a> HirToMirContext<'a> {
             break_block: loop_exit_block,
             label: label.cloned(),
             exit_phi_nodes: BTreeMap::new(),
+            continue_phi_nodes: BTreeMap::new(),
         });
 
         // Step 5: Build condition block - check if index < length

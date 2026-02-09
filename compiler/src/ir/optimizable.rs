@@ -346,9 +346,18 @@ fn collect_called_functions(
                 }
             }
             HirStatement::While {
-                condition, body, ..
+                condition,
+                body,
+                continue_update,
+                ..
+            } => {
+                collect_called_functions_in_expr(condition, called);
+                collect_called_functions(body, called);
+                if let Some(update) = continue_update {
+                    collect_called_functions(update, called);
+                }
             }
-            | HirStatement::DoWhile {
+            HirStatement::DoWhile {
                 body, condition, ..
             } => {
                 collect_called_functions_in_expr(condition, called);

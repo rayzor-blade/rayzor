@@ -243,12 +243,16 @@ impl DropPointAnalyzer {
                 label: _,
                 condition,
                 body,
+                continue_update,
             } => {
                 let was_in_loop = self.in_loop;
                 self.in_loop = true;
 
                 self.analyze_expr(condition);
                 self.analyze_block(body);
+                if let Some(update) = continue_update {
+                    self.analyze_block(update);
+                }
 
                 self.in_loop = was_in_loop;
             }

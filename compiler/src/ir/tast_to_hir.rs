@@ -890,6 +890,7 @@ impl<'a> TastToHirContext<'a> {
                     label: None,
                     condition: self.lower_expression(condition),
                     body: self.lower_block(std::slice::from_ref(body)),
+                    continue_update: None,
                 };
                 self.loop_labels.pop();
                 hir_stmt
@@ -902,7 +903,7 @@ impl<'a> TastToHirContext<'a> {
                 body,
                 ..
             } => {
-                // Desugar for loop to while loop
+                // Desugar for loop to while loop with separate continue_update
                 let mut statements = Vec::new();
 
                 // Add init statement if present
@@ -910,16 +911,13 @@ impl<'a> TastToHirContext<'a> {
                     statements.push(self.lower_statement(init));
                 }
 
-                // Create while loop
+                // Create while loop with update in continue_update (not body)
                 self.loop_labels.push(None);
-                let while_body = if let Some(update) = update {
-                    // Add update at end of body
-                    let mut body_stmts = vec![self.lower_statement(body)];
-                    body_stmts.push(HirStatement::Expr(self.lower_expression(update)));
-                    HirBlock::new(body_stmts, self.current_scope)
-                } else {
-                    self.lower_block(std::slice::from_ref(body))
-                };
+                let while_body = self.lower_block(std::slice::from_ref(body));
+                let continue_update = update.as_ref().map(|upd| {
+                    let update_stmt = HirStatement::Expr(self.lower_expression(upd));
+                    HirBlock::new(vec![update_stmt], self.current_scope)
+                });
 
                 let while_stmt = HirStatement::While {
                     label: None,
@@ -928,6 +926,7 @@ impl<'a> TastToHirContext<'a> {
                         .map(|e| self.lower_expression(e))
                         .unwrap_or_else(|| self.make_bool_literal(true)),
                     body: while_body,
+                    continue_update,
                 };
                 self.loop_labels.pop();
 
@@ -1991,6 +1990,7 @@ impl<'a> TastToHirContext<'a> {
                         expr: None,
                         scope: self.current_scope,
                     },
+                    continue_update: None,
                 };
                 HirExprKind::Block(HirBlock {
                     statements: vec![while_stmt],
@@ -2013,6 +2013,7 @@ impl<'a> TastToHirContext<'a> {
                         expr: None,
                         scope: self.current_scope,
                     },
+                    continue_update: None,
                 };
                 HirExprKind::Block(HirBlock {
                     statements: vec![while_stmt],
@@ -2036,6 +2037,7 @@ impl<'a> TastToHirContext<'a> {
                         expr: None,
                         scope: self.current_scope,
                     },
+                    continue_update: None,
                 };
                 HirExprKind::Block(HirBlock {
                     statements: vec![while_stmt],

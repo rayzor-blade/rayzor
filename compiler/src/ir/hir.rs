@@ -216,6 +216,10 @@ pub enum HirStatement {
         label: Option<SymbolId>,
         condition: HirExpr,
         body: HirBlock,
+        /// Optional update block executed on continue and at end of body.
+        /// Used for C-style for loops and range iteration to ensure the
+        /// loop counter increment runs even on `continue`.
+        continue_update: Option<HirBlock>,
     },
 
     /// Do-while loop

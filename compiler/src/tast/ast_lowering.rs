@@ -6724,16 +6724,81 @@ impl<'a> AstLowering<'a> {
                                                 ..
                                             } => {
                                                 let ret = *return_type;
+                                                let params_owned = params.clone();
                                                 // If return type is a TypeParameter, infer from arguments
                                                 if type_table.is_type_parameter(ret) {
                                                     let mut inferred = ret;
-                                                    for (i, param_ty) in params.iter().enumerate() {
+                                                    for (i, param_ty) in
+                                                        params_owned.iter().enumerate()
+                                                    {
                                                         if *param_ty == ret && i < arg_exprs.len() {
                                                             inferred = arg_exprs[i].expr_type;
                                                             break;
                                                         }
                                                     }
                                                     inferred
+                                                } else if let Some(ret_info) = type_table.get(ret) {
+                                                    // Check if return type is a GenericInstance with TypeParameter args
+                                                    // e.g., Thread<T> from spawn<T>(fn: Void -> T): Thread<T>
+                                                    if let crate::tast::core::TypeKind::GenericInstance {
+                                                        base_type,
+                                                        type_args: ret_type_args,
+                                                        ..
+                                                    } = &ret_info.kind
+                                                    {
+                                                        let mut subs: Vec<(TypeId, TypeId)> = Vec::new();
+                                                        for ret_ta in ret_type_args.iter() {
+                                                            if let Some(ta_info) = type_table.get(*ret_ta) {
+                                                                if let crate::tast::core::TypeKind::TypeParameter {
+                                                                    symbol_id: tp_sym,
+                                                                    ..
+                                                                } = &ta_info.kind
+                                                                {
+                                                                    for (pi, param_ty) in params_owned.iter().enumerate() {
+                                                                        if pi >= arg_exprs.len() {
+                                                                            continue;
+                                                                        }
+                                                                        if let Some(concrete) =
+                                                                            Self::match_type_param_in_types(
+                                                                                *tp_sym,
+                                                                                *param_ty,
+                                                                                arg_exprs[pi].expr_type,
+                                                                                &type_table,
+                                                                            )
+                                                                        {
+                                                                            subs.push((*ret_ta, concrete));
+                                                                            break;
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+
+                                                        if !subs.is_empty() {
+                                                            let base_type_val = *base_type;
+                                                            let new_args: Vec<TypeId> = ret_type_args
+                                                                .iter()
+                                                                .map(|ta| {
+                                                                    subs.iter()
+                                                                        .find(|(old, _)| old == ta)
+                                                                        .map(|(_, new)| *new)
+                                                                        .unwrap_or(*ta)
+                                                                })
+                                                                .collect();
+                                                            drop(type_table);
+                                                            self.context
+                                                                .type_table
+                                                                .borrow_mut()
+                                                                .create_generic_instance(
+                                                                    base_type_val,
+                                                                    new_args,
+                                                                )
+                                                        } else {
+                                                            ret
+                                                        }
+                                                    } else {
+                                                        ret
+                                                    }
                                                 } else {
                                                     ret
                                                 }
@@ -7657,30 +7722,22 @@ impl<'a> AstLowering<'a> {
                 metadata: ExpressionMetadata::default(),
             };
 
-            let increment_stmt = TypedStatement::Expression {
-                expression: increment,
+            // Create: for (var i = start; i < end; i++) { body }
+            // Using TypedStatement::For separates the update from the body,
+            // so `continue` properly executes i++ before jumping to condition.
+            let for_stmt = TypedStatement::For {
+                init: Some(Box::new(init_stmt)),
+                condition: Some(condition),
+                update: Some(increment),
+                body: Box::new(body_stmt),
                 source_location: SourceLocation::unknown(),
             };
 
-            // Create while body: { body; i++ }
-            let while_body = TypedStatement::Block {
-                statements: vec![body_stmt, increment_stmt],
-                scope_id: loop_body_scope_id,
-                source_location: SourceLocation::unknown(),
-            };
-
-            // Create: while (i < end) { body; i++ }
-            let while_stmt = TypedStatement::While {
-                condition,
-                body: Box::new(while_body),
-                source_location: SourceLocation::unknown(),
-            };
-
-            // Return block: { var i = start; while (i < end) { body; i++ } }
+            // Return block: { for (...) { body } }
             return Ok(TypedExpression {
                 expr_type: self.context.type_table.borrow().void_type(),
                 kind: TypedExpressionKind::Block {
-                    statements: vec![init_stmt, while_stmt],
+                    statements: vec![for_stmt],
                     scope_id: ScopeId::from_raw(self.context.next_scope_id()),
                 },
                 usage: VariableUsage::Move,
@@ -9549,6 +9606,80 @@ impl<'a> AstLowering<'a> {
             }
         }
         None
+    }
+
+    /// Recursively match a parameter type against an argument type to find where
+    /// a specific TypeParameter appears, and extract the concrete type from the
+    /// argument at the same structural position.
+    ///
+    /// For example, if param_ty is `Function { return_type: T }` and arg_ty is
+    /// `Function { return_type: Int }`, this returns `Some(Int)` for target T.
+    fn match_type_param_in_types(
+        target_sym: SymbolId,
+        param_ty: TypeId,
+        arg_ty: TypeId,
+        type_table: &std::cell::Ref<'_, crate::tast::TypeTable>,
+    ) -> Option<TypeId> {
+        let param_info = type_table.get(param_ty)?;
+        match &param_info.kind {
+            crate::tast::core::TypeKind::TypeParameter { symbol_id, .. } => {
+                if *symbol_id == target_sym {
+                    Some(arg_ty)
+                } else {
+                    None
+                }
+            }
+            crate::tast::core::TypeKind::Function {
+                params: fn_params,
+                return_type: fn_ret,
+                ..
+            } => {
+                let arg_info = type_table.get(arg_ty)?;
+                if let crate::tast::core::TypeKind::Function {
+                    params: arg_fn_params,
+                    return_type: arg_fn_ret,
+                    ..
+                } = &arg_info.kind
+                {
+                    // Check return type
+                    if let Some(result) = Self::match_type_param_in_types(
+                        target_sym,
+                        *fn_ret,
+                        *arg_fn_ret,
+                        type_table,
+                    ) {
+                        return Some(result);
+                    }
+                    // Check function parameters
+                    for (fp, ap) in fn_params.iter().zip(arg_fn_params.iter()) {
+                        if let Some(result) =
+                            Self::match_type_param_in_types(target_sym, *fp, *ap, type_table)
+                        {
+                            return Some(result);
+                        }
+                    }
+                }
+                None
+            }
+            crate::tast::core::TypeKind::GenericInstance { type_args, .. } => {
+                let arg_info = type_table.get(arg_ty)?;
+                if let crate::tast::core::TypeKind::GenericInstance {
+                    type_args: arg_type_args,
+                    ..
+                } = &arg_info.kind
+                {
+                    for (ta, ata) in type_args.iter().zip(arg_type_args.iter()) {
+                        if let Some(result) =
+                            Self::match_type_param_in_types(target_sym, *ta, *ata, type_table)
+                        {
+                            return Some(result);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 
     /// Determine variable usage based on expression kind (simplified for TAST)
