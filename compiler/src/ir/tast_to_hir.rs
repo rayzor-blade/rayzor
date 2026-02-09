@@ -771,16 +771,41 @@ impl<'a> TastToHirContext<'a> {
 
     /// Lower a constructor
     fn lower_constructor(&mut self, method: &TypedFunction) -> HirConstructor {
-        let body = self.lower_block(&method.body);
+        let mut body = self.lower_block(&method.body);
 
-        // Extract super call and field initializations from constructor body
-        // This requires analyzing the first statements for:
-        // 1. super(...) calls - must be first statement if present
-        // 2. this.field = value - field initializations before other logic
-        //
-        // For now, these are left as None/empty and extracted during
-        // a separate constructor analysis pass in HIR optimization.
-        // The full constructor body is preserved in `body` so no information is lost.
+        // Extract super() call from constructor body if present.
+        // In Haxe, super(args) must be the first statement in a child constructor.
+        // We scan the first statement for Call { callee: Super, args } and extract it
+        // into HirConstructor.super_call so the MIR lowering can emit the parent
+        // constructor call before the child's field initializations.
+        let mut super_call = None;
+        // super() may be inside a nested Block (the constructor body gets wrapped).
+        // Scan both top-level and one-level-deep block statements.
+        let stmts_to_scan: &mut Vec<HirStatement> = &mut body.statements;
+        // If the body is a single Block expression, unwrap it
+        if stmts_to_scan.len() == 1 {
+            if let HirStatement::Expr(expr) = &stmts_to_scan[0] {
+                if let HirExprKind::Block(inner_block) = &expr.kind {
+                    // Replace body with the inner block's contents
+                    let inner_stmts = inner_block.statements.clone();
+                    *stmts_to_scan = inner_stmts;
+                }
+            }
+        }
+        if let Some(first_stmt) = stmts_to_scan.first() {
+            if let HirStatement::Expr(expr) = first_stmt {
+                if let HirExprKind::Call { callee, args, .. } = &expr.kind {
+                    if matches!(callee.kind, HirExprKind::Super) {
+                        super_call = Some(HirSuperCall {
+                            args: args.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        if super_call.is_some() {
+            body.statements.remove(0);
+        }
 
         HirConstructor {
             params: method
@@ -788,8 +813,8 @@ impl<'a> TastToHirContext<'a> {
                 .iter()
                 .map(|p| self.lower_param(p))
                 .collect(),
-            super_call: None,        // Extracted in HIR constructor analysis pass
-            field_inits: Vec::new(), // Extracted in HIR constructor analysis pass
+            super_call,
+            field_inits: Vec::new(),
             body,
         }
     }

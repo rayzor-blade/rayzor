@@ -2083,15 +2083,45 @@ impl<'a> HirToMirContext<'a> {
 
         // Handle super() call if present
         if let Some(super_call) = &constructor.super_call {
-            // debug!("Processing super() call with {} args", super_call.args.len());
-
             if let Some(parent_type_id) = parent_type {
-                // debug!("Parent class TypeId={:?}", parent_type_id);
+                // Look up parent constructor by TypeId first, then by name as fallback
+                let parent_ctor_id = self.constructor_map.get(&parent_type_id).copied()
+                    .or_else(|| {
+                        // TypeId mismatch: class.extends uses TAST TypeIds, constructor_map uses MIR TypeIds.
+                        // Fall back to looking up by class name via constructor_name_map.
+                        // Resolve parent class symbol from the type_table.
+                        let type_table = self.type_table.borrow();
+                        let parent_symbol = type_table.get(parent_type_id).and_then(|ti| {
+                            if let TypeKind::Class { symbol_id, .. } = &ti.kind {
+                                Some(*symbol_id)
+                            } else {
+                                None
+                            }
+                        });
+                        drop(type_table);
 
-                // Look up parent constructor
-                if let Some(&parent_ctor_id) = self.constructor_map.get(&parent_type_id) {
-                    // debug!("Found parent constructor IrFunctionId={:?}", parent_ctor_id);
+                        if let Some(parent_sym) = parent_symbol {
+                            if let Some(sym_info) = self.symbol_table.get_symbol(parent_sym) {
+                                // Try qualified name first
+                                if let Some(qual_name) = sym_info.qualified_name
+                                    .and_then(|q| self.string_interner.get(q))
+                                {
+                                    if let Some(&fid) = self.constructor_name_map.get(qual_name) {
+                                        return Some(fid);
+                                    }
+                                }
+                                // Try simple name
+                                if let Some(name) = self.string_interner.get(sym_info.name) {
+                                    if let Some(&fid) = self.constructor_name_map.get(name) {
+                                        return Some(fid);
+                                    }
+                                }
+                            }
+                        }
+                        None
+                    });
 
+                if let Some(parent_ctor_id) = parent_ctor_id {
                     // Lower super call arguments
                     let mut arg_regs = vec![this_reg]; // 'this' is first argument
                     for arg in &super_call.args {
@@ -2100,7 +2130,6 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // debug!("Calling parent constructor with {} args", arg_regs.len());
                     // Call parent constructor (returns void)
                     self.builder.build_call_direct(
                         parent_ctor_id,
@@ -2116,8 +2145,6 @@ impl<'a> HirToMirContext<'a> {
                         crate::tast::SourceLocation::unknown(),
                     );
                 }
-            } else {
-                // debug!("super() call but no parent class - this is an error in HIR");
             }
         }
 
