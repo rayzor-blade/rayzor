@@ -250,6 +250,7 @@ register_symbol!(
     crate::haxe_sys::haxe_trace_string_struct
 );
 register_symbol!("haxe_trace_any", crate::haxe_sys::haxe_trace_any);
+register_symbol!("haxe_trace_array", crate::haxe_sys::haxe_trace_array);
 
 // Enum RTTI
 register_symbol!("haxe_register_enum", crate::type_system::haxe_register_enum);

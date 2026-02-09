@@ -156,6 +156,38 @@ pub extern "C" fn haxe_trace_any(dynamic_ptr: *mut u8) {
     }
 }
 
+/// Trace an Array value — prints elements as [e0, e1, e2, ...]
+/// The value is expected to be a pointer to a HaxeArray struct.
+/// Elements are printed as integers (i64) since arrays store i64 values.
+#[no_mangle]
+pub extern "C" fn haxe_trace_array(arr_ptr: *mut u8) {
+    if arr_ptr.is_null() {
+        print_with_prefix("null");
+        return;
+    }
+
+    unsafe {
+        let arr = &*(arr_ptr as *const crate::haxe_array::HaxeArray);
+        let mut result = String::from("[");
+        for i in 0..arr.len {
+            if i > 0 {
+                result.push_str(", ");
+            }
+            if arr.elem_size == 8 {
+                let val = *(arr.ptr.add(i * 8) as *const i64);
+                result.push_str(&val.to_string());
+            } else if arr.elem_size == 4 {
+                let val = *(arr.ptr.add(i * 4) as *const i32);
+                result.push_str(&val.to_string());
+            } else {
+                result.push('?');
+            }
+        }
+        result.push(']');
+        print_with_prefix(&result);
+    }
+}
+
 // ============================================================================
 // Std.string() - Type-specific string conversions
 // All functions return *mut HaxeString to avoid struct return ABI issues

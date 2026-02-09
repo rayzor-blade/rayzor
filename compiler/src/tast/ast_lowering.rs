@@ -9073,11 +9073,11 @@ impl<'a> AstLowering<'a> {
                         Ok(symbol.type_id)
                     } else {
                         // Handle built-in method access for Array, String, etc.
-                        self.infer_builtin_method_type(object, *field_symbol)
+                        self.infer_builtin_method_type(object.expr_type, *field_symbol)
                     }
                 } else {
                     // Handle built-in method access for Array, String, etc.
-                    self.infer_builtin_method_type(object, *field_symbol)
+                    self.infer_builtin_method_type(object.expr_type, *field_symbol)
                 }
             }
             TypedExpressionKind::ArrayAccess { array, .. } => {
@@ -9358,8 +9358,25 @@ impl<'a> AstLowering<'a> {
 
             // Get the method symbol
             let method_type_id = match self.context.symbol_table.get_symbol(method_symbol) {
-                Some(symbol) => symbol.type_id,
-                None => return Ok(type_table.dynamic_type()),
+                Some(symbol) if symbol.type_id.is_valid() => symbol.type_id,
+                _ => {
+                    // Method symbol has no type info (placeholder for built-in methods).
+                    // Use infer_builtin_method_type to get the method's function type,
+                    // then extract the return type from it.
+                    drop(type_table);
+                    let method_func_type =
+                        self.infer_builtin_method_type(receiver_type, method_symbol)?;
+                    let type_table = self.context.type_table.borrow();
+                    return match type_table.get(method_func_type) {
+                        Some(info) => match &info.kind {
+                            crate::tast::core::TypeKind::Function { return_type, .. } => {
+                                Ok(*return_type)
+                            }
+                            _ => Ok(method_func_type), // Not a function type — it's the type itself (e.g., length: Int)
+                        },
+                        None => Ok(type_table.dynamic_type()),
+                    };
+                }
             };
 
             // Get the method's function type
@@ -11061,7 +11078,7 @@ impl<'a> AstLowering<'a> {
     /// Infer the type of built-in methods like Array.push, String.charAt, etc.
     fn infer_builtin_method_type(
         &mut self,
-        object: &TypedExpression,
+        receiver_type: TypeId,
         field_symbol: SymbolId,
     ) -> LoweringResult<TypeId> {
         // Get the field name from the symbol
@@ -11077,7 +11094,7 @@ impl<'a> AstLowering<'a> {
 
         // Check the object type to see if it's a built-in type with known methods
         let type_table = self.context.type_table.borrow();
-        if let Some(object_type_info) = type_table.get(object.expr_type) {
+        if let Some(object_type_info) = type_table.get(receiver_type) {
             match &object_type_info.kind {
                 crate::tast::core::TypeKind::Array { element_type } => {
                     match field_name.as_str() {
@@ -11100,6 +11117,82 @@ impl<'a> AstLowering<'a> {
                             // length: Int
                             Ok(type_table.int_type())
                         }
+                        "map" => {
+                            // map(f: (T) -> S): Array<S>
+                            // For now, return Array<T> (same element type as input)
+                            // The actual return element type depends on the callback,
+                            // but we preserve the array type so trace/dispatch works.
+                            let elem = *element_type;
+                            drop(type_table);
+                            let arr_type =
+                                self.context.type_table.borrow_mut().create_array_type(elem);
+                            let func_type = {
+                                let tt = self.context.type_table.borrow();
+                                let callback_type = tt.dynamic_type();
+                                drop(tt);
+                                self.context
+                                    .type_table
+                                    .borrow_mut()
+                                    .create_function_type(vec![callback_type], arr_type)
+                            };
+                            Ok(func_type)
+                        }
+                        "filter" => {
+                            // filter(f: (T) -> Bool): Array<T>
+                            let elem = *element_type;
+                            drop(type_table);
+                            let arr_type =
+                                self.context.type_table.borrow_mut().create_array_type(elem);
+                            let func_type = {
+                                let tt = self.context.type_table.borrow();
+                                let callback_type = tt.dynamic_type();
+                                drop(tt);
+                                self.context
+                                    .type_table
+                                    .borrow_mut()
+                                    .create_function_type(vec![callback_type], arr_type)
+                            };
+                            Ok(func_type)
+                        }
+                        "sort" => {
+                            // sort(f: (T, T) -> Int): Void
+                            let void_type = type_table.void_type();
+                            let callback_type = type_table.dynamic_type();
+                            drop(type_table);
+                            Ok(self
+                                .context
+                                .type_table
+                                .borrow_mut()
+                                .create_function_type(vec![callback_type], void_type))
+                        }
+                        "indexOf" | "lastIndexOf" => {
+                            // indexOf(x: T, ?fromIndex: Int): Int
+                            Ok(type_table.int_type())
+                        }
+                        "contains" => {
+                            // contains(x: T): Bool
+                            Ok(type_table.bool_type())
+                        }
+                        "join" => {
+                            // join(sep: String): String
+                            Ok(type_table.string_type())
+                        }
+                        "slice" | "splice" | "concat" | "copy" | "reverse" => {
+                            // Returns Array<T>
+                            let elem = *element_type;
+                            drop(type_table);
+                            Ok(self.context.type_table.borrow_mut().create_array_type(elem))
+                        }
+                        "remove" => {
+                            // remove(x: T): Bool
+                            Ok(type_table.bool_type())
+                        }
+                        "insert" | "unshift" => {
+                            // insert(pos: Int, x: T): Void
+                            Ok(type_table.void_type())
+                        }
+                        "toString" => Ok(type_table.string_type()),
+                        "iterator" | "keyValueIterator" => Ok(type_table.dynamic_type()),
                         _ => Ok(type_table.dynamic_type()),
                     }
                 }

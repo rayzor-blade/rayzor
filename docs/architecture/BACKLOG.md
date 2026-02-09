@@ -1764,9 +1764,16 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - LLVM backend: Full closure support (MakeClosure, ClosureFunc, ClosureEnv, CallIndirect)
 - Indirect call parameter type inference from callee's function type
 
+**What Also Works (2026-02-09):**
+
+- Pass closure as function argument (typed and untyped) — `apply((x:Int) -> x * 2, 21)`
+- Inline lambda in HOF calls — `arr.map((x:Int) -> x * 2)`
+- Bidirectional type inference for untyped lambdas — `arr.map((x) -> x * 2)` infers `x:Int`
+- Method call return type inference via `infer_builtin_method_type` — `arr.map(f)` returns `Array<T>`
+- `trace()` for Array types — prints `[1, 2, 3]`
+
 **Not Yet Implemented:**
 
-- [ ] Pass closure as function argument (`arr.map((x) -> x * 2)`)
 - [ ] Partial application / bind
 - [ ] `Reflect.isFunction()` support
 

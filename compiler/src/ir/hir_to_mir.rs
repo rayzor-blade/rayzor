@@ -6833,6 +6833,26 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
 
+                        // Check if this is an Array type from HIR type info
+                        let is_array_type = matches!(
+                            &hir_type_kind,
+                            Some(crate::tast::core::TypeKind::Array { .. })
+                        );
+
+                        // For Array types, call haxe_trace_array directly
+                        if is_array_type {
+                            let trace_array_id = self.get_or_register_extern_function(
+                                "haxe_trace_array",
+                                vec![IrType::Ptr(Box::new(IrType::Void))],
+                                IrType::Void,
+                            );
+                            return self.builder.build_call_direct(
+                                trace_array_id,
+                                vec![arg_reg],
+                                IrType::Void,
+                            );
+                        }
+
                         // Determine which trace function to call based on type
                         let trace_method = {
                             match &arg_type {
