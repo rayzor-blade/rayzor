@@ -797,7 +797,7 @@ fn run_file(
     );
 
     // Handle precompiled .rzb bundles
-    if file.extension().map_or(false, |ext| ext == "rzb") {
+    if file.extension().is_some_and(|ext| ext == "rzb") {
         return run_bundle(&file, verbose, stats, preset);
     }
 
