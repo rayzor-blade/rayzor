@@ -709,6 +709,70 @@ fn try_load_gpu_plugin() -> Option<GpuPlugin> {
     None
 }
 
+fn run_bundle(
+    file: &Path,
+    verbose: bool,
+    stats: bool,
+    preset: Preset,
+) -> Result<(), String> {
+    use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
+    use compiler::ir::load_bundle;
+
+    if !file.exists() {
+        return Err(format!("Bundle not found: {}", file.display()));
+    }
+
+    let bundle =
+        load_bundle(file).map_err(|e| format!("Failed to load bundle: {}", e))?;
+
+    let entry_func_id = bundle
+        .entry_function_id()
+        .ok_or("Bundle has no entry function")?;
+
+    if verbose {
+        println!(
+            "  bundle   {} modules, entry: {}",
+            bundle.module_count(),
+            bundle.entry_function()
+        );
+    }
+
+    // Get runtime symbols
+    let plugin = rayzor_runtime::get_plugin();
+    let symbols = plugin.runtime_symbols();
+    let symbols_ref: Vec<(&str, *const u8)> =
+        symbols.iter().map(|(n, p)| (*n, *p)).collect();
+
+    let mut config = TieredConfig::from_preset(preset.to_tier_preset());
+    config.verbosity = if verbose { 2 } else { 0 };
+    config.start_interpreted = false;
+
+    let mut backend = TieredBackend::with_symbols(config, &symbols_ref)?;
+
+    for module in bundle.modules().iter() {
+        backend
+            .compile_module(module.clone())
+            .map_err(|e| format!("Failed to compile module '{}': {}", module.name, e))?;
+    }
+
+    if stats {
+        let backend_stats = backend.get_statistics();
+        println!("  tier 0   {} functions", backend_stats.baseline_functions);
+        println!("  tier 1   {} functions", backend_stats.standard_functions);
+        println!("  tier 2   {} functions", backend_stats.optimized_functions);
+        println!("  tier 3   {} functions", backend_stats.llvm_functions);
+    }
+
+    backend
+        .execute_function(entry_func_id, vec![])
+        .map_err(|e| format!("Execution failed: {}", e))?;
+
+    backend.shutdown();
+
+    println!("✓ Complete");
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_file(
     file_arg: Option<PathBuf>,
@@ -738,6 +802,11 @@ fn run_file(
         profile,
         preset
     );
+
+    // Handle precompiled .rzb bundles
+    if file.extension().map_or(false, |ext| ext == "rzb") {
+        return run_bundle(&file, verbose, stats, preset);
+    }
 
     #[cfg(not(feature = "llvm-backend"))]
     if _llvm {
