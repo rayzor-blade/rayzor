@@ -108,6 +108,28 @@ pub struct EnumInfo {
     pub variants: &'static [EnumVariantInfo],
 }
 
+/// Class field metadata
+#[derive(Clone)]
+pub struct ClassFieldInfo {
+    /// Field name
+    pub name: &'static str,
+    /// Whether this is a static field
+    pub is_static: bool,
+}
+
+/// Class type metadata
+#[derive(Clone)]
+pub struct ClassInfo {
+    /// Qualified class name (e.g., "Main", "Animal")
+    pub name: &'static str,
+    /// Super class type id (None if no parent)
+    pub super_type_id: Option<u32>,
+    /// Instance fields (including inherited)
+    pub instance_fields: &'static [&'static str],
+    /// Static fields (own class only)
+    pub static_fields: &'static [&'static str],
+}
+
 /// Type metadata
 ///
 /// Contains all runtime information needed for a type:
@@ -115,6 +137,7 @@ pub struct EnumInfo {
 /// - toString function for string conversion
 /// - Type name for debugging
 /// - Optional enum info for enum types
+/// - Optional class info for class types
 #[derive(Clone)]
 pub struct TypeInfo {
     pub name: &'static str,
@@ -123,12 +146,19 @@ pub struct TypeInfo {
     pub to_string: ToStringFn,
     /// Enum-specific metadata (None for non-enum types)
     pub enum_info: Option<&'static EnumInfo>,
+    /// Class-specific metadata (None for non-class types)
+    pub class_info: Option<&'static ClassInfo>,
 }
 
 /// Global type registry
 ///
 /// Maps TypeId -> TypeInfo for runtime type dispatch
 static TYPE_REGISTRY: RwLock<Option<HashMap<TypeId, TypeInfo>>> = RwLock::new(None);
+
+/// Global class name registry for Type.resolveClass
+///
+/// Maps qualified class name -> TypeId
+static CLASS_NAME_REGISTRY: RwLock<Option<HashMap<String, u32>>> = RwLock::new(None);
 
 /// Initialize the type registry with primitive types
 pub fn init_type_system() {
@@ -143,6 +173,7 @@ pub fn init_type_system() {
             align: 1,
             to_string: void_to_string,
             enum_info: None,
+            class_info: None,
         },
     );
 
@@ -154,6 +185,7 @@ pub fn init_type_system() {
             align: 1,
             to_string: null_to_string,
             enum_info: None,
+            class_info: None,
         },
     );
 
@@ -165,6 +197,7 @@ pub fn init_type_system() {
             align: std::mem::align_of::<bool>(),
             to_string: bool_to_string,
             enum_info: None,
+            class_info: None,
         },
     );
 
@@ -176,6 +209,7 @@ pub fn init_type_system() {
             align: std::mem::align_of::<i64>(),
             to_string: int_to_string,
             enum_info: None,
+            class_info: None,
         },
     );
 
@@ -187,6 +221,7 @@ pub fn init_type_system() {
             align: std::mem::align_of::<f64>(),
             to_string: float_to_string,
             enum_info: None,
+            class_info: None,
         },
     );
 
@@ -198,6 +233,7 @@ pub fn init_type_system() {
             align: std::mem::align_of::<StringPtr>(),
             to_string: string_to_string,
             enum_info: None,
+            class_info: None,
         },
     );
 
@@ -290,6 +326,7 @@ pub extern "C" fn haxe_register_enum(
             align: std::mem::align_of::<i64>(),
             to_string: enum_to_string,
             enum_info: Some(enum_info),
+            class_info: None,
         };
 
         register_type(TypeId(type_id), type_info);
@@ -331,9 +368,220 @@ pub fn register_enum_from_mir(
         align: std::mem::align_of::<i64>(),
         to_string: enum_to_string,
         enum_info: Some(enum_info),
+        class_info: None,
     };
 
     register_type(TypeId(type_id), type_info);
+}
+
+// ============================================================================
+// Class RTTI registration (called from compiler backends)
+// ============================================================================
+
+/// Register class RTTI directly from MIR metadata.
+/// `instance_fields` are all instance field names (including inherited).
+/// `static_fields` are own static field names.
+pub fn register_class_from_mir(
+    type_id: u32,
+    name: &str,
+    super_type_id: Option<u32>,
+    instance_fields: &[String],
+    static_fields: &[String],
+) {
+    let class_name_static: &'static str = Box::leak(name.to_string().into_boxed_str());
+
+    let instance_fields_static: &'static [&'static str] = Box::leak(
+        instance_fields
+            .iter()
+            .map(|f| -> &'static str { Box::leak(f.clone().into_boxed_str()) })
+            .collect::<Vec<&'static str>>()
+            .into_boxed_slice(),
+    );
+
+    let static_fields_static: &'static [&'static str] = Box::leak(
+        static_fields
+            .iter()
+            .map(|f| -> &'static str { Box::leak(f.clone().into_boxed_str()) })
+            .collect::<Vec<&'static str>>()
+            .into_boxed_slice(),
+    );
+
+    let class_info = Box::leak(Box::new(ClassInfo {
+        name: class_name_static,
+        super_type_id,
+        instance_fields: instance_fields_static,
+        static_fields: static_fields_static,
+    }));
+
+    let type_info = TypeInfo {
+        name: class_name_static,
+        size: 0, // Struct size is not tracked here (computed by backend)
+        align: 8,
+        to_string: void_to_string,
+        enum_info: None,
+        class_info: Some(class_info),
+    };
+
+    register_type(TypeId(type_id), type_info);
+
+
+
+    // Also register in the name-to-TypeId reverse map
+    let mut guard = CLASS_NAME_REGISTRY.write().unwrap();
+    let registry = guard.get_or_insert_with(HashMap::new);
+    registry.insert(name.to_string(), type_id);
+}
+
+// ============================================================================
+// Class RTTI query functions (called from JIT'd code)
+// ============================================================================
+
+/// Helper: allocate a HaxeString from a &str, using the C API.
+unsafe fn alloc_haxe_string(s: &str) -> *mut u8 {
+    let hs_layout = std::alloc::Layout::new::<crate::haxe_string::HaxeString>();
+    let hs_ptr = std::alloc::alloc(hs_layout) as *mut crate::haxe_string::HaxeString;
+    if hs_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    crate::haxe_string::haxe_string_from_bytes(hs_ptr, s.as_ptr(), s.len());
+    hs_ptr as *mut u8
+}
+
+/// Helper: build a HaxeArray of HaxeStrings from a slice of &str.
+unsafe fn build_string_array(names: &[&str]) -> *mut u8 {
+    let arr_layout = std::alloc::Layout::new::<crate::haxe_array::HaxeArray>();
+    let arr_ptr = std::alloc::alloc(arr_layout) as *mut crate::haxe_array::HaxeArray;
+    if arr_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    crate::haxe_array::haxe_array_new(
+        arr_ptr,
+        std::mem::size_of::<*mut crate::haxe_string::HaxeString>(),
+    );
+    for name in names {
+        let hs_ptr = alloc_haxe_string(name);
+        if !hs_ptr.is_null() {
+            crate::haxe_array::haxe_array_push(
+                arr_ptr,
+                &hs_ptr as *const *mut u8 as *const u8,
+            );
+        }
+    }
+    arr_ptr as *mut u8
+}
+
+/// Type.getClassName(c) -> String
+/// Takes a type_id (i64), returns the class name as a HaxeString pointer.
+#[no_mangle]
+pub extern "C" fn haxe_type_get_class_name(type_id: i64) -> *mut u8 {
+    let guard = TYPE_REGISTRY.read().unwrap();
+    if let Some(registry) = guard.as_ref() {
+        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
+            if let Some(class_info) = &type_info.class_info {
+                return unsafe { alloc_haxe_string(class_info.name) };
+            }
+        }
+    }
+    std::ptr::null_mut()
+}
+
+/// Type.getSuperClass(c) -> Class<Dynamic> (returns super's type_id, or -1 if none)
+#[no_mangle]
+pub extern "C" fn haxe_type_get_super_class(type_id: i64) -> i64 {
+    let guard = TYPE_REGISTRY.read().unwrap();
+    if let Some(registry) = guard.as_ref() {
+        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
+            if let Some(class_info) = &type_info.class_info {
+                if let Some(super_id) = class_info.super_type_id {
+                    return super_id as i64;
+                }
+            }
+        }
+    }
+    -1
+}
+
+/// Type.getInstanceFields(c) -> Array<String>
+/// Returns an array of instance field names (including inherited).
+#[no_mangle]
+pub extern "C" fn haxe_type_get_instance_fields(type_id: i64) -> *mut u8 {
+    let guard = TYPE_REGISTRY.read().unwrap();
+    if let Some(registry) = guard.as_ref() {
+        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
+            if let Some(class_info) = &type_info.class_info {
+                return unsafe { build_string_array(class_info.instance_fields) };
+            }
+        }
+    }
+    unsafe { build_string_array(&[]) }
+}
+
+/// Type.getClassFields(c) -> Array<String>
+/// Returns an array of static field names (own class only).
+#[no_mangle]
+pub extern "C" fn haxe_type_get_class_fields(type_id: i64) -> *mut u8 {
+    let guard = TYPE_REGISTRY.read().unwrap();
+    if let Some(registry) = guard.as_ref() {
+        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
+            if let Some(class_info) = &type_info.class_info {
+                return unsafe { build_string_array(class_info.static_fields) };
+            }
+        }
+    }
+    unsafe { build_string_array(&[]) }
+}
+
+/// Type.resolveClass(name) -> Class<Dynamic> (returns type_id, or -1 if not found)
+#[no_mangle]
+pub extern "C" fn haxe_type_resolve_class(name_ptr: *mut u8) -> i64 {
+    if name_ptr.is_null() {
+        return -1;
+    }
+    let name = unsafe {
+        let hs = &*(name_ptr as *const crate::haxe_string::HaxeString);
+        if hs.ptr.is_null() || hs.len == 0 {
+            return -1;
+        }
+        let bytes = std::slice::from_raw_parts(hs.ptr, hs.len);
+        String::from_utf8_lossy(bytes).to_string()
+    };
+    let guard = CLASS_NAME_REGISTRY.read().unwrap();
+    if let Some(registry) = guard.as_ref() {
+        if let Some(&type_id) = registry.get(&name) {
+            return type_id as i64;
+        }
+    }
+    -1
+}
+
+/// Type.getEnumConstructs(e) -> Array<String>
+/// Takes an enum type_id, returns array of constructor names.
+#[no_mangle]
+pub extern "C" fn haxe_type_get_enum_constructs(type_id: i64) -> *mut u8 {
+    let guard = TYPE_REGISTRY.read().unwrap();
+    if let Some(registry) = guard.as_ref() {
+        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
+            if let Some(enum_info) = &type_info.enum_info {
+                let names: Vec<&str> = enum_info.variants.iter().map(|v| v.name).collect();
+                return unsafe { build_string_array(&names) };
+            }
+        }
+    }
+    unsafe { build_string_array(&[]) }
+}
+
+/// Type.getEnumName(e) -> String
+#[no_mangle]
+pub extern "C" fn haxe_type_get_enum_name(type_id: i64) -> *mut u8 {
+    let guard = TYPE_REGISTRY.read().unwrap();
+    if let Some(registry) = guard.as_ref() {
+        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
+            if let Some(enum_info) = &type_info.enum_info {
+                return unsafe { alloc_haxe_string(enum_info.name) };
+            }
+        }
+    }
+    std::ptr::null_mut()
 }
 
 // ============================================================================
@@ -464,6 +712,7 @@ pub extern "C" fn haxe_register_enum_finish(type_id: u32) {
                 align: std::mem::align_of::<i64>(),
                 to_string: enum_to_string,
                 enum_info: Some(enum_info),
+                class_info: None,
             };
 
             register_type(TypeId(type_id), type_info);

@@ -3090,6 +3090,27 @@ impl StdlibMapping {
             // Type.typeof(v:Dynamic):ValueType (returns ordinal as i32)
             map_method!(static "Type", "typeof" => "haxe_type_typeof", params: 1, returns: primitive,
                 types: &[PtrU8] => I32),
+            // Type.getClassName(c:Class<Dynamic>):String
+            map_method!(static "Type", "getClassName" => "haxe_type_get_class_name", params: 1, returns: complex,
+                types: &[I64] => PtrVoid),
+            // Type.getSuperClass(c:Class<Dynamic>):Class<Dynamic>
+            map_method!(static "Type", "getSuperClass" => "haxe_type_get_super_class", params: 1, returns: primitive,
+                types: &[I64] => I64),
+            // Type.getInstanceFields(c:Class<Dynamic>):Array<String>
+            map_method!(static "Type", "getInstanceFields" => "haxe_type_get_instance_fields", params: 1, returns: complex,
+                types: &[I64] => PtrVoid),
+            // Type.getClassFields(c:Class<Dynamic>):Array<String>
+            map_method!(static "Type", "getClassFields" => "haxe_type_get_class_fields", params: 1, returns: complex,
+                types: &[I64] => PtrVoid),
+            // Type.resolveClass(name:String):Class<Dynamic>
+            map_method!(static "Type", "resolveClass" => "haxe_type_resolve_class", params: 1, returns: primitive,
+                types: &[PtrVoid] => I64),
+            // Type.getEnumConstructs(e:Enum<Dynamic>):Array<String>
+            map_method!(static "Type", "getEnumConstructs" => "haxe_type_get_enum_constructs", params: 1, returns: complex,
+                types: &[I64] => PtrVoid),
+            // Type.getEnumName(e:Enum<Dynamic>):String
+            map_method!(static "Type", "getEnumName" => "haxe_type_get_enum_name", params: 1, returns: complex,
+                types: &[I64] => PtrVoid),
         ];
 
         self.register_from_tuples(mappings);

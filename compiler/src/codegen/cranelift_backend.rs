@@ -3756,7 +3756,33 @@ impl CraneliftBackend {
         modules: &[std::sync::Arc<crate::ir::IrModule>],
     ) -> Result<(), String> {
         Self::register_enum_rtti_from_modules(modules);
+        Self::register_class_rtti_from_modules(modules);
         Ok(())
+    }
+
+    /// Register class RTTI by walking MIR module type definitions directly.
+    pub fn register_class_rtti_from_modules(modules: &[std::sync::Arc<crate::ir::IrModule>]) {
+        use crate::ir::modules::IrTypeDefinition;
+        use rayzor_runtime::type_system::register_class_from_mir;
+
+        for module in modules {
+            for (_id, typedef) in &module.types {
+                if let IrTypeDefinition::Struct { fields, .. } = &typedef.definition {
+                    let instance_fields: Vec<String> =
+                        fields.iter().map(|f| f.name.clone()).collect();
+                    let static_fields: Vec<String> = Vec::new();
+                    let super_type_id = typedef.super_type_id.map(|t| t.0);
+
+                    register_class_from_mir(
+                        typedef.type_id.0,
+                        &typedef.name,
+                        super_type_id,
+                        &instance_fields,
+                        &static_fields,
+                    );
+                }
+            }
+        }
     }
 
     /// Register enum RTTI by walking MIR module type definitions directly.

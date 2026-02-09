@@ -17563,6 +17563,7 @@ impl<'a> HirToMirContext<'a> {
                 discriminant_type: IrType::I32,
             },
             source_location: IrSourceLocation::unknown(),
+            super_type_id: None,
         };
 
         self.builder.module.add_type(typedef);
@@ -17631,7 +17632,7 @@ impl<'a> HirToMirContext<'a> {
                 .insert(parent_field.symbol_id, (child_type, *field_index));
 
             fields.push(IrField {
-                name: parent_field.name.to_string(),
+                name: self.string_interner.get(parent_field.name).unwrap_or("<unknown>").to_string(),
                 ty: self.convert_type(parent_field.ty),
                 offset: None,
             });
@@ -17700,7 +17701,7 @@ impl<'a> HirToMirContext<'a> {
             }
 
             fields.push(IrField {
-                name: field.name.to_string(),
+                name: self.string_interner.get(field.name).unwrap_or("<unknown>").to_string(),
                 ty: self.convert_type(field.ty),
                 offset: None,
             });
@@ -17710,13 +17711,14 @@ impl<'a> HirToMirContext<'a> {
 
         let typedef = IrTypeDef {
             id: typedef_id,
-            name: class.name.to_string(),
+            name: self.string_interner.get(class.name).unwrap_or("<unknown>").to_string(),
             type_id,
             definition: IrTypeDefinition::Struct {
                 fields,
                 packed: false,
             },
             source_location: IrSourceLocation::unknown(),
+            super_type_id: class.extends,
         };
 
         self.builder.module.add_type(typedef);
@@ -17780,7 +17782,7 @@ impl<'a> HirToMirContext<'a> {
             .methods
             .iter()
             .map(|method| IrField {
-                name: method.name.to_string(),
+                name: self.string_interner.get(method.name).unwrap_or("<unknown>").to_string(),
                 ty: IrType::Ptr(Box::new(IrType::Function {
                     params: vec![IrType::Any],
                     return_type: Box::new(IrType::Any),
@@ -17792,13 +17794,14 @@ impl<'a> HirToMirContext<'a> {
 
         let typedef = IrTypeDef {
             id: typedef_id,
-            name: interface.name.to_string(),
+            name: self.string_interner.get(interface.name).unwrap_or("<unknown>").to_string(),
             type_id,
             definition: IrTypeDefinition::Struct {
                 fields,
                 packed: false,
             },
             source_location: IrSourceLocation::unknown(),
+            super_type_id: None,
         };
 
         self.builder.module.add_type(typedef);
@@ -17815,12 +17818,13 @@ impl<'a> HirToMirContext<'a> {
 
         let typedef = IrTypeDef {
             id: typedef_id,
-            name: abstract_decl.name.to_string(),
+            name: self.string_interner.get(abstract_decl.name).unwrap_or("<unknown>").to_string(),
             type_id,
             definition: IrTypeDefinition::Alias {
                 aliased_type: IrType::Any, // TODO: Get underlying type
             },
             source_location: IrSourceLocation::unknown(),
+            super_type_id: None,
         };
 
         self.builder.module.add_type(typedef);
@@ -17879,13 +17883,14 @@ impl<'a> HirToMirContext<'a> {
 
                 let typedef = IrTypeDef {
                     id: typedef_id,
-                    name: alias.name.to_string(),
+                    name: self.string_interner.get(alias.name).unwrap_or("<unknown>").to_string(),
                     type_id,
                     definition: IrTypeDefinition::Struct {
                         fields: ir_fields,
                         packed: false,
                     },
                     source_location: IrSourceLocation::unknown(),
+                    super_type_id: None,
                 };
 
                 self.builder.module.add_type(typedef);
@@ -17900,12 +17905,13 @@ impl<'a> HirToMirContext<'a> {
 
         let typedef = IrTypeDef {
             id: typedef_id,
-            name: alias.name.to_string(),
+            name: self.string_interner.get(alias.name).unwrap_or("<unknown>").to_string(),
             type_id,
             definition: IrTypeDefinition::Alias {
                 aliased_type: IrType::Any, // TODO: Convert aliased TypeId to IrType
             },
             source_location: IrSourceLocation::unknown(),
+            super_type_id: None,
         };
 
         self.builder.module.add_type(typedef);

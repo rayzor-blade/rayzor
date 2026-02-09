@@ -284,6 +284,14 @@ register_symbol!(
 );
 register_symbol!("haxe_std_is", crate::type_system::haxe_std_is);
 register_symbol!("haxe_std_downcast", crate::type_system::haxe_std_downcast);
+// Type RTTI query functions
+register_symbol!("haxe_type_get_class_name", crate::type_system::haxe_type_get_class_name);
+register_symbol!("haxe_type_get_super_class", crate::type_system::haxe_type_get_super_class);
+register_symbol!("haxe_type_get_instance_fields", crate::type_system::haxe_type_get_instance_fields);
+register_symbol!("haxe_type_get_class_fields", crate::type_system::haxe_type_get_class_fields);
+register_symbol!("haxe_type_resolve_class", crate::type_system::haxe_type_resolve_class);
+register_symbol!("haxe_type_get_enum_constructs", crate::type_system::haxe_type_get_enum_constructs);
+register_symbol!("haxe_type_get_enum_name", crate::type_system::haxe_type_get_enum_name);
 register_symbol!("haxe_trace_enum", crate::type_system::haxe_trace_enum);
 register_symbol!(
     "haxe_trace_enum_boxed",

@@ -1463,10 +1463,11 @@ impl TieredBackend {
             backend.compile_module_without_finalize(module)?;
         }
 
-        // Register enum RTTI from MIR type definitions so that
-        // getName()/getParameters()/trace work correctly at runtime
+        // Register RTTI from MIR type definitions so that
+        // getName()/getParameters()/trace/Type API work correctly at runtime
         for module in modules.iter() {
             Self::register_enum_rtti_from_module(module);
+            Self::register_class_rtti_from_module(module);
         }
 
         // Finalize all modules at once (must be done before getting function pointers)
@@ -1526,6 +1527,33 @@ impl TieredBackend {
                     .collect();
 
                 register_enum_from_mir(typedef.type_id.0, &typedef.name, &variant_data);
+            }
+        }
+    }
+
+    /// Register class RTTI from a single MIR module's type definitions.
+    fn register_class_rtti_from_module(module: &IrModule) {
+        use crate::ir::modules::IrTypeDefinition;
+        use rayzor_runtime::type_system::register_class_from_mir;
+
+        for (_id, typedef) in &module.types {
+            if let IrTypeDefinition::Struct { fields, .. } = &typedef.definition {
+                // Separate instance and static fields
+                // In MIR, all fields are in the struct — we treat them all as instance fields
+                // Static fields would need separate tracking (future work)
+                let instance_fields: Vec<String> =
+                    fields.iter().map(|f| f.name.clone()).collect();
+                let static_fields: Vec<String> = Vec::new();
+
+                let super_type_id = typedef.super_type_id.map(|t| t.0);
+
+                register_class_from_mir(
+                    typedef.type_id.0,
+                    &typedef.name,
+                    super_type_id,
+                    &instance_fields,
+                    &static_fields,
+                );
             }
         }
     }

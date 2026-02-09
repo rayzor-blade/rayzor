@@ -116,6 +116,10 @@ pub struct IrTypeDef {
 
     /// Source location
     pub source_location: IrSourceLocation,
+
+    /// Super class type id (for class types with inheritance)
+    #[serde(default)]
+    pub super_type_id: Option<TypeId>,
 }
 
 /// Type definition variants
