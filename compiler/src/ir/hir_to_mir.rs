@@ -11991,29 +11991,48 @@ impl<'a> HirToMirContext<'a> {
     /// call `obj.toString()` and return the resulting `*HaxeString` register.
     /// Returns `Some(string_reg)` on success, `None` if not a class or toString not found.
     fn try_call_tostring(&mut self, obj_reg: IrId, type_id: TypeId) -> Option<Option<IrId>> {
-        // Check if type_id is a Class
-        let is_class = {
+        // Get the class symbol_id from the type_table
+        let class_symbol = {
             let type_table = self.type_table.borrow();
-            type_table
-                .get(type_id)
-                .map(|ti| matches!(ti.kind, crate::tast::TypeKind::Class { .. }))
-                .unwrap_or(false)
+            type_table.get(type_id).and_then(|ti| {
+                if let TypeKind::Class { symbol_id, .. } = &ti.kind {
+                    Some(*symbol_id)
+                } else {
+                    None
+                }
+            })
         };
 
-        if !is_class {
-            return Some(None);
+        let class_symbol = match class_symbol {
+            Some(s) => s,
+            None => return Some(None), // Not a class type
+        };
+
+        // Find the toString method symbol for THIS specific class by scanning HIR type declarations
+        let mut tostring_symbol = None;
+        for (_tid, type_decl) in self.current_hir_types.iter() {
+            if let HirTypeDecl::Class(class) = type_decl {
+                if class.symbol_id == class_symbol {
+                    // Found the class — look for a toString method
+                    for method in &class.methods {
+                        let method_name = self.string_interner.get(method.function.name).unwrap_or("");
+                        if method_name == "toString" && !method.is_static {
+                            tostring_symbol = Some(method.function.symbol_id);
+                            break;
+                        }
+                    }
+                    break;
+                }
+            }
         }
 
-        // Search for toString function in the current module
-        let tostring_id = self
-            .builder
-            .module
-            .functions
-            .iter()
-            .find(|(_, func)| func.name == "toString")
-            .map(|(id, _)| *id);
+        let tostring_symbol = match tostring_symbol {
+            Some(s) => s,
+            None => return Some(None), // Class has no toString() method
+        };
 
-        let tostring_id = match tostring_id {
+        // Look up the IrFunctionId for this specific toString method
+        let tostring_id = match self.function_map.get(&tostring_symbol).copied() {
             Some(id) => id,
             None => return Some(None),
         };
