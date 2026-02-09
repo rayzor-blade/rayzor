@@ -16997,45 +16997,78 @@ impl<'a> HirToMirContext<'a> {
     }
 
     fn lower_string_interpolation(&mut self, parts: &[HirStringPart]) -> Option<IrId> {
-        // String interpolation: "Hello ${name}!" becomes string concatenation
-        // Implemented as repeated calls to string concatenation
-        //
-        // Strategy:
-        // 1. Start with empty string or first literal
-        // 2. For each part:
-        //    - If literal: concatenate directly
-        //    - If expression: convert to string (toString()) then concatenate
-
         if parts.is_empty() {
             return self.builder.build_string(String::new());
         }
 
-        // Build up the result by concatenating parts
-        let mut result = None;
+        let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
+
+        // Pre-register extern functions for type conversion and concatenation
+        let concat_fn = self.get_or_register_extern_function(
+            "haxe_string_concat",
+            vec![string_ptr_ty.clone(), string_ptr_ty.clone()],
+            string_ptr_ty.clone(),
+        );
+
+        let mut result: Option<IrId> = None;
 
         for part in parts {
-            let part_value = match part {
+            let part_str = match part {
                 HirStringPart::Literal(s) => {
-                    // Literal string part
                     self.builder.build_string(s.to_string())?
                 }
                 HirStringPart::Interpolation(expr) => {
-                    // Expression part - needs toString() conversion
                     let expr_val = self.lower_expression(expr)?;
 
-                    // TODO: Call toString() method or use type-specific conversion
-                    // For now, just use the value directly (assuming it's already a string)
-                    expr_val
+                    // Convert to string based on expression type
+                    let expr_type_kind = {
+                        let type_table = self.type_table.borrow();
+                        type_table.get(expr.ty).map(|ti| ti.kind.clone())
+                    };
+
+                    match expr_type_kind.as_ref() {
+                        Some(TypeKind::String) => expr_val, // already a string
+                        Some(TypeKind::Int) => {
+                            let conv_fn = self.get_or_register_extern_function(
+                                "haxe_string_from_int",
+                                vec![IrType::I64],
+                                string_ptr_ty.clone(),
+                            );
+                            self.builder.build_call_direct(conv_fn, vec![expr_val], string_ptr_ty.clone())?
+                        }
+                        Some(TypeKind::Float) => {
+                            let conv_fn = self.get_or_register_extern_function(
+                                "haxe_string_from_float",
+                                vec![IrType::F64],
+                                string_ptr_ty.clone(),
+                            );
+                            self.builder.build_call_direct(conv_fn, vec![expr_val], string_ptr_ty.clone())?
+                        }
+                        Some(TypeKind::Bool) => {
+                            let conv_fn = self.get_or_register_extern_function(
+                                "haxe_string_from_bool",
+                                vec![IrType::I32],
+                                string_ptr_ty.clone(),
+                            );
+                            self.builder.build_call_direct(conv_fn, vec![expr_val], string_ptr_ty.clone())?
+                        }
+                        _ => {
+                            // Fallback: treat as int (prints raw i64 value)
+                            let conv_fn = self.get_or_register_extern_function(
+                                "haxe_string_from_int",
+                                vec![IrType::I64],
+                                string_ptr_ty.clone(),
+                            );
+                            self.builder.build_call_direct(conv_fn, vec![expr_val], string_ptr_ty.clone())?
+                        }
+                    }
                 }
             };
 
             result = match result {
-                None => Some(part_value), // First part
+                None => Some(part_str),
                 Some(acc) => {
-                    // Concatenate with accumulator
-                    // TODO: Use proper string concatenation operator or runtime function
-                    // For now, use binary add which should work for strings
-                    self.builder.build_binop(BinaryOp::Add, acc, part_value)
+                    self.builder.build_call_direct(concat_fn, vec![acc, part_str], string_ptr_ty.clone())
                 }
             };
         }
