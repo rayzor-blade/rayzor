@@ -244,6 +244,11 @@ pub struct HirToMirContext<'a> {
     /// Interface vtables: maps (class SymbolId, interface SymbolId) → method SymbolIds
     /// Each entry's method order matches the interface's method_names order
     interface_vtables: BTreeMap<(SymbolId, SymbolId), Vec<SymbolId>>,
+
+    /// Constrained type parameter info for function parameters.
+    /// Maps IrFunctionId → Vec<(param_index, interface_SymbolId)>
+    /// Used at call sites to wrap arguments in fat pointers for constrained type params.
+    constrained_param_interfaces: BTreeMap<IrFunctionId, Vec<(usize, SymbolId)>>,
 }
 
 /// TCC runtime function IDs for __c__ inline code lowering
@@ -383,6 +388,7 @@ impl<'a> HirToMirContext<'a> {
             next_anon_shape_id: 0,
             interface_method_names: BTreeMap::new(),
             interface_vtables: BTreeMap::new(),
+            constrained_param_interfaces: BTreeMap::new(),
         };
 
         // Pre-declare malloc so it's available for heap allocations during lowering
@@ -1721,6 +1727,9 @@ impl<'a> HirToMirContext<'a> {
         let func_id = self.builder.start_function(symbol_id, func_name, signature);
         self.function_map.insert(symbol_id, func_id);
 
+        // Record constrained type parameter info for call-site fat pointer wrapping
+        self.record_constrained_params(func_id, hir_func, this_type.is_some());
+
         // Respect Haxe `inline` keyword — always inline these functions
         if hir_func.is_inline {
             if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
@@ -1768,6 +1777,9 @@ impl<'a> HirToMirContext<'a> {
 
         let func_id = self.builder.start_function(symbol_id, func_name, signature);
         self.function_map.insert(symbol_id, func_id);
+
+        // Record constrained type parameter info for call-site fat pointer wrapping
+        self.record_constrained_params(func_id, hir_func, this_type.is_some());
 
         // Respect Haxe `inline` keyword — always inline these functions
         if hir_func.is_inline {
@@ -2160,10 +2172,12 @@ impl<'a> HirToMirContext<'a> {
             .unwrap_or_else(|| format!("func_{}", symbol_id.as_raw()));
         // debug!("===== STARTING FUNCTION: {} (symbol {:?}) =====", func_name, symbol_id);
         let func_id = self.builder.start_function(symbol_id, func_name, signature);
-        // debug!("  Function ID: {:?}, Entry block created", func_id);
 
         // Store function mapping for call resolution
         self.function_map.insert(symbol_id, func_id);
+
+        // Record constrained type parameter info for call-site fat pointer wrapping
+        self.record_constrained_params(func_id, hir_func, false);
 
         // Apply SSA-derived optimization hints to function attributes
         // These hints come from DFG/SSA analysis and guide MIR optimization
@@ -4851,6 +4865,7 @@ impl<'a> HirToMirContext<'a> {
                     .iter()
                     .map(|&ty_id| self.convert_type(ty_id))
                     .collect();
+
 
                 // DEBUG: Check if void function is being called with dest
                 debug!(
@@ -7745,18 +7760,37 @@ impl<'a> HirToMirContext<'a> {
                                 type_table
                                     .get(receiver_type)
                                     .map(|ti| {
-                                        if let crate::tast::core::TypeKind::Class {
-                                            symbol_id,
-                                            ..
-                                        } = &ti.kind
-                                        {
-                                            // Check if this is a stdlib class
-                                            self.symbol_table
-                                                .get_symbol(*symbol_id)
-                                                .map(|s| !self.is_stdlib_class_by_symbol(s))
-                                                .unwrap_or(false)
-                                        } else {
-                                            false
+                                        match &ti.kind {
+                                            crate::tast::core::TypeKind::Class {
+                                                symbol_id,
+                                                ..
+                                            } => {
+                                                // Check if this is a stdlib class
+                                                self.symbol_table
+                                                    .get_symbol(*symbol_id)
+                                                    .map(|s| !self.is_stdlib_class_by_symbol(s))
+                                                    .unwrap_or(false)
+                                            }
+                                            // TypeParameter receivers always come from user-defined generics.
+                                            // Method calls on T should resolve through function_map, not stdlib.
+                                            // (Constrained T:Interface is handled earlier by interface dispatch.)
+                                            crate::tast::core::TypeKind::TypeParameter { .. } => true,
+                                            // GenericInstance: check if the base type is a user class
+                                            crate::tast::core::TypeKind::GenericInstance { base_type, .. } => {
+                                                type_table.get(*base_type)
+                                                    .map(|bt| {
+                                                        if let crate::tast::core::TypeKind::Class { symbol_id, .. } = &bt.kind {
+                                                            self.symbol_table
+                                                                .get_symbol(*symbol_id)
+                                                                .map(|s| !self.is_stdlib_class_by_symbol(s))
+                                                                .unwrap_or(false)
+                                                        } else {
+                                                            false
+                                                        }
+                                                    })
+                                                    .unwrap_or(false)
+                                            }
+                                            _ => false,
                                         }
                                     })
                                     .unwrap_or(false)
@@ -8708,10 +8742,40 @@ impl<'a> HirToMirContext<'a> {
                     // If still not found, try lookup by function name in function_map
                     // This handles cases where method calls use different symbol IDs than the definition
                     // (e.g., chained method calls like z.mul(z).add(c) where add has a different symbol)
+                    //
+                    // IMPORTANT: When matching by bare name, also verify the function belongs to
+                    // the receiver's class (via qualified name). Without this, common names like
+                    // "get", "set", "toString" could match wrong stdlib functions.
+                    if func_id_opt.is_none() && *is_method {
+                    }
                     if func_id_opt.is_none() && *is_method {
                         if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
                             if let Some(method_name) = self.string_interner.get(sym_info.name) {
-                                // Search function_map by name
+                                // Get receiver's class name for disambiguation
+                                let receiver_class_name = if !args.is_empty() {
+                                    let type_table = self.type_table.borrow();
+                                    let class_sym = type_table.get(args[0].ty).and_then(|ti| match &ti.kind {
+                                        TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                                        TypeKind::GenericInstance { base_type, .. } => {
+                                            type_table.get(*base_type).and_then(|bt| match &bt.kind {
+                                                TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                                                _ => None,
+                                            })
+                                        }
+                                        _ => None,
+                                    });
+                                    let name = class_sym.and_then(|sid| {
+                                        self.symbol_table.get_symbol(sid)
+                                            .and_then(|s| self.string_interner.get(s.name))
+                                            .map(|s| s.to_string())
+                                    });
+                                    drop(type_table);
+                                    name
+                                } else {
+                                    None
+                                };
+
+                                // Search function_map by name, preferring qualified name match
                                 for (func_sym, &func_id) in &self.function_map {
                                     if let Some(func_sym_info) =
                                         self.symbol_table.get_symbol(*func_sym)
@@ -8720,6 +8784,17 @@ impl<'a> HirToMirContext<'a> {
                                             self.string_interner.get(func_sym_info.name)
                                         {
                                             if func_name == method_name {
+                                                // If we know the receiver class, verify via qualified name
+                                                if let Some(ref class_name) = receiver_class_name {
+                                                    let qual_match = func_sym_info
+                                                        .qualified_name
+                                                        .and_then(|qn| self.string_interner.get(qn))
+                                                        .map(|qn| qn.contains(class_name.as_str()))
+                                                        .unwrap_or(false);
+                                                    if !qual_match {
+                                                        continue; // Skip — wrong class
+                                                    }
+                                                }
                                                 debug!("[NAME FALLBACK] Found method '{}' by name: {:?} -> {:?}",
                                                     method_name, func_sym, func_id);
                                                 func_id_opt = Some(func_id);
@@ -8857,14 +8932,24 @@ impl<'a> HirToMirContext<'a> {
                             debug!("[FUNCTION_MAP] Result: {:?}", result);
 
                             // Type erasure coercion for generic method returns:
-                            // If expr.ty is a TypeParameter (erased to I64), resolve to the
-                            // concrete type using the receiver's type arguments and coerce.
+                            // The function returns I64 (type-erased), but the concrete
+                            // return type may differ. Two paths:
+                            // 1. AST already resolved expr.ty to concrete (nested generics)
+                            // 2. expr.ty is still TypeParameter → resolve via receiver
                             if let Some(call_result) = result {
-                                if actual_return_type == IrType::I64 && !args.is_empty() {
-                                    if let Some(concrete_ty_id) = self.resolve_type_param_from_receiver(expr.ty, args[0].ty) {
-                                        let concrete_ir_type = self.convert_type(concrete_ty_id);
-                                        if concrete_ir_type != IrType::I64 {
-                                            return self.coerce_from_i64(call_result, concrete_ty_id);
+                                if actual_return_type == IrType::I64 {
+                                    let expected_ir_type = self.convert_type(expr.ty);
+                                    if expected_ir_type != IrType::I64 {
+                                        // Path 1: AST resolved type (e.g., Box<Int> → Ptr)
+                                        return self.coerce_from_i64(call_result, expr.ty);
+                                    }
+                                    // Path 2: expr.ty is still TypeParameter → resolve via receiver's type_args
+                                    if !args.is_empty() {
+                                        if let Some(concrete_ty_id) = self.resolve_type_param_from_receiver(expr.ty, args[0].ty) {
+                                            let concrete_ir_type = self.convert_type(concrete_ty_id);
+                                            if concrete_ir_type != IrType::I64 {
+                                                return self.coerce_from_i64(call_result, concrete_ty_id);
+                                            }
                                         }
                                     }
                                 }
@@ -8970,6 +9055,35 @@ impl<'a> HirToMirContext<'a> {
                             } else {
                                 converted_hir_type_args.clone()
                             };
+
+                            // Wrap arguments for constrained type parameters (T:Interface)
+                            // If a parameter expects a fat pointer (constrained TypeParam),
+                            // wrap the class argument in a fat pointer with the interface's vtable.
+                            if let Some(constrained) =
+                                self.constrained_param_interfaces.get(&func_id).cloned()
+                            {
+                                for (param_idx, iface_sym) in &constrained {
+                                    if *param_idx < arg_regs.len() && *param_idx < args.len() {
+                                        let arg_type = args[*param_idx].ty;
+                                        if let Some(class_sym) = self.get_class_symbol(arg_type) {
+                                            if self
+                                                .interface_vtables
+                                                .contains_key(&(class_sym, *iface_sym))
+                                            {
+                                                if let Some(wrapped) =
+                                                    self.wrap_in_interface_fat_ptr(
+                                                        arg_regs[*param_idx],
+                                                        class_sym,
+                                                        *iface_sym,
+                                                    )
+                                                {
+                                                    arg_regs[*param_idx] = wrapped;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
 
                             // Use HIR type_args or inferred type_args for static generic calls
                             debug!("[FUNCTION_MAP] Direct call lowered {} args: {:?}, final_type_args: {:?}", arg_regs.len(), arg_regs, final_type_args);
@@ -9227,19 +9341,31 @@ impl<'a> HirToMirContext<'a> {
                 // SPECIAL CASE: Abstract type constructors
                 // If this is an abstract type, treat this as a simple value wrap (no allocation).
                 if is_abstract {
-                    // debug!("Abstract type constructor detected - returning wrapped value");
-                    if args.len() == 1 {
-                        return self.lower_expression(&args[0]);
-                    } else if args.is_empty() {
-                        // eprintln!("WARNING: Abstract constructor with no arguments, returning 0");
-                        return self.builder.build_const(IrValue::I32(0));
-                    } else {
-                        // eprintln!(
-                        //     "WARNING: Abstract constructor with {} arguments, using first",
-                        //     args.len()
-                        // );
-                        return self.lower_expression(&args[0]);
+                    // Before treating as abstract value-wrap, check if there's a user-defined
+                    // class with the same name that has a constructor registered. User classes
+                    // should override stdlib abstract types with the same short name
+                    // (e.g., user's `class Box<T>` vs stdlib `rayzor.Box<T>` abstract).
+                    let has_user_constructor = hir_class_name
+                        .and_then(|interned| self.string_interner.get(interned))
+                        .map(|name| self.constructor_name_map.contains_key(name))
+                        .unwrap_or(false)
+                        || actual_symbol_id
+                            .and_then(|sid| self.symbol_table.get_symbol(sid))
+                            .and_then(|s| s.qualified_name)
+                            .and_then(|qn| self.string_interner.get(qn))
+                            .map(|qn| self.constructor_name_map.contains_key(qn))
+                            .unwrap_or(false);
+
+                    if !has_user_constructor {
+                        if args.len() == 1 {
+                            return self.lower_expression(&args[0]);
+                        } else if args.is_empty() {
+                            return self.builder.build_const(IrValue::I32(0));
+                        } else {
+                            return self.lower_expression(&args[0]);
+                        }
                     }
+                    // User constructor exists - fall through to normal class construction
                 }
 
                 // SPECIAL CASE: Check if this is an extern stdlib class constructor BEFORE fallback
@@ -9313,7 +9439,6 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
                 }
-                debug!("[NEW EXPR]: resolved class_name={:?}", class_name);
 
                 // MONOMORPHIZATION: For generic extern classes like Vec<T>, monomorphize the class name
                 // based on type arguments. Vec<Int> -> VecI32, Vec<Float> -> VecF64, etc.
@@ -9428,7 +9553,7 @@ impl<'a> HirToMirContext<'a> {
                         }
                         found
                     };
-                    if let Some((wrapper_name, needs_out_param)) = constructor_info {
+                if let Some((wrapper_name, needs_out_param)) = constructor_info {
                         // Lower arguments
                         let arg_regs: Vec<_> = args
                             .iter()
@@ -9495,6 +9620,18 @@ impl<'a> HirToMirContext<'a> {
                                 constructor_type_id = *base_type;
                                 has_constructor = true;
                             }
+                        }
+                    }
+                }
+
+                // Try constructor_name_map as final fallback before value wrap
+                if !has_constructor {
+                    if let Some(class_name) = final_class_name {
+                        if let Some(&func_id) = self.constructor_name_map.get(class_name) {
+                            constructor_type_id = *class_type; // doesn't matter, we have func_id
+                            has_constructor = true;
+                            // Store directly in constructor_map for future lookups
+                            self.constructor_map.insert(*class_type, func_id);
                         }
                     }
                 }
@@ -9673,7 +9810,8 @@ impl<'a> HirToMirContext<'a> {
                 let obj_size: u64 = ((field_count + 1) * 8).max(16);
 
                 // Use heap allocation (malloc) for class instances
-                let obj_ptr = self.build_heap_alloc(obj_size)?;
+                let obj_ptr = self.build_heap_alloc(obj_size);
+                let obj_ptr = obj_ptr?;
 
                 // Note: Field initialization is handled by the constructor call below.
                 // The constructor stores user fields starting at index 0.
@@ -9693,6 +9831,17 @@ impl<'a> HirToMirContext<'a> {
                     // Constructor returns void, so we ignore the result
                     self.builder
                         .build_call_direct(constructor_func_id, arg_regs, IrType::Void);
+
+                    // Transfer ownership: constructor args that are heap-allocated
+                    // are now owned by the new object (stored in its fields).
+                    // Remove them from drop tracking to prevent premature free.
+                    for arg in args.iter() {
+                        if let HirExprKind::Variable { symbol, .. } = &arg.kind {
+                            if self.owned_heap_values.contains_key(symbol) {
+                                self.owned_heap_values.remove(symbol);
+                            }
+                        }
+                    }
                 } else {
                     // eprintln!("WARNING: Constructor not found for TypeId {:?}", class_type);
                 }
@@ -11100,7 +11249,15 @@ impl<'a> HirToMirContext<'a> {
             // Type parameters — type erasure: all type params are pointer-sized (8 bytes)
             // This allows ONE struct layout per generic class for all instantiations.
             // Coercion to/from concrete types happens at generic boundaries (field access, calls).
-            Some(TypeKind::TypeParameter { .. }) => IrType::I64,
+            // Exception: constrained type params (T:Interface) become Ptr(Void) — fat pointer
+            // for vtable-based dispatch on interface methods.
+            Some(TypeKind::TypeParameter { constraints, .. }) => {
+                if !constraints.is_empty() && self.has_interface_constraint(&constraints) {
+                    IrType::Ptr(Box::new(IrType::Void))
+                } else {
+                    IrType::I64
+                }
+            }
             Some(TypeKind::Dynamic) => {
                 // Dynamic type is used as a placeholder for unresolved generic type parameters
                 // in stdlib (e.g., ArrayIterator<T>.next() where T is unresolved).
@@ -15954,14 +16111,67 @@ impl<'a> HirToMirContext<'a> {
         Some(fat_ptr)
     }
 
-    /// Check if a type is an interface type and return its SymbolId
+    /// Check if a type is an interface type and return its SymbolId.
+    /// Also handles TypeParameters with interface constraints (T:Printable).
     fn get_interface_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
         let type_table = self.type_table.borrow();
         let type_ref = type_table.get(type_id)?;
-        if let TypeKind::Interface { symbol_id, .. } = &type_ref.kind {
-            Some(*symbol_id)
-        } else {
-            None
+        match &type_ref.kind {
+            TypeKind::Interface { symbol_id, .. } => Some(*symbol_id),
+            TypeKind::TypeParameter { constraints, .. } => {
+                // For constrained type params, find the first interface constraint
+                for constraint_id in constraints {
+                    if let Some(constraint_type) = type_table.get(*constraint_id) {
+                        if let TypeKind::Interface { symbol_id, .. } = &constraint_type.kind {
+                            return Some(*symbol_id);
+                        }
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Check if a list of constraint TypeIds contains at least one interface constraint
+    fn has_interface_constraint(&self, constraints: &[TypeId]) -> bool {
+        let type_table = self.type_table.borrow();
+        constraints.iter().any(|c| {
+            type_table
+                .get(*c)
+                .map_or(false, |t| matches!(t.kind, TypeKind::Interface { .. }))
+        })
+    }
+
+    /// Record which function parameters are constrained type parameters.
+    /// Used at call sites to wrap class arguments in fat pointers.
+    fn record_constrained_params(
+        &mut self,
+        func_id: IrFunctionId,
+        hir_func: &HirFunction,
+        has_this: bool,
+    ) {
+        let mut constrained = Vec::new();
+        for (i, param) in hir_func.params.iter().enumerate() {
+            let type_table = self.type_table.borrow();
+            if let Some(type_info) = type_table.get(param.ty) {
+                if let TypeKind::TypeParameter { constraints, .. } = &type_info.kind {
+                    // Find the first interface constraint
+                    for constraint_id in constraints {
+                        if let Some(constraint_type) = type_table.get(*constraint_id) {
+                            if let TypeKind::Interface { symbol_id, .. } = &constraint_type.kind {
+                                // param_index in MIR includes 'this' offset
+                                let mir_index = if has_this { i + 1 } else { i };
+                                constrained.push((mir_index, *symbol_id));
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !constrained.is_empty() {
+            self.constrained_param_interfaces.insert(func_id, constrained);
         }
     }
 
@@ -16192,6 +16402,17 @@ impl<'a> HirToMirContext<'a> {
         let recv_info = type_table.get(receiver_type_id)?;
         let (class_symbol, concrete_args) = match &recv_info.kind {
             crate::tast::TypeKind::Class { symbol_id, type_args } => (*symbol_id, type_args.clone()),
+            crate::tast::TypeKind::GenericInstance { base_type, type_args, .. } => {
+                // Unwrap GenericInstance to get the base class's symbol_id
+                if let Some(base_info) = type_table.get(*base_type) {
+                    match &base_info.kind {
+                        crate::tast::TypeKind::Class { symbol_id, .. } => (*symbol_id, type_args.clone()),
+                        _ => return None,
+                    }
+                } else {
+                    return None;
+                }
+            }
             _ => return None,
         };
         drop(type_table);

@@ -21,7 +21,7 @@ This document tracks major features, enhancements, and technical debt for the Ra
 
 **Status:** 🟢 Complete (2026-02-08)
 **Related Files:**
-- `compiler/src/tast/ast_lowering.rs` - Type arg inference from constructor args
+- `compiler/src/tast/ast_lowering.rs` - Type arg inference from constructor/function args, return type substitution
 - `compiler/src/ir/hir_to_mir.rs` - TypeParameter→I64 erasure, field load/store coercion
 - `compiler/src/ir/builder.rs` - F64↔I64 bitcast in build_call_direct
 - `compiler/src/ir/types.rs` - TypeVar size=8 safety net
@@ -42,10 +42,10 @@ This document tracks major features, enhancements, and technical debt for the Ra
 **Architecture:** Type erasure — all type parameters become I64 (8 bytes) at MIR level. One struct layout per generic class regardless of instantiation. Coercion (bitcast for floats, cast for ints) at field load/store and method call boundaries.
 
 **Not Yet Implemented:**
-- [ ] Generic constraint validation
+- [x] Generic constraint validation — constrained TypeParameters (`<T:Interface>`) dispatch through fat pointer interface vtables
 - [ ] Abstract types with generics support
-- [ ] Generic functions (standalone, not class methods)
-- [ ] Nested generics (`Container<Container<Int>>`)
+- [x] Generic functions (standalone, not class methods) — return type inferred from argument types at each call site
+- [x] Nested generics (`Container<Container<Int>>`) — fixed stdlib method name collision for TypeParameter receivers + user class name collision with stdlib abstracts
 
 ### 1.2 Type System Extensions
 
@@ -1655,7 +1655,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 13 | Enum methods + statics | P1 | Medium | 🔴 Not started | rich enums |
 | 14 | Abstract types (operator overloading) | P1 | High | 🟡 Partial | custom types |
 | 15 | Dynamic type operations | P1 | Medium | 🟡 Partial | interop, JSON |
-| 16 | Type parameters on functions | P1 | Medium | 🟡 Partial | generic functions |
+| 16 | Type parameters on functions | P1 | Medium | 🟢 Complete | generic functions |
 | 17 | Null safety (`Null<T>`) | P2 | Medium | 🔴 Not started | null checks |
 | 18 | Structural subtyping | P2 | Medium | 🔴 Not started | structural interfaces |
 | 19 | `@:forward` on abstracts | P2 | Medium | 🔴 Not started | delegation |

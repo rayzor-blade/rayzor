@@ -1249,10 +1249,36 @@ fn try_build_candidate_function_wide(
                         }
                         changed = true;
                     }
-                    IrInstruction::Cast { dest, src, .. }
-                    | IrInstruction::BitCast { dest, src, .. }
+                    IrInstruction::Cast {
+                        dest,
+                        src,
+                        from_ty,
+                        to_ty,
+                    } if tracked.contains(src) && !tracked.contains(dest) => {
+                        // If casting a tracked pointer to a non-pointer type
+                        // (e.g., Ptr→I64 for generic type erasure), the allocation
+                        // escapes type-safe tracking — reject this candidate.
+                        if matches!(from_ty, IrType::Ptr(_)) && !matches!(to_ty, IrType::Ptr(_))
+                        {
+                            return None;
+                        }
+                        tracked.insert(*dest);
+                        if let Some(&field_idx) = gep_map.get(src) {
+                            gep_map.insert(*dest, field_idx);
+                        }
+                        changed = true;
+                    }
+                    IrInstruction::BitCast { dest, src, ty }
                         if tracked.contains(src) && !tracked.contains(dest) =>
                     {
+                        // BitCast to non-pointer type means type erasure — reject
+                        if !matches!(ty, IrType::Ptr(_)) {
+                            if let Some(src_ty) = value_types.get(src) {
+                                if matches!(src_ty, IrType::Ptr(_)) {
+                                    return None;
+                                }
+                            }
+                        }
                         tracked.insert(*dest);
                         if let Some(&field_idx) = gep_map.get(src) {
                             gep_map.insert(*dest, field_idx);

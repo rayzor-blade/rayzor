@@ -839,7 +839,7 @@ fn run_file(
     )?;
 
     // Run O0 pass manager to expand Haxe `inline` functions and apply SRA
-    {
+    if std::env::var("RAYZOR_RAW_MIR").is_err() {
         use compiler::ir::optimization::{OptimizationLevel, PassManager};
         let mut pass_manager = PassManager::for_level(OptimizationLevel::O0);
         let _ = pass_manager.run(&mut mir_module);
@@ -1751,7 +1751,20 @@ fn cmd_dump(
         };
         for mut pass in passes {
             let result = pass.run_on_module(&mut module);
-            // Check if new() function has unreachable blocks after this pass
+            // Check main function after each pass for missing instructions
+            for func in module.functions.values() {
+                if func.name == "main" {
+                    // Count total instructions
+                    let total_insts: usize = func.cfg.blocks.values().map(|b| b.instructions.len()).sum();
+                    let total_blocks = func.cfg.blocks.len();
+                    // Check if $4 is defined (second malloc result)
+                    let has_ir4 = func.cfg.blocks.values().any(|b| {
+                        b.instructions.iter().any(|inst| inst.dest() == Some(compiler::ir::IrId::new(4)))
+                    });
+                    eprintln!("  After '{}': main has {} blocks, {} instructions, $4 defined: {}",
+                        pass.name(), total_blocks, total_insts, has_ir4);
+                }
+            }
             for func in module.functions.values() {
                 if func.name == "new" && func.signature.parameters.len() == 1 {
                     let has_unreachable = func.cfg.blocks.values().any(|b| {

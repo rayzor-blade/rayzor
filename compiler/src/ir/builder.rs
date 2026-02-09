@@ -338,6 +338,8 @@ impl IrBuilder {
                         (&arg_ty, param_ty),
                         (IrType::I32 | IrType::I64, IrType::F64 | IrType::F32)
                             | (IrType::F64 | IrType::F32, IrType::I32 | IrType::I64)
+                            | (IrType::I64, IrType::Ptr(_))
+                            | (IrType::Ptr(_), IrType::I64)
                     );
                     if needs_cast {
                         // F64↔I64: use bitcast (bit-preserving) for type erasure boundaries
