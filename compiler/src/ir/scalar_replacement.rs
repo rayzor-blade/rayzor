@@ -148,7 +148,13 @@ fn run_sra_on_function(
     let constants = build_constant_map(&function.cfg);
     let candidates = find_candidates_in_function(&function.cfg, &constants, malloc_ids, free_ids);
 
-    for candidate in &candidates {
+    // Process only ONE candidate per pass to avoid stale data issues.
+    // When we apply SRA to one candidate, it removes/replaces instructions,
+    // which shifts indices and invalidates the pre-computed free_locations
+    // and alloc_location for other candidates. By processing one at a time
+    // and letting the optimizer loop re-run this pass, we ensure each
+    // candidate is analyzed on the current function state.
+    if let Some(candidate) = candidates.first() {
         let eliminated = apply_sra(function, candidate);
         if eliminated > 0 {
             result.modified = true;
