@@ -324,6 +324,11 @@ impl InliningPass {
         // Create continuation block for after inlined code
         let continuation_block = caller.cfg.create_block();
 
+        // Collect return block info for phi node in continuation block.
+        // When a callee has multiple return paths, we need a phi node to merge
+        // the return values from different blocks (instead of invalid multi-def Copy).
+        let mut return_phi_incoming: Vec<(IrBlockId, IrId)> = Vec::new();
+
         // Clone callee blocks into caller with remapped registers and blocks
         for (&old_block_id, old_block) in &callee.cfg.blocks {
             let new_block_id = *block_map
@@ -359,7 +364,7 @@ impl InliningPass {
             }
 
             // Clone and remap instructions
-            let new_instructions: Vec<IrInstruction> = old_block
+            let mut new_instructions: Vec<IrInstruction> = old_block
                 .instructions
                 .iter()
                 .map(|inst| Self::remap_instruction(inst, &reg_map, &block_map))
@@ -368,16 +373,10 @@ impl InliningPass {
             // Handle terminator
             let new_terminator = match &old_block.terminator {
                 IrTerminator::Return { value } => {
-                    // Map return value to call destination
-                    if let (Some(dest), Some(val)) = (call_site.dest, value) {
+                    // Collect return value for merging at continuation block.
+                    if let (Some(_dest), Some(val)) = (call_site.dest, value) {
                         let mapped_val = *reg_map.get(val).unwrap_or(val);
-                        // Add copy instruction to continuation block
-                        if let Some(cont_block) = caller.cfg.get_block_mut(continuation_block) {
-                            cont_block.instructions.push(IrInstruction::Copy {
-                                dest,
-                                src: mapped_val,
-                            });
-                        }
+                        return_phi_incoming.push((new_block_id, mapped_val));
                     }
                     IrTerminator::Branch {
                         target: continuation_block,
@@ -435,6 +434,35 @@ impl InliningPass {
                 new_block.phi_nodes = new_phis;
                 new_block.instructions = new_instructions;
                 new_block.terminator = new_terminator;
+            }
+        }
+
+        // Merge return values into the continuation block.
+        // - Single return: use a Copy instruction (preserves SRA/optimizer compatibility)
+        // - Multiple returns: use a phi node (correct SSA for merging values from different paths)
+        if let Some(dest) = call_site.dest {
+            if return_phi_incoming.len() == 1 {
+                // Single return path: add Copy in the return block (like before)
+                let (return_block_id, return_val) = return_phi_incoming[0];
+                if let Some(ret_block) = caller.cfg.get_block_mut(return_block_id) {
+                    ret_block.instructions.push(IrInstruction::Copy {
+                        dest,
+                        src: return_val,
+                    });
+                }
+            } else if return_phi_incoming.len() > 1 {
+                // Multiple return paths: use phi node for correct SSA merging
+                if let Some(cont_block) = caller.cfg.get_block_mut(continuation_block) {
+                    cont_block.phi_nodes.push(IrPhiNode {
+                        dest,
+                        incoming: return_phi_incoming,
+                        ty: callee.signature.return_type.clone(),
+                    });
+                }
+                // Register the phi dest type in the caller
+                caller
+                    .register_types
+                    .insert(dest, callee.signature.return_type.clone());
             }
         }
 

@@ -405,14 +405,24 @@ impl OptimizationPass for CopyPropagationPass {
         for function in module.functions.values_mut() {
             // Use BTreeMap for deterministic iteration order
             let mut copies: BTreeMap<IrId, IrId> = BTreeMap::new();
+            // Track registers with multiple copy definitions — these cannot be safely propagated
+            let mut multi_def: BTreeSet<IrId> = BTreeSet::new();
 
             // Find copy instructions
             for block in function.cfg.blocks.values() {
                 for inst in &block.instructions {
                     if let IrInstruction::Copy { dest, src } = inst {
+                        if copies.contains_key(dest) {
+                            multi_def.insert(*dest);
+                        }
                         copies.insert(*dest, *src);
                     }
                 }
+            }
+
+            // Remove multi-defined registers — they have different values on different paths
+            for id in &multi_def {
+                copies.remove(id);
             }
 
             if !copies.is_empty() {

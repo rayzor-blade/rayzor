@@ -3401,6 +3401,19 @@ impl<'a> AstLowering<'a> {
             }
         };
 
+        // Register the abstract type in the type table with the underlying type
+        // so that resolve_this_type can return the underlying type for `this`
+        {
+            let abstract_type_id = self.context.type_table.borrow_mut().create_abstract_type(
+                abstract_symbol,
+                underlying_type,
+                Vec::new(),
+            );
+            self.context
+                .symbol_table
+                .update_symbol_type(abstract_symbol, abstract_type_id);
+        }
+
         // Process from/to types
         let from_types = abstract_decl
             .from
@@ -3412,6 +3425,9 @@ impl<'a> AstLowering<'a> {
             .iter()
             .map(|t| self.lower_type(t))
             .collect::<Result<Vec<_>, _>>()?;
+
+        // Push abstract onto class context stack so `this` resolves correctly in method bodies
+        self.context.class_context_stack.push(abstract_symbol);
 
         // Process fields - separate fields, methods, and constructors
         let mut fields = Vec::with_capacity(abstract_decl.fields.len());
@@ -3448,6 +3464,9 @@ impl<'a> AstLowering<'a> {
                 }
             }
         }
+
+        // Pop abstract from class context stack
+        self.context.class_context_stack.pop();
 
         self.context.pop_type_parameters();
         self.context.exit_scope();

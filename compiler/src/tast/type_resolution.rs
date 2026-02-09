@@ -1058,7 +1058,9 @@ pub fn resolve_abstract_type(
     type_table.borrow().dynamic_type()
 }
 
-/// Resolve 'this' type in class context
+/// Resolve 'this' type in class context.
+/// For abstract types, `this` is the underlying value (e.g., Int for `abstract Counter(Int)`),
+/// not the abstract wrapper type.
 pub fn resolve_this_type(
     type_table: &RefCell<TypeTable>,
     symbol_table: &SymbolTable,
@@ -1066,7 +1068,19 @@ pub fn resolve_this_type(
 ) -> TypeId {
     if let Some(class_symbol) = current_class_symbol {
         if let Some(symbol) = symbol_table.get_symbol(class_symbol) {
-            return symbol.type_id;
+            let type_id = symbol.type_id;
+            // For abstract types, `this` IS the underlying value, not the wrapper
+            let tt = type_table.borrow();
+            if let Some(type_info) = tt.get(type_id) {
+                if let crate::tast::core::TypeKind::Abstract {
+                    underlying: Some(underlying_type),
+                    ..
+                } = &type_info.kind
+                {
+                    return *underlying_type;
+                }
+            }
+            return type_id;
         }
     }
     type_table.borrow().dynamic_type()

@@ -1433,6 +1433,23 @@ impl<'a> HirToMirContext<'a> {
                         );
                     }
                 }
+                HirTypeDecl::Abstract(abstract_decl) => {
+                    // Register abstract method signatures — same as classes but
+                    // this_type uses the underlying type (value, not pointer)
+                    for method in &abstract_decl.methods {
+                        let this_type = if !method.is_static {
+                            Some(abstract_decl.underlying)
+                        } else {
+                            None
+                        };
+                        self.register_function_signature_with_class_type_params(
+                            method.function.symbol_id,
+                            &method.function,
+                            this_type,
+                            &abstract_decl.type_params,
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -1658,6 +1675,25 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
                 }
+                HirTypeDecl::Abstract(abstract_decl) => {
+                    // Lower abstract method bodies — same as classes but
+                    // this_type uses the underlying type (value, not pointer)
+                    for method in &abstract_decl.methods {
+                        if method.function.body.is_none() {
+                            continue; // Skip extern abstract methods
+                        }
+                        let this_type = if !method.is_static {
+                            Some(abstract_decl.underlying)
+                        } else {
+                            None
+                        };
+                        self.lower_function_body(
+                            method.function.symbol_id,
+                            &method.function,
+                            this_type,
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -1759,15 +1795,31 @@ impl<'a> HirToMirContext<'a> {
 
         // For instance methods, add implicit 'this' parameter
         if let Some(type_id) = this_type {
-            let this_type = match self.convert_type(type_id) {
-                IrType::Ptr(_) => IrType::Ptr(Box::new(IrType::Void)),
-                _ => IrType::Ptr(Box::new(IrType::Void)),
+            // Abstract types use their underlying IR type directly (value, not pointer).
+            // Classes always use Ptr(Void) since 'this' is a heap-allocated object.
+            // We detect this by checking if the converted type is a non-pointer type.
+            let converted = self.convert_type(type_id);
+            let this_ir_type = match &converted {
+                IrType::I8
+                | IrType::I16
+                | IrType::I32
+                | IrType::I64
+                | IrType::U8
+                | IrType::U16
+                | IrType::U32
+                | IrType::U64
+                | IrType::F32
+                | IrType::F64
+                | IrType::Bool => {
+                    converted // Raw value type for abstract underlying types
+                }
+                _ => IrType::Ptr(Box::new(IrType::Void)), // Heap pointer for classes
             };
             signature.parameters.insert(
                 0,
                 IrParameter {
                     name: "this".to_string(),
-                    ty: this_type,
+                    ty: this_ir_type,
                     reg: IrId::new(0),
                     by_ref: false,
                 },
@@ -7962,6 +8014,15 @@ impl<'a> HirToMirContext<'a> {
                                                         false
                                                     }
                                                 })
+                                                .unwrap_or(false),
+                                            // Abstract types with user-defined methods
+                                            crate::tast::core::TypeKind::Abstract {
+                                                symbol_id,
+                                                ..
+                                            } => self
+                                                .symbol_table
+                                                .get_symbol(*symbol_id)
+                                                .map(|s| !self.is_stdlib_class_by_symbol(s))
                                                 .unwrap_or(false),
                                             _ => false,
                                         }

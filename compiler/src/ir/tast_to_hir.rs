@@ -588,6 +588,23 @@ impl<'a> TastToHirContext<'a> {
             })
             .collect();
 
+        // Lower methods (same pattern as classes)
+        let hir_methods: Vec<HirMethod> = abstract_decl
+            .methods
+            .iter()
+            .map(|method| HirMethod {
+                function: self.lower_function(method),
+                visibility: self.convert_visibility(method.visibility),
+                is_static: method.is_static,
+                is_override: false,
+                is_abstract: false,
+            })
+            .collect();
+
+        // Abstract constructors use value-wrap at the call site (new MyInt(42) → 42).
+        // Don't lower the constructor body since `this = value` isn't a standard assignment.
+        let hir_constructor = None;
+
         let hir_abstract = HirAbstract {
             symbol_id: abstract_decl.symbol_id,
             name: abstract_decl.name.clone(),
@@ -599,6 +616,8 @@ impl<'a> TastToHirContext<'a> {
             to_rules,
             operators,
             fields,
+            methods: hir_methods,
+            constructor: hir_constructor,
             metadata: Vec::new(),
         };
 
@@ -1338,8 +1357,6 @@ impl<'a> TastToHirContext<'a> {
                 type_arguments,
                 arguments,
             } => {
-                // println!("DEBUG lower_expression: MethodCall on type {:?}", receiver.expr_type);
-
                 // Check if this is an abstract type method that should be inlined
                 if let Some(inlined) = self.try_inline_abstract_method(
                     receiver,
@@ -3514,9 +3531,7 @@ impl<'a> TastToHirContext<'a> {
         let abstract_def = found_abstract.unwrap();
         let method = found_method.unwrap();
 
-        // println!("DEBUG: Inlining abstract method '{}' for abstract type '{}'",
-        //     self.string_interner.get(method.name).unwrap_or("<unknown>"),
-        //     self.string_interner.get(abstract_def.name).unwrap_or("<unknown>"));
+        // Found the abstract method — try to inline it
 
         // Inline the method body
         // Build a parameter mapping: parameter symbols -> argument expressions (already lowered to HIR)
@@ -3543,25 +3558,49 @@ impl<'a> TastToHirContext<'a> {
         // Lower the receiver once
         let lowered_receiver = self.lower_expression(receiver);
 
-        // For simple methods with just a return statement, inline the return expression
-        if method.body.len() == 1 {
-            if let Some(return_stmt) = method.body.first() {
-                if let TypedStatement::Return {
-                    value: Some(return_expr),
-                    ..
-                } = return_stmt
-                {
-                    // Clone and inline the return expression
-                    // Replace references to `this` with the receiver and params with arguments
-                    let inlined = self.inline_expression_deep(
-                        return_expr,
-                        &lowered_receiver,
-                        &param_map,
-                        result_type, // Pass the expected result type for fixing New expressions
-                    );
-                    return Some(inlined);
+        // Extract the return expression from the method body.
+        // The body may be structured as:
+        //   1. Direct: [Return { value: Some(expr) }]
+        //   2. Wrapped: [Expression { Block { [Return { value: Some(expr) }] } }]
+        // The second form is common when the parser wraps method bodies in a Block.
+        let return_expr = if method.body.len() == 1 {
+            match method.body.first() {
+                Some(TypedStatement::Return {
+                    value: Some(expr), ..
+                }) => Some(expr),
+                Some(TypedStatement::Expression { expression, .. }) => {
+                    // Unwrap Expression(Block([Return(...)]))
+                    if let TypedExpressionKind::Block { statements, .. } = &expression.kind {
+                        if statements.len() == 1 {
+                            if let TypedStatement::Return {
+                                value: Some(expr), ..
+                            } = &statements[0]
+                            {
+                                Some(expr)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
                 }
+                _ => None,
             }
+        } else {
+            None
+        };
+
+        if let Some(return_expr) = return_expr {
+            let inlined = self.inline_expression_deep(
+                return_expr,
+                &lowered_receiver,
+                &param_map,
+                result_type,
+            );
+            return Some(inlined);
         }
 
         // For more complex methods, we'd need to:

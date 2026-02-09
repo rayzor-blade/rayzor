@@ -101,6 +101,8 @@ pub struct HirAbstract {
     pub to_rules: Vec<HirCastRule>,
     pub operators: Vec<HirOperatorOverload>,
     pub fields: Vec<HirAbstractField>,
+    pub methods: Vec<HirMethod>,
+    pub constructor: Option<HirConstructor>,
     pub metadata: Vec<HirAttribute>,
 }
 
