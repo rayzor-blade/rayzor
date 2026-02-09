@@ -3793,7 +3793,7 @@ impl CraneliftBackend {
     }
 
     /// Map MIR IrType to runtime ParamType for RTTI registration.
-    fn ir_type_to_param_type(ty: &IrType) -> rayzor_runtime::type_system::ParamType {
+    pub fn ir_type_to_param_type(ty: &IrType) -> rayzor_runtime::type_system::ParamType {
         use rayzor_runtime::type_system::ParamType;
         match ty {
             IrType::I32 | IrType::I64 => ParamType::Int,

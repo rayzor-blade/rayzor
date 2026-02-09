@@ -496,6 +496,43 @@ unsafe extern "C" fn enum_to_string(value_ptr: *const u8) -> StringPtr {
 }
 
 /// Get enum variant name as a HaxeString pointer
+/// Get the discriminant index of an enum value.
+/// For unboxed enums (is_boxed=0): value IS the discriminant, return directly.
+/// For boxed enums (is_boxed!=0): value is a pointer, read i32 tag from offset 0.
+#[no_mangle]
+pub extern "C" fn haxe_enum_get_index(value: i64, is_boxed: i32) -> i64 {
+    if is_boxed == 0 {
+        value
+    } else {
+        let ptr = value as *const u8;
+        if ptr.is_null() {
+            return -1;
+        }
+        unsafe { *(ptr as *const i32) as i64 }
+    }
+}
+
+/// Get the name of an enum value.
+/// For unboxed enums (is_boxed=0): value is the discriminant.
+/// For boxed enums (is_boxed!=0): value is a pointer, read i32 tag from offset 0.
+#[no_mangle]
+pub extern "C" fn haxe_enum_get_name(
+    type_id: u32,
+    value: i64,
+    is_boxed: i32,
+) -> *mut crate::haxe_string::HaxeString {
+    let discriminant = if is_boxed == 0 {
+        value
+    } else {
+        let ptr = value as *const u8;
+        if ptr.is_null() {
+            return std::ptr::null_mut();
+        }
+        unsafe { *(ptr as *const i32) as i64 }
+    };
+    haxe_enum_variant_name(type_id, discriminant)
+}
+
 /// Returns the variant name for the given type_id and discriminant
 /// Returns null if not an enum or discriminant is out of range
 #[no_mangle]
@@ -517,6 +554,85 @@ pub extern "C" fn haxe_enum_variant_name(
     } else {
         std::ptr::null_mut()
     }
+}
+
+/// Get name of a boxed enum value (heap-allocated with tag at offset 0).
+/// Reads the i32 tag from the struct, then looks up the variant name via RTTI.
+#[no_mangle]
+pub extern "C" fn haxe_enum_get_name_boxed(
+    type_id: u32,
+    ptr: *const u8,
+) -> *mut crate::haxe_string::HaxeString {
+    if ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        let tag = *(ptr as *const i32) as i64;
+        haxe_enum_variant_name(type_id, tag)
+    }
+}
+
+/// Get parameters of an enum value as a HaxeArray.
+/// For unboxed enums (is_boxed=0): returns empty array.
+/// For boxed enums (is_boxed!=0): reads fields from heap struct and boxes them as Dynamic.
+#[no_mangle]
+pub extern "C" fn haxe_enum_get_parameters(
+    type_id: u32,
+    value: i64,
+    is_boxed: i32,
+) -> *mut crate::haxe_array::HaxeArray {
+    use crate::haxe_array::HaxeArray;
+    use std::alloc::{alloc, Layout};
+
+    // Allocate a HaxeArray on the heap
+    let arr = unsafe {
+        let layout = Layout::new::<HaxeArray>();
+        let ptr = alloc(layout) as *mut HaxeArray;
+        if ptr.is_null() {
+            panic!("Failed to allocate HaxeArray for getParameters");
+        }
+        crate::haxe_array::haxe_array_new(ptr, 8); // elem_size=8 for i64/pointer elements
+        ptr
+    };
+
+    if is_boxed == 0 {
+        // Unboxed enum: no parameters, return empty array
+        return arr;
+    }
+
+    // Boxed enum: value is a pointer to [tag:i32][pad:i32][field0:i64][field1:i64]...
+    let ptr = value as *const u8;
+    if ptr.is_null() {
+        return arr;
+    }
+
+    unsafe {
+        let tag = *(ptr as *const i32) as i64;
+        if let Some(variant_info) = get_enum_variant_info(TypeId(type_id), tag) {
+            for i in 0..variant_info.param_count {
+                let field_ptr = ptr.add(8 + i * 8);
+                let raw_val = *(field_ptr as *const i64);
+                let param_type = variant_info
+                    .param_types
+                    .get(i)
+                    .copied()
+                    .unwrap_or(ParamType::Dynamic);
+                // Box the field value as Dynamic based on its type
+                let boxed = match param_type {
+                    ParamType::Int => haxe_box_int_ptr(raw_val),
+                    ParamType::Float => haxe_box_float_ptr(f64::from_bits(raw_val as u64)),
+                    ParamType::Bool => haxe_box_bool_ptr(raw_val != 0),
+                    // String and Object fields are already pointers, pass through
+                    ParamType::String | ParamType::Object | ParamType::Dynamic => {
+                        haxe_box_int_ptr(raw_val)
+                    }
+                };
+                crate::haxe_array::haxe_array_push_i64(arr, boxed as i64);
+            }
+        }
+    }
+
+    arr
 }
 
 /// Trace an enum value by type_id and discriminant

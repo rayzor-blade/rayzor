@@ -254,6 +254,8 @@ impl StdlibMapping {
         mapping.register_type_methods();
         // EReg (regular expressions)
         mapping.register_ereg_methods();
+        // Enum built-in methods (getIndex, getName, getParameters)
+        mapping.register_enum_methods();
         mapping
     }
 
@@ -3106,6 +3108,28 @@ impl StdlibMapping {
             map_method!(instance "EReg", "replace" => "haxe_ereg_replace", params: 2, returns: primitive),
             // static escape(s:String):String
             map_method!(static "EReg", "escape" => "haxe_ereg_escape", params: 1, returns: primitive),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    fn register_enum_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            // getIndex() -> Int: returns the variant discriminant
+            // Runtime signature: haxe_enum_get_index(value: i64, is_boxed: i32) -> i64
+            // has_self_param=false because the caller injects (value, is_boxed), not just self
+            map_method!(instance "Enum", "getIndex" => "haxe_enum_get_index", params: 0,
+                returns: primitive, types: &[I64, I32] => I64),
+            // getName() -> String: returns the variant name via RTTI
+            // Runtime signature: haxe_enum_get_name(type_id: u32, value: i64, is_boxed: i32) -> *mut HaxeString
+            map_method!(instance "Enum", "getName" => "haxe_enum_get_name", params: 0,
+                returns: primitive, types: &[I32, I64, I32] => PtrString),
+            // getParameters() -> Array<Dynamic>: returns variant fields as boxed array
+            // Runtime signature: haxe_enum_get_parameters(type_id: u32, value: i64, is_boxed: i32) -> *mut HaxeArray
+            map_method!(instance "Enum", "getParameters" => "haxe_enum_get_parameters", params: 0,
+                returns: primitive, types: &[I32, I64, I32] => PtrVoid),
         ];
 
         self.register_from_tuples(mappings);

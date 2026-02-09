@@ -269,6 +269,19 @@ register_symbol!(
     "haxe_enum_variant_name",
     crate::type_system::haxe_enum_variant_name
 );
+register_symbol!(
+    "haxe_enum_get_name_boxed",
+    crate::type_system::haxe_enum_get_name_boxed
+);
+register_symbol!(
+    "haxe_enum_get_index",
+    crate::type_system::haxe_enum_get_index
+);
+register_symbol!("haxe_enum_get_name", crate::type_system::haxe_enum_get_name);
+register_symbol!(
+    "haxe_enum_get_parameters",
+    crate::type_system::haxe_enum_get_parameters
+);
 register_symbol!("haxe_trace_enum", crate::type_system::haxe_trace_enum);
 register_symbol!(
     "haxe_trace_enum_boxed",

@@ -3547,6 +3547,7 @@ impl<'a> HirToMirContext<'a> {
         let (base_class_name, qualified_class_name, type_args) = match &type_info.kind {
             TypeKind::String => (Some("String"), None, Vec::new()),
             TypeKind::Array { .. } => (Some("Array"), None, Vec::new()),
+            TypeKind::Enum { .. } => (Some("Enum"), None, Vec::new()),
             TypeKind::Class {
                 symbol_id,
                 type_args,
@@ -3662,6 +3663,13 @@ impl<'a> HirToMirContext<'a> {
                 // For generic instances like Deque<Int>, Channel<String>, Arc<T>
                 // Get the base type's class name (e.g., "Deque" from Deque<Int>)
                 if let Some(base_info) = type_table.get(*base_type) {
+                    // Generic enums (e.g., Option<Int>) resolve to "Enum" class
+                    if matches!(&base_info.kind, TypeKind::Enum { .. }) {
+                        return self
+                            .stdlib_mapping
+                            .find_by_name("Enum", method_name)
+                            .map(|(sig, mapping)| (sig.class, sig.method, mapping));
+                    }
                     let sym_id = match &base_info.kind {
                         TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
                         TypeKind::Abstract { symbol_id, .. } => Some(*symbol_id),
@@ -4602,6 +4610,74 @@ impl<'a> HirToMirContext<'a> {
             }
         }
         false
+    }
+
+    /// Try to dispatch an enum built-in method (getIndex, getName, getParameters).
+    /// Uses runtime mapping registered in runtime_mapping.rs.
+    /// Injects compile-time constants (type_id, is_boxed) as extra params.
+    fn try_dispatch_enum_method(
+        &mut self,
+        method_symbol: SymbolId,
+        args: &[HirExpr],
+    ) -> Option<Option<IrId>> {
+        let receiver = &args[0];
+        let enum_sym_id = self.resolve_enum_symbol(receiver.ty)?;
+
+        // Look up the method in stdlib mapping under "Enum" class
+        let method_name = self
+            .symbol_table
+            .get_symbol(method_symbol)
+            .and_then(|s| self.string_interner.get(s.name))
+            .map(|s| s.to_string())?;
+
+        let (_, runtime_func) = self
+            .stdlib_mapping
+            .find_by_name("Enum", &method_name)
+            .map(|(sig, call)| (sig.method, call.runtime_name))?;
+
+        // Gather compile-time enum metadata
+        let is_boxed = self.enum_is_boxed(enum_sym_id);
+        let enum_type_id = self
+            .symbol_table
+            .get_symbol(enum_sym_id)
+            .map(|s| s.type_id.0 as i32)
+            .unwrap_or(0);
+
+        // Lower the receiver (the enum value)
+        let receiver_reg = self.lower_expression(receiver)?;
+        let is_boxed_const =
+            self.builder
+                .build_const(IrValue::I32(if is_boxed { 1 } else { 0 }))?;
+
+        // Build args and return type from the runtime mapping's param_types/return_type.
+        // getIndex takes (value, is_boxed), getName/getParameters take (type_id, value, is_boxed).
+        let (call_args, param_types, return_type) = if runtime_func == "haxe_enum_get_index" {
+            (
+                vec![receiver_reg, is_boxed_const],
+                vec![IrType::I64, IrType::I32],
+                IrType::I64,
+            )
+        } else {
+            let type_id_const = self.builder.build_const(IrValue::I32(enum_type_id))?;
+            let ret_ty = if runtime_func == "haxe_enum_get_name" {
+                IrType::Ptr(Box::new(IrType::String))
+            } else {
+                // getParameters returns opaque array pointer
+                IrType::Ptr(Box::new(IrType::Void))
+            };
+            (
+                vec![type_id_const, receiver_reg, is_boxed_const],
+                vec![IrType::I32, IrType::I64, IrType::I32],
+                ret_ty,
+            )
+        };
+
+        let func_id =
+            self.get_or_register_extern_function(runtime_func, param_types, return_type.clone());
+        let result = self
+            .builder
+            .build_call_direct(func_id, call_args, return_type)?;
+        Some(Some(result))
     }
 
     /// Lower a HIR expression to MIR value
@@ -6226,6 +6302,15 @@ impl<'a> HirToMirContext<'a> {
                                     );
                                 }
                             }
+                        }
+                    }
+
+                    // ENUM INSTANCE METHOD DISPATCH:
+                    // Delegates to runtime functions registered in runtime_mapping.rs.
+                    // Injects compile-time constants (type_id, is_boxed) as extra params.
+                    if *is_method && !args.is_empty() {
+                        if let Some(Some(result)) = self.try_dispatch_enum_method(*symbol, args) {
+                            return Some(result);
                         }
                     }
 

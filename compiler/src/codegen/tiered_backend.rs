@@ -1463,6 +1463,12 @@ impl TieredBackend {
             backend.compile_module_without_finalize(module)?;
         }
 
+        // Register enum RTTI from MIR type definitions so that
+        // getName()/getParameters()/trace work correctly at runtime
+        for module in modules.iter() {
+            Self::register_enum_rtti_from_module(module);
+        }
+
         // Finalize all modules at once (must be done before getting function pointers)
         backend.finalize()?;
 
@@ -1497,6 +1503,31 @@ impl TieredBackend {
         }
 
         Ok(())
+    }
+
+    /// Register enum RTTI from a single MIR module's type definitions.
+    /// This ensures getName()/getParameters()/trace work correctly at runtime.
+    fn register_enum_rtti_from_module(module: &IrModule) {
+        use crate::ir::modules::IrTypeDefinition;
+        use rayzor_runtime::type_system::{register_enum_from_mir, ParamType};
+
+        for (_id, typedef) in &module.types {
+            if let IrTypeDefinition::Enum { variants, .. } = &typedef.definition {
+                let variant_data: Vec<(String, usize, Vec<ParamType>)> = variants
+                    .iter()
+                    .map(|v| {
+                        let param_types: Vec<ParamType> = v
+                            .fields
+                            .iter()
+                            .map(|f| CraneliftBackend::ir_type_to_param_type(&f.ty))
+                            .collect();
+                        (v.name.clone(), v.fields.len(), param_types)
+                    })
+                    .collect();
+
+                register_enum_from_mir(typedef.type_id.0, &typedef.name, &variant_data);
+            }
+        }
     }
 
     /// Compile ALL modules with Cranelift backend at the specified tier
