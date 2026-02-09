@@ -14281,9 +14281,19 @@ impl<'a> HirToMirContext<'a> {
             IrType::Ptr(Box::new(IrType::U8)),
         )?;
 
-        // Dereference the pointer to get the actual value
-        // Array elements are stored as i64 values, so load as i64
-        self.builder.build_load(elem_ptr, IrType::I64)
+        // Determine the correct load type based on the element type.
+        // This preserves type information so trace and other consumers
+        // can dispatch correctly (e.g., String elements print as strings).
+        let load_type = {
+            let type_table = self.type_table.borrow();
+            match type_table.get(ty).map(|ti| &ti.kind) {
+                Some(crate::tast::TypeKind::String) => IrType::Ptr(Box::new(IrType::String)),
+                Some(crate::tast::TypeKind::Float) => IrType::F64,
+                _ => IrType::I64, // Int, Bool, class pointers, Dynamic, etc.
+            }
+        };
+
+        self.builder.build_load(elem_ptr, load_type)
     }
 
     fn lower_logical_and(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Option<IrId> {
