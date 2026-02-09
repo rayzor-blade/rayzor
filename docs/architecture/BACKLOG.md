@@ -646,22 +646,24 @@ map.set(new Key(1, "foo"), "value");
 
 ### 6.2 Core Types Status
 
-**String Class - VERIFIED STABLE ✅ (2025-11-25):**
-- [x] length - get string length (haxe_string_len)
-- [x] charAt(index) - get character at index (haxe_string_char_at_ptr)
+**String Class - VERIFIED STABLE ✅ (2026-02-09):**
+
+- [x] length - get string length (haxe_string_length) — fixed 2026-02-09, was mapped to dead stub returning 0
+- [x] charAt(index) - get character at index (haxe_string_char_at_ptr via String_charAt MIR wrapper)
 - [x] charCodeAt(index) - get ASCII code at index (haxe_string_char_code_at_ptr)
-- [x] indexOf(needle, startIndex) - find substring (haxe_string_index_of_ptr)
-- [x] lastIndexOf(needle, startIndex) - find last occurrence (haxe_string_last_index_of_ptr)
+- [x] indexOf(needle, startIndex) - find substring (haxe_string_index_of_ptr via String_indexOf MIR wrapper)
+- [x] lastIndexOf(needle, startIndex) - find last occurrence (haxe_string_last_index_of_ptr via String_lastIndexOf MIR wrapper)
 - [x] substr(pos, len) - extract substring by position (haxe_string_substr_ptr)
-- [x] substring(start, end) - extract substring by indices (haxe_string_substring_ptr)
+- [x] substring(start, end) - extract substring by indices (haxe_string_substring_ptr via String_substring MIR wrapper)
 - [x] toUpperCase() - convert to uppercase (haxe_string_upper)
 - [x] toLowerCase() - convert to lowercase (haxe_string_lower)
 - [x] toString() - copy string (haxe_string_copy)
 - [x] String.fromCharCode(code) - create from char code (haxe_string_from_char_code)
 - [x] split(delimiter) - split string (haxe_string_split_ptr)
+- [x] concat(other) - string concatenation (haxe_string_concat)
 
-> ✅ **Verified:** All 12 String methods tested and working with correct type handling.
-> Runtime functions use i32 for Int parameters, Ptr(String) for String parameters.
+> ✅ **Verified:** All 13 String methods tested and working (2026-02-09).
+> Dead stub functions removed — all methods now route to runtime externs or MIR wrappers.
 
 **Array<T> Class - VERIFIED WORKING ✅ (2025-11-25):**
 - [x] length - get array length (haxe_array_length)
@@ -915,15 +917,22 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 
 ## 8. Optimization Passes 🟡
 
-**Status:** Basic Passes Implemented
+**Status:** Core Passes Implemented, Advanced Passes Needed
 
 ### Implemented
-- [x] Dead code elimination
+
+- [x] Dead code elimination (DCE)
 - [x] Constant folding
 - [x] Copy propagation
+- [x] Inlining (method and function, configurable max_size)
+- [x] Scalar Replacement of Aggregates (SRA) — replaces heap allocs with scalar registers
+- [x] Phi-aware SRA — handles loop-carried allocations with phi nodes
+- [x] Bounds Check Elimination (BCE) — eliminates redundant array bounds checks in for-in loops
+- [x] Global Load Caching
+- [x] FMA fusion (same-block only, cross-block disabled for FP correctness)
 
 ### Needed
-- [ ] Inlining (method and function)
+
 - [ ] Loop optimizations (unrolling, invariant hoisting)
 - [ ] Escape analysis
 - [ ] Devirtualization
@@ -990,8 +999,9 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 7. ✅ **JIT Execution - E2E test execution** (tiered backend 20/20 stress tests)
 
 ### Phase 3: Core Features
-8. 🔴 Generics type system
-9. 🔴 Monomorphization
+
+8. ✅ Generics type system (type erasure approach, 2026-02-08)
+9. ✅ Monomorphization (specialization working)
 10. 🔴 Equality and ordering traits
 11. 🔴 Hash trait
 
@@ -1025,9 +1035,12 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 3. 🔴 Capture analysis for closures
 
 **Remaining Work:**
-1. Generics constraint validation and abstract types
+
+1. ~~Generics constraint validation and abstract types~~ ✅ Core generics complete (2026-02-08)
 2. Async/await state machine transformation
 3. Full RTTI for Type/Reflect classes
+4. Multi-catch exception handling (typed catch blocks)
+5. Equality/ordering/hash traits
 
 ---
 
@@ -1785,7 +1798,18 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 ### 16.6 String Interpolation 🟢
 
 **Priority:** P0 — Low complexity, high impact
-**Status:** ✅ Complete (already implemented — parser, AST, TAST, HIR desugaring all work)
+**Status:** ✅ Complete (2026-02-09) — parser, AST, TAST, HIR desugaring, MIR type conversion all work
+
+**What Works:**
+
+- `'Hello ${name}!'` — string variable interpolation
+- `'x = ${x}'` — Int variable interpolation (auto-converts via `haxe_string_from_int`)
+- `'pi = ${pi}'` — Float variable interpolation (auto-converts via `haxe_string_from_float`)
+- `'${x} + ${x} = ${x + x}'` — expression interpolation with arithmetic
+- `'Point is: ${p}'` — class instance interpolation (calls `toString()` if defined)
+- Concatenation uses `haxe_string_concat` runtime function (not `BinaryOp::Add`)
+
+**Architecture:** TAST→HIR desugars string interpolation into `HirBinaryOp::Add` chains. The Binary Add handler in HIR→MIR calls `try_call_tostring()` for class types and `convert_to_string()` for primitives.
 
 **What Works:**
 - Single-quote string interpolation: `'Hello $name, you are ${age + 1} years old'`
@@ -2082,6 +2106,33 @@ trace("The point is: " + p);    // ✅ (calls toString())
 - Implementation should follow dependency order to avoid rework
 
 **Last Updated:** 2026-02-07 (Haxe Language Feature Gap Analysis)
+
+## Recent Progress (Session 2026-02-09 - SRA Fix, String Methods, Super Constructors)
+
+**SRA Stale Index Crash Fix:** ✅ Complete
+
+- ✅ **Process one SRA candidate per pass** — two classes in same file (e.g., `Container` + `Named`) caused "Free ptr IrId(4) not found in value_map" crash. Root cause: `run_sra_on_function()` applied multiple candidates sequentially, causing stale instruction indices after first candidate removed instructions. Fix: process only one candidate per pass (matching phi-SRA's existing pattern), let optimizer loop re-run for remaining candidates.
+- ✅ **toString() resolution fix** — `try_call_tostring()` searched for ANY function named "toString" in the module, not the one belonging to the specific class. Fixed by looking up the class's SymbolId and scanning HIR type declarations for the specific class's toString method.
+
+**String Interpolation MIR Fix:** ✅ Complete
+
+- ✅ **Type-based conversion** — Int/Float/Bool interpolated values now auto-convert via `haxe_string_from_int`/`haxe_string_from_float`/`haxe_string_from_bool`
+- ✅ **Proper concatenation** — uses `haxe_string_concat` runtime function instead of `BinaryOp::Add`
+- ✅ **Class toString()** — string interpolation with class instances calls `toString()` if defined
+
+**String.length Fix:** ✅ Complete
+
+- ✅ **Remapped to runtime** — `String.length` was mapped to dead stub returning 0, now calls `haxe_string_length` runtime function
+- ✅ **Dead stub cleanup** — removed 10 dead string stub functions (~275 lines), all superseded by MIR wrappers or direct runtime externs
+
+**Super Constructor Calls:** ✅ Complete
+
+- ✅ **`super()` in subclass constructors** — `Dog extends Animal` with `super(n, a)` now works
+- ✅ **TypeId mismatch fallback** — parent constructor lookup falls back to `type_table` → `SymbolId` → `constructor_name_map` when `class.extends` TypeId doesn't match `constructor_map` keys
+
+**Commits:** 4f60fdd, 5aac6f1, 8747bab, c9d9f09, e691dc6
+
+---
 
 ## Recent Progress (Session 2026-01-31 - Inline C / TinyCC Runtime API)
 
