@@ -163,7 +163,12 @@ pub fn arrow_params<'a>(full: &'a str, input: &'a str) -> PResult<'a, Vec<ArrowP
                 let (i, _) = ws(i)?;
                 identifier(i)
             },
-            |id| vec![ArrowParam { name: id, type_hint: None }],
+            |id| {
+                vec![ArrowParam {
+                    name: id,
+                    type_hint: None,
+                }]
+            },
         ),
         // Multiple parameters in parentheses, with optional type annotations
         // Supports: (x), (x:Int), (x:Int, y:String), etc.

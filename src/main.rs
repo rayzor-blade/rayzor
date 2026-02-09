@@ -709,12 +709,7 @@ fn try_load_gpu_plugin() -> Option<GpuPlugin> {
     None
 }
 
-fn run_bundle(
-    file: &Path,
-    verbose: bool,
-    stats: bool,
-    preset: Preset,
-) -> Result<(), String> {
+fn run_bundle(file: &Path, verbose: bool, stats: bool, preset: Preset) -> Result<(), String> {
     use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
     use compiler::ir::load_bundle;
 
@@ -722,8 +717,7 @@ fn run_bundle(
         return Err(format!("Bundle not found: {}", file.display()));
     }
 
-    let bundle =
-        load_bundle(file).map_err(|e| format!("Failed to load bundle: {}", e))?;
+    let bundle = load_bundle(file).map_err(|e| format!("Failed to load bundle: {}", e))?;
 
     let entry_func_id = bundle
         .entry_function_id()
@@ -740,8 +734,7 @@ fn run_bundle(
     // Get runtime symbols
     let plugin = rayzor_runtime::get_plugin();
     let symbols = plugin.runtime_symbols();
-    let symbols_ref: Vec<(&str, *const u8)> =
-        symbols.iter().map(|(n, p)| (*n, *p)).collect();
+    let symbols_ref: Vec<(&str, *const u8)> = symbols.iter().map(|(n, p)| (*n, *p)).collect();
 
     let mut config = TieredConfig::from_preset(preset.to_tier_preset());
     config.verbosity = if verbose { 2 } else { 0 };

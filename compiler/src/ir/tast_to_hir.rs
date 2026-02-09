@@ -796,9 +796,7 @@ impl<'a> TastToHirContext<'a> {
             if let HirStatement::Expr(expr) = first_stmt {
                 if let HirExprKind::Call { callee, args, .. } = &expr.kind {
                     if matches!(callee.kind, HirExprKind::Super) {
-                        super_call = Some(HirSuperCall {
-                            args: args.clone(),
-                        });
+                        super_call = Some(HirSuperCall { args: args.clone() });
                     }
                 }
             }

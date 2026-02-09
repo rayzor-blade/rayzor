@@ -6229,14 +6229,11 @@ impl<'a> AstLowering<'a> {
 
                     // Create symbol WITH the correct type so body expressions
                     // (like x * 2) resolve the variable to the right type
-                    let param_symbol = self
-                        .context
-                        .symbol_table
-                        .create_variable_with_type(
-                            param_interned,
-                            self.context.current_scope,
-                            param_type,
-                        );
+                    let param_symbol = self.context.symbol_table.create_variable_with_type(
+                        param_interned,
+                        self.context.current_scope,
+                        param_type,
+                    );
 
                     typed_params.push(TypedParameter {
                         symbol_id: param_symbol,

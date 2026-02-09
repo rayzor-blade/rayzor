@@ -424,8 +424,6 @@ pub fn register_class_from_mir(
 
     register_type(TypeId(type_id), type_info);
 
-
-
     // Also register in the name-to-TypeId reverse map
     let mut guard = CLASS_NAME_REGISTRY.write().unwrap();
     let registry = guard.get_or_insert_with(HashMap::new);
@@ -461,10 +459,7 @@ unsafe fn build_string_array(names: &[&str]) -> *mut u8 {
     for name in names {
         let hs_ptr = alloc_haxe_string(name);
         if !hs_ptr.is_null() {
-            crate::haxe_array::haxe_array_push(
-                arr_ptr,
-                &hs_ptr as *const *mut u8 as *const u8,
-            );
+            crate::haxe_array::haxe_array_push(arr_ptr, &hs_ptr as *const *mut u8 as *const u8);
         }
     }
     arr_ptr as *mut u8

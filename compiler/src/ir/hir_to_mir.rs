@@ -2085,41 +2085,46 @@ impl<'a> HirToMirContext<'a> {
         if let Some(super_call) = &constructor.super_call {
             if let Some(parent_type_id) = parent_type {
                 // Look up parent constructor by TypeId first, then by name as fallback
-                let parent_ctor_id = self.constructor_map.get(&parent_type_id).copied()
-                    .or_else(|| {
-                        // TypeId mismatch: class.extends uses TAST TypeIds, constructor_map uses MIR TypeIds.
-                        // Fall back to looking up by class name via constructor_name_map.
-                        // Resolve parent class symbol from the type_table.
-                        let type_table = self.type_table.borrow();
-                        let parent_symbol = type_table.get(parent_type_id).and_then(|ti| {
-                            if let TypeKind::Class { symbol_id, .. } = &ti.kind {
-                                Some(*symbol_id)
-                            } else {
-                                None
-                            }
-                        });
-                        drop(type_table);
+                let parent_ctor_id =
+                    self.constructor_map
+                        .get(&parent_type_id)
+                        .copied()
+                        .or_else(|| {
+                            // TypeId mismatch: class.extends uses TAST TypeIds, constructor_map uses MIR TypeIds.
+                            // Fall back to looking up by class name via constructor_name_map.
+                            // Resolve parent class symbol from the type_table.
+                            let type_table = self.type_table.borrow();
+                            let parent_symbol = type_table.get(parent_type_id).and_then(|ti| {
+                                if let TypeKind::Class { symbol_id, .. } = &ti.kind {
+                                    Some(*symbol_id)
+                                } else {
+                                    None
+                                }
+                            });
+                            drop(type_table);
 
-                        if let Some(parent_sym) = parent_symbol {
-                            if let Some(sym_info) = self.symbol_table.get_symbol(parent_sym) {
-                                // Try qualified name first
-                                if let Some(qual_name) = sym_info.qualified_name
-                                    .and_then(|q| self.string_interner.get(q))
-                                {
-                                    if let Some(&fid) = self.constructor_name_map.get(qual_name) {
-                                        return Some(fid);
+                            if let Some(parent_sym) = parent_symbol {
+                                if let Some(sym_info) = self.symbol_table.get_symbol(parent_sym) {
+                                    // Try qualified name first
+                                    if let Some(qual_name) = sym_info
+                                        .qualified_name
+                                        .and_then(|q| self.string_interner.get(q))
+                                    {
+                                        if let Some(&fid) = self.constructor_name_map.get(qual_name)
+                                        {
+                                            return Some(fid);
+                                        }
                                     }
-                                }
-                                // Try simple name
-                                if let Some(name) = self.string_interner.get(sym_info.name) {
-                                    if let Some(&fid) = self.constructor_name_map.get(name) {
-                                        return Some(fid);
+                                    // Try simple name
+                                    if let Some(name) = self.string_interner.get(sym_info.name) {
+                                        if let Some(&fid) = self.constructor_name_map.get(name) {
+                                            return Some(fid);
+                                        }
                                     }
                                 }
                             }
-                        }
-                        None
-                    });
+                            None
+                        });
 
                 if let Some(parent_ctor_id) = parent_ctor_id {
                     // Lower super call arguments
@@ -12015,7 +12020,8 @@ impl<'a> HirToMirContext<'a> {
                 if class.symbol_id == class_symbol {
                     // Found the class — look for a toString method
                     for method in &class.methods {
-                        let method_name = self.string_interner.get(method.function.name).unwrap_or("");
+                        let method_name =
+                            self.string_interner.get(method.function.name).unwrap_or("");
                         if method_name == "toString" && !method.is_static {
                             tostring_symbol = Some(method.function.symbol_id);
                             break;
@@ -16272,7 +16278,10 @@ impl<'a> HirToMirContext<'a> {
         // Strategy 2: Use body result register type from locals
         if let Some(result_reg) = body_result {
             if let Some(local) = function.locals.get(&result_reg) {
-                debug!("Inferred return type from body result locals: {:?}", local.ty);
+                debug!(
+                    "Inferred return type from body result locals: {:?}",
+                    local.ty
+                );
                 return local.ty.clone();
             }
         }
@@ -17086,9 +17095,7 @@ impl<'a> HirToMirContext<'a> {
 
         for part in parts {
             let part_str = match part {
-                HirStringPart::Literal(s) => {
-                    self.builder.build_string(s.to_string())?
-                }
+                HirStringPart::Literal(s) => self.builder.build_string(s.to_string())?,
                 HirStringPart::Interpolation(expr) => {
                     let expr_val = self.lower_expression(expr)?;
 
@@ -17106,7 +17113,11 @@ impl<'a> HirToMirContext<'a> {
                                 vec![IrType::I64],
                                 string_ptr_ty.clone(),
                             );
-                            self.builder.build_call_direct(conv_fn, vec![expr_val], string_ptr_ty.clone())?
+                            self.builder.build_call_direct(
+                                conv_fn,
+                                vec![expr_val],
+                                string_ptr_ty.clone(),
+                            )?
                         }
                         Some(TypeKind::Float) => {
                             let conv_fn = self.get_or_register_extern_function(
@@ -17114,7 +17125,11 @@ impl<'a> HirToMirContext<'a> {
                                 vec![IrType::F64],
                                 string_ptr_ty.clone(),
                             );
-                            self.builder.build_call_direct(conv_fn, vec![expr_val], string_ptr_ty.clone())?
+                            self.builder.build_call_direct(
+                                conv_fn,
+                                vec![expr_val],
+                                string_ptr_ty.clone(),
+                            )?
                         }
                         Some(TypeKind::Bool) => {
                             let conv_fn = self.get_or_register_extern_function(
@@ -17122,7 +17137,11 @@ impl<'a> HirToMirContext<'a> {
                                 vec![IrType::I32],
                                 string_ptr_ty.clone(),
                             );
-                            self.builder.build_call_direct(conv_fn, vec![expr_val], string_ptr_ty.clone())?
+                            self.builder.build_call_direct(
+                                conv_fn,
+                                vec![expr_val],
+                                string_ptr_ty.clone(),
+                            )?
                         }
                         _ => {
                             // Fallback: treat as int (prints raw i64 value)
@@ -17131,7 +17150,11 @@ impl<'a> HirToMirContext<'a> {
                                 vec![IrType::I64],
                                 string_ptr_ty.clone(),
                             );
-                            self.builder.build_call_direct(conv_fn, vec![expr_val], string_ptr_ty.clone())?
+                            self.builder.build_call_direct(
+                                conv_fn,
+                                vec![expr_val],
+                                string_ptr_ty.clone(),
+                            )?
                         }
                     }
                 }
@@ -17139,9 +17162,11 @@ impl<'a> HirToMirContext<'a> {
 
             result = match result {
                 None => Some(part_str),
-                Some(acc) => {
-                    self.builder.build_call_direct(concat_fn, vec![acc, part_str], string_ptr_ty.clone())
-                }
+                Some(acc) => self.builder.build_call_direct(
+                    concat_fn,
+                    vec![acc, part_str],
+                    string_ptr_ty.clone(),
+                ),
             };
         }
 
@@ -17774,7 +17799,11 @@ impl<'a> HirToMirContext<'a> {
                 .insert(parent_field.symbol_id, (child_type, *field_index));
 
             fields.push(IrField {
-                name: self.string_interner.get(parent_field.name).unwrap_or("<unknown>").to_string(),
+                name: self
+                    .string_interner
+                    .get(parent_field.name)
+                    .unwrap_or("<unknown>")
+                    .to_string(),
                 ty: self.convert_type(parent_field.ty),
                 offset: None,
             });
@@ -17843,7 +17872,11 @@ impl<'a> HirToMirContext<'a> {
             }
 
             fields.push(IrField {
-                name: self.string_interner.get(field.name).unwrap_or("<unknown>").to_string(),
+                name: self
+                    .string_interner
+                    .get(field.name)
+                    .unwrap_or("<unknown>")
+                    .to_string(),
                 ty: self.convert_type(field.ty),
                 offset: None,
             });
@@ -17853,7 +17886,11 @@ impl<'a> HirToMirContext<'a> {
 
         let typedef = IrTypeDef {
             id: typedef_id,
-            name: self.string_interner.get(class.name).unwrap_or("<unknown>").to_string(),
+            name: self
+                .string_interner
+                .get(class.name)
+                .unwrap_or("<unknown>")
+                .to_string(),
             type_id,
             definition: IrTypeDefinition::Struct {
                 fields,
@@ -17924,7 +17961,11 @@ impl<'a> HirToMirContext<'a> {
             .methods
             .iter()
             .map(|method| IrField {
-                name: self.string_interner.get(method.name).unwrap_or("<unknown>").to_string(),
+                name: self
+                    .string_interner
+                    .get(method.name)
+                    .unwrap_or("<unknown>")
+                    .to_string(),
                 ty: IrType::Ptr(Box::new(IrType::Function {
                     params: vec![IrType::Any],
                     return_type: Box::new(IrType::Any),
@@ -17936,7 +17977,11 @@ impl<'a> HirToMirContext<'a> {
 
         let typedef = IrTypeDef {
             id: typedef_id,
-            name: self.string_interner.get(interface.name).unwrap_or("<unknown>").to_string(),
+            name: self
+                .string_interner
+                .get(interface.name)
+                .unwrap_or("<unknown>")
+                .to_string(),
             type_id,
             definition: IrTypeDefinition::Struct {
                 fields,
@@ -17960,7 +18005,11 @@ impl<'a> HirToMirContext<'a> {
 
         let typedef = IrTypeDef {
             id: typedef_id,
-            name: self.string_interner.get(abstract_decl.name).unwrap_or("<unknown>").to_string(),
+            name: self
+                .string_interner
+                .get(abstract_decl.name)
+                .unwrap_or("<unknown>")
+                .to_string(),
             type_id,
             definition: IrTypeDefinition::Alias {
                 aliased_type: IrType::Any, // TODO: Get underlying type
@@ -18025,7 +18074,11 @@ impl<'a> HirToMirContext<'a> {
 
                 let typedef = IrTypeDef {
                     id: typedef_id,
-                    name: self.string_interner.get(alias.name).unwrap_or("<unknown>").to_string(),
+                    name: self
+                        .string_interner
+                        .get(alias.name)
+                        .unwrap_or("<unknown>")
+                        .to_string(),
                     type_id,
                     definition: IrTypeDefinition::Struct {
                         fields: ir_fields,
@@ -18047,7 +18100,11 @@ impl<'a> HirToMirContext<'a> {
 
         let typedef = IrTypeDef {
             id: typedef_id,
-            name: self.string_interner.get(alias.name).unwrap_or("<unknown>").to_string(),
+            name: self
+                .string_interner
+                .get(alias.name)
+                .unwrap_or("<unknown>")
+                .to_string(),
             type_id,
             definition: IrTypeDefinition::Alias {
                 aliased_type: IrType::Any, // TODO: Convert aliased TypeId to IrType
