@@ -440,8 +440,8 @@ impl MacroInterpreter {
             ExprKind::Arrow { params, expr: body } => {
                 let macro_params: Vec<MacroParam> = params
                     .iter()
-                    .map(|name| MacroParam {
-                        name: name.clone(),
+                    .map(|p| MacroParam {
+                        name: p.name.clone(),
                         optional: false,
                         rest: false,
                         default_value: None,

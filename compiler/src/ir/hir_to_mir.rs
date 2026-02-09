@@ -16085,10 +16085,31 @@ impl<'a> HirToMirContext<'a> {
         self.current_drop_points = None;
         self.current_stmt_index = 0;
 
-        // Map lambda parameters to registers
+        // Map lambda parameters to registers AND register as locals
+        // (matching regular function param setup at line ~2274-2288)
         for (i, param) in params.iter().enumerate() {
             let param_reg = IrId::new(param_offset + i as u32);
             self.symbol_map.insert(param.symbol_id, param_reg);
+
+            // Also register parameter as a local so type inference can find it
+            let param_type = self.convert_type(param.ty);
+            let param_name = self
+                .string_interner
+                .get(param.name)
+                .unwrap_or("<param>")
+                .to_string();
+            if let Some(func) = self.builder.current_function_mut() {
+                func.locals.insert(
+                    param_reg,
+                    super::IrLocal {
+                        name: param_name,
+                        ty: param_type,
+                        mutable: false,
+                        source_location: super::IrSourceLocation::unknown(),
+                        allocation: super::AllocationHint::Register,
+                    },
+                );
+            }
         }
 
         // Setup captured variables using environment layout
@@ -16110,18 +16131,42 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Lower the body expression
-        let body_result = self.lower_expression(body);
+        // Lower the body expression.
+        // For arrow functions, the body is typically a Block wrapping a single expression
+        // statement. lower_expression(Block) returns None because blocks don't have return
+        // values in general. To get the lambda's body result, we unwrap the block and
+        // lower the inner expression directly.
+        let body_result = match &body.kind {
+            crate::ir::hir::HirExprKind::Block(block) => {
+                if block.statements.len() == 1 && block.expr.is_none() {
+                    // Single-expression block (common in arrow functions):
+                    // Extract the expression from the Expr statement and lower directly
+                    if let crate::ir::hir::HirStatement::Expr(expr) = &block.statements[0] {
+                        self.lower_expression(expr)
+                    } else {
+                        // Single non-expression statement (e.g., Let) — lower normally
+                        self.lower_statement(&block.statements[0]);
+                        None
+                    }
+                } else {
+                    // Multi-statement block: lower all statements, use trailing expr if any
+                    for stmt in &block.statements {
+                        self.lower_statement(stmt);
+                    }
+                    if let Some(trailing_expr) = &block.expr {
+                        self.lower_expression(trailing_expr)
+                    } else {
+                        None
+                    }
+                }
+            }
+            _ => self.lower_expression(body),
+        };
 
         // Infer return type from actual generated code (borrows function immutably)
         let return_type = {
             let lambda_func = self.builder.module.functions.get(&func_id)?;
-            let rt = self.infer_lambda_return_type(lambda_func, entry_block, body_result);
-            debug!(
-                "Lambda final return type: {:?}, body_result: {:?}",
-                rt, body_result
-            );
-            rt
+            self.infer_lambda_return_type(lambda_func, entry_block, body_result)
         };
 
         // Update signature and add terminator (borrows function mutably)
@@ -16224,11 +16269,19 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Strategy 2: Use body result register type
+        // Strategy 2: Use body result register type from locals
         if let Some(result_reg) = body_result {
             if let Some(local) = function.locals.get(&result_reg) {
-                debug!("Inferred return type from body result: {:?}", local.ty);
+                debug!("Inferred return type from body result locals: {:?}", local.ty);
                 return local.ty.clone();
+            }
+        }
+
+        // Strategy 3: Check register_types map (populated by build_binop, build_call_direct, etc.)
+        if let Some(result_reg) = body_result {
+            if let Some(ty) = function.register_types.get(&result_reg) {
+                debug!("Inferred return type from register_types: {:?}", ty);
+                return ty.clone();
             }
         }
 

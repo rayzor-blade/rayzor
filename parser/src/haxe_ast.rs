@@ -488,6 +488,13 @@ pub struct FunctionParam {
     pub span: Span,
 }
 
+/// Arrow function parameter (supports optional type annotations)
+#[derive(Debug, Clone, PartialEq)]
+pub struct ArrowParam {
+    pub name: String,
+    pub type_hint: Option<Type>,
+}
+
 /// Type expressions
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
@@ -647,9 +654,9 @@ pub enum ExprKind {
     /// Function expression: `function(x) return x * 2`
     Function(Function),
 
-    /// Arrow function: `x -> x * 2`
+    /// Arrow function: `x -> x * 2` or `(x:Int) -> x * 2`
     Arrow {
-        params: Vec<String>,
+        params: Vec<ArrowParam>,
         expr: Box<Expr>,
     },
 

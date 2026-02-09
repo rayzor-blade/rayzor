@@ -154,7 +154,7 @@ pub fn function_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
     ))
 }
 
-pub fn arrow_params<'a>(full: &'a str, input: &'a str) -> PResult<'a, Vec<String>> {
+pub fn arrow_params<'a>(full: &'a str, input: &'a str) -> PResult<'a, Vec<ArrowParam>> {
     let (input, _) = ws(input)?; // Skip leading whitespace
     alt((
         // Single parameter without parentheses (no type annotation allowed)
@@ -163,7 +163,7 @@ pub fn arrow_params<'a>(full: &'a str, input: &'a str) -> PResult<'a, Vec<String
                 let (i, _) = ws(i)?;
                 identifier(i)
             },
-            |id| vec![id],
+            |id| vec![ArrowParam { name: id, type_hint: None }],
         ),
         // Multiple parameters in parentheses, with optional type annotations
         // Supports: (x), (x:Int), (x:Int, y:String), etc.
@@ -172,9 +172,8 @@ pub fn arrow_params<'a>(full: &'a str, input: &'a str) -> PResult<'a, Vec<String
             separated_list0(symbol(","), |i| {
                 let (i, _) = ws(i)?;
                 let (i, name) = identifier(i)?;
-                // Skip optional type annotation `:Type` (parsed but discarded)
-                let (i, _) = opt(preceded(symbol(":"), |i| type_expr(full, i))).parse(i)?;
-                Ok((i, name))
+                let (i, type_hint) = opt(preceded(symbol(":"), |i| type_expr(full, i))).parse(i)?;
+                Ok((i, ArrowParam { name, type_hint }))
             }),
             symbol(")"),
         ),

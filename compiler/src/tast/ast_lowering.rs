@@ -6213,22 +6213,35 @@ impl<'a> AstLowering<'a> {
                 }
             }
             ExprKind::Arrow { params, expr } => {
-                // Arrow function: x -> x * 2 - create a new scope for the function body
+                // Arrow function: x -> x * 2 or (x:Int) -> x * 2
                 let function_scope = self.context.enter_scope(ScopeKind::Function);
 
                 let mut typed_params = Vec::new();
-                for param_name in params {
-                    // Create parameter with inferred type in the current scope
-                    let param_interned = self.context.string_interner.intern(param_name);
+                for param in params {
+                    let param_interned = self.context.string_interner.intern(&param.name);
+
+                    // Use type annotation if present, otherwise fall back to dynamic
+                    let param_type = if let Some(ref type_hint) = param.type_hint {
+                        self.lower_type(type_hint)?
+                    } else {
+                        self.context.type_table.borrow().dynamic_type()
+                    };
+
+                    // Create symbol WITH the correct type so body expressions
+                    // (like x * 2) resolve the variable to the right type
                     let param_symbol = self
                         .context
                         .symbol_table
-                        .create_variable_in_scope(param_interned, self.context.current_scope);
+                        .create_variable_with_type(
+                            param_interned,
+                            self.context.current_scope,
+                            param_type,
+                        );
 
                     typed_params.push(TypedParameter {
                         symbol_id: param_symbol,
                         name: param_interned,
-                        param_type: self.context.type_table.borrow().dynamic_type(),
+                        param_type,
                         is_optional: false,
                         default_value: None,
                         mutability: crate::tast::symbols::Mutability::Immutable,
