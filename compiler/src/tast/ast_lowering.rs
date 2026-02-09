@@ -5507,14 +5507,61 @@ impl<'a> AstLowering<'a> {
                 }
             }
             ExprKind::Binary { left, op, right } => {
-                let left_expr = self.lower_expression(left)?;
-                let right_expr = self.lower_expression(right)?;
-                let typed_op = self.lower_binary_operator(op)?;
+                // Special handling for `is` operator: `expr is Type`
+                if matches!(op, BinaryOp::Is) {
+                    let left_expr = self.lower_expression(left)?;
+                    // The right side is a type name parsed as an expression (Ident)
+                    // Extract the type name and resolve it
+                    // Build a TypePath from the right-hand expression
+                    let type_path = match &right.kind {
+                        ExprKind::Ident(name) => parser::TypePath {
+                            package: vec![],
+                            name: name.clone(),
+                            sub: None,
+                        },
+                        ExprKind::Field { expr, field, .. } => {
+                            // Handle qualified names like `pack.Type`
+                            let mut parts = Vec::new();
+                            fn collect_parts(e: &Expr, parts: &mut Vec<String>) {
+                                match &e.kind {
+                                    ExprKind::Ident(n) => parts.push(n.clone()),
+                                    ExprKind::Field { expr, field, .. } => {
+                                        collect_parts(expr, parts);
+                                        parts.push(field.clone());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            collect_parts(expr, &mut parts);
+                            parser::TypePath {
+                                package: parts,
+                                name: field.clone(),
+                                sub: None,
+                            }
+                        }
+                        _ => {
+                            return Err(LoweringError::UnresolvedType {
+                                type_name: format!("{:?}", right.kind),
+                                location: self.context.create_location_from_span(expression.span),
+                            });
+                        }
+                    };
+                    // Resolve via full type resolution (handles user classes, imports, namespaces)
+                    let check_type = self.resolve_type_path(&type_path)?;
+                    TypedExpressionKind::Is {
+                        expression: Box::new(left_expr),
+                        check_type,
+                    }
+                } else {
+                    let left_expr = self.lower_expression(left)?;
+                    let right_expr = self.lower_expression(right)?;
+                    let typed_op = self.lower_binary_operator(op)?;
 
-                TypedExpressionKind::BinaryOp {
-                    left: Box::new(left_expr),
-                    operator: typed_op,
-                    right: Box::new(right_expr),
+                    TypedExpressionKind::BinaryOp {
+                        left: Box::new(left_expr),
+                        operator: typed_op,
+                        right: Box::new(right_expr),
+                    }
                 }
             }
             ExprKind::Unary { op, expr } => {
@@ -6107,15 +6154,20 @@ impl<'a> AstLowering<'a> {
             }
             ExprKind::Cast { expr, type_hint } => {
                 let typed_expr = self.lower_expression(expr)?;
-                let target_type = if let Some(hint) = type_hint {
-                    self.lower_type(hint)?
+                let (target_type, cast_kind) = if let Some(hint) = type_hint {
+                    // cast(expr, Type) — safe/explicit cast
+                    (self.lower_type(hint)?, CastKind::Explicit)
                 } else {
-                    self.context.type_table.borrow().dynamic_type()
+                    // cast expr — unsafe cast (no type check, reinterpret)
+                    (
+                        self.context.type_table.borrow().dynamic_type(),
+                        CastKind::Unsafe,
+                    )
                 };
                 TypedExpressionKind::Cast {
                     expression: Box::new(typed_expr),
                     target_type,
-                    cast_kind: CastKind::Explicit,
+                    cast_kind,
                 }
             }
             ExprKind::TypeCheck { expr, type_hint } => {

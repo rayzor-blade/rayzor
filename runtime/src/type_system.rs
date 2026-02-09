@@ -635,6 +635,38 @@ pub extern "C" fn haxe_enum_get_parameters(
     arr
 }
 
+/// Runtime type check for Dynamic/boxed values.
+/// Checks if a boxed DynamicValue has the given type_id.
+/// Used by `Std.is()` and `(expr is Type)` for Dynamic-typed values.
+#[no_mangle]
+pub extern "C" fn haxe_std_is(value_ptr: *mut u8, expected_type_id: i64) -> bool {
+    if value_ptr.is_null() {
+        return false;
+    }
+    unsafe {
+        let dynamic = *(value_ptr as *const DynamicValue);
+        dynamic.type_id.0 as i64 == expected_type_id
+    }
+}
+
+/// Runtime downcast for Dynamic/boxed values.
+/// Returns the value pointer if the type matches, null otherwise.
+/// Used by `Std.downcast()`.
+#[no_mangle]
+pub extern "C" fn haxe_std_downcast(value_ptr: *mut u8, expected_type_id: i64) -> *mut u8 {
+    if value_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        let dynamic = *(value_ptr as *const DynamicValue);
+        if dynamic.type_id.0 as i64 == expected_type_id {
+            dynamic.value_ptr
+        } else {
+            std::ptr::null_mut()
+        }
+    }
+}
+
 /// Trace an enum value by type_id and discriminant
 /// Prints the variant name if available, otherwise the discriminant
 #[no_mangle]

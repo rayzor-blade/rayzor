@@ -10304,7 +10304,11 @@ impl<'a> HirToMirContext<'a> {
                 Some(result_reg)
             }
 
-            HirExprKind::Cast { expr, target, .. } => {
+            HirExprKind::Cast {
+                expr,
+                target,
+                is_safe,
+            } => {
                 // Check if target is a @:coreType abstract with @:from (e.g., SIMD4f)
                 // In that case, emit a function call to the @:from wrapper instead of a cast
                 let is_simd4f_target = {
@@ -10360,10 +10364,141 @@ impl<'a> HirToMirContext<'a> {
                         .build_call_direct(func_id, vec![value_reg], return_type);
                 }
 
-                let value_reg = self.lower_expression(expr)?;
                 let from_type = self.convert_type(expr.ty);
                 let to_type = self.convert_type(*target);
-                self.builder.build_cast(value_reg, from_type, to_type)
+
+                // For unsafe casts or when source and target MIR types match,
+                // emit a direct cast instruction (no runtime check)
+                if !is_safe || from_type == to_type {
+                    let value_reg = self.lower_expression(expr)?;
+                    return self.builder.build_cast(value_reg, from_type, to_type);
+                }
+
+                // Safe cast: resolve at compile time based on source/target type kinds
+                let source_kind = {
+                    let type_table = self.type_table.borrow();
+                    type_table.get(expr.ty).map(|ti| ti.kind.clone())
+                };
+                let target_kind = {
+                    let type_table = self.type_table.borrow();
+                    type_table.get(*target).map(|ti| ti.kind.clone())
+                };
+
+                match (&source_kind, &target_kind) {
+                    // Primitive-to-primitive: always succeeds, emit static conversion
+                    (Some(TypeKind::Int), Some(TypeKind::Float))
+                    | (Some(TypeKind::Float), Some(TypeKind::Int))
+                    | (Some(TypeKind::Int), Some(TypeKind::Bool))
+                    | (Some(TypeKind::Bool), Some(TypeKind::Int))
+                    | (Some(TypeKind::Float), Some(TypeKind::Bool))
+                    | (Some(TypeKind::Bool), Some(TypeKind::Float)) => {
+                        let value_reg = self.lower_expression(expr)?;
+                        self.builder.build_cast(value_reg, from_type, to_type)
+                    }
+
+                    // Class/Interface → same pointer representation: pass-through
+                    // (trust static types — no object headers for runtime downcasting)
+                    (Some(TypeKind::Class { .. }), Some(TypeKind::Class { .. }))
+                    | (Some(TypeKind::Class { .. }), Some(TypeKind::Interface { .. }))
+                    | (Some(TypeKind::Interface { .. }), Some(TypeKind::Class { .. }))
+                    | (Some(TypeKind::Interface { .. }), Some(TypeKind::Interface { .. })) => {
+                        let value_reg = self.lower_expression(expr)?;
+                        self.builder.build_cast(value_reg, from_type, to_type)
+                    }
+
+                    // Fallback: emit raw cast (same as unsafe)
+                    _ => {
+                        let value_reg = self.lower_expression(expr)?;
+                        self.builder.build_cast(value_reg, from_type, to_type)
+                    }
+                }
+            }
+
+            HirExprKind::TypeCheck { expr, expected } => {
+                // (expr is Type) — compile-time type check for statically-typed code
+                let source_kind = {
+                    let type_table = self.type_table.borrow();
+                    type_table.get(expr.ty).map(|ti| ti.kind.clone())
+                };
+                let target_kind = {
+                    let type_table = self.type_table.borrow();
+                    type_table.get(*expected).map(|ti| ti.kind.clone())
+                };
+
+                // For statically-typed code, resolve at compile time
+                let result = match (&source_kind, &target_kind) {
+                    // Same type kind → always true (but null check needed for refs)
+                    _ if expr.ty == *expected => {
+                        // Exact same type → true
+                        self.builder.build_const(IrValue::Bool(true))
+                    }
+                    // Primitive type checks
+                    (Some(TypeKind::Int), Some(TypeKind::Int))
+                    | (Some(TypeKind::Float), Some(TypeKind::Float))
+                    | (Some(TypeKind::Bool), Some(TypeKind::Bool))
+                    | (Some(TypeKind::String), Some(TypeKind::String)) => {
+                        self.builder.build_const(IrValue::Bool(true))
+                    }
+                    // Cross-primitive: always false
+                    (Some(TypeKind::Int), Some(TypeKind::Float))
+                    | (Some(TypeKind::Float), Some(TypeKind::Int))
+                    | (Some(TypeKind::Int), Some(TypeKind::String))
+                    | (Some(TypeKind::String), Some(TypeKind::Int))
+                    | (Some(TypeKind::Float), Some(TypeKind::String))
+                    | (Some(TypeKind::String), Some(TypeKind::Float))
+                    | (Some(TypeKind::Bool), Some(TypeKind::Int))
+                    | (Some(TypeKind::Int), Some(TypeKind::Bool))
+                    | (Some(TypeKind::Bool), Some(TypeKind::Float))
+                    | (Some(TypeKind::Float), Some(TypeKind::Bool)) => {
+                        self.builder.build_const(IrValue::Bool(false))
+                    }
+                    // Class-to-class: check class hierarchy at compile time
+                    (
+                        Some(TypeKind::Class {
+                            symbol_id: src_sym, ..
+                        }),
+                        Some(TypeKind::Class {
+                            symbol_id: tgt_sym, ..
+                        }),
+                    ) => {
+                        let src_sym = *src_sym;
+                        let tgt_sym = *tgt_sym;
+                        let _value = self.lower_expression(expr);
+                        if src_sym == tgt_sym {
+                            // Same class → true
+                            self.builder.build_const(IrValue::Bool(true))
+                        } else if self.is_subclass_of(expr.ty, *expected) {
+                            // Source is subclass of target (upcast) → true
+                            self.builder.build_const(IrValue::Bool(true))
+                        } else if self.is_subclass_of(*expected, expr.ty) {
+                            // Target is subclass of source (downcast) →
+                            // can't verify at runtime without object headers, trust static types
+                            self.builder.build_const(IrValue::Bool(true))
+                        } else {
+                            // Unrelated classes → false
+                            self.builder.build_const(IrValue::Bool(false))
+                        }
+                    }
+                    // Class vs primitive or other unrelated → false
+                    (Some(TypeKind::Class { .. }), Some(TypeKind::Int))
+                    | (Some(TypeKind::Class { .. }), Some(TypeKind::Float))
+                    | (Some(TypeKind::Class { .. }), Some(TypeKind::Bool))
+                    | (Some(TypeKind::Class { .. }), Some(TypeKind::String))
+                    | (Some(TypeKind::Int), Some(TypeKind::Class { .. }))
+                    | (Some(TypeKind::Float), Some(TypeKind::Class { .. }))
+                    | (Some(TypeKind::Bool), Some(TypeKind::Class { .. }))
+                    | (Some(TypeKind::String), Some(TypeKind::Class { .. })) => {
+                        let _value = self.lower_expression(expr);
+                        self.builder.build_const(IrValue::Bool(false))
+                    }
+                    // Fallback: lower the expression (for side effects) and return true
+                    // (trust static types — proper runtime checks need object headers)
+                    _ => {
+                        let _value = self.lower_expression(expr);
+                        self.builder.build_const(IrValue::Bool(true))
+                    }
+                };
+                result
             }
 
             HirExprKind::If {
@@ -16801,6 +16936,27 @@ impl<'a> HirToMirContext<'a> {
             }
         }
         current
+    }
+
+    /// Check if `source_type` is a subclass of `target_type` by walking the extends chain.
+    fn is_subclass_of(&self, source_type: TypeId, target_type: TypeId) -> bool {
+        let mut current = source_type;
+        for _ in 0..20 {
+            // Get the class for current type
+            if let Some(HirTypeDecl::Class(class)) = self.current_hir_types.get(&current) {
+                if let Some(parent_type) = class.extends {
+                    if parent_type == target_type {
+                        return true;
+                    }
+                    current = parent_type;
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        false
     }
 
     fn lower_string_interpolation(&mut self, parts: &[HirStringPart]) -> Option<IrId> {

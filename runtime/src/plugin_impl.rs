@@ -282,6 +282,8 @@ register_symbol!(
     "haxe_enum_get_parameters",
     crate::type_system::haxe_enum_get_parameters
 );
+register_symbol!("haxe_std_is", crate::type_system::haxe_std_is);
+register_symbol!("haxe_std_downcast", crate::type_system::haxe_std_downcast);
 register_symbol!("haxe_trace_enum", crate::type_system::haxe_trace_enum);
 register_symbol!(
     "haxe_trace_enum_boxed",

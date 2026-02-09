@@ -1646,13 +1646,13 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 4 | Closures as first-class values | P0 | High | 🟢 Complete | callbacks, HOFs |
 | 5 | Array.map/filter/sort (higher-order) | P0 | Medium | 🟢 Complete | functional patterns |
 | 6 | String interpolation | P0 | Low | 🟢 Complete | basic string formatting |
-| 7 | for-in range (`0...n`) | P0 | Low | 🟡 Partial | basic loops |
+| 7 | for-in range (`0...n`) | P0 | Low | 🟢 Complete | basic loops |
 | 8 | Static extensions (`using`) | P1 | Medium | 🟢 Complete | idiomatic Haxe |
-| 9 | Safe cast (`cast(expr, Type)`) | P1 | Medium | 🔴 Not started | type-safe downcasting |
+| 9 | Safe cast (`cast(expr, Type)`) | P1 | Medium | 🟡 In progress | type-safe downcasting |
 | 10 | Generics instantiation end-to-end | P1 | High | 🟢 Complete | generic classes/functions |
 | 11 | Property get/set dispatch | P1 | Medium | 🟡 Mostly done | encapsulation |
 | 12 | EReg (regex runtime) | P1 | Medium | 🟢 Complete | text processing |
-| 13 | Enum methods + statics | P1 | Medium | 🔴 Not started | rich enums |
+| 13 | Enum methods + statics | P1 | Medium | 🟡 Partial | rich enums |
 | 14 | Abstract types (operator overloading) | P1 | High | 🟡 Partial | custom types |
 | 15 | Dynamic type operations | P1 | Medium | 🟡 Partial | interop, JSON |
 | 16 | Type parameters on functions | P1 | Medium | 🟢 Complete | generic functions |
@@ -1687,7 +1687,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 - [ ] Guard expressions in match arms (`case v if v > 0:`)
 - [ ] Exhaustiveness checking (warn on missing cases)
-- [ ] `EnumValue` API (`Type.enumIndex()`, `Type.enumParameters()`)
+- [x] `EnumValue` API (`getIndex()`, `getName()`, `getParameters()`) — via runtime mapping
 - [ ] Nested pattern matching (`case Pair(Some(x), _):`)
 
 ### 16.2 Interface Dispatch (Vtables) 🟢
@@ -1793,17 +1793,24 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - Expression interpolation: `${expr}`
 - Desugared to string concatenation during AST lowering
 
-### 16.7 For-in Range Iteration 🟡
+### 16.7 For-in Range Iteration 🟢
 
 **Priority:** P0
-**Current State:** `for (v in iterable)` works for arrays. `0...n` range syntax is partially supported.
+**Status:** ✅ Complete (2026-02-09)
 
-**What's Missing:**
-- [ ] `IntIterator` (`0...10` creates IntIterator with hasNext/next)
-- [ ] `for (i in 0...10)` full support
-- [ ] Custom iterator protocol (`hasNext()` + `next()`)
-- [ ] `do...while` loop
-- [ ] Labeled break/continue (`break label`)
+**What Works:**
+
+- [x] `for (i in 0...10)` — desugars to C-style while loop with counter
+- [x] `for (v in array)` — inlined array iteration (no iterator classes needed)
+- [x] `for (key => value in collection)` — key-value iteration
+- [x] `do { body } while (cond)` — desugars to `{ body; while(cond) { body } }`
+- [x] `continue` in range loops — update block executes before condition check
+- [x] Break/continue with labels
+
+**Not Yet Implemented:**
+
+- [ ] Custom iterator protocol (`hasNext()` + `next()`) for user types
+- [ ] `for (key => value in map)` with Map types
 
 ### 16.8 Static Extensions (`using`) 🟢
 
@@ -1881,16 +1888,28 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - `matchedPos()` — returns anonymous object `{pos:Int, len:Int}`, needs MIR wrapper
 - `map()` — needs passing Haxe closure to runtime
 
-### 16.13 Enum Methods and Statics 🔴
+### 16.13 Enum Methods and Statics 🟡
 
 **Priority:** P1
-**Current State:** Enums are data-only. No methods or static members.
+**Status:** Partial (2026-02-09) — Built-in instance methods complete
+
+**Implemented:**
+
+- [x] `enumValue.getIndex()` — returns variant discriminant (0-based)
+- [x] `enumValue.getName()` — returns variant name as String via RTTI
+- [x] `enumValue.getParameters()` — returns variant fields as Array\<Dynamic\>
+- [x] Works on both boxed (parameterized) and unboxed (simple) enums
+- [x] Works via variable or chained (`Color.Red.getName()`, `var c = Color.Red; c.getName()`)
+- [x] Chained property access (`myEnum.getParameters().length`)
+- [x] Uses runtime mapping infrastructure (not hardcoded in hir_to_mir)
+- [x] Enum RTTI registration in tiered backend for runtime getName/getParameters
 
 **What's Missing:**
-- [ ] Methods on enum types
-- [ ] Static methods on enums
+
+- [ ] User-defined methods on enum types (Haxe doesn't support this — abstract enums do)
 - [ ] `Type.getEnumConstructs()` — list variant names
 - [ ] `Type.createEnum()` — create variant by name/index
+- [ ] `Type.enumIndex()` / `Type.enumConstructor()` / `Type.enumParameters()` (Type API equivalents)
 
 ### 16.14 Null Safety 🔴
 

@@ -2049,10 +2049,11 @@ impl<'a> TastToHirContext<'a> {
                 expression,
                 check_type,
             } => {
-                // Type check expression — lower as a call or placeholder
                 let inner = self.lower_expression(expression);
-                // For now, lower as the expression itself (type check is a future feature)
-                return inner;
+                HirExprKind::TypeCheck {
+                    expr: Box::new(inner),
+                    expected: *check_type,
+                }
             }
             TypedExpressionKind::Meta {
                 metadata,

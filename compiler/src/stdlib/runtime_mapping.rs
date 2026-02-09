@@ -1575,6 +1575,18 @@ impl StdlibMapping {
             // Std.random(x: Int) -> Int
             map_method!(static "Std", "random" => "haxe_std_random", params: 1, returns: primitive,
                 types: &[I64] => I64),
+            // Std.is(v: Dynamic, t: Dynamic) -> Bool  (runtime type check)
+            map_method!(static "Std", "is" => "haxe_std_is", params: 2, returns: primitive,
+                types: &[PtrVoid, I64] => I64),
+            // Std.isOfType(v: Dynamic, t: Dynamic) -> Bool  (alias for Std.is)
+            map_method!(static "Std", "isOfType" => "haxe_std_is", params: 2, returns: primitive,
+                types: &[PtrVoid, I64] => I64),
+            // Std.downcast(v: Dynamic, t: Dynamic) -> Dynamic  (runtime downcast)
+            map_method!(static "Std", "downcast" => "haxe_std_downcast", params: 2, returns: complex,
+                types: &[PtrVoid, I64] => PtrVoid),
+            // Std.instance(v: Dynamic, t: Dynamic) -> Dynamic  (alias for Std.downcast)
+            map_method!(static "Std", "instance" => "haxe_std_downcast", params: 2, returns: complex,
+                types: &[PtrVoid, I64] => PtrVoid),
         ];
 
         self.register_from_tuples(mappings);
