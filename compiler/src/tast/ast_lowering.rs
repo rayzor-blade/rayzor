@@ -2648,8 +2648,7 @@ impl<'a> AstLowering<'a> {
             );
             type_param_map.insert(tp.name, type_id);
         }
-        self.context
-            .push_type_parameters(type_param_map.clone());
+        self.context.push_type_parameters(type_param_map.clone());
 
         // Store ordered type parameter TypeIds for generic type inference
         if !type_param_map.is_empty() {
@@ -2657,8 +2656,7 @@ impl<'a> AstLowering<'a> {
                 .iter()
                 .filter_map(|tp| type_param_map.get(&tp.name).copied())
                 .collect();
-            self.class_type_params
-                .insert(class_symbol, ordered_tp_ids);
+            self.class_type_params.insert(class_symbol, ordered_tp_ids);
         }
 
         // Process extends clause

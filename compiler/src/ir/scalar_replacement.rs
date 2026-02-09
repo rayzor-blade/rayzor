@@ -1258,8 +1258,7 @@ fn try_build_candidate_function_wide(
                         // If casting a tracked pointer to a non-pointer type
                         // (e.g., Ptr→I64 for generic type erasure), the allocation
                         // escapes type-safe tracking — reject this candidate.
-                        if matches!(from_ty, IrType::Ptr(_)) && !matches!(to_ty, IrType::Ptr(_))
-                        {
+                        if matches!(from_ty, IrType::Ptr(_)) && !matches!(to_ty, IrType::Ptr(_)) {
                             return None;
                         }
                         tracked.insert(*dest);

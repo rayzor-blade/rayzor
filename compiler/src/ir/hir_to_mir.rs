@@ -4866,7 +4866,6 @@ impl<'a> HirToMirContext<'a> {
                     .map(|&ty_id| self.convert_type(ty_id))
                     .collect();
 
-
                 // DEBUG: Check if void function is being called with dest
                 debug!(
                     "[CALL] expr.ty={:?}, result_type={:?}, is_method={}",
@@ -7774,22 +7773,32 @@ impl<'a> HirToMirContext<'a> {
                                             // TypeParameter receivers always come from user-defined generics.
                                             // Method calls on T should resolve through function_map, not stdlib.
                                             // (Constrained T:Interface is handled earlier by interface dispatch.)
-                                            crate::tast::core::TypeKind::TypeParameter { .. } => true,
+                                            crate::tast::core::TypeKind::TypeParameter {
+                                                ..
+                                            } => true,
                                             // GenericInstance: check if the base type is a user class
-                                            crate::tast::core::TypeKind::GenericInstance { base_type, .. } => {
-                                                type_table.get(*base_type)
-                                                    .map(|bt| {
-                                                        if let crate::tast::core::TypeKind::Class { symbol_id, .. } = &bt.kind {
-                                                            self.symbol_table
-                                                                .get_symbol(*symbol_id)
-                                                                .map(|s| !self.is_stdlib_class_by_symbol(s))
-                                                                .unwrap_or(false)
-                                                        } else {
-                                                            false
-                                                        }
-                                                    })
-                                                    .unwrap_or(false)
-                                            }
+                                            crate::tast::core::TypeKind::GenericInstance {
+                                                base_type,
+                                                ..
+                                            } => type_table
+                                                .get(*base_type)
+                                                .map(|bt| {
+                                                    if let crate::tast::core::TypeKind::Class {
+                                                        symbol_id,
+                                                        ..
+                                                    } = &bt.kind
+                                                    {
+                                                        self.symbol_table
+                                                            .get_symbol(*symbol_id)
+                                                            .map(|s| {
+                                                                !self.is_stdlib_class_by_symbol(s)
+                                                            })
+                                                            .unwrap_or(false)
+                                                    } else {
+                                                        false
+                                                    }
+                                                })
+                                                .unwrap_or(false),
                                             _ => false,
                                         }
                                     })
@@ -8746,26 +8755,31 @@ impl<'a> HirToMirContext<'a> {
                     // IMPORTANT: When matching by bare name, also verify the function belongs to
                     // the receiver's class (via qualified name). Without this, common names like
                     // "get", "set", "toString" could match wrong stdlib functions.
-                    if func_id_opt.is_none() && *is_method {
-                    }
+                    if func_id_opt.is_none() && *is_method {}
                     if func_id_opt.is_none() && *is_method {
                         if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
                             if let Some(method_name) = self.string_interner.get(sym_info.name) {
                                 // Get receiver's class name for disambiguation
                                 let receiver_class_name = if !args.is_empty() {
                                     let type_table = self.type_table.borrow();
-                                    let class_sym = type_table.get(args[0].ty).and_then(|ti| match &ti.kind {
-                                        TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
-                                        TypeKind::GenericInstance { base_type, .. } => {
-                                            type_table.get(*base_type).and_then(|bt| match &bt.kind {
-                                                TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
-                                                _ => None,
-                                            })
-                                        }
-                                        _ => None,
-                                    });
+                                    let class_sym =
+                                        type_table.get(args[0].ty).and_then(|ti| match &ti.kind {
+                                            TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                                            TypeKind::GenericInstance { base_type, .. } => {
+                                                type_table.get(*base_type).and_then(|bt| match &bt
+                                                    .kind
+                                                {
+                                                    TypeKind::Class { symbol_id, .. } => {
+                                                        Some(*symbol_id)
+                                                    }
+                                                    _ => None,
+                                                })
+                                            }
+                                            _ => None,
+                                        });
                                     let name = class_sym.and_then(|sid| {
-                                        self.symbol_table.get_symbol(sid)
+                                        self.symbol_table
+                                            .get_symbol(sid)
                                             .and_then(|s| self.string_interner.get(s.name))
                                             .map(|s| s.to_string())
                                     });
@@ -8945,10 +8959,14 @@ impl<'a> HirToMirContext<'a> {
                                     }
                                     // Path 2: expr.ty is still TypeParameter → resolve via receiver's type_args
                                     if !args.is_empty() {
-                                        if let Some(concrete_ty_id) = self.resolve_type_param_from_receiver(expr.ty, args[0].ty) {
-                                            let concrete_ir_type = self.convert_type(concrete_ty_id);
+                                        if let Some(concrete_ty_id) = self
+                                            .resolve_type_param_from_receiver(expr.ty, args[0].ty)
+                                        {
+                                            let concrete_ir_type =
+                                                self.convert_type(concrete_ty_id);
                                             if concrete_ir_type != IrType::I64 {
-                                                return self.coerce_from_i64(call_result, concrete_ty_id);
+                                                return self
+                                                    .coerce_from_i64(call_result, concrete_ty_id);
                                             }
                                         }
                                     }
@@ -9070,8 +9088,8 @@ impl<'a> HirToMirContext<'a> {
                                                 .interface_vtables
                                                 .contains_key(&(class_sym, *iface_sym))
                                             {
-                                                if let Some(wrapped) =
-                                                    self.wrap_in_interface_fat_ptr(
+                                                if let Some(wrapped) = self
+                                                    .wrap_in_interface_fat_ptr(
                                                         arg_regs[*param_idx],
                                                         class_sym,
                                                         *iface_sym,
@@ -9324,10 +9342,14 @@ impl<'a> HirToMirContext<'a> {
                             // Unwrap GenericInstance to find base class symbol_id
                             if let Some(base_info) = type_table.get(*base_type) {
                                 match &base_info.kind {
-                                    crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                                    crate::tast::TypeKind::Class { symbol_id, .. } => {
+                                        Some(*symbol_id)
+                                    }
                                     _ => None,
                                 }
-                            } else { None }
+                            } else {
+                                None
+                            }
                         }
                         _ => None,
                     };
@@ -9382,20 +9404,25 @@ impl<'a> HirToMirContext<'a> {
                     let type_table = self.type_table.borrow();
                     class_name = if let Some(type_ref) = type_table.get(*class_type) {
                         match &type_ref.kind {
-                            crate::tast::TypeKind::Class { symbol_id, .. } => {
-                                self.symbol_table
-                                    .get_symbol(*symbol_id)
-                                    .and_then(|sym| self.string_interner.get(sym.name))
-                            }
+                            crate::tast::TypeKind::Class { symbol_id, .. } => self
+                                .symbol_table
+                                .get_symbol(*symbol_id)
+                                .and_then(|sym| self.string_interner.get(sym.name)),
                             crate::tast::TypeKind::GenericInstance { base_type, .. } => {
                                 // Unwrap GenericInstance to get base class name
                                 if let Some(base_info) = type_table.get(*base_type) {
-                                    if let crate::tast::TypeKind::Class { symbol_id, .. } = &base_info.kind {
+                                    if let crate::tast::TypeKind::Class { symbol_id, .. } =
+                                        &base_info.kind
+                                    {
                                         self.symbol_table
                                             .get_symbol(*symbol_id)
                                             .and_then(|sym| self.string_interner.get(sym.name))
-                                    } else { None }
-                                } else { None }
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
                             }
                             _ => None,
                         }
@@ -9553,7 +9580,7 @@ impl<'a> HirToMirContext<'a> {
                         }
                         found
                     };
-                if let Some((wrapper_name, needs_out_param)) = constructor_info {
+                    if let Some((wrapper_name, needs_out_param)) = constructor_info {
                         // Lower arguments
                         let arg_regs: Vec<_> = args
                             .iter()
@@ -9615,7 +9642,9 @@ impl<'a> HirToMirContext<'a> {
                 if !has_constructor {
                     let type_table = self.type_table.borrow();
                     if let Some(type_info) = type_table.get(*class_type) {
-                        if let crate::tast::TypeKind::GenericInstance { base_type, .. } = &type_info.kind {
+                        if let crate::tast::TypeKind::GenericInstance { base_type, .. } =
+                            &type_info.kind
+                        {
                             if self.constructor_map.contains_key(base_type) {
                                 constructor_type_id = *base_type;
                                 has_constructor = true;
@@ -12828,7 +12857,8 @@ impl<'a> HirToMirContext<'a> {
 
                             // Use GEP to get field pointer, then store
                             if let Some(field_ptr) =
-                                self.builder.build_gep(obj_reg, vec![index_const], field_ty.clone())
+                                self.builder
+                                    .build_gep(obj_reg, vec![index_const], field_ty.clone())
                             {
                                 // Type erasure coercion: if field is I64 (erased type param)
                                 // but value is a concrete type, coerce before storing
@@ -12836,18 +12866,24 @@ impl<'a> HirToMirContext<'a> {
                                     if let Some(val_ty) = self.builder.get_register_type(value) {
                                         if val_ty != IrType::I64 {
                                             match val_ty {
-                                                IrType::F64 | IrType::F32 => {
-                                                    self.builder.build_bitcast(value, IrType::I64)
-                                                        .unwrap_or(value)
-                                                }
-                                                _ => {
-                                                    self.builder.build_cast(value, val_ty, IrType::I64)
-                                                        .unwrap_or(value)
-                                                }
+                                                IrType::F64 | IrType::F32 => self
+                                                    .builder
+                                                    .build_bitcast(value, IrType::I64)
+                                                    .unwrap_or(value),
+                                                _ => self
+                                                    .builder
+                                                    .build_cast(value, val_ty, IrType::I64)
+                                                    .unwrap_or(value),
                                             }
-                                        } else { value }
-                                    } else { value }
-                                } else { value };
+                                        } else {
+                                            value
+                                        }
+                                    } else {
+                                        value
+                                    }
+                                } else {
+                                    value
+                                };
                                 self.builder.build_store(field_ptr, store_value);
                             }
                         }
@@ -13838,7 +13874,8 @@ impl<'a> HirToMirContext<'a> {
         let field_value = self.builder.build_load(field_ptr, field_ir_ty.clone())?;
 
         // Register the type of the loaded value
-        self.builder.set_register_type(field_value, field_ir_ty.clone());
+        self.builder
+            .set_register_type(field_value, field_ir_ty.clone());
 
         // Type erasure coercion: if field is I64 (erased type param) but expr expects concrete type
         let expected_ir_ty = self.convert_type(field_ty);
@@ -16171,7 +16208,8 @@ impl<'a> HirToMirContext<'a> {
             }
         }
         if !constrained.is_empty() {
-            self.constrained_param_interfaces.insert(func_id, constrained);
+            self.constrained_param_interfaces
+                .insert(func_id, constrained);
         }
     }
 
@@ -16388,7 +16426,11 @@ impl<'a> HirToMirContext<'a> {
     /// Resolve a TypeParameter TypeId to its concrete type using the receiver's type arguments.
     /// For example, if expr.ty is TypeParameter(T) and receiver is Container<Float>,
     /// returns Some(Float_TypeId).
-    fn resolve_type_param_from_receiver(&self, type_param_id: TypeId, receiver_type_id: TypeId) -> Option<TypeId> {
+    fn resolve_type_param_from_receiver(
+        &self,
+        type_param_id: TypeId,
+        receiver_type_id: TypeId,
+    ) -> Option<TypeId> {
         let type_table = self.type_table.borrow();
 
         // Check if type_param_id is actually a TypeParameter
@@ -16401,12 +16443,21 @@ impl<'a> HirToMirContext<'a> {
         // Get receiver's class info with concrete type_args
         let recv_info = type_table.get(receiver_type_id)?;
         let (class_symbol, concrete_args) = match &recv_info.kind {
-            crate::tast::TypeKind::Class { symbol_id, type_args } => (*symbol_id, type_args.clone()),
-            crate::tast::TypeKind::GenericInstance { base_type, type_args, .. } => {
+            crate::tast::TypeKind::Class {
+                symbol_id,
+                type_args,
+            } => (*symbol_id, type_args.clone()),
+            crate::tast::TypeKind::GenericInstance {
+                base_type,
+                type_args,
+                ..
+            } => {
                 // Unwrap GenericInstance to get the base class's symbol_id
                 if let Some(base_info) = type_table.get(*base_type) {
                     match &base_info.kind {
-                        crate::tast::TypeKind::Class { symbol_id, .. } => (*symbol_id, type_args.clone()),
+                        crate::tast::TypeKind::Class { symbol_id, .. } => {
+                            (*symbol_id, type_args.clone())
+                        }
                         _ => return None,
                     }
                 } else {
