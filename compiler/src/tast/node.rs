@@ -972,6 +972,8 @@ pub struct TypedAbstract {
     pub from_types: Vec<TypeId>,
     /// To conversion types
     pub to_types: Vec<TypeId>,
+    /// Whether this is an enum abstract
+    pub is_enum_abstract: bool,
     /// Visibility
     pub visibility: Visibility,
     /// Source location

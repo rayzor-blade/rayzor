@@ -299,6 +299,7 @@ pub fn abstract_decl<'a>(full: &'a str, input: &'a str) -> PResult<'a, AbstractD
             from,
             to,
             fields,
+            is_enum_abstract: is_enum_abstract.is_some(),
             span: Span::new(start, end),
         },
     ))

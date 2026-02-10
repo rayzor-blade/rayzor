@@ -12388,27 +12388,79 @@ impl<'a> HirToMirContext<'a> {
             .and_then(|rules| rules.iter().find(|r| r.from_type == source_type))
             .cloned();
 
-        let rule = matching_rule?;
-
-        if let Some(cast_func_sym) = rule.cast_function {
-            // Has a conversion function — resolve and call it
-            let value_reg = self.lower_expression(expr)?;
-            let func_id = self.resolve_abstract_conversion_function(cast_func_sym, target)?;
-            let result_type = self.convert_type(target);
-            self.builder
-                .build_call_direct(func_id, vec![value_reg], result_type)
-        } else {
-            // No conversion function — keyword from (identity conversion)
-            // The value just passes through, possibly with a type cast
-            let value_reg = self.lower_expression(expr)?;
-            let from_type = self.convert_type(source_type);
-            let to_type = self.convert_type(target);
-            if from_type == to_type {
-                Some(value_reg) // No-op
+        if let Some(rule) = matching_rule {
+            if let Some(cast_func_sym) = rule.cast_function {
+                // Has a conversion function — resolve and call it
+                let value_reg = self.lower_expression(expr)?;
+                let func_id = self.resolve_abstract_conversion_function(cast_func_sym, target)?;
+                let result_type = self.convert_type(target);
+                self.builder
+                    .build_call_direct(func_id, vec![value_reg], result_type)
             } else {
-                self.builder.build_cast(value_reg, from_type, to_type)
+                // No conversion function — keyword from (identity conversion)
+                let value_reg = self.lower_expression(expr)?;
+                let from_type = self.convert_type(source_type);
+                let to_type = self.convert_type(target);
+                if from_type == to_type {
+                    Some(value_reg)
+                } else {
+                    self.builder.build_cast(value_reg, from_type, to_type)
+                }
             }
+        } else {
+            // Fallback: for extern/imported abstracts (e.g., SIMD4f) whose @:from rules
+            // weren't populated (not in file.abstracts), try stdlib mapping directly.
+            self.try_stdlib_from_cast(expr, target, &abs_name)
         }
+    }
+
+    /// Fallback @:from conversion for extern abstracts via stdlib mapping.
+    /// Searches for a static "fromArray"/"fromXxx" method in the abstract's stdlib class.
+    fn try_stdlib_from_cast(
+        &mut self,
+        expr: &HirExpr,
+        target: TypeId,
+        abs_name: &InternedString,
+    ) -> Option<IrId> {
+        // Resolve abstract's stdlib class name (e.g., "rayzor_SIMD4f")
+        let class_name = {
+            let type_table = self.type_table.borrow();
+            let ti = type_table.get(target)?;
+            if let TypeKind::Abstract { symbol_id, .. } = &ti.kind {
+                let sym = self.symbol_table.get_symbol(*symbol_id)?;
+                sym.native_name
+                    .and_then(|nn| self.string_interner.get(nn))
+                    .map(|n| n.replace("::", "_"))
+                    .or_else(|| {
+                        self.string_interner
+                            .get(sym.name)
+                            .map(|n| format!("rayzor_{}", n))
+                    })
+            } else {
+                None
+            }
+        }?;
+
+        // Search stdlib mapping for a static @:from method (e.g., "fromArray")
+        let mapping_info = self
+            .stdlib_mapping
+            .find_by_name(&class_name, "fromArray")
+            .map(|(_, m)| (m.runtime_name.to_string(), m.is_mir_wrapper));
+
+        let (runtime_func, is_mir_wrapper) = mapping_info?;
+
+        let value_reg = self.lower_expression(expr)?;
+        let result_type = self.convert_type(target);
+        let param_types = vec![IrType::Ptr(Box::new(IrType::Void))];
+
+        let func_id = if is_mir_wrapper {
+            self.register_stdlib_mir_forward_ref(&runtime_func, param_types, result_type.clone())
+        } else {
+            self.get_or_register_extern_function(&runtime_func, param_types, result_type.clone())
+        };
+
+        self.builder
+            .build_call_direct(func_id, vec![value_reg], result_type)
     }
 
     /// Resolve an abstract @:from/@:to conversion function to an IrFunctionId.

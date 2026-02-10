@@ -180,11 +180,12 @@ impl<'a> TastToHirContext<'a> {
     /// This handles cases like: static inline var SOLAR_MASS = 4.0 * PI * PI;
     /// where PI is also a static inline var
     fn evaluate_inline_static_vars(&mut self, file: &TypedFile) {
-        // Collect all static fields that need evaluation
+        // Collect all static fields that need evaluation (from classes and abstracts)
         let static_fields: Vec<_> = file
             .classes
             .iter()
             .flat_map(|class| class.fields.iter())
+            .chain(file.abstracts.iter().flat_map(|abs| abs.fields.iter()))
             .filter(|field| field.is_static && field.initializer.is_some())
             .map(|field| (field.symbol_id, field.initializer.as_ref().unwrap().clone()))
             .collect();
@@ -1300,29 +1301,42 @@ impl<'a> TastToHirContext<'a> {
                 class_symbol,
                 field_symbol,
             } => {
+                // First check pre-evaluated inline values (handles enum abstract fields and
+                // static inline vars that were pre-computed by evaluate_inline_static_vars)
+                if let Some(literal) = self.inline_var_values.get(field_symbol).cloned() {
+                    return HirExpr {
+                        kind: HirExprKind::Literal(literal),
+                        ty: expr.expr_type,
+                        lifetime: LifetimeId::from_raw(1),
+                        source_location: expr.source_location,
+                    };
+                }
+
                 // Static fields with constant initializers should be inlined
                 // For non-constant static fields, we would need global data storage
                 let mut inlined_value = None;
 
                 if let Some(file) = &self.current_file {
-                    // Find the class by symbol
-                    for class in &file.classes {
-                        if class.symbol_id == *class_symbol {
-                            // Find the field by symbol
-                            for field in &class.fields {
-                                if field.symbol_id == *field_symbol && field.is_static {
-                                    // Check if field has a constant initializer
-                                    if let Some(ref init_expr) = field.initializer {
-                                        if let TypedExpressionKind::Literal { value } =
-                                            &init_expr.kind
-                                        {
-                                            // Inline the literal value
-                                            inlined_value = Some(HirExprKind::Literal(
-                                                self.lower_literal(value),
-                                            ));
-                                        }
-                                    }
-                                    break;
+                    // Find the class or abstract by symbol
+                    let field_iter: Vec<&crate::tast::node::TypedField> = file
+                        .classes
+                        .iter()
+                        .filter(|c| c.symbol_id == *class_symbol)
+                        .flat_map(|c| c.fields.iter())
+                        .chain(
+                            file.abstracts
+                                .iter()
+                                .filter(|a| a.symbol_id == *class_symbol)
+                                .flat_map(|a| a.fields.iter()),
+                        )
+                        .collect();
+
+                    for field in field_iter {
+                        if field.symbol_id == *field_symbol && field.is_static {
+                            if let Some(ref init_expr) = field.initializer {
+                                if let TypedExpressionKind::Literal { value } = &init_expr.kind {
+                                    inlined_value =
+                                        Some(HirExprKind::Literal(self.lower_literal(value)));
                                 }
                             }
                             break;
@@ -1334,7 +1348,6 @@ impl<'a> TastToHirContext<'a> {
                     hir_kind
                 } else {
                     // Fallback: treat as variable (may not work for all cases)
-                    // TODO: Add proper global static data storage for non-constant static fields
                     debug!(
                         "WARNING: Static field access without constant initializer may not work"
                     );

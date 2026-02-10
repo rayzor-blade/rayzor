@@ -366,6 +366,7 @@ pub struct AbstractDecl {
     pub from: Vec<Type>,
     pub to: Vec<Type>,
     pub fields: Vec<ClassField>,
+    pub is_enum_abstract: bool,
     pub span: Span,
 }
 

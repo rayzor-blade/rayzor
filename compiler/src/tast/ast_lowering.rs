@@ -3430,6 +3430,9 @@ impl<'a> AstLowering<'a> {
             .map(|t| self.lower_type(t))
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Initialize class_fields for this abstract so field tracking works (needed for enum abstract)
+        self.class_fields.insert(abstract_symbol, Vec::new());
+
         // Push abstract onto class context stack so `this` resolves correctly in method bodies
         self.context.class_context_stack.push(abstract_symbol);
 
@@ -3462,7 +3465,24 @@ impl<'a> AstLowering<'a> {
                 _ => {
                     // Handle regular fields (var, final, property)
                     match self.lower_field(field) {
-                        Ok(typed_field) => fields.push(typed_field),
+                        Ok(mut typed_field) => {
+                            // For enum abstracts, all var fields are implicitly static
+                            if abstract_decl.is_enum_abstract && !typed_field.is_static {
+                                typed_field.is_static = true;
+                                // Also update class_fields tracking
+                                if let Some(field_list) =
+                                    self.class_fields.get_mut(&abstract_symbol)
+                                {
+                                    if let Some(entry) = field_list
+                                        .iter_mut()
+                                        .find(|(_, sym, _)| *sym == typed_field.symbol_id)
+                                    {
+                                        entry.2 = true;
+                                    }
+                                }
+                            }
+                            fields.push(typed_field);
+                        }
                         Err(e) => self.context.add_error(e),
                     }
                 }
@@ -3485,6 +3505,7 @@ impl<'a> AstLowering<'a> {
             constructors,
             from_types,
             to_types,
+            is_enum_abstract: abstract_decl.is_enum_abstract,
             visibility: self.lower_access(&abstract_decl.access),
             source_location: self.context.create_location_from_span(abstract_decl.span),
         };
@@ -7629,6 +7650,46 @@ impl<'a> AstLowering<'a> {
                                     });
                                 }
                             }
+                        }
+                    }
+                }
+
+                // Check if this is an abstract (enum abstract) and the field is a static value
+                if symbol_kind == Some(crate::tast::symbols::SymbolKind::Abstract) {
+                    let abstract_symbol = symbol_id;
+                    let field_name = self.context.intern_string(field);
+
+                    if let Some(fields) = self.class_fields.get(&abstract_symbol) {
+                        if let Some((_, field_symbol, _)) =
+                            fields.iter().find(|(name, _, _)| *name == field_name)
+                        {
+                            let field_symbol = *field_symbol;
+                            let expr_type = self
+                                .context
+                                .symbol_table
+                                .get_symbol(field_symbol)
+                                .map(|s| s.type_id)
+                                .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type());
+
+                            let kind = TypedExpressionKind::StaticFieldAccess {
+                                class_symbol: abstract_symbol,
+                                field_symbol,
+                            };
+
+                            let usage = VariableUsage::Copy;
+                            let lifetime_id = self.assign_lifetime(&kind, &expr_type);
+                            let metadata = self.analyze_expression_metadata(&kind);
+
+                            return Ok(TypedExpression {
+                                expr_type,
+                                kind,
+                                usage,
+                                lifetime_id,
+                                source_location: self
+                                    .context
+                                    .create_location_from_span(expression.span),
+                                metadata,
+                            });
                         }
                     }
                 }

@@ -1914,9 +1914,8 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 **What's Missing:**
 - [x] Implicit conversions (`@:from`, `@:to`) (2026-02-10)
-- [ ] Abstract enum (`abstract Color(Int) { var Red = 0; var Blue = 1; }`)
+- [x] Enum abstract (`enum abstract Color(Int) { var Red = 0; var Blue = 1; }`) (2026-02-10)
 - [ ] `@:forward` — delegate methods to underlying type
-- [ ] `@:enum` abstracts
 - [ ] Static methods on abstracts (MIR path)
 
 ### 16.11 Dynamic Type 🟡

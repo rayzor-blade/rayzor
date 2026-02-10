@@ -734,6 +734,31 @@ impl InstructionExt for IrInstruction {
                 // outputs contains IrType, not IrId, so no replacement needed
             }
             IrInstruction::ClosureEnv { closure, .. } => replace(closure),
+            // Vector / SIMD instructions
+            IrInstruction::VectorLoad { ptr, .. } => replace(ptr),
+            IrInstruction::VectorStore { ptr, value, .. } => {
+                replace(ptr);
+                replace(value);
+            }
+            IrInstruction::VectorBinOp { left, right, .. } => {
+                replace(left);
+                replace(right);
+            }
+            IrInstruction::VectorSplat { scalar, .. } => replace(scalar),
+            IrInstruction::VectorExtract { vector, .. } => replace(vector),
+            IrInstruction::VectorInsert { vector, scalar, .. } => {
+                replace(vector);
+                replace(scalar);
+            }
+            IrInstruction::VectorReduce { vector, .. } => replace(vector),
+            IrInstruction::VectorUnaryOp { operand, .. } => replace(operand),
+            IrInstruction::VectorMinMax { left, right, .. } => {
+                replace(left);
+                replace(right);
+            }
+            // Move/Clone instructions
+            IrInstruction::Move { src, .. } => replace(src),
+            IrInstruction::Clone { src, .. } => replace(src),
             // Instructions with no uses to replace
             IrInstruction::Const { .. }
             | IrInstruction::Jump { .. }
