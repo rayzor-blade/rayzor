@@ -1666,8 +1666,8 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 11 | Property get/set dispatch | P1 | Medium | 🟡 Mostly done | encapsulation |
 | 12 | EReg (regex runtime) | P1 | Medium | 🟢 Complete | text processing |
 | 13 | Enum methods + statics | P1 | Medium | 🟡 Partial | rich enums |
-| 14 | Abstract types (operator overloading) | P1 | High | 🟡 Partial | custom types |
-| 15 | Dynamic type operations | P1 | Medium | 🟡 Partial | interop, JSON |
+| 14 | Abstract types (operator overloading) | P1 | High | 🟡 Methods done | custom types |
+| 15 | Dynamic type operations | P1 | Medium | 🟡 Partial (anon r/w done) | interop, JSON |
 | 16 | Type parameters on functions | P1 | Medium | 🟢 Complete | generic functions |
 | 17 | Null safety (`Null<T>`) | P2 | Medium | 🔴 Not started | null checks |
 | 18 | Structural subtyping | P2 | Medium | 🔴 Not started | structural interfaces |
@@ -1872,28 +1872,39 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 ### 16.10 Abstract Types 🟡
 
 **Priority:** P1
-**Current State:** Parser handles abstract declarations. `@:coreType` extern abstracts work (SIMD4f, CString). Operator overloading via `@:op` partially works.
+**Current State:** Parser handles abstract declarations. `@:coreType` extern abstracts work (SIMD4f, CString). Operator overloading via `@:op` partially works. User-defined abstract methods with underlying types work end-to-end (2026-02-09).
+
+**What Works (2026-02-09):**
+- [x] User-defined abstract types with underlying type (`abstract MyInt(Int)`)
+- [x] `this` in abstract methods refers to underlying value (Int, Float, etc.)
+- [x] Abstract instance methods lowered through full TAST→HIR→MIR pipeline
+- [x] Multi-statement methods with multiple return paths (phi-based inlining)
+- [x] `@:op(A + B)` on non-extern abstracts (TAST-level inlining for single-return)
 
 **What's Missing:**
-- [ ] User-defined abstract types with underlying type (`abstract MyInt(Int)`)
 - [ ] Implicit conversions (`@:from`, `@:to`)
-- [ ] `@:op(A + B)` on non-extern abstracts
 - [ ] Abstract enum (`abstract Color(Int) { var Red = 0; var Blue = 1; }`)
 - [ ] `@:forward` — delegate methods to underlying type
 - [ ] `@:enum` abstracts
-- [ ] `this` in abstract methods refers to underlying value
+- [ ] Static methods on abstracts (MIR path)
 
 ### 16.11 Dynamic Type 🟡
 
 **Priority:** P1
-**Current State:** `Dynamic` type exists in type system. Boxing/unboxing works for basic types. Anonymous objects use Dynamic for field types.
+**Current State:** `Dynamic` type exists in type system. Boxing/unboxing works for basic types. Anonymous objects use Dynamic for field types. Dynamic field read/write works for anonymous objects via Reflect API fallback. Dynamic→typed coercion works in both Let and Assign handlers.
+
+**Implemented:**
+
+- [x] `Dynamic` field READ for anonymous objects (Reflect API fallback)
+- [x] `Dynamic` field WRITE for anonymous objects (Reflect API fallback)
+- [x] `Dynamic` → typed coercion at assignment (Let and Assign handlers)
+- [x] Reflect.field/setField on Dynamic objects (anonymous)
 
 **What's Missing:**
-- [ ] `Dynamic` field access (`obj.anyField` without compile-time check)
+
+- [ ] `Dynamic` field access for class instances (needs field offset RTTI registration)
 - [ ] `Dynamic` method calls
 - [ ] `Dynamic` arithmetic operations
-- [ ] `Dynamic` → typed coercion at assignment
-- [ ] Reflect.field/setField on Dynamic objects
 - [ ] JSON parsing returns Dynamic
 
 ### 16.12 EReg (Regular Expressions) 🟢

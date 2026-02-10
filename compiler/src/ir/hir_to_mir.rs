@@ -2942,6 +2942,26 @@ impl<'a> HirToMirContext<'a> {
 
                     // Store to lvalue
                     if let Some(value) = final_value {
+                        // Dynamic↔typed coercion (box concrete→Dynamic, unbox Dynamic→concrete)
+                        let value = if let HirLValue::Variable(sym) = lhs {
+                            if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
+                                let target_ty = sym_info.type_id;
+                                if target_ty != TypeId::invalid() {
+                                    let after_box = self
+                                        .maybe_box_value(value, rhs.ty, target_ty)
+                                        .unwrap_or(value);
+                                    self.maybe_unbox_value(after_box, rhs.ty, target_ty)
+                                        .unwrap_or(after_box)
+                                } else {
+                                    value
+                                }
+                            } else {
+                                value
+                            }
+                        } else {
+                            value
+                        };
+
                         // Wrap class instance in interface fat pointer if assigning to interface var
                         let value = if let HirLValue::Variable(sym) = lhs {
                             if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
@@ -13392,15 +13412,106 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
                     } else {
+                        // Dynamic field WRITE fallback via Reflect API.
+                        // If the object is Dynamic (anonymous object boxed as Dynamic),
+                        // unbox and use haxe_reflect_set_field.
+                        let is_dynamic = {
+                            let type_table = self.type_table.borrow();
+                            type_table
+                                .get(object.ty)
+                                .map(|t| matches!(t.kind, TypeKind::Dynamic))
+                                .unwrap_or(false)
+                        };
+                        if is_dynamic {
+                            let field_name_str = self
+                                .symbol_table
+                                .get_symbol(*field)
+                                .and_then(|s| self.string_interner.get(s.name))
+                                .map(|s| s.to_string());
+                            if let Some(fname) = field_name_str {
+                                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                                // Unbox Dynamic to get the anonymous object handle.
+                                let unbox_ref_id = self.get_or_register_extern_function(
+                                    "haxe_unbox_reference_ptr",
+                                    vec![ptr_u8.clone()],
+                                    ptr_u8.clone(),
+                                );
+                                if let Some(handle) = self.builder.build_call_direct(
+                                    unbox_ref_id,
+                                    vec![obj_reg],
+                                    ptr_u8.clone(),
+                                ) {
+                                    // Box the value based on its IR type
+                                    let value_ir_type = self.builder.get_register_type(value);
+                                    let boxed_value = match &value_ir_type {
+                                        Some(IrType::F64) | Some(IrType::F32) => {
+                                            let box_id = self.get_or_register_extern_function(
+                                                "haxe_box_float_ptr",
+                                                vec![IrType::F64],
+                                                ptr_u8.clone(),
+                                            );
+                                            self.builder.build_call_direct(
+                                                box_id,
+                                                vec![value],
+                                                ptr_u8.clone(),
+                                            )
+                                        }
+                                        Some(IrType::Bool) => {
+                                            let box_id = self.get_or_register_extern_function(
+                                                "haxe_box_bool_ptr",
+                                                vec![IrType::Bool],
+                                                ptr_u8.clone(),
+                                            );
+                                            self.builder.build_call_direct(
+                                                box_id,
+                                                vec![value],
+                                                ptr_u8.clone(),
+                                            )
+                                        }
+                                        Some(IrType::Ptr(_)) => {
+                                            // Already a pointer — pass through as-is
+                                            Some(value)
+                                        }
+                                        _ => {
+                                            // Int or other integer types
+                                            let box_id = self.get_or_register_extern_function(
+                                                "haxe_box_int_ptr",
+                                                vec![IrType::I64],
+                                                ptr_u8.clone(),
+                                            );
+                                            self.builder.build_call_direct(
+                                                box_id,
+                                                vec![value],
+                                                ptr_u8.clone(),
+                                            )
+                                        }
+                                    };
+                                    if let Some(boxed) = boxed_value {
+                                        let field_name_reg =
+                                            self.builder.build_const(IrValue::String(fname));
+                                        if let Some(field_name_reg) = field_name_reg {
+                                            let set_field_id = self
+                                                .get_or_register_extern_function(
+                                                    "haxe_reflect_set_field",
+                                                    vec![ptr_u8.clone(), ptr_u8.clone(), ptr_u8],
+                                                    IrType::Void,
+                                                );
+                                            self.builder.build_call_direct(
+                                                set_field_id,
+                                                vec![handle, field_name_reg, boxed],
+                                                IrType::Void,
+                                            );
+                                        }
+                                    }
+                                }
+                                return;
+                            }
+                        }
                         let field_name = self
                             .symbol_table
                             .get_symbol(*field)
                             .map(|s| format!("{}", s.name))
                             .unwrap_or_else(|| format!("{:?}", field));
-                        // eprintln!(
-                        //     "WARNING: Field '{}' ({:?}) not found in field_index_map for write",
-                        //     field_name, field
-                        // );
                         self.add_error(
                             &format!("Field '{}' ({:?}) index not found for write - class may not be registered", field_name, field),
                             SourceLocation::unknown()
@@ -13485,18 +13596,25 @@ impl<'a> HirToMirContext<'a> {
                     // which is also NOT a boxed Dynamic value.
                     if let Some(IrType::Ptr(inner)) = &obj_ir_type {
                         if matches!(**inner, IrType::Void) {
-                            // This is a raw pointer (e.g., from StringMap<Point>.get()),
-                            // not a boxed Dynamic value. Skip unboxing.
+                            // Ptr(Void) can be: raw class pointer OR anonymous object handle.
+                            // Check if ANY class has this field before routing to class access.
+                            let field_in_class = self.field_exists_in_any_class(field);
                             drop(type_table);
-                            return self.lower_field_access_for_class(obj, field, field_ty);
+                            if field_in_class {
+                                return self.lower_field_access_for_class(obj, field, field_ty);
+                            }
+                            // No class has this field — use Reflect API (anonymous object)
+                            return self.dynamic_reflect_field_read(obj, field, field_ty);
                         }
                     }
                     // Also check for I64 - this is a raw pointer from Array element access
                     if matches!(&obj_ir_type, Some(IrType::I64)) {
-                        // This is a raw pointer stored as I64 (e.g., from Array<Body>),
-                        // not a boxed Dynamic value. Skip unboxing.
+                        let field_in_class = self.field_exists_in_any_class(field);
                         drop(type_table);
-                        return self.lower_field_access_for_class(obj, field, field_ty);
+                        if field_in_class {
+                            return self.lower_field_access_for_class(obj, field, field_ty);
+                        }
+                        return self.dynamic_reflect_field_read(obj, field, field_ty);
                     }
                     drop(type_table);
 
@@ -13547,7 +13665,14 @@ impl<'a> HirToMirContext<'a> {
                                     resolved_field_ty,
                                 );
                             } else {
-                                (receiver_ty, field)
+                                // Dynamic field READ fallback via Reflect API.
+                                // Safe: field_index_map name-match failed, so no class has this field.
+                                // Only anonymous objects (typed as Dynamic) reach here.
+                                return self.dynamic_reflect_field_read(
+                                    unboxed_obj,
+                                    field,
+                                    field_ty,
+                                );
                             }
                         } else {
                             (receiver_ty, field)
@@ -14121,6 +14246,117 @@ impl<'a> HirToMirContext<'a> {
         self.builder.set_register_type(field_value, field_ir_ty);
 
         Some(field_value)
+    }
+
+    /// Check if any class in field_index_map has a field with the same name.
+    fn field_exists_in_any_class(&self, field: SymbolId) -> bool {
+        // Check by SymbolId first
+        if self.field_index_map.contains_key(&field) {
+            return true;
+        }
+        // Check by name
+        let field_name = match self.symbol_table.get_symbol(field).map(|s| s.name) {
+            Some(name) => name,
+            None => return false,
+        };
+        for (sym, _) in &self.field_index_map {
+            if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
+                if sym_info.name == field_name {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// Dynamic field READ fallback via Reflect API.
+    /// Used when receiver is Dynamic and field_index_map has no matching class field.
+    /// The object may be a boxed DynamicValue (from boxing) — unbox to get the anonymous handle.
+    fn dynamic_reflect_field_read(
+        &mut self,
+        obj: IrId,
+        field: SymbolId,
+        field_ty: TypeId,
+    ) -> Option<IrId> {
+        let field_name_str = self
+            .symbol_table
+            .get_symbol(field)
+            .and_then(|s| self.string_interner.get(s.name))
+            .map(|s| s.to_string())?;
+
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+
+        // Unbox the Dynamic value to get the anonymous object handle.
+        // The object may be a boxed DynamicValue (from haxe_box_reference_ptr).
+        let unbox_ref_id = self.get_or_register_extern_function(
+            "haxe_unbox_reference_ptr",
+            vec![ptr_u8.clone()],
+            ptr_u8.clone(),
+        );
+        let handle = self
+            .builder
+            .build_call_direct(unbox_ref_id, vec![obj], ptr_u8.clone())?;
+
+        let field_name_reg = self.builder.build_const(IrValue::String(field_name_str))?;
+        let reflect_field_id = self.get_or_register_extern_function(
+            "haxe_reflect_field",
+            vec![ptr_u8.clone(), ptr_u8.clone()],
+            ptr_u8.clone(),
+        );
+        let dynamic_result = self.builder.build_call_direct(
+            reflect_field_id,
+            vec![handle, field_name_reg],
+            ptr_u8.clone(),
+        )?;
+
+        // Unbox based on field_ty
+        let type_table = self.type_table.borrow();
+        let field_type_kind = type_table.get(field_ty).map(|t| t.kind.clone());
+        drop(type_table);
+
+        let result = match field_type_kind.as_ref() {
+            Some(TypeKind::Int) => {
+                let unbox_id = self.get_or_register_extern_function(
+                    "haxe_unbox_int_ptr",
+                    vec![ptr_u8.clone()],
+                    IrType::I64,
+                );
+                self.builder
+                    .build_call_direct(unbox_id, vec![dynamic_result], IrType::I64)?
+            }
+            Some(TypeKind::Float) => {
+                let unbox_id = self.get_or_register_extern_function(
+                    "haxe_unbox_float_ptr",
+                    vec![ptr_u8.clone()],
+                    IrType::F64,
+                );
+                self.builder
+                    .build_call_direct(unbox_id, vec![dynamic_result], IrType::F64)?
+            }
+            Some(TypeKind::Bool) => {
+                let unbox_id = self.get_or_register_extern_function(
+                    "haxe_unbox_bool_ptr",
+                    vec![ptr_u8.clone()],
+                    IrType::Bool,
+                );
+                self.builder
+                    .build_call_direct(unbox_id, vec![dynamic_result], IrType::Bool)?
+            }
+            Some(TypeKind::String) => {
+                let unbox_id = self.get_or_register_extern_function(
+                    "haxe_unbox_reference_ptr",
+                    vec![ptr_u8.clone()],
+                    ptr_u8.clone(),
+                );
+                self.builder
+                    .build_call_direct(unbox_id, vec![dynamic_result], ptr_u8)?
+            }
+            _ => {
+                // Dynamic or unknown: return DynamicValue* as-is
+                dynamic_result
+            }
+        };
+        Some(result)
     }
 
     /// Direct field access for typedef'd anonymous structs (like FileStat)
