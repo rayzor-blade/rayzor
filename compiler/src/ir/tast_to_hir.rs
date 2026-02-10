@@ -534,32 +534,71 @@ impl<'a> TastToHirContext<'a> {
 
         // Extract implicit conversion rules
         // @:from rules allow implicit conversion FROM other types TO this abstract
-        let from_rules: Vec<HirCastRule> = abstract_decl
+        let mut from_rules: Vec<HirCastRule> = abstract_decl
             .from_types
             .iter()
             .map(|&from_ty| {
                 HirCastRule {
                     from_type: from_ty,
                     to_type: type_id,
-                    is_implicit: true,   // @:from rules are implicit conversions
-                    cast_function: None, // Will be resolved during type checking
+                    is_implicit: true,
+                    cast_function: None, // Keyword from — no function needed
                 }
             })
             .collect();
 
         // @:to rules allow implicit conversion FROM this abstract TO other types
-        let to_rules: Vec<HirCastRule> = abstract_decl
+        let mut to_rules: Vec<HirCastRule> = abstract_decl
             .to_types
             .iter()
             .map(|&to_ty| {
                 HirCastRule {
                     from_type: type_id,
                     to_type: to_ty,
-                    is_implicit: true,   // @:to rules are implicit conversions
-                    cast_function: None, // Will be resolved during type checking
+                    is_implicit: true,
+                    cast_function: None, // Keyword to — no function needed
                 }
             })
             .collect();
+
+        // Scan methods for @:from/@:to metadata and associate conversion functions
+        for method in &abstract_decl.methods {
+            if method.metadata.is_from_conversion
+                && method.is_static
+                && !method.parameters.is_empty()
+            {
+                // @:from static function: first param type is the source type
+                let param_type = method.parameters[0].param_type;
+                // Check if there's already a keyword rule for this source type
+                let existing = from_rules.iter_mut().find(|r| r.from_type == param_type);
+                if let Some(rule) = existing {
+                    rule.cast_function = Some(method.symbol_id);
+                } else {
+                    // @:from method defines a new conversion rule (no keyword clause needed)
+                    from_rules.push(HirCastRule {
+                        from_type: param_type,
+                        to_type: type_id,
+                        is_implicit: true,
+                        cast_function: Some(method.symbol_id),
+                    });
+                }
+            }
+            if method.metadata.is_to_conversion && !method.is_static {
+                // @:to instance function: return type is the target type
+                let target_type = method.return_type;
+                let existing = to_rules.iter_mut().find(|r| r.to_type == target_type);
+                if let Some(rule) = existing {
+                    rule.cast_function = Some(method.symbol_id);
+                } else {
+                    to_rules.push(HirCastRule {
+                        from_type: type_id,
+                        to_type: target_type,
+                        is_implicit: true,
+                        cast_function: Some(method.symbol_id),
+                    });
+                }
+            }
+        }
 
         // Extract operator overloads from methods
         // Methods with @:op metadata become operators

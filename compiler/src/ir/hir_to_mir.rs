@@ -249,6 +249,14 @@ pub struct HirToMirContext<'a> {
     /// Maps IrFunctionId → Vec<(param_index, interface_SymbolId)>
     /// Used at call sites to wrap arguments in fat pointers for constrained type params.
     constrained_param_interfaces: BTreeMap<IrFunctionId, Vec<(usize, SymbolId)>>,
+
+    /// Abstract type @:from conversion rules.
+    /// Maps abstract name (InternedString) → list of from-rules.
+    abstract_from_rules: BTreeMap<InternedString, Vec<HirCastRule>>,
+
+    /// Abstract type @:to conversion rules.
+    /// Maps abstract name (InternedString) → list of to-rules.
+    abstract_to_rules: BTreeMap<InternedString, Vec<HirCastRule>>,
 }
 
 /// TCC runtime function IDs for __c__ inline code lowering
@@ -394,6 +402,8 @@ impl<'a> HirToMirContext<'a> {
             interface_method_names: BTreeMap::new(),
             interface_vtables: BTreeMap::new(),
             constrained_param_interfaces: BTreeMap::new(),
+            abstract_from_rules: BTreeMap::new(),
+            abstract_to_rules: BTreeMap::new(),
         };
 
         // Pre-declare malloc so it's available for heap allocations during lowering
@@ -2818,6 +2828,14 @@ impl<'a> HirToMirContext<'a> {
                             value_reg
                         };
 
+                        // Apply abstract @:from implicit conversion if needed
+                        let final_value = if let Some(target_ty) = var_type {
+                            self.maybe_abstract_from_convert(final_value, init_expr.ty, target_ty)
+                                .unwrap_or(final_value)
+                        } else {
+                            final_value
+                        };
+
                         // Wrap class instance in interface fat pointer if needed
                         let final_value = if let Some(target_ty) = var_type {
                             self.maybe_wrap_for_interface(final_value, init_expr.ty, target_ty)
@@ -2952,6 +2970,23 @@ impl<'a> HirToMirContext<'a> {
                                         .unwrap_or(value);
                                     self.maybe_unbox_value(after_box, rhs.ty, target_ty)
                                         .unwrap_or(after_box)
+                                } else {
+                                    value
+                                }
+                            } else {
+                                value
+                            }
+                        } else {
+                            value
+                        };
+
+                        // Apply abstract @:from implicit conversion if needed
+                        let value = if let HirLValue::Variable(sym) = lhs {
+                            if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
+                                let target_ty = sym_info.type_id;
+                                if target_ty != TypeId::invalid() {
+                                    self.maybe_abstract_from_convert(value, rhs.ty, target_ty)
+                                        .unwrap_or(value)
                                 } else {
                                     value
                                 }
@@ -10525,59 +10560,10 @@ impl<'a> HirToMirContext<'a> {
                 target,
                 is_safe,
             } => {
-                // Check if target is a @:coreType abstract with @:from (e.g., SIMD4f)
-                // In that case, emit a function call to the @:from wrapper instead of a cast
-                let is_simd4f_target = {
-                    let type_table = self.type_table.borrow();
-                    type_table
-                        .get(*target)
-                        .map(|ti| {
-                            let sym_id = match &ti.kind {
-                                TypeKind::Abstract { symbol_id, .. } => Some(*symbol_id),
-                                TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
-                                _ => None,
-                            };
-                            sym_id
-                                .map(|sid| {
-                                    self.symbol_table
-                                        .get_symbol(sid)
-                                        .map(|s| {
-                                            // Check native_name first, then symbol name
-                                            let by_native = s
-                                                .native_name
-                                                .and_then(|nn| self.string_interner.get(nn))
-                                                .map(|n| n == "rayzor::SIMD4f")
-                                                .unwrap_or(false);
-                                            let by_name = self
-                                                .string_interner
-                                                .get(s.name)
-                                                .map(|n| n == "SIMD4f")
-                                                .unwrap_or(false);
-                                            by_native || by_name
-                                        })
-                                        .unwrap_or(false)
-                                })
-                                .unwrap_or(false)
-                        })
-                        .unwrap_or(false)
-                };
-
-                if is_simd4f_target {
-                    // @:from implicit cast → call SIMD4f_fromArray wrapper
-                    let value_reg = self.lower_expression(expr)?;
-                    let param_types = vec![self
-                        .builder
-                        .get_register_type(value_reg)
-                        .unwrap_or(IrType::Ptr(Box::new(IrType::Void)))];
-                    let return_type = IrType::vector(IrType::F32, 4);
-                    let func_id = self.register_stdlib_mir_forward_ref(
-                        "SIMD4f_fromArray",
-                        param_types,
-                        return_type.clone(),
-                    );
-                    return self
-                        .builder
-                        .build_call_direct(func_id, vec![value_reg], return_type);
+                // Check if target is an abstract type with @:from conversion rules
+                // This generalizes the SIMD4f path to work with any abstract
+                if let Some(converted) = self.try_abstract_from_cast(expr, *target) {
+                    return Some(converted);
                 }
 
                 let from_type = self.convert_type(expr.ty);
@@ -12372,6 +12358,160 @@ impl<'a> HirToMirContext<'a> {
             vec![ptr_val],
             IrType::Ptr(Box::new(IrType::String)),
         )
+    }
+
+    /// Resolve a TypeId to the abstract's qualified name, for looking up @:from/@:to rules.
+    /// Uses qualified_name for user-defined abstracts, native_name for extern abstracts (e.g., SIMD4f).
+    /// Returns None if the TypeId is not an abstract type.
+    fn resolve_abstract_name(&self, type_id: TypeId) -> Option<InternedString> {
+        let type_table = self.type_table.borrow();
+        if let Some(ti) = type_table.get(type_id) {
+            if let TypeKind::Abstract { symbol_id, .. } = &ti.kind {
+                if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
+                    return sym.qualified_name.or(sym.native_name).or(Some(sym.name));
+                }
+            }
+        }
+        None
+    }
+
+    /// Try to apply an abstract @:from conversion in a Cast expression.
+    /// Returns Some(result_reg) if a matching @:from rule was found, None otherwise.
+    fn try_abstract_from_cast(&mut self, expr: &HirExpr, target: TypeId) -> Option<IrId> {
+        let source_type = expr.ty;
+        let abs_name = self.resolve_abstract_name(target)?;
+
+        // Look up @:from rules for the target abstract
+        let matching_rule = self
+            .abstract_from_rules
+            .get(&abs_name)
+            .and_then(|rules| rules.iter().find(|r| r.from_type == source_type))
+            .cloned();
+
+        let rule = matching_rule?;
+
+        if let Some(cast_func_sym) = rule.cast_function {
+            // Has a conversion function — resolve and call it
+            let value_reg = self.lower_expression(expr)?;
+            let func_id = self.resolve_abstract_conversion_function(cast_func_sym, target)?;
+            let result_type = self.convert_type(target);
+            self.builder
+                .build_call_direct(func_id, vec![value_reg], result_type)
+        } else {
+            // No conversion function — keyword from (identity conversion)
+            // The value just passes through, possibly with a type cast
+            let value_reg = self.lower_expression(expr)?;
+            let from_type = self.convert_type(source_type);
+            let to_type = self.convert_type(target);
+            if from_type == to_type {
+                Some(value_reg) // No-op
+            } else {
+                self.builder.build_cast(value_reg, from_type, to_type)
+            }
+        }
+    }
+
+    /// Resolve an abstract @:from/@:to conversion function to an IrFunctionId.
+    /// Tries function_map (user-defined), external_function_map, then stdlib_mapping.
+    fn resolve_abstract_conversion_function(
+        &mut self,
+        symbol: SymbolId,
+        target_type: TypeId,
+    ) -> Option<IrFunctionId> {
+        // 1. Check function_map (user-defined abstract methods)
+        if let Some(&func_id) = self.function_map.get(&symbol) {
+            return Some(func_id);
+        }
+        // 2. Check external_function_map
+        if let Some(&func_id) = self.external_function_map.get(&symbol) {
+            return Some(func_id);
+        }
+        // 3. Fallback: look up by qualified name
+        if let Some(sym_info) = self.symbol_table.get_symbol(symbol) {
+            if let Some(qn) = sym_info.qualified_name {
+                if let Some(qualified) = self.string_interner.get(qn) {
+                    if let Some(&func_id) = self.external_function_name_map.get(qualified) {
+                        return Some(func_id);
+                    }
+                }
+            }
+            // 4. Try stdlib mapping by method name for @:coreType abstracts
+            if let Some(method_name) = self.string_interner.get(sym_info.name) {
+                // Check if this is a stdlib abstract (e.g., SIMD4f)
+                let type_table = self.type_table.borrow();
+                if let Some(ti) = type_table.get(target_type) {
+                    if let TypeKind::Abstract { symbol_id, .. } = &ti.kind {
+                        if let Some(abs_sym) = self.symbol_table.get_symbol(*symbol_id) {
+                            let class_name = abs_sym
+                                .native_name
+                                .and_then(|nn| self.string_interner.get(nn))
+                                .map(|n| n.replace("::", "_"))
+                                .or_else(|| {
+                                    self.string_interner
+                                        .get(abs_sym.name)
+                                        .map(|n| format!("rayzor_{}", n))
+                                });
+                            drop(type_table);
+                            if let Some(class) = class_name {
+                                // Try stdlib mapping (e.g., rayzor_SIMD4f + fromArray)
+                                if let Some((_, mapping)) =
+                                    self.stdlib_mapping.find_by_name(&class, method_name)
+                                {
+                                    let runtime_func = mapping.runtime_name;
+                                    let result_type = self.convert_type(target_type);
+                                    if mapping.is_mir_wrapper {
+                                        // MIR wrapper — register as forward ref
+                                        let func_id = self.register_stdlib_mir_forward_ref(
+                                            runtime_func,
+                                            vec![IrType::Ptr(Box::new(IrType::Void))],
+                                            result_type,
+                                        );
+                                        return Some(func_id);
+                                    } else {
+                                        let func_id = self.get_or_register_extern_function(
+                                            runtime_func,
+                                            vec![IrType::Ptr(Box::new(IrType::Void))],
+                                            result_type,
+                                        );
+                                        return Some(func_id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Try to apply an abstract @:from conversion in Let/Assign context.
+    /// Returns Some(converted_reg) if a matching @:from rule was found, None otherwise.
+    fn maybe_abstract_from_convert(
+        &mut self,
+        value: IrId,
+        source_type: TypeId,
+        target_type: TypeId,
+    ) -> Option<IrId> {
+        let abs_name = self.resolve_abstract_name(target_type)?;
+
+        let matching_rule = self
+            .abstract_from_rules
+            .get(&abs_name)
+            .and_then(|rules| rules.iter().find(|r| r.from_type == source_type))
+            .cloned();
+
+        let rule = matching_rule?;
+
+        if let Some(cast_func_sym) = rule.cast_function {
+            let func_id = self.resolve_abstract_conversion_function(cast_func_sym, target_type)?;
+            let result_type = self.convert_type(target_type);
+            self.builder
+                .build_call_direct(func_id, vec![value], result_type)
+        } else {
+            // No conversion function — keyword from, value passes through
+            None
+        }
     }
 
     fn maybe_box_value(
@@ -18465,6 +18605,25 @@ impl<'a> HirToMirContext<'a> {
         };
 
         self.builder.module.add_type(typedef);
+
+        // Store @:from/@:to conversion rules keyed by abstract qualified_name.
+        // We use qualified_name (or native_name for extern abstracts, or plain name as fallback)
+        // because HIR and type_table have different SymbolIds/TypeIds for the same abstract.
+        // The name is the only stable identifier shared between both.
+        let rule_key = self
+            .symbol_table
+            .get_symbol(abstract_decl.symbol_id)
+            .and_then(|sym| sym.qualified_name.or(sym.native_name).or(Some(sym.name)))
+            .unwrap_or(abstract_decl.name);
+
+        if !abstract_decl.from_rules.is_empty() {
+            self.abstract_from_rules
+                .insert(rule_key, abstract_decl.from_rules.clone());
+        }
+        if !abstract_decl.to_rules.is_empty() {
+            self.abstract_to_rules
+                .insert(rule_key, abstract_decl.to_rules.clone());
+        }
     }
 
     fn register_alias_metadata(&mut self, type_id: TypeId, alias: &HirTypeAlias) {

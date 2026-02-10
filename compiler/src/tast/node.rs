@@ -591,6 +591,12 @@ pub struct FunctionMetadata {
     /// Whether this function is marked with @:arrayAccess
     pub is_array_access: bool,
 
+    /// Whether this function is marked with @:from (abstract implicit conversion)
+    pub is_from_conversion: bool,
+
+    /// Whether this function is marked with @:to (abstract implicit conversion)
+    pub is_to_conversion: bool,
+
     /// Memory safety annotations
     pub memory_annotations: Vec<MemoryAnnotation>,
 }

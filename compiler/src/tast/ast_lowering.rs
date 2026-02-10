@@ -2900,6 +2900,8 @@ impl<'a> AstLowering<'a> {
                     overload_signatures: vec![],
                     operator_metadata: vec![],
                     is_array_access: false,
+                    is_from_conversion: false,
+                    is_to_conversion: false,
                     memory_annotations: vec![],
                 },
             });
@@ -2974,6 +2976,8 @@ impl<'a> AstLowering<'a> {
                         overload_signatures: vec![],
                         operator_metadata: vec![],
                         is_array_access: false,
+                        is_from_conversion: false,
+                        is_to_conversion: false,
                         memory_annotations: vec![],
                     },
                 });
@@ -4248,6 +4252,10 @@ impl<'a> AstLowering<'a> {
         // Check for @:arrayAccess metadata
         let is_array_access = self.has_array_access_metadata(&field.meta);
 
+        // Check for @:from / @:to metadata (abstract implicit conversions)
+        let is_from_conversion = field.meta.iter().any(|m| m.name == "from");
+        let is_to_conversion = field.meta.iter().any(|m| m.name == "to");
+
         self.context.pop_type_parameters();
         self.context.exit_scope();
 
@@ -4281,6 +4289,8 @@ impl<'a> AstLowering<'a> {
                 overload_signatures,
                 operator_metadata,
                 is_array_access,
+                is_from_conversion,
+                is_to_conversion,
                 memory_annotations: self.extract_memory_annotations(&field.meta),
             },
         })
@@ -6337,16 +6347,16 @@ impl<'a> AstLowering<'a> {
                     }
                 }
 
-                // Check for array literal → SIMD4f @:from conversion
+                // Check for implicit @:from conversion (e.g., array literal → abstract type)
+                // Array/object literals assigned to abstract types need an explicit Cast node
+                // so the MIR Cast handler can look up and call the @:from conversion function.
+                // Simple literals (int, float, string) and variables are handled by the
+                // MIR Let handler's maybe_abstract_from_convert() instead.
                 if let (Some(init_expr), Some(target_ty)) = (expr.as_ref(), declared_type) {
-                    if matches!(&init_expr.kind, ExprKind::Array(_))
-                        && self.is_simd4f_type(target_ty)
-                    {
-                        warn!(
-                            "SIMD4f from Array<Float> allocates a temporary heap array. \
-                             Use tuple syntax instead: var v:SIMD4f = (1.0, 2.0, 3.0, 4.0)"
-                        );
-                        // Lower the array, then wrap in an implicit cast to SIMD4f
+                    let needs_cast = self.is_abstract_type(target_ty)
+                        && matches!(&init_expr.kind, ExprKind::Array(_) | ExprKind::Object(_));
+                    if needs_cast {
+                        // Lower the initializer, then wrap in an implicit cast to the abstract type
                         let array_expr = self.lower_expression(init_expr)?;
                         let cast_expr = TypedExpression {
                             kind: TypedExpressionKind::Cast {
@@ -11489,6 +11499,16 @@ impl<'a> AstLowering<'a> {
         } else {
             false
         }
+    }
+
+    /// Check if a type is an abstract type (any abstract, not just SIMD4f).
+    fn is_abstract_type(&self, ty: crate::tast::TypeId) -> bool {
+        use crate::tast::core::TypeKind;
+        let type_table = self.context.type_table.borrow();
+        matches!(
+            type_table.get(ty).map(|ti| &ti.kind),
+            Some(TypeKind::Abstract { .. })
+        )
     }
 
     /// Try to desugar a tuple literal to a static method call (e.g., SIMD4f.make()).
