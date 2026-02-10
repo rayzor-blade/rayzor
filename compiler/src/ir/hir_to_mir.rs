@@ -6442,18 +6442,72 @@ impl<'a> HirToMirContext<'a> {
                         // Fallback: use find_receiver_class_name if monomorphized_var_types didn't have it
                         let receiver_class_hint_owned = receiver_class_hint_owned
                             .or_else(|| self.find_receiver_class_name(receiver));
+
+                        // SIMD4f detection: If the receiver type converts to VecF32x4, force
+                        // the class hint to "rayzor_SIMD4f". This prevents the FALLBACK2 brute-force
+                        // search from matching Tensor methods (which share names like sum, dot, sqrt).
+                        //
+                        // Two-stage detection:
+                        // 1. Check convert_type(receiver_type) — works when HIR type is SIMD4f abstract
+                        // 2. Check receiver variable's register type — works for chained calls like
+                        //    b.sum() where b = a.sqrt(), because build_call_direct sets the register
+                        //    type from the function's actual return type (VecF32x4), even though
+                        //    the HIR expression type might be Dynamic (TypeId(5)).
+                        let receiver_class_hint_owned = if receiver_class_hint_owned.is_none() {
+                            let ir_ty = self.convert_type(receiver_type);
+                            if ir_ty.is_vector() {
+                                Some("rayzor_SIMD4f".to_string())
+                            } else if let crate::ir::hir::HirExprKind::Variable {
+                                symbol: recv_sym,
+                                ..
+                            } = &receiver.kind
+                            {
+                                // Fallback: check the register type of the receiver variable.
+                                // This catches chained calls where the receiver's HIR type is Dynamic
+                                // but its register was typed as VecF32x4 by a previous SIMD4f call.
+                                self.symbol_map
+                                    .get(recv_sym)
+                                    .and_then(|reg| self.builder.get_register_type(*reg))
+                                    .filter(|ty| ty.is_vector())
+                                    .map(|_| "rayzor_SIMD4f".to_string())
+                            } else {
+                                None
+                            }
+                        } else {
+                            receiver_class_hint_owned
+                        };
                         let receiver_class_hint = receiver_class_hint_owned.as_deref();
 
                         // Calculate actual param count (excluding the receiver) for overload disambiguation
                         // e.g., s.indexOf("World", 0) has args=[s, "World", 0], param_count=2
                         let param_count = args.len().saturating_sub(1);
-                        // Try to find stdlib runtime mapping for this method
-                        let runtime_info = self.get_stdlib_runtime_info(
-                            *symbol,
-                            receiver_type,
-                            Some(param_count),
-                            receiver_class_hint,
-                        );
+
+                        // SIMD4f direct lookup: When receiver is known to be SIMD4f, bypass
+                        // get_stdlib_runtime_info (whose FALLBACK2 excludes SIMD matches).
+                        let runtime_info = if receiver_class_hint == Some("rayzor_SIMD4f") {
+                            let method_name_str = self
+                                .symbol_table
+                                .get_symbol(*symbol)
+                                .and_then(|s| self.string_interner.get(s.name));
+                            if let Some(mn) = method_name_str {
+                                self.stdlib_mapping
+                                    .find_by_name_and_params("rayzor_SIMD4f", mn, param_count)
+                                    .or_else(|| {
+                                        self.stdlib_mapping.find_by_name("rayzor_SIMD4f", mn)
+                                    })
+                                    .map(|(sig, mapping)| (sig.class, sig.method, mapping))
+                            } else {
+                                None
+                            }
+                        } else {
+                            // Try to find stdlib runtime mapping for this method
+                            self.get_stdlib_runtime_info(
+                                *symbol,
+                                receiver_type,
+                                Some(param_count),
+                                receiver_class_hint,
+                            )
+                        };
                         debug!(
                             "[EXTERN-VAR-DISPATCH] method={:?}, runtime_info={:?}",
                             self.symbol_table
@@ -6471,11 +6525,52 @@ impl<'a> HirToMirContext<'a> {
                             } else {
                                 let runtime_func = runtime_call.runtime_name;
                                 let is_instance_method = runtime_call.has_self_param;
+                                let is_mir_wrapper = runtime_call.is_mir_wrapper;
                                 debug!(
-                                    "[EXTERN METHOD VAR] Redirecting {}.{} -> {} (instance={})",
-                                    class_name, method_name, runtime_func, is_instance_method
+                                    "[EXTERN METHOD VAR] Redirecting {}.{} -> {} (instance={}, mir_wrapper={})",
+                                    class_name, method_name, runtime_func, is_instance_method, is_mir_wrapper
                                 );
 
+                                // MIR wrapper path: use register_stdlib_mir_forward_ref
+                                // MIR wrappers (SIMD4f, Thread, Channel, etc.) are compiled by
+                                // Cranelift alongside user code. They must NOT be registered as
+                                // extern C functions.
+                                if is_mir_wrapper {
+                                    // Lower receiver + args
+                                    let mut arg_regs = Vec::new();
+                                    if is_instance_method {
+                                        let receiver_reg = self.lower_expression(receiver)?;
+                                        arg_regs.push(receiver_reg);
+                                    }
+                                    for arg in args.iter().skip(1) {
+                                        if let Some(reg) = self.lower_expression(arg) {
+                                            arg_regs.push(reg);
+                                        }
+                                    }
+
+                                    let param_types: Vec<_> = arg_regs
+                                        .iter()
+                                        .map(|r| {
+                                            self.builder
+                                                .get_register_type(*r)
+                                                .unwrap_or(IrType::I64)
+                                        })
+                                        .collect();
+
+                                    let mir_func_id = self.register_stdlib_mir_forward_ref(
+                                        runtime_func,
+                                        param_types,
+                                        result_type.clone(),
+                                    );
+
+                                    return self.builder.build_call_direct(
+                                        mir_func_id,
+                                        arg_regs,
+                                        result_type.clone(),
+                                    );
+                                }
+
+                                // Extern C path: register as extern function
                                 // Get expected parameter types from the extern function signature
                                 let (expected_param_types, actual_return_type) = self
                                     .get_stdlib_mir_wrapper_signature(runtime_func)
@@ -6501,19 +6596,12 @@ impl<'a> HirToMirContext<'a> {
                                     });
 
                                 // Build argument list based on whether this is instance or static method
-                                // IMPORTANT: When is_method=true, args[0] is ALWAYS the receiver/class:
-                                // - For instance methods: args[0] is the instance receiver, pass it to runtime
-                                // - For static methods: args[0] is the CLASS type, SKIP it (not a real arg)
                                 let mut arg_regs = Vec::new();
                                 let args_to_process: &[HirExpr] = if is_instance_method {
-                                    // Instance method: args[0] is receiver, rest are actual args
                                     let receiver_reg = self.lower_expression(receiver)?;
-                                    debug!("[RECEIVER LOWER] method={}, receiver_reg={:?}, receiver_type={:?}", runtime_func, receiver_reg, self.builder.get_register_type(receiver_reg));
                                     arg_regs.push(receiver_reg);
                                     &args[1..]
                                 } else {
-                                    // Static method with is_method=true: args[0] is the CLASS type, skip it
-                                    // The actual arguments start at args[1]
                                     &args[1..]
                                 };
 
@@ -6538,28 +6626,23 @@ impl<'a> HirToMirContext<'a> {
                                 let param_types = if expected_param_types.len() == arg_regs.len() {
                                     expected_param_types.clone()
                                 } else {
-                                    // When is_method=true, args[0] is always receiver/class type - skip it
-                                    // For instance methods, add self param first; for static methods, no self param
                                     let mut params = if is_instance_method {
                                         vec![IrType::Ptr(Box::new(IrType::U8))]
                                     } else {
                                         vec![]
                                     };
-                                    // Always skip args[0] since is_method=true means args[0] is receiver/class
                                     for arg in args.iter().skip(1) {
                                         params.push(self.convert_type(arg.ty));
                                     }
                                     params
                                 };
 
-                                // Register the extern function
                                 let extern_func_id = self.get_or_register_extern_function(
                                     runtime_func,
                                     param_types,
                                     actual_return_type.clone(),
                                 );
 
-                                // Call the extern function
                                 let call_result = self.builder.build_call_direct(
                                     extern_func_id,
                                     arg_regs,

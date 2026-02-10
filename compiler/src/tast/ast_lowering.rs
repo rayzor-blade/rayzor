@@ -6190,11 +6190,16 @@ impl<'a> AstLowering<'a> {
                 }
             }
             ExprKind::TypeCheck { expr, type_hint } => {
+                // (expr : Type) is a type check hint — returns the value (not a boolean).
+                // It asserts at compile time that expr is compatible with Type.
+                // At runtime, it acts as an implicit cast (identity for same type, coercion otherwise).
                 let typed_expr = self.lower_expression(expr)?;
-                let check_type = self.lower_type(type_hint)?;
-                TypedExpressionKind::Is {
+                let target_type = self.lower_type(type_hint)?;
+
+                TypedExpressionKind::Cast {
                     expression: Box::new(typed_expr),
-                    check_type,
+                    target_type,
+                    cast_kind: CastKind::Checked,
                 }
             }
             ExprKind::Function(func) => {

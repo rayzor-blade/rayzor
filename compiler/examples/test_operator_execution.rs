@@ -53,7 +53,7 @@ fn main() -> Result<(), String> {
         }
 
         class Main {
-            public static function main():Int {
+            public static function main() {
                 var a:Counter = 5;
                 var b:Counter = 10;
                 return a + b;  // Should call add() which inlines to: this + rhs = 5 + 10 = 15

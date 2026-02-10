@@ -3819,8 +3819,58 @@ impl<'a> TastToHirContext<'a> {
                 )
             }
 
+            // For checked casts (from type annotations like `(rhs : Int)`),
+            // recursively inline to substitute parameters. Only handle Checked
+            // casts to avoid interfering with other cast kinds during compilation.
+            TypedExpressionKind::Cast {
+                expression,
+                target_type,
+                cast_kind: CastKind::Checked,
+            } => {
+                let lowered_inner = self.inline_expression_deep(
+                    expression,
+                    this_replacement,
+                    param_map,
+                    expression.expr_type,
+                );
+                HirExpr::new(
+                    HirExprKind::Cast {
+                        expr: Box::new(lowered_inner),
+                        target: *target_type,
+                        is_safe: true,
+                    },
+                    expr.expr_type,
+                    self.current_lifetime,
+                    expr.source_location,
+                )
+            }
+
+            // For field access on parameters (e.g., `rhs.toInt()`),
+            // recursively inline the object expression
+            TypedExpressionKind::FieldAccess {
+                object,
+                field_symbol,
+            } if matches!(&object.kind, TypedExpressionKind::Variable { symbol_id } if param_map.contains_key(symbol_id))
+                || matches!(&object.kind, TypedExpressionKind::This { .. }) =>
+            {
+                let lowered_object = self.inline_expression_deep(
+                    object,
+                    this_replacement,
+                    param_map,
+                    object.expr_type,
+                );
+                HirExpr::new(
+                    HirExprKind::Field {
+                        object: Box::new(lowered_object),
+                        field: *field_symbol,
+                    },
+                    expr.expr_type,
+                    self.current_lifetime,
+                    expr.source_location,
+                )
+            }
+
             // For other expressions, lower them normally
-            // In a full implementation, we'd handle all expression types recursively
             _ => self.lower_expression(expr),
         }
     }

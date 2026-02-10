@@ -1666,7 +1666,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 11 | Property get/set dispatch | P1 | Medium | 🟡 Mostly done | encapsulation |
 | 12 | EReg (regex runtime) | P1 | Medium | 🟢 Complete | text processing |
 | 13 | Enum methods + statics | P1 | Medium | 🟡 Partial | rich enums |
-| 14 | Abstract types (operator overloading) | P1 | High | 🟡 Methods done | custom types |
+| 14 | Abstract types (operator overloading) | P1 | High | 🟡 Methods + @:op done | custom types |
 | 15 | Dynamic type operations | P1 | Medium | 🟡 Partial (anon r/w done) | interop, JSON |
 | 16 | Type parameters on functions | P1 | Medium | 🟢 Complete | generic functions |
 | 17 | Null safety (`Null<T>`) | P2 | Medium | 🔴 Not started | null checks |
@@ -1876,24 +1876,21 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 ### 16.10 Abstract Types 🟡
 
 **Priority:** P1
-**Current State:** Parser handles abstract declarations. `@:coreType` extern abstracts work (SIMD4f, CString). Operator overloading via `@:op` partially works. User-defined abstract methods with underlying types work end-to-end (2026-02-09).
+**Current State:** Parser handles abstract declarations. `@:coreType` extern abstracts work (SIMD4f, CString). Operator overloading via `@:op` works end-to-end (2026-02-10). User-defined abstract methods with underlying types work end-to-end (2026-02-09).
 
-**What Works (2026-02-09):**
+**What Works (2026-02-10):**
 - [x] User-defined abstract types with underlying type (`abstract MyInt(Int)`)
 - [x] `this` in abstract methods refers to underlying value (Int, Float, etc.)
 - [x] Abstract instance methods lowered through full TAST→HIR→MIR pipeline
 - [x] Multi-statement methods with multiple return paths (phi-based inlining)
 - [x] `@:op(A + B)` on non-extern abstracts (TAST-level inlining for single-return)
+- [x] `@:op` with type check hints (`(rhs : Int)`) inside method bodies
+- [x] `@:op(A + B)`, `@:op(A - B)`, `@:op(A * B)` all verified working
+- [x] `inline_expression_deep` handles Cast, FieldAccess expression types for substitution
 
-**Test Results:**
-```
-Test 2: Abstract with Operator Overloading (@:op)
-
-  ✓ TAST generated (1 files)
-  ✓ HIR and MIR generated
-❌ FAILED: Operator overloading not working
-  Error: Verifier errors in main: - inst4 (return v4): result 0 has type f64, must match function signature of i32
-```
+**Bugs Fixed (2026-02-10):**
+- `(expr : Type)` type check hint was incorrectly lowered to `TypedExpressionKind::Is` (boolean) instead of `Cast` (value). Fixed in `ast_lowering.rs`.
+- `inline_expression_deep` didn't handle `Cast` or `FieldAccess` — parameter references inside casts were not substituted. Fixed in `tast_to_hir.rs`.
 
 **What's Missing:**
 - [ ] Implicit conversions (`@:from`, `@:to`)

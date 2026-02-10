@@ -3084,6 +3084,20 @@ impl CompilationUnit {
             );
         }
 
+        // Verify MIR wrapper forward refs were replaced during merge.
+        // A MirWrapper function with an empty CFG means the stdlib merge failed
+        // to find the implementation — this would cause wrong values at runtime.
+        for (func_id, func) in &mir_module.functions {
+            if matches!(func.kind, crate::ir::FunctionKind::MirWrapper)
+                && func.cfg.blocks.is_empty()
+            {
+                debug!(
+                    "Unreplaced MIR forward ref after stdlib merge: '{}' (ID {})",
+                    func.name, func_id.0
+                );
+            }
+        }
+
         // Run monomorphization pass to specialize generic functions
         let mut monomorphizer = Monomorphizer::new();
         monomorphizer.monomorphize_module(&mut mir_module);

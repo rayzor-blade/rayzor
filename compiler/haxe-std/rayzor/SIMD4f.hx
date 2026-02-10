@@ -20,7 +20,7 @@ package rayzor;
 @:coreType
 @:notNull
 @:native("rayzor::SIMD4f")
-abstract SIMD4f {
+extern abstract SIMD4f {
     /** Broadcast a single value to all 4 lanes */
     @:native("splat")
     public static function splat(v:Float):SIMD4f;
