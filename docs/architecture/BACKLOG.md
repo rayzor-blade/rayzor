@@ -1661,7 +1661,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 6 | String interpolation | P0 | Low | 🟢 Complete | basic string formatting |
 | 7 | for-in range (`0...n`) | P0 | Low | 🟢 Complete | basic loops |
 | 8 | Static extensions (`using`) | P1 | Medium | 🟢 Complete | idiomatic Haxe |
-| 9 | Safe cast (`cast(expr, Type)`) | P1 | Medium | 🟡 In progress | type-safe downcasting |
+| 9 | Safe cast (`cast(expr, Type)`) | P1 | Medium | 🟡 Primitives + Dynamic done | type-safe downcasting |
 | 10 | Generics instantiation end-to-end | P1 | High | 🟢 Complete | generic classes/functions |
 | 11 | Property get/set dispatch | P1 | Medium | 🟡 Mostly done | encapsulation |
 | 12 | EReg (regex runtime) | P1 | Medium | 🟢 Complete | text processing |
@@ -1858,16 +1858,20 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 **Implementation:** Already existed in ast_lowering.rs — `lower_using()` registers using modules, `find_static_extension_method()` resolves calls, method call desugaring converts to `StaticMethodCall` with receiver prepended as first argument.
 
-### 16.9 Safe Cast 🔴
+### 16.9 Safe Cast 🟡
 
 **Priority:** P1
-**Current State:** `cast(expr, Type)` syntax not implemented. Unsafe `cast expr` may partially work.
+**Current State:** Primitive safe casts and Dynamic↔concrete casts work. Class hierarchy downcasting deferred.
+
+**What Works (2026-02-10):**
+- [x] Safe primitive casts (Int↔Float, Int↔Bool, Float↔Bool) — compile-time resolved
+- [x] Dynamic→concrete safe downcast via `haxe_std_downcast` (returns null on failure)
+- [x] Concrete→Dynamic safe cast via `maybe_box_value`
+- [x] Dynamic TypeCheck (`expr is Type`) via `haxe_std_is` runtime call
 
 **What's Missing:**
-- [ ] `cast(expr, Type)` — returns null on failure (safe cast)
-- [ ] `cast expr` — unchecked cast (unsafe, for FFI/interop)
-- [ ] Runtime type check before cast
-- [ ] Integration with RTTI system
+- [ ] Class hierarchy runtime downcasting (needs object headers with type IDs)
+- [ ] Interface compatibility checks at runtime
 
 ### 16.10 Abstract Types 🟡
 
@@ -1880,6 +1884,16 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [x] Abstract instance methods lowered through full TAST→HIR→MIR pipeline
 - [x] Multi-statement methods with multiple return paths (phi-based inlining)
 - [x] `@:op(A + B)` on non-extern abstracts (TAST-level inlining for single-return)
+
+**Test Results:**
+```
+Test 2: Abstract with Operator Overloading (@:op)
+
+  ✓ TAST generated (1 files)
+  ✓ HIR and MIR generated
+❌ FAILED: Operator overloading not working
+  Error: Verifier errors in main: - inst4 (return v4): result 0 has type f64, must match function signature of i32
+```
 
 **What's Missing:**
 - [ ] Implicit conversions (`@:from`, `@:to`)
@@ -2043,7 +2057,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 10. **Abstract types** (16.10) — user-defined abstracts
 
 #### Tier 3: Completeness (polish and compatibility)
-11. **Safe cast** (16.9)
+11. 🟡 **Safe cast** (16.9) — primitives + Dynamic done, class hierarchy deferred
 12. **Dynamic type ops** (16.11)
 13. **Null safety** (16.14)
 14. **RTTI** (16.18)

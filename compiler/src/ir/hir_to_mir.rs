@@ -10529,6 +10529,34 @@ impl<'a> HirToMirContext<'a> {
                         self.builder.build_cast(value_reg, from_type, to_type)
                     }
 
+                    // Dynamic → concrete type: runtime downcast (null on failure)
+                    (Some(TypeKind::Dynamic), _)
+                        if !matches!(&target_kind, Some(TypeKind::Dynamic)) =>
+                    {
+                        let value_reg = self.lower_expression(expr)?;
+                        let type_id_const = self
+                            .builder
+                            .build_const(IrValue::I64(target.as_raw() as i64))?;
+                        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                        let downcast_id = self.get_or_register_extern_function(
+                            "haxe_std_downcast",
+                            vec![ptr_u8.clone(), IrType::I64],
+                            ptr_u8.clone(),
+                        );
+                        self.builder.build_call_direct(
+                            downcast_id,
+                            vec![value_reg, type_id_const],
+                            ptr_u8,
+                        )
+                    }
+
+                    // Concrete → Dynamic: box the value
+                    (_, Some(TypeKind::Dynamic)) => {
+                        let value_reg = self.lower_expression(expr)?;
+                        self.maybe_box_value(value_reg, expr.ty, *target)
+                            .or(Some(value_reg))
+                    }
+
                     // Class/Interface → same pointer representation: pass-through
                     // (trust static types — no object headers for runtime downcasting)
                     (Some(TypeKind::Class { .. }), Some(TypeKind::Class { .. }))
@@ -10560,6 +10588,24 @@ impl<'a> HirToMirContext<'a> {
 
                 // For statically-typed code, resolve at compile time
                 let result = match (&source_kind, &target_kind) {
+                    // Dynamic source: runtime type check via haxe_std_is
+                    (Some(TypeKind::Dynamic), _) => {
+                        let value_reg = self.lower_expression(expr)?;
+                        let type_id_const = self
+                            .builder
+                            .build_const(IrValue::I64(expected.as_raw() as i64))?;
+                        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                        let is_func_id = self.get_or_register_extern_function(
+                            "haxe_std_is",
+                            vec![ptr_u8, IrType::I64],
+                            IrType::Bool,
+                        );
+                        self.builder.build_call_direct(
+                            is_func_id,
+                            vec![value_reg, type_id_const],
+                            IrType::Bool,
+                        )
+                    }
                     // Same type kind → always true (but null check needed for refs)
                     _ if expr.ty == *expected => {
                         // Exact same type → true
