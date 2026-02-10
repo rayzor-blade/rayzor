@@ -1028,6 +1028,422 @@ pub extern "C" fn haxe_array_filter(
     }
 }
 
+// ============================================================================
+// Search & Query Methods
+// ============================================================================
+
+/// indexOf: find first occurrence of value, searching from fromIndex forward.
+/// Returns index or -1 if not found. Compares raw i64 values.
+#[no_mangle]
+pub extern "C" fn haxe_array_index_of(arr: *const HaxeArray, value: i64, from_index: i64) -> i64 {
+    if arr.is_null() {
+        return -1;
+    }
+
+    unsafe {
+        let arr_ref = &*arr;
+        let len = arr_ref.len as i64;
+
+        // Resolve fromIndex (negative = from end)
+        let start = if from_index < 0 {
+            (len + from_index).max(0) as usize
+        } else {
+            from_index as usize
+        };
+
+        if start >= arr_ref.len {
+            return -1;
+        }
+
+        let data = arr_ref.ptr as *const i64;
+        for i in start..arr_ref.len {
+            if *data.add(i) == value {
+                return i as i64;
+            }
+        }
+        -1
+    }
+}
+
+/// lastIndexOf: find last occurrence of value, searching from fromIndex backward.
+/// Returns index or -1 if not found.
+#[no_mangle]
+pub extern "C" fn haxe_array_last_index_of(
+    arr: *const HaxeArray,
+    value: i64,
+    from_index: i64,
+) -> i64 {
+    if arr.is_null() {
+        return -1;
+    }
+
+    unsafe {
+        let arr_ref = &*arr;
+        let len = arr_ref.len as i64;
+
+        if arr_ref.len == 0 {
+            return -1;
+        }
+
+        // Resolve fromIndex (negative = from end, default = last element)
+        let start = if from_index < 0 {
+            let resolved = len + from_index;
+            if resolved < 0 {
+                return -1;
+            }
+            resolved as usize
+        } else if from_index >= len {
+            arr_ref.len - 1
+        } else {
+            from_index as usize
+        };
+
+        let data = arr_ref.ptr as *const i64;
+        let mut i = start as isize;
+        while i >= 0 {
+            if *data.add(i as usize) == value {
+                return i as i64;
+            }
+            i -= 1;
+        }
+        -1
+    }
+}
+
+/// contains: check if array contains value. Returns 1 (true) or 0 (false).
+#[no_mangle]
+pub extern "C" fn haxe_array_contains(arr: *const HaxeArray, value: i64) -> i64 {
+    if haxe_array_index_of(arr, value, 0) >= 0 {
+        1
+    } else {
+        0
+    }
+}
+
+// ============================================================================
+// Array Mutation Methods
+// ============================================================================
+
+/// shift: remove and return first element as raw i64. Returns 0 if empty.
+#[no_mangle]
+pub extern "C" fn haxe_array_shift(arr: *mut HaxeArray) -> i64 {
+    if arr.is_null() {
+        return 0;
+    }
+
+    unsafe {
+        let arr_ref = &mut *arr;
+        if arr_ref.len == 0 {
+            return 0;
+        }
+
+        // Read first element
+        let data = arr_ref.ptr as *const i64;
+        let first = *data;
+
+        // Shift all elements left by one
+        if arr_ref.len > 1 {
+            let src = arr_ref.ptr.add(arr_ref.elem_size);
+            let dst = arr_ref.ptr;
+            let bytes = (arr_ref.len - 1) * arr_ref.elem_size;
+            ptr::copy(src, dst, bytes);
+        }
+
+        arr_ref.len -= 1;
+        first
+    }
+}
+
+/// shift_ptr: remove and return first element as a boxed DynamicValue*.
+/// Returns null if empty. Matches the pattern of haxe_array_pop_ptr.
+#[no_mangle]
+pub extern "C" fn haxe_array_shift_ptr(arr: *mut HaxeArray) -> *mut u8 {
+    if arr.is_null() {
+        return ptr::null_mut();
+    }
+
+    unsafe {
+        let arr_ref = &mut *arr;
+        if arr_ref.len == 0 {
+            return ptr::null_mut();
+        }
+
+        // Read first element
+        let elem_ptr = arr_ref.ptr;
+
+        // Box the value
+        let boxed = if arr_ref.elem_size == 8 {
+            let value = *(elem_ptr as *const i64);
+            crate::type_system::haxe_box_int_ptr(value)
+        } else if arr_ref.elem_size == 4 {
+            let value = *(elem_ptr as *const i32);
+            crate::type_system::haxe_box_int_ptr(value as i64)
+        } else {
+            *(elem_ptr as *const *mut u8)
+        };
+
+        // Shift all elements left by one
+        if arr_ref.len > 1 {
+            let src = arr_ref.ptr.add(arr_ref.elem_size);
+            let dst = arr_ref.ptr;
+            let bytes = (arr_ref.len - 1) * arr_ref.elem_size;
+            ptr::copy(src, dst, bytes);
+        }
+
+        arr_ref.len -= 1;
+        boxed
+    }
+}
+
+/// unshift: add element at the beginning of the array
+#[no_mangle]
+pub extern "C" fn haxe_array_unshift(arr: *mut HaxeArray, value: i64) {
+    if arr.is_null() {
+        return;
+    }
+
+    unsafe {
+        let arr_ref = &mut *arr;
+
+        // Ensure capacity
+        if arr_ref.len >= arr_ref.cap {
+            let new_cap = if arr_ref.cap == 0 {
+                INITIAL_CAPACITY
+            } else {
+                arr_ref.cap * 2
+            };
+            let new_size = new_cap * arr_ref.elem_size;
+            let new_ptr = if arr_ref.ptr.is_null() || arr_ref.cap == 0 {
+                let layout = Layout::from_size_align_unchecked(new_size, 8);
+                alloc(layout)
+            } else {
+                let old_size = arr_ref.cap * arr_ref.elem_size;
+                let old_layout = Layout::from_size_align_unchecked(old_size, 8);
+                realloc(arr_ref.ptr, old_layout, new_size)
+            };
+            if new_ptr.is_null() {
+                panic!("Failed to reallocate memory for Array.unshift");
+            }
+            arr_ref.ptr = new_ptr;
+            arr_ref.cap = new_cap;
+        }
+
+        // Shift all elements right by one
+        if arr_ref.len > 0 {
+            let src = arr_ref.ptr;
+            let dst = arr_ref.ptr.add(arr_ref.elem_size);
+            let bytes = arr_ref.len * arr_ref.elem_size;
+            ptr::copy(src, dst, bytes);
+        }
+
+        // Store new element at position 0
+        let data = arr_ref.ptr as *mut i64;
+        *data = value;
+        arr_ref.len += 1;
+    }
+}
+
+/// concat: create new array from elements of arr followed by elements of other
+#[no_mangle]
+pub extern "C" fn haxe_array_concat(
+    out: *mut HaxeArray,
+    arr: *const HaxeArray,
+    other: *const HaxeArray,
+) {
+    if out.is_null() {
+        return;
+    }
+
+    unsafe {
+        let (arr_ptr, arr_len, elem_size) = if !arr.is_null() {
+            let a = &*arr;
+            (a.ptr, a.len, a.elem_size)
+        } else {
+            (ptr::null_mut(), 0, 8)
+        };
+
+        let (other_ptr, other_len, other_elem_size) = if !other.is_null() {
+            let o = &*other;
+            (o.ptr, o.len, o.elem_size)
+        } else {
+            (ptr::null_mut(), 0, 8)
+        };
+
+        let es = if elem_size > 0 {
+            elem_size
+        } else {
+            other_elem_size
+        };
+        let total_len = arr_len + other_len;
+        let cap = total_len.max(INITIAL_CAPACITY);
+        let total_size = cap * es;
+        let layout = Layout::from_size_align_unchecked(total_size, 8);
+        let new_ptr = alloc(layout);
+        if new_ptr.is_null() {
+            panic!("Failed to allocate memory for Array.concat");
+        }
+
+        // Copy first array
+        if arr_len > 0 && !arr_ptr.is_null() {
+            ptr::copy_nonoverlapping(arr_ptr, new_ptr, arr_len * es);
+        }
+
+        // Copy second array
+        if other_len > 0 && !other_ptr.is_null() {
+            ptr::copy_nonoverlapping(other_ptr, new_ptr.add(arr_len * es), other_len * es);
+        }
+
+        (*out).ptr = new_ptr;
+        (*out).len = total_len;
+        (*out).cap = cap;
+        (*out).elem_size = es;
+    }
+}
+
+/// splice: remove `len` elements starting at `pos`, return them in `out`.
+/// Modifies `arr` in place.
+#[no_mangle]
+pub extern "C" fn haxe_array_splice(out: *mut HaxeArray, arr: *mut HaxeArray, pos: i64, len: i64) {
+    if arr.is_null() || out.is_null() {
+        if !out.is_null() {
+            haxe_array_new(out, 8);
+        }
+        return;
+    }
+
+    unsafe {
+        let arr_ref = &mut *arr;
+        let arr_len = arr_ref.len as i64;
+        let es = arr_ref.elem_size;
+
+        // Resolve pos (negative = from end)
+        let actual_pos = if pos < 0 {
+            (arr_len + pos).max(0) as usize
+        } else {
+            (pos as usize).min(arr_ref.len)
+        };
+
+        // Handle invalid len
+        if len <= 0 || actual_pos >= arr_ref.len {
+            haxe_array_new(out, es);
+            return;
+        }
+
+        let actual_len = (len as usize).min(arr_ref.len - actual_pos);
+
+        // Copy removed elements to out
+        let removed_ptr = arr_ref.ptr.add(actual_pos * es);
+        haxe_array_from_elements(out, removed_ptr, actual_len, es);
+
+        // Shift remaining elements left
+        let remaining = arr_ref.len - actual_pos - actual_len;
+        if remaining > 0 {
+            let src = arr_ref.ptr.add((actual_pos + actual_len) * es);
+            let dst = arr_ref.ptr.add(actual_pos * es);
+            ptr::copy(src, dst, remaining * es);
+        }
+
+        arr_ref.len -= actual_len;
+    }
+}
+
+/// resize: set array length. Truncates or zero-extends.
+#[no_mangle]
+pub extern "C" fn haxe_array_resize(arr: *mut HaxeArray, new_len: i64) {
+    if arr.is_null() || new_len < 0 {
+        return;
+    }
+
+    let new_len = new_len as usize;
+
+    unsafe {
+        let arr_ref = &mut *arr;
+
+        if new_len <= arr_ref.len {
+            // Truncate
+            arr_ref.len = new_len;
+            return;
+        }
+
+        // Extend - ensure capacity
+        if new_len > arr_ref.cap {
+            let mut new_cap = if arr_ref.cap == 0 {
+                INITIAL_CAPACITY
+            } else {
+                arr_ref.cap
+            };
+            while new_cap < new_len {
+                new_cap *= 2;
+            }
+            let new_size = new_cap * arr_ref.elem_size;
+            let new_ptr = if arr_ref.ptr.is_null() || arr_ref.cap == 0 {
+                let layout = Layout::from_size_align_unchecked(new_size, 8);
+                alloc(layout)
+            } else {
+                let old_size = arr_ref.cap * arr_ref.elem_size;
+                let old_layout = Layout::from_size_align_unchecked(old_size, 8);
+                realloc(arr_ref.ptr, old_layout, new_size)
+            };
+            if new_ptr.is_null() {
+                panic!("Failed to allocate memory for Array.resize");
+            }
+            arr_ref.ptr = new_ptr;
+            arr_ref.cap = new_cap;
+        }
+
+        // Zero-fill new elements
+        let start = arr_ref.len * arr_ref.elem_size;
+        let bytes = (new_len - arr_ref.len) * arr_ref.elem_size;
+        ptr::write_bytes(arr_ref.ptr.add(start), 0, bytes);
+        arr_ref.len = new_len;
+    }
+}
+
+/// toString: create string representation "[elem0, elem1, ...]"
+/// Elements are printed as integers (i64). For proper type-aware printing,
+/// the compiler should use trace() which has type info.
+#[no_mangle]
+pub extern "C" fn haxe_array_to_string(arr: *const HaxeArray) -> *mut HaxeString {
+    unsafe {
+        let result_layout = Layout::new::<HaxeString>();
+        let result_ptr = alloc(result_layout) as *mut HaxeString;
+        if result_ptr.is_null() {
+            panic!("Failed to allocate HaxeString for toString");
+        }
+
+        if arr.is_null() || (*arr).len == 0 {
+            crate::haxe_string::haxe_string_from_bytes(result_ptr, b"[]".as_ptr(), 2);
+            return result_ptr;
+        }
+
+        let arr_ref = &*arr;
+
+        // Build string representation
+        let mut s = String::with_capacity(arr_ref.len * 4 + 2);
+        s.push('[');
+
+        let data = arr_ref.ptr as *const i64;
+        for i in 0..arr_ref.len {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            let val = *data.add(i);
+            s.push_str(&val.to_string());
+        }
+
+        s.push(']');
+
+        let bytes = s.as_bytes();
+        crate::haxe_string::haxe_string_from_bytes(result_ptr, bytes.as_ptr(), bytes.len());
+
+        result_ptr
+    }
+}
+
+// ============================================================================
+// Higher-Order Array Methods
+// ============================================================================
+
 /// Sort: in-place sort using comparator callback.
 /// Callback signature: fn(env_ptr: *mut u8, a: i64, b: i64) -> i32
 /// Returns negative if a < b, 0 if equal, positive if a > b.

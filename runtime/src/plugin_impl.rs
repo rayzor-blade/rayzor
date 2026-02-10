@@ -165,6 +165,37 @@ register_symbol!("haxe_array_reverse", crate::haxe_array::haxe_array_reverse);
 register_symbol!("haxe_array_copy", crate::haxe_array::haxe_array_copy);
 register_symbol!("haxe_array_slice", crate::haxe_array::haxe_array_slice);
 register_symbol!("haxe_array_join", crate::haxe_array::haxe_array_join);
+register_symbol!("haxe_array_concat", crate::haxe_array::haxe_array_concat);
+register_symbol!("haxe_array_splice", crate::haxe_array::haxe_array_splice);
+
+// Search & Query
+register_symbol!(
+    "haxe_array_index_of",
+    crate::haxe_array::haxe_array_index_of
+);
+register_symbol!(
+    "haxe_array_last_index_of",
+    crate::haxe_array::haxe_array_last_index_of
+);
+register_symbol!(
+    "haxe_array_contains",
+    crate::haxe_array::haxe_array_contains
+);
+
+// Mutation
+register_symbol!("haxe_array_shift", crate::haxe_array::haxe_array_shift);
+register_symbol!(
+    "haxe_array_shift_ptr",
+    crate::haxe_array::haxe_array_shift_ptr
+);
+register_symbol!("haxe_array_unshift", crate::haxe_array::haxe_array_unshift);
+register_symbol!("haxe_array_resize", crate::haxe_array::haxe_array_resize);
+
+// String representation
+register_symbol!(
+    "haxe_array_to_string",
+    crate::haxe_array::haxe_array_to_string
+);
 
 // Higher-order methods
 register_symbol!("haxe_array_map", crate::haxe_array::haxe_array_map);

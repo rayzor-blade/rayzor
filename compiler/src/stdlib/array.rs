@@ -24,6 +24,14 @@ pub fn build_array_type(builder: &mut MirBuilder) {
     build_array_length(builder);
     build_array_slice(builder);
     build_array_join(builder);
+    build_array_index_of(builder);
+    build_array_last_index_of(builder);
+    build_array_shift(builder);
+    build_array_unshift(builder);
+    build_array_resize(builder);
+    build_array_concat(builder);
+    build_array_splice(builder);
+    build_array_to_string(builder);
     build_array_map(builder);
     build_array_filter(builder);
     build_array_sort(builder);
@@ -134,6 +142,108 @@ fn declare_array_externs(builder: &mut MirBuilder) {
         .param("arr", ptr_void.clone())
         .param("index", i64_ty.clone())
         .returns(IrType::Bool)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // haxe_array_index_of(arr: *const HaxeArray, value: i64, from_index: i64) -> i64
+    let func_id = builder
+        .begin_function("haxe_array_index_of")
+        .param("arr", ptr_void.clone())
+        .param("value", i64_ty.clone())
+        .param("from_index", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // haxe_array_last_index_of(arr: *const HaxeArray, value: i64, from_index: i64) -> i64
+    let func_id = builder
+        .begin_function("haxe_array_last_index_of")
+        .param("arr", ptr_void.clone())
+        .param("value", i64_ty.clone())
+        .param("from_index", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // haxe_array_contains(arr: *const HaxeArray, value: i64) -> i64
+    let func_id = builder
+        .begin_function("haxe_array_contains")
+        .param("arr", ptr_void.clone())
+        .param("value", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // haxe_array_shift(arr: *mut HaxeArray) -> i64
+    let func_id = builder
+        .begin_function("haxe_array_shift")
+        .param("arr", ptr_void.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // haxe_array_shift_ptr(arr: *mut HaxeArray) -> *mut u8 (boxed DynamicValue)
+    let func_id = builder
+        .begin_function("haxe_array_shift_ptr")
+        .param("arr", ptr_void.clone())
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // haxe_array_unshift(arr: *mut HaxeArray, value: i64)
+    let func_id = builder
+        .begin_function("haxe_array_unshift")
+        .param("arr", ptr_void.clone())
+        .param("value", i64_ty.clone())
+        .returns(void_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // haxe_array_resize(arr: *mut HaxeArray, len: i64)
+    let func_id = builder
+        .begin_function("haxe_array_resize")
+        .param("arr", ptr_void.clone())
+        .param("len", i64_ty.clone())
+        .returns(void_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // haxe_array_concat(out: *mut HaxeArray, arr: *const HaxeArray, other: *const HaxeArray)
+    let func_id = builder
+        .begin_function("haxe_array_concat")
+        .param("out", ptr_void.clone())
+        .param("arr", ptr_void.clone())
+        .param("other", ptr_void.clone())
+        .returns(void_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // haxe_array_splice(out: *mut HaxeArray, arr: *mut HaxeArray, pos: i64, len: i64)
+    let func_id = builder
+        .begin_function("haxe_array_splice")
+        .param("out", ptr_void.clone())
+        .param("arr", ptr_void.clone())
+        .param("pos", i64_ty.clone())
+        .param("len", i64_ty.clone())
+        .returns(void_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // haxe_array_to_string(arr: *const HaxeArray) -> *mut HaxeString
+    let func_id = builder
+        .begin_function("haxe_array_to_string")
+        .param("arr", ptr_void.clone())
+        .returns(ptr_void.clone())
         .calling_convention(CallingConvention::C)
         .build();
     builder.mark_as_extern(func_id);
@@ -363,6 +473,276 @@ fn build_array_join(builder: &mut MirBuilder) {
         builder.ret(Some(result));
     } else {
         // Return null on failure
+        let null_val = builder.const_value(crate::ir::IrValue::Null);
+        builder.ret(Some(null_val));
+    }
+}
+
+/// Build: fn array_index_of(arr: Ptr(Void), value: i64) -> i64
+/// Wrapper for haxe_array_index_of that defaults fromIndex to 0
+fn build_array_index_of(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let i64_ty = IrType::I64;
+
+    let func_id = builder
+        .begin_function("array_index_of")
+        .param("arr", ptr_void.clone())
+        .param("value", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+    let value = builder.get_param(1);
+    let from_index = builder.const_i64(0);
+
+    let index_of_func = builder
+        .get_function_by_name("haxe_array_index_of")
+        .expect("haxe_array_index_of extern not found");
+
+    if let Some(result) = builder.call(index_of_func, vec![arr, value, from_index]) {
+        builder.ret(Some(result));
+    } else {
+        let neg_one = builder.const_i64(-1);
+        builder.ret(Some(neg_one));
+    }
+}
+
+/// Build: fn array_last_index_of(arr: Ptr(Void), value: i64) -> i64
+/// Wrapper for haxe_array_last_index_of that defaults fromIndex to i64::MAX (search from end)
+fn build_array_last_index_of(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let i64_ty = IrType::I64;
+
+    let func_id = builder
+        .begin_function("array_last_index_of")
+        .param("arr", ptr_void.clone())
+        .param("value", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+    let value = builder.get_param(1);
+    // i64::MAX as sentinel — runtime handles "from end" when >= len
+    let from_index = builder.const_i64(i64::MAX);
+
+    let last_index_of_func = builder
+        .get_function_by_name("haxe_array_last_index_of")
+        .expect("haxe_array_last_index_of extern not found");
+
+    if let Some(result) = builder.call(last_index_of_func, vec![arr, value, from_index]) {
+        builder.ret(Some(result));
+    } else {
+        let neg_one = builder.const_i64(-1);
+        builder.ret(Some(neg_one));
+    }
+}
+
+/// Build: fn array_shift(arr: Any) -> Any
+/// Wrapper: removes and returns first element as boxed DynamicValue*
+fn build_array_shift(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+
+    let func_id = builder
+        .begin_function("array_shift")
+        .param("arr", IrType::Any)
+        .returns(IrType::Any)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+    let arr_ptr = builder.cast(arr, IrType::Any, ptr_void.clone());
+
+    // Call haxe_array_shift_ptr which returns boxed DynamicValue*
+    let shift_func = builder
+        .get_function_by_name("haxe_array_shift_ptr")
+        .expect("haxe_array_shift_ptr extern not found");
+
+    if let Some(result) = builder.call(shift_func, vec![arr_ptr]) {
+        let result_i64 = builder.cast(result, ptr_void, IrType::Any);
+        builder.ret(Some(result_i64));
+    } else {
+        let null_val = builder.const_value(crate::ir::IrValue::Null);
+        builder.ret(Some(null_val));
+    }
+}
+
+/// Build: fn array_unshift(arr: Any, value: Any) -> void
+/// Wrapper: adds element at the beginning
+fn build_array_unshift(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+
+    let func_id = builder
+        .begin_function("array_unshift")
+        .param("arr", IrType::Any)
+        .param("value", IrType::Any)
+        .returns(IrType::Void)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+    let value = builder.get_param(1);
+    let arr_ptr = builder.cast(arr, IrType::Any, ptr_void);
+
+    let unshift_func = builder
+        .get_function_by_name("haxe_array_unshift")
+        .expect("haxe_array_unshift extern not found");
+
+    builder.call(unshift_func, vec![arr_ptr, value]);
+    builder.ret(None);
+}
+
+/// Build: fn array_resize(arr: Any, len: i64) -> void
+/// Wrapper: sets array length
+fn build_array_resize(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+
+    let func_id = builder
+        .begin_function("array_resize")
+        .param("arr", IrType::Any)
+        .param("len", IrType::I64)
+        .returns(IrType::Void)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+    let len = builder.get_param(1);
+    let arr_ptr = builder.cast(arr, IrType::Any, ptr_void);
+
+    let resize_func = builder
+        .get_function_by_name("haxe_array_resize")
+        .expect("haxe_array_resize extern not found");
+
+    builder.call(resize_func, vec![arr_ptr, len]);
+    builder.ret(None);
+}
+
+/// Build: fn array_concat(arr: Ptr(Void), other: Ptr(Void)) -> Ptr(Void)
+/// Wrapper for haxe_array_concat that handles out-param allocation
+fn build_array_concat(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+
+    let func_id = builder
+        .begin_function("array_concat")
+        .param("arr", ptr_void.clone())
+        .param("other", ptr_void.clone())
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+    let other = builder.get_param(1);
+
+    // Allocate out array struct (32 bytes)
+    let malloc_func = builder
+        .get_function_by_name("malloc")
+        .expect("malloc extern not found");
+    let size = builder.const_i64(HAXE_ARRAY_STRUCT_SIZE as i64);
+    let out_ptr = builder
+        .call(malloc_func, vec![size])
+        .expect("malloc should return a pointer");
+
+    // Call haxe_array_concat(out, arr, other)
+    let concat_func = builder
+        .get_function_by_name("haxe_array_concat")
+        .expect("haxe_array_concat extern not found");
+    builder.call(concat_func, vec![out_ptr, arr, other]);
+
+    builder.ret(Some(out_ptr));
+}
+
+/// Build: fn array_splice(arr: Ptr(Void), pos: i64, len: i64) -> Ptr(Void)
+/// Wrapper for haxe_array_splice that handles out-param allocation
+fn build_array_splice(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let i64_ty = IrType::I64;
+
+    let func_id = builder
+        .begin_function("array_splice")
+        .param("arr", ptr_void.clone())
+        .param("pos", i64_ty.clone())
+        .param("len", i64_ty)
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+    let pos = builder.get_param(1);
+    let len = builder.get_param(2);
+
+    // Allocate out array struct (32 bytes)
+    let malloc_func = builder
+        .get_function_by_name("malloc")
+        .expect("malloc extern not found");
+    let size = builder.const_i64(HAXE_ARRAY_STRUCT_SIZE as i64);
+    let out_ptr = builder
+        .call(malloc_func, vec![size])
+        .expect("malloc should return a pointer");
+
+    // Call haxe_array_splice(out, arr, pos, len)
+    let splice_func = builder
+        .get_function_by_name("haxe_array_splice")
+        .expect("haxe_array_splice extern not found");
+    builder.call(splice_func, vec![out_ptr, arr, pos, len]);
+
+    builder.ret(Some(out_ptr));
+}
+
+/// Build: fn array_to_string(arr: Ptr(Void)) -> Ptr(Void)
+/// Wrapper for haxe_array_to_string
+fn build_array_to_string(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+
+    let func_id = builder
+        .begin_function("array_to_string")
+        .param("arr", ptr_void.clone())
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+
+    // Call haxe_array_to_string(arr) -> *HaxeString
+    let to_string_func = builder
+        .get_function_by_name("haxe_array_to_string")
+        .expect("haxe_array_to_string extern not found");
+
+    if let Some(result) = builder.call(to_string_func, vec![arr]) {
+        builder.ret(Some(result));
+    } else {
         let null_val = builder.const_value(crate::ir::IrValue::Null);
         builder.ret(Some(null_val));
     }

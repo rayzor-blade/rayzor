@@ -915,29 +915,41 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 
 ---
 
-## 8. Optimization Passes 🟡
+## 8. Optimization Passes 🟢
 
-**Status:** Core Passes Implemented, Advanced Passes Needed
+**Status:** Comprehensive Pass Pipeline (O0–O3), Few Gaps Remain
 
 ### Implemented
 
 - [x] Dead code elimination (DCE)
 - [x] Constant folding
 - [x] Copy propagation
-- [x] Inlining (method and function, configurable max_size)
-- [x] Scalar Replacement of Aggregates (SRA) — replaces heap allocs with scalar registers
-- [x] Phi-aware SRA — handles loop-carried allocations with phi nodes
+- [x] Inlining (method and function, configurable max_size, cost model with loop depth bonus)
+- [x] Scalar Replacement of Aggregates (SRA) — replaces heap allocs with scalar registers, phi-aware
 - [x] Bounds Check Elimination (BCE) — eliminates redundant array bounds checks in for-in loops
-- [x] Global Load Caching
+- [x] Global Load Caching — eliminates redundant global loads within functions (~1.67x on nbody)
 - [x] FMA fusion (same-block only, cross-block disabled for FP correctness)
+- [x] Loop Invariant Code Motion (LICM) — hoists loop-invariant instructions, alloc hoisting with escape analysis
+- [x] Common Subexpression Elimination (CSE) — local CSE with value numbering, commutative normalization
+- [x] Global Value Numbering (GVN) — cross-block CSE using dominator tree (O3 only)
+- [x] Tail Call Optimization (TCO) — identifies and marks direct/indirect/self-recursive tail calls (O3 only)
+- [x] Unreachable Block Elimination — removes dead code blocks
+- [x] Control Flow Simplification — constant-folds conditional branches
+- [x] InsertFree — correctness pass with escape analysis for non-escaping allocations (all levels)
+- [x] Loop Vectorization framework — SIMD types and vector instruction infrastructure (O3 only, limited transformation)
 
-### Needed
+### Pass Pipeline (per optimization level)
 
-- [ ] Loop optimizations (unrolling, invariant hoisting)
-- [ ] Escape analysis
+**O0:** InsertFree → Inlining(forced, max=15) → DCE → SRA → CopyProp → DCE
+**O1:** InsertFree → Inlining → DCE → ConstFold → CopyProp → UnreachableBlockElim
+**O2:** InsertFree → Inlining → DCE → SRA → ConstFold → CopyProp → GlobalLoadCache → BCE → CSE → LICM → CFSimplify → UnreachableBlockElim → DCE
+**O3:** InsertFree → Inlining → GlobalLoadCache → DCE → SRA → ConstFold → CopyProp → BCE → GVN → CSE → LICM → LoopVec → TCO → CFSimplify → UnreachableBlockElim → DCE
+
+### Not Yet Implemented
+
+- [ ] Loop unrolling
 - [ ] Devirtualization
-- [ ] Tail call optimization
-- [ ] SIMD vectorization
+- [ ] Full loop auto-vectorization (framework exists, transformation logic is limited)
 
 ---
 
@@ -1657,7 +1669,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 2 | Interface dispatch (vtables) | P0 | High | 🟢 Complete | polymorphism, stdlib |
 | 3 | try/catch exception handling | P0 | High | 🟢 Complete | error handling |
 | 4 | Closures as first-class values | P0 | High | 🟢 Complete | callbacks, HOFs |
-| 5 | Array.map/filter/sort (higher-order) | P0 | Medium | 🟢 Complete | functional patterns |
+| 5 | Array methods (map/filter/sort/indexOf/contains/concat/splice/shift/unshift/resize/toString) | P0 | Medium | 🟢 Complete | functional patterns, collections |
 | 6 | String interpolation | P0 | Low | 🟢 Complete | basic string formatting |
 | 7 | for-in range (`0...n`) | P0 | Low | 🟢 Complete | basic loops |
 | 8 | Static extensions (`using`) | P1 | Medium | 🟢 Complete | idiomatic Haxe |
@@ -1700,8 +1712,10 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 - [ ] Guard expressions in match arms (`case v if v > 0:`)
 - [ ] Exhaustiveness checking (warn on missing cases)
-- [x] `EnumValue` API (`getIndex()`, `getName()`, `getParameters()`) — via runtime mapping
 - [ ] Nested pattern matching (`case Pair(Some(x), _):`)
+
+**Completed separately (see 16.13):**
+- [x] `EnumValue` API (`getIndex()`, `getName()`, `getParameters()`) — via runtime mapping
 
 ### 16.2 Interface Dispatch (Vtables) 🟢
 
@@ -1777,30 +1791,36 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [ ] Partial application / bind
 - [ ] `Reflect.isFunction()` support
 
-### 16.5 Higher-Order Array Methods 🟢
+### 16.5 Array Methods 🟢
 
 **Priority:** P0 — Critical (depends on 16.4 Closures)
-**Status:** ✅ Complete (2026-02-08)
+**Status:** ✅ Complete (2026-02-10)
 
 **What Works:**
 
 - [x] `arr.map(f)` — transform elements
 - [x] `arr.filter(f)` — select elements
 - [x] `arr.sort(f)` — sort with comparator
+- [x] `arr.indexOf(v)` — find element (2026-02-10)
+- [x] `arr.lastIndexOf(v)` — find element from end (2026-02-10)
+- [x] `arr.contains(v)` — check membership (2026-02-10)
+- [x] `arr.join(sep)` — string join
+- [x] `arr.concat(other)` — concatenate (2026-02-10)
+- [x] `arr.copy()` — shallow copy
+- [x] `arr.splice(pos, len)` — remove range (2026-02-10)
+- [x] `arr.slice(pos, end)` — sub-array
+- [x] `arr.reverse()` — reverse in-place
+- [x] `arr.remove(v)` — remove first occurrence
+- [x] `arr.insert(pos, v)` — insert at position
+- [x] `arr.shift()` — remove and return first element (2026-02-10)
+- [x] `arr.unshift(v)` — add element at start (2026-02-10)
+- [x] `arr.resize(len)` — set array length (2026-02-10)
+- [x] `arr.toString()` — string representation (2026-02-10)
 
 **Not Yet Implemented:**
 
-- [ ] `arr.indexOf(v)` — find element
-- [ ] `arr.contains(v)` — check membership
-- [ ] `arr.iterator()` — for-in iteration
-- [ ] `arr.join(sep)` — string join
-- [ ] `arr.concat(other)` — concatenate
-- [ ] `arr.copy()` — shallow copy
-- [ ] `arr.splice(pos, len)` — remove range
-- [ ] `arr.slice(pos, end)` — sub-array
-- [ ] `arr.reverse()` — reverse in-place
-- [ ] `arr.remove(v)` — remove first occurrence
-- [ ] `arr.insert(pos, v)` — insert at position
+- [ ] `arr.iterator()` — custom iterator protocol for user types
+- [ ] `arr.keyValueIterator()` — key-value iteration
 
 ### 16.6 String Interpolation 🟢
 
@@ -1893,7 +1913,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - `inline_expression_deep` didn't handle `Cast` or `FieldAccess` — parameter references inside casts were not substituted. Fixed in `tast_to_hir.rs`.
 
 **What's Missing:**
-- [ ] Implicit conversions (`@:from`, `@:to`)
+- [x] Implicit conversions (`@:from`, `@:to`) (2026-02-10)
 - [ ] Abstract enum (`abstract Color(Int) { var Red = 0; var Blue = 1; }`)
 - [ ] `@:forward` — delegate methods to underlying type
 - [ ] `@:enum` abstracts

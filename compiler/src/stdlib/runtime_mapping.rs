@@ -1424,14 +1424,22 @@ impl StdlibMapping {
             // Array.slice uses MIR wrapper that handles out-param allocation
             map_method!(instance "Array", "slice" => "array_slice", params: 2, returns: primitive),
             map_method!(instance "Array", "copy" => "haxe_array_copy", params: 0, returns: complex),
-            // Search methods
-            // indexOf(x:T, fromIndex:Int): arg[0]=array, arg[1]=value (needs ptr), arg[2]=fromIndex
-            // Bitmask: 0b10 = bit 1 set
-            map_method!(instance "Array", "indexOf" => "haxe_array_index_of", params: 2, returns: primitive, ptr_params: 0b10),
-            map_method!(instance "Array", "lastIndexOf" => "haxe_array_last_index_of", params: 2, returns: primitive, ptr_params: 0b10),
+            // Search methods — MIR wrappers default optional fromIndex
+            map_method!(instance "Array", "indexOf" => "array_index_of", params: 1, returns: primitive),
+            map_method!(instance "Array", "lastIndexOf" => "array_last_index_of", params: 1, returns: primitive),
+            map_method!(instance "Array", "contains" => "haxe_array_contains", params: 1, returns: primitive),
             // Array.join(sep: String) -> String
             // Joins array elements with separator, returns new string
             map_method!(instance "Array", "join" => "array_join", params: 1, returns: primitive),
+            // Mutation methods — MIR wrappers handle Any→Ptr conversion
+            map_method!(instance "Array", "shift" => "array_shift", params: 0, returns: primitive),
+            map_method!(instance "Array", "unshift" => "array_unshift", params: 1, returns: void),
+            map_method!(instance "Array", "resize" => "array_resize", params: 1, returns: void),
+            // concat and splice use MIR wrappers that handle out-param allocation
+            map_method!(instance "Array", "concat" => "array_concat", params: 1, returns: primitive),
+            map_method!(instance "Array", "splice" => "array_splice", params: 2, returns: primitive),
+            // toString returns string pointer
+            map_method!(instance "Array", "toString" => "array_to_string", params: 0, returns: primitive),
             // Higher-order methods
             // map/filter take a closure, sort takes a comparator closure
             // All use MIR wrappers that extract fn_ptr + env_ptr from closure struct
