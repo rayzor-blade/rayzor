@@ -2368,7 +2368,7 @@ impl<'a> TastToHirContext<'a> {
             BinaryOperator::BitXor => HirBinaryOp::BitXor,
             BinaryOperator::Shl => HirBinaryOp::Shl,
             BinaryOperator::Shr => HirBinaryOp::Shr,
-            // Range and NullCoalesce might not exist in TAST
+            BinaryOperator::NullCoal => HirBinaryOp::NullCoalesce,
             _ => HirBinaryOp::Add, // Default fallback
         }
     }

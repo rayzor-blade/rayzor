@@ -730,6 +730,22 @@ register_symbol!(
     "haxe_intmap_to_string",
     crate::haxe_sys::haxe_intmap_to_string
 );
+register_symbol!(
+    "haxe_stringmap_keys_to_array",
+    crate::haxe_sys::haxe_stringmap_keys_to_array
+);
+register_symbol!(
+    "haxe_intmap_keys_to_array",
+    crate::haxe_sys::haxe_intmap_keys_to_array
+);
+register_symbol!(
+    "haxe_stringmap_values_to_array",
+    crate::haxe_sys::haxe_stringmap_values_to_array
+);
+register_symbol!(
+    "haxe_intmap_values_to_array",
+    crate::haxe_sys::haxe_intmap_values_to_array
+);
 
 // ============================================================================
 // Type System (Dynamic values and Std.string)
@@ -1438,9 +1454,14 @@ register_symbol!(
     crate::exception::rayzor_exception_pop_handler
 );
 register_symbol!("rayzor_throw", crate::exception::rayzor_throw);
+register_symbol!("rayzor_throw_typed", crate::exception::rayzor_throw_typed);
 register_symbol!(
     "rayzor_get_exception",
     crate::exception::rayzor_get_exception
+);
+register_symbol!(
+    "rayzor_get_exception_type_id",
+    crate::exception::rayzor_get_exception_type_id
 );
 
 // ============================================================================

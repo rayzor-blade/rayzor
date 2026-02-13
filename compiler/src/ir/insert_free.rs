@@ -155,15 +155,16 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
         return 0;
     }
 
-    // Step 1: Find all allocation sources (Alloc + malloc + rayzor_anon_new calls)
+    // Step 1: Find all allocation sources (malloc + rayzor_anon_new calls)
+    // NOTE: IrInstruction::Alloc is NOT included here because Alloc creates
+    // stack slots (via Cranelift's create_sized_stack_slot), not heap memory.
+    // Stack slots are automatically freed when the function returns.
+    // Calling libc free() on a stack address causes SIGABRT.
     let mut alloc_ids: Vec<IrId> = Vec::new();
     let mut anon_alloc_ids: HashSet<IrId> = HashSet::new();
     for block in function.cfg.blocks.values() {
         for inst in &block.instructions {
             match inst {
-                IrInstruction::Alloc { dest, .. } => {
-                    alloc_ids.push(*dest);
-                }
                 IrInstruction::CallDirect {
                     dest: Some(dest),
                     func_id,

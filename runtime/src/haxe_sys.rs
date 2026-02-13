@@ -2859,3 +2859,101 @@ pub extern "C" fn haxe_intmap_to_string(map_ptr: *mut HaxeIntMap) -> *mut HaxeSt
         rust_string_to_haxe(result)
     }
 }
+
+/// Get StringMap keys as a HaxeArray of HaxeString pointers.
+/// Returns a pointer to a heap-allocated HaxeArray with elem_size=8 (pointer-sized elements).
+#[no_mangle]
+pub extern "C" fn haxe_stringmap_keys_to_array(
+    map_ptr: *mut HaxeStringMap,
+) -> *mut crate::haxe_array::HaxeArray {
+    use crate::haxe_array::HaxeArray;
+    use std::alloc::{alloc, Layout};
+
+    unsafe {
+        let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
+        crate::haxe_array::haxe_array_new(arr, 8); // 8 bytes per element (pointer-sized)
+
+        if !map_ptr.is_null() {
+            let map = &*map_ptr;
+            for key in map.map.keys() {
+                let hs = rust_string_to_haxe(key.clone());
+                let hs_as_i64 = hs as i64;
+                crate::haxe_array::haxe_array_push_i64(arr, hs_as_i64);
+            }
+        }
+
+        arr
+    }
+}
+
+/// Get IntMap keys as a HaxeArray of i64 values.
+/// Returns a pointer to a heap-allocated HaxeArray with elem_size=8.
+#[no_mangle]
+pub extern "C" fn haxe_intmap_keys_to_array(
+    map_ptr: *mut HaxeIntMap,
+) -> *mut crate::haxe_array::HaxeArray {
+    use crate::haxe_array::HaxeArray;
+    use std::alloc::{alloc, Layout};
+
+    unsafe {
+        let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
+        crate::haxe_array::haxe_array_new(arr, 8);
+
+        if !map_ptr.is_null() {
+            let map = &*map_ptr;
+            for &key in map.map.keys() {
+                crate::haxe_array::haxe_array_push_i64(arr, key);
+            }
+        }
+
+        arr
+    }
+}
+
+/// Get StringMap values as a HaxeArray of u64 raw values.
+/// Returns a pointer to a heap-allocated HaxeArray with elem_size=8.
+#[no_mangle]
+pub extern "C" fn haxe_stringmap_values_to_array(
+    map_ptr: *mut HaxeStringMap,
+) -> *mut crate::haxe_array::HaxeArray {
+    use crate::haxe_array::HaxeArray;
+    use std::alloc::{alloc, Layout};
+
+    unsafe {
+        let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
+        crate::haxe_array::haxe_array_new(arr, 8);
+
+        if !map_ptr.is_null() {
+            let map = &*map_ptr;
+            for &val in map.map.values() {
+                crate::haxe_array::haxe_array_push_i64(arr, val as i64);
+            }
+        }
+
+        arr
+    }
+}
+
+/// Get IntMap values as a HaxeArray of u64 raw values.
+/// Returns a pointer to a heap-allocated HaxeArray with elem_size=8.
+#[no_mangle]
+pub extern "C" fn haxe_intmap_values_to_array(
+    map_ptr: *mut HaxeIntMap,
+) -> *mut crate::haxe_array::HaxeArray {
+    use crate::haxe_array::HaxeArray;
+    use std::alloc::{alloc, Layout};
+
+    unsafe {
+        let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
+        crate::haxe_array::haxe_array_new(arr, 8);
+
+        if !map_ptr.is_null() {
+            let map = &*map_ptr;
+            for &val in map.map.values() {
+                crate::haxe_array::haxe_array_push_i64(arr, val as i64);
+            }
+        }
+
+        arr
+    }
+}

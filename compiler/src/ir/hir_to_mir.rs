@@ -3169,6 +3169,7 @@ impl<'a> HirToMirContext<'a> {
             }
 
             HirStatement::Throw(expr) => {
+                let thrown_type_id = self.runtime_type_id(expr.ty);
                 if let Some(exception_reg) = self.lower_expression(expr) {
                     // Cast exception to i64 for uniform storage
                     let reg_type = self
@@ -3183,14 +3184,21 @@ impl<'a> HirToMirContext<'a> {
                         exception_reg
                     };
 
-                    // Call rayzor_throw(exception_value) — this longjmps, never returns
+                    // Call rayzor_throw_typed(exception_value, type_id)
+                    let type_id_const = self
+                        .builder
+                        .build_const(IrValue::I32(thrown_type_id as i32))
+                        .expect("failed to create type_id const");
                     let throw_fn = self.get_or_register_extern_function(
-                        "rayzor_throw",
-                        vec![IrType::I64],
+                        "rayzor_throw_typed",
+                        vec![IrType::I64, IrType::I32],
                         IrType::Void,
                     );
-                    self.builder
-                        .build_call_direct(throw_fn, vec![exc_as_i64], IrType::Void);
+                    self.builder.build_call_direct(
+                        throw_fn,
+                        vec![exc_as_i64, type_id_const],
+                        IrType::Void,
+                    );
                     self.builder.build_unreachable();
                 }
             }
@@ -3687,6 +3695,15 @@ impl<'a> HirToMirContext<'a> {
             TypeKind::String => (Some("String"), None, Vec::new()),
             TypeKind::Array { .. } => (Some("Array"), None, Vec::new()),
             TypeKind::Enum { .. } => (Some("Enum"), None, Vec::new()),
+            TypeKind::Map { key_type, .. } => {
+                // Map types route to StringMap or IntMap based on key type
+                let key_kind = type_table.get(*key_type).map(|t| t.kind.clone());
+                let class = match key_kind {
+                    Some(TypeKind::Int) | Some(TypeKind::Bool) => "IntMap",
+                    _ => "StringMap",
+                };
+                (Some(class), None, Vec::new())
+            }
             TypeKind::Class {
                 symbol_id,
                 type_args,
@@ -5597,14 +5614,25 @@ impl<'a> HirToMirContext<'a> {
                                 .get_stdlib_mir_wrapper_signature(runtime_func)
                                 .map(|(params, ret)| (params, ret))
                                 .unwrap_or_else(|| {
-                                    // Fallback: derive from arguments (old behavior)
+                                    // Fallback: derive from arguments, using stdlib mapping hints
                                     let mut params = vec![IrType::Ptr(Box::new(IrType::U8))];
-                                    for arg in args {
-                                        params.push(self.convert_type(arg.ty));
+                                    for (i, arg) in args.iter().enumerate() {
+                                        // Check raw_value_params bitmask: bit (i+1) means param i+1
+                                        // (bit 0 is self, bit 1 is first user arg, etc.)
+                                        let param_bit = 1u32 << (i + 1);
+                                        if runtime_call.raw_value_params & param_bit != 0 {
+                                            params.push(IrType::U64);
+                                        } else if runtime_call.extend_to_i64_params & param_bit != 0
+                                        {
+                                            params.push(IrType::I64);
+                                        } else {
+                                            params.push(self.convert_type(arg.ty));
+                                        }
                                     }
-                                    // Use Void if function doesn't return a value
-                                    // This fixes array.push() returning void but being tracked for drop
-                                    let ret_type = if runtime_call.has_return {
+                                    // Use U64 return for returns_raw_value, Void for no return
+                                    let ret_type = if runtime_call.returns_raw_value {
+                                        IrType::U64
+                                    } else if runtime_call.has_return {
                                         result_type.clone()
                                     } else {
                                         IrType::Void
@@ -6561,6 +6589,10 @@ impl<'a> HirToMirContext<'a> {
                                 let runtime_func = runtime_call.runtime_name;
                                 let is_instance_method = runtime_call.has_self_param;
                                 let is_mir_wrapper = runtime_call.is_mir_wrapper;
+                                let returns_raw_value = runtime_call.returns_raw_value;
+                                let raw_value_params = runtime_call.raw_value_params;
+                                let extend_to_i64_params = runtime_call.extend_to_i64_params;
+                                let has_return = runtime_call.has_return;
                                 debug!(
                                     "[EXTERN METHOD VAR] Redirecting {}.{} -> {} (instance={}, mir_wrapper={})",
                                     class_name, method_name, runtime_func, is_instance_method, is_mir_wrapper
@@ -6619,10 +6651,22 @@ impl<'a> HirToMirContext<'a> {
                                             vec![]
                                         };
                                         // Always skip args[0] since is_method=true
-                                        for arg in args.iter().skip(1) {
-                                            params.push(self.convert_type(arg.ty));
+                                        // Use stdlib mapping hints for param types
+                                        for (i, arg) in args.iter().skip(1).enumerate() {
+                                            // raw_value_params: bit 0 = self, bit 1 = first user param, etc.
+                                            let user_bit = 1u32 << (i + 1);
+                                            if raw_value_params & user_bit != 0 {
+                                                params.push(IrType::U64);
+                                            } else if extend_to_i64_params & user_bit != 0 {
+                                                params.push(IrType::I64);
+                                            } else {
+                                                params.push(self.convert_type(arg.ty));
+                                            }
                                         }
-                                        let ret_type = if runtime_call.has_return {
+                                        // Use U64 return for returns_raw_value
+                                        let ret_type = if returns_raw_value {
+                                            IrType::U64
+                                        } else if has_return {
                                             result_type.clone()
                                         } else {
                                             IrType::Void
@@ -6684,6 +6728,62 @@ impl<'a> HirToMirContext<'a> {
                                     actual_return_type.clone(),
                                 )?;
 
+                                // Handle returns_raw_value: cast raw U64 to the appropriate type
+                                if returns_raw_value {
+                                    let final_result = match &result_type {
+                                        IrType::I32 => self.builder.build_cast(
+                                            call_result,
+                                            IrType::U64,
+                                            IrType::I32,
+                                        ),
+                                        IrType::I64 => self.builder.build_cast(
+                                            call_result,
+                                            IrType::U64,
+                                            IrType::I64,
+                                        ),
+                                        IrType::F64 => {
+                                            self.builder.build_bitcast(call_result, IrType::F64)
+                                        }
+                                        IrType::F32 => {
+                                            if let Some(f64_reg) =
+                                                self.builder.build_bitcast(call_result, IrType::F64)
+                                            {
+                                                self.builder.build_cast(
+                                                    f64_reg,
+                                                    IrType::F64,
+                                                    IrType::F32,
+                                                )
+                                            } else {
+                                                None
+                                            }
+                                        }
+                                        IrType::Bool => self.builder.build_cast(
+                                            call_result,
+                                            IrType::U64,
+                                            IrType::Bool,
+                                        ),
+                                        IrType::Ptr(ref inner)
+                                            if matches!(inner.as_ref(), IrType::String) =>
+                                        {
+                                            // Concrete pointer type (e.g., Ptr(String))
+                                            self.builder.build_cast(
+                                                call_result,
+                                                IrType::U64,
+                                                result_type.clone(),
+                                            )
+                                        }
+                                        _ => {
+                                            // Unresolved T or Dynamic: keep as I64
+                                            self.builder.build_cast(
+                                                call_result,
+                                                IrType::U64,
+                                                IrType::I64,
+                                            )
+                                        }
+                                    };
+                                    return final_result;
+                                }
+
                                 // Auto-unbox if runtime returns Ptr(U8) but HIR expects primitive
                                 return self.maybe_unbox_for_extern_return(
                                     call_result,
@@ -6717,6 +6817,13 @@ impl<'a> HirToMirContext<'a> {
                             {
                                 // Skip extern abstracts (CString, Usize, Ptr, etc.)
                                 // — they appear as Class in the type table but don't have toString()
+                                // Get class name for stdlib lookup
+                                let class_name_str = self
+                                    .symbol_table
+                                    .get_symbol(*symbol_id)
+                                    .and_then(|s| self.string_interner.get(s.name))
+                                    .unwrap_or("");
+
                                 let is_extern = self
                                     .symbol_table
                                     .get_symbol(*symbol_id)
@@ -6724,14 +6831,18 @@ impl<'a> HirToMirContext<'a> {
                                         s.flags.contains(crate::tast::symbols::SymbolFlags::EXTERN)
                                     })
                                     .unwrap_or(false);
-                                if is_extern {
+
+                                // Skip extern classes UNLESS they have a toString in stdlib_mapping
+                                // (e.g., StringMap, IntMap, Date have stdlib toString methods)
+                                let has_stdlib_tostring = self
+                                    .stdlib_mapping
+                                    .find_by_name(class_name_str, "toString")
+                                    .is_some();
+
+                                if is_extern && !has_stdlib_tostring {
                                     None
                                 } else {
-                                    // Get class name
-                                    self.symbol_table
-                                        .get_symbol(*symbol_id)
-                                        .and_then(|s| self.string_interner.get(s.name))
-                                        .map(|name| name.to_string())
+                                    Some(class_name_str.to_string())
                                 }
                             } else {
                                 None
@@ -7046,7 +7157,7 @@ impl<'a> HirToMirContext<'a> {
                         // Determine which trace function to call based on type
                         let trace_method = {
                             match &arg_type {
-                                IrType::I32 | IrType::I64 => "traceInt",
+                                IrType::I32 | IrType::I64 | IrType::U64 => "traceInt",
                                 IrType::F32 | IrType::F64 => "traceFloat",
                                 IrType::Bool => "traceBool",
                                 IrType::String => "traceString", // String is ptr+len struct
@@ -8086,8 +8197,10 @@ impl<'a> HirToMirContext<'a> {
                                                 IrType::U64,
                                                 IrType::Bool,
                                             ),
-                                            IrType::Ptr(_) => {
-                                                // Interpret as pointer
+                                            IrType::Ptr(ref inner)
+                                                if !matches!(inner.as_ref(), IrType::Void) =>
+                                            {
+                                                // Concrete pointer type (e.g., Ptr(String))
                                                 self.builder.build_cast(
                                                     raw_reg,
                                                     IrType::U64,
@@ -8095,8 +8208,13 @@ impl<'a> HirToMirContext<'a> {
                                                 )
                                             }
                                             _ => {
-                                                // For unknown types, return the raw u64
-                                                Some(raw_reg)
+                                                // Unresolved T (Ptr(Void)/Dynamic) or unknown: keep as I64
+                                                // so the raw value isn't misinterpreted as a pointer
+                                                self.builder.build_cast(
+                                                    raw_reg,
+                                                    IrType::U64,
+                                                    IrType::I64,
+                                                )
                                             }
                                         };
                                         return final_result;
@@ -10360,6 +10478,7 @@ impl<'a> HirToMirContext<'a> {
                 match op {
                     HirBinaryOp::And => return self.lower_logical_and(lhs, rhs),
                     HirBinaryOp::Or => return self.lower_logical_or(lhs, rhs),
+                    HirBinaryOp::NullCoalesce => return self.lower_null_coalesce(lhs, rhs),
                     _ => {}
                 }
 
@@ -10897,17 +11016,87 @@ impl<'a> HirToMirContext<'a> {
                     .build_call_direct(get_exc_fn, vec![], IrType::I64)
                     .unwrap_or_else(|| self.builder.build_const(IrValue::I64(0)).expect("const"));
 
-                // Execute first matching catch handler
-                if let Some(handler) = catch_handlers.first() {
-                    self.symbol_map.insert(handler.exception_var, exception_id);
-                    self.lower_expression(&handler.body);
-                }
+                let get_exc_type_fn = self.get_or_register_extern_function(
+                    "rayzor_get_exception_type_id",
+                    vec![],
+                    IrType::I32,
+                );
+                let exc_type_id = self
+                    .builder
+                    .build_call_direct(get_exc_type_fn, vec![], IrType::I32)
+                    .unwrap_or_else(|| self.builder.build_const(IrValue::I32(0)).expect("const"));
 
-                if let Some(finally_body) = &finally_expr {
-                    self.lower_expression(finally_body);
-                }
+                // Type-based dispatch across catch handlers
+                if !catch_handlers.is_empty() {
+                    let mut next_test_block: Option<IrBlockId> = None;
 
-                self.builder.build_branch(continuation_block);
+                    for (i, handler) in catch_handlers.iter().enumerate() {
+                        let catch_type_kind = {
+                            let type_table = self.type_table.borrow();
+                            type_table
+                                .get(handler.exception_type)
+                                .map(|t| t.kind.clone())
+                        };
+                        let is_dynamic =
+                            matches!(catch_type_kind, Some(crate::tast::TypeKind::Dynamic));
+
+                        let catch_body_block = match self.builder.create_block() {
+                            Some(b) => b,
+                            None => return None,
+                        };
+
+                        if let Some(test_block) = next_test_block {
+                            self.builder.switch_to_block(test_block);
+                        }
+
+                        if is_dynamic || i == catch_handlers.len() - 1 {
+                            self.builder.build_branch(catch_body_block);
+                            next_test_block = None;
+                        } else {
+                            let expected_type_id = self.runtime_type_id(handler.exception_type);
+                            let expected_const = self
+                                .builder
+                                .build_const(IrValue::I32(expected_type_id as i32))
+                                .expect("const");
+                            let type_match = self
+                                .builder
+                                .build_cmp(CompareOp::Eq, exc_type_id, expected_const)
+                                .expect("cmp");
+
+                            let next_block = self.builder.create_block().expect("create block");
+                            self.builder.build_cond_branch(
+                                type_match,
+                                catch_body_block,
+                                next_block,
+                            );
+                            next_test_block = Some(next_block);
+                        }
+
+                        // --- catch body ---
+                        self.builder.switch_to_block(catch_body_block);
+                        self.symbol_map.insert(handler.exception_var, exception_id);
+                        self.lower_expression(&handler.body);
+
+                        if let Some(finally_body) = &finally_expr {
+                            self.lower_expression(finally_body);
+                        }
+                        self.builder.build_branch(continuation_block);
+                    }
+
+                    // Fallthrough if no catch matched
+                    if let Some(fallthrough_block) = next_test_block {
+                        self.builder.switch_to_block(fallthrough_block);
+                        if let Some(finally_body) = &finally_expr {
+                            self.lower_expression(finally_body);
+                        }
+                        self.builder.build_branch(continuation_block);
+                    }
+                } else {
+                    if let Some(finally_body) = &finally_expr {
+                        self.lower_expression(finally_body);
+                    }
+                    self.builder.build_branch(continuation_block);
+                }
 
                 // --- continuation ---
                 self.builder.switch_to_block(continuation_block);
@@ -11842,9 +12031,12 @@ impl<'a> HirToMirContext<'a> {
                 IrType::Ptr(Box::new(IrType::Void))
             }
             Some(TypeKind::Optional { inner_type }) => {
-                // Optional types (T?) as nullable pointers
-                let inner = self.convert_type(*inner_type);
-                IrType::Ptr(Box::new(inner))
+                // Optional/Nullable types (Null<T>): same IR representation as inner type.
+                // With type erasure, null is represented as 0 for primitives/TypeParameter
+                // or null pointer for reference types (which are already Ptr).
+                // Wrapping in Ptr causes spurious casts (I64→Ptr) when the value is
+                // a raw scalar from returns_raw_value stdlib calls (e.g., StringMap.get()).
+                self.convert_type(*inner_type)
             }
 
             // Abstract types - use their underlying type
@@ -12248,24 +12440,53 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        let tostring_symbol = match tostring_symbol {
-            Some(s) => s,
-            None => return Some(None), // Class has no toString() method
-        };
+        if let Some(tostring_symbol) = tostring_symbol {
+            // User class with toString() in HIR — look up compiled function
+            if let Some(tostring_id) = self.function_map.get(&tostring_symbol).copied() {
+                let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
+                let string_reg =
+                    self.builder
+                        .build_call_direct(tostring_id, vec![obj_reg], string_ptr_ty)?;
+                return Some(Some(string_reg));
+            }
+        }
 
-        // Look up the IrFunctionId for this specific toString method
-        let tostring_id = match self.function_map.get(&tostring_symbol).copied() {
-            Some(id) => id,
-            None => return Some(None),
-        };
+        // Fallback: check stdlib_mapping for a registered toString() method
+        // This handles stdlib classes (StringMap, IntMap, Date, Bytes, etc.)
+        let class_name = self
+            .symbol_table
+            .get_symbol(class_symbol)
+            .and_then(|s| self.string_interner.get(s.name))
+            .unwrap_or("")
+            .to_string();
 
-        // Call toString(this) -> *HaxeString
-        let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
-        let string_reg =
-            self.builder
-                .build_call_direct(tostring_id, vec![obj_reg], string_ptr_ty)?;
+        if let Some((_sig, mapping)) = self.stdlib_mapping.find_by_name(&class_name, "toString") {
+            let runtime_name = mapping.runtime_name;
+            let is_mir_wrapper = mapping.is_mir_wrapper;
+            let ptr_void = IrType::Ptr(Box::new(IrType::Void));
 
-        Some(Some(string_reg))
+            let func_id = if is_mir_wrapper {
+                self.register_stdlib_mir_forward_ref(runtime_name, vec![ptr_void.clone()], ptr_void)
+            } else {
+                self.get_or_register_extern_function(runtime_name, vec![ptr_void.clone()], ptr_void)
+            };
+
+            let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
+            if let Some(str_ptr) = self.builder.build_call_direct(
+                func_id,
+                vec![obj_reg],
+                IrType::Ptr(Box::new(IrType::Void)),
+            ) {
+                // Cast from Ptr(Void) to Ptr(String) for trace
+                let string_reg = self
+                    .builder
+                    .build_cast(str_ptr, IrType::Ptr(Box::new(IrType::Void)), string_ptr_ty)
+                    .unwrap_or(str_ptr);
+                return Some(Some(string_reg));
+            }
+        }
+
+        Some(None) // No toString() found
     }
 
     /// Convert a value to a string pointer
@@ -15058,6 +15279,44 @@ impl<'a> HirToMirContext<'a> {
         Some(result)
     }
 
+    fn lower_null_coalesce(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Option<IrId> {
+        // Null coalescing: lhs ?? rhs
+        // If lhs is non-null, return lhs; otherwise evaluate and return rhs
+        let eval_rhs = self.builder.create_block()?;
+        let merge = self.builder.create_block()?;
+
+        // Evaluate LHS
+        let lhs_val = self.lower_expression(lhs)?;
+
+        // Capture current block before branching
+        let lhs_block = self.builder.current_block()?;
+
+        // Null check: lhs != 0 (null pointers and null values are 0)
+        let zero = self.builder.build_const(IrValue::I64(0))?;
+        let is_not_null = self.builder.build_cmp(CompareOp::Ne, lhs_val, zero)?;
+
+        // If not null -> merge with lhs_val, else -> evaluate rhs
+        self.builder
+            .build_cond_branch(is_not_null, merge, eval_rhs)?;
+
+        // Block for evaluating RHS (only when lhs is null)
+        self.builder.switch_to_block(eval_rhs);
+        let rhs_val = self.lower_expression(rhs)?;
+        let rhs_block = self.builder.current_block()?;
+        self.builder.build_branch(merge)?;
+
+        // Merge block with phi node
+        self.builder.switch_to_block(merge);
+        let result_type = self.convert_type(lhs.ty);
+        let result = self.builder.build_phi(merge, result_type)?;
+        self.builder
+            .add_phi_incoming(merge, result, lhs_block, lhs_val)?;
+        self.builder
+            .add_phi_incoming(merge, result, rhs_block, rhs_val)?;
+
+        Some(result)
+    }
+
     fn lower_conditional(
         &mut self,
         cond: &HirExpr,
@@ -15628,6 +15887,52 @@ impl<'a> HirToMirContext<'a> {
         debug!("[for-in]: pattern={:?}", pattern);
         debug!("[for-in]: iter_expr.ty={:?}", iter_expr.ty);
 
+        // Check the iterable expression's type to determine iteration strategy
+        let iter_type_kind = {
+            let type_table = self.type_table.borrow();
+            type_table.get(iter_expr.ty).map(|t| t.kind.clone())
+        };
+
+        // For Map types, convert keys to a HaxeArray and iterate over that
+        if let Some(crate::tast::TypeKind::Map { key_type, .. }) = &iter_type_kind {
+            let key_type_kind = {
+                let type_table = self.type_table.borrow();
+                type_table.get(*key_type).map(|t| t.kind.clone())
+            };
+            let is_int_key = matches!(
+                key_type_kind,
+                Some(crate::tast::TypeKind::Int) | Some(crate::tast::TypeKind::Bool)
+            );
+
+            // Lower the map expression
+            let Some(map_ptr) = self.lower_expression(iter_expr) else {
+                return;
+            };
+
+            // Call keys_to_array to get a HaxeArray of keys
+            let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+            let keys_fn_name = if is_int_key {
+                "haxe_intmap_keys_to_array"
+            } else {
+                "haxe_stringmap_keys_to_array"
+            };
+            let keys_fn = self.get_or_register_extern_function(
+                keys_fn_name,
+                vec![ptr_void.clone()],
+                ptr_void.clone(),
+            );
+            let Some(keys_array) = self
+                .builder
+                .build_call_direct(keys_fn, vec![map_ptr], ptr_void)
+            else {
+                return;
+            };
+
+            // Now iterate over the keys array using the standard array iteration path
+            self.lower_for_in_over_array(pattern, keys_array, *key_type, body, label);
+            return;
+        }
+
         // For-in loops over Arrays desugar to index-based iteration:
         // for (x in arr) { body }
         //
@@ -15799,6 +16104,128 @@ impl<'a> HirToMirContext<'a> {
         self.loop_stack.pop();
 
         // Step 7: Continue at exit block
+        self.builder.switch_to_block(loop_exit_block);
+    }
+
+    /// Helper: iterate over a HaxeArray by index. Used by both Array for-in and Map for-in
+    /// (where keys are first converted to a HaxeArray).
+    fn lower_for_in_over_array(
+        &mut self,
+        pattern: &HirPattern,
+        collection: IrId,
+        elem_type_id: TypeId,
+        body: &HirBlock,
+        label: Option<&SymbolId>,
+    ) {
+        // Read array length from HaxeArray struct (offset 8 = len field)
+        let Some(offset_8) = self.builder.build_const(IrValue::I64(8)) else {
+            return;
+        };
+        let Some(len_ptr) =
+            self.builder
+                .build_binop(crate::ir::instructions::BinaryOp::Add, collection, offset_8)
+        else {
+            return;
+        };
+        let Some(array_len) = self.builder.build_load(len_ptr, IrType::I64) else {
+            return;
+        };
+
+        // Initialize index to 0
+        let Some(zero) = self.builder.build_const(IrValue::I64(0)) else {
+            return;
+        };
+        let Some(index_ptr) = self.builder.build_alloc(IrType::I64, None) else {
+            return;
+        };
+        self.builder.build_store(index_ptr, zero);
+
+        // Create loop blocks
+        let Some(loop_cond_block) = self.builder.create_block() else {
+            return;
+        };
+        let Some(loop_body_block) = self.builder.create_block() else {
+            return;
+        };
+        let Some(loop_exit_block) = self.builder.create_block() else {
+            return;
+        };
+
+        self.builder.build_branch(loop_cond_block);
+
+        // Push loop context for break/continue
+        self.loop_stack.push(LoopContext {
+            continue_block: loop_cond_block,
+            break_block: loop_exit_block,
+            label: label.cloned(),
+            exit_phi_nodes: BTreeMap::new(),
+            continue_phi_nodes: BTreeMap::new(),
+        });
+
+        // Condition block: index < length
+        self.builder.switch_to_block(loop_cond_block);
+        let Some(current_index) = self.builder.build_load(index_ptr, IrType::I64) else {
+            self.loop_stack.pop();
+            return;
+        };
+        let Some(cmp_result) = self.builder.build_cmp(
+            crate::ir::instructions::CompareOp::Lt,
+            current_index,
+            array_len,
+        ) else {
+            self.loop_stack.pop();
+            return;
+        };
+        self.builder
+            .build_cond_branch(cmp_result, loop_body_block, loop_exit_block);
+
+        // Body block: get element, bind, execute body, increment
+        self.builder.switch_to_block(loop_body_block);
+        let Some(idx_for_access) = self.builder.build_load(index_ptr, IrType::I64) else {
+            self.loop_stack.pop();
+            return;
+        };
+        let Some(element_value) = self.lower_index_access(collection, idx_for_access, elem_type_id)
+        else {
+            self.loop_stack.pop();
+            return;
+        };
+
+        // Bind the pattern to the element value
+        match pattern {
+            HirPattern::Variable { symbol, .. } => {
+                self.symbol_map.insert(*symbol, element_value);
+            }
+            _ => {}
+        }
+
+        // Lower the loop body
+        self.enter_drop_scope();
+        self.lower_block(body);
+
+        // Increment index
+        if !self.is_terminated() {
+            self.exit_drop_scope();
+            let Some(idx_to_inc) = self.builder.build_load(index_ptr, IrType::I64) else {
+                self.loop_stack.pop();
+                return;
+            };
+            let Some(one) = self.builder.build_const(IrValue::I64(1)) else {
+                self.loop_stack.pop();
+                return;
+            };
+            let Some(next_index) =
+                self.builder
+                    .build_binop(crate::ir::instructions::BinaryOp::Add, idx_to_inc, one)
+            else {
+                self.loop_stack.pop();
+                return;
+            };
+            self.builder.build_store(index_ptr, next_index);
+            self.builder.build_branch(loop_cond_block);
+        }
+
+        self.loop_stack.pop();
         self.builder.switch_to_block(loop_exit_block);
     }
 
@@ -16425,7 +16852,7 @@ impl<'a> HirToMirContext<'a> {
         self.builder
             .build_call_direct(pop_fn2, vec![], IrType::Void);
 
-        // Get the exception value
+        // Get the exception value and type_id
         let get_exc_fn =
             self.get_or_register_extern_function("rayzor_get_exception", vec![], IrType::I64);
         let exception_id = self
@@ -16437,29 +16864,86 @@ impl<'a> HirToMirContext<'a> {
                     .expect("failed to create const")
             });
 
-        // For now, dispatch to first catch block (we support catch (e:Dynamic) only)
-        // TODO: Add type-based dispatch for multiple catch clauses
+        let get_exc_type_fn = self.get_or_register_extern_function(
+            "rayzor_get_exception_type_id",
+            vec![],
+            IrType::I32,
+        );
+        let exc_type_id = self
+            .builder
+            .build_call_direct(get_exc_type_fn, vec![], IrType::I32)
+            .unwrap_or_else(|| {
+                self.builder
+                    .build_const(IrValue::I32(0))
+                    .expect("failed to create const")
+            });
+
+        // Type-based dispatch across catch clauses
         if !catches.is_empty() {
-            let catch_block = match self.builder.create_block() {
-                Some(b) => b,
-                None => return,
-            };
-            self.builder.build_branch(catch_block);
-
-            // --- catch block ---
-            self.builder.switch_to_block(catch_block);
-
-            // Bind the exception variable
-            self.symbol_map
-                .insert(catches[0].exception_var, exception_id);
-
-            // Lower the catch block body
-            self.lower_block(&catches[0].body);
-
-            if let Some(fb) = finally_block {
-                self.builder.build_branch(fb);
+            let after_catch_target = if let Some(fb) = finally_block {
+                fb
             } else {
-                self.builder.build_branch(continuation_block);
+                continuation_block
+            };
+
+            // Build chain: for each catch, test type match → body or next catch
+            let mut next_test_block: Option<IrBlockId> = None;
+
+            for (i, catch_clause) in catches.iter().enumerate() {
+                let catch_type_kind = {
+                    let type_table = self.type_table.borrow();
+                    type_table
+                        .get(catch_clause.exception_type)
+                        .map(|t| t.kind.clone())
+                };
+                let is_dynamic = matches!(catch_type_kind, Some(crate::tast::TypeKind::Dynamic));
+
+                let catch_body_block = match self.builder.create_block() {
+                    Some(b) => b,
+                    None => return,
+                };
+
+                // If this is not the first catch, the previous test's false branch leads here
+                if let Some(test_block) = next_test_block {
+                    self.builder.switch_to_block(test_block);
+                }
+                // else: we're still in the landing_pad block from above
+
+                if is_dynamic || i == catches.len() - 1 {
+                    // Dynamic catches everything; last catch is also unconditional fallback
+                    self.builder.build_branch(catch_body_block);
+                    next_test_block = None;
+                } else {
+                    // Test: exc_type_id == expected_type_id
+                    let expected_type_id = self.runtime_type_id(catch_clause.exception_type);
+                    let expected_const = self
+                        .builder
+                        .build_const(IrValue::I32(expected_type_id as i32))
+                        .expect("failed to create type_id const");
+                    let type_match = self
+                        .builder
+                        .build_cmp(CompareOp::Eq, exc_type_id, expected_const)
+                        .expect("failed to build type cmp");
+
+                    let next_block = self.builder.create_block().expect("failed to create block");
+                    self.builder
+                        .build_cond_branch(type_match, catch_body_block, next_block);
+                    next_test_block = Some(next_block);
+                }
+
+                // --- catch body ---
+                self.builder.switch_to_block(catch_body_block);
+                self.symbol_map
+                    .insert(catch_clause.exception_var, exception_id);
+                self.lower_block(&catch_clause.body);
+                self.builder.build_branch(after_catch_target);
+            }
+
+            // If all typed catches failed and no Dynamic/final catch consumed it,
+            // branch to finally/continuation (exception goes unhandled at this level)
+            if let Some(fallthrough_block) = next_test_block {
+                self.builder.switch_to_block(fallthrough_block);
+                self.builder.build_branch(after_catch_target);
             }
         } else {
             // No catch clauses — go directly to finally or continuation
@@ -17152,64 +17636,138 @@ impl<'a> HirToMirContext<'a> {
     fn lower_map_literal(&mut self, entries: &[(HirExpr, HirExpr)]) -> Option<IrId> {
         // Map literal: [key1 => val1, key2 => val2, ...]
         //
-        // Lowering strategy:
-        // 1. Allocate map structure (hash table)
-        // 2. Initialize each key-value pair
-        // 3. Return map pointer
-        //
-        // This is a simplified implementation. Production would use a proper hash table runtime.
+        // Determine key type from first entry and use appropriate runtime:
+        // - String keys → StringMap (haxe_stringmap_new/set)
+        // - Int keys → IntMap (haxe_intmap_new/set)
+        // - Object keys → TODO: ObjectMap (generic HashMap by pointer identity) not yet implemented
 
-        let entry_count = entries.len();
-
-        // Allocate map structure: header + entry array
-        // Structure: [size, capacity, entry0_key, entry0_val, entry1_key, entry1_val, ...]
-        let total_slots = 2 + (entry_count * 2); // header + (key, value) pairs
-        let count_val = self.builder.build_int(total_slots as i64, IrType::I64)?;
-        let map_ptr = self
-            .builder
-            .build_alloc(IrType::Ptr(Box::new(IrType::Any)), Some(count_val))?;
-
-        // Store size in header (index 0)
-        let size_field = self.builder.build_int(entry_count as i64, IrType::I64)?;
-        self.builder.build_store(map_ptr, size_field)?;
-
-        // Store capacity (index 1)
-        let capacity_val = self.builder.build_int(entry_count as i64, IrType::I64)?;
-        let capacity_idx = self.builder.build_int(1, IrType::I64)?;
-        let capacity_ptr = self.builder.build_gep(
-            map_ptr,
-            vec![capacity_idx],
-            IrType::Ptr(Box::new(IrType::Any)),
-        )?;
-        self.builder.build_store(capacity_ptr, capacity_val)?;
-
-        // Store each key-value pair
-        for (i, (key, value)) in entries.iter().enumerate() {
-            let key_val = self.lower_expression(key)?;
-            let value_val = self.lower_expression(value)?;
-
-            // Store key at index: 2 + i * 2
-            let key_index = 2 + (i * 2);
-            let key_idx = self.builder.build_int(key_index as i64, IrType::I64)?;
-            let key_ptr = self.builder.build_gep(
-                map_ptr,
-                vec![key_idx],
-                IrType::Ptr(Box::new(IrType::Any)),
-            )?;
-            self.builder.build_store(key_ptr, key_val)?;
-
-            // Store value at index: 2 + i * 2 + 1
-            let val_index = 2 + (i * 2) + 1;
-            let val_idx = self.builder.build_int(val_index as i64, IrType::I64)?;
-            let val_ptr = self.builder.build_gep(
-                map_ptr,
-                vec![val_idx],
-                IrType::Ptr(Box::new(IrType::Any)),
-            )?;
-            self.builder.build_store(val_ptr, value_val)?;
+        if entries.is_empty() {
+            // Default to StringMap for empty map literals
+            let new_fn = self.get_or_register_extern_function(
+                "haxe_stringmap_new",
+                vec![],
+                IrType::Ptr(Box::new(IrType::Void)),
+            );
+            return self.builder.build_call_direct(
+                new_fn,
+                vec![],
+                IrType::Ptr(Box::new(IrType::Void)),
+            );
         }
 
-        Some(map_ptr)
+        // Determine key type from first entry
+        let key_type_kind = {
+            let type_table = self.type_table.borrow();
+            type_table.get(entries[0].0.ty).map(|t| t.kind.clone())
+        };
+        let is_int_key = matches!(
+            key_type_kind,
+            Some(crate::tast::TypeKind::Int) | Some(crate::tast::TypeKind::Bool)
+        );
+
+        let map_ptr_type = IrType::Ptr(Box::new(IrType::Void));
+
+        if is_int_key {
+            // IntMap
+            let new_fn = self.get_or_register_extern_function(
+                "haxe_intmap_new",
+                vec![],
+                map_ptr_type.clone(),
+            );
+            let map_ptr = self
+                .builder
+                .build_call_direct(new_fn, vec![], map_ptr_type.clone())?;
+
+            let set_fn = self.get_or_register_extern_function(
+                "haxe_intmap_set",
+                vec![map_ptr_type.clone(), IrType::I64, IrType::U64],
+                IrType::Void,
+            );
+
+            for (key, value) in entries.iter() {
+                let key_val = self.lower_expression(key)?;
+                let value_val = self.lower_expression(value)?;
+
+                // Cast key to i64
+                let key_type = self.convert_type(key.ty);
+                let key_i64 = if key_type != IrType::I64 {
+                    self.builder
+                        .build_cast(key_val, key_type, IrType::I64)
+                        .unwrap_or(key_val)
+                } else {
+                    key_val
+                };
+
+                // Cast value to u64 for raw storage
+                let val_type = self.convert_type(value.ty);
+                let val_u64 = match &val_type {
+                    IrType::F64 => self
+                        .builder
+                        .build_bitcast(value_val, IrType::U64)
+                        .unwrap_or(value_val),
+                    IrType::U64 => value_val,
+                    _ => self
+                        .builder
+                        .build_cast(value_val, val_type, IrType::U64)
+                        .unwrap_or(value_val),
+                };
+
+                self.builder.build_call_direct(
+                    set_fn,
+                    vec![map_ptr, key_i64, val_u64],
+                    IrType::Void,
+                );
+            }
+
+            Some(map_ptr)
+        } else {
+            // StringMap (default for String keys and other types)
+            let new_fn = self.get_or_register_extern_function(
+                "haxe_stringmap_new",
+                vec![],
+                map_ptr_type.clone(),
+            );
+            let map_ptr = self
+                .builder
+                .build_call_direct(new_fn, vec![], map_ptr_type.clone())?;
+
+            let set_fn = self.get_or_register_extern_function(
+                "haxe_stringmap_set",
+                vec![
+                    map_ptr_type.clone(),
+                    IrType::Ptr(Box::new(IrType::U8)),
+                    IrType::U64,
+                ],
+                IrType::Void,
+            );
+
+            for (key, value) in entries.iter() {
+                let key_val = self.lower_expression(key)?;
+                let value_val = self.lower_expression(value)?;
+
+                // Cast value to u64 for raw storage
+                let val_type = self.convert_type(value.ty);
+                let val_u64 = match &val_type {
+                    IrType::F64 => self
+                        .builder
+                        .build_bitcast(value_val, IrType::U64)
+                        .unwrap_or(value_val),
+                    IrType::U64 => value_val,
+                    _ => self
+                        .builder
+                        .build_cast(value_val, val_type, IrType::U64)
+                        .unwrap_or(value_val),
+                };
+
+                self.builder.build_call_direct(
+                    set_fn,
+                    vec![map_ptr, key_val, val_u64],
+                    IrType::Void,
+                );
+            }
+
+            Some(map_ptr)
+        }
     }
 
     /// Wrap a class instance in an interface fat pointer.
@@ -17671,6 +18229,9 @@ impl<'a> HirToMirContext<'a> {
             Some(TypeKind::Int) => 3,
             Some(TypeKind::Float) => 4,
             Some(TypeKind::String) => 5,
+            Some(TypeKind::Dynamic) => 5, // Dynamic matches anything
+            Some(TypeKind::Class { symbol_id, .. }) => symbol_id.as_raw() as u32 + 1000,
+            Some(TypeKind::Enum { symbol_id, .. }) => symbol_id.as_raw() as u32 + 1000,
             Some(TypeKind::TypeAlias { target_type, .. }) => {
                 let target = *target_type;
                 drop(type_table);

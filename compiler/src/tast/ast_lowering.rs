@@ -8123,7 +8123,67 @@ impl<'a> AstLowering<'a> {
             });
         }
 
-        // For non-Array types, use the generic iterator pattern (requires iterator classes)
+        // For Map types, emit a ForIn statement that passes through to MIR level
+        // where keys_to_array + array iteration handles it
+        let is_map = {
+            let type_table = self.context.type_table.borrow();
+            if let Some(actual_type) = type_table.get(iterable_expr.expr_type) {
+                matches!(&actual_type.kind, TypeKind::Map { .. })
+            } else {
+                false
+            }
+        };
+
+        if is_map && key_var.is_none() {
+            let loop_body_scope_id = ScopeId::from_raw(self.context.next_scope_id());
+            let source_location = self.context.create_location_from_span(expression.span);
+            // For Map for-in, iterate over keys (not values)
+            let element_type = {
+                let type_table = self.context.type_table.borrow();
+                if let Some(actual_type) = type_table.get(iterable_expr.expr_type) {
+                    if let TypeKind::Map { key_type, .. } = &actual_type.kind {
+                        *key_type
+                    } else {
+                        self.infer_element_type_from_iterable(&iterable_expr)
+                    }
+                } else {
+                    self.infer_element_type_from_iterable(&iterable_expr)
+                }
+            };
+            let var_name = self.context.intern_string(var);
+            let var_symbol = self.context.symbol_table.create_variable_with_type(
+                var_name,
+                loop_body_scope_id,
+                element_type,
+            );
+
+            let old_scope = self.context.current_scope;
+            self.context.current_scope = loop_body_scope_id;
+            let body_stmt = self.convert_expression_to_statement(body)?;
+            self.context.current_scope = old_scope;
+
+            let for_in_stmt = TypedStatement::ForIn {
+                value_var: var_symbol,
+                key_var: None,
+                iterable: iterable_expr,
+                body: Box::new(body_stmt),
+                source_location,
+            };
+
+            return Ok(TypedExpression {
+                expr_type: self.context.type_table.borrow().void_type(),
+                kind: TypedExpressionKind::Block {
+                    statements: vec![for_in_stmt],
+                    scope_id: loop_body_scope_id,
+                },
+                usage: VariableUsage::Move,
+                lifetime_id: LifetimeId::static_lifetime(),
+                source_location,
+                metadata: ExpressionMetadata::default(),
+            });
+        }
+
+        // For non-Array, non-Map types, use the generic iterator pattern (requires iterator classes)
         let _iterator_type_name = self.infer_iterator_type_name(&iterable_expr.expr_type);
 
         // Validate that the iterable type is actually iterable
