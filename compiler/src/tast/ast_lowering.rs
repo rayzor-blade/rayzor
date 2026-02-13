@@ -9147,6 +9147,10 @@ impl<'a> AstLowering<'a> {
                         // Assignment returns the type of the left operand
                         Ok(left.expr_type)
                     }
+                    BinaryOperator::NullCoal => {
+                        // Null coalescing: result type is the LHS type (non-null version)
+                        Ok(left.expr_type)
+                    }
                     _ => Ok(type_table.dynamic_type()),
                 }
             }

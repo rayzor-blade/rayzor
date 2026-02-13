@@ -1628,6 +1628,39 @@ impl<'a> TastToHirContext<'a> {
                             scope: self.current_scope,
                         })
                     }
+                    BinaryOperator::NullCoal => {
+                        // Desugar `lhs ?? rhs` into `if (lhs != null) lhs else rhs`
+                        // For non-nullable primitives (Int, Float, Bool), always return LHS
+                        let is_non_nullable = {
+                            let type_table = self.type_table.borrow();
+                            type_table.get(left.expr_type).map_or(false, |t| {
+                                matches!(t.kind, TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+                            })
+                        };
+                        if is_non_nullable {
+                            // Primitive types can never be null, just return LHS
+                            return self.lower_expression(left);
+                        }
+                        // Reference types: desugar to conditional
+                        let lhs_expr = self.lower_expression(left);
+                        let rhs_expr = self.lower_expression(right);
+                        let null_expr = self.make_null_literal();
+                        let condition = HirExpr::new(
+                            HirExprKind::Binary {
+                                op: HirBinaryOp::Ne,
+                                lhs: Box::new(lhs_expr.clone()),
+                                rhs: Box::new(null_expr),
+                            },
+                            self.get_bool_type(),
+                            self.current_lifetime,
+                            expr.source_location,
+                        );
+                        HirExprKind::If {
+                            condition: Box::new(condition),
+                            then_expr: Box::new(lhs_expr),
+                            else_expr: Box::new(rhs_expr),
+                        }
+                    }
                     _ => {
                         // Regular binary operators
                         HirExprKind::Binary {
@@ -2395,6 +2428,7 @@ impl<'a> TastToHirContext<'a> {
             BinaryOperator::Shl => HirBinaryOp::Shl,
             BinaryOperator::Shr => HirBinaryOp::Shr,
             BinaryOperator::NullCoal => HirBinaryOp::NullCoalesce,
+            BinaryOperator::Range => HirBinaryOp::Range,
             _ => HirBinaryOp::Add, // Default fallback
         }
     }
@@ -2623,10 +2657,13 @@ impl<'a> TastToHirContext<'a> {
         &mut self,
         expression: &TypedExpression,
         array_symbol: SymbolId,
-        array_name: InternedString,
+        _array_name: InternedString,
         array_type: TypeId,
     ) -> Result<HirBlock, String> {
-        // Create _tmp.push(expression)
+        // Desugar to: _tmp.push(expression)
+        // Uses the same pattern as regular method calls in HIR:
+        // Call { callee: Variable(push_sym), args: [receiver, element], is_method: true }
+        // The MIR Variable callee path resolves "push" via stdlib mapping for Array types.
         let array_ref = HirExpr::new(
             HirExprKind::Variable {
                 symbol: array_symbol,
@@ -2637,31 +2674,23 @@ impl<'a> TastToHirContext<'a> {
             SourceLocation::unknown(),
         );
 
-        // BACKLOG: Need proper method resolution for Array.push
-        // See src/ir/BACKLOG.md section 2a
-        // For now, we cannot properly resolve the push method symbol
-        // This blocks correct array comprehension desugaring
+        let push_symbol = self.lookup_array_push_method(array_type).ok_or_else(|| {
+            "Cannot resolve Array.push method for comprehension desugaring".to_string()
+        })?;
 
-        // Attempt to look up push method from Array type
-        let push_symbol = self.lookup_array_push_method(array_type)
-            .ok_or_else(|| {
-                format!("Cannot resolve Array.push method for comprehension desugaring. Array type methods must be loaded from haxe-std")
-            })?;
-
-        // Create method call: array.push(element)
         let push_call = HirExpr::new(
             HirExprKind::Call {
                 callee: Box::new(HirExpr::new(
-                    HirExprKind::Field {
-                        object: Box::new(array_ref),
-                        field: push_symbol,
+                    HirExprKind::Variable {
+                        symbol: push_symbol,
+                        capture_mode: None,
                     },
-                    self.get_dynamic_type(), // BACKLOG: Need actual method type
+                    self.get_dynamic_type(),
                     self.current_lifetime,
                     SourceLocation::unknown(),
                 )),
                 type_args: Vec::new(),
-                args: vec![self.lower_expression(expression)],
+                args: vec![array_ref, self.lower_expression(expression)],
                 is_method: true,
             },
             self.get_void_type(),
@@ -2830,6 +2859,17 @@ impl<'a> TastToHirContext<'a> {
             // Also check the name field directly
             if let Some(name_str) = self.string_interner.get(symbol.name) {
                 if name_str == "Array.push" || name_str == "haxe.Array.push" {
+                    return Some(symbol.id);
+                }
+            }
+        }
+
+        // Strategy 4: Find any symbol simply named "push" that belongs to an Array class
+        let push_name = self.string_interner.intern("push");
+        for symbol in self.symbol_table.all_symbols() {
+            if symbol.name == push_name {
+                // Check if this push belongs to Array by examining the parent class
+                if symbol.kind == crate::tast::symbols::SymbolKind::Function {
                     return Some(symbol.id);
                 }
             }

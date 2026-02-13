@@ -2677,6 +2677,23 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// Lower a HIR block expression to MIR, returning the trailing expression's value
+    fn lower_block_expr(&mut self, block: &HirBlock) -> Option<IrId> {
+        // Process all statements
+        for stmt in &block.statements {
+            self.lower_statement(stmt);
+            self.check_drop_points_after_statement();
+            self.current_stmt_index += 1;
+        }
+
+        // Return trailing expression value if present
+        if let Some(expr) = &block.expr {
+            self.lower_expression(expr)
+        } else {
+            None
+        }
+    }
+
     /// Lower a HIR statement to MIR instructions
     fn lower_statement(&mut self, stmt: &HirStatement) {
         match stmt {
@@ -10780,9 +10797,8 @@ impl<'a> HirToMirContext<'a> {
                     (Some(TypeKind::Dynamic), _) => {
                         let value_reg = self.lower_expression(expr)?;
                         let rt_type_id = self.runtime_type_id(*expected);
-                        let type_id_const = self
-                            .builder
-                            .build_const(IrValue::I64(rt_type_id as i64))?;
+                        let type_id_const =
+                            self.builder.build_const(IrValue::I64(rt_type_id as i64))?;
                         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                         let is_func_id = self.get_or_register_extern_function(
                             "haxe_std_is",
@@ -10875,11 +10891,7 @@ impl<'a> HirToMirContext<'a> {
                 else_expr,
             } => self.lower_conditional(condition, then_expr, else_expr),
 
-            HirExprKind::Block(block) => {
-                self.lower_block(block);
-                // Block expressions can return values through their trailing expression
-                None // Simplified for now
-            }
+            HirExprKind::Block(block) => self.lower_block_expr(block),
 
             HirExprKind::Lambda {
                 params,
@@ -15295,22 +15307,35 @@ impl<'a> HirToMirContext<'a> {
     fn lower_null_coalesce(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Option<IrId> {
         // Null coalescing: lhs ?? rhs
         // If lhs is non-null, return lhs; otherwise evaluate and return rhs
+        //
+        // Uses intermediary blocks (like ternary) to avoid Cranelift phi issues
+        // when br_if targets a merge block directly.
+        let lhs_pass = self.builder.create_block()?;
         let eval_rhs = self.builder.create_block()?;
         let merge = self.builder.create_block()?;
 
         // Evaluate LHS
         let lhs_val = self.lower_expression(lhs)?;
 
-        // Capture current block before branching
-        let lhs_block = self.builder.current_block()?;
-
         // Null check: lhs != 0 (null pointers and null values are 0)
-        let zero = self.builder.build_const(IrValue::I64(0))?;
+        // Use same type as LHS to avoid type mismatch in comparison
+        let lhs_ir_type = self.builder.get_register_type(lhs_val);
+        let zero = match lhs_ir_type {
+            Some(IrType::I32) => self.builder.build_const(IrValue::I32(0))?,
+            Some(IrType::F32) => self.builder.build_const(IrValue::F32(0.0))?,
+            Some(IrType::F64) => self.builder.build_const(IrValue::F64(0.0))?,
+            _ => self.builder.build_const(IrValue::I64(0))?,
+        };
         let is_not_null = self.builder.build_cmp(CompareOp::Ne, lhs_val, zero)?;
 
-        // If not null -> merge with lhs_val, else -> evaluate rhs
+        // If not null -> lhs_pass block, else -> evaluate rhs
         self.builder
-            .build_cond_branch(is_not_null, merge, eval_rhs)?;
+            .build_cond_branch(is_not_null, lhs_pass, eval_rhs)?;
+
+        // LHS pass-through block (just branches to merge)
+        self.builder.switch_to_block(lhs_pass);
+        let lhs_pass_block = self.builder.current_block()?;
+        self.builder.build_branch(merge)?;
 
         // Block for evaluating RHS (only when lhs is null)
         self.builder.switch_to_block(eval_rhs);
@@ -15323,7 +15348,7 @@ impl<'a> HirToMirContext<'a> {
         let result_type = self.convert_type(lhs.ty);
         let result = self.builder.build_phi(merge, result_type)?;
         self.builder
-            .add_phi_incoming(merge, result, lhs_block, lhs_val)?;
+            .add_phi_incoming(merge, result, lhs_pass_block, lhs_val)?;
         self.builder
             .add_phi_incoming(merge, result, rhs_block, rhs_val)?;
 
@@ -15900,6 +15925,17 @@ impl<'a> HirToMirContext<'a> {
         debug!("[for-in]: pattern={:?}", pattern);
         debug!("[for-in]: iter_expr.ty={:?}", iter_expr.ty);
 
+        // Check for range expressions (0...5) — desugar to counter loop
+        if let HirExprKind::Binary {
+            op: HirBinaryOp::Range,
+            lhs,
+            rhs,
+        } = &iter_expr.kind
+        {
+            self.lower_for_in_range(pattern, lhs, rhs, body, label);
+            return;
+        }
+
         // Check the iterable expression's type to determine iteration strategy
         let iter_type_kind = {
             let type_table = self.type_table.borrow();
@@ -16117,6 +16153,119 @@ impl<'a> HirToMirContext<'a> {
         self.loop_stack.pop();
 
         // Step 7: Continue at exit block
+        self.builder.switch_to_block(loop_exit_block);
+    }
+
+    /// Lower a range-based for-in loop: `for (i in start...end) { body }`
+    /// Desugars to: `var i = start; while (i < end) { body; i++; }`
+    fn lower_for_in_range(
+        &mut self,
+        pattern: &HirPattern,
+        start_expr: &HirExpr,
+        end_expr: &HirExpr,
+        body: &HirBlock,
+        label: Option<&SymbolId>,
+    ) {
+        debug!("[for-in-range]: lowering range-based for-in loop");
+
+        // Lower start and end expressions
+        let Some(start_val) = self.lower_expression(start_expr) else {
+            return;
+        };
+        let Some(end_val) = self.lower_expression(end_expr) else {
+            return;
+        };
+
+        // Allocate counter on stack, initialize to start
+        let Some(counter_ptr) = self.builder.build_alloc(IrType::I64, None) else {
+            return;
+        };
+        self.builder.build_store(counter_ptr, start_val);
+
+        // Create loop blocks
+        let Some(loop_cond_block) = self.builder.create_block() else {
+            return;
+        };
+        let Some(loop_body_block) = self.builder.create_block() else {
+            return;
+        };
+        let Some(loop_exit_block) = self.builder.create_block() else {
+            return;
+        };
+
+        // Jump to condition check
+        self.builder.build_branch(loop_cond_block);
+
+        // Push loop context for break/continue
+        self.loop_stack.push(LoopContext {
+            continue_block: loop_cond_block,
+            break_block: loop_exit_block,
+            label: label.cloned(),
+            exit_phi_nodes: BTreeMap::new(),
+            continue_phi_nodes: BTreeMap::new(),
+        });
+
+        // Condition block: counter < end
+        self.builder.switch_to_block(loop_cond_block);
+        let Some(current_val) = self.builder.build_load(counter_ptr, IrType::I64) else {
+            self.loop_stack.pop();
+            return;
+        };
+        let Some(cmp_result) =
+            self.builder
+                .build_cmp(crate::ir::instructions::CompareOp::Lt, current_val, end_val)
+        else {
+            self.loop_stack.pop();
+            return;
+        };
+        self.builder
+            .build_cond_branch(cmp_result, loop_body_block, loop_exit_block);
+
+        // Body block
+        self.builder.switch_to_block(loop_body_block);
+
+        // Reload counter and bind to pattern variable
+        let Some(loop_val) = self.builder.build_load(counter_ptr, IrType::I64) else {
+            self.loop_stack.pop();
+            return;
+        };
+        match pattern {
+            HirPattern::Variable { symbol, .. } => {
+                self.symbol_map.insert(*symbol, loop_val);
+            }
+            _ => {}
+        }
+
+        // Lower loop body
+        self.enter_drop_scope();
+        self.lower_block(body);
+
+        // Increment counter
+        if !self.is_terminated() {
+            self.exit_drop_scope();
+            let Some(idx_to_inc) = self.builder.build_load(counter_ptr, IrType::I64) else {
+                self.loop_stack.pop();
+                return;
+            };
+            let Some(one) = self.builder.build_const(IrValue::I64(1)) else {
+                self.loop_stack.pop();
+                return;
+            };
+            let Some(next_val) =
+                self.builder
+                    .build_binop(crate::ir::instructions::BinaryOp::Add, idx_to_inc, one)
+            else {
+                self.loop_stack.pop();
+                return;
+            };
+            self.builder.build_store(counter_ptr, next_val);
+            self.builder.build_branch(loop_cond_block);
+        }
+
+        // Pop loop context
+        self.loop_stack.pop();
+
+        // Continue at exit block
         self.builder.switch_to_block(loop_exit_block);
     }
 

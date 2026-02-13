@@ -768,7 +768,10 @@ register_symbol!("haxe_unbox_string", crate::type_system::haxe_unbox_string);
 register_symbol!("haxe_box_int_ptr", crate::type_system::haxe_box_int_ptr);
 register_symbol!("haxe_box_float_ptr", crate::type_system::haxe_box_float_ptr);
 register_symbol!("haxe_box_bool_ptr", crate::type_system::haxe_box_bool_ptr);
-register_symbol!("haxe_box_string_ptr", crate::type_system::haxe_box_string_ptr);
+register_symbol!(
+    "haxe_box_string_ptr",
+    crate::type_system::haxe_box_string_ptr
+);
 register_symbol!("haxe_unbox_int_ptr", crate::type_system::haxe_unbox_int_ptr);
 register_symbol!(
     "haxe_unbox_float_ptr",

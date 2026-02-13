@@ -488,6 +488,14 @@ impl OptimizationPass for UnreachableBlockEliminationPass {
             if eliminated > 0 {
                 result.modified = true;
                 result.blocks_eliminated += eliminated;
+
+                // Clean up phi nodes: remove incoming edges from eliminated blocks
+                for block in function.cfg.blocks.values_mut() {
+                    for phi in &mut block.phi_nodes {
+                        phi.incoming
+                            .retain(|(pred_block, _)| reachable.contains(pred_block));
+                    }
+                }
             }
         }
 

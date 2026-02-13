@@ -1686,8 +1686,8 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 19 | `@:forward` on abstracts | P2 | Medium | 🔴 Not started | delegation |
 | 20 | Macros (compile-time) | P2 | Very High | 🔴 Not started | metaprogramming |
 | 21 | Map literal syntax | P2 | Low | 🟢 Complete | `["key" => val]` |
-| 22 | Array comprehension | P2 | Medium | 🔴 Not started | `[for (x in arr) x*2]` |
-| 23 | `Std.is()` / `Std.downcast()` (RTTI) | P2 | Medium | 🔴 Not started | runtime type checks |
+| 22 | Array comprehension | P2 | Medium | 🟢 Complete | `[for (x in arr) x*2]` |
+| 23 | `Std.is()` / `Std.downcast()` (RTTI) | P2 | Medium | 🟡 `is` + `Std.isOfType` done | runtime type checks |
 
 ---
 
@@ -1998,7 +1998,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 **Implemented (2026-02-13):**
 
-- [x] Null coalescing `??` — proper null-check branching (was incorrectly lowered as Add)
+- [x] Null coalescing `??` — desugared at HIR level to `if (lhs != null) lhs else rhs`; non-nullable primitives (Int, Float, Bool) short-circuit to LHS
 
 **What's Missing:**
 
@@ -2035,30 +2035,42 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 - [ ] `for (key => value in map)` key-value iteration (key-only works)
 
-### 16.17 Array Comprehension 🔴
+### 16.17 Array Comprehension 🟢
 
 **Priority:** P2
-**Current State:** Not implemented.
+**Status:** ✅ Complete (2026-02-13)
+
+**What Works:**
+
+- [x] `[for (i in 0...5) i * i]` — range comprehension (desugars to counter-based loop with push)
+- [x] `[for (x in arr) x * 2]` — array comprehension (desugars to for-in loop with push)
+- [x] Block expression result (`HirExprKind::Block` returns trailing expression value)
 
 **What's Missing:**
-- [ ] `[for (x in arr) x * 2]` — array comprehension
-- [ ] `[for (x in arr) if (x > 0) x]` — filtered comprehension
+
+- [ ] `[for (x in arr) if (x > 0) x]` — filtered comprehension (requires parser changes)
 - [ ] Nested comprehensions
 
 ### 16.18 RTTI (Runtime Type Information) 🟡
 
 **Priority:** P2
-**Current State:** Basic enum RTTI exists. Type IDs assigned. Anonymous object shapes registered.
+**Current State:** `is` operator and `Std.isOfType()` work for class hierarchies and Dynamic primitives. Runtime type registry and boxing infrastructure complete.
+
+**Implemented (2026-02-13):**
+- [x] `x is Type` — compile-time for static types, runtime for Dynamic (via `haxe_std_is`)
+- [x] `Std.isOfType(value, Type)` — desugared to TypeCheck at HIR level
+- [x] Class hierarchy checks (`Dog is Animal` upcast/downcast)
+- [x] Dynamic primitive checks (`x is Int`, `x is String`, `x is Bool`, `x is Float`)
+- [x] String→Dynamic boxing (`haxe_box_string_ptr`)
+- [x] `is_subclass_of` SymbolId-based lookup (fixes TAST/HIR TypeId mismatch)
 
 **What's Missing:**
-- [ ] `Std.is(value, Type)` — runtime type checking
-- [ ] `Std.downcast(value, Type)` — safe downcast
 - [ ] `Type.getClass(obj)` — get class of object
 - [ ] `Type.getClassName(cls)` — get class name as string
 - [ ] `Type.getInstanceFields(cls)` — list fields
 - [ ] `Type.getSuperClass(cls)` — class hierarchy
 - [ ] `Type.typeof(value)` — get ValueType enum
-- [ ] Full class metadata at runtime
+- [ ] Full class metadata registration at runtime
 
 ### 16.19 Macros (Compile-Time) 🔴
 
@@ -2098,7 +2110,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 13. 🟡 **Null safety** (16.14) — `??` done, `?.` and flow analysis remaining
 14. **RTTI** (16.18)
 15. ✅ **Map literals** (16.16) — literals, method dispatch, for-in iteration (2026-02-13)
-16. **Array comprehension** (16.17)
+16. ✅ **Array comprehension** (16.17) — range and array for-in comprehensions (2026-02-13)
 17. **Macros** (16.19)
 
 ---
