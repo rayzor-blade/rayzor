@@ -2026,24 +2026,50 @@ impl<'a> TastToHirContext<'a> {
                 type_arguments,
                 arguments,
             } => {
-                // Lower static method call to a regular function call
-                // Static methods are just functions in the class namespace
-                HirExprKind::Call {
-                    callee: Box::new(HirExpr::new(
-                        HirExprKind::Variable {
-                            symbol: *method_symbol,
-                            capture_mode: None,
-                        },
-                        expr.expr_type,
-                        expr.lifetime_id,
-                        expr.source_location,
-                    )),
-                    type_args: type_arguments.clone(),
-                    args: arguments
-                        .iter()
-                        .map(|arg| self.lower_expression(arg))
-                        .collect(),
-                    is_method: false, // Static methods are regular function calls
+                // Check for Std.is() / Std.isOfType() — desugar to TypeCheck
+                let class_name = self
+                    .symbol_table
+                    .get_symbol(*class_symbol)
+                    .and_then(|s| self.string_interner.get(s.name))
+                    .map(|s| s.to_string());
+                let method_name = self
+                    .symbol_table
+                    .get_symbol(*method_symbol)
+                    .and_then(|s| self.string_interner.get(s.name))
+                    .map(|s| s.to_string());
+
+                if matches!(class_name.as_deref(), Some("Std"))
+                    && matches!(method_name.as_deref(), Some("is") | Some("isOfType"))
+                    && arguments.len() == 2
+                {
+                    // Desugar Std.is(value, Type) → (value is Type)
+                    let value_hir = self.lower_expression(&arguments[0]);
+                    let type_arg = &arguments[1];
+                    // The second argument's expr_type is the TypeId of the checked type
+                    HirExprKind::TypeCheck {
+                        expr: Box::new(value_hir),
+                        expected: type_arg.expr_type,
+                    }
+                } else {
+                    // Lower static method call to a regular function call
+                    // Static methods are just functions in the class namespace
+                    HirExprKind::Call {
+                        callee: Box::new(HirExpr::new(
+                            HirExprKind::Variable {
+                                symbol: *method_symbol,
+                                capture_mode: None,
+                            },
+                            expr.expr_type,
+                            expr.lifetime_id,
+                            expr.source_location,
+                        )),
+                        type_args: type_arguments.clone(),
+                        args: arguments
+                            .iter()
+                            .map(|arg| self.lower_expression(arg))
+                            .collect(),
+                        is_method: false, // Static methods are regular function calls
+                    }
                 }
             }
             TypedExpressionKind::PatternPlaceholder {

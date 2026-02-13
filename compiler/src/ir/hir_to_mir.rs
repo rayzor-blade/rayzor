@@ -10779,9 +10779,10 @@ impl<'a> HirToMirContext<'a> {
                     // Dynamic source: runtime type check via haxe_std_is
                     (Some(TypeKind::Dynamic), _) => {
                         let value_reg = self.lower_expression(expr)?;
+                        let rt_type_id = self.runtime_type_id(*expected);
                         let type_id_const = self
                             .builder
-                            .build_const(IrValue::I64(expected.as_raw() as i64))?;
+                            .build_const(IrValue::I64(rt_type_id as i64))?;
                         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                         let is_func_id = self.get_or_register_extern_function(
                             "haxe_std_is",
@@ -12903,7 +12904,19 @@ impl<'a> HirToMirContext<'a> {
                     .build_call_direct(box_func_id, vec![value, type_id_const], ptr_u8)
             }
 
-            // TODO: String (special struct handling), Abstract (depends on underlying type)
+            Some(TypeKind::String) => {
+                debug!("[BOXING] Auto-boxing String to Dynamic using haxe_box_string_ptr");
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let box_func_id = self.get_or_register_extern_function(
+                    "haxe_box_string_ptr",
+                    vec![IrType::String],
+                    ptr_u8.clone(),
+                );
+                self.builder
+                    .build_call_direct(box_func_id, vec![value], ptr_u8)
+            }
+
+            // Abstract, TypeParam, etc. — skip boxing for unsupported types
             _ => {
                 debug!(
                     "[BOXING] Unsupported type for boxing: {:?}",
@@ -18256,21 +18269,57 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Check if `source_type` is a subclass of `target_type` by walking the extends chain.
+    /// Uses SymbolId-based lookup to handle TAST/HIR TypeId mismatch.
     fn is_subclass_of(&self, source_type: TypeId, target_type: TypeId) -> bool {
-        let mut current = source_type;
+        // Get target SymbolId from type_table
+        let target_sym = {
+            let type_table = self.type_table.borrow();
+            match type_table.get(target_type).map(|ti| &ti.kind) {
+                Some(TypeKind::Class { symbol_id, .. }) => *symbol_id,
+                _ => return false,
+            }
+        };
+
+        // Get source SymbolId and walk the class hierarchy
+        let source_sym = {
+            let type_table = self.type_table.borrow();
+            match type_table.get(source_type).map(|ti| &ti.kind) {
+                Some(TypeKind::Class { symbol_id, .. }) => *symbol_id,
+                _ => return false,
+            }
+        };
+
+        let mut current_sym = source_sym;
         for _ in 0..20 {
-            // Get the class for current type
-            if let Some(HirTypeDecl::Class(class)) = self.current_hir_types.get(&current) {
-                if let Some(parent_type) = class.extends {
-                    if parent_type == target_type {
+            // Find the class with this SymbolId in current_hir_types
+            let parent_type = self.current_hir_types.values().find_map(|decl| {
+                if let super::hir::HirTypeDecl::Class(class) = decl {
+                    if class.symbol_id == current_sym {
+                        class.extends
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
+
+            match parent_type {
+                Some(parent_type_id) => {
+                    // Get parent's SymbolId from type_table
+                    let parent_sym = {
+                        let type_table = self.type_table.borrow();
+                        match type_table.get(parent_type_id).map(|ti| &ti.kind) {
+                            Some(TypeKind::Class { symbol_id, .. }) => *symbol_id,
+                            _ => return false,
+                        }
+                    };
+                    if parent_sym == target_sym {
                         return true;
                     }
-                    current = parent_type;
-                } else {
-                    return false;
+                    current_sym = parent_sym;
                 }
-            } else {
-                return false;
+                None => return false,
             }
         }
         false

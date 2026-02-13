@@ -1051,7 +1051,7 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 1. ~~Generics constraint validation and abstract types~~ ✅ Core generics complete (2026-02-08)
 2. Async/await state machine transformation
 3. Full RTTI for Type/Reflect classes
-4. Multi-catch exception handling (typed catch blocks)
+4. ~~Multi-catch exception handling (typed catch blocks)~~ ✅ Complete (2026-02-13)
 5. Equality/ordering/hash traits
 
 ---
@@ -1685,7 +1685,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 18 | Structural subtyping | P2 | Medium | 🔴 Not started | structural interfaces |
 | 19 | `@:forward` on abstracts | P2 | Medium | 🔴 Not started | delegation |
 | 20 | Macros (compile-time) | P2 | Very High | 🔴 Not started | metaprogramming |
-| 21 | Map literal syntax | P2 | Low | 🔴 Not started | `["key" => val]` |
+| 21 | Map literal syntax | P2 | Low | 🟢 Complete | `["key" => val]` |
 | 22 | Array comprehension | P2 | Medium | 🔴 Not started | `[for (x in arr) x*2]` |
 | 23 | `Std.is()` / `Std.downcast()` (RTTI) | P2 | Medium | 🔴 Not started | runtime type checks |
 
@@ -1754,10 +1754,14 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - Catch block with `Dynamic` type matching
 - Normal control flow preserved (try without throw skips catch)
 
+**Implemented (2026-02-13):**
+
+- [x] Typed catch matching (`catch (e:String)` vs `catch (e:Int)`) — `rayzor_throw_typed()` stores type_id, landing pad chains `icmp` per catch clause
+- [x] Multiple catch blocks with type discrimination — dispatches by `rayzor_get_exception_type_id()`
+- [x] `catch (e:Dynamic)` as universal fallback
+
 **Not Yet Implemented:**
 
-- [ ] Typed catch matching (`catch (e:String)` vs `catch (e:Int)`)
-- [ ] Multiple catch blocks with type discrimination
 - [ ] Finally block execution
 - [ ] Exception propagation through uncaught functions (cross-function unwinding)
 - [ ] `haxe.Exception` base class
@@ -1858,10 +1862,14 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [x] `continue` in range loops — update block executes before condition check
 - [x] Break/continue with labels
 
+**Implemented (2026-02-13):**
+
+- [x] `for (key in map)` — Map for-in iterates keys via `keys_to_array` runtime + array iteration path
+
 **Not Yet Implemented:**
 
 - [ ] Custom iterator protocol (`hasNext()` + `next()`) for user types
-- [ ] `for (key => value in map)` with Map types
+- [ ] `for (key => value in map)` key-value destructuring iteration
 
 ### 16.8 Static Extensions (`using`) 🟢
 
@@ -1983,15 +1991,19 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [ ] `Type.createEnum()` — create variant by name/index
 - [ ] `Type.enumIndex()` / `Type.enumConstructor()` / `Type.enumParameters()` (Type API equivalents)
 
-### 16.14 Null Safety 🔴
+### 16.14 Null Safety 🟡
 
 **Priority:** P2
-**Current State:** No null safety enforcement. Null is a valid value for any reference type.
+**Current State:** Null coalescing operator implemented. No full null safety enforcement.
+
+**Implemented (2026-02-13):**
+
+- [x] Null coalescing `??` — proper null-check branching (was incorrectly lowered as Add)
 
 **What's Missing:**
+
 - [ ] `Null<T>` wrapper type
 - [ ] Null-check operator `?.` (optional chaining)
-- [ ] Null coalescing `??`
 - [ ] Compile-time null flow analysis
 - [ ] `@:notNull` metadata
 
@@ -2005,15 +2017,23 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [ ] Structural interfaces (any object with matching fields satisfies the type)
 - [ ] Compile-time structural matching
 
-### 16.16 Map Literal Syntax 🔴
+### 16.16 Map Literal Syntax 🟢
 
 **Priority:** P2
-**Current State:** IntMap/StringMap exist as runtime types. No literal syntax.
+**Status:** ✅ Complete (2026-02-13)
 
-**What's Missing:**
-- [ ] `["key1" => val1, "key2" => val2]` map literal syntax
-- [ ] Type inference for map key/value types
-- [ ] `for (key => value in map)` iteration
+**What Works:**
+
+- [x] `["key1" => val1, "key2" => val2]` map literal syntax — lowers to `haxe_stringmap_new()` + `haxe_stringmap_set()` calls
+- [x] `[1 => val1, 2 => val2]` int key map literals — lowers to `haxe_intmap_new()` + `haxe_intmap_set()` calls
+- [x] Type inference for map key/value types
+- [x] Map method dispatch (`.get()`, `.set()`, `.exists()`) via `TypeKind::Map` handler in `get_stdlib_runtime_info`
+- [x] `for (key in map)` iteration — converts keys to HaxeArray via `keys_to_array` runtime, then iterates
+- [x] `trace(map)` — toString via stdlib mapping
+
+**Not Yet Implemented:**
+
+- [ ] `for (key => value in map)` key-value iteration (key-only works)
 
 ### 16.17 Array Comprehension 🔴
 
@@ -2075,9 +2095,9 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 #### Tier 3: Completeness (polish and compatibility)
 11. 🟡 **Safe cast** (16.9) — primitives + Dynamic done, class hierarchy deferred
 12. **Dynamic type ops** (16.11)
-13. **Null safety** (16.14)
+13. 🟡 **Null safety** (16.14) — `??` done, `?.` and flow analysis remaining
 14. **RTTI** (16.18)
-15. **Map literals** (16.16)
+15. ✅ **Map literals** (16.16) — literals, method dispatch, for-in iteration (2026-02-13)
 16. **Array comprehension** (16.17)
 17. **Macros** (16.19)
 

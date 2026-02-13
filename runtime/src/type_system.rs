@@ -1584,6 +1584,20 @@ pub extern "C" fn haxe_box_bool_ptr(value: bool) -> *mut u8 {
     Box::into_raw(boxed) as *mut u8
 }
 
+/// Box a String as Dynamic (returns opaque pointer to DynamicValue)
+/// Takes a null-terminated string pointer.
+#[no_mangle]
+pub extern "C" fn haxe_box_string_ptr(str_ptr: *const u8) -> *mut u8 {
+    let len = if str_ptr.is_null() {
+        0
+    } else {
+        unsafe { libc::strlen(str_ptr as *const libc::c_char) }
+    };
+    let dynamic = haxe_box_string(str_ptr, len);
+    let boxed = Box::new(dynamic);
+    Box::into_raw(boxed) as *mut u8
+}
+
 /// Unbox an Int from Dynamic (takes opaque pointer to DynamicValue)
 #[no_mangle]
 pub extern "C" fn haxe_unbox_int_ptr(ptr: *mut u8) -> i64 {
