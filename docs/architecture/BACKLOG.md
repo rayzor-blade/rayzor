@@ -1657,7 +1657,7 @@ Two optimizations applied to the shared LLVM codegen (benefits both JIT and AOT)
 ## 16. Haxe Language Feature Gap Analysis 🔴
 
 **Priority:** Critical — these gaps block real-world Haxe code from compiling
-**Last Audit:** 2026-02-08 (cross-referenced against https://haxe.org/manual/introduction.html)
+**Last Audit:** 2026-02-13 (cross-referenced against https://haxe.org/manual/introduction.html)
 
 ### Gap Priority Matrix
 
@@ -1678,10 +1678,10 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 11 | Property get/set dispatch | P1 | Medium | 🟡 Mostly done | encapsulation |
 | 12 | EReg (regex runtime) | P1 | Medium | 🟢 Complete | text processing |
 | 13 | Enum methods + statics | P1 | Medium | 🟡 Partial | rich enums |
-| 14 | Abstract types (operator overloading) | P1 | High | 🟡 Methods + @:op done | custom types |
+| 14 | Abstract types (operator overloading) | P1 | High | 🟡 Methods + @:op + @:from/@:to + enum abstract done | custom types |
 | 15 | Dynamic type operations | P1 | Medium | 🟡 Partial (anon r/w done) | interop, JSON |
 | 16 | Type parameters on functions | P1 | Medium | 🟢 Complete | generic functions |
-| 17 | Null safety (`Null<T>`) | P2 | Medium | 🔴 Not started | null checks |
+| 17 | Null safety (`Null<T>`) | P2 | Medium | 🟡 `??` done | null checks |
 | 18 | Structural subtyping | P2 | Medium | 🔴 Not started | structural interfaces |
 | 19 | `@:forward` on abstracts | P2 | Medium | 🔴 Not started | delegation |
 | 20 | Macros (compile-time) | P2 | Very High | 🔴 Not started | metaprogramming |
@@ -2185,7 +2185,27 @@ trace("The point is: " + p);    // ✅ (calls toString())
 - **Async state machines** build on generics and memory safety
 - Implementation should follow dependency order to avoid rework
 
-**Last Updated:** 2026-02-07 (Haxe Language Feature Gap Analysis)
+**Last Updated:** 2026-02-13 (SRA Object Header Fixes)
+
+## Recent Progress (Session 2026-02-13 - SRA & InsertFree Fixes)
+
+**InsertFree Loop Use-After-Free Fix:** ✅ Complete
+
+- ✅ **Removed inner-block free path** — InsertFree's "last-use block" heuristic for inner-block allocs was unsound for loop-carried allocations. Freeing at the last-use block freed after the first loop iteration, causing use-after-free on subsequent iterations (mandelbrot checksum regressed from 112798515 to 111562500). Fix: only free entry-block allocs at return blocks; inner-block allocs are eliminated by SRA or leak (acceptable).
+
+**SRA Object Header Field-0 Fix:** ✅ Complete
+
+- ✅ **Removed field-0 skip in regular SRA** — Object headers put `__type_id` at GEP index 0. SRA skipped tracking index 0, but `num_fields = max_index + 1` still counted it. Safety check found field 0 had no type → rejected ALL object-header candidates. Fix: track all field indices including 0; the type_id store becomes a dead Copy that DCE removes.
+- ✅ **Fixed phi-SRA safety check** — phi_gep_map only contains fields accessed through the phi (e.g., 1, 2), not field 0 (type_id never read through phi). Safety check iterated `0..num_fields` and rejected candidates where field 0 had no type. Fix: iterate only `phi_gep_map.values()` instead of `0..num_fields`.
+- ✅ **Benchmark OOM resolved** — SRA now eliminates 4 of 5 Complex object mallocs in mandelbrot's inner loop. Benchmark runner completes all backends without OOM. Memory: ~19MB.
+
+**SRA Register ID Collision Fix:** ✅ Complete
+
+- ✅ **Recompute next_reg_id in apply_sra** — After inlining, `function.next_reg_id` was stale (e.g., 51 while function had registers up to $79). SRA allocated new register IDs that collided with existing ones, causing `BitCast source IrId(38) not found in value_map` crash in test_generics.hx. Fix: scan all blocks for max register ID at the start of `apply_sra`, matching the existing pattern in `apply_phi_sra`.
+
+**Verification:** All 28 test files pass, mandelbrot checksum = 112798515, benchmark completes all backends.
+
+---
 
 ## Recent Progress (Session 2026-02-09 - SRA Fix, String Methods, Super Constructors)
 

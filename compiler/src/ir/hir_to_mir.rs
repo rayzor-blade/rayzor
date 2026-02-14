@@ -257,6 +257,15 @@ pub struct HirToMirContext<'a> {
     /// Abstract type @:to conversion rules.
     /// Maps abstract name (InternedString) → list of to-rules.
     abstract_to_rules: BTreeMap<InternedString, Vec<HirCastRule>>,
+
+    /// Abstract @:forward rules.
+    /// Maps abstract SymbolId → (underlying_type, forwarded method names). Empty vec = forward all.
+    abstract_forward_rules: BTreeMap<SymbolId, (TypeId, Vec<InternedString>)>,
+
+    /// Symbols known to hold boxed DynamicValue pointers (from maybe_box_value in Let/Assign).
+    /// Used by the Dynamic BinaryOp path to distinguish actual boxed Dynamic values from
+    /// raw i64 values that happen to have Dynamic type (e.g., untyped lambda params).
+    boxed_dynamic_symbols: BTreeSet<SymbolId>,
 }
 
 /// TCC runtime function IDs for __c__ inline code lowering
@@ -341,6 +350,7 @@ struct SavedLoweringState {
     reassigned_in_scope: BTreeSet<SymbolId>,
     current_drop_points: Option<DropPoints>,
     current_stmt_index: usize,
+    boxed_dynamic_symbols: BTreeSet<SymbolId>,
 }
 
 impl<'a> HirToMirContext<'a> {
@@ -404,6 +414,8 @@ impl<'a> HirToMirContext<'a> {
             constrained_param_interfaces: BTreeMap::new(),
             abstract_from_rules: BTreeMap::new(),
             abstract_to_rules: BTreeMap::new(),
+            abstract_forward_rules: BTreeMap::new(),
+            boxed_dynamic_symbols: BTreeSet::new(),
         };
 
         // Pre-declare malloc so it's available for heap allocations during lowering
@@ -2838,6 +2850,14 @@ impl<'a> HirToMirContext<'a> {
                             let after_box = self
                                 .maybe_box_value(value_reg, init_expr.ty, target_ty)
                                 .unwrap_or(value_reg);
+
+                            // Track if boxing actually happened (value was boxed into Dynamic)
+                            if after_box != value_reg {
+                                if let HirPattern::Variable { symbol, .. } = pattern {
+                                    self.boxed_dynamic_symbols.insert(*symbol);
+                                }
+                            }
+
                             // Then try unboxing (Dynamic → concrete)
                             self.maybe_unbox_value(after_box, init_expr.ty, target_ty)
                                 .unwrap_or(after_box)
@@ -2985,6 +3005,10 @@ impl<'a> HirToMirContext<'a> {
                                     let after_box = self
                                         .maybe_box_value(value, rhs.ty, target_ty)
                                         .unwrap_or(value);
+                                    // Track boxing for Dynamic arithmetic safety
+                                    if after_box != value {
+                                        self.boxed_dynamic_symbols.insert(*sym);
+                                    }
                                     self.maybe_unbox_value(after_box, rhs.ty, target_ty)
                                         .unwrap_or(after_box)
                                 } else {
@@ -3962,10 +3986,37 @@ impl<'a> HirToMirContext<'a> {
         }
         // Fallback without param count
         if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(class_name, method_name) {
-            Some((sig.class, sig.method, mapping))
-        } else {
-            None
+            return Some((sig.class, sig.method, mapping));
         }
+
+        // @:forward fallback: if the abstract's own name didn't match, try underlying type
+        {
+            let type_table = self.type_table.borrow();
+            if let Some(type_info) = type_table.get(receiver_type) {
+                if let TypeKind::Abstract { symbol_id, .. } = &type_info.kind {
+                    if let Some((underlying_type, forward_list)) =
+                        self.abstract_forward_rules.get(symbol_id)
+                    {
+                        let method_interned =
+                            self.symbol_table.get_symbol(method_symbol).map(|s| s.name);
+                        let is_forwarded = forward_list.is_empty()
+                            || method_interned.map_or(false, |n| forward_list.contains(&n));
+                        if is_forwarded {
+                            let underlying = *underlying_type;
+                            drop(type_table);
+                            return self.get_stdlib_runtime_info(
+                                method_symbol,
+                                underlying,
+                                param_count,
+                                None,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     /// Check if a qualified name + method belongs to rayzor stdlib and return the runtime function name
@@ -4870,6 +4921,22 @@ impl<'a> HirToMirContext<'a> {
             HirExprKind::Literal(lit) => self.lower_literal(lit, expr.ty),
 
             HirExprKind::Variable { symbol, .. } => {
+                // Check if this is a class/enum used as a value (e.g., Type.getClassName(Animal))
+                // Must be before function reference check since class symbols may also map to constructors
+                if let Some(sym) = self.symbol_table.get_symbol(*symbol) {
+                    use crate::tast::SymbolKind;
+                    if sym.kind == SymbolKind::Class {
+                        // Class runtime type_id = SymbolId.as_raw() (matches TypeId::from_raw in tast_to_hir)
+                        let runtime_type_id = sym.id.as_raw() as i64;
+                        return self.builder.build_const(IrValue::I64(runtime_type_id));
+                    }
+                    if sym.kind == SymbolKind::Enum {
+                        // Enum runtime type_id = sym.type_id (matches register_enum_metadata)
+                        let runtime_type_id = sym.type_id.0 as i64;
+                        return self.builder.build_const(IrValue::I64(runtime_type_id));
+                    }
+                }
+
                 // Check if this symbol is a function reference (local or external)
                 if let Some(func_id) = self.get_function_id(symbol) {
                     // Create a function pointer constant for static methods
@@ -5942,10 +6009,38 @@ impl<'a> HirToMirContext<'a> {
                                 if let (Some(class_name), Some(method_name)) =
                                     (class_name_opt, method_name_opt)
                                 {
-                                    // Look up in stdlib_mapping
-                                    if let Some((_sig, mapping)) =
-                                        self.stdlib_mapping.find_by_name(&class_name, method_name)
-                                    {
+                                    // Look up in stdlib_mapping (try abstract's own name first, then @:forward underlying)
+                                    let stdlib_result = self
+                                        .stdlib_mapping
+                                        .find_by_name(&class_name, method_name)
+                                        .map(|(sig, m)| (sig.clone(), m.clone()))
+                                        .or_else(|| {
+                                            // @:forward fallback: check if method should be forwarded to underlying type
+                                            let (underlying_type, forward_list) =
+                                                self.abstract_forward_rules.get(&sym_id)?;
+                                            // Check if this method is in the forward list (empty = forward all)
+                                            let method_interned = self
+                                                .symbol_table
+                                                .get_symbol(*field)
+                                                .map(|s| s.name);
+                                            let is_forwarded = forward_list.is_empty()
+                                                || method_interned
+                                                    .map_or(false, |n| forward_list.contains(&n));
+                                            if !is_forwarded {
+                                                return None;
+                                            }
+                                            // Resolve underlying type's class name
+                                            let underlying_class = self
+                                                .resolve_type_class_name_with(
+                                                    &type_table,
+                                                    *underlying_type,
+                                                )?;
+                                            self.stdlib_mapping
+                                                .find_by_name(&underlying_class, method_name)
+                                                .map(|(sig, m)| (sig.clone(), m.clone()))
+                                        });
+
+                                    if let Some((_sig, mapping)) = stdlib_result {
                                         // Extract data before dropping borrows
                                         let is_mir_wrapper = mapping.is_mir_wrapper;
                                         let runtime_name = mapping.runtime_name.to_string();
@@ -10359,8 +10454,25 @@ impl<'a> HirToMirContext<'a> {
                 let obj_ptr = self.build_heap_alloc(obj_size);
                 let obj_ptr = obj_ptr?;
 
+                // Store object header: runtime type_id at GEP index 0
+                // This enables runtime type identification for downcasting, Dynamic field access, etc.
+                if let Some(sym_id) = actual_symbol_id {
+                    let runtime_type_id = sym_id.as_raw() as i64;
+                    if let Some(type_id_const) =
+                        self.builder.build_const(IrValue::I64(runtime_type_id))
+                    {
+                        if let Some(index_0) = self.builder.build_const(IrValue::I32(0)) {
+                            if let Some(header_ptr) =
+                                self.builder.build_gep(obj_ptr, vec![index_0], IrType::I64)
+                            {
+                                self.builder.build_store(header_ptr, type_id_const);
+                            }
+                        }
+                    }
+                }
+
                 // Note: Field initialization is handled by the constructor call below.
-                // The constructor stores user fields starting at index 0.
+                // The constructor stores user fields starting at index 1 (after header).
 
                 // debug!("Class type constructor - allocated object");
                 // debug!("Available constructors: {:?}", self.constructor_map.keys().collect::<Vec<_>>());
@@ -10576,6 +10688,120 @@ impl<'a> HirToMirContext<'a> {
                             vec![lhs_str_val, rhs_str_val],
                             string_ptr_ty,
                         );
+                    }
+                }
+
+                // Dynamic arithmetic: unbox both operands to f64, use normal MIR ops, rebox
+                // IMPORTANT: Only use this path when both operands are KNOWN to be boxed
+                // DynamicValue pointers. Untyped lambda params are also Ptr(Void) but hold
+                // raw i64 values — unboxing them would dereference invalid pointers (SIGSEGV).
+                {
+                    let lhs_ir = self.convert_type(lhs.ty);
+                    let rhs_ir = self.convert_type(rhs.ty);
+                    let lhs_is_dyn = matches!(&lhs_ir, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void));
+                    let rhs_is_dyn = matches!(&rhs_ir, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void));
+
+                    // Check if operands are actually boxed DynamicValues (not raw lambda params)
+                    let lhs_is_boxed = match &lhs.kind {
+                        HirExprKind::Variable { symbol, .. } => {
+                            self.boxed_dynamic_symbols.contains(symbol)
+                        }
+                        // Complex expressions (calls, field access, etc.) likely produce
+                        // properly-typed values — conservatively assume boxed
+                        _ => true,
+                    };
+                    let rhs_is_boxed = match &rhs.kind {
+                        HirExprKind::Variable { symbol, .. } => {
+                            self.boxed_dynamic_symbols.contains(symbol)
+                        }
+                        _ => true,
+                    };
+
+                    if lhs_is_dyn && rhs_is_dyn && lhs_is_boxed && rhs_is_boxed {
+                        let is_supported = matches!(
+                            op,
+                            HirBinaryOp::Add
+                                | HirBinaryOp::Sub
+                                | HirBinaryOp::Mul
+                                | HirBinaryOp::Div
+                                | HirBinaryOp::Mod
+                                | HirBinaryOp::Eq
+                                | HirBinaryOp::Lt
+                                | HirBinaryOp::Gt
+                                | HirBinaryOp::Le
+                                | HirBinaryOp::Ge
+                                | HirBinaryOp::Ne
+                        );
+                        if is_supported {
+                            let lhs_reg = self.lower_expression(lhs)?;
+                            let rhs_reg = self.lower_expression(rhs)?;
+                            let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+
+                            // Unbox both Dynamic operands to f64 via haxe_unbox_float_ptr
+                            let unbox_func = self.get_or_register_extern_function(
+                                "haxe_unbox_float_ptr",
+                                vec![ptr_void.clone()],
+                                IrType::F64,
+                            );
+                            let lhs_f64 = self.builder.build_call_direct(
+                                unbox_func,
+                                vec![lhs_reg],
+                                IrType::F64,
+                            )?;
+                            let rhs_f64 = self.builder.build_call_direct(
+                                unbox_func,
+                                vec![rhs_reg],
+                                IrType::F64,
+                            )?;
+
+                            let is_comparison = matches!(
+                                op,
+                                HirBinaryOp::Eq
+                                    | HirBinaryOp::Ne
+                                    | HirBinaryOp::Lt
+                                    | HirBinaryOp::Le
+                                    | HirBinaryOp::Gt
+                                    | HirBinaryOp::Ge
+                            );
+
+                            if is_comparison {
+                                // Comparisons: use MIR compare, returns raw i64 (0/1)
+                                let cmp_op = match op {
+                                    HirBinaryOp::Eq => CompareOp::Eq,
+                                    HirBinaryOp::Ne => CompareOp::Ne,
+                                    HirBinaryOp::Lt => CompareOp::Lt,
+                                    HirBinaryOp::Le => CompareOp::Le,
+                                    HirBinaryOp::Gt => CompareOp::Gt,
+                                    HirBinaryOp::Ge => CompareOp::Ge,
+                                    _ => unreachable!(),
+                                };
+                                return self.builder.build_cmp(cmp_op, lhs_f64, rhs_f64);
+                            } else {
+                                // Arithmetic: use MIR float binop on f64, then box result
+                                let bin_op = match op {
+                                    HirBinaryOp::Add => BinaryOp::FAdd,
+                                    HirBinaryOp::Sub => BinaryOp::FSub,
+                                    HirBinaryOp::Mul => BinaryOp::FMul,
+                                    HirBinaryOp::Div => BinaryOp::FDiv,
+                                    HirBinaryOp::Mod => BinaryOp::FRem,
+                                    _ => unreachable!(),
+                                };
+                                let result_f64 =
+                                    self.builder.build_binop(bin_op, lhs_f64, rhs_f64)?;
+
+                                // Box the f64 result back to Dynamic
+                                let box_func = self.get_or_register_extern_function(
+                                    "haxe_box_float_ptr",
+                                    vec![IrType::F64],
+                                    IrType::Ptr(Box::new(IrType::U8)),
+                                );
+                                return self.builder.build_call_direct(
+                                    box_func,
+                                    vec![result_f64],
+                                    IrType::Ptr(Box::new(IrType::U8)),
+                                );
+                            }
+                        }
                     }
                 }
 
@@ -10847,19 +11073,38 @@ impl<'a> HirToMirContext<'a> {
                     ) => {
                         let src_sym = *src_sym;
                         let tgt_sym = *tgt_sym;
-                        let _value = self.lower_expression(expr);
                         if src_sym == tgt_sym {
                             // Same class → true
+                            let _value = self.lower_expression(expr);
                             self.builder.build_const(IrValue::Bool(true))
                         } else if self.is_subclass_of(expr.ty, *expected) {
-                            // Source is subclass of target (upcast) → true
+                            // Source is subclass of target (upcast) → always true
+                            let _value = self.lower_expression(expr);
                             self.builder.build_const(IrValue::Bool(true))
                         } else if self.is_subclass_of(*expected, expr.ty) {
                             // Target is subclass of source (downcast) →
-                            // can't verify at runtime without object headers, trust static types
-                            self.builder.build_const(IrValue::Bool(true))
+                            // runtime check via object header
+                            let value_reg = self.lower_expression(expr)?;
+                            let target_type_id = tgt_sym.as_raw() as i64;
+                            let type_id_const =
+                                self.builder.build_const(IrValue::I64(target_type_id))?;
+                            let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                            let is_func = self.get_or_register_extern_function(
+                                "haxe_object_is_instance",
+                                vec![ptr_void, IrType::I64],
+                                IrType::I64,
+                            );
+                            let result_i64 = self.builder.build_call_direct(
+                                is_func,
+                                vec![value_reg, type_id_const],
+                                IrType::I64,
+                            )?;
+                            // Convert i64 (0/1) to Bool
+                            let zero = self.builder.build_const(IrValue::I64(0))?;
+                            self.builder.build_cmp(CompareOp::Ne, result_i64, zero)
                         } else {
                             // Unrelated classes → false
+                            let _value = self.lower_expression(expr);
                             self.builder.build_const(IrValue::Bool(false))
                         }
                     }
@@ -12609,6 +12854,30 @@ impl<'a> HirToMirContext<'a> {
         None
     }
 
+    /// Resolve a TypeId to its stdlib class name (e.g., "Array", "String").
+    /// Takes a borrowed type_table to avoid double-borrow issues.
+    fn resolve_type_class_name_with(
+        &self,
+        type_table: &TypeTable,
+        type_id: TypeId,
+    ) -> Option<String> {
+        let type_info = type_table.get(type_id)?;
+        match &type_info.kind {
+            TypeKind::Class { symbol_id, .. } | TypeKind::Abstract { symbol_id, .. } => {
+                self.symbol_table.get_symbol(*symbol_id).and_then(|s| {
+                    s.qualified_name
+                        .or(Some(s.name))
+                        .and_then(|n| self.string_interner.get(n))
+                        .map(|s| s.replace(".", "_"))
+                })
+            }
+            TypeKind::GenericInstance { base_type, .. } => {
+                self.resolve_type_class_name_with(type_table, *base_type)
+            }
+            _ => None,
+        }
+    }
+
     /// Try to apply an abstract @:from conversion in a Cast expression.
     /// Returns Some(result_reg) if a matching @:from rule was found, None otherwise.
     fn try_abstract_from_cast(&mut self, expr: &HirExpr, target: TypeId) -> Option<IrId> {
@@ -14156,22 +14425,35 @@ impl<'a> HirToMirContext<'a> {
             let obj_ir_type = self.builder.get_register_type(obj);
             if let Some(ty) = type_table.get(receiver_ty) {
                 if matches!(ty.kind, TypeKind::Dynamic) {
-                    // Check if the object's IR type is already a non-boxed pointer or raw integer
-                    // If the IR type is Ptr(Void), this is likely a raw pointer from StringMap/IntMap.get(),
-                    // NOT a boxed Dynamic value. In that case, skip unboxing.
-                    // If the IR type is I64, this is likely a raw pointer stored in an Array<T>,
-                    // which is also NOT a boxed Dynamic value.
+                    // Dynamic-typed receiver: may be a boxed DynamicValue* (from Let handler boxing)
+                    // or a raw pointer from StringMap/IntMap.get().
+                    // For Ptr(Void): unbox first to get the actual object pointer, then
+                    // decide class vs anonymous path.
                     if let Some(IrType::Ptr(inner)) = &obj_ir_type {
                         if matches!(**inner, IrType::Void) {
-                            // Ptr(Void) can be: raw class pointer OR anonymous object handle.
-                            // Check if ANY class has this field before routing to class access.
                             let field_in_class = self.field_exists_in_any_class(field);
                             drop(type_table);
+
+                            // Unbox to get the actual object pointer from DynamicValue*
+                            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                            let unbox_func = self.get_or_register_extern_function(
+                                "haxe_unbox_reference_ptr",
+                                vec![ptr_u8.clone()],
+                                ptr_u8.clone(),
+                            );
+                            let unboxed_obj =
+                                self.builder
+                                    .build_call_direct(unbox_func, vec![obj], ptr_u8)?;
+
                             if field_in_class {
-                                return self.lower_field_access_for_class(obj, field, field_ty);
+                                return self.lower_field_access_for_class(
+                                    unboxed_obj,
+                                    field,
+                                    field_ty,
+                                );
                             }
                             // No class has this field — use Reflect API (anonymous object)
-                            return self.dynamic_reflect_field_read(obj, field, field_ty);
+                            return self.dynamic_reflect_field_read(unboxed_obj, field, field_ty);
                         }
                     }
                     // Also check for I64 - this is a raw pointer from Array element access
@@ -17246,6 +17528,7 @@ impl<'a> HirToMirContext<'a> {
             reassigned_in_scope: self.reassigned_in_scope.clone(),
             current_drop_points: self.current_drop_points.clone(),
             current_stmt_index: self.current_stmt_index,
+            boxed_dynamic_symbols: self.boxed_dynamic_symbols.clone(),
         }
     }
 
@@ -17261,6 +17544,7 @@ impl<'a> HirToMirContext<'a> {
         self.reassigned_in_scope = state.reassigned_in_scope;
         self.current_drop_points = state.current_drop_points;
         self.current_stmt_index = state.current_stmt_index;
+        self.boxed_dynamic_symbols = state.boxed_dynamic_symbols;
     }
 
     /// PASS 1: Create lambda skeleton with placeholder signature
@@ -19214,7 +19498,14 @@ impl<'a> HirToMirContext<'a> {
         let typedef_id = self.builder.module.alloc_typedef_id();
 
         let mut fields = Vec::new();
-        let mut field_index = 0u32;
+        // Index 0 is reserved for the object header (__type_id: i64)
+        // This enables runtime type identification for downcasting, Dynamic field access, Type.getClass()
+        fields.push(IrField {
+            name: "__type_id".to_string(),
+            ty: IrType::I64,
+            offset: None,
+        });
+        let mut field_index = 1u32; // User fields start at index 1
 
         // Collect all inherited fields from parent classes (recursively)
         self.collect_inherited_fields(class.extends, type_id, &mut fields, &mut field_index);
@@ -19434,6 +19725,22 @@ impl<'a> HirToMirContext<'a> {
         if !abstract_decl.to_rules.is_empty() {
             self.abstract_to_rules
                 .insert(rule_key, abstract_decl.to_rules.clone());
+        }
+
+        // Store @:forward rules if present
+        if !abstract_decl.forward_fields.is_empty()
+            || self
+                .symbol_table
+                .get_symbol(abstract_decl.symbol_id)
+                .map_or(false, |s| s.flags.is_forward())
+        {
+            self.abstract_forward_rules.insert(
+                abstract_decl.symbol_id,
+                (
+                    abstract_decl.underlying,
+                    abstract_decl.forward_fields.clone(),
+                ),
+            );
         }
     }
 

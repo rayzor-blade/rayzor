@@ -659,6 +659,7 @@ impl<'a> TastToHirContext<'a> {
             methods: hir_methods,
             constructor: hir_constructor,
             metadata: Vec::new(),
+            forward_fields: abstract_decl.forward_fields.clone(),
         };
 
         self.module

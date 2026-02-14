@@ -972,6 +972,8 @@ pub struct TypedAbstract {
     pub from_types: Vec<TypeId>,
     /// To conversion types
     pub to_types: Vec<TypeId>,
+    /// @:forward field/method names (empty = forward all)
+    pub forward_fields: Vec<InternedString>,
     /// Whether this is an enum abstract
     pub is_enum_abstract: bool,
     /// Visibility

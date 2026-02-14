@@ -579,6 +579,96 @@ pub extern "C" fn haxe_type_get_enum_name(type_id: i64) -> *mut u8 {
     std::ptr::null_mut()
 }
 
+/// Type.createEnum(e, constr, ?params) -> T
+/// Creates an enum value dynamically by constructor name.
+/// For parameterless constructors, returns the tag as i64 (unboxed).
+/// For constructors with parameters, allocates boxed enum [tag:i32][pad:i32][fields...].
+#[no_mangle]
+pub extern "C" fn haxe_type_create_enum(
+    type_id: i64,
+    constr_ptr: *mut u8,
+    params_ptr: *mut u8,
+) -> i64 {
+    let constr_name = if constr_ptr.is_null() {
+        return 0;
+    } else {
+        unsafe {
+            let hs = &*(constr_ptr as *const crate::haxe_string::HaxeString);
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(hs.ptr, hs.len))
+        }
+    };
+
+    let guard = TYPE_REGISTRY.read().unwrap();
+    if let Some(registry) = guard.as_ref() {
+        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
+            if let Some(enum_info) = &type_info.enum_info {
+                for (idx, variant) in enum_info.variants.iter().enumerate() {
+                    if variant.name == constr_name {
+                        return create_enum_value(idx as i32, variant.param_count, params_ptr);
+                    }
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Type.createEnumIndex(e, index, ?params) -> T
+/// Creates an enum value dynamically by constructor index.
+#[no_mangle]
+pub extern "C" fn haxe_type_create_enum_index(
+    type_id: i64,
+    index: i64,
+    params_ptr: *mut u8,
+) -> i64 {
+    let guard = TYPE_REGISTRY.read().unwrap();
+    if let Some(registry) = guard.as_ref() {
+        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
+            if let Some(enum_info) = &type_info.enum_info {
+                if let Some(variant) = enum_info.variants.get(index as usize) {
+                    return create_enum_value(index as i32, variant.param_count, params_ptr);
+                }
+            }
+        }
+    }
+    0
+}
+
+/// Helper: create an enum value (unboxed tag or boxed struct)
+fn create_enum_value(tag: i32, param_count: usize, params_ptr: *mut u8) -> i64 {
+    if param_count == 0 {
+        // Unboxed: just the tag
+        return tag as i64;
+    }
+
+    // Boxed: allocate [tag:i32][pad:i32][field0:i64][field1:i64]...
+    let size = 8 + param_count * 8;
+    unsafe {
+        let layout = std::alloc::Layout::from_size_align(size, 8).unwrap();
+        let ptr = std::alloc::alloc_zeroed(layout);
+        if ptr.is_null() {
+            return 0;
+        }
+        // Write tag
+        *(ptr as *mut i32) = tag;
+
+        // Copy parameters from the HaxeArray if provided
+        if !params_ptr.is_null() {
+            let arr = &*(params_ptr as *const crate::haxe_array::HaxeArray);
+            for i in 0..param_count.min(arr.len) {
+                let val = crate::haxe_array::haxe_array_get_i64(
+                    params_ptr as *const crate::haxe_array::HaxeArray,
+                    i,
+                );
+                let field_ptr = ptr.add(8 + i * 8);
+                *(field_ptr as *mut i64) = val;
+            }
+        }
+
+        ptr as i64
+    }
+}
+
 // ============================================================================
 // Simpler per-variant registration API (easier to call from generated code)
 // ============================================================================
@@ -1225,21 +1315,41 @@ pub extern "C" fn haxe_box_null() -> DynamicValue {
 // Unboxing functions: Extract concrete values from Dynamic
 // ============================================================================
 
-/// Unbox a Dynamic as Int (returns 0 if wrong type)
+/// Unbox a Dynamic as Int (handles Float→Int truncation, returns 0 for other types)
 #[no_mangle]
 pub extern "C" fn haxe_unbox_int(dynamic: DynamicValue) -> i64 {
     if dynamic.type_id == TYPE_INT {
         unsafe { *(dynamic.value_ptr as *const i64) }
+    } else if dynamic.type_id == TYPE_FLOAT {
+        unsafe { *(dynamic.value_ptr as *const f64) as i64 }
+    } else if dynamic.type_id == TYPE_BOOL {
+        unsafe {
+            if *(dynamic.value_ptr as *const bool) {
+                1
+            } else {
+                0
+            }
+        }
     } else {
         0
     }
 }
 
-/// Unbox a Dynamic as Float (returns 0.0 if wrong type)
+/// Unbox a Dynamic as Float (handles Int→Float promotion, returns 0.0 for other types)
 #[no_mangle]
 pub extern "C" fn haxe_unbox_float(dynamic: DynamicValue) -> f64 {
     if dynamic.type_id == TYPE_FLOAT {
         unsafe { *(dynamic.value_ptr as *const f64) }
+    } else if dynamic.type_id == TYPE_INT {
+        unsafe { *(dynamic.value_ptr as *const i64) as f64 }
+    } else if dynamic.type_id == TYPE_BOOL {
+        unsafe {
+            if *(dynamic.value_ptr as *const bool) {
+                1.0
+            } else {
+                0.0
+            }
+        }
     } else {
         0.0
     }
@@ -1673,4 +1783,61 @@ pub extern "C" fn haxe_unbox_reference_ptr(ptr: *mut u8) -> *mut u8 {
         let dynamic = *dynamic_ptr;
         dynamic.value_ptr
     }
+}
+
+// Dynamic arithmetic is handled at the compiler level:
+// 1. Unbox both Dynamic operands to f64 via haxe_unbox_float_ptr
+// 2. Perform normal MIR arithmetic (FAdd, FSub, etc.)
+// 3. Box result via haxe_box_float_ptr (or leave as raw i64 for comparisons)
+// This reuses the existing unbox/box infrastructure without dedicated runtime functions.
+
+// ============================================================================
+// Object Header Introspection
+// ============================================================================
+
+/// Read the runtime type_id from an object's header (first 8 bytes at offset 0).
+/// All class instances have a `__type_id: i64` field at GEP index 0.
+#[no_mangle]
+pub extern "C" fn haxe_object_get_type_id(obj_ptr: *const u8) -> i64 {
+    if obj_ptr.is_null() {
+        return -1;
+    }
+    unsafe { *(obj_ptr as *const i64) }
+}
+
+/// Check if an object is an instance of (or subclass of) a target type.
+/// Walks the class hierarchy via TYPE_REGISTRY super_type_id chain.
+#[no_mangle]
+pub extern "C" fn haxe_object_is_instance(obj_ptr: *const u8, target_type_id: i64) -> i64 {
+    if obj_ptr.is_null() {
+        return 0;
+    }
+    let actual_type_id = unsafe { *(obj_ptr as *const i64) };
+    if actual_type_id == target_type_id {
+        return 1;
+    }
+    // Walk parent chain via TYPE_REGISTRY
+    let registry = TYPE_REGISTRY.read().unwrap();
+    if let Some(ref registry) = *registry {
+        let mut current = TypeId(actual_type_id as u32);
+        loop {
+            if let Some(type_info) = registry.get(&current) {
+                if let Some(class_info) = &type_info.class_info {
+                    if let Some(parent_id) = class_info.super_type_id {
+                        if parent_id as i64 == target_type_id {
+                            return 1;
+                        }
+                        current = TypeId(parent_id);
+                    } else {
+                        break; // No parent
+                    }
+                } else {
+                    break; // Not a class
+                }
+            } else {
+                break; // TypeId not found
+            }
+        }
+    }
+    0
 }

@@ -345,6 +345,14 @@ register_symbol!(
     "haxe_type_get_enum_name",
     crate::type_system::haxe_type_get_enum_name
 );
+register_symbol!(
+    "haxe_type_create_enum",
+    crate::type_system::haxe_type_create_enum
+);
+register_symbol!(
+    "haxe_type_create_enum_index",
+    crate::type_system::haxe_type_create_enum_index
+);
 register_symbol!("haxe_trace_enum", crate::type_system::haxe_trace_enum);
 register_symbol!(
     "haxe_trace_enum_boxed",
@@ -353,6 +361,16 @@ register_symbol!(
 register_symbol!(
     "haxe_trace_enum_boxed_typed",
     crate::type_system::haxe_trace_enum_boxed_typed
+);
+
+// Object header introspection
+register_symbol!(
+    "haxe_object_get_type_id",
+    crate::type_system::haxe_object_get_type_id
+);
+register_symbol!(
+    "haxe_object_is_instance",
+    crate::type_system::haxe_object_is_instance
 );
 
 // Std.string() - Type-specific conversions

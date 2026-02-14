@@ -3098,6 +3098,9 @@ impl StdlibMapping {
             // Type.typeof(v:Dynamic):ValueType (returns ordinal as i32)
             map_method!(static "Type", "typeof" => "haxe_type_typeof", params: 1, returns: primitive,
                 types: &[PtrU8] => I32),
+            // Type.getClass(o:T):Class<T> — reads object header type_id
+            map_method!(static "Type", "getClass" => "haxe_object_get_type_id", params: 1, returns: primitive,
+                types: &[PtrVoid] => I64),
             // Type.getClassName(c:Class<Dynamic>):String
             map_method!(static "Type", "getClassName" => "haxe_type_get_class_name", params: 1, returns: complex,
                 types: &[I64] => PtrVoid),
@@ -3119,6 +3122,12 @@ impl StdlibMapping {
             // Type.getEnumName(e:Enum<Dynamic>):String
             map_method!(static "Type", "getEnumName" => "haxe_type_get_enum_name", params: 1, returns: complex,
                 types: &[I64] => PtrVoid),
+            // Type.createEnum(e, constr, ?params):T
+            map_method!(static "Type", "createEnum" => "haxe_type_create_enum", params: 3, returns: primitive,
+                types: &[I64, PtrVoid, PtrVoid] => I64),
+            // Type.createEnumIndex(e, index, ?params):T
+            map_method!(static "Type", "createEnumIndex" => "haxe_type_create_enum_index", params: 3, returns: primitive,
+                types: &[I64, I64, PtrVoid] => I64),
         ];
 
         self.register_from_tuples(mappings);

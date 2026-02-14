@@ -429,8 +429,10 @@ fn try_build_phi_candidate(
                         None => return None,
                     };
 
+                    // Track ALL field indices including index 0 (__type_id header).
+                    // See comment in try_build_candidate_function_wide for rationale.
+
                     // Check for type conflict: same index with different element types
-                    // This happens when vtable (i32) and user field (f64) share index 0
                     if let Some(existing_ty) = gep_element_types.get(&field_idx) {
                         if existing_ty != ty {
                             return None;
@@ -646,9 +648,12 @@ fn try_build_phi_candidate(
 
     let num_fields = phi_gep_map.values().max().copied().unwrap_or(0) + 1;
 
-    // Safety check: reject candidates where any field lacks a known type
-    for field_idx in 0..num_fields {
-        if !field_types.contains_key(&field_idx) {
+    // Safety check: reject candidates where any ACCESSED field lacks a known type.
+    // Only check fields actually in phi_gep_map (not 0..num_fields), because
+    // fields like index 0 (__type_id header) may exist in the underlying mallocs
+    // but never be accessed through the phi pointer.
+    for field_idx in phi_gep_map.values() {
+        if !field_types.contains_key(field_idx) {
             return None;
         }
     }
@@ -1229,8 +1234,12 @@ fn try_build_candidate_function_wide(
                         ty,
                     } if tracked.contains(ptr) && !tracked.contains(dest) => {
                         if let Some(field_idx) = resolve_gep_field_index(indices, constants) {
+                            // Track ALL field indices including index 0 (__type_id header).
+                            // The type_id store becomes a dead Copy that DCE removes.
+                            // We must track index 0 because skipping it causes the
+                            // safety check (num_fields vs field_types) to reject candidates
+                            // where max_field_index > 0 but field 0 has no type.
                             // Check for type conflict: same index with different element types
-                            // This happens when vtable (i32) and user field (f64) share index 0
                             if let Some(existing_ty) = gep_element_types.get(&field_idx) {
                                 if existing_ty != ty {
                                     // Type conflict at this field index - reject candidate
@@ -1503,6 +1512,25 @@ fn terminator_uses_tracked(terminator: &super::IrTerminator, tracked: &BTreeSet<
 /// This works for the post-inlining pattern where stores happen before loads
 /// in a linear block sequence (alloc block → constructor block → use block).
 fn apply_sra(function: &mut IrFunction, candidate: &SraCandidate) -> usize {
+    // Recompute next_reg_id by scanning all existing IDs to avoid conflicts.
+    // This is necessary because inlining and other passes may create registers
+    // without updating next_reg_id, leading to ID collisions.
+    let mut max_id = function.next_reg_id;
+    for block in function.cfg.blocks.values() {
+        for phi in &block.phi_nodes {
+            max_id = max_id.max(phi.dest.as_u32() + 1);
+            for (_, v) in &phi.incoming {
+                max_id = max_id.max(v.as_u32() + 1);
+            }
+        }
+        for inst in &block.instructions {
+            if let Some(dest) = inst.dest() {
+                max_id = max_id.max(dest.as_u32() + 1);
+            }
+        }
+    }
+    function.next_reg_id = max_id;
+
     // Allocate initial Undef registers for each field
     let mut field_regs: Vec<IrId> = Vec::with_capacity(candidate.num_fields);
     for _ in 0..candidate.num_fields {

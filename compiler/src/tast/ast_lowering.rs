@@ -3343,6 +3343,28 @@ impl<'a> AstLowering<'a> {
             sym.flags = sym.flags.union(abstract_meta_flags);
         }
 
+        // Extract @:forward metadata params (method/field names to forward to underlying type)
+        let forward_fields: Vec<InternedString> = abstract_decl
+            .meta
+            .iter()
+            .find(|m| {
+                let name = m.name.strip_prefix(':').unwrap_or(&m.name);
+                name == "forward"
+            })
+            .map(|m| {
+                m.params
+                    .iter()
+                    .filter_map(|p| {
+                        if let parser::haxe_ast::ExprKind::Ident(name) = &p.kind {
+                            Some(self.context.intern_string(name))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         // Add abstract to the root scope so it can be resolved for forward references
         self.context
             .scope_tree
@@ -3505,6 +3527,7 @@ impl<'a> AstLowering<'a> {
             constructors,
             from_types,
             to_types,
+            forward_fields,
             is_enum_abstract: abstract_decl.is_enum_abstract,
             visibility: self.lower_access(&abstract_decl.access),
             source_location: self.context.create_location_from_span(abstract_decl.span),
@@ -9082,12 +9105,17 @@ impl<'a> AstLowering<'a> {
                         // Add can be either string concatenation or numeric addition
                         let left_type = left.expr_type;
                         let right_type = right.expr_type;
+                        let dynamic_type = type_table.dynamic_type();
                         let string_type = type_table.string_type();
                         let int_type = type_table.int_type();
                         let float_type = type_table.float_type();
 
+                        // If either operand is Dynamic, result is Dynamic
+                        if left_type == dynamic_type || right_type == dynamic_type {
+                            Ok(dynamic_type)
+                        }
                         // If either operand is string, result is string (concatenation)
-                        if left_type == string_type || right_type == string_type {
+                        else if left_type == string_type || right_type == string_type {
                             Ok(string_type)
                         }
                         // If either operand is Float, result is Float
@@ -9110,9 +9138,14 @@ impl<'a> AstLowering<'a> {
                         // Purely numeric operations
                         let left_type = left.expr_type;
                         let right_type = right.expr_type;
+                        let dynamic_type = type_table.dynamic_type();
 
+                        // If either operand is Dynamic, result is Dynamic
+                        if left_type == dynamic_type || right_type == dynamic_type {
+                            Ok(dynamic_type)
+                        }
                         // If either operand is Float, result is Float
-                        if left_type == type_table.float_type()
+                        else if left_type == type_table.float_type()
                             || right_type == type_table.float_type()
                         {
                             Ok(type_table.float_type())
@@ -11419,6 +11452,27 @@ impl<'a> AstLowering<'a> {
                         }
                         _ => Ok(type_table.dynamic_type()),
                     }
+                }
+                crate::tast::core::TypeKind::Abstract {
+                    symbol_id,
+                    underlying,
+                    ..
+                } => {
+                    // For abstracts (including @:forward), resolve through underlying type
+                    let resolved_underlying =
+                        underlying.or_else(|| type_table.resolve_abstract_underlying(*symbol_id));
+                    if let Some(underlying_type) = resolved_underlying {
+                        drop(type_table);
+                        self.infer_builtin_method_type(underlying_type, field_symbol)
+                    } else {
+                        Ok(type_table.dynamic_type())
+                    }
+                }
+                crate::tast::core::TypeKind::GenericInstance { base_type, .. } => {
+                    // For generic instances, resolve through base type
+                    let base = *base_type;
+                    drop(type_table);
+                    self.infer_builtin_method_type(base, field_symbol)
                 }
                 _ => Ok(type_table.dynamic_type()),
             }

@@ -104,6 +104,8 @@ pub struct HirAbstract {
     pub methods: Vec<HirMethod>,
     pub constructor: Option<HirConstructor>,
     pub metadata: Vec<HirAttribute>,
+    /// @:forward field/method names (empty = forward all)
+    pub forward_fields: Vec<InternedString>,
 }
 
 /// Cast rule for abstract types

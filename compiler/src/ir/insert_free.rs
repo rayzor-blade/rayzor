@@ -244,8 +244,43 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
     // Pick a single anon_drop function ID for emitting drop calls
     let anon_drop_id = ids.anon_drop_ids.iter().next().cloned();
 
-    // Step 4: Insert Free/Drop before each return for each non-escaping alloc
+    // Step 4: Insert Free/Drop for each non-escaping alloc.
+    // For allocs defined in the entry block (which dominates all returns), insert at return blocks.
+    // For allocs defined in inner blocks (e.g., loop bodies from inlined constructors),
+    // insert at the last-use block to avoid referencing IrIds that don't dominate the return.
+    let entry_block = function.entry_block();
+
+    // Build a map: alloc_id → defining block
+    let mut alloc_def_block: HashMap<IrId, IrBlockId> = HashMap::new();
+    for (&block_id, block) in &function.cfg.blocks {
+        for inst in &block.instructions {
+            if let IrInstruction::CallDirect {
+                dest: Some(dest),
+                func_id,
+                ..
+            } = inst
+            {
+                if ids.malloc_ids.contains(func_id) || ids.anon_new_ids.contains(func_id) {
+                    alloc_def_block.insert(*dest, block_id);
+                }
+            }
+        }
+    }
+
+    // Partition allocs into entry-block vs inner-block
+    let mut entry_allocs = Vec::new();
+    let mut inner_allocs = Vec::new();
+    for &alloc_id in &allocs_needing_free {
+        if alloc_def_block.get(&alloc_id) == Some(&entry_block) {
+            entry_allocs.push(alloc_id);
+        } else {
+            inner_allocs.push(alloc_id);
+        }
+    }
+
     let mut inserted = 0;
+
+    // Entry-block allocs: free at return blocks (original behavior)
     for block_id in &return_blocks {
         if let Some(block) = function.cfg.blocks.get_mut(block_id) {
             let return_value = if let IrTerminator::Return { value } = &block.terminator {
@@ -254,9 +289,8 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
                 None
             };
 
-            for &alloc_id in &allocs_needing_free {
+            for &alloc_id in &entry_allocs {
                 let derived = &derived_sets[&alloc_id];
-                // Don't free if this alloc is being returned
                 if let Some(ret_val) = return_value {
                     if ret_val == alloc_id || derived.contains(&ret_val) {
                         continue;
@@ -264,7 +298,6 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
                 }
 
                 if anon_alloc_ids.contains(&alloc_id) {
-                    // Arc-backed anon object: emit rayzor_anon_drop(handle) call
                     if let Some(drop_id) = anon_drop_id {
                         block.instructions.push(IrInstruction::CallDirect {
                             dest: None,
@@ -277,7 +310,6 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
                         inserted += 1;
                     }
                 } else {
-                    // Regular malloc allocation: emit Free instruction
                     block
                         .instructions
                         .push(IrInstruction::Free { ptr: alloc_id });
@@ -286,6 +318,13 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
             }
         }
     }
+
+    // Inner-block allocs: skip for now.
+    // The "last-use block" approach is unsound for loop-carried allocations:
+    // if an alloc is used in a loop body, freeing at the "last use" block frees it
+    // after the first iteration, causing use-after-free on subsequent iterations.
+    // These allocations are typically eliminated by SRA (promoted to registers).
+    // Any remaining inner-block allocs will leak, which is acceptable.
 
     inserted
 }
