@@ -1833,22 +1833,18 @@ pub extern "C" fn haxe_object_is_instance(obj_ptr: *const u8, target_type_id: i6
     let registry = TYPE_REGISTRY.read().unwrap();
     if let Some(ref registry) = *registry {
         let mut current = TypeId(actual_type_id as u32);
-        loop {
-            if let Some(type_info) = registry.get(&current) {
-                if let Some(class_info) = &type_info.class_info {
-                    if let Some(parent_id) = class_info.super_type_id {
-                        if parent_id as i64 == target_type_id {
-                            return 1;
-                        }
-                        current = TypeId(parent_id);
-                    } else {
-                        break; // No parent
+        while let Some(type_info) = registry.get(&current) {
+            if let Some(class_info) = &type_info.class_info {
+                if let Some(parent_id) = class_info.super_type_id {
+                    if parent_id as i64 == target_type_id {
+                        return 1;
                     }
+                    current = TypeId(parent_id);
                 } else {
-                    break; // Not a class
+                    break; // No parent
                 }
             } else {
-                break; // TypeId not found
+                break; // Not a class
             }
         }
     }

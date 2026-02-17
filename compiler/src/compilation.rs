@@ -2711,16 +2711,21 @@ impl CompilationUnit {
         {
             use crate::tast::symbols::SymbolFlags;
             let has_non_extern_class = typed_file.classes.iter().any(|c| {
-                !self.symbol_table.get_symbol(c.symbol_id)
+                !self
+                    .symbol_table
+                    .get_symbol(c.symbol_id)
                     .map(|s| s.flags.contains(SymbolFlags::EXTERN))
                     .unwrap_or(false)
             });
             let has_non_extern_abstract = typed_file.abstracts.iter().any(|a| {
-                !self.symbol_table.get_symbol(a.symbol_id)
+                !self
+                    .symbol_table
+                    .get_symbol(a.symbol_id)
                     .map(|s| s.flags.contains(SymbolFlags::EXTERN))
                     .unwrap_or(false)
             });
-            let has_extern_decls = !typed_file.classes.is_empty() || !typed_file.abstracts.is_empty();
+            let has_extern_decls =
+                !typed_file.classes.is_empty() || !typed_file.abstracts.is_empty();
             let is_extern_only = has_extern_decls
                 && !has_non_extern_class
                 && !has_non_extern_abstract

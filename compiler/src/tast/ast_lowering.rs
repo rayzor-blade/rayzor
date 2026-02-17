@@ -2180,10 +2180,7 @@ impl<'a> AstLowering<'a> {
     /// This runs after pre_register_declaration (which creates class type entries)
     /// but before full lowering, so that field access on forward-referenced classes
     /// can resolve field names and types correctly.
-    fn pre_register_class_fields(
-        &mut self,
-        class_decl: &parser::ClassDecl,
-    ) -> LoweringResult<()> {
+    fn pre_register_class_fields(&mut self, class_decl: &parser::ClassDecl) -> LoweringResult<()> {
         let class_name = self.context.intern_string(&class_decl.name);
 
         // Look up the pre-registered class symbol
@@ -2226,18 +2223,14 @@ impl<'a> AstLowering<'a> {
 
             // Resolve the field type from the type hint
             let field_type = if let Some(th) = type_hint {
-                self.lower_type(th).unwrap_or_else(|_| {
-                    self.context.type_table.borrow().dynamic_type()
-                })
+                self.lower_type(th)
+                    .unwrap_or_else(|_| self.context.type_table.borrow().dynamic_type())
             } else {
                 self.context.type_table.borrow().dynamic_type()
             };
 
             let interned_name = self.context.intern_string(&field_name);
-            let field_symbol = self
-                .context
-                .symbol_table
-                .create_variable(interned_name);
+            let field_symbol = self.context.symbol_table.create_variable(interned_name);
 
             // Set the field's type
             self.context
@@ -3432,15 +3425,18 @@ impl<'a> AstLowering<'a> {
         self.context.update_symbol_qualified_name(abstract_symbol);
 
         // Extract @:native metadata for abstracts
-        let mut abstract_meta_flags = self.extract_metadata_flags(&abstract_decl.meta, abstract_symbol);
+        let mut abstract_meta_flags =
+            self.extract_metadata_flags(&abstract_decl.meta, abstract_symbol);
         // Also check for modifiers (extern, final, etc)
         for modifier in &abstract_decl.modifiers {
             match modifier {
                 parser::haxe_ast::Modifier::Extern => {
-                    abstract_meta_flags = abstract_meta_flags.union(crate::tast::symbols::SymbolFlags::EXTERN);
+                    abstract_meta_flags =
+                        abstract_meta_flags.union(crate::tast::symbols::SymbolFlags::EXTERN);
                 }
                 parser::haxe_ast::Modifier::Final => {
-                    abstract_meta_flags = abstract_meta_flags.union(crate::tast::symbols::SymbolFlags::FINAL);
+                    abstract_meta_flags =
+                        abstract_meta_flags.union(crate::tast::symbols::SymbolFlags::FINAL);
                 }
                 _ => {}
             }
@@ -7843,19 +7839,20 @@ impl<'a> AstLowering<'a> {
         // Helper: look up a field or method by name in a class, checking both
         // class_fields and class_methods. Methods are tracked separately from fields,
         // so we must check both to resolve instance method calls like `obj.lock()`.
-        let resolve_in_class = |this: &Self, class_sym: &SymbolId, name: InternedString| -> Option<SymbolId> {
-            if let Some(fields) = this.class_fields.get(class_sym) {
-                if let Some((_, sym, _)) = fields.iter().find(|(n, _, _)| *n == name) {
-                    return Some(*sym);
+        let resolve_in_class =
+            |this: &Self, class_sym: &SymbolId, name: InternedString| -> Option<SymbolId> {
+                if let Some(fields) = this.class_fields.get(class_sym) {
+                    if let Some((_, sym, _)) = fields.iter().find(|(n, _, _)| *n == name) {
+                        return Some(*sym);
+                    }
                 }
-            }
-            if let Some(methods) = this.class_methods.get(class_sym) {
-                if let Some((_, sym, _)) = methods.iter().find(|(n, _, _)| *n == name) {
-                    return Some(*sym);
+                if let Some(methods) = this.class_methods.get(class_sym) {
+                    if let Some((_, sym, _)) = methods.iter().find(|(n, _, _)| *n == name) {
+                        return Some(*sym);
+                    }
                 }
-            }
-            None
-        };
+                None
+            };
 
         // For field access, we need to look up the field symbol from the object's type
         // Create type parameter with deferred constraint resolution
@@ -9400,13 +9397,9 @@ impl<'a> AstLowering<'a> {
                 let result = match type_table.get(array.expr_type) {
                     Some(array_type) => match &array_type.kind {
                         crate::tast::core::TypeKind::Array { element_type } => Ok(*element_type),
-                        _other => {
-                            Ok(type_table.dynamic_type())
-                        }
+                        _other => Ok(type_table.dynamic_type()),
                     },
-                    None => {
-                        Ok(type_table.dynamic_type())
-                    }
+                    None => Ok(type_table.dynamic_type()),
                 };
                 result
             }

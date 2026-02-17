@@ -1750,12 +1750,20 @@ impl CraneliftBackend {
                 left,
                 right,
             } => {
-                // Get type from register_types map
+                // Get type from register_types map, locals, or phi nodes
+                let phi_ty = function
+                    .cfg
+                    .blocks
+                    .values()
+                    .flat_map(|b| b.phi_nodes.iter())
+                    .find(|phi| phi.dest == *left)
+                    .map(|phi| &phi.ty);
                 let ty = function
                     .register_types
                     .get(left)
                     .or_else(|| function.locals.get(left).map(|local| &local.ty))
-                    .ok_or_else(|| format!("Type not found for Cmp operand {:?}", left))?;
+                    .or(phi_ty)
+                    .ok_or_else(|| format!("Type not found for Cmp operand {:?} (right={:?}, dest={:?}, op={:?}) in function '{}'", left, right, dest, op, function.name))?;
 
                 let value =
                     Self::lower_compare_op_static(value_map, builder, op, ty, *left, *right)?;

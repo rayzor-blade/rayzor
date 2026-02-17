@@ -1399,7 +1399,6 @@ impl<'a> HirToMirContext<'a> {
 
     /// Lower a HIR module to MIR
     pub fn lower_module(&mut self, hir_module: &HirModule) -> Result<IrModule, Vec<LoweringError>> {
-
         // Extract SSA optimization hints from HIR metadata
         // These were populated during HIR lowering by querying DFG/SSA
         self.extract_ssa_hints_from_hir(hir_module);
@@ -2852,7 +2851,8 @@ impl<'a> HirToMirContext<'a> {
                             // This enables disambiguation of chained calls like:
                             //   var guard = mutex.lock(); guard.get(); guard.unlock();
                             if let Some(class_hint) = self.register_class_hints.get(&value_reg) {
-                                self.monomorphized_var_types.insert(*symbol, class_hint.clone());
+                                self.monomorphized_var_types
+                                    .insert(*symbol, class_hint.clone());
                             }
                         }
 
@@ -2924,10 +2924,21 @@ impl<'a> HirToMirContext<'a> {
                         // the result is an alias of `c`'s heap memory. Transfer ownership
                         // from the source variable to the new variable so the drop analysis
                         // doesn't free the source while the alias is still in use.
-                        if let HirExprKind::Cast { expr: cast_expr, is_safe: true, .. } = &init_expr.kind {
-                            if let HirExprKind::Variable { symbol: src_symbol, .. } = &cast_expr.kind {
+                        if let HirExprKind::Cast {
+                            expr: cast_expr,
+                            is_safe: true,
+                            ..
+                        } = &init_expr.kind
+                        {
+                            if let HirExprKind::Variable {
+                                symbol: src_symbol, ..
+                            } = &cast_expr.kind
+                            {
                                 if let Some(src_ir_id) = self.owned_heap_values.remove(src_symbol) {
-                                    if let HirPattern::Variable { symbol: dst_symbol, .. } = pattern {
+                                    if let HirPattern::Variable {
+                                        symbol: dst_symbol, ..
+                                    } = pattern
+                                    {
                                         // Transfer: remove source from drop tracking,
                                         // register destination as the new owner
                                         self.reassigned_in_scope.insert(*src_symbol);
@@ -3958,11 +3969,16 @@ impl<'a> HirToMirContext<'a> {
                     if parts.len() >= 2 {
                         let class_parts = &parts[..parts.len() - 1];
                         let underscore_class = class_parts.join("_");
-                        if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(&underscore_class, method_name) {
+                        if let Some((sig, mapping)) = self
+                            .stdlib_mapping
+                            .find_by_name(&underscore_class, method_name)
+                        {
                             return Some((sig.class, sig.method, mapping));
                         }
                         if let Some(&class_name) = parts.iter().rev().nth(1) {
-                            if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(class_name, method_name) {
+                            if let Some((sig, mapping)) =
+                                self.stdlib_mapping.find_by_name(class_name, method_name)
+                            {
                                 return Some((sig.class, sig.method, mapping));
                             }
                         }
@@ -3971,7 +3987,9 @@ impl<'a> HirToMirContext<'a> {
                 // Try receiver_class_hint for disambiguation (e.g., guard.get() where guard
                 // is typed as Dynamic but hint says "rayzor_concurrent_MutexGuard")
                 if let Some(hint) = receiver_class_hint {
-                    if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(hint, method_name) {
+                    if let Some((sig, mapping)) =
+                        self.stdlib_mapping.find_by_name(hint, method_name)
+                    {
                         return Some((sig.class, sig.method, mapping));
                     }
                 }
@@ -5870,10 +5888,14 @@ impl<'a> HirToMirContext<'a> {
                                     || result_type == IrType::I64;
                                 if needs_resolve {
                                     let type_table = self.type_table.borrow();
-                                    type_table.get(object.ty).and_then(|ti| {
-                                        match &ti.kind {
+                                    type_table
+                                        .get(object.ty)
+                                        .and_then(|ti| match &ti.kind {
                                             crate::tast::TypeKind::Class { type_args, .. }
-                                            | crate::tast::TypeKind::GenericInstance { type_args, .. } => {
+                                            | crate::tast::TypeKind::GenericInstance {
+                                                type_args,
+                                                ..
+                                            } => {
                                                 if !type_args.is_empty() {
                                                     Some(self.convert_type(type_args[0]))
                                                 } else {
@@ -5881,8 +5903,8 @@ impl<'a> HirToMirContext<'a> {
                                                 }
                                             }
                                             _ => None,
-                                        }
-                                    }).unwrap_or_else(|| result_type.clone())
+                                        })
+                                        .unwrap_or_else(|| result_type.clone())
                                 } else {
                                     result_type.clone()
                                 }
@@ -6075,11 +6097,21 @@ impl<'a> HirToMirContext<'a> {
                                 type_table.get(object.ty).and_then(|ti| {
                                     match &ti.kind {
                                         crate::tast::TypeKind::Class { type_args, .. }
-                                        | crate::tast::TypeKind::GenericInstance { type_args, .. } => {
+                                        | crate::tast::TypeKind::GenericInstance {
+                                            type_args,
+                                            ..
+                                        } => {
                                             if !type_args.is_empty() {
                                                 let t = self.convert_type(type_args[0]);
                                                 // Only unbox if resolved to a concrete primitive
-                                                if matches!(t, IrType::I32 | IrType::I64 | IrType::F32 | IrType::F64 | IrType::Bool) {
+                                                if matches!(
+                                                    t,
+                                                    IrType::I32
+                                                        | IrType::I64
+                                                        | IrType::F32
+                                                        | IrType::F64
+                                                        | IrType::Bool
+                                                ) {
                                                     Some(t)
                                                 } else {
                                                     None
@@ -6192,34 +6224,46 @@ impl<'a> HirToMirContext<'a> {
 
                                         // Lower object (receiver) + args, auto-boxing primitives
                                         // when the MIR wrapper expects Ptr(U8) (e.g., Channel<Int>.send(42))
-                                        let mir_wrapper_sig = self.get_stdlib_mir_wrapper_signature(&runtime_name);
+                                        let mir_wrapper_sig =
+                                            self.get_stdlib_mir_wrapper_signature(&runtime_name);
                                         let obj_reg = self.lower_expression(object)?;
                                         let mut arg_regs = vec![obj_reg];
                                         for (i, arg) in args.iter().enumerate() {
                                             if let Some(reg) = self.lower_expression(arg) {
                                                 let actual_ty = self.convert_type(arg.ty);
                                                 // param index i+1 because param 0 is the receiver
-                                                let expected_ty = mir_wrapper_sig.as_ref()
-                                                    .and_then(|(params, _)| params.get(i + 1).cloned())
+                                                let expected_ty = mir_wrapper_sig
+                                                    .as_ref()
+                                                    .and_then(|(params, _)| {
+                                                        params.get(i + 1).cloned()
+                                                    })
                                                     .unwrap_or_else(|| actual_ty.clone());
                                                 let final_reg = self.maybe_box_for_extern_call(
-                                                    reg, &actual_ty, &expected_ty,
+                                                    reg,
+                                                    &actual_ty,
+                                                    &expected_ty,
                                                 )?;
                                                 arg_regs.push(final_reg);
                                             }
                                         }
 
                                         if is_mir_wrapper {
-                                            let param_types: Vec<_> = mir_wrapper_sig.as_ref()
+                                            let param_types: Vec<_> = mir_wrapper_sig
+                                                .as_ref()
                                                 .map(|(params, _)| params.clone())
                                                 .unwrap_or_else(|| {
-                                                    arg_regs.iter().map(|r| {
-                                                        self.builder.get_register_type(*r)
-                                                            .unwrap_or(IrType::I64)
-                                                    }).collect()
+                                                    arg_regs
+                                                        .iter()
+                                                        .map(|r| {
+                                                            self.builder
+                                                                .get_register_type(*r)
+                                                                .unwrap_or(IrType::I64)
+                                                        })
+                                                        .collect()
                                                 });
 
-                                            let mir_return_type = mir_wrapper_sig.as_ref()
+                                            let mir_return_type = mir_wrapper_sig
+                                                .as_ref()
                                                 .map(|(_, ret)| ret.clone())
                                                 .unwrap_or_else(|| result_type.clone());
 
@@ -6902,7 +6946,8 @@ impl<'a> HirToMirContext<'a> {
                                 // Cranelift alongside user code. They must NOT be registered as
                                 // extern C functions.
                                 if is_mir_wrapper {
-                                    self.builder.call_label = Some(format!("MIR_WRAPPER:{}", runtime_func));
+                                    self.builder.call_label =
+                                        Some(format!("MIR_WRAPPER:{}", runtime_func));
                                     // Lower receiver + args
                                     let mut arg_regs = Vec::new();
                                     if is_instance_method {
@@ -6929,7 +6974,8 @@ impl<'a> HirToMirContext<'a> {
                                     // type erases to Ptr(Void) or I64, but the MIR wrapper returns
                                     // a concrete type (e.g., Ptr(U8)). Using the concrete type
                                     // prevents spurious unboxing in downstream field access.
-                                    let mir_return_type = self.get_stdlib_mir_wrapper_signature(runtime_func)
+                                    let mir_return_type = self
+                                        .get_stdlib_mir_wrapper_signature(runtime_func)
                                         .map(|(_, ret)| ret)
                                         .unwrap_or_else(|| result_type.clone());
 
@@ -6948,8 +6994,10 @@ impl<'a> HirToMirContext<'a> {
                                     // Store class hint for result to enable disambiguation
                                     // of subsequent method calls on TypeParameter receivers
                                     if let Some(result_reg) = call_result {
-                                        let return_class = Self::get_return_class_hint(class_name, method_name);
-                                        self.register_class_hints.insert(result_reg, return_class.to_string());
+                                        let return_class =
+                                            Self::get_return_class_hint(class_name, method_name);
+                                        self.register_class_hints
+                                            .insert(result_reg, return_class.to_string());
                                     }
 
                                     return call_result;
@@ -6992,7 +7040,8 @@ impl<'a> HirToMirContext<'a> {
                                         (params, ret_type)
                                     });
 
-                                self.builder.call_label = Some(format!("EXTERN_C:{}", runtime_func));
+                                self.builder.call_label =
+                                    Some(format!("EXTERN_C:{}", runtime_func));
                                 // Build argument list based on whether this is instance or static method
                                 let mut arg_regs = Vec::new();
                                 let args_to_process: &[HirExpr] = if is_instance_method {
@@ -7642,7 +7691,12 @@ impl<'a> HirToMirContext<'a> {
                         {
                             let type_table = self.type_table.borrow();
                             if let Some(type_info) = type_table.get(receiver_type) {
-                                if matches!(type_info.kind, TypeKind::Dynamic | TypeKind::TypeParameter { .. } | TypeKind::Placeholder { .. }) {
+                                if matches!(
+                                    type_info.kind,
+                                    TypeKind::Dynamic
+                                        | TypeKind::TypeParameter { .. }
+                                        | TypeKind::Placeholder { .. }
+                                ) {
                                     drop(type_table);
 
                                     // First, check if this might be a stdlib method call
@@ -7690,17 +7744,25 @@ impl<'a> HirToMirContext<'a> {
                                         // (e.g., Arc.get vs MutexGuard.get — both have 0 params)
                                         if filtered_classes.len() > 1 {
                                             // Check if the receiver variable has a class hint
-                                            let receiver_hint = if let HirExprKind::Variable { symbol: recv_sym, .. } = &args[0].kind {
+                                            let receiver_hint = if let HirExprKind::Variable {
+                                                symbol: recv_sym,
+                                                ..
+                                            } = &args[0].kind
+                                            {
                                                 self.monomorphized_var_types.get(&recv_sym).cloned()
                                             } else {
                                                 None
                                             };
 
                                             if let Some(hint) = &receiver_hint {
-                                                let hinted: Vec<_> = filtered_classes.iter()
+                                                let hinted: Vec<_> = filtered_classes
+                                                    .iter()
                                                     .filter(|(class, _, _)| {
-                                                        *class == hint.as_str() || class.ends_with(&format!("_{}", hint))
-                                                            || hint.ends_with(&format!("_{}", class))
+                                                        *class == hint.as_str()
+                                                            || class
+                                                                .ends_with(&format!("_{}", hint))
+                                                            || hint
+                                                                .ends_with(&format!("_{}", class))
                                                     })
                                                     .copied()
                                                     .collect();
@@ -7735,39 +7797,60 @@ impl<'a> HirToMirContext<'a> {
                                                 // Lower all arguments with auto-boxing
                                                 // CRITICAL: If the receiver (args[0]) can't be lowered, skip this handler
                                                 // to prevent generating 0-arg calls for instance methods that expect self.
-                                                let mir_wrapper_sig = self.get_stdlib_mir_wrapper_signature(&mir_func_name);
+                                                let mir_wrapper_sig = self
+                                                    .get_stdlib_mir_wrapper_signature(
+                                                        &mir_func_name,
+                                                    );
                                                 let mut arg_regs = Vec::new();
                                                 let mut param_types = Vec::new();
                                                 let mut receiver_failed = false;
                                                 for (i, arg) in args.iter().enumerate() {
                                                     if let Some(reg) = self.lower_expression(arg) {
                                                         let actual_ty = self.convert_type(arg.ty);
-                                                        let expected_ty = mir_wrapper_sig.as_ref()
-                                                            .and_then(|(params, _)| params.get(i).cloned())
+                                                        let expected_ty = mir_wrapper_sig
+                                                            .as_ref()
+                                                            .and_then(|(params, _)| {
+                                                                params.get(i).cloned()
+                                                            })
                                                             .unwrap_or_else(|| actual_ty.clone());
 
                                                         // TypeParameter/Dynamic/Placeholder args erased to I64
                                                         // should be CAST to Ptr(U8), not BOXED. The erased I64
                                                         // value IS a pointer (class/struct handle), not an integer.
                                                         let is_erased_type_param = {
-                                                            let type_table = self.type_table.borrow();
-                                                            type_table.get(arg.ty).map(|ti| matches!(
+                                                            let type_table =
+                                                                self.type_table.borrow();
+                                                            type_table
+                                                                .get(arg.ty)
+                                                                .map(|ti| {
+                                                                    matches!(
                                                                 ti.kind,
                                                                 TypeKind::TypeParameter { .. }
                                                                 | TypeKind::Dynamic
                                                                 | TypeKind::Placeholder { .. }
-                                                            )).unwrap_or(false)
+                                                            )
+                                                                })
+                                                                .unwrap_or(false)
                                                         };
                                                         let final_reg = if is_erased_type_param
                                                             && matches!(actual_ty, IrType::I64)
-                                                            && matches!(&expected_ty, IrType::Ptr(_))
-                                                        {
+                                                            && matches!(
+                                                                &expected_ty,
+                                                                IrType::Ptr(_)
+                                                            ) {
                                                             // Cast I64 → Ptr(U8) instead of boxing
-                                                            self.builder.build_cast(reg, IrType::I64, expected_ty.clone())
+                                                            self.builder
+                                                                .build_cast(
+                                                                    reg,
+                                                                    IrType::I64,
+                                                                    expected_ty.clone(),
+                                                                )
                                                                 .unwrap_or(reg)
                                                         } else {
                                                             self.maybe_box_for_extern_call(
-                                                                reg, &actual_ty, &expected_ty,
+                                                                reg,
+                                                                &actual_ty,
+                                                                &expected_ty,
                                                             )?
                                                         };
                                                         arg_regs.push(final_reg);
@@ -7784,33 +7867,34 @@ impl<'a> HirToMirContext<'a> {
                                                 if receiver_failed {
                                                     // Don't generate a broken call; fall through
                                                 } else {
+                                                    // Get MIR wrapper return type
+                                                    let mir_return_type = mir_wrapper_sig
+                                                        .as_ref()
+                                                        .map(|(_, ret)| ret.clone())
+                                                        .unwrap_or_else(|| result_type.clone());
 
-                                                // Get MIR wrapper return type
-                                                let mir_return_type = mir_wrapper_sig.as_ref()
-                                                    .map(|(_, ret)| ret.clone())
-                                                    .unwrap_or_else(|| result_type.clone());
+                                                    // Register forward reference
+                                                    let mir_func_id = self
+                                                        .register_stdlib_mir_forward_ref(
+                                                            &mir_func_name,
+                                                            param_types,
+                                                            mir_return_type.clone(),
+                                                        );
 
-                                                // Register forward reference
-                                                let mir_func_id = self
-                                                    .register_stdlib_mir_forward_ref(
-                                                        &mir_func_name,
-                                                        param_types,
-                                                        mir_return_type.clone(),
-                                                    );
+                                                    let call_result =
+                                                        self.builder.build_call_direct(
+                                                            mir_func_id,
+                                                            arg_regs,
+                                                            mir_return_type.clone(),
+                                                        )?;
 
-                                                let call_result = self.builder.build_call_direct(
-                                                    mir_func_id,
-                                                    arg_regs,
-                                                    mir_return_type.clone(),
-                                                )?;
-
-                                                // Auto-unbox: resolve generic T from receiver type args
-                                                // e.g., Channel<Int>.tryReceive() returns Ptr(U8) but should produce I32
-                                                let resolved_expected = {
-                                                    let type_table = self.type_table.borrow();
-                                                    // The receiver is args[0] - check its type for generic args
-                                                    if !args.is_empty() {
-                                                        type_table.get(args[0].ty).and_then(|ti| {
+                                                    // Auto-unbox: resolve generic T from receiver type args
+                                                    // e.g., Channel<Int>.tryReceive() returns Ptr(U8) but should produce I32
+                                                    let resolved_expected = {
+                                                        let type_table = self.type_table.borrow();
+                                                        // The receiver is args[0] - check its type for generic args
+                                                        if !args.is_empty() {
+                                                            type_table.get(args[0].ty).and_then(|ti| {
                                                             match &ti.kind {
                                                                 crate::tast::TypeKind::Class { type_args, .. }
                                                                 | crate::tast::TypeKind::GenericInstance { type_args, .. } => {
@@ -7826,26 +7910,34 @@ impl<'a> HirToMirContext<'a> {
                                                                 _ => None,
                                                             }
                                                         }).unwrap_or_else(|| result_type.clone())
-                                                    } else {
-                                                        result_type.clone()
+                                                        } else {
+                                                            result_type.clone()
+                                                        }
+                                                    };
+                                                    let final_result = self
+                                                        .maybe_unbox_for_extern_return(
+                                                            call_result,
+                                                            &mir_return_type,
+                                                            &resolved_expected,
+                                                        );
+
+                                                    // Store class hint for the result register to enable
+                                                    // disambiguation of subsequent method calls on this value.
+                                                    // E.g., Mutex.lock() returns MutexGuard, so the result
+                                                    // should be tagged as MutexGuard for .get()/.unlock() dispatch.
+                                                    if let Some(result_reg) = final_result {
+                                                        let return_class =
+                                                            Self::get_return_class_hint(
+                                                                class_name,
+                                                                method_name,
+                                                            );
+                                                        self.register_class_hints.insert(
+                                                            result_reg,
+                                                            return_class.to_string(),
+                                                        );
                                                     }
-                                                };
-                                                let final_result = self.maybe_unbox_for_extern_return(
-                                                    call_result,
-                                                    &mir_return_type,
-                                                    &resolved_expected,
-                                                );
 
-                                                // Store class hint for the result register to enable
-                                                // disambiguation of subsequent method calls on this value.
-                                                // E.g., Mutex.lock() returns MutexGuard, so the result
-                                                // should be tagged as MutexGuard for .get()/.unlock() dispatch.
-                                                if let Some(result_reg) = final_result {
-                                                    let return_class = Self::get_return_class_hint(class_name, method_name);
-                                                    self.register_class_hints.insert(result_reg, return_class.to_string());
-                                                }
-
-                                                return final_result;
+                                                    return final_result;
                                                 } // end else !receiver_failed
                                             } else {
                                                 // Direct extern call
@@ -7921,7 +8013,9 @@ impl<'a> HirToMirContext<'a> {
                                                 // IMPORTANT: If the receiver has a class hint (set by stdlib MIR
                                                 // wrapper dispatch), it's a raw class pointer from a method like
                                                 // MutexGuard_get — NOT a boxed DynamicValue. Don't unbox it.
-                                                let has_class_hint = self.register_class_hints.contains_key(&receiver_reg);
+                                                let has_class_hint = self
+                                                    .register_class_hints
+                                                    .contains_key(&receiver_reg);
                                                 let receiver_mir_type =
                                                     self.builder.get_register_type(receiver_reg);
                                                 let should_unbox = !has_class_hint && receiver_mir_type.as_ref()
@@ -8186,7 +8280,8 @@ impl<'a> HirToMirContext<'a> {
                                     // Lower all arguments and collect their types
                                     // Auto-box primitive args when MIR wrapper expects Ptr(U8)
                                     // (e.g., Channel<Int>.send(42) needs to box the Int)
-                                    let mir_wrapper_params = self.get_stdlib_mir_wrapper_signature(&mir_func_name)
+                                    let mir_wrapper_params = self
+                                        .get_stdlib_mir_wrapper_signature(&mir_func_name)
                                         .map(|(params, _)| params);
                                     let mut arg_regs = Vec::new();
                                     let mut param_types = Vec::new();
@@ -8194,7 +8289,8 @@ impl<'a> HirToMirContext<'a> {
                                         if let Some(reg) = self.lower_expression(arg) {
                                             let actual_ty = self.convert_type(arg.ty);
                                             // Check if MIR wrapper expects a different type (e.g., Ptr(U8) for boxed value)
-                                            let expected_ty = mir_wrapper_params.as_ref()
+                                            let expected_ty = mir_wrapper_params
+                                                .as_ref()
                                                 .and_then(|params| params.get(i).cloned())
                                                 .unwrap_or_else(|| actual_ty.clone());
                                             let final_reg = self.maybe_box_for_extern_call(
@@ -8274,7 +8370,8 @@ impl<'a> HirToMirContext<'a> {
 
                                     // Generate the call with the MIR wrapper's actual return type
                                     // (which may be Ptr(U8) for generic methods returning T)
-                                    let mir_actual_return = self.get_stdlib_mir_wrapper_signature(&mir_func_name)
+                                    let mir_actual_return = self
+                                        .get_stdlib_mir_wrapper_signature(&mir_func_name)
                                         .map(|(_, ret)| ret)
                                         .unwrap_or_else(|| final_return_type.clone());
                                     let call_result = self.builder.build_call_direct(
@@ -9411,11 +9508,12 @@ impl<'a> HirToMirContext<'a> {
                                                         .unwrap_or_else(|| actual_ty.clone());
 
                                                     // Auto-box if MIR wrapper expects Ptr(U8) but arg is primitive
-                                                    let final_reg = self.maybe_box_for_extern_call(
-                                                        reg,
-                                                        &actual_ty,
-                                                        &expected_ty,
-                                                    )?;
+                                                    let final_reg = self
+                                                        .maybe_box_for_extern_call(
+                                                            reg,
+                                                            &actual_ty,
+                                                            &expected_ty,
+                                                        )?;
                                                     arg_regs.push(final_reg);
                                                 }
                                             }
@@ -10140,7 +10238,8 @@ impl<'a> HirToMirContext<'a> {
                                 }
 
                                 if let Some((class_name, mapping)) = found_mapping {
-                                    self.builder.call_label = Some(format!("STATIC_SEARCH:{}", class_name));
+                                    self.builder.call_label =
+                                        Some(format!("STATIC_SEARCH:{}", class_name));
                                     let runtime_name = mapping.runtime_name;
                                     // eprintln!(
                                     //     "INFO: {} static method detected: {} (runtime: {})",
@@ -10192,7 +10291,8 @@ impl<'a> HirToMirContext<'a> {
                                 if let Some(&existing_func_id) =
                                     self.external_function_name_map.get(qual_name_str)
                                 {
-                                    self.builder.call_label = Some(format!("NAME_MAP_HIT:{}", qual_name_str));
+                                    self.builder.call_label =
+                                        Some(format!("NAME_MAP_HIT:{}", qual_name_str));
                                     debug!("[NAME MAP HIT] Found '{}' in external_function_name_map -> {:?}", qual_name_str, existing_func_id);
 
                                     // Lower arguments
@@ -10209,7 +10309,8 @@ impl<'a> HirToMirContext<'a> {
                                     );
                                 }
 
-                                self.builder.call_label = Some(format!("FORWARD_REF:{}", qual_name_str));
+                                self.builder.call_label =
+                                    Some(format!("FORWARD_REF:{}", qual_name_str));
                                 debug!("[FORWARD REF] Registering forward reference for unresolved call to '{}'", qual_name_str);
 
                                 // Lower arguments and collect their types
@@ -10537,7 +10638,11 @@ impl<'a> HirToMirContext<'a> {
                                                 "[NEW EXPR]: find_constructor(native='{}') = {:?}",
                                                 native_class_name, rc.runtime_name
                                             );
-                                            found = Some((rc.runtime_name, rc.needs_out_param, rc.is_mir_wrapper));
+                                            found = Some((
+                                                rc.runtime_name,
+                                                rc.needs_out_param,
+                                                rc.is_mir_wrapper,
+                                            ));
                                         }
                                     }
                                 }
@@ -10552,7 +10657,11 @@ impl<'a> HirToMirContext<'a> {
                                             {
                                                 debug!("[NEW EXPR]: find_constructor(qualified='{}') = {:?}",
                                                     qualified_class_name, rc.runtime_name);
-                                                found = Some((rc.runtime_name, rc.needs_out_param, rc.is_mir_wrapper));
+                                                found = Some((
+                                                    rc.runtime_name,
+                                                    rc.needs_out_param,
+                                                    rc.is_mir_wrapper,
+                                                ));
                                             }
                                         }
                                     }
@@ -10567,12 +10676,14 @@ impl<'a> HirToMirContext<'a> {
                                     "[NEW EXPR]: find_constructor('{}') = {:?}",
                                     class_name, rc.runtime_name
                                 );
-                                found = Some((rc.runtime_name, rc.needs_out_param, rc.is_mir_wrapper));
+                                found =
+                                    Some((rc.runtime_name, rc.needs_out_param, rc.is_mir_wrapper));
                             }
                         }
                         found
                     };
-                    if let Some((wrapper_name, needs_out_param, is_mir_wrapper)) = constructor_info {
+                    if let Some((wrapper_name, needs_out_param, is_mir_wrapper)) = constructor_info
+                    {
                         // Lower arguments
                         let arg_regs: Vec<_> = args
                             .iter()
@@ -11074,33 +11185,17 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
 
-                // Dynamic arithmetic: unbox both operands to f64, use normal MIR ops, rebox
-                // IMPORTANT: Only use this path when both operands are KNOWN to be boxed
-                // DynamicValue pointers. Untyped lambda params are also Ptr(Void) but hold
-                // raw i64 values — unboxing them would dereference invalid pointers (SIGSEGV).
+                // Dynamic arithmetic: when both HIR types are Dynamic (Ptr(Void)), check actual
+                // MIR register types after lowering to determine if values are truly boxed
+                // DynamicValue pointers vs raw concrete values (e.g., class field access on
+                // Dynamic-typed object, or integer arithmetic result with Dynamic HIR type).
                 {
                     let lhs_ir = self.convert_type(lhs.ty);
                     let rhs_ir = self.convert_type(rhs.ty);
                     let lhs_is_dyn = matches!(&lhs_ir, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void));
                     let rhs_is_dyn = matches!(&rhs_ir, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void));
 
-                    // Check if operands are actually boxed DynamicValues (not raw lambda params)
-                    let lhs_is_boxed = match &lhs.kind {
-                        HirExprKind::Variable { symbol, .. } => {
-                            self.boxed_dynamic_symbols.contains(symbol)
-                        }
-                        // Complex expressions (calls, field access, etc.) likely produce
-                        // properly-typed values — conservatively assume boxed
-                        _ => true,
-                    };
-                    let rhs_is_boxed = match &rhs.kind {
-                        HirExprKind::Variable { symbol, .. } => {
-                            self.boxed_dynamic_symbols.contains(symbol)
-                        }
-                        _ => true,
-                    };
-
-                    if lhs_is_dyn && rhs_is_dyn && lhs_is_boxed && rhs_is_boxed {
+                    if lhs_is_dyn && rhs_is_dyn {
                         let is_supported = matches!(
                             op,
                             HirBinaryOp::Add
@@ -11116,74 +11211,258 @@ impl<'a> HirToMirContext<'a> {
                                 | HirBinaryOp::Ne
                         );
                         if is_supported {
+                            // Lower operands first, then check actual register types
                             let lhs_reg = self.lower_expression(lhs)?;
                             let rhs_reg = self.lower_expression(rhs)?;
-                            let ptr_void = IrType::Ptr(Box::new(IrType::Void));
 
-                            // Unbox both Dynamic operands to f64 via haxe_unbox_float_ptr
-                            let unbox_func = self.get_or_register_extern_function(
-                                "haxe_unbox_float_ptr",
-                                vec![ptr_void.clone()],
-                                IrType::F64,
-                            );
-                            let lhs_f64 = self.builder.build_call_direct(
-                                unbox_func,
-                                vec![lhs_reg],
-                                IrType::F64,
-                            )?;
-                            let rhs_f64 = self.builder.build_call_direct(
-                                unbox_func,
-                                vec![rhs_reg],
-                                IrType::F64,
-                            )?;
+                            // Determine if each operand is actually a boxed DynamicValue:
+                            // - Variables: use boxed_dynamic_symbols tracking (handles lambda
+                            //   params that have Dynamic type but hold raw i64 values)
+                            // - Other expressions: check actual MIR register type — concrete
+                            //   types (I32, F64, etc.) are definitely not boxed pointers
+                            let is_concrete_ir_type = |ty: &IrType| -> bool {
+                                matches!(
+                                    ty,
+                                    IrType::I8
+                                        | IrType::I16
+                                        | IrType::I32
+                                        | IrType::I64
+                                        | IrType::U8
+                                        | IrType::U16
+                                        | IrType::U32
+                                        | IrType::U64
+                                        | IrType::F32
+                                        | IrType::F64
+                                        | IrType::Bool
+                                )
+                            };
 
-                            let is_comparison = matches!(
-                                op,
-                                HirBinaryOp::Eq
-                                    | HirBinaryOp::Ne
-                                    | HirBinaryOp::Lt
-                                    | HirBinaryOp::Le
-                                    | HirBinaryOp::Gt
-                                    | HirBinaryOp::Ge
-                            );
+                            let lhs_boxed = match &lhs.kind {
+                                HirExprKind::Variable { symbol, .. } => {
+                                    self.boxed_dynamic_symbols.contains(symbol)
+                                }
+                                _ => {
+                                    let ty = self.builder.get_register_type(lhs_reg);
+                                    !ty.as_ref().map(|t| is_concrete_ir_type(t)).unwrap_or(false)
+                                }
+                            };
+                            let rhs_boxed = match &rhs.kind {
+                                HirExprKind::Variable { symbol, .. } => {
+                                    self.boxed_dynamic_symbols.contains(symbol)
+                                }
+                                _ => {
+                                    let ty = self.builder.get_register_type(rhs_reg);
+                                    !ty.as_ref().map(|t| is_concrete_ir_type(t)).unwrap_or(false)
+                                }
+                            };
 
-                            if is_comparison {
-                                // Comparisons: use MIR compare, returns raw i64 (0/1)
-                                let cmp_op = match op {
-                                    HirBinaryOp::Eq => CompareOp::Eq,
-                                    HirBinaryOp::Ne => CompareOp::Ne,
-                                    HirBinaryOp::Lt => CompareOp::Lt,
-                                    HirBinaryOp::Le => CompareOp::Le,
-                                    HirBinaryOp::Gt => CompareOp::Gt,
-                                    HirBinaryOp::Ge => CompareOp::Ge,
-                                    _ => unreachable!(),
-                                };
-                                return self.builder.build_cmp(cmp_op, lhs_f64, rhs_f64);
-                            } else {
-                                // Arithmetic: use MIR float binop on f64, then box result
-                                let bin_op = match op {
-                                    HirBinaryOp::Add => BinaryOp::FAdd,
-                                    HirBinaryOp::Sub => BinaryOp::FSub,
-                                    HirBinaryOp::Mul => BinaryOp::FMul,
-                                    HirBinaryOp::Div => BinaryOp::FDiv,
-                                    HirBinaryOp::Mod => BinaryOp::FRem,
-                                    _ => unreachable!(),
-                                };
-                                let result_f64 =
-                                    self.builder.build_binop(bin_op, lhs_f64, rhs_f64)?;
-
-                                // Box the f64 result back to Dynamic
-                                let box_func = self.get_or_register_extern_function(
-                                    "haxe_box_float_ptr",
-                                    vec![IrType::F64],
-                                    IrType::Ptr(Box::new(IrType::U8)),
+                            if lhs_boxed && rhs_boxed {
+                                // Both are actually boxed DynamicValue pointers.
+                                // Unbox to f64, operate, rebox.
+                                let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                                let unbox_func = self.get_or_register_extern_function(
+                                    "haxe_unbox_float_ptr",
+                                    vec![ptr_void.clone()],
+                                    IrType::F64,
                                 );
-                                return self.builder.build_call_direct(
-                                    box_func,
-                                    vec![result_f64],
-                                    IrType::Ptr(Box::new(IrType::U8)),
+                                let lhs_f64 = self.builder.build_call_direct(
+                                    unbox_func,
+                                    vec![lhs_reg],
+                                    IrType::F64,
+                                )?;
+                                let rhs_f64 = self.builder.build_call_direct(
+                                    unbox_func,
+                                    vec![rhs_reg],
+                                    IrType::F64,
+                                )?;
+
+                                let is_comparison = matches!(
+                                    op,
+                                    HirBinaryOp::Eq
+                                        | HirBinaryOp::Ne
+                                        | HirBinaryOp::Lt
+                                        | HirBinaryOp::Le
+                                        | HirBinaryOp::Gt
+                                        | HirBinaryOp::Ge
                                 );
+
+                                if is_comparison {
+                                    let cmp_op = match op {
+                                        HirBinaryOp::Eq => CompareOp::Eq,
+                                        HirBinaryOp::Ne => CompareOp::Ne,
+                                        HirBinaryOp::Lt => CompareOp::Lt,
+                                        HirBinaryOp::Le => CompareOp::Le,
+                                        HirBinaryOp::Gt => CompareOp::Gt,
+                                        HirBinaryOp::Ge => CompareOp::Ge,
+                                        _ => unreachable!(),
+                                    };
+                                    return self.builder.build_cmp(cmp_op, lhs_f64, rhs_f64);
+                                } else {
+                                    let bin_op = match op {
+                                        HirBinaryOp::Add => BinaryOp::FAdd,
+                                        HirBinaryOp::Sub => BinaryOp::FSub,
+                                        HirBinaryOp::Mul => BinaryOp::FMul,
+                                        HirBinaryOp::Div => BinaryOp::FDiv,
+                                        HirBinaryOp::Mod => BinaryOp::FRem,
+                                        _ => unreachable!(),
+                                    };
+                                    let result_f64 =
+                                        self.builder.build_binop(bin_op, lhs_f64, rhs_f64)?;
+
+                                    let box_func = self.get_or_register_extern_function(
+                                        "haxe_box_float_ptr",
+                                        vec![IrType::F64],
+                                        IrType::Ptr(Box::new(IrType::U8)),
+                                    );
+                                    return self.builder.build_call_direct(
+                                        box_func,
+                                        vec![result_f64],
+                                        IrType::Ptr(Box::new(IrType::U8)),
+                                    );
+                                }
                             }
+
+                            // At least one operand is NOT boxed — it's a raw concrete value
+                            // with Dynamic HIR type (e.g., class field access, integer arithmetic).
+                            // Handle mixed boxed+concrete and fully concrete cases.
+                            let mut effective_lhs = lhs_reg;
+                            let mut effective_rhs = rhs_reg;
+
+                            // Unbox boxed side if mixed (one boxed, one concrete)
+                            if lhs_boxed && !rhs_boxed {
+                                let rhs_ty = self
+                                    .builder
+                                    .get_register_type(rhs_reg)
+                                    .unwrap_or(IrType::I64);
+                                let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                                if matches!(rhs_ty, IrType::F32 | IrType::F64) {
+                                    let unbox = self.get_or_register_extern_function(
+                                        "haxe_unbox_float_ptr",
+                                        vec![ptr_void],
+                                        IrType::F64,
+                                    );
+                                    effective_lhs = self.builder.build_call_direct(
+                                        unbox,
+                                        vec![lhs_reg],
+                                        IrType::F64,
+                                    )?;
+                                } else {
+                                    let unbox = self.get_or_register_extern_function(
+                                        "haxe_unbox_int_ptr",
+                                        vec![ptr_void],
+                                        IrType::I64,
+                                    );
+                                    effective_lhs = self.builder.build_call_direct(
+                                        unbox,
+                                        vec![lhs_reg],
+                                        IrType::I64,
+                                    )?;
+                                }
+                            } else if !lhs_boxed && rhs_boxed {
+                                let lhs_ty = self
+                                    .builder
+                                    .get_register_type(lhs_reg)
+                                    .unwrap_or(IrType::I64);
+                                let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                                if matches!(lhs_ty, IrType::F32 | IrType::F64) {
+                                    let unbox = self.get_or_register_extern_function(
+                                        "haxe_unbox_float_ptr",
+                                        vec![ptr_void],
+                                        IrType::F64,
+                                    );
+                                    effective_rhs = self.builder.build_call_direct(
+                                        unbox,
+                                        vec![rhs_reg],
+                                        IrType::F64,
+                                    )?;
+                                } else {
+                                    let unbox = self.get_or_register_extern_function(
+                                        "haxe_unbox_int_ptr",
+                                        vec![ptr_void],
+                                        IrType::I64,
+                                    );
+                                    effective_rhs = self.builder.build_call_direct(
+                                        unbox,
+                                        vec![rhs_reg],
+                                        IrType::I64,
+                                    )?;
+                                }
+                            }
+
+                            // Use actual register types for type coercion
+                            let eff_lhs_ty = self
+                                .builder
+                                .get_register_type(effective_lhs)
+                                .unwrap_or(IrType::I64);
+                            let eff_rhs_ty = self
+                                .builder
+                                .get_register_type(effective_rhs)
+                                .unwrap_or(IrType::I64);
+
+                            let l_is_int = matches!(
+                                eff_lhs_ty,
+                                IrType::I8
+                                    | IrType::I16
+                                    | IrType::I32
+                                    | IrType::I64
+                                    | IrType::U8
+                                    | IrType::U16
+                                    | IrType::U32
+                                    | IrType::U64
+                            );
+                            let r_is_int = matches!(
+                                eff_rhs_ty,
+                                IrType::I8
+                                    | IrType::I16
+                                    | IrType::I32
+                                    | IrType::I64
+                                    | IrType::U8
+                                    | IrType::U16
+                                    | IrType::U32
+                                    | IrType::U64
+                            );
+                            let l_is_float = matches!(eff_lhs_ty, IrType::F32 | IrType::F64);
+                            let r_is_float = matches!(eff_rhs_ty, IrType::F32 | IrType::F64);
+
+                            if l_is_int && r_is_float {
+                                effective_lhs = self.builder.build_cast(
+                                    effective_lhs,
+                                    eff_lhs_ty.clone(),
+                                    IrType::F64,
+                                )?;
+                            }
+                            if r_is_int && l_is_float {
+                                effective_rhs = self.builder.build_cast(
+                                    effective_rhs,
+                                    eff_rhs_ty.clone(),
+                                    IrType::F64,
+                                )?;
+                            }
+                            if matches!(op, HirBinaryOp::Div) && l_is_int && r_is_int {
+                                effective_lhs = self.builder.build_cast(
+                                    effective_lhs,
+                                    eff_lhs_ty.clone(),
+                                    IrType::F64,
+                                )?;
+                                effective_rhs = self.builder.build_cast(
+                                    effective_rhs,
+                                    eff_rhs_ty.clone(),
+                                    IrType::F64,
+                                )?;
+                            }
+
+                            let result_reg = match self.convert_binary_op_to_mir(*op) {
+                                MirBinaryOp::Binary(bin_op) => self.builder.build_binop(
+                                    bin_op,
+                                    effective_lhs,
+                                    effective_rhs,
+                                )?,
+                                MirBinaryOp::Compare(cmp_op) => {
+                                    self.builder
+                                        .build_cmp(cmp_op, effective_lhs, effective_rhs)?
+                                }
+                            };
+                            return Some(result_reg);
                         }
                     }
                 }
@@ -11386,9 +11665,7 @@ impl<'a> HirToMirContext<'a> {
                         let tgt_sym = *tgt_sym;
                         let value_reg = self.lower_expression(expr)?;
 
-                        if src_sym == tgt_sym
-                            || self.is_subclass_of(expr.ty, *target)
-                        {
+                        if src_sym == tgt_sym || self.is_subclass_of(expr.ty, *target) {
                             // Same class or upcast: always succeeds
                             self.builder.build_cast(value_reg, from_type, to_type)
                         } else {
@@ -11399,9 +11676,8 @@ impl<'a> HirToMirContext<'a> {
                             // Must match what the New handler stores in the object header
                             // and what TYPE_REGISTRY is indexed by.
                             let target_type_id = target.as_raw() as i64;
-                            let type_id_const = self
-                                .builder
-                                .build_const(IrValue::I64(target_type_id))?;
+                            let type_id_const =
+                                self.builder.build_const(IrValue::I64(target_type_id))?;
                             let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                             let downcast_func = self.get_or_register_extern_function(
                                 "haxe_safe_downcast_class",
@@ -14893,7 +15169,8 @@ impl<'a> HirToMirContext<'a> {
                     }
                     // Ptr(U8) from stdlib method returns (e.g., MutexGuard_get) is a raw
                     // class pointer, NOT a boxed DynamicValue. Check class fields first.
-                    if matches!(&obj_ir_type, Some(IrType::Ptr(inner)) if matches!(**inner, IrType::U8)) {
+                    if matches!(&obj_ir_type, Some(IrType::Ptr(inner)) if matches!(**inner, IrType::U8))
+                    {
                         let field_in_class = self.field_exists_in_any_class(field);
                         drop(type_table);
                         if field_in_class {
@@ -15274,9 +15551,7 @@ impl<'a> HirToMirContext<'a> {
                     .symbol_table
                     .get_symbol(field)
                     .map(|s| s.name)
-                    .or_else(|| {
-                        None
-                    })?;
+                    .or_else(|| None)?;
 
                 // Search for any field with the same name
                 let mut found_result = None;

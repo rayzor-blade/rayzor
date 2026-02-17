@@ -959,7 +959,9 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 
 ### 9.1 Completed
 
-- [x] **600/600 tests passing** (100% pass rate as of 2026-01-28)
+- [x] **600/600 unit tests passing** (100% pass rate as of 2026-01-28)
+- [x] **43/43 haxe test files passing** (100% pass rate as of 2026-02-17)
+- [x] **9/9 e2e tests passing** (100% pass rate as of 2026-02-17, including arc_mutex_integration)
 - [x] **Docker stress test environment** (`ci/bench-test/`) for reproducible amd64 testing
 - [x] **SIGSEGV signal handler** for crash diagnosis with stack traces
 - [x] **Automated stress testing** (20-iteration default, configurable)
@@ -1679,7 +1681,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 12 | EReg (regex runtime) | P1 | Medium | 🟢 Complete | text processing |
 | 13 | Enum methods + statics | P1 | Medium | 🟡 Partial | rich enums |
 | 14 | Abstract types (operator overloading) | P1 | High | 🟡 Methods + @:op + @:from/@:to + enum abstract done | custom types |
-| 15 | Dynamic type operations | P1 | Medium | 🟡 Partial (anon r/w done) | interop, JSON |
+| 15 | Dynamic type operations | P1 | Medium | 🟡 Partial (anon r/w, arithmetic fix done) | interop, JSON |
 | 16 | Type parameters on functions | P1 | Medium | 🟢 Complete | generic functions |
 | 17 | Null safety (`Null<T>`) | P2 | Medium | 🟡 `??` done | null checks |
 | 18 | Structural subtyping | P2 | Medium | 🔴 Not started | structural interfaces |
@@ -1889,16 +1891,18 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 ### 16.9 Safe Cast 🟡
 
 **Priority:** P1
-**Current State:** Primitive safe casts and Dynamic↔concrete casts work. Class hierarchy downcasting deferred.
+**Current State:** Primitive safe casts and Dynamic↔concrete casts work. Object headers implemented (2026-02-13), enabling runtime type identification. Class hierarchy downcasting infrastructure in place.
 
-**What Works (2026-02-10):**
+**What Works (2026-02-10+):**
 - [x] Safe primitive casts (Int↔Float, Int↔Bool, Float↔Bool) — compile-time resolved
 - [x] Dynamic→concrete safe downcast via `haxe_std_downcast` (returns null on failure)
 - [x] Concrete→Dynamic safe cast via `maybe_box_value`
 - [x] Dynamic TypeCheck (`expr is Type`) via `haxe_std_is` runtime call
+- [x] Object headers with `__type_id` at GEP index 0 (2026-02-13) — enables runtime type identification
+- [x] `haxe_object_get_type_id` / `haxe_object_is_instance` runtime functions (2026-02-13)
 
 **What's Missing:**
-- [ ] Class hierarchy runtime downcasting (needs object headers with type IDs)
+- [ ] Class hierarchy runtime downcasting (`haxe_safe_downcast` with type hierarchy walk)
 - [ ] Interface compatibility checks at runtime
 
 ### 16.10 Abstract Types 🟡
@@ -1929,7 +1933,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 ### 16.11 Dynamic Type 🟡
 
 **Priority:** P1
-**Current State:** `Dynamic` type exists in type system. Boxing/unboxing works for basic types. Anonymous objects use Dynamic for field types. Dynamic field read/write works for anonymous objects via Reflect API fallback. Dynamic→typed coercion works in both Let and Assign handlers.
+**Current State:** `Dynamic` type exists in type system. Boxing/unboxing works for basic types. Anonymous objects use Dynamic for field types. Dynamic field read/write works for anonymous objects via Reflect API fallback. Dynamic→typed coercion works in both Let and Assign handlers. Dynamic arithmetic with register-type safety (2026-02-17).
 
 **Implemented:**
 
@@ -1937,12 +1941,18 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [x] `Dynamic` field WRITE for anonymous objects (Reflect API fallback)
 - [x] `Dynamic` → typed coercion at assignment (Let and Assign handlers)
 - [x] Reflect.field/setField on Dynamic objects (anonymous)
+- [x] `Dynamic` arithmetic — register-type check prevents SIGSEGV when operands are concrete (2026-02-17)
+- [x] `boxed_dynamic_symbols` tracking for lambda params (2026-02-13)
+- [x] MIR register type fallback for non-Variable expressions (BinaryOp, FieldAccess) (2026-02-17)
+
+**Bugs Fixed (2026-02-17):**
+- Dynamic BinaryOp SIGSEGV on `Array<Dynamic>` elements: `var palette = []; palette[i].r + palette[i].g` crashed because the `_ => true` fallback in `is_boxed` check wrongly assumed non-Variable expressions (BinaryOp results, FieldAccess on class) produce boxed DynamicValues. Fix: check actual MIR register types after lowering — concrete types (I32, F64) are definitely not boxed. Mixed boxed+concrete cases unbox the pointer side.
 
 **What's Missing:**
 
 - [ ] `Dynamic` field access for class instances (needs field offset RTTI registration)
 - [ ] `Dynamic` method calls
-- [ ] `Dynamic` arithmetic operations
+- [x] `Dynamic` arithmetic operations — basic arithmetic works (2026-02-17)
 - [ ] JSON parsing returns Dynamic
 
 ### 16.12 EReg (Regular Expressions) 🟢
@@ -2054,23 +2064,26 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 ### 16.18 RTTI (Runtime Type Information) 🟡
 
 **Priority:** P2
-**Current State:** `is` operator and `Std.isOfType()` work for class hierarchies and Dynamic primitives. Runtime type registry and boxing infrastructure complete.
+**Current State:** `is` operator and `Std.isOfType()` work for class hierarchies and Dynamic primitives. Runtime type registry and boxing infrastructure complete. Object headers with `__type_id` enable runtime type identification (2026-02-13).
 
-**Implemented (2026-02-13):**
+**Implemented (2026-02-13+):**
 - [x] `x is Type` — compile-time for static types, runtime for Dynamic (via `haxe_std_is`)
 - [x] `Std.isOfType(value, Type)` — desugared to TypeCheck at HIR level
 - [x] Class hierarchy checks (`Dog is Animal` upcast/downcast)
 - [x] Dynamic primitive checks (`x is Int`, `x is String`, `x is Bool`, `x is Float`)
 - [x] String→Dynamic boxing (`haxe_box_string_ptr`)
 - [x] `is_subclass_of` SymbolId-based lookup (fixes TAST/HIR TypeId mismatch)
+- [x] Object headers — `__type_id: i64` at GEP index 0 on every class allocation (2026-02-13)
+- [x] `haxe_object_get_type_id(obj_ptr) -> i64` runtime function (2026-02-13)
+- [x] `haxe_object_is_instance(obj_ptr, type_id) -> bool` runtime function (2026-02-13)
+- [x] SRA compatibility — skips GEP index 0 (header field) to avoid type conflicts (2026-02-13)
 
 **What's Missing:**
-- [ ] `Type.getClass(obj)` — get class of object
+- [ ] `Type.getClass(obj)` — get class of object (runtime function exists, stdlib mapping needed)
 - [ ] `Type.getClassName(cls)` — get class name as string
 - [ ] `Type.getInstanceFields(cls)` — list fields
 - [ ] `Type.getSuperClass(cls)` — class hierarchy
 - [ ] `Type.typeof(value)` — get ValueType enum
-- [ ] Full class metadata registration at runtime
 
 ### 16.19 Macros (Compile-Time) 🔴
 
@@ -2185,7 +2198,29 @@ trace("The point is: " + p);    // ✅ (calls toString())
 - **Async state machines** build on generics and memory safety
 - Implementation should follow dependency order to avoid rework
 
-**Last Updated:** 2026-02-13 (SRA Object Header Fixes)
+**Last Updated:** 2026-02-17 (Dynamic BinaryOp Fix, Cmp Phi Types, RTTI/Safe Cast Updates)
+
+## Recent Progress (Session 2026-02-17 - Dynamic BinaryOp Fix & Codegen Hardening)
+
+**Dynamic BinaryOp Register-Type Safety:** ✅ Complete
+
+- ✅ **Fixed SIGSEGV on `Array<Dynamic>` element arithmetic** — `var palette = []; palette[i].r + palette[i].g + palette[i].b` crashed because the Dynamic BinaryOp path's `_ => true` fallback in `is_boxed` check wrongly assumed non-Variable expressions (BinaryOp results, FieldAccess on class) produce boxed DynamicValues. Actually, class field access on Dynamic-typed objects produces raw i32 values, and integer arithmetic results are raw i32 — NOT boxed pointers. Calling `haxe_unbox_float_ptr` on these raw values caused SIGSEGV.
+- ✅ **Register-type-based boxing check** — Replaced the `_ => true` heuristic with actual MIR register type checking. After lowering both operands, `builder.get_register_type()` reveals concrete types (I32, F64) that are definitely not boxed. Variables still use `boxed_dynamic_symbols` tracking (for lambda params). Mixed cases (one boxed + one concrete) unbox the pointer side to match.
+- ✅ **DebugChecksum.hx** now outputs correct checksum 112798515 (matching Haxe C++ reference)
+
+**Cranelift Cmp Phi Type Lookup:** ✅ Complete
+
+- ✅ **Fixed "Type not found for Cmp operand"** — After SRA+CopyProp optimization, phi-defined registers used in Cmp instructions had no entry in `register_types` or `locals`. Added phi node type lookup fallback in cranelift_backend.rs Cmp handler: scans `function.cfg.blocks` for phi with matching `dest`, uses `phi.ty`.
+
+**Arc/Mutex Concurrency Support:** ✅ Complete
+
+- ✅ **Cross-file type resolution** — Arc<T> and Mutex<T> work with user classes across files
+- ✅ **arc_mutex_integration e2e test** — 9/9 e2e tests now pass (was 8/9 due to eprintln stderr contention)
+- ✅ **Debug trace cleanup** — Removed 35+ `eprintln!` debug traces across 5 files (hir_to_mir.rs, compilation.rs, concurrency.rs, cranelift_backend.rs, builder.rs, inlining.rs)
+
+**Verification:** 43/43 haxe test files pass, 9/9 e2e tests pass, mandelbrot checksum = 112798515.
+
+---
 
 ## Recent Progress (Session 2026-02-13 - SRA & InsertFree Fixes)
 
