@@ -26,6 +26,9 @@ pub struct IrBuilder {
 
     /// Source location context
     current_source_location: IrSourceLocation,
+
+    /// Debug: call site label for tracing
+    pub call_label: Option<String>,
 }
 
 impl IrBuilder {
@@ -35,6 +38,7 @@ impl IrBuilder {
             module: IrModule::new(module_name, source_file),
             current_function: None,
             current_block: None,
+            call_label: None,
             current_source_location: IrSourceLocation::unknown(),
         }
     }

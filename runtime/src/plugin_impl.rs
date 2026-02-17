@@ -372,6 +372,10 @@ register_symbol!(
     "haxe_object_is_instance",
     crate::type_system::haxe_object_is_instance
 );
+register_symbol!(
+    "haxe_safe_downcast_class",
+    crate::type_system::haxe_safe_downcast_class
+);
 
 // Std.string() - Type-specific conversions
 register_symbol!(

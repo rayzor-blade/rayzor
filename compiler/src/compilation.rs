@@ -1896,23 +1896,13 @@ impl CompilationUnit {
                 // Mark as loaded
                 self.namespace_resolver.mark_file_loaded(file_path.clone());
 
-                // Try BLADE cache first (only if caching is enabled)
-                if self.config.enable_cache {
-                    if let Some(cached_mir) = self.try_load_blade_cached(&filename, &source) {
-                        debug!("[BLADE] Loaded from cache: {}", name);
-                        // Add cached MIR to our modules
-                        self.mir_modules.push(std::sync::Arc::new(cached_mir));
-
-                        // Register enum declarations from cached source so that
-                        // user code can resolve imported enum types and variants.
-                        // Only enums are registered here — class registration is
-                        // handled by the normal TAST pipeline and must NOT be done
-                        // here to avoid overwriting user imports (e.g., sys.thread.Mutex
-                        // overwriting rayzor.concurrent.Mutex).
-                        self.register_enums_from_source(&filename, &source);
-                        continue;
-                    }
-                }
+                // NOTE: BLADE cache is intentionally NOT used here.
+                // The BLADE cache stores compiled MIR but does NOT preserve type system
+                // state (symbol scopes, class_methods, method signatures). When importing
+                // files, we need lower_file() to run so that class symbols get their
+                // scope_id set and methods are registered in the shared symbol_table.
+                // Without this, cross-file method resolution fails (e.g., Mutex.lock()
+                // returns Dynamic instead of MutexGuard<T>).
 
                 // Cache miss or caching disabled - compile normally
                 match self.compile_file_with_shared_state(&filename, &source) {
@@ -1926,7 +1916,7 @@ impl CompilationUnit {
                             }
                         }
                     }
-                    Err(_) => {
+                    Err(_e) => {
                         // If it still fails, fall back to old retry mechanism
                         // This handles edge cases like Placeholder typedefs
                     }
@@ -2713,6 +2703,36 @@ impl CompilationUnit {
                 .collect::<Vec<_>>()
         })?;
 
+        // Check if this file contains ONLY extern class declarations BEFORE MIR lowering.
+        // Extern class files only need TAST+HIR for type system registration (symbol scopes,
+        // method signatures). Their runtime code is provided by build_stdlib() from Rust
+        // implementations. Generating MIR stubs here would create function entries with wrong
+        // signatures (0-param stubs for methods that need a receiver), breaking codegen.
+        {
+            use crate::tast::symbols::SymbolFlags;
+            let has_non_extern_class = typed_file.classes.iter().any(|c| {
+                !self.symbol_table.get_symbol(c.symbol_id)
+                    .map(|s| s.flags.contains(SymbolFlags::EXTERN))
+                    .unwrap_or(false)
+            });
+            let has_non_extern_abstract = typed_file.abstracts.iter().any(|a| {
+                !self.symbol_table.get_symbol(a.symbol_id)
+                    .map(|s| s.flags.contains(SymbolFlags::EXTERN))
+                    .unwrap_or(false)
+            });
+            let has_extern_decls = !typed_file.classes.is_empty() || !typed_file.abstracts.is_empty();
+            let is_extern_only = has_extern_decls
+                && !has_non_extern_class
+                && !has_non_extern_abstract
+                && typed_file.functions.is_empty()
+                && typed_file.enums.is_empty();
+            if is_extern_only {
+                self.compiled_files
+                    .insert(filename.to_string(), typed_file.clone());
+                return Ok(typed_file);
+            }
+        }
+
         // Lower to MIR
         // Use lower_hir_to_mir_with_function_map to:
         // 1. Pass external function references from previously compiled stdlib files
@@ -2805,29 +2825,7 @@ impl CompilationUnit {
             );
         }
 
-        // Only skip EXTERN stdlib files (those with Rust implementations in build_stdlib).
-        // Pure Haxe stdlib files (like ArrayIterator) must compile when imported.
-        let is_extern_stdlib_file = filename.contains("rayzor/concurrent/") ||
-            filename.contains("rayzor\\concurrent\\") ||  // Windows compatibility
-            // Also skip core types that have Rust implementations
-            (filename.contains("haxe-std") && (
-                filename.ends_with("/String.hx") ||
-                filename.ends_with("\\String.hx") ||
-                filename.ends_with("/Array.hx") ||
-                filename.ends_with("\\Array.hx")
-            ));
-
-        if is_extern_stdlib_file {
-            debug!(
-                "DEBUG: Skipping MIR module creation for EXTERN stdlib file: {}",
-                filename
-            );
-            // Extern stdlib files have Rust implementations in build_stdlib().
-            // The Haxe files are just type declarations.
-            self.compiled_files
-                .insert(filename.to_string(), typed_file.clone());
-            return Ok(typed_file);
-        }
+        // NOTE: extern-only files are handled above (before MIR generation).
 
         // Merge stdlib MIR (extern functions for Thread, Channel, Mutex, Arc, etc.)
         // This ensures extern runtime functions are available.
@@ -2982,18 +2980,6 @@ impl CompilationUnit {
             }
         }
 
-        debug!(
-            "DEBUG: ID replacement map has {} entries:",
-            id_replacements.len()
-        );
-        for (old_id, new_id) in &id_replacements {
-            if let Some(func) = mir_module.functions.get(old_id) {
-                debug!("  {} (ID {}) -> ID {}", func.name, old_id.0, new_id.0);
-            } else {
-                debug!("  (unknown) ID {} -> ID {}", old_id.0, new_id.0);
-            }
-        }
-
         // Now merge the stdlib functions
         for (func_id, func) in renumbered_functions {
             // DEBUG: Check signature after renumbering
@@ -3028,10 +3014,6 @@ impl CompilationUnit {
                                 ..
                             } => {
                                 if let Some(&new_id) = id_replacements.get(called_func_id) {
-                                    debug!(
-                                        "DEBUG: Updated CallDirect in {} from func_id {} -> {}",
-                                        caller_func.name, called_func_id.0, new_id.0
-                                    );
                                     *called_func_id = new_id;
                                 }
                             }

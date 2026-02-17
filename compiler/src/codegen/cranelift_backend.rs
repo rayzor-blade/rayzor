@@ -2260,6 +2260,18 @@ impl CraneliftBackend {
                     }
 
                     // Emit the call instruction
+                    {
+                        let decl = module.declarations().get_function_decl(cl_func_id);
+                        let expected_params = decl.signature.params.len();
+                        if expected_params != call_args.len() {
+                            eprintln!("[CALL MISMATCH] In '{}': calling '{}' (MIR {:?}, CL {:?}): expected {} params, providing {} args, is_extern={}, env_added={}, sret={}",
+                                function.name, called_func.name, func_id, cl_func_id,
+                                expected_params, call_args.len(), is_extern_func, should_add_env, uses_sret);
+                            for (pi, p) in called_func.signature.parameters.iter().enumerate() {
+                                eprintln!("  MIR param[{}] '{}': {:?}", pi, p.name, p.ty);
+                            }
+                        }
+                    }
                     let call_inst = builder.ins().call(func_ref, &call_args);
 
                     // Handle return value

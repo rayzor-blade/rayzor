@@ -379,8 +379,6 @@ pub unsafe extern "C" fn rayzor_arc_clone(arc: *const u8) -> *mut u8 {
 /// - returned pointer is valid as long as Arc exists
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_arc_get(arc: *const u8) -> *const u8 {
-    debug!("[rayzor_arc_get] Called with arc={:?}", arc);
-
     if arc.is_null() {
         debug!("[SAFETY ERROR] rayzor_arc_get: NULL arc pointer");
         return ptr::null();
@@ -399,7 +397,6 @@ pub unsafe extern "C" fn rayzor_arc_get(arc: *const u8) -> *const u8 {
     // Forget to avoid decrementing ref count
     std::mem::forget(arc_ref);
 
-    debug!("[rayzor_arc_get] Returning {:?}", value_ptr);
     value_ptr
 }
 

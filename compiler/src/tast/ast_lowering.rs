@@ -1277,6 +1277,18 @@ impl<'a> AstLowering<'a> {
             }
         }
 
+        // Pass 1.5: Pre-register class fields for ALL classes before method bodies are lowered.
+        // This enables forward references (e.g., NBody referencing Body fields when Body is
+        // declared later in the file). Without this, field resolution falls back to placeholders
+        // with Dynamic type, causing incorrect code generation.
+        for declaration in &file.declarations {
+            if let TypeDeclaration::Class(class_decl) = declaration {
+                if let Err(e) = self.pre_register_class_fields(class_decl) {
+                    self.collected_errors.push(e);
+                }
+            }
+        }
+
         // Second pass: Process declarations with full type resolution
         for (i, declaration) in file.declarations.iter().enumerate() {
             match self.lower_declaration(declaration) {
@@ -2161,6 +2173,88 @@ impl<'a> AstLowering<'a> {
                 // Skip conditional compilation blocks in pre-registration
             }
         }
+        Ok(())
+    }
+
+    /// Pre-register class fields for forward reference resolution.
+    /// This runs after pre_register_declaration (which creates class type entries)
+    /// but before full lowering, so that field access on forward-referenced classes
+    /// can resolve field names and types correctly.
+    fn pre_register_class_fields(
+        &mut self,
+        class_decl: &parser::ClassDecl,
+    ) -> LoweringResult<()> {
+        let class_name = self.context.intern_string(&class_decl.name);
+
+        // Look up the pre-registered class symbol
+        let class_symbol = match self
+            .context
+            .symbol_table
+            .lookup_symbol(ScopeId::first(), class_name)
+        {
+            Some(entry) => entry.id,
+            None => return Ok(()), // Not pre-registered, skip
+        };
+
+        // If class_fields already has entries for this class, skip (already registered)
+        if self.class_fields.contains_key(&class_symbol) {
+            return Ok(());
+        }
+
+        // Initialize the field list
+        self.class_fields.insert(class_symbol, Vec::new());
+
+        // Register each var/final/property field
+        for field in &class_decl.fields {
+            let (field_name, type_hint) = match &field.kind {
+                parser::ClassFieldKind::Var {
+                    name, type_hint, ..
+                } => (name.clone(), type_hint.as_ref()),
+                parser::ClassFieldKind::Final {
+                    name, type_hint, ..
+                } => (name.clone(), type_hint.as_ref()),
+                parser::ClassFieldKind::Property {
+                    name, type_hint, ..
+                } => (name.clone(), type_hint.as_ref()),
+                parser::ClassFieldKind::Function(_) => continue, // Skip methods
+            };
+
+            let is_static = field
+                .modifiers
+                .iter()
+                .any(|m| matches!(m, parser::Modifier::Static));
+
+            // Resolve the field type from the type hint
+            let field_type = if let Some(th) = type_hint {
+                self.lower_type(th).unwrap_or_else(|_| {
+                    self.context.type_table.borrow().dynamic_type()
+                })
+            } else {
+                self.context.type_table.borrow().dynamic_type()
+            };
+
+            let interned_name = self.context.intern_string(&field_name);
+            let field_symbol = self
+                .context
+                .symbol_table
+                .create_variable(interned_name);
+
+            // Set the field's type
+            self.context
+                .symbol_table
+                .update_symbol_type(field_symbol, field_type);
+
+            // Mark as field
+            if let Some(sym) = self.context.symbol_table.get_symbol_mut(field_symbol) {
+                sym.kind = crate::tast::SymbolKind::Field;
+            }
+
+            // Add to class_fields
+            if let Some(field_list) = self.class_fields.get_mut(&class_symbol) {
+                field_list.push((interned_name, field_symbol, is_static));
+            }
+        }
+
         Ok(())
     }
 
@@ -3338,7 +3432,19 @@ impl<'a> AstLowering<'a> {
         self.context.update_symbol_qualified_name(abstract_symbol);
 
         // Extract @:native metadata for abstracts
-        let abstract_meta_flags = self.extract_metadata_flags(&abstract_decl.meta, abstract_symbol);
+        let mut abstract_meta_flags = self.extract_metadata_flags(&abstract_decl.meta, abstract_symbol);
+        // Also check for modifiers (extern, final, etc)
+        for modifier in &abstract_decl.modifiers {
+            match modifier {
+                parser::haxe_ast::Modifier::Extern => {
+                    abstract_meta_flags = abstract_meta_flags.union(crate::tast::symbols::SymbolFlags::EXTERN);
+                }
+                parser::haxe_ast::Modifier::Final => {
+                    abstract_meta_flags = abstract_meta_flags.union(crate::tast::symbols::SymbolFlags::FINAL);
+                }
+                _ => {}
+            }
+        }
         if let Some(sym) = self.context.symbol_table.get_symbol_mut(abstract_symbol) {
             sym.flags = sym.flags.union(abstract_meta_flags);
         }
@@ -4499,6 +4605,17 @@ impl<'a> AstLowering<'a> {
                 }
 
                 // 2. Try to resolve as a built-in type (covers basic types first)
+                // IMPORTANT: Skip "Array" when type params are present (e.g., Array<Body>).
+                // resolve_builtin_type("Array") returns Array<Dynamic>, discarding params.
+                // Instead, resolve the element type and create Array<ElementType>.
+                if name == "Array" && !params.is_empty() {
+                    let element_type = self.lower_type(&params[0])?;
+                    return Ok(self
+                        .context
+                        .type_table
+                        .borrow_mut()
+                        .create_array_type(element_type));
+                }
                 if let Some(builtin_type) = self.resolve_builtin_type(&name) {
                     return Ok(builtin_type);
                 }
@@ -7723,6 +7840,23 @@ impl<'a> AstLowering<'a> {
         let obj_expr = self.lower_expression(expr)?;
         let field_name = self.context.intern_string(field);
 
+        // Helper: look up a field or method by name in a class, checking both
+        // class_fields and class_methods. Methods are tracked separately from fields,
+        // so we must check both to resolve instance method calls like `obj.lock()`.
+        let resolve_in_class = |this: &Self, class_sym: &SymbolId, name: InternedString| -> Option<SymbolId> {
+            if let Some(fields) = this.class_fields.get(class_sym) {
+                if let Some((_, sym, _)) = fields.iter().find(|(n, _, _)| *n == name) {
+                    return Some(*sym);
+                }
+            }
+            if let Some(methods) = this.class_methods.get(class_sym) {
+                if let Some((_, sym, _)) = methods.iter().find(|(n, _, _)| *n == name) {
+                    return Some(*sym);
+                }
+            }
+            None
+        };
+
         // For field access, we need to look up the field symbol from the object's type
         // Create type parameter with deferred constraint resolution
         // But we can try to resolve it if the object is 'this'
@@ -7730,15 +7864,8 @@ impl<'a> AstLowering<'a> {
             TypedExpressionKind::This { this_type: _ } => {
                 // If accessing field on 'this', try to find it in current class
                 if let Some(class_symbol) = self.context.class_context_stack.last() {
-                    if let Some(fields) = self.class_fields.get(class_symbol) {
-                        fields
-                            .iter()
-                            .find(|(name, _, _)| *name == field_name)
-                            .map(|(_, symbol, _)| *symbol)
-                            .unwrap_or_else(|| self.context.symbol_table.create_field(field_name))
-                    } else {
-                        self.context.symbol_table.create_field(field_name)
-                    }
+                    resolve_in_class(self, class_symbol, field_name)
+                        .unwrap_or_else(|| self.context.symbol_table.create_field(field_name))
                 } else {
                     self.context.symbol_table.create_field(field_name)
                 }
@@ -7747,20 +7874,8 @@ impl<'a> AstLowering<'a> {
                 // If accessing field on a variable/parameter, try to resolve from its type
                 if let Some(symbol) = self.context.symbol_table.get_symbol(*symbol_id) {
                     if let Some(class_symbol) = self.resolve_type_to_class_symbol(symbol.type_id) {
-                        // Look for the field in this class
-                        if let Some(fields) = self.class_fields.get(&class_symbol) {
-                            if let Some((_, field_symbol_id, _)) =
-                                fields.iter().find(|(name, _, _)| *name == field_name)
-                            {
-                                *field_symbol_id
-                            } else {
-                                // Field not found, create placeholder
-                                self.context.symbol_table.create_field(field_name)
-                            }
-                        } else {
-                            // No fields tracked for this class, create placeholder
-                            self.context.symbol_table.create_field(field_name)
-                        }
+                        resolve_in_class(self, &class_symbol, field_name)
+                            .unwrap_or_else(|| self.context.symbol_table.create_field(field_name))
                     } else {
                         // Can't resolve object type to class, create placeholder
                         self.context.symbol_table.create_field(field_name)
@@ -7771,8 +7886,15 @@ impl<'a> AstLowering<'a> {
                 }
             }
             _ => {
-                // For other objects, create placeholder - type checker will resolve
-                self.context.symbol_table.create_field(field_name)
+                // For other expression kinds (chained calls, etc.), try to resolve
+                // from the expression's type to find methods/fields
+                let obj_type = obj_expr.expr_type;
+                if let Some(class_symbol) = self.resolve_type_to_class_symbol(obj_type) {
+                    resolve_in_class(self, &class_symbol, field_name)
+                        .unwrap_or_else(|| self.context.symbol_table.create_field(field_name))
+                } else {
+                    self.context.symbol_table.create_field(field_name)
+                }
             }
         };
 
@@ -9275,13 +9397,18 @@ impl<'a> AstLowering<'a> {
             TypedExpressionKind::ArrayAccess { array, .. } => {
                 // Extract element type from array type
                 let type_table = self.context.type_table.borrow();
-                match type_table.get(array.expr_type) {
+                let result = match type_table.get(array.expr_type) {
                     Some(array_type) => match &array_type.kind {
                         crate::tast::core::TypeKind::Array { element_type } => Ok(*element_type),
-                        _ => Ok(type_table.dynamic_type()),
+                        _other => {
+                            Ok(type_table.dynamic_type())
+                        }
                     },
-                    None => Ok(type_table.dynamic_type()),
-                }
+                    None => {
+                        Ok(type_table.dynamic_type())
+                    }
+                };
+                result
             }
             TypedExpressionKind::MethodCall {
                 receiver,

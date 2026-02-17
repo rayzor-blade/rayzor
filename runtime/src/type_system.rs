@@ -1805,6 +1805,19 @@ pub extern "C" fn haxe_object_get_type_id(obj_ptr: *const u8) -> i64 {
     unsafe { *(obj_ptr as *const i64) }
 }
 
+/// Safe downcast for class instances using object headers.
+/// Reads the type_id from offset 0, walks the class hierarchy, and returns
+/// the object pointer on match or null on failure.
+/// Used by `cast(expr, Type)` for class→class safe casts.
+#[no_mangle]
+pub extern "C" fn haxe_safe_downcast_class(obj_ptr: *mut u8, target_type_id: i64) -> *mut u8 {
+    if haxe_object_is_instance(obj_ptr, target_type_id) != 0 {
+        obj_ptr
+    } else {
+        std::ptr::null_mut()
+    }
+}
+
 /// Check if an object is an instance of (or subclass of) a target type.
 /// Walks the class hierarchy via TYPE_REGISTRY super_type_id chain.
 #[no_mangle]
