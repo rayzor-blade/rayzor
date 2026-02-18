@@ -163,6 +163,7 @@ impl IrBuilder {
             IrValue::F64(_) => IrType::F64,
             IrValue::Bool(_) => IrType::Bool,
             IrValue::String(_) => IrType::String,
+            IrValue::Null => IrType::Ptr(Box::new(IrType::Void)),
             _ => IrType::Any,
         };
         self.set_register_type(dest, ty);

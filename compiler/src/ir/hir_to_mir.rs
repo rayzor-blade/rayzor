@@ -2887,6 +2887,14 @@ impl<'a> HirToMirContext<'a> {
                             value_reg
                         };
 
+                        // Auto-box primitive for Null<T> (Optional) assignment
+                        let final_value = if let Some(target_ty) = var_type {
+                            self.maybe_box_for_optional(final_value, init_expr.ty, target_ty)
+                                .unwrap_or(final_value)
+                        } else {
+                            final_value
+                        };
+
                         // Apply abstract @:from implicit conversion if needed
                         let final_value = if let Some(target_ty) = var_type {
                             self.maybe_abstract_from_convert(final_value, init_expr.ty, target_ty)
@@ -13142,12 +13150,15 @@ impl<'a> HirToMirContext<'a> {
                 IrType::Ptr(Box::new(IrType::Void))
             }
             Some(TypeKind::Optional { inner_type }) => {
-                // Optional/Nullable types (Null<T>): same IR representation as inner type.
-                // With type erasure, null is represented as 0 for primitives/TypeParameter
-                // or null pointer for reference types (which are already Ptr).
-                // Wrapping in Ptr causes spurious casts (I64→Ptr) when the value is
-                // a raw scalar from returns_raw_value stdlib calls (e.g., StringMap.get()).
-                self.convert_type(*inner_type)
+                // Null<T>: primitives need boxing to distinguish null from 0/0.0/false.
+                // Reference types are already nullable pointers — no boxing needed.
+                let inner_ir = self.convert_type(*inner_type);
+                match inner_ir {
+                    IrType::I32 | IrType::I64 | IrType::F64 | IrType::F32 | IrType::Bool => {
+                        IrType::Ptr(Box::new(IrType::U8)) // Boxed DynamicValue*
+                    }
+                    _ => inner_ir,
+                }
             }
 
             // Abstract types - use their underlying type
@@ -14058,6 +14069,161 @@ impl<'a> HirToMirContext<'a> {
                 );
                 Some(value) // Skip boxing for unsupported types
             }
+        }
+    }
+
+    /// Auto-box a primitive value when assigning to a Null<T> (Optional{primitive}) variable.
+    /// Returns Some(boxed_ptr) if boxing was performed, None if not needed.
+    fn maybe_box_for_optional(
+        &mut self,
+        value: IrId,
+        value_ty: TypeId,
+        target_ty: TypeId,
+    ) -> Option<IrId> {
+        use crate::tast::TypeKind;
+
+        // Check if target is Optional with a primitive inner type
+        let inner_type = {
+            let type_table = self.type_table.borrow();
+            match type_table.get(target_ty).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type }) => Some(*inner_type),
+                _ => return None,
+            }
+        };
+        let inner_type = inner_type?;
+
+        let inner_ir = self.convert_type(inner_type);
+        // Only box primitives — reference types in Optional are already nullable
+        if !matches!(inner_ir, IrType::I32 | IrType::I64 | IrType::F64 | IrType::F32 | IrType::Bool) {
+            return None;
+        }
+
+        // Check if source is already a pointer (already boxed, or null literal)
+        let val_ir = self.builder.get_register_type(value);
+        match val_ir {
+            Some(IrType::Ptr(_)) => return None, // Already a pointer, no boxing needed
+            _ => {}
+        }
+
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+
+        // Check if value is the null literal (I64(0) or I32(0)) — cast to null pointer
+        // We can't easily detect null literals, but if source type is Dynamic/Unknown
+        // and register type is I64, it's likely a null literal or dynamic value.
+        let source_is_null_literal = {
+            let type_table = self.type_table.borrow();
+            matches!(
+                type_table.get(value_ty).map(|t| &t.kind),
+                Some(TypeKind::Dynamic) | Some(TypeKind::Unknown) | None
+            )
+        };
+        if source_is_null_literal && matches!(val_ir, Some(IrType::I64)) {
+            // Cast null (i64 0) to Ptr(U8) null pointer
+            return self.builder.build_cast(value, IrType::I64, ptr_u8);
+        }
+
+        // Box the primitive value
+        match &inner_ir {
+            IrType::I32 => {
+                // Ensure value is I64 for haxe_box_int_ptr
+                let v64 = if matches!(val_ir, Some(IrType::I32)) {
+                    self.builder.build_cast(value, IrType::I32, IrType::I64)?
+                } else {
+                    value
+                };
+                let box_func = self.get_or_register_extern_function(
+                    "haxe_box_int_ptr",
+                    vec![IrType::I64],
+                    ptr_u8.clone(),
+                );
+                self.builder.build_call_direct(box_func, vec![v64], ptr_u8)
+            }
+            IrType::F64 => {
+                let box_func = self.get_or_register_extern_function(
+                    "haxe_box_float_ptr",
+                    vec![IrType::F64],
+                    ptr_u8.clone(),
+                );
+                self.builder.build_call_direct(box_func, vec![value], ptr_u8)
+            }
+            IrType::Bool => {
+                let v64 = self.builder.build_cast(value, IrType::Bool, IrType::I64)?;
+                let box_func = self.get_or_register_extern_function(
+                    "haxe_box_bool_ptr",
+                    vec![IrType::I64],
+                    ptr_u8.clone(),
+                );
+                self.builder.build_call_direct(box_func, vec![v64], ptr_u8)
+            }
+            _ => None,
+        }
+    }
+
+    /// Auto-unbox a Null<T> (Optional{primitive}) value to its inner primitive type.
+    /// Returns Some(unboxed_val) if unboxing was performed, None if not needed.
+    fn maybe_unbox_optional(
+        &mut self,
+        value: IrId,
+        source_ty: TypeId,
+        target_ty: TypeId,
+    ) -> Option<IrId> {
+        use crate::tast::TypeKind;
+
+        // Check if source is Optional with a primitive inner type
+        let inner_type = {
+            let type_table = self.type_table.borrow();
+            match type_table.get(source_ty).map(|t| &t.kind) {
+                Some(TypeKind::Optional { inner_type }) => Some(*inner_type),
+                _ => return None,
+            }
+        };
+        let inner_type = inner_type?;
+
+        let inner_ir = self.convert_type(inner_type);
+        let target_ir = self.convert_type(target_ty);
+
+        // Only unbox when target is the matching primitive type
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        match (&inner_ir, &target_ir) {
+            (IrType::I32, IrType::I32) => {
+                let unbox_func = self.get_or_register_extern_function(
+                    "haxe_unbox_int_ptr",
+                    vec![ptr_u8],
+                    IrType::I64,
+                );
+                let result = self.builder.build_call_direct(unbox_func, vec![value], IrType::I64)?;
+                self.builder.build_cast(result, IrType::I64, IrType::I32)
+            }
+            (IrType::F64, IrType::F64) => {
+                let unbox_func = self.get_or_register_extern_function(
+                    "haxe_unbox_float_ptr",
+                    vec![ptr_u8],
+                    IrType::F64,
+                );
+                self.builder.build_call_direct(unbox_func, vec![value], IrType::F64)
+            }
+            (IrType::Bool, IrType::Bool) => {
+                let unbox_func = self.get_or_register_extern_function(
+                    "haxe_unbox_bool_ptr",
+                    vec![ptr_u8],
+                    IrType::I64,
+                );
+                let result = self.builder.build_call_direct(unbox_func, vec![value], IrType::I64)?;
+                self.builder.build_cast(result, IrType::I64, IrType::Bool)
+            }
+            _ => None,
+        }
+    }
+
+    /// Check if a TypeId is Optional{primitive} (Null<Int>, Null<Float>, Null<Bool>).
+    fn is_optional_primitive(&self, type_id: TypeId) -> bool {
+        use crate::tast::TypeKind;
+        let type_table = self.type_table.borrow();
+        if let Some(TypeKind::Optional { inner_type }) = type_table.get(type_id).map(|t| &t.kind) {
+            let inner_ir = self.convert_type(*inner_type);
+            matches!(inner_ir, IrType::I32 | IrType::I64 | IrType::F64 | IrType::F32 | IrType::Bool)
+        } else {
+            false
         }
     }
 
@@ -16461,6 +16627,9 @@ impl<'a> HirToMirContext<'a> {
         let eval_rhs = self.builder.create_block()?;
         let merge = self.builder.create_block()?;
 
+        // Check if LHS is Optional{primitive} — needs unbox in pass-through
+        let opt_prim = self.is_optional_primitive(lhs.ty);
+
         // Evaluate LHS
         let lhs_val = self.lower_expression(lhs)?;
 
@@ -16479,8 +16648,49 @@ impl<'a> HirToMirContext<'a> {
         self.builder
             .build_cond_branch(is_not_null, lhs_pass, eval_rhs)?;
 
-        // LHS pass-through block (just branches to merge)
+        // LHS pass-through block — unbox if Optional{primitive}
         self.builder.switch_to_block(lhs_pass);
+        let lhs_final = if opt_prim {
+            // Unbox the boxed primitive: Ptr(U8) → inner type
+            let inner_type = {
+                let type_table = self.type_table.borrow();
+                match type_table.get(lhs.ty).map(|t| &t.kind) {
+                    Some(crate::tast::TypeKind::Optional { inner_type }) => Some(*inner_type),
+                    _ => None,
+                }
+            };
+            if let Some(inner_ty) = inner_type {
+                let inner_ir = self.convert_type(inner_ty);
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                match &inner_ir {
+                    IrType::I32 => {
+                        let unbox_func = self.get_or_register_extern_function(
+                            "haxe_unbox_int_ptr", vec![ptr_u8], IrType::I64,
+                        );
+                        let unboxed = self.builder.build_call_direct(unbox_func, vec![lhs_val], IrType::I64)?;
+                        self.builder.build_cast(unboxed, IrType::I64, IrType::I32)?
+                    }
+                    IrType::F64 => {
+                        let unbox_func = self.get_or_register_extern_function(
+                            "haxe_unbox_float_ptr", vec![ptr_u8], IrType::F64,
+                        );
+                        self.builder.build_call_direct(unbox_func, vec![lhs_val], IrType::F64)?
+                    }
+                    IrType::Bool => {
+                        let unbox_func = self.get_or_register_extern_function(
+                            "haxe_unbox_bool_ptr", vec![ptr_u8], IrType::I64,
+                        );
+                        let unboxed = self.builder.build_call_direct(unbox_func, vec![lhs_val], IrType::I64)?;
+                        self.builder.build_cast(unboxed, IrType::I64, IrType::Bool)?
+                    }
+                    _ => lhs_val,
+                }
+            } else {
+                lhs_val
+            }
+        } else {
+            lhs_val
+        };
         let lhs_pass_block = self.builder.current_block()?;
         self.builder.build_branch(merge)?;
 
@@ -16491,11 +16701,16 @@ impl<'a> HirToMirContext<'a> {
         self.builder.build_branch(merge)?;
 
         // Merge block with phi node
+        // When LHS was Optional{primitive}, result type is the unboxed primitive type (RHS type)
         self.builder.switch_to_block(merge);
-        let result_type = self.convert_type(lhs.ty);
+        let result_type = if opt_prim {
+            self.convert_type(rhs.ty)
+        } else {
+            self.convert_type(lhs.ty)
+        };
         let result = self.builder.build_phi(merge, result_type)?;
         self.builder
-            .add_phi_incoming(merge, result, lhs_pass_block, lhs_val)?;
+            .add_phi_incoming(merge, result, lhs_pass_block, lhs_final)?;
         self.builder
             .add_phi_incoming(merge, result, rhs_block, rhs_val)?;
 

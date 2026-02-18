@@ -1683,7 +1683,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 14 | Abstract types (operator overloading) | P1 | High | 🟢 Complete | custom types |
 | 15 | Dynamic type operations | P1 | Medium | 🟢 Complete (anon r/w, arithmetic, class fields, method calls) | interop, JSON |
 | 16 | Type parameters on functions | P1 | Medium | 🟢 Complete | generic functions |
-| 17 | Null safety (`Null<T>`) | P2 | Medium | 🟡 `??` and `?.` done, `Null<T>` not started | null checks |
+| 17 | Null safety (`Null<T>`) | P2 | Medium | 🟢 Complete (`??`, `?.`, `Null<T>` wrapper) | null checks |
 | 18 | Structural subtyping | P2 | Medium | 🔴 Not started | structural interfaces |
 | 19 | `@:forward` on abstracts | P2 | Medium | 🟢 Complete (merged into #14) | delegation |
 | 20 | Macros (compile-time) | P2 | Very High | 🔴 Not started | metaprogramming |
@@ -2003,7 +2003,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 ### 16.14 Null Safety 🟡
 
 **Priority:** P2
-**Current State:** Null coalescing and optional chaining implemented. No full null safety enforcement.
+**Current State:** Core null safety complete: `??`, `?.`, and `Null<T>` wrapper type.
 
 **Implemented (2026-02-13):**
 
@@ -2012,10 +2012,10 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 **Implemented (2026-02-18):**
 
 - [x] Optional chaining `?.` — desugared at TAST→HIR level to `if (obj != null) obj.field else null`; supports field access (`obj?.field`), method calls (`obj?.method()`), and chaining (`a?.b?.c`). Simple variable objects use clone; complex expressions use Let binding to avoid double evaluation.
+- [x] `Null<T>` wrapper type — `Null<Int>` boxes primitives as `DynamicValue*` pointers to distinguish null from 0/0.0/false. `??` with `Null<T>` LHS unboxes in pass-through path. Null literal assigned to `Null<T>` stays as null pointer (not boxed).
 
-**What's Missing:**
+**What's Missing (future):**
 
-- [ ] `Null<T>` wrapper type (needed for `?.` on Int/Float to distinguish 0/0.0 from null)
 - [ ] Compile-time null flow analysis
 - [ ] `@:notNull` metadata
 
@@ -2126,7 +2126,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 #### Tier 3: Completeness (polish and compatibility)
 11. ✅ **Safe cast** (16.9) — primitives + Dynamic + class hierarchy downcast (2026-02-17)
 12. ✅ **Dynamic type ops** (16.11) — anon R/W, arithmetic, class fields, method calls (2026-02-18)
-13. 🟡 **Null safety** (16.14) — `??` and `?.` done, `Null<T>` and flow analysis remaining
+13. ✅ **Null safety** (16.14) — `??`, `?.`, `Null<T>` wrapper type (2026-02-18)
 14. ✅ **RTTI** (16.18) — is, isOfType, Type API (getClass/getClassName/getSuperClass) (2026-02-17)
 15. ✅ **Map literals** (16.16) — literals, method dispatch, for-in iteration (2026-02-13)
 16. ✅ **Array comprehension** (16.17) — range and array for-in comprehensions (2026-02-13)

@@ -4612,6 +4612,14 @@ impl<'a> AstLowering<'a> {
                         .borrow_mut()
                         .create_array_type(element_type));
                 }
+                if name == "Null" && params.len() == 1 {
+                    let inner_type = self.lower_type(&params[0])?;
+                    return Ok(self
+                        .context
+                        .type_table
+                        .borrow_mut()
+                        .create_optional_type(inner_type));
+                }
                 if let Some(builtin_type) = self.resolve_builtin_type(&name) {
                     return Ok(builtin_type);
                 }

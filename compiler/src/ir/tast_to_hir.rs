@@ -1806,6 +1806,36 @@ impl<'a> TastToHirContext<'a> {
                             // Primitive types can never be null, just return LHS
                             return self.lower_expression(left);
                         }
+
+                        // For Optional{primitive} (Null<Int>, Null<Float>, Null<Bool>),
+                        // keep as NullCoalesce op — MIR handler unboxes in pass-through
+                        let is_optional_prim = {
+                            let type_table = self.type_table.borrow();
+                            type_table.get(left.expr_type).map_or(false, |t| {
+                                if let TypeKind::Optional { inner_type } = &t.kind {
+                                    type_table.get(*inner_type).map_or(false, |it| {
+                                        matches!(it.kind, TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+                                    })
+                                } else {
+                                    false
+                                }
+                            })
+                        };
+                        if is_optional_prim {
+                            let lhs_expr = self.lower_expression(left);
+                            let rhs_expr = self.lower_expression(right);
+                            return HirExpr::new(
+                                HirExprKind::Binary {
+                                    op: HirBinaryOp::NullCoalesce,
+                                    lhs: Box::new(lhs_expr),
+                                    rhs: Box::new(rhs_expr),
+                                },
+                                right.expr_type,
+                                self.current_lifetime,
+                                expr.source_location,
+                            );
+                        }
+
                         // Reference types: desugar to conditional
                         let lhs_expr = self.lower_expression(left);
                         let rhs_expr = self.lower_expression(right);
