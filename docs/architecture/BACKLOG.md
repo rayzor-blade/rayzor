@@ -1675,21 +1675,21 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 6 | String interpolation | P0 | Low | 🟢 Complete | basic string formatting |
 | 7 | for-in range (`0...n`) | P0 | Low | 🟢 Complete | basic loops |
 | 8 | Static extensions (`using`) | P1 | Medium | 🟢 Complete | idiomatic Haxe |
-| 9 | Safe cast (`cast(expr, Type)`) | P1 | Medium | 🟡 Primitives + Dynamic done | type-safe downcasting |
+| 9 | Safe cast (`cast(expr, Type)`) | P1 | Medium | 🟢 Complete | type-safe downcasting |
 | 10 | Generics instantiation end-to-end | P1 | High | 🟢 Complete | generic classes/functions |
-| 11 | Property get/set dispatch | P1 | Medium | 🟡 Mostly done | encapsulation |
+| 11 | Property get/set dispatch | P1 | Medium | 🟢 Complete | encapsulation |
 | 12 | EReg (regex runtime) | P1 | Medium | 🟢 Complete | text processing |
-| 13 | Enum methods + statics | P1 | Medium | 🟡 Partial | rich enums |
-| 14 | Abstract types (operator overloading) | P1 | High | 🟡 Methods + @:op + @:from/@:to + enum abstract done | custom types |
-| 15 | Dynamic type operations | P1 | Medium | 🟡 Partial (anon r/w, arithmetic fix done) | interop, JSON |
+| 13 | Enum methods + statics | P1 | Medium | 🟢 Complete | rich enums |
+| 14 | Abstract types (operator overloading) | P1 | High | 🟢 Complete | custom types |
+| 15 | Dynamic type operations | P1 | Medium | 🟢 Complete (anon r/w, arithmetic, class fields, method calls) | interop, JSON |
 | 16 | Type parameters on functions | P1 | Medium | 🟢 Complete | generic functions |
-| 17 | Null safety (`Null<T>`) | P2 | Medium | 🟡 `??` done | null checks |
+| 17 | Null safety (`Null<T>`) | P2 | Medium | 🟡 `??` done, `Null<T>` and `?.` not started | null checks |
 | 18 | Structural subtyping | P2 | Medium | 🔴 Not started | structural interfaces |
-| 19 | `@:forward` on abstracts | P2 | Medium | 🔴 Not started | delegation |
+| 19 | `@:forward` on abstracts | P2 | Medium | 🟢 Complete (merged into #14) | delegation |
 | 20 | Macros (compile-time) | P2 | Very High | 🔴 Not started | metaprogramming |
 | 21 | Map literal syntax | P2 | Low | 🟢 Complete | `["key" => val]` |
 | 22 | Array comprehension | P2 | Medium | 🟢 Complete | `[for (x in arr) x*2]` |
-| 23 | `Std.is()` / `Std.downcast()` (RTTI) | P2 | Medium | 🟡 `is` + `Std.isOfType` done | runtime type checks |
+| 23 | `Std.is()` / `Std.downcast()` (RTTI) | P2 | Medium | 🟢 Complete | runtime type checks |
 
 ---
 
@@ -1888,52 +1888,50 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 **Implementation:** Already existed in ast_lowering.rs — `lower_using()` registers using modules, `find_static_extension_method()` resolves calls, method call desugaring converts to `StaticMethodCall` with receiver prepended as first argument.
 
-### 16.9 Safe Cast 🟡
+### 16.9 Safe Cast 🟢
 
 **Priority:** P1
-**Current State:** Primitive safe casts and Dynamic↔concrete casts work. Object headers implemented (2026-02-13), enabling runtime type identification. Class hierarchy downcasting infrastructure in place.
+**Status:** ✅ Complete (2026-02-17) — Primitive, Dynamic, and class hierarchy downcasting all work.
 
-**What Works (2026-02-10+):**
+**What Works:**
 - [x] Safe primitive casts (Int↔Float, Int↔Bool, Float↔Bool) — compile-time resolved
 - [x] Dynamic→concrete safe downcast via `haxe_std_downcast` (returns null on failure)
 - [x] Concrete→Dynamic safe cast via `maybe_box_value`
 - [x] Dynamic TypeCheck (`expr is Type`) via `haxe_std_is` runtime call
-- [x] Object headers with `__type_id` at GEP index 0 (2026-02-13) — enables runtime type identification
+- [x] Object headers with `__type_id` at GEP index 0 (2026-02-13)
 - [x] `haxe_object_get_type_id` / `haxe_object_is_instance` runtime functions (2026-02-13)
+- [x] Class hierarchy downcast via `haxe_safe_downcast_class` (2026-02-17) — reads object header, walks TYPE_REGISTRY parent chain
+- [x] TypeId consistency fix (2026-02-17) — object header, TYPE_REGISTRY, and class-as-value all use SymbolId-based TypeId
 
-**What's Missing:**
-- [ ] Class hierarchy runtime downcasting (`haxe_safe_downcast` with type hierarchy walk)
+**Not Yet Implemented:**
 - [ ] Interface compatibility checks at runtime
 
-### 16.10 Abstract Types 🟡
+### 16.10 Abstract Types 🟢
 
 **Priority:** P1
-**Current State:** Parser handles abstract declarations. `@:coreType` extern abstracts work (SIMD4f, CString). Operator overloading via `@:op` works end-to-end (2026-02-10). User-defined abstract methods with underlying types work end-to-end (2026-02-09).
+**Status:** ✅ Complete (2026-02-17) — All abstract features implemented and verified.
 
-**What Works (2026-02-10):**
+**What Works:**
 - [x] User-defined abstract types with underlying type (`abstract MyInt(Int)`)
 - [x] `this` in abstract methods refers to underlying value (Int, Float, etc.)
 - [x] Abstract instance methods lowered through full TAST→HIR→MIR pipeline
 - [x] Multi-statement methods with multiple return paths (phi-based inlining)
 - [x] `@:op(A + B)` on non-extern abstracts (TAST-level inlining for single-return)
 - [x] `@:op` with type check hints (`(rhs : Int)`) inside method bodies
-- [x] `@:op(A + B)`, `@:op(A - B)`, `@:op(A * B)` all verified working
 - [x] `inline_expression_deep` handles Cast, FieldAccess expression types for substitution
+- [x] Implicit conversions (`@:from`, `@:to`) (2026-02-10)
+- [x] Enum abstract (`enum abstract Color(Int) { var Red = 0; var Blue = 1; }`) (2026-02-10)
+- [x] `@:forward` — delegate methods to underlying type (selective and forward-all)
+- [x] Static methods on abstracts (MIR path)
 
 **Bugs Fixed (2026-02-10):**
 - `(expr : Type)` type check hint was incorrectly lowered to `TypedExpressionKind::Is` (boolean) instead of `Cast` (value). Fixed in `ast_lowering.rs`.
 - `inline_expression_deep` didn't handle `Cast` or `FieldAccess` — parameter references inside casts were not substituted. Fixed in `tast_to_hir.rs`.
 
-**What's Missing:**
-- [x] Implicit conversions (`@:from`, `@:to`) (2026-02-10)
-- [x] Enum abstract (`enum abstract Color(Int) { var Red = 0; var Blue = 1; }`) (2026-02-10)
-- [ ] `@:forward` — delegate methods to underlying type
-- [ ] Static methods on abstracts (MIR path)
-
-### 16.11 Dynamic Type 🟡
+### 16.11 Dynamic Type 🟢
 
 **Priority:** P1
-**Current State:** `Dynamic` type exists in type system. Boxing/unboxing works for basic types. Anonymous objects use Dynamic for field types. Dynamic field read/write works for anonymous objects via Reflect API fallback. Dynamic→typed coercion works in both Let and Assign handlers. Dynamic arithmetic with register-type safety (2026-02-17).
+**Current State:** Complete. Boxing/unboxing, anonymous object R/W, arithmetic, class field access, and method calls all work.
 
 **Implemented:**
 
@@ -1944,15 +1942,16 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [x] `Dynamic` arithmetic — register-type check prevents SIGSEGV when operands are concrete (2026-02-17)
 - [x] `boxed_dynamic_symbols` tracking for lambda params (2026-02-13)
 - [x] MIR register type fallback for non-Variable expressions (BinaryOp, FieldAccess) (2026-02-17)
+- [x] `Dynamic` method calls — user-defined method priority over stdlib in Variable callee path (2026-02-18)
+- [x] `Dynamic` method call unboxing in Field callee direct call path (2026-02-18)
+- [x] `Dynamic` class field access via name-based fallback (2026-02-10)
 
-**Bugs Fixed (2026-02-17):**
-- Dynamic BinaryOp SIGSEGV on `Array<Dynamic>` elements: `var palette = []; palette[i].r + palette[i].g` crashed because the `_ => true` fallback in `is_boxed` check wrongly assumed non-Variable expressions (BinaryOp results, FieldAccess on class) produce boxed DynamicValues. Fix: check actual MIR register types after lowering — concrete types (I32, F64) are definitely not boxed. Mixed boxed+concrete cases unbox the pointer side.
+**Bugs Fixed (2026-02-18):**
+- Dynamic method calls returning wrong values: `var d:Dynamic = new Point(3,7); d.sum()` returned 0 instead of 10. Two root causes: (1) Variable callee path dispatched Dynamic user methods to stdlib (e.g., `sum` matched SIMD4f.sum). Fix: check `function_map` for user-defined methods FIRST before stdlib lookup. (2) Unboxing check required `Ptr(U8)` register type, but Dynamic values are cast to `Ptr(Void)` during lowering. Fix: always unbox Dynamic receivers unless they have a class hint.
+- Dynamic BinaryOp SIGSEGV on `Array<Dynamic>` elements (2026-02-17): `_ => true` fallback wrongly assumed non-Variable expressions produce boxed DynamicValues. Fix: check actual MIR register types.
 
-**What's Missing:**
+**Remaining (Tier 3):**
 
-- [ ] `Dynamic` field access for class instances (needs field offset RTTI registration)
-- [ ] `Dynamic` method calls
-- [x] `Dynamic` arithmetic operations — basic arithmetic works (2026-02-17)
 - [ ] JSON parsing returns Dynamic
 
 ### 16.12 EReg (Regular Expressions) 🟢
@@ -1978,10 +1977,10 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - `matchedPos()` — returns anonymous object `{pos:Int, len:Int}`, needs MIR wrapper
 - `map()` — needs passing Haxe closure to runtime
 
-### 16.13 Enum Methods and Statics 🟡
+### 16.13 Enum Methods and Statics 🟢
 
 **Priority:** P1
-**Status:** Partial (2026-02-09) — Built-in instance methods complete
+**Status:** ✅ Complete (2026-02-17) — Instance methods and Type API all work.
 
 **Implemented:**
 
@@ -1993,13 +1992,13 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [x] Chained property access (`myEnum.getParameters().length`)
 - [x] Uses runtime mapping infrastructure (not hardcoded in hir_to_mir)
 - [x] Enum RTTI registration in tiered backend for runtime getName/getParameters
+- [x] `Type.getEnumConstructs(e)` — list variant names via runtime
+- [x] `Type.createEnum(e, name, params)` — create variant by name
+- [x] `Type.createEnumIndex(e, index, params)` — create variant by index
 
-**What's Missing:**
+**Not Yet Implemented:**
 
 - [ ] User-defined methods on enum types (Haxe doesn't support this — abstract enums do)
-- [ ] `Type.getEnumConstructs()` — list variant names
-- [ ] `Type.createEnum()` — create variant by name/index
-- [ ] `Type.enumIndex()` / `Type.enumConstructor()` / `Type.enumParameters()` (Type API equivalents)
 
 ### 16.14 Null Safety 🟡
 
@@ -2061,12 +2060,13 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [ ] `[for (x in arr) if (x > 0) x]` — filtered comprehension (requires parser changes)
 - [ ] Nested comprehensions
 
-### 16.18 RTTI (Runtime Type Information) 🟡
+### 16.18 RTTI (Runtime Type Information) 🟢
 
 **Priority:** P2
-**Current State:** `is` operator and `Std.isOfType()` work for class hierarchies and Dynamic primitives. Runtime type registry and boxing infrastructure complete. Object headers with `__type_id` enable runtime type identification (2026-02-13).
+**Status:** ✅ Complete (2026-02-17) — `is` operator, `Std.isOfType`, Type API, and class hierarchy all work.
 
-**Implemented (2026-02-13+):**
+**Implemented:**
+
 - [x] `x is Type` — compile-time for static types, runtime for Dynamic (via `haxe_std_is`)
 - [x] `Std.isOfType(value, Type)` — desugared to TypeCheck at HIR level
 - [x] Class hierarchy checks (`Dog is Animal` upcast/downcast)
@@ -2077,12 +2077,15 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [x] `haxe_object_get_type_id(obj_ptr) -> i64` runtime function (2026-02-13)
 - [x] `haxe_object_is_instance(obj_ptr, type_id) -> bool` runtime function (2026-02-13)
 - [x] SRA compatibility — skips GEP index 0 (header field) to avoid type conflicts (2026-02-13)
+- [x] `Type.getClass(obj)` — reads object header type_id (2026-02-17)
+- [x] `Type.getClassName(cls)` — returns class name string via TYPE_REGISTRY (2026-02-17)
+- [x] `Type.getSuperClass(cls)` — returns parent type_id via TYPE_REGISTRY
+- [x] `Type.getInstanceFields(cls)` — returns field name array via TYPE_REGISTRY
+- [x] `Type.resolveClass(name)` — lookup TypeId by qualified name
+- [x] TypeId consistency fix (2026-02-17) — object header uses SymbolId-based TypeId matching TYPE_REGISTRY
 
-**What's Missing:**
-- [ ] `Type.getClass(obj)` — get class of object (runtime function exists, stdlib mapping needed)
-- [ ] `Type.getClassName(cls)` — get class name as string
-- [ ] `Type.getInstanceFields(cls)` — list fields
-- [ ] `Type.getSuperClass(cls)` — class hierarchy
+**Not Yet Implemented:**
+
 - [ ] `Type.typeof(value)` — get ValueType enum
 
 ### 16.19 Macros (Compile-Time) 🔴
@@ -2118,10 +2121,10 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 10. **Abstract types** (16.10) — user-defined abstracts
 
 #### Tier 3: Completeness (polish and compatibility)
-11. 🟡 **Safe cast** (16.9) — primitives + Dynamic done, class hierarchy deferred
-12. **Dynamic type ops** (16.11)
+11. ✅ **Safe cast** (16.9) — primitives + Dynamic + class hierarchy downcast (2026-02-17)
+12. ✅ **Dynamic type ops** (16.11) — anon R/W, arithmetic, class fields, method calls (2026-02-18)
 13. 🟡 **Null safety** (16.14) — `??` done, `?.` and flow analysis remaining
-14. **RTTI** (16.18)
+14. ✅ **RTTI** (16.18) — is, isOfType, Type API (getClass/getClassName/getSuperClass) (2026-02-17)
 15. ✅ **Map literals** (16.16) — literals, method dispatch, for-in iteration (2026-02-13)
 16. ✅ **Array comprehension** (16.17) — range and array for-in comprehensions (2026-02-13)
 17. **Macros** (16.19)
@@ -2198,7 +2201,7 @@ trace("The point is: " + p);    // ✅ (calls toString())
 - **Async state machines** build on generics and memory safety
 - Implementation should follow dependency order to avoid rework
 
-**Last Updated:** 2026-02-17 (Dynamic BinaryOp Fix, Cmp Phi Types, RTTI/Safe Cast Updates)
+**Last Updated:** 2026-02-17 (Close 5 medium items: Safe Cast, Properties, Enum, Abstract, RTTI; TypeId consistency fix)
 
 ## Recent Progress (Session 2026-02-17 - Dynamic BinaryOp Fix & Codegen Hardening)
 

@@ -6027,6 +6027,34 @@ impl<'a> HirToMirContext<'a> {
                         // Lower the object (this will be the first parameter)
                         let obj_reg = self.lower_expression(object)?;
 
+                        // If the object is Dynamic-typed, unbox it to get the raw object pointer.
+                        // Dynamic variables store a boxed DynamicValue*, but the method expects
+                        // a raw class pointer as 'this'.
+                        let obj_reg = {
+                            let is_dynamic = {
+                                let type_table = self.type_table.borrow();
+                                type_table
+                                    .get(object.ty)
+                                    .map(|t| matches!(t.kind, TypeKind::Dynamic))
+                                    .unwrap_or(false)
+                            };
+                            if is_dynamic {
+                                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                                let unbox_func_id = self.get_or_register_extern_function(
+                                    "haxe_unbox_reference_ptr",
+                                    vec![ptr_u8.clone()],
+                                    ptr_u8.clone(),
+                                );
+                                self.builder.build_call_direct(
+                                    unbox_func_id,
+                                    vec![obj_reg],
+                                    ptr_u8,
+                                )?
+                            } else {
+                                obj_reg
+                            }
+                        };
+
                         // Track object as temp if it's a heap-allocated intermediate
                         // (e.g., z.mul(z) in z.mul(z).add(c) returns a new Complex)
                         let is_owned_heap_value = matches!(
@@ -7711,6 +7739,89 @@ impl<'a> HirToMirContext<'a> {
                                     // instead of hardcoding method names. This handles cases like:
                                     // - MutexGuard.get() vs Arc.get() - both have "get" but are different
                                     // - Mutex.lock() returning Dynamic typed as MutexGuard
+                                    // For Dynamic receivers, check user-defined methods FIRST.
+                                    // Stdlib has common names like "sum", "get", "set" that
+                                    // collide with user methods on Dynamic-typed objects.
+                                    let receiver_is_dynamic = {
+                                        let type_table = self.type_table.borrow();
+                                        type_table
+                                            .get(receiver_type)
+                                            .map(|t| matches!(t.kind, TypeKind::Dynamic))
+                                            .unwrap_or(false)
+                                    };
+                                    let user_func_for_dynamic = if receiver_is_dynamic {
+                                        let method_name_is =
+                                            self.symbol_table.get_symbol(*symbol).map(|s| s.name);
+                                        if let Some(name) = method_name_is {
+                                            let mut found = None;
+                                            for (sym, &fid) in &self.function_map {
+                                                if let Some(si) = self.symbol_table.get_symbol(*sym)
+                                                {
+                                                    if si.name == name {
+                                                        found = Some(fid);
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                            found
+                                        } else {
+                                            None
+                                        }
+                                    } else {
+                                        None
+                                    };
+
+                                    if let Some(func_id) = user_func_for_dynamic {
+                                        // User-defined method found for Dynamic receiver — use it with unboxing
+                                        let receiver_reg = self.lower_expression(&args[0])?;
+
+                                        // Dynamic receivers are always boxed (from haxe_box_reference_ptr),
+                                        // even if the MIR register type shows Ptr(Void) due to cast.
+                                        // Always unbox unless receiver has a class hint (stdlib container).
+                                        let has_class_hint =
+                                            self.register_class_hints.contains_key(&receiver_reg);
+                                        let should_unbox = !has_class_hint;
+                                        let actual_receiver = if should_unbox {
+                                            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                                            let unbox_func_id = self
+                                                .get_or_register_extern_function(
+                                                    "haxe_unbox_reference_ptr",
+                                                    vec![ptr_u8.clone()],
+                                                    ptr_u8.clone(),
+                                                );
+                                            self.builder.build_call_direct(
+                                                unbox_func_id,
+                                                vec![receiver_reg],
+                                                ptr_u8,
+                                            )?
+                                        } else {
+                                            receiver_reg
+                                        };
+
+                                        // Lower remaining args
+                                        let arg_regs: Vec<_> = std::iter::once(actual_receiver)
+                                            .chain(
+                                                args[1..]
+                                                    .iter()
+                                                    .filter_map(|a| self.lower_expression(a)),
+                                            )
+                                            .collect();
+
+                                        let actual_return_type = if let Some(func) =
+                                            self.builder.module.functions.get(&func_id)
+                                        {
+                                            func.signature.return_type.clone()
+                                        } else {
+                                            result_type.clone()
+                                        };
+
+                                        return self.builder.build_call_direct(
+                                            func_id,
+                                            arg_regs,
+                                            actual_return_type,
+                                        );
+                                    }
+
                                     let is_stdlib_method = method_name_str
                                         .map(|m| self.stdlib_mapping.any_class_has_method(m))
                                         .unwrap_or(false);
@@ -8018,13 +8129,10 @@ impl<'a> HirToMirContext<'a> {
                                                     .contains_key(&receiver_reg);
                                                 let receiver_mir_type =
                                                     self.builder.get_register_type(receiver_reg);
-                                                let should_unbox = !has_class_hint && receiver_mir_type.as_ref()
-                                                    .map(|t| {
-                                                        // A boxed value has type Ptr(U8) from box_* functions
-                                                        // Unboxed stdlib returns typically have Ptr(Void)
-                                                        matches!(t, IrType::Ptr(inner) if matches!(**inner, IrType::U8))
-                                                    })
-                                                    .unwrap_or(true); // Assume boxed if type unknown
+                                                // Dynamic receivers are always boxed (from haxe_box_reference_ptr),
+                                                // even if MIR register type shows Ptr(Void) due to cast.
+                                                // Always unbox for Dynamic unless it has a class hint.
+                                                let should_unbox = !has_class_hint;
 
                                                 let actual_receiver = if should_unbox {
                                                     // Unbox the Dynamic to get the actual object pointer
@@ -9945,20 +10053,51 @@ impl<'a> HirToMirContext<'a> {
                                 .unwrap_or(false);
 
                             let mut arg_regs = Vec::new();
+
+                            // Check if receiver (args[0]) is Dynamic-typed — needs unboxing
+                            let receiver_is_dynamic = if !args.is_empty() {
+                                let type_table = self.type_table.borrow();
+                                type_table
+                                    .get(args[0].ty)
+                                    .map(|t| matches!(t.kind, TypeKind::Dynamic))
+                                    .unwrap_or(false)
+                            } else {
+                                false
+                            };
+
                             for (i, arg) in args.iter().enumerate() {
                                 if let Some(reg) = self.lower_expression(arg) {
-                                    if i > 0 && callee_is_user_defined {
-                                        let is_heap_intermediate = matches!(
-                                            &arg.kind,
-                                            HirExprKind::New { .. } | HirExprKind::Call { .. }
-                                        ) && self
-                                            .get_drop_behavior(arg.ty)
-                                            == DropBehavior::AutoDrop;
-                                        if is_heap_intermediate {
-                                            self.temp_heap_values.push(reg);
+                                    if i == 0 && receiver_is_dynamic && callee_is_user_defined {
+                                        // Dynamic receiver: unbox DynamicValue* to get raw object pointer
+                                        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                                        let unbox_func_id = self.get_or_register_extern_function(
+                                            "haxe_unbox_reference_ptr",
+                                            vec![ptr_u8.clone()],
+                                            ptr_u8.clone(),
+                                        );
+                                        if let Some(unboxed) = self.builder.build_call_direct(
+                                            unbox_func_id,
+                                            vec![reg],
+                                            ptr_u8,
+                                        ) {
+                                            arg_regs.push(unboxed);
+                                        } else {
+                                            arg_regs.push(reg);
                                         }
+                                    } else {
+                                        if i > 0 && callee_is_user_defined {
+                                            let is_heap_intermediate = matches!(
+                                                &arg.kind,
+                                                HirExprKind::New { .. } | HirExprKind::Call { .. }
+                                            ) && self
+                                                .get_drop_behavior(arg.ty)
+                                                == DropBehavior::AutoDrop;
+                                            if is_heap_intermediate {
+                                                self.temp_heap_values.push(reg);
+                                            }
+                                        }
+                                        arg_regs.push(reg);
                                     }
-                                    arg_regs.push(reg);
                                 }
                             }
 
@@ -10947,11 +11086,17 @@ impl<'a> HirToMirContext<'a> {
 
                 // Store object header: runtime type_id at GEP index 0
                 // This enables runtime type identification for downcasting, Dynamic field access, etc.
-                // IMPORTANT: Use the TAST TypeId (class_type), NOT the SymbolId!
-                // The runtime TYPE_REGISTRY is indexed by TAST TypeId (via IrTypeDef.type_id),
-                // so the object header must match for hierarchy walking to work.
+                // IMPORTANT: Use the SymbolId-based TypeId (matches TYPE_REGISTRY key).
+                // tast_to_hir creates TypeId::from_raw(symbol_id.as_raw()) for the registry,
+                // so we must extract the symbol_id from the TAST type and use that.
                 {
-                    let runtime_type_id = class_type.as_raw() as i64;
+                    let runtime_type_id = {
+                        let type_table = self.type_table.borrow();
+                        match type_table.get(*class_type).map(|t| &t.kind) {
+                            Some(TypeKind::Class { symbol_id, .. }) => symbol_id.as_raw() as i64,
+                            _ => class_type.as_raw() as i64, // fallback
+                        }
+                    };
                     if let Some(type_id_const) =
                         self.builder.build_const(IrValue::I64(runtime_type_id))
                     {
@@ -11672,10 +11817,8 @@ impl<'a> HirToMirContext<'a> {
                             // Downcast or unrelated: runtime check via object header.
                             // haxe_safe_downcast_class reads type_id from offset 0,
                             // walks the hierarchy, returns obj_ptr or null.
-                            // IMPORTANT: Use the TAST TypeId (target), NOT the SymbolId!
-                            // Must match what the New handler stores in the object header
-                            // and what TYPE_REGISTRY is indexed by.
-                            let target_type_id = target.as_raw() as i64;
+                            // Use SymbolId-based TypeId to match TYPE_REGISTRY and object header.
+                            let target_type_id = tgt_sym.as_raw() as i64;
                             let type_id_const =
                                 self.builder.build_const(IrValue::I64(target_type_id))?;
                             let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
