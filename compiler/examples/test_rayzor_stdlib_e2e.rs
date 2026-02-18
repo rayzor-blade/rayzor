@@ -608,7 +608,7 @@ class Main {
             "rayzor_channel_send",
             "rayzor_channel_try_receive",
         ])
-        .expect_level(TestLevel::MirValidation), // TODO: channel execution hangs — investigate separately
+        .expect_level(TestLevel::Execution), // TODO: channel execution hangs — investigate separately
     );
 
     // ============================================================================
@@ -660,7 +660,7 @@ class Main {
 "#,
         )
         .expect_mir_calls(vec!["rayzor_channel_init", "rayzor_channel_send", "rayzor_channel_try_receive"])
-        .expect_level(TestLevel::MirValidation), // TODO: channel execution hangs — investigate separately
+        .expect_level(TestLevel::Execution), // TODO: channel execution hangs — investigate separately
     );
 
     // ============================================================================

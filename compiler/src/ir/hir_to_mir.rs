@@ -7940,8 +7940,10 @@ impl<'a> HirToMirContext<'a> {
                                                             .unwrap_or_else(|| actual_ty.clone());
 
                                                         // TypeParameter/Dynamic/Placeholder args erased to I64
-                                                        // should be CAST to Ptr(U8), not BOXED. The erased I64
-                                                        // value IS a pointer (class/struct handle), not an integer.
+                                                        // should be CAST to Ptr(U8), not BOXED — but ONLY
+                                                        // when the actual register value is a pointer (I64).
+                                                        // For concrete primitives (I32, F64, Bool from Channel<Int>),
+                                                        // the value must be BOXED, not cast.
                                                         let is_erased_type_param = {
                                                             let type_table =
                                                                 self.type_table.borrow();
@@ -7957,13 +7959,22 @@ impl<'a> HirToMirContext<'a> {
                                                                 })
                                                                 .unwrap_or(false)
                                                         };
+                                                        // Check if register holds a concrete primitive
+                                                        // (e.g., Channel<Int>.send(42) → reg is I32, not a pointer)
+                                                        let reg_ir_type = self.builder.get_register_type(reg);
+                                                        let is_concrete_primitive = matches!(
+                                                            reg_ir_type,
+                                                            Some(IrType::I32) | Some(IrType::F32) | Some(IrType::F64) | Some(IrType::Bool)
+                                                        );
                                                         let final_reg = if is_erased_type_param
                                                             && matches!(actual_ty, IrType::I64)
                                                             && matches!(
                                                                 &expected_ty,
                                                                 IrType::Ptr(_)
-                                                            ) {
-                                                            // Cast I64 → Ptr(U8) instead of boxing
+                                                            )
+                                                            && !is_concrete_primitive
+                                                        {
+                                                            // Cast I64 → Ptr(U8) — the I64 is actually a pointer
                                                             self.builder
                                                                 .build_cast(
                                                                     reg,
@@ -7971,6 +7982,16 @@ impl<'a> HirToMirContext<'a> {
                                                                     expected_ty.clone(),
                                                                 )
                                                                 .unwrap_or(reg)
+                                                        } else if is_concrete_primitive
+                                                            && matches!(&expected_ty, IrType::Ptr(_))
+                                                        {
+                                                            // Box concrete primitive for generic param
+                                                            let box_ty = reg_ir_type.unwrap();
+                                                            self.maybe_box_for_extern_call(
+                                                                reg,
+                                                                &box_ty,
+                                                                &expected_ty,
+                                                            )?
                                                         } else {
                                                             self.maybe_box_for_extern_call(
                                                                 reg,
@@ -8018,7 +8039,7 @@ impl<'a> HirToMirContext<'a> {
                                                     let resolved_expected = {
                                                         let type_table = self.type_table.borrow();
                                                         // The receiver is args[0] - check its type for generic args
-                                                        if !args.is_empty() {
+                                                        let from_receiver = if !args.is_empty() {
                                                             type_table.get(args[0].ty).and_then(|ti| {
                                                             match &ti.kind {
                                                                 crate::tast::TypeKind::Class { type_args, .. }
@@ -8034,10 +8055,26 @@ impl<'a> HirToMirContext<'a> {
                                                                 }
                                                                 _ => None,
                                                             }
-                                                        }).unwrap_or_else(|| result_type.clone())
+                                                        })
                                                         } else {
-                                                            result_type.clone()
-                                                        }
+                                                            None
+                                                        };
+                                                        // Also check if return type is Optional{primitive} (Null<T>)
+                                                        // and resolve to the inner primitive for unboxing
+                                                        let from_optional = type_table.get(expr.ty).and_then(|ti| {
+                                                            if let crate::tast::TypeKind::Optional { inner_type } = &ti.kind {
+                                                                let t = self.convert_type(*inner_type);
+                                                                if matches!(t, IrType::I32 | IrType::I64 | IrType::F32 | IrType::F64 | IrType::Bool) {
+                                                                    Some(t)
+                                                                } else {
+                                                                    None
+                                                                }
+                                                            } else {
+                                                                None
+                                                            }
+                                                        });
+                                                        drop(type_table);
+                                                        from_receiver.or(from_optional).unwrap_or_else(|| result_type.clone())
                                                     };
                                                     let final_result = self
                                                         .maybe_unbox_for_extern_return(
