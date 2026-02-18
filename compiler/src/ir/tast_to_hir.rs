@@ -1814,7 +1814,10 @@ impl<'a> TastToHirContext<'a> {
                             type_table.get(left.expr_type).map_or(false, |t| {
                                 if let TypeKind::Optional { inner_type } = &t.kind {
                                     type_table.get(*inner_type).map_or(false, |it| {
-                                        matches!(it.kind, TypeKind::Int | TypeKind::Float | TypeKind::Bool)
+                                        matches!(
+                                            it.kind,
+                                            TypeKind::Int | TypeKind::Float | TypeKind::Bool
+                                        )
                                     })
                                 } else {
                                     false

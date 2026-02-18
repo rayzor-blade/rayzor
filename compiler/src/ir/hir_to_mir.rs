@@ -7961,10 +7961,14 @@ impl<'a> HirToMirContext<'a> {
                                                         };
                                                         // Check if register holds a concrete primitive
                                                         // (e.g., Channel<Int>.send(42) → reg is I32, not a pointer)
-                                                        let reg_ir_type = self.builder.get_register_type(reg);
+                                                        let reg_ir_type =
+                                                            self.builder.get_register_type(reg);
                                                         let is_concrete_primitive = matches!(
                                                             reg_ir_type,
-                                                            Some(IrType::I32) | Some(IrType::F32) | Some(IrType::F64) | Some(IrType::Bool)
+                                                            Some(IrType::I32)
+                                                                | Some(IrType::F32)
+                                                                | Some(IrType::F64)
+                                                                | Some(IrType::Bool)
                                                         );
                                                         let final_reg = if is_erased_type_param
                                                             && matches!(actual_ty, IrType::I64)
@@ -7983,7 +7987,10 @@ impl<'a> HirToMirContext<'a> {
                                                                 )
                                                                 .unwrap_or(reg)
                                                         } else if is_concrete_primitive
-                                                            && matches!(&expected_ty, IrType::Ptr(_))
+                                                            && matches!(
+                                                                &expected_ty,
+                                                                IrType::Ptr(_)
+                                                            )
                                                         {
                                                             // Box concrete primitive for generic param
                                                             let box_ty = reg_ir_type.unwrap();
@@ -8074,7 +8081,9 @@ impl<'a> HirToMirContext<'a> {
                                                             }
                                                         });
                                                         drop(type_table);
-                                                        from_receiver.or(from_optional).unwrap_or_else(|| result_type.clone())
+                                                        from_receiver
+                                                            .or(from_optional)
+                                                            .unwrap_or_else(|| result_type.clone())
                                                     };
                                                     let final_result = self
                                                         .maybe_unbox_for_extern_return(
@@ -14131,7 +14140,10 @@ impl<'a> HirToMirContext<'a> {
 
         let inner_ir = self.convert_type(inner_type);
         // Only box primitives — reference types in Optional are already nullable
-        if !matches!(inner_ir, IrType::I32 | IrType::I64 | IrType::F64 | IrType::F32 | IrType::Bool) {
+        if !matches!(
+            inner_ir,
+            IrType::I32 | IrType::I64 | IrType::F64 | IrType::F32 | IrType::Bool
+        ) {
             return None;
         }
 
@@ -14181,7 +14193,8 @@ impl<'a> HirToMirContext<'a> {
                     vec![IrType::F64],
                     ptr_u8.clone(),
                 );
-                self.builder.build_call_direct(box_func, vec![value], ptr_u8)
+                self.builder
+                    .build_call_direct(box_func, vec![value], ptr_u8)
             }
             IrType::Bool => {
                 let v64 = self.builder.build_cast(value, IrType::Bool, IrType::I64)?;
@@ -14228,7 +14241,9 @@ impl<'a> HirToMirContext<'a> {
                     vec![ptr_u8],
                     IrType::I64,
                 );
-                let result = self.builder.build_call_direct(unbox_func, vec![value], IrType::I64)?;
+                let result =
+                    self.builder
+                        .build_call_direct(unbox_func, vec![value], IrType::I64)?;
                 self.builder.build_cast(result, IrType::I64, IrType::I32)
             }
             (IrType::F64, IrType::F64) => {
@@ -14237,7 +14252,8 @@ impl<'a> HirToMirContext<'a> {
                     vec![ptr_u8],
                     IrType::F64,
                 );
-                self.builder.build_call_direct(unbox_func, vec![value], IrType::F64)
+                self.builder
+                    .build_call_direct(unbox_func, vec![value], IrType::F64)
             }
             (IrType::Bool, IrType::Bool) => {
                 let unbox_func = self.get_or_register_extern_function(
@@ -14245,7 +14261,9 @@ impl<'a> HirToMirContext<'a> {
                     vec![ptr_u8],
                     IrType::I64,
                 );
-                let result = self.builder.build_call_direct(unbox_func, vec![value], IrType::I64)?;
+                let result =
+                    self.builder
+                        .build_call_direct(unbox_func, vec![value], IrType::I64)?;
                 self.builder.build_cast(result, IrType::I64, IrType::Bool)
             }
             _ => None,
@@ -14258,7 +14276,10 @@ impl<'a> HirToMirContext<'a> {
         let type_table = self.type_table.borrow();
         if let Some(TypeKind::Optional { inner_type }) = type_table.get(type_id).map(|t| &t.kind) {
             let inner_ir = self.convert_type(*inner_type);
-            matches!(inner_ir, IrType::I32 | IrType::I64 | IrType::F64 | IrType::F32 | IrType::Bool)
+            matches!(
+                inner_ir,
+                IrType::I32 | IrType::I64 | IrType::F64 | IrType::F32 | IrType::Bool
+            )
         } else {
             false
         }
@@ -16702,23 +16723,39 @@ impl<'a> HirToMirContext<'a> {
                 match &inner_ir {
                     IrType::I32 => {
                         let unbox_func = self.get_or_register_extern_function(
-                            "haxe_unbox_int_ptr", vec![ptr_u8], IrType::I64,
+                            "haxe_unbox_int_ptr",
+                            vec![ptr_u8],
+                            IrType::I64,
                         );
-                        let unboxed = self.builder.build_call_direct(unbox_func, vec![lhs_val], IrType::I64)?;
+                        let unboxed = self.builder.build_call_direct(
+                            unbox_func,
+                            vec![lhs_val],
+                            IrType::I64,
+                        )?;
                         self.builder.build_cast(unboxed, IrType::I64, IrType::I32)?
                     }
                     IrType::F64 => {
                         let unbox_func = self.get_or_register_extern_function(
-                            "haxe_unbox_float_ptr", vec![ptr_u8], IrType::F64,
+                            "haxe_unbox_float_ptr",
+                            vec![ptr_u8],
+                            IrType::F64,
                         );
-                        self.builder.build_call_direct(unbox_func, vec![lhs_val], IrType::F64)?
+                        self.builder
+                            .build_call_direct(unbox_func, vec![lhs_val], IrType::F64)?
                     }
                     IrType::Bool => {
                         let unbox_func = self.get_or_register_extern_function(
-                            "haxe_unbox_bool_ptr", vec![ptr_u8], IrType::I64,
+                            "haxe_unbox_bool_ptr",
+                            vec![ptr_u8],
+                            IrType::I64,
                         );
-                        let unboxed = self.builder.build_call_direct(unbox_func, vec![lhs_val], IrType::I64)?;
-                        self.builder.build_cast(unboxed, IrType::I64, IrType::Bool)?
+                        let unboxed = self.builder.build_call_direct(
+                            unbox_func,
+                            vec![lhs_val],
+                            IrType::I64,
+                        )?;
+                        self.builder
+                            .build_cast(unboxed, IrType::I64, IrType::Bool)?
                     }
                     _ => lhs_val,
                 }
