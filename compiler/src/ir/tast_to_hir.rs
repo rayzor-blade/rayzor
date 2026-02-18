@@ -1301,10 +1301,7 @@ impl<'a> TastToHirContext<'a> {
                     //   Safe to reference twice since variables are just register reads.
                     // - Complex objects: { var _tmp = obj; if (_tmp != null) _tmp.field else null }
                     //   Uses Let binding to avoid double-evaluation of conditionals.
-                    let is_simple = matches!(
-                        object.kind,
-                        TypedExpressionKind::Variable { .. }
-                    );
+                    let is_simple = matches!(object.kind, TypedExpressionKind::Variable { .. });
 
                     if is_simple {
                         let obj_expr = self.lower_expression(object);

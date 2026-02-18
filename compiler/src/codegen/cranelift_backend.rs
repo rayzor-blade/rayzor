@@ -2773,7 +2773,11 @@ impl CraneliftBackend {
                 let elem_size = match ty {
                     crate::ir::IrType::Ptr(inner) | crate::ir::IrType::Ref(inner) => {
                         let inner_size = Self::type_size(inner);
-                        if inner_size == 0 { 8 } else { inner_size }
+                        if inner_size == 0 {
+                            8
+                        } else {
+                            inner_size
+                        }
                     }
                     _ => Self::type_size(ty), // Fallback for non-pointer types
                 };

@@ -11083,13 +11083,10 @@ impl<'a> HirToMirContext<'a> {
                 // Look up pre-computed allocation size from register_class_metadata.
                 // The HIR type registry uses TypeId::from_raw(symbol_id), so convert
                 // the TAST class_type via its symbol_id for the lookup.
-                let registry_type_id = actual_symbol_id
-                    .map(|sid| TypeId::from_raw(sid.as_raw()));
+                let registry_type_id = actual_symbol_id.map(|sid| TypeId::from_raw(sid.as_raw()));
                 let obj_size: u64 = registry_type_id
                     .and_then(|tid| self.class_alloc_sizes.get(&tid).copied())
-                    .unwrap_or_else(|| {
-                        ((args.len() as u64 + 1) * 8).max(16)
-                    });
+                    .unwrap_or_else(|| ((args.len() as u64 + 1) * 8).max(16));
 
                 // Use heap allocation (malloc) for class instances
                 let obj_ptr = self.build_heap_alloc(obj_size);

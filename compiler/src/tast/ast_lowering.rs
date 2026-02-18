@@ -5763,7 +5763,11 @@ impl<'a> AstLowering<'a> {
             ExprKind::Call { expr, args } => {
                 return self.lower_call_expression(expression, expr, args);
             }
-            ExprKind::Field { expr, field, is_optional } => {
+            ExprKind::Field {
+                expr,
+                field,
+                is_optional,
+            } => {
                 return self.lower_field_expression(expression, expr, field, *is_optional);
             }
             ExprKind::Index { expr, index } => {
