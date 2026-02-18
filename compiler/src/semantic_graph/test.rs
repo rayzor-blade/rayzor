@@ -336,6 +336,7 @@ mod haxe_specific_tests {
                 metadata: ExpressionMetadata::default(),
             },
             body: create_test_statement(),
+            guard: None,
             source_location: SourceLocation::unknown(),
         };
 
@@ -351,6 +352,7 @@ mod haxe_specific_tests {
                 metadata: ExpressionMetadata::default(),
             },
             body: create_test_statement(),
+            guard: None,
             source_location: SourceLocation::unknown(),
         };
 

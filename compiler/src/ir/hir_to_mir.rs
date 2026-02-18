@@ -251,6 +251,14 @@ pub struct HirToMirContext<'a> {
     /// Each entry's method order matches the interface's method_names order
     interface_vtables: BTreeMap<(SymbolId, SymbolId), Vec<SymbolId>>,
 
+    /// Interface inheritance: maps interface SymbolId → parent interface SymbolIds
+    /// Used to create transitive vtables for implementing classes
+    interface_extends: BTreeMap<SymbolId, Vec<SymbolId>>,
+
+    /// Class method lookup: maps (class_symbol, method_name) → method SymbolId
+    /// Populated during register_class_metadata for iterator protocol dispatch
+    class_method_symbols: BTreeMap<(SymbolId, InternedString), SymbolId>,
+
     /// Constrained type parameter info for function parameters.
     /// Maps IrFunctionId → Vec<(param_index, interface_SymbolId)>
     /// Used at call sites to wrap arguments in fat pointers for constrained type params.
@@ -423,6 +431,8 @@ impl<'a> HirToMirContext<'a> {
             next_anon_shape_id: 0,
             interface_method_names: BTreeMap::new(),
             interface_vtables: BTreeMap::new(),
+            interface_extends: BTreeMap::new(),
+            class_method_symbols: BTreeMap::new(),
             constrained_param_interfaces: BTreeMap::new(),
             abstract_from_rules: BTreeMap::new(),
             abstract_to_rules: BTreeMap::new(),
@@ -1417,9 +1427,43 @@ impl<'a> HirToMirContext<'a> {
         // This populates field_index_map which is needed for field access
         // Two-pass: register interfaces first so interface_method_names is populated
         // before classes try to build vtables.
-        for (type_id, type_decl) in &hir_module.types {
-            if matches!(type_decl, HirTypeDecl::Interface(_)) {
-                self.register_type_metadata(*type_id, type_decl);
+        // Topological sort: parent interfaces must be registered before children
+        // so inherited methods are available when building child method tables.
+        {
+            let interfaces: Vec<(TypeId, &HirTypeDecl)> = hir_module
+                .types
+                .iter()
+                .filter(|(_, td)| matches!(td, HirTypeDecl::Interface(_)))
+                .map(|(tid, td)| (*tid, td))
+                .collect();
+
+            let mut registered: std::collections::HashSet<TypeId> =
+                std::collections::HashSet::new();
+            let mut remaining = interfaces.clone();
+            let max_iterations = remaining.len() + 1;
+            let mut iteration = 0;
+            while !remaining.is_empty() && iteration < max_iterations {
+                iteration += 1;
+                let mut next_remaining = Vec::new();
+                for (type_id, type_decl) in remaining {
+                    if let HirTypeDecl::Interface(iface) = type_decl {
+                        let parents_ready = iface
+                            .extends
+                            .iter()
+                            .all(|parent_tid| registered.contains(parent_tid));
+                        if parents_ready {
+                            self.register_type_metadata(type_id, type_decl);
+                            registered.insert(type_id);
+                        } else {
+                            next_remaining.push((type_id, type_decl));
+                        }
+                    }
+                }
+                remaining = next_remaining;
+            }
+            // Register any remaining interfaces (handles cycles gracefully)
+            for (type_id, type_decl) in remaining {
+                self.register_type_metadata(type_id, type_decl);
             }
         }
         for (type_id, type_decl) in &hir_module.types {
@@ -10643,6 +10687,26 @@ impl<'a> HirToMirContext<'a> {
                                 None
                             }
                         }
+                        crate::tast::TypeKind::TypeAlias {
+                            symbol_id,
+                            target_type,
+                            ..
+                        } => {
+                            // Resolve TypeAlias to find the actual class symbol
+                            // For user classes, the TypeAlias symbol_id IS the class symbol
+                            let mut resolved = Some(*symbol_id);
+                            // Also try resolving through target_type for deeper aliases
+                            if let Some(target) = type_table.get(*target_type) {
+                                if let crate::tast::TypeKind::Class {
+                                    symbol_id: class_sym,
+                                    ..
+                                } = &target.kind
+                                {
+                                    resolved = Some(*class_sym);
+                                }
+                            }
+                            resolved
+                        }
                         _ => None,
                     };
                     let is_abs = matches!(type_ref.kind, crate::tast::TypeKind::Abstract { .. });
@@ -13063,6 +13127,11 @@ impl<'a> HirToMirContext<'a> {
             HirExprKind::Call { args, .. } => {
                 for arg in args {
                     self.find_modified_variables_in_expression(arg, modified);
+                }
+            }
+            HirExprKind::Block(block) => {
+                for stmt in &block.statements {
+                    self.find_modified_variables_in_statement(stmt, modified);
                 }
             }
             _ => {}
@@ -17377,11 +17446,46 @@ impl<'a> HirToMirContext<'a> {
             type_table.get(iter_expr.ty).map(|t| t.kind.clone())
         };
 
-        // For Map types, convert keys to a HaxeArray and iterate over that
-        if let Some(crate::tast::TypeKind::Map { key_type, .. }) = &iter_type_kind {
+        // For Map types (including IntMap/StringMap extern classes), convert keys
+        // to a HaxeArray and iterate over that
+        let map_kv_types: Option<(TypeId, TypeId)> = match &iter_type_kind {
+            Some(crate::tast::TypeKind::Map {
+                key_type,
+                value_type,
+            }) => Some((*key_type, *value_type)),
+            Some(crate::tast::TypeKind::Class {
+                symbol_id,
+                type_args,
+            }) => {
+                let class_name = self
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .and_then(|sym| self.string_interner.get(sym.name));
+                let type_table = self.type_table.borrow();
+                match class_name {
+                    Some("IntMap") => {
+                        let value_type = type_args
+                            .first()
+                            .copied()
+                            .unwrap_or_else(|| type_table.dynamic_type());
+                        Some((type_table.int_type(), value_type))
+                    }
+                    Some("StringMap") => {
+                        let value_type = type_args
+                            .first()
+                            .copied()
+                            .unwrap_or_else(|| type_table.dynamic_type());
+                        Some((type_table.string_type(), value_type))
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some((key_type, value_type)) = map_kv_types {
             let key_type_kind = {
                 let type_table = self.type_table.borrow();
-                type_table.get(*key_type).map(|t| t.kind.clone())
+                type_table.get(key_type).map(|t| t.kind.clone())
             };
             let is_int_key = matches!(
                 key_type_kind,
@@ -17412,9 +17516,43 @@ impl<'a> HirToMirContext<'a> {
                 return;
             };
 
-            // Now iterate over the keys array using the standard array iteration path
-            self.lower_for_in_over_array(pattern, keys_array, *key_type, body, label);
+            // Check if this is key=>value iteration (Tuple pattern)
+            if let HirPattern::Tuple(sub_patterns) = pattern {
+                if sub_patterns.len() == 2 {
+                    self.lower_for_in_map_kv(
+                        &sub_patterns[0],
+                        &sub_patterns[1],
+                        map_ptr,
+                        keys_array,
+                        key_type,
+                        value_type,
+                        is_int_key,
+                        body,
+                        label,
+                    );
+                    return;
+                }
+            }
+
+            // Key-only iteration: iterate over the keys array
+            self.lower_for_in_over_array(pattern, keys_array, key_type, body, label);
             return;
+        }
+
+        // For class/interface types with hasNext()/next() iterator protocol,
+        // desugar to a while loop calling those methods directly.
+        if let Some(ref kind) = iter_type_kind {
+            let is_iterator_class = matches!(
+                kind,
+                crate::tast::TypeKind::Class { .. }
+                    | crate::tast::TypeKind::Interface { .. }
+                    | crate::tast::TypeKind::TypeAlias { .. }
+                    | crate::tast::TypeKind::Placeholder { .. }
+            );
+            if is_iterator_class {
+                self.lower_for_in_iterator_protocol(pattern, iter_expr, body, label);
+                return;
+            }
         }
 
         // For-in loops over Arrays desugar to index-based iteration:
@@ -17702,6 +17840,525 @@ impl<'a> HirToMirContext<'a> {
 
         // Continue at exit block
         self.builder.switch_to_block(loop_exit_block);
+    }
+
+    /// Lower for-in iteration using the hasNext()/next() iterator protocol.
+    /// Synthesizes HIR for `while (obj.hasNext()) { var x = obj.next(); body; }`
+    /// and delegates to lower_while_loop which handles phi nodes for mutable variables.
+    fn lower_for_in_iterator_protocol(
+        &mut self,
+        pattern: &HirPattern,
+        iter_expr: &HirExpr,
+        body: &HirBlock,
+        label: Option<&SymbolId>,
+    ) {
+        // Lower the iterable expression and store it in a temp variable
+        let Some(obj_reg) = self.lower_expression(iter_expr) else {
+            return;
+        };
+
+        // Resolve the class symbol from the iterable's type
+        let class_sym = {
+            let type_table = self.type_table.borrow();
+            let mut tid = iter_expr.ty;
+            let mut result: Option<SymbolId> = None;
+            for _ in 0..10 {
+                if let Some(ty) = type_table.get(tid) {
+                    match &ty.kind {
+                        crate::tast::TypeKind::Class { symbol_id, .. } => {
+                            result = Some(*symbol_id);
+                            break;
+                        }
+                        crate::tast::TypeKind::TypeAlias {
+                            symbol_id,
+                            target_type,
+                            ..
+                        } => {
+                            result = Some(*symbol_id);
+                            tid = *target_type;
+                        }
+                        crate::tast::TypeKind::Placeholder { .. } => break,
+                        _ => break,
+                    }
+                } else {
+                    break;
+                }
+            }
+            result
+        };
+
+        let class_sym = match class_sym {
+            Some(s) => s,
+            None => return,
+        };
+
+        // Look up hasNext and next methods on the class
+        let has_next_name = self.string_interner.intern("hasNext");
+        let next_name = self.string_interner.intern("next");
+
+        let has_next_sym = self
+            .class_method_symbols
+            .get(&(class_sym, has_next_name))
+            .copied();
+        let next_sym = self
+            .class_method_symbols
+            .get(&(class_sym, next_name))
+            .copied();
+
+        let (has_next_sym, next_sym) = match (has_next_sym, next_sym) {
+            (Some(hn), Some(n)) => (hn, n),
+            _ => return,
+        };
+
+        let has_next_fn = self.get_function_id(&has_next_sym);
+        let next_fn = self.get_function_id(&next_sym);
+
+        let (has_next_fn, next_fn) = match (has_next_fn, next_fn) {
+            (Some(hn), Some(n)) => (hn, n),
+            _ => return,
+        };
+
+        // Store obj pointer to a stack slot so it survives across blocks
+        let obj_ty = self
+            .builder
+            .get_register_type(obj_reg)
+            .unwrap_or(IrType::Ptr(Box::new(IrType::Void)));
+        let Some(obj_slot) = self.builder.build_alloc(obj_ty.clone(), None) else {
+            return;
+        };
+        self.builder.build_store(obj_slot, obj_reg);
+
+        // Also store mutable variables from outer scope in stack slots
+        // so assignments in the loop body are visible after the loop
+        let modified_vars = {
+            let mut modified = std::collections::HashSet::new();
+            for stmt in &body.statements {
+                self.find_modified_variables_in_statement(stmt, &mut modified);
+            }
+            modified
+        };
+
+        // Create stack slots for each modified variable
+        let mut var_slots: BTreeMap<SymbolId, (IrId, IrType)> = BTreeMap::new();
+        for sym in &modified_vars {
+            if let Some(&current_reg) = self.symbol_map.get(sym) {
+                let ty = self
+                    .builder
+                    .get_register_type(current_reg)
+                    .unwrap_or(IrType::I64);
+                if let Some(slot) = self.builder.build_alloc(ty.clone(), None) {
+                    self.builder.build_store(slot, current_reg);
+                    var_slots.insert(*sym, (slot, ty));
+                }
+            }
+        }
+
+        // Update symbol_map to use stack loads for modified variables
+        // This ensures assignments in the loop body use stores to slots
+        // (The assignment handler stores to symbol_map; we need loads before use)
+        // Actually, we need to handle this differently: before each loop iteration,
+        // load from slots; after each assignment, store to slots.
+        // The simplest approach: load all modified vars at the start of each block iteration.
+
+        // Create loop blocks
+        let Some(loop_cond_block) = self.builder.create_block() else {
+            return;
+        };
+        let Some(loop_body_block) = self.builder.create_block() else {
+            return;
+        };
+        let Some(loop_exit_block) = self.builder.create_block() else {
+            return;
+        };
+
+        self.builder.build_branch(loop_cond_block);
+
+        // Push loop context
+        self.loop_stack.push(LoopContext {
+            continue_block: loop_cond_block,
+            break_block: loop_exit_block,
+            label: label.cloned(),
+            exit_phi_nodes: BTreeMap::new(),
+            continue_phi_nodes: BTreeMap::new(),
+        });
+
+        // Condition block: call hasNext()
+        self.builder.switch_to_block(loop_cond_block);
+        let Some(obj_for_cond) = self.builder.build_load(obj_slot, obj_ty.clone()) else {
+            self.loop_stack.pop();
+            return;
+        };
+        let Some(has_next_result) =
+            self.builder
+                .build_call_direct(has_next_fn, vec![obj_for_cond], IrType::Bool)
+        else {
+            self.loop_stack.pop();
+            return;
+        };
+        self.builder
+            .build_cond_branch(has_next_result, loop_body_block, loop_exit_block);
+
+        // Body block
+        self.builder.switch_to_block(loop_body_block);
+
+        // Load modified vars from slots at body entry
+        for (sym, (slot, ty)) in &var_slots {
+            if let Some(loaded) = self.builder.build_load(*slot, ty.clone()) {
+                self.symbol_map.insert(*sym, loaded);
+            }
+        }
+
+        // Call next() and bind the pattern
+        let Some(obj_for_body) = self.builder.build_load(obj_slot, obj_ty) else {
+            self.loop_stack.pop();
+            return;
+        };
+        let Some(next_value) =
+            self.builder
+                .build_call_direct(next_fn, vec![obj_for_body], IrType::I64)
+        else {
+            self.loop_stack.pop();
+            return;
+        };
+
+        match pattern {
+            HirPattern::Variable { symbol, .. } => {
+                self.symbol_map.insert(*symbol, next_value);
+            }
+            _ => {}
+        }
+
+        // Lower the loop body
+        self.enter_drop_scope();
+        self.lower_block(body);
+
+        // Store modified vars back to slots before branching back
+        if !self.is_terminated() {
+            for (sym, (slot, _ty)) in &var_slots {
+                if let Some(&current_reg) = self.symbol_map.get(sym) {
+                    self.builder.build_store(*slot, current_reg);
+                }
+            }
+            self.exit_drop_scope();
+            self.builder.build_branch(loop_cond_block);
+        } else {
+            self.exit_drop_scope();
+        }
+
+        self.loop_stack.pop();
+
+        // Exit block: load final values from slots
+        self.builder.switch_to_block(loop_exit_block);
+        for (sym, (slot, ty)) in &var_slots {
+            if let Some(loaded) = self.builder.build_load(*slot, ty.clone()) {
+                self.symbol_map.insert(*sym, loaded);
+            }
+        }
+    }
+
+    /// Helper: iterate over map keys and look up values for `for (key => value in map)`.
+    /// Iterates the keys array, calls map.get(key) for each, and binds both key and value.
+    #[allow(clippy::too_many_arguments)]
+    fn lower_for_in_map_kv(
+        &mut self,
+        key_pattern: &HirPattern,
+        value_pattern: &HirPattern,
+        map_ptr: IrId,
+        keys_array: IrId,
+        key_type_id: TypeId,
+        value_type_id: TypeId,
+        is_int_key: bool,
+        body: &HirBlock,
+        label: Option<&SymbolId>,
+    ) {
+        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+
+        // Read keys array length
+        let Some(offset_8) = self.builder.build_const(IrValue::I64(8)) else {
+            return;
+        };
+        let Some(len_ptr) =
+            self.builder
+                .build_binop(crate::ir::instructions::BinaryOp::Add, keys_array, offset_8)
+        else {
+            return;
+        };
+        let Some(array_len) = self.builder.build_load(len_ptr, IrType::I64) else {
+            return;
+        };
+
+        // Initialize index to 0
+        let Some(zero) = self.builder.build_const(IrValue::I64(0)) else {
+            return;
+        };
+        let Some(index_ptr) = self.builder.build_alloc(IrType::I64, None) else {
+            return;
+        };
+        self.builder.build_store(index_ptr, zero);
+
+        // Save entry block for phi node incoming edges
+        let entry_block = if let Some(block_id) = self.builder.current_block() {
+            block_id
+        } else {
+            return;
+        };
+
+        // Collect referenced variables in body for phi node creation
+        // (same pattern as lower_while_loop)
+        let mut referenced_vars = std::collections::HashSet::new();
+        self.collect_referenced_variables_in_block(body, &mut referenced_vars);
+        let modified_vars: std::collections::HashSet<SymbolId> = referenced_vars
+            .into_iter()
+            .filter(|sym| {
+                let in_map = self.symbol_map.contains_key(sym);
+                let is_param = if let Some(func) = self.builder.current_function() {
+                    func.signature
+                        .parameters
+                        .iter()
+                        .any(|p| self.symbol_map.get(sym) == Some(&p.reg))
+                } else {
+                    false
+                };
+                in_map && !is_param
+            })
+            .collect();
+
+        // Save initial values of loop variables
+        let mut loop_var_initial_values: BTreeMap<SymbolId, (IrId, IrType)> = BTreeMap::new();
+        for symbol_id in &modified_vars {
+            if let Some(&reg) = self.symbol_map.get(symbol_id) {
+                if let Some(func) = self.builder.current_function() {
+                    if let Some(local) = func.locals.get(&reg) {
+                        loop_var_initial_values.insert(*symbol_id, (reg, local.ty.clone()));
+                    }
+                }
+            }
+        }
+
+        // Create loop blocks
+        let Some(loop_cond_block) = self.builder.create_block() else {
+            return;
+        };
+        let Some(loop_body_block) = self.builder.create_block() else {
+            return;
+        };
+        let Some(loop_exit_block) = self.builder.create_block() else {
+            return;
+        };
+
+        self.builder.build_branch(loop_cond_block);
+
+        // Condition block: create phi nodes for loop-carried variables
+        self.builder.switch_to_block(loop_cond_block);
+
+        let mut phi_nodes: BTreeMap<SymbolId, IrId> = BTreeMap::new();
+        for (symbol_id, (initial_reg, var_type)) in &loop_var_initial_values {
+            if let Some(phi_reg) = self.builder.build_phi(loop_cond_block, var_type.clone()) {
+                self.builder
+                    .add_phi_incoming(loop_cond_block, phi_reg, entry_block, *initial_reg);
+                if let Some(func) = self.builder.current_function_mut() {
+                    if let Some(local) = func.locals.get(initial_reg).cloned() {
+                        func.locals.insert(
+                            phi_reg,
+                            super::IrLocal {
+                                name: format!("{}_phi", local.name),
+                                ty: var_type.clone(),
+                                mutable: true,
+                                source_location: local.source_location,
+                                allocation: super::AllocationHint::Register,
+                            },
+                        );
+                    }
+                }
+                phi_nodes.insert(*symbol_id, phi_reg);
+                self.symbol_map.insert(*symbol_id, phi_reg);
+            }
+        }
+
+        // Create exit phi nodes so post-loop code sees final values
+        let mut exit_phi_nodes: BTreeMap<SymbolId, IrId> = BTreeMap::new();
+        for (symbol_id, loop_phi_reg) in &phi_nodes {
+            if let Some((_, var_type)) = loop_var_initial_values.get(symbol_id) {
+                let Some(exit_param_reg) = self.builder.alloc_reg() else {
+                    continue;
+                };
+                if let Some(func) = self.builder.current_function_mut() {
+                    if let Some(exit_block_data) = func.cfg.get_block_mut(loop_exit_block) {
+                        let exit_phi = super::IrPhiNode {
+                            dest: exit_param_reg,
+                            incoming: vec![(loop_cond_block, *loop_phi_reg)],
+                            ty: var_type.clone(),
+                        };
+                        exit_block_data.add_phi(exit_phi);
+                        func.locals.insert(
+                            exit_param_reg,
+                            super::IrLocal {
+                                name: format!("loop_exit_{}", symbol_id.as_raw()),
+                                ty: var_type.clone(),
+                                mutable: false,
+                                source_location: super::IrSourceLocation::unknown(),
+                                allocation: super::AllocationHint::Register,
+                            },
+                        );
+                    }
+                }
+                exit_phi_nodes.insert(*symbol_id, exit_param_reg);
+            }
+        }
+
+        // Push loop context for break/continue
+        self.loop_stack.push(LoopContext {
+            continue_block: loop_cond_block,
+            break_block: loop_exit_block,
+            label: label.cloned(),
+            exit_phi_nodes: exit_phi_nodes.clone(),
+            continue_phi_nodes: BTreeMap::new(),
+        });
+
+        // Condition: index < length
+        let Some(current_index) = self.builder.build_load(index_ptr, IrType::I64) else {
+            self.loop_stack.pop();
+            return;
+        };
+        let Some(cmp_result) = self.builder.build_cmp(
+            crate::ir::instructions::CompareOp::Lt,
+            current_index,
+            array_len,
+        ) else {
+            self.loop_stack.pop();
+            return;
+        };
+        self.builder
+            .build_cond_branch(cmp_result, loop_body_block, loop_exit_block);
+
+        // Body block: get key, look up value, bind both, execute body, increment
+        self.builder.switch_to_block(loop_body_block);
+        let Some(idx_for_access) = self.builder.build_load(index_ptr, IrType::I64) else {
+            self.loop_stack.pop();
+            return;
+        };
+
+        // Get key from keys array
+        let Some(key_value) = self.lower_index_access(keys_array, idx_for_access, key_type_id)
+        else {
+            self.loop_stack.pop();
+            return;
+        };
+
+        // Bind key to pattern
+        if let HirPattern::Variable { symbol, .. } = key_pattern {
+            self.symbol_map.insert(*symbol, key_value);
+        }
+
+        // Look up value: map.get(key)
+        let get_fn_name = if is_int_key {
+            "haxe_intmap_get"
+        } else {
+            "haxe_stringmap_get"
+        };
+        let key_ir_type = if is_int_key {
+            IrType::I64
+        } else {
+            IrType::Ptr(Box::new(IrType::U8))
+        };
+        let get_fn = self.get_or_register_extern_function(
+            get_fn_name,
+            vec![ptr_void.clone(), key_ir_type],
+            IrType::I64,
+        );
+        let Some(raw_value) =
+            self.builder
+                .build_call_direct(get_fn, vec![map_ptr, key_value], IrType::I64)
+        else {
+            self.loop_stack.pop();
+            return;
+        };
+
+        // Convert raw u64 to the correct value type
+        let value_ir_type = self.convert_type(value_type_id);
+        let map_value = match &value_ir_type {
+            IrType::Ptr(_) => {
+                // Pointer types: bitcast i64 to ptr
+                if let Some(cast) = self.builder.build_bitcast(raw_value, value_ir_type) {
+                    cast
+                } else {
+                    raw_value
+                }
+            }
+            IrType::F64 => {
+                // Float: bitcast i64 bits to f64
+                if let Some(cast) = self.builder.build_bitcast(raw_value, IrType::F64) {
+                    cast
+                } else {
+                    raw_value
+                }
+            }
+            _ => {
+                // Int, Bool, etc.: raw i64 is fine (truncate/cast as needed)
+                raw_value
+            }
+        };
+
+        // Bind value to pattern
+        if let HirPattern::Variable { symbol, .. } = value_pattern {
+            self.symbol_map.insert(*symbol, map_value);
+        }
+
+        // Lower the loop body
+        self.enter_drop_scope();
+        self.lower_block(body);
+
+        // Add back-edge phi incoming values from body end to cond block
+        let body_end_block = self.builder.current_block().unwrap_or(loop_body_block);
+        for (symbol_id, phi_reg) in &phi_nodes {
+            let back_edge_value = if let Some(&updated_reg) = self.symbol_map.get(symbol_id) {
+                updated_reg
+            } else {
+                *phi_reg
+            };
+            self.builder.add_phi_incoming(
+                loop_cond_block,
+                *phi_reg,
+                body_end_block,
+                back_edge_value,
+            );
+        }
+
+        // Increment index
+        if !self.is_terminated() {
+            self.exit_drop_scope();
+            let Some(idx_to_inc) = self.builder.build_load(index_ptr, IrType::I64) else {
+                self.loop_stack.pop();
+                return;
+            };
+            let Some(one) = self.builder.build_const(IrValue::I64(1)) else {
+                self.loop_stack.pop();
+                return;
+            };
+            let Some(next_val) =
+                self.builder
+                    .build_binop(crate::ir::instructions::BinaryOp::Add, idx_to_inc, one)
+            else {
+                self.loop_stack.pop();
+                return;
+            };
+            self.builder.build_store(index_ptr, next_val);
+            self.builder.build_branch(loop_cond_block);
+        }
+
+        self.loop_stack.pop();
+        self.builder.switch_to_block(loop_exit_block);
+
+        // Update symbol map to use exit phi nodes for post-loop code
+        for (symbol_id, exit_param_reg) in &exit_phi_nodes {
+            self.symbol_map.insert(*symbol_id, *exit_param_reg);
+        }
+        // Update owned_heap_values to use exit phi values
+        for (symbol_id, exit_param_reg) in &exit_phi_nodes {
+            if self.owned_heap_values.contains_key(symbol_id) {
+                self.owned_heap_values.insert(*symbol_id, *exit_param_reg);
+            }
+        }
     }
 
     /// Helper: iterate over a HaxeArray by index. Used by both Array for-in and Map for-in
@@ -20748,8 +21405,12 @@ impl<'a> HirToMirContext<'a> {
         let alloc_size = (field_index as u64 * 8).max(16);
         self.class_alloc_sizes.insert(type_id, alloc_size);
 
-        // Build interface vtables for each implemented interface.
-        // For each interface method, find the matching class method by name.
+        // Build interface vtables for each implemented interface AND their
+        // transitive parent interfaces. For each interface method, find the
+        // matching class method by name.
+        //
+        // Collect all interface symbols (direct + transitive parents)
+        let mut all_iface_symbols: Vec<SymbolId> = Vec::new();
         for &iface_type_id in &class.implements {
             let iface_symbol = {
                 let type_table = self.type_table.borrow();
@@ -20761,55 +21422,105 @@ impl<'a> HirToMirContext<'a> {
                     }
                 })
             };
-
             if let Some(iface_sym) = iface_symbol {
-                if let Some(method_names) = self.interface_method_names.get(&iface_sym).cloned() {
-                    let mut vtable_entries = Vec::new();
-                    for iface_method_name in &method_names {
-                        // Find the class method that matches this interface method name
-                        let class_method_sym = class
-                            .methods
-                            .iter()
-                            .find(|m| m.function.name == *iface_method_name)
-                            .map(|m| m.function.symbol_id);
-
-                        if let Some(method_sym) = class_method_sym {
-                            vtable_entries.push(method_sym);
+                // Add this interface
+                if !all_iface_symbols.contains(&iface_sym) {
+                    all_iface_symbols.push(iface_sym);
+                }
+                // Recursively add parent interfaces
+                let mut stack = vec![iface_sym];
+                while let Some(current) = stack.pop() {
+                    if let Some(parents) = self.interface_extends.get(&current).cloned() {
+                        for parent in parents {
+                            if !all_iface_symbols.contains(&parent) {
+                                all_iface_symbols.push(parent);
+                                stack.push(parent);
+                            }
                         }
                     }
-                    self.interface_vtables
-                        .insert((class.symbol_id, iface_sym), vtable_entries);
                 }
             }
         }
 
-        // IMPORTANT: Pre-register constructor mapping so that 'new' expressions
-        // in function bodies can find the constructor before it's actually lowered.
-        // The constructor will be lowered later in the second pass.
-        // We use a placeholder IrFunctionId that will be updated when the actual
-        // constructor is lowered.
-        //
-        // NOTE: We can't lower the constructor here because we're still in the
-        // metadata registration phase and function lowering requires a different
-        // builder state. So we just reserve the mapping.
-        //
-        // Actually, we can't pre-register with a placeholder because we don't have
-        // a function ID yet. The real fix is to ensure constructors are lowered
-        // before module-level functions. But for now, we'll keep the current
-        // approach and ensure the ordering is correct at the module level.
+        // Build vtable for each interface (direct and inherited)
+        for iface_sym in all_iface_symbols {
+            if let Some(method_names) = self.interface_method_names.get(&iface_sym).cloned() {
+                let mut vtable_entries = Vec::new();
+                for iface_method_name in &method_names {
+                    // Find the class method that matches this interface method name
+                    let class_method_sym = class
+                        .methods
+                        .iter()
+                        .find(|m| m.function.name == *iface_method_name)
+                        .map(|m| m.function.symbol_id);
+
+                    if let Some(method_sym) = class_method_sym {
+                        vtable_entries.push(method_sym);
+                    }
+                }
+                self.interface_vtables
+                    .insert((class.symbol_id, iface_sym), vtable_entries);
+            }
+        }
+
+        // Register class method symbols for iterator protocol lookup
+        for method in &class.methods {
+            self.class_method_symbols.insert(
+                (class.symbol_id, method.function.name),
+                method.function.symbol_id,
+            );
+        }
     }
 
     fn register_interface_metadata(&mut self, type_id: TypeId, interface: &HirInterface) {
         // Interfaces are represented as method tables
         let typedef_id = self.builder.module.alloc_typedef_id();
 
-        let fields: Vec<IrField> = interface
-            .methods
+        // Collect parent interface SymbolIds and their methods
+        let mut parent_symbols = Vec::new();
+        let mut all_method_names: Vec<InternedString> = Vec::new();
+
+        for &parent_type_id in &interface.extends {
+            let parent_sym = {
+                let type_table = self.type_table.borrow();
+                type_table.get(parent_type_id).and_then(|t| {
+                    if let TypeKind::Interface { symbol_id, .. } = &t.kind {
+                        Some(*symbol_id)
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(psym) = parent_sym {
+                parent_symbols.push(psym);
+                // Add inherited methods (already registered due to ordering)
+                if let Some(parent_methods) = self.interface_method_names.get(&psym).cloned() {
+                    for m in parent_methods {
+                        if !all_method_names.contains(&m) {
+                            all_method_names.push(m);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add own methods after inherited ones
+        for method in &interface.methods {
+            if !all_method_names.contains(&method.name) {
+                all_method_names.push(method.name);
+            }
+        }
+
+        // Store extends relationships for transitive vtable building
+        self.interface_extends
+            .insert(interface.symbol_id, parent_symbols);
+
+        let fields: Vec<IrField> = all_method_names
             .iter()
-            .map(|method| IrField {
+            .map(|name| IrField {
                 name: self
                     .string_interner
-                    .get(method.name)
+                    .get(*name)
                     .unwrap_or("<unknown>")
                     .to_string(),
                 ty: IrType::Ptr(Box::new(IrType::Function {
@@ -20839,10 +21550,9 @@ impl<'a> HirToMirContext<'a> {
 
         self.builder.module.add_type(typedef);
 
-        // Store method ordering for vtable construction
-        let method_names: Vec<InternedString> = interface.methods.iter().map(|m| m.name).collect();
+        // Store method ordering for vtable construction (includes inherited methods)
         self.interface_method_names
-            .insert(interface.symbol_id, method_names);
+            .insert(interface.symbol_id, all_method_names);
     }
 
     fn register_abstract_metadata(&mut self, type_id: TypeId, abstract_decl: &HirAbstract) {

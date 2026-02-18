@@ -781,6 +781,9 @@ pub struct TypedSwitchCase {
     /// Case value (constant expression)
     pub case_value: TypedExpression,
 
+    /// Optional guard expression (`case v if v > 0:`)
+    pub guard: Option<TypedExpression>,
+
     /// Case body
     pub body: TypedStatement,
 

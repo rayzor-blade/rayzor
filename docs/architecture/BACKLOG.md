@@ -1712,7 +1712,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 **Not Yet Implemented:**
 
-- [ ] Guard expressions in match arms (`case v if v > 0:`)
+- [x] Guard expressions in match arms (`case v if v > 0:`) — guards propagated from AST through TAST/HIR to MIR (2026-02-18)
 - [ ] Exhaustiveness checking (warn on missing cases)
 - [ ] Nested pattern matching (`case Pair(Some(x), _):`)
 
@@ -1736,7 +1736,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 **Not Yet Implemented:**
 
 - [ ] Multiple interface implementation (`class Foo implements Bar implements Baz`)
-- [ ] Interface inheritance (`interface A extends B`)
+- [x] Interface inheritance (`interface A extends B`) — inherited methods in vtable, transitive parent vtables for implementing classes (2026-02-18)
 - [ ] `Std.is(obj, IMyInterface)` runtime check
 - [ ] Fat pointer lifecycle management (free on scope exit)
 
@@ -1870,8 +1870,8 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 **Not Yet Implemented:**
 
-- [ ] Custom iterator protocol (`hasNext()` + `next()`) for user types
-- [ ] `for (key => value in map)` key-value destructuring iteration
+- [x] Custom iterator protocol (`hasNext()` + `next()`) for user types — direct method call dispatch via class_method_symbols, stack slots for mutable outer vars (2026-02-18)
+- [x] `for (key => value in map)` key-value destructuring iteration — calls map.get(key) per iteration for IntMap/StringMap (2026-02-18)
 
 ### 16.8 Static Extensions (`using`) 🟢
 

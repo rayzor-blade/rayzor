@@ -941,7 +941,7 @@ impl<'a> TastToHirContext<'a> {
                     // TAST TypedSwitchCase has case_value and body
                     let patterns = vec![self.lower_case_value_pattern(&case.case_value)];
 
-                    let guard = None; // TAST doesn't have guard on switch cases
+                    let guard = case.guard.as_ref().map(|g| self.lower_expression(g));
                     let body = self.lower_statement_as_block(&case.body);
 
                     hir_cases.push(HirMatchCase {
@@ -2051,12 +2051,14 @@ impl<'a> TastToHirContext<'a> {
                 default_case,
             } => {
                 // Check if any case has constructor patterns (enum matching)
+                // Note: guards and variable bindings are handled in the if-else chain path
                 let has_constructor_patterns = cases.iter().any(|case| {
                     matches!(
                         &case.case_value.kind,
                         TypedExpressionKind::PatternPlaceholder { pattern, .. }
                             if matches!(pattern, parser::Pattern::Constructor { .. })
-                    ) || matches!(
+                    )
+                    || matches!(
                         &case.case_value.kind,
                         TypedExpressionKind::FunctionCall { function, .. }
                             if matches!(&function.kind, TypedExpressionKind::Variable { symbol_id }
@@ -2098,7 +2100,7 @@ impl<'a> TastToHirContext<'a> {
 
                         hir_cases.push(HirMatchCase {
                             patterns,
-                            guard: None,
+                            guard: case.guard.as_ref().map(|g| self.lower_expression(g)),
                             body,
                         });
                     }
@@ -2132,7 +2134,7 @@ impl<'a> TastToHirContext<'a> {
 
                     HirExprKind::Block(block)
                 } else {
-                    // Simple value matching: convert to if-then-else chain
+                    // Value matching with optional guards: convert to if-then-else chain
                     let discriminant_expr = self.lower_expression(discriminant);
                     let mut current_expr = default_case
                         .as_ref()
@@ -2141,7 +2143,6 @@ impl<'a> TastToHirContext<'a> {
 
                     // Build if-then-else chain from right to left
                     for case in cases.iter().rev() {
-                        let case_value = self.lower_expression(&case.case_value);
                         let case_body = match &case.body {
                             TypedStatement::Expression { expression, .. } => {
                                 self.lower_expression(expression)
@@ -2161,18 +2162,71 @@ impl<'a> TastToHirContext<'a> {
                             }
                         };
 
-                        let condition = HirExpr::new(
-                            HirExprKind::Binary {
-                                lhs: Box::new(discriminant_expr.clone()),
-                                op: crate::ir::hir::HirBinaryOp::Eq,
-                                rhs: Box::new(case_value),
-                            },
-                            self.get_bool_type(),
-                            self.current_lifetime,
-                            SourceLocation::unknown(),
+                        // Extract variable bindings for PatternPlaceholder cases
+                        let var_bindings: Vec<(InternedString, SymbolId)> =
+                            if let TypedExpressionKind::PatternPlaceholder {
+                                variable_bindings,
+                                ..
+                            } = &case.case_value.kind
+                            {
+                                variable_bindings.clone()
+                            } else {
+                                vec![]
+                            };
+
+                        // Determine condition based on case type
+                        let is_wildcard = matches!(
+                            &case.case_value.kind,
+                            TypedExpressionKind::Null
+                                | TypedExpressionKind::PatternPlaceholder { .. }
                         );
 
-                        current_expr = HirExpr::new(
+                        let condition = if is_wildcard {
+                            // Variable pattern or wildcard: always matches (condition is guard or true)
+                            if let Some(ref guard) = case.guard {
+                                self.lower_expression(guard)
+                            } else {
+                                // Unconditional match (wildcard without guard)
+                                HirExpr::new(
+                                    HirExprKind::Literal(crate::ir::hir::HirLiteral::Bool(true)),
+                                    self.get_bool_type(),
+                                    self.current_lifetime,
+                                    SourceLocation::unknown(),
+                                )
+                            }
+                        } else {
+                            // Literal value match
+                            let case_value = self.lower_expression(&case.case_value);
+                            let eq_condition = HirExpr::new(
+                                HirExprKind::Binary {
+                                    lhs: Box::new(discriminant_expr.clone()),
+                                    op: crate::ir::hir::HirBinaryOp::Eq,
+                                    rhs: Box::new(case_value),
+                                },
+                                self.get_bool_type(),
+                                self.current_lifetime,
+                                SourceLocation::unknown(),
+                            );
+
+                            // If there's a guard, combine with AND
+                            if let Some(ref guard) = case.guard {
+                                let guard_expr = self.lower_expression(guard);
+                                HirExpr::new(
+                                    HirExprKind::Binary {
+                                        lhs: Box::new(eq_condition),
+                                        op: crate::ir::hir::HirBinaryOp::And,
+                                        rhs: Box::new(guard_expr),
+                                    },
+                                    self.get_bool_type(),
+                                    self.current_lifetime,
+                                    SourceLocation::unknown(),
+                                )
+                            } else {
+                                eq_condition
+                            }
+                        };
+
+                        let if_expr = HirExpr::new(
                             HirExprKind::If {
                                 condition: Box::new(condition),
                                 then_expr: Box::new(case_body),
@@ -2182,6 +2236,35 @@ impl<'a> TastToHirContext<'a> {
                             self.current_lifetime,
                             SourceLocation::unknown(),
                         );
+
+                        // If there are variable bindings, wrap in a block that
+                        // binds each pattern variable to the discriminant
+                        if !var_bindings.is_empty() {
+                            let mut stmts = Vec::new();
+                            for (name, sym) in &var_bindings {
+                                stmts.push(HirStatement::Let {
+                                    pattern: HirPattern::Variable {
+                                        name: *name,
+                                        symbol: *sym,
+                                    },
+                                    type_hint: None,
+                                    init: Some(discriminant_expr.clone()),
+                                    is_mutable: false,
+                                });
+                            }
+                            current_expr = HirExpr::new(
+                                HirExprKind::Block(HirBlock {
+                                    statements: stmts,
+                                    expr: Some(Box::new(if_expr)),
+                                    scope: self.current_scope,
+                                }),
+                                self.get_dynamic_type(),
+                                self.current_lifetime,
+                                SourceLocation::unknown(),
+                            );
+                        } else {
+                            current_expr = if_expr;
+                        }
                     }
 
                     current_expr.kind

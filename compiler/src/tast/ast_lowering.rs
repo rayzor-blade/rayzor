@@ -4888,14 +4888,8 @@ impl<'a> AstLowering<'a> {
 
     /// Resolve a TypePath to a TypeId for constructor calls
     fn resolve_type_path(&mut self, type_path: &parser::TypePath) -> LoweringResult<TypeId> {
-        // First check if it's a built-in type
-        if type_path.package.is_empty() && type_path.sub.is_none() {
-            if let Some(builtin_type) = self.resolve_builtin_type(&type_path.name) {
-                return Ok(builtin_type);
-            }
-        }
-
-        // Try to resolve using the import resolver first
+        // Try to resolve using the import resolver first — user imports take priority
+        // over top-level stdlib builtins (Array, Map, etc.)
         let name_interned = self.context.string_interner.intern(&type_path.name);
         let candidates = self.context.import_resolver.resolve_type(
             name_interned,
@@ -4914,6 +4908,15 @@ impl<'a> AstLowering<'a> {
                 if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
                     return Ok(symbol.type_id);
                 }
+            }
+        }
+
+        // Only check top-level stdlib builtins when no import candidates exist.
+        // This ensures user-defined classes with the same name as builtins (e.g., Map)
+        // take priority when explicitly imported.
+        if candidates.is_empty() && type_path.package.is_empty() && type_path.sub.is_none() {
+            if let Some(builtin_type) = self.resolve_builtin_type(&type_path.name) {
+                return Ok(builtin_type);
             }
         }
 
@@ -8285,39 +8288,81 @@ impl<'a> AstLowering<'a> {
             });
         }
 
-        // For Map types, emit a ForIn statement that passes through to MIR level
-        // where keys_to_array + array iteration handles it
-        let is_map = {
+        // For Map types (including IntMap/StringMap extern classes), emit a ForIn
+        // statement that passes through to MIR level where keys_to_array + array
+        // iteration handles it
+        let map_key_value_types: Option<(TypeId, TypeId)> = {
             let type_table = self.context.type_table.borrow();
             if let Some(actual_type) = type_table.get(iterable_expr.expr_type) {
-                matches!(&actual_type.kind, TypeKind::Map { .. })
+                match &actual_type.kind {
+                    TypeKind::Map {
+                        key_type,
+                        value_type,
+                    } => Some((*key_type, *value_type)),
+                    TypeKind::Class {
+                        symbol_id,
+                        type_args,
+                    } => {
+                        // Check if this is IntMap<T> or StringMap<T> extern class
+                        let class_name = self
+                            .context
+                            .symbol_table
+                            .get_symbol(*symbol_id)
+                            .and_then(|sym| self.context.string_interner.get(sym.name));
+                        match class_name {
+                            Some("IntMap") => {
+                                let value_type = type_args
+                                    .first()
+                                    .copied()
+                                    .unwrap_or_else(|| type_table.dynamic_type());
+                                Some((type_table.int_type(), value_type))
+                            }
+                            Some("StringMap") => {
+                                let value_type = type_args
+                                    .first()
+                                    .copied()
+                                    .unwrap_or_else(|| type_table.dynamic_type());
+                                Some((type_table.string_type(), value_type))
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
             } else {
-                false
+                None
             }
         };
 
-        if is_map && key_var.is_none() {
+        if let Some((key_type_id, value_type_id)) = map_key_value_types {
             let loop_body_scope_id = ScopeId::from_raw(self.context.next_scope_id());
             let source_location = self.context.create_location_from_span(expression.span);
-            // For Map for-in, iterate over keys (not values)
-            let element_type = {
-                let type_table = self.context.type_table.borrow();
-                if let Some(actual_type) = type_table.get(iterable_expr.expr_type) {
-                    if let TypeKind::Map { key_type, .. } = &actual_type.kind {
-                        *key_type
-                    } else {
-                        self.infer_element_type_from_iterable(&iterable_expr)
-                    }
-                } else {
-                    self.infer_element_type_from_iterable(&iterable_expr)
-                }
-            };
+
+            // For key-only iteration: value_var gets key type
+            // For key=>value iteration: value_var gets value type, key_var gets key type
             let var_name = self.context.intern_string(var);
+            let var_type = if key_var.is_some() {
+                value_type_id
+            } else {
+                key_type_id
+            };
             let var_symbol = self.context.symbol_table.create_variable_with_type(
                 var_name,
                 loop_body_scope_id,
-                element_type,
+                var_type,
             );
+
+            // Create key variable if key=>value syntax is used
+            let key_sym = if let Some(ref key_name) = key_var {
+                let key_interned = self.context.intern_string(key_name);
+                Some(self.context.symbol_table.create_variable_with_type(
+                    key_interned,
+                    loop_body_scope_id,
+                    key_type_id,
+                ))
+            } else {
+                None
+            };
 
             let old_scope = self.context.current_scope;
             self.context.current_scope = loop_body_scope_id;
@@ -8326,7 +8371,7 @@ impl<'a> AstLowering<'a> {
 
             let for_in_stmt = TypedStatement::ForIn {
                 value_var: var_symbol,
-                key_var: None,
+                key_var: key_sym,
                 iterable: iterable_expr,
                 body: Box::new(body_stmt),
                 source_location,
@@ -8345,89 +8390,57 @@ impl<'a> AstLowering<'a> {
             });
         }
 
-        // For non-Array, non-Map types, use the generic iterator pattern (requires iterator classes)
-        let _iterator_type_name = self.infer_iterator_type_name(&iterable_expr.expr_type);
-
-        // Validate that the iterable type is actually iterable
+        // For non-Array, non-Map types (classes with iterator protocol, interfaces, etc.),
+        // emit a ForIn statement and let MIR handle the iteration dispatch.
         {
-            let type_table = self.context.type_table.borrow();
-            if let Some(actual_type) = type_table.get(iterable_expr.expr_type) {
-                use crate::tast::core::TypeKind;
-                let is_iterable = matches!(
-                    &actual_type.kind,
-                    TypeKind::Array { .. }
-                        | TypeKind::Map { .. }
-                        | TypeKind::String
-                        | TypeKind::Dynamic
-                        | TypeKind::Class { .. }
-                        | TypeKind::Interface { .. }
-                );
-                if !is_iterable {
-                    drop(type_table);
-                    self.context.add_error(LoweringError::TypeInferenceError {
-                        expression: "Type is not iterable".to_string(),
-                        location: iterable_expr.source_location,
-                    });
-                }
-            }
-        }
+            let loop_body_scope_id = ScopeId::from_raw(self.context.next_scope_id());
+            let source_location = self.context.create_location_from_span(expression.span);
 
-        // Create the loop body scope
-        let loop_body_scope_id = ScopeId::from_raw(self.context.next_scope_id());
-
-        // Create the loop variable
-        let var_name = self.context.intern_string(var);
-        let element_type = self.infer_element_type_from_iterable(&iterable_expr);
-        let var_symbol = self.context.symbol_table.create_variable_with_type(
-            var_name,
-            loop_body_scope_id,
-            element_type,
-        );
-
-        // Handle optional key variable for key-value iteration
-        let key_symbol = if let Some(key) = key_var {
-            let key_name = self.context.intern_string(key);
-            let int_type = self.context.type_table.borrow().int_type();
-            Some(self.context.symbol_table.create_variable_with_type(
-                key_name,
+            let var_name = self.context.intern_string(var);
+            let element_type = self.infer_element_type_from_iterable(&iterable_expr);
+            let var_symbol = self.context.symbol_table.create_variable_with_type(
+                var_name,
                 loop_body_scope_id,
-                int_type,
-            ))
-        } else {
-            None
-        };
+                element_type,
+            );
 
-        // Enter the loop body scope
-        let old_scope = self.context.current_scope;
-        self.context.current_scope = loop_body_scope_id;
+            let key_sym = if let Some(ref key_name) = key_var {
+                let key_interned = self.context.intern_string(key_name);
+                let int_type = self.context.type_table.borrow().int_type();
+                Some(self.context.symbol_table.create_variable_with_type(
+                    key_interned,
+                    loop_body_scope_id,
+                    int_type,
+                ))
+            } else {
+                None
+            };
 
-        let body_stmt = self.convert_expression_to_statement(body)?;
+            let old_scope = self.context.current_scope;
+            self.context.current_scope = loop_body_scope_id;
+            let body_stmt = self.convert_expression_to_statement(body)?;
+            self.context.current_scope = old_scope;
 
-        // Restore the previous scope
-        self.context.current_scope = old_scope;
+            let for_in_stmt = TypedStatement::ForIn {
+                value_var: var_symbol,
+                key_var: key_sym,
+                iterable: iterable_expr,
+                body: Box::new(body_stmt),
+                source_location,
+            };
 
-        // Use the existing convert_for_in_to_c_style_for function for generic iterators
-        let for_stmt = self.convert_for_in_to_c_style_for(
-            var_symbol,
-            key_symbol,
-            iterable_expr,
-            body_stmt,
-            loop_body_scope_id,
-            self.context.create_location_from_span(expression.span),
-        )?;
-
-        // Wrap in an expression
-        Ok(TypedExpression {
-            expr_type: self.context.type_table.borrow().void_type(),
-            kind: TypedExpressionKind::Block {
-                statements: vec![for_stmt],
-                scope_id: ScopeId::from_raw(self.context.next_scope_id()),
-            },
-            usage: VariableUsage::Move,
-            lifetime_id: LifetimeId::static_lifetime(),
-            source_location: self.context.create_location_from_span(expression.span),
-            metadata: ExpressionMetadata::default(),
-        })
+            return Ok(TypedExpression {
+                expr_type: self.context.type_table.borrow().void_type(),
+                kind: TypedExpressionKind::Block {
+                    statements: vec![for_in_stmt],
+                    scope_id: loop_body_scope_id,
+                },
+                usage: VariableUsage::Move,
+                lifetime_id: LifetimeId::static_lifetime(),
+                source_location,
+                metadata: ExpressionMetadata::default(),
+            });
+        }
     }
 
     /// Lower array comprehension: [for (i in 0...10) i * 2]
@@ -10535,6 +10548,13 @@ impl<'a> AstLowering<'a> {
                 let case_expr =
                     self.create_constructor_expression_with_bindings(first_pattern, var_bindings)?;
 
+                // Lower guard in the new scope (before restoring) so pattern vars are visible
+                let guard = case
+                    .guard
+                    .as_ref()
+                    .map(|g| self.lower_expression(g))
+                    .transpose()?;
+
                 // Lower case body as expression in the new scope with bound variables
                 let body_expr = self.lower_expression(&case.body)?;
 
@@ -10548,6 +10568,7 @@ impl<'a> AstLowering<'a> {
 
                 return Ok(TypedSwitchCase {
                     case_value: case_expr,
+                    guard,
                     body,
                     source_location: self.context.span_to_location(&case.span),
                 });
@@ -10572,6 +10593,11 @@ impl<'a> AstLowering<'a> {
 
         Ok(TypedSwitchCase {
             case_value,
+            guard: case
+                .guard
+                .as_ref()
+                .map(|g| self.lower_expression(g))
+                .transpose()?,
             body,
             source_location: self.context.span_to_location(&case.span),
         })
@@ -10598,6 +10624,13 @@ impl<'a> AstLowering<'a> {
                 let case_expr =
                     self.create_constructor_expression_with_bindings(first_pattern, var_bindings)?;
 
+                // Lower guard in the new scope (before restoring) so pattern vars are visible
+                let guard = case
+                    .guard
+                    .as_ref()
+                    .map(|g| self.lower_expression(g))
+                    .transpose()?;
+
                 // Lower case body in the new scope with bound variables
                 let body = self.lower_expression_to_statement(&case.body)?;
 
@@ -10606,6 +10639,7 @@ impl<'a> AstLowering<'a> {
 
                 return Ok(TypedSwitchCase {
                     case_value: case_expr,
+                    guard,
                     body,
                     source_location: self.context.span_to_location(&case.span),
                 });
@@ -10625,6 +10659,11 @@ impl<'a> AstLowering<'a> {
 
         Ok(TypedSwitchCase {
             case_value,
+            guard: case
+                .guard
+                .as_ref()
+                .map(|g| self.lower_expression(g))
+                .transpose()?,
             body,
             source_location: self.context.span_to_location(&case.span),
         })
@@ -10901,7 +10940,9 @@ impl<'a> AstLowering<'a> {
                         metadata: ExpressionMetadata::default(),
                     })
                 } else {
-                    self.lower_pattern_to_expression(pattern)
+                    // Variable binding pattern (e.g., `case v if v > 0:`)
+                    // Use PatternPlaceholder to preserve variable bindings for HIR lowering
+                    self.create_pattern_placeholder_with_bindings(pattern, variable_bindings)
                 }
             }
             _ => {
