@@ -952,6 +952,7 @@ impl<'a> TypeCheckingPhase<'a> {
             TypedExpressionKind::FieldAccess {
                 object,
                 field_symbol,
+                ..
             } => {
                 let object_type = self.check_expression(object)?;
 
@@ -1232,7 +1233,7 @@ impl<'a> TypeCheckingPhase<'a> {
                 receiver,
                 method_symbol,
                 arguments,
-                type_arguments: _,
+                ..
             } => {
                 self.check_method_call_expr(
                     receiver,

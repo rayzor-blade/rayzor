@@ -480,6 +480,7 @@ fn test_null_safety_with_ssa(
                                         metadata: ExpressionMetadata::default(),
                                     }),
                                     field_symbol: SymbolId::from_raw(200),
+                                    is_optional: false,
                                 },
                                 expr_type: TypeId::from_raw(1),
                                 usage: VariableUsage::Copy,

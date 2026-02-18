@@ -1033,10 +1033,12 @@ pub enum TypedExpressionKind {
         symbol_id: SymbolId,
     },
 
-    /// Field access: obj.field
+    /// Field access: obj.field or obj?.field
     FieldAccess {
         object: Box<TypedExpression>,
         field_symbol: SymbolId,
+        /// True for optional chaining: obj?.field
+        is_optional: bool,
     },
 
     /// Static field access: Class.field
@@ -1058,12 +1060,14 @@ pub enum TypedExpressionKind {
         type_arguments: Vec<TypeId>,
     },
 
-    /// Method call
+    /// Method call: obj.method() or obj?.method()
     MethodCall {
         receiver: Box<TypedExpression>,
         method_symbol: SymbolId,
         arguments: Vec<TypedExpression>,
         type_arguments: Vec<TypeId>,
+        /// True for optional chaining: obj?.method()
+        is_optional: bool,
     },
 
     /// Static method call

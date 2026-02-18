@@ -493,6 +493,7 @@ fn create_field_access(object_symbol: SymbolId, field_symbol: SymbolId) -> Typed
         kind: TypedExpressionKind::FieldAccess {
             object: Box::new(create_variable_expression(object_symbol)),
             field_symbol,
+            is_optional: false,
         },
         expr_type: TypeId::from_raw(1),
         usage: VariableUsage::Copy,

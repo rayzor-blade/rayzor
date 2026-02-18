@@ -1480,6 +1480,9 @@ fn uses_any_tracked(inst: &IrInstruction, tracked: &BTreeSet<IrId>) -> bool {
         IrInstruction::BinOp { left, right, .. } => {
             tracked.contains(left) || tracked.contains(right)
         }
+        IrInstruction::Cmp { left, right, .. } => {
+            tracked.contains(left) || tracked.contains(right)
+        }
         IrInstruction::Select {
             condition,
             true_val,

@@ -5687,6 +5687,7 @@ impl<'a> AstLowering<'a> {
                     TypedExpressionKind::FieldAccess {
                         object: Box::new(receiver),
                         field_symbol: symbol_id,
+                        is_optional: false,
                     }
                 } else {
                     TypedExpressionKind::Variable { symbol_id }
@@ -5762,8 +5763,8 @@ impl<'a> AstLowering<'a> {
             ExprKind::Call { expr, args } => {
                 return self.lower_call_expression(expression, expr, args);
             }
-            ExprKind::Field { expr, field, .. } => {
-                return self.lower_field_expression(expression, expr, field);
+            ExprKind::Field { expr, field, is_optional } => {
+                return self.lower_field_expression(expression, expr, field, *is_optional);
             }
             ExprKind::Index { expr, index } => {
                 let array_expr = self.lower_expression(expr)?;
@@ -6845,8 +6846,9 @@ impl<'a> AstLowering<'a> {
             ExprKind::Field {
                 expr: obj_expr,
                 field,
-                ..
+                is_optional: field_is_optional,
             } => {
+                let is_optional_call = *field_is_optional;
                 // Check if this is a static method call (Class.method)
                 if let ExprKind::Ident(class_name) = &obj_expr.kind {
                     let class_name_interned = self.context.intern_string(class_name);
@@ -7198,6 +7200,7 @@ impl<'a> AstLowering<'a> {
                             method_symbol,
                             arguments: arg_exprs,
                             type_arguments: Vec::new(),
+                            is_optional: is_optional_call,
                         }
                     }
                 } else {
@@ -7207,6 +7210,7 @@ impl<'a> AstLowering<'a> {
                         method_symbol,
                         arguments: arg_exprs,
                         type_arguments: Vec::new(),
+                        is_optional: is_optional_call,
                     }
                 }
             }
@@ -7320,6 +7324,7 @@ impl<'a> AstLowering<'a> {
                                 method_symbol,
                                 arguments: arg_exprs,
                                 type_arguments: Vec::new(),
+                                is_optional: false,
                             }
                         };
 
@@ -7369,6 +7374,7 @@ impl<'a> AstLowering<'a> {
         expression: &Expr,
         expr: &Expr,
         field: &str,
+        is_optional: bool,
     ) -> LoweringResult<TypedExpression> {
         // Helper function to extract a fully qualified path from nested Field expressions
         // For example: rayzor.concurrent.Thread -> vec!["rayzor", "concurrent", "Thread"]
@@ -7898,6 +7904,7 @@ impl<'a> AstLowering<'a> {
         let kind = TypedExpressionKind::FieldAccess {
             object: Box::new(obj_expr),
             field_symbol,
+            is_optional,
         };
 
         // Build the TypedExpression for the non-early-return path
@@ -8135,6 +8142,7 @@ impl<'a> AstLowering<'a> {
                 kind: TypedExpressionKind::FieldAccess {
                     object: Box::new(iterable_expr.clone()),
                     field_symbol: length_symbol,
+                    is_optional: false,
                 },
                 usage: VariableUsage::Copy,
                 lifetime_id: LifetimeId::static_lifetime(),
@@ -8880,6 +8888,7 @@ impl<'a> AstLowering<'a> {
                 method_symbol: iterator_method_symbol,
                 arguments: vec![],
                 type_arguments: vec![],
+                is_optional: false,
             },
             usage: VariableUsage::Move,
             lifetime_id: LifetimeId::static_lifetime(),
@@ -8917,6 +8926,7 @@ impl<'a> AstLowering<'a> {
                 method_symbol: has_next_symbol,
                 arguments: vec![],
                 type_arguments: vec![],
+                is_optional: false,
             },
             usage: VariableUsage::Copy,
             lifetime_id: LifetimeId::static_lifetime(),
@@ -8946,6 +8956,7 @@ impl<'a> AstLowering<'a> {
                     method_symbol: next_symbol,
                     arguments: vec![],
                     type_arguments: vec![],
+                    is_optional: false,
                 },
                 usage: VariableUsage::Move,
                 lifetime_id: LifetimeId::static_lifetime(),
@@ -8982,6 +8993,7 @@ impl<'a> AstLowering<'a> {
                 kind: TypedExpressionKind::FieldAccess {
                     object: Box::new(pair_var.clone()),
                     field_symbol: key_field_symbol,
+                    is_optional: false,
                 },
                 usage: VariableUsage::Copy,
                 lifetime_id: LifetimeId::static_lifetime(),
@@ -9006,6 +9018,7 @@ impl<'a> AstLowering<'a> {
                 kind: TypedExpressionKind::FieldAccess {
                     object: Box::new(pair_var),
                     field_symbol: value_field_symbol,
+                    is_optional: false,
                 },
                 usage: VariableUsage::Copy,
                 lifetime_id: LifetimeId::static_lifetime(),
@@ -9033,6 +9046,7 @@ impl<'a> AstLowering<'a> {
                     method_symbol: next_symbol,
                     arguments: vec![],
                     type_arguments: vec![],
+                    is_optional: false,
                 },
                 usage: VariableUsage::Move,
                 lifetime_id: LifetimeId::static_lifetime(),
@@ -9376,6 +9390,7 @@ impl<'a> AstLowering<'a> {
             TypedExpressionKind::FieldAccess {
                 object,
                 field_symbol,
+                ..
             } => {
                 // Look up field type from symbol table
                 if let Some(symbol) = self.context.symbol_table.get_symbol(*field_symbol) {
@@ -10317,6 +10332,7 @@ impl<'a> AstLowering<'a> {
             TypedExpressionKind::FieldAccess {
                 object,
                 field_symbol,
+                ..
             } => {
                 self.validate_expression(object, errors);
                 if *field_symbol == SymbolId::invalid() {

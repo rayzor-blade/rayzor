@@ -1293,11 +1293,109 @@ impl<'a> TastToHirContext<'a> {
             TypedExpressionKind::FieldAccess {
                 object,
                 field_symbol,
-                ..
-            } => HirExprKind::Field {
-                object: Box::new(self.lower_expression(object)),
-                field: *field_symbol,
-            },
+                is_optional,
+            } => {
+                if *is_optional {
+                    // Desugar obj?.field:
+                    // - Simple objects (Variable): if (obj != null) obj.field else null
+                    //   Safe to reference twice since variables are just register reads.
+                    // - Complex objects: { var _tmp = obj; if (_tmp != null) _tmp.field else null }
+                    //   Uses Let binding to avoid double-evaluation of conditionals.
+                    let is_simple = matches!(
+                        object.kind,
+                        TypedExpressionKind::Variable { .. }
+                    );
+
+                    if is_simple {
+                        let obj_expr = self.lower_expression(object);
+                        let condition = HirExpr::new(
+                            HirExprKind::Binary {
+                                op: HirBinaryOp::Ne,
+                                lhs: Box::new(obj_expr.clone()),
+                                rhs: Box::new(self.make_null_literal()),
+                            },
+                            self.get_bool_type(),
+                            self.current_lifetime,
+                            expr.source_location,
+                        );
+                        let then_expr = HirExpr::new(
+                            HirExprKind::Field {
+                                object: Box::new(obj_expr),
+                                field: *field_symbol,
+                            },
+                            expr.expr_type,
+                            self.current_lifetime,
+                            expr.source_location,
+                        );
+                        HirExprKind::If {
+                            condition: Box::new(condition),
+                            then_expr: Box::new(then_expr),
+                            else_expr: Box::new(self.make_null_literal()),
+                        }
+                    } else {
+                        // Complex object: use Let binding
+                        let obj_expr = self.lower_expression(object);
+                        let (tmp_name, tmp_symbol) = self.gen_temp_var();
+                        let tmp_var = HirExpr::new(
+                            HirExprKind::Variable {
+                                symbol: tmp_symbol,
+                                capture_mode: None,
+                            },
+                            object.expr_type,
+                            self.current_lifetime,
+                            expr.source_location,
+                        );
+                        let let_stmt = HirStatement::Let {
+                            pattern: HirPattern::Variable {
+                                name: tmp_name,
+                                symbol: tmp_symbol,
+                            },
+                            type_hint: Some(object.expr_type),
+                            init: Some(obj_expr),
+                            is_mutable: false,
+                        };
+                        let condition = HirExpr::new(
+                            HirExprKind::Binary {
+                                op: HirBinaryOp::Ne,
+                                lhs: Box::new(tmp_var.clone()),
+                                rhs: Box::new(self.make_null_literal()),
+                            },
+                            self.get_bool_type(),
+                            self.current_lifetime,
+                            expr.source_location,
+                        );
+                        let then_expr = HirExpr::new(
+                            HirExprKind::Field {
+                                object: Box::new(tmp_var),
+                                field: *field_symbol,
+                            },
+                            expr.expr_type,
+                            self.current_lifetime,
+                            expr.source_location,
+                        );
+                        let if_expr = HirExpr::new(
+                            HirExprKind::If {
+                                condition: Box::new(condition),
+                                then_expr: Box::new(then_expr),
+                                else_expr: Box::new(self.make_null_literal()),
+                            },
+                            expr.expr_type,
+                            self.current_lifetime,
+                            expr.source_location,
+                        );
+                        HirExprKind::Block(HirBlock::with_expr(
+                            vec![let_stmt],
+                            if_expr,
+                            self.current_scope,
+                        ))
+                    }
+                } else {
+                    HirExprKind::Field {
+                        object: Box::new(self.lower_expression(object)),
+                        field: *field_symbol,
+                    }
+                }
+            }
             TypedExpressionKind::StaticFieldAccess {
                 class_symbol,
                 field_symbol,
@@ -1409,7 +1507,86 @@ impl<'a> TastToHirContext<'a> {
                 method_symbol,
                 type_arguments,
                 arguments,
+                is_optional,
             } => {
+                if *is_optional {
+                    // Desugar obj?.method(args) → { var _tmp = obj; if (_tmp != null) _tmp.method(args) else null }
+                    let receiver_expr = self.lower_expression(receiver);
+                    let (tmp_name, tmp_symbol) = self.gen_temp_var();
+                    let tmp_var = HirExpr::new(
+                        HirExprKind::Variable {
+                            symbol: tmp_symbol,
+                            capture_mode: None,
+                        },
+                        receiver.expr_type,
+                        self.current_lifetime,
+                        expr.source_location,
+                    );
+                    let let_stmt = HirStatement::Let {
+                        pattern: HirPattern::Variable {
+                            name: tmp_name,
+                            symbol: tmp_symbol,
+                        },
+                        type_hint: Some(receiver.expr_type),
+                        init: Some(receiver_expr),
+                        is_mutable: false,
+                    };
+                    let condition = HirExpr::new(
+                        HirExprKind::Binary {
+                            op: HirBinaryOp::Ne,
+                            lhs: Box::new(tmp_var.clone()),
+                            rhs: Box::new(self.make_null_literal()),
+                        },
+                        self.get_bool_type(),
+                        self.current_lifetime,
+                        expr.source_location,
+                    );
+
+                    // Build the method call for the then-branch
+                    let mut call_args = vec![tmp_var];
+                    call_args.extend(arguments.iter().map(|a| self.lower_expression(a)));
+                    let then_expr = HirExpr::new(
+                        HirExprKind::Call {
+                            callee: Box::new(HirExpr::new(
+                                HirExprKind::Variable {
+                                    symbol: *method_symbol,
+                                    capture_mode: None,
+                                },
+                                expr.expr_type,
+                                self.current_lifetime,
+                                expr.source_location,
+                            )),
+                            type_args: type_arguments.clone(),
+                            args: call_args,
+                            is_method: true,
+                        },
+                        expr.expr_type,
+                        self.current_lifetime,
+                        expr.source_location,
+                    );
+
+                    let if_expr = HirExpr::new(
+                        HirExprKind::If {
+                            condition: Box::new(condition),
+                            then_expr: Box::new(then_expr),
+                            else_expr: Box::new(self.make_null_literal()),
+                        },
+                        expr.expr_type,
+                        self.current_lifetime,
+                        expr.source_location,
+                    );
+                    return HirExpr::new(
+                        HirExprKind::Block(HirBlock::with_expr(
+                            vec![let_stmt],
+                            if_expr,
+                            self.current_scope,
+                        )),
+                        expr.expr_type,
+                        self.current_lifetime,
+                        expr.source_location,
+                    );
+                }
+
                 // Check if this is an abstract type method that should be inlined
                 if let Some(inlined) = self.try_inline_abstract_method(
                     receiver,
@@ -1418,7 +1595,6 @@ impl<'a> TastToHirContext<'a> {
                     expr.expr_type,
                     expr.source_location,
                 ) {
-                    // println!("DEBUG lower_expression: Method inlined successfully!");
                     return inlined;
                 }
 
@@ -1426,30 +1602,22 @@ impl<'a> TastToHirContext<'a> {
                 if let Some((class_name, method_name, _is_static)) =
                     self.get_stdlib_method_info(receiver.expr_type, *method_symbol)
                 {
-                    // println!("DEBUG: Mapping stdlib method {}.{} to runtime function", class_name, method_name);
-
                     let sig = MethodSignature {
                         class: class_name,
                         method: method_name,
                         is_static: _is_static,
-                        is_constructor: false, // Not checking for constructors in this code path
-                        param_count: arguments.len(), // Use actual arg count for lookup
+                        is_constructor: false,
+                        param_count: arguments.len(),
                     };
 
                     if let Some(_mapping) = self.stdlib_mapping.get(&sig) {
-                        // println!("DEBUG: Found runtime mapping for {}.{}", class_name, method_name);
-                        // For now, continue with normal lowering
-                        // The actual runtime function call will be generated in MIR lowering
-                        // based on the method signature
+                        // Continue with normal lowering — actual runtime function call
+                        // will be generated in MIR lowering based on the method signature
                     }
                 }
 
-                // println!("DEBUG lower_expression: Method NOT inlined, lowering normally");
-
                 // Desugar method call to function call with receiver as first argument
                 // receiver.method(args) becomes method(receiver, args)
-                // This makes the calling convention explicit for later lowering
-
                 let receiver_expr = self.lower_expression(receiver);
                 let mut call_args = vec![receiver_expr];
                 call_args.extend(arguments.iter().map(|a| self.lower_expression(a)));
@@ -1460,14 +1628,13 @@ impl<'a> TastToHirContext<'a> {
                             symbol: *method_symbol,
                             capture_mode: None,
                         },
-                        // TODO: Get actual method type from symbol table
                         expr.expr_type,
                         self.current_lifetime,
                         expr.source_location,
                     )),
                     type_args: type_arguments.clone(),
                     args: call_args,
-                    is_method: true, // Mark that this was originally a method call
+                    is_method: true,
                 }
             }
             TypedExpressionKind::New {
@@ -3775,6 +3942,7 @@ impl<'a> TastToHirContext<'a> {
                 method_symbol,
                 type_arguments,
                 arguments,
+                ..
             } => {
                 // println!("DEBUG inline_expression_deep: Found MethodCall on {:?}", method_symbol);
 
@@ -3969,6 +4137,7 @@ impl<'a> TastToHirContext<'a> {
             TypedExpressionKind::FieldAccess {
                 object,
                 field_symbol,
+                ..
             } if matches!(&object.kind, TypedExpressionKind::Variable { symbol_id } if param_map.contains_key(symbol_id))
                 || matches!(&object.kind, TypedExpressionKind::This { .. }) =>
             {

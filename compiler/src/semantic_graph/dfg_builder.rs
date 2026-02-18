@@ -863,6 +863,7 @@ impl DfgBuilder {
             TypedExpressionKind::FieldAccess {
                 object,
                 field_symbol,
+                ..
             } => self.build_field_access_expression(node_id, object, *field_symbol, expression),
             TypedExpressionKind::StaticFieldAccess {
                 class_symbol,
@@ -897,6 +898,7 @@ impl DfgBuilder {
                 method_symbol,
                 arguments,
                 type_arguments,
+                ..
             } => self.build_method_call_expression(
                 node_id,
                 receiver,
@@ -2754,6 +2756,7 @@ impl DfgBuilder {
             TypedExpressionKind::FieldAccess {
                 object,
                 field_symbol,
+                ..
             } => {
                 // Build store operation for field assignment
                 let object_node = self.build_expression(object)?;

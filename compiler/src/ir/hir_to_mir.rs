@@ -272,6 +272,11 @@ pub struct HirToMirContext<'a> {
     /// Used by the Dynamic BinaryOp path to distinguish actual boxed Dynamic values from
     /// raw i64 values that happen to have Dynamic type (e.g., untyped lambda params).
     boxed_dynamic_symbols: BTreeSet<SymbolId>,
+
+    /// Allocation sizes for class instances (in bytes).
+    /// Maps class TypeId → allocation size. Populated during register_class_metadata.
+    /// Used by the New handler to allocate the correct size for objects.
+    class_alloc_sizes: BTreeMap<TypeId, u64>,
 }
 
 /// TCC runtime function IDs for __c__ inline code lowering
@@ -423,6 +428,7 @@ impl<'a> HirToMirContext<'a> {
             abstract_to_rules: BTreeMap::new(),
             abstract_forward_rules: BTreeMap::new(),
             boxed_dynamic_symbols: BTreeSet::new(),
+            class_alloc_sizes: BTreeMap::new(),
         };
 
         // Pre-declare malloc so it's available for heap allocations during lowering
@@ -11074,11 +11080,16 @@ impl<'a> HirToMirContext<'a> {
                 // When a method returns `new Foo()`, the object must outlive the callee's stack frame
                 let _class_mir_type = self.convert_type(*class_type);
 
-                // Calculate object size from constructor parameter count.
-                // Each field is at most 8 bytes (f64/i64/ptr). Add 8 bytes
-                // overhead for object header. Minimum 16 bytes.
-                let field_count = args.len() as u64; // constructor args = instance fields
-                let obj_size: u64 = ((field_count + 1) * 8).max(16);
+                // Look up pre-computed allocation size from register_class_metadata.
+                // The HIR type registry uses TypeId::from_raw(symbol_id), so convert
+                // the TAST class_type via its symbol_id for the lookup.
+                let registry_type_id = actual_symbol_id
+                    .map(|sid| TypeId::from_raw(sid.as_raw()));
+                let obj_size: u64 = registry_type_id
+                    .and_then(|tid| self.class_alloc_sizes.get(&tid).copied())
+                    .unwrap_or_else(|| {
+                        ((args.len() as u64 + 1) * 8).max(16)
+                    });
 
                 // Use heap allocation (malloc) for class instances
                 let obj_ptr = self.build_heap_alloc(obj_size);
@@ -16759,9 +16770,8 @@ impl<'a> HirToMirContext<'a> {
         // Only create result phi if BOTH branches return values (for expression-style ifs)
         // If only one returns a value, that's a type error - skip result phi
         if then_val.is_some() && else_val.is_some() {
-            // Determine result type from then expression
-            // TODO: Get actual type from HIR expression
-            let result_type = IrType::I32; // Placeholder
+            // Determine result type from then expression's HIR type
+            let result_type = self.convert_type(then_expr.ty);
             let result = match self.builder.build_phi(merge_block, result_type.clone()) {
                 Some(r) => {
                     // debug!("Created result phi {:?}", r);
@@ -20446,6 +20456,11 @@ impl<'a> HirToMirContext<'a> {
         };
 
         self.builder.module.add_type(typedef);
+
+        // Record allocation size: field_index is the next available index,
+        // so total slots = field_index (includes header at index 0).
+        let alloc_size = (field_index as u64 * 8).max(16);
+        self.class_alloc_sizes.insert(type_id, alloc_size);
 
         // Build interface vtables for each implemented interface.
         // For each interface method, find the matching class method by name.

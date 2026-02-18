@@ -2766,11 +2766,14 @@ impl CraneliftBackend {
                     .get(&index_id)
                     .ok_or_else(|| format!("GEP index {:?} not found in value_map", index_id))?;
 
-                // Get the size of the ELEMENT type, not the pointer type
-                // ty is Ptr(ElementType), so we need to unwrap it to get the element size
+                // Get the size of the ELEMENT type, not the pointer type.
+                // ty is Ptr(ElementType), so we unwrap to get the element size.
+                // Special case: Ptr(Void) means "opaque pointer to struct fields" —
+                // each field is pointer-sized (8 bytes), so use 8 instead of 0.
                 let elem_size = match ty {
                     crate::ir::IrType::Ptr(inner) | crate::ir::IrType::Ref(inner) => {
-                        Self::type_size(inner)
+                        let inner_size = Self::type_size(inner);
+                        if inner_size == 0 { 8 } else { inner_size }
                     }
                     _ => Self::type_size(ty), // Fallback for non-pointer types
                 };

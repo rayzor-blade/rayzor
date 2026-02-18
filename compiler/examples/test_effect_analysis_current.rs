@@ -239,6 +239,7 @@ fn test_side_effect_function(
                                 metadata: ExpressionMetadata::default(),
                             }),
                             field_symbol: SymbolId::from_raw(100),
+                            is_optional: false,
                         },
                         expr_type: TypeId::from_raw(1),
                         usage: VariableUsage::Copy,
