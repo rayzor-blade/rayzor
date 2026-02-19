@@ -305,6 +305,11 @@ pub struct HirToMirContext<'a> {
 
     /// base method SymbolId → (slot_index, defining_class) — checked at call sites
     virtual_dispatch_info: BTreeMap<SymbolId, (u32, SymbolId)>,
+
+    /// Parameter default expressions for functions/constructors.
+    /// Keyed by IrFunctionId, value is Vec matching user-visible params (excludes implicit 'this').
+    /// Only populated for functions that have at least one parameter with a default value.
+    function_param_defaults: BTreeMap<IrFunctionId, Vec<Option<HirExpr>>>,
 }
 
 /// TCC runtime function IDs for __c__ inline code lowering
@@ -465,6 +470,7 @@ impl<'a> HirToMirContext<'a> {
             class_virtual_slots: BTreeMap::new(),
             class_vtables: BTreeMap::new(),
             virtual_dispatch_info: BTreeMap::new(),
+            function_param_defaults: BTreeMap::new(),
         };
 
         // Pre-declare malloc so it's available for heap allocations during lowering
@@ -1881,6 +1887,13 @@ impl<'a> HirToMirContext<'a> {
         let func_id = self.builder.start_function(symbol_id, func_name, signature);
         self.function_map.insert(symbol_id, func_id);
 
+        // Store default parameter expressions for call-site filling
+        let defaults: Vec<Option<HirExpr>> =
+            hir_func.params.iter().map(|p| p.default.clone()).collect();
+        if defaults.iter().any(|d| d.is_some()) {
+            self.function_param_defaults.insert(func_id, defaults);
+        }
+
         // Record constrained type parameter info for call-site fat pointer wrapping
         self.record_constrained_params(func_id, hir_func, this_type.is_some());
 
@@ -1948,6 +1961,13 @@ impl<'a> HirToMirContext<'a> {
         let func_id = self.builder.start_function(symbol_id, func_name, signature);
         self.function_map.insert(symbol_id, func_id);
 
+        // Store default parameter expressions for call-site filling
+        let defaults: Vec<Option<HirExpr>> =
+            hir_func.params.iter().map(|p| p.default.clone()).collect();
+        if defaults.iter().any(|d| d.is_some()) {
+            self.function_param_defaults.insert(func_id, defaults);
+        }
+
         // Record constrained type parameter info for call-site fat pointer wrapping
         self.record_constrained_params(func_id, hir_func, this_type.is_some());
 
@@ -2009,6 +2029,13 @@ impl<'a> HirToMirContext<'a> {
         self.constructor_map.insert(type_id, func_id);
         self.register_constructor_by_name(class_symbol, func_id);
 
+        // Store default parameter expressions for call-site filling
+        let defaults: Vec<Option<HirExpr>> =
+            constructor.params.iter().map(|p| p.default.clone()).collect();
+        if defaults.iter().any(|d| d.is_some()) {
+            self.function_param_defaults.insert(func_id, defaults);
+        }
+
         let fallback_type_id = TypeId::from_raw(class_symbol.as_raw());
         if fallback_type_id != type_id {
             self.constructor_map.insert(fallback_type_id, func_id);
@@ -2057,6 +2084,13 @@ impl<'a> HirToMirContext<'a> {
         self.function_map.insert(class_symbol, func_id);
         self.constructor_map.insert(type_id, func_id);
         self.register_constructor_by_name(class_symbol, func_id);
+
+        // Store default parameter expressions for call-site filling
+        let defaults: Vec<Option<HirExpr>> =
+            constructor.params.iter().map(|p| p.default.clone()).collect();
+        if defaults.iter().any(|d| d.is_some()) {
+            self.function_param_defaults.insert(func_id, defaults);
+        }
 
         // Also register with TypeId derived from class SymbolId as a fallback
         let fallback_type_id = TypeId::from_raw(class_symbol.as_raw());
@@ -2299,6 +2333,9 @@ impl<'a> HirToMirContext<'a> {
                             arg_regs.push(arg_reg);
                         }
                     }
+
+                    // Fill in default values for any missing optional parameters
+                    self.fill_default_args(parent_ctor_id, &mut arg_regs, true);
 
                     // Call parent constructor (returns void)
                     self.builder.build_call_direct(
@@ -10313,6 +10350,9 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
 
+                            // Fill in default values for any missing optional parameters
+                            self.fill_default_args(func_id, &mut arg_regs, true);
+
                             // Extract type_args from receiver's class type for generic method calls
                             let ir_type_args = if !args.is_empty() {
                                 let receiver_type = args[0].ty;
@@ -10487,6 +10527,9 @@ impl<'a> HirToMirContext<'a> {
                                     arg_regs.push(reg);
                                 }
                             }
+
+                            // Fill in default values for any missing optional parameters
+                            self.fill_default_args(func_id, &mut arg_regs, false);
 
                             // Infer type_args for static generic calls if not already provided
                             let final_type_args = if converted_hir_type_args.is_empty() {
@@ -11399,9 +11442,12 @@ impl<'a> HirToMirContext<'a> {
 
                 if let Some(constructor_func_id) = constructor_func_id {
                     // Call constructor with object as first argument
-                    let arg_regs: Vec<_> = std::iter::once(obj_ptr)
+                    let mut arg_regs: Vec<_> = std::iter::once(obj_ptr)
                         .chain(args.iter().filter_map(|a| self.lower_expression(a)))
                         .collect();
+
+                    // Fill in default values for any missing optional parameters
+                    self.fill_default_args(constructor_func_id, &mut arg_regs, true);
 
                     // Constructor returns void, so we ignore the result
                     self.builder
@@ -13627,6 +13673,42 @@ impl<'a> HirToMirContext<'a> {
                     vec![pattern_val, flags_val],
                     IrType::Ptr(Box::new(IrType::U8)),
                 )
+            }
+        }
+    }
+
+    /// Fill in default argument values for a function call when fewer args are provided
+    /// than the function expects. `arg_regs` already contains the lowered arguments
+    /// (possibly including implicit 'this' for methods/constructors).
+    /// `has_implicit_this` indicates whether arg_regs[0] is an implicit 'this' pointer
+    /// that is NOT part of the user-visible params.
+    fn fill_default_args(
+        &mut self,
+        func_id: IrFunctionId,
+        arg_regs: &mut Vec<IrId>,
+        has_implicit_this: bool,
+    ) {
+        // Clone defaults to release immutable borrow before calling lower_expression
+        let defaults = match self.function_param_defaults.get(&func_id) {
+            Some(d) => d.clone(),
+            None => return,
+        };
+
+        let user_arg_count = if has_implicit_this {
+            arg_regs.len().saturating_sub(1)
+        } else {
+            arg_regs.len()
+        };
+
+        if user_arg_count >= defaults.len() {
+            return; // All args provided
+        }
+
+        for i in user_arg_count..defaults.len() {
+            if let Some(ref default_expr) = defaults[i] {
+                if let Some(reg) = self.lower_expression(default_expr) {
+                    arg_regs.push(reg);
+                }
             }
         }
     }

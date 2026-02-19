@@ -2766,21 +2766,10 @@ impl CraneliftBackend {
                     .get(&index_id)
                     .ok_or_else(|| format!("GEP index {:?} not found in value_map", index_id))?;
 
-                // Get the size of the ELEMENT type, not the pointer type.
-                // ty is Ptr(ElementType), so we unwrap to get the element size.
-                // Special case: Ptr(Void) means "opaque pointer to struct fields" —
-                // each field is pointer-sized (8 bytes), so use 8 instead of 0.
-                let elem_size = match ty {
-                    crate::ir::IrType::Ptr(inner) | crate::ir::IrType::Ref(inner) => {
-                        let inner_size = Self::type_size(inner);
-                        if inner_size == 0 {
-                            8
-                        } else {
-                            inner_size
-                        }
-                    }
-                    _ => Self::type_size(ty), // Fallback for non-pointer types
-                };
+                // All Rayzor object field slots are uniformly 8 bytes
+                // (class_alloc_sizes = field_index * 8). Use 8 as the element size
+                // regardless of the field's actual type to match the allocation layout.
+                let elem_size: usize = 8;
                 let size_val = builder.ins().iconst(types::I64, elem_size as i64);
 
                 // Convert index to i64 if needed (only if not already i64)
