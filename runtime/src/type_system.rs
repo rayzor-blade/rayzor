@@ -153,7 +153,7 @@ pub struct TypeInfo {
 /// Global type registry
 ///
 /// Maps TypeId -> TypeInfo for runtime type dispatch
-static TYPE_REGISTRY: RwLock<Option<HashMap<TypeId, TypeInfo>>> = RwLock::new(None);
+pub(crate) static TYPE_REGISTRY: RwLock<Option<HashMap<TypeId, TypeInfo>>> = RwLock::new(None);
 
 /// Global class name registry for Type.resolveClass
 ///
@@ -1845,6 +1845,59 @@ pub extern "C" fn haxe_object_is_instance(obj_ptr: *const u8, target_type_id: i6
                 }
             } else {
                 break; // Not a class
+            }
+        }
+    }
+    0
+}
+
+// ============================================================================
+// Class Virtual Method Dispatch (Vtable Registry)
+// ============================================================================
+
+/// Global vtable registry: type_id (as u32) -> Vec of closure pointers (i64).
+/// Each closure pointer points to a `{fn_code_ptr, env_ptr}` struct allocated
+/// by `build_function_ref` in the compiler.
+static VTABLE_REGISTRY: RwLock<Option<HashMap<u32, Vec<i64>>>> = RwLock::new(None);
+
+/// Initialize a vtable for a class with the given type_id and slot count.
+/// Called at program startup before any user code.
+#[no_mangle]
+pub extern "C" fn haxe_vtable_init(type_id: i32, slot_count: i32) {
+    let mut registry = VTABLE_REGISTRY.write().unwrap();
+    let map = registry.get_or_insert_with(HashMap::new);
+    map.insert(type_id as u32, vec![0i64; slot_count as usize]);
+}
+
+/// Store a closure pointer at a vtable slot for a class type_id.
+/// The closure_ptr comes from `build_function_ref` — a pointer to
+/// `{fn_code_ptr: i64, env_ptr: i64}`.
+#[no_mangle]
+pub extern "C" fn haxe_vtable_set_slot(type_id: i32, slot_index: i32, closure_ptr: i64) {
+    let mut registry = VTABLE_REGISTRY.write().unwrap();
+    if let Some(map) = registry.as_mut() {
+        if let Some(vtable) = map.get_mut(&(type_id as u32)) {
+            if (slot_index as usize) < vtable.len() {
+                vtable[slot_index as usize] = closure_ptr;
+            }
+        }
+    }
+}
+
+/// Look up a vtable slot for an object. Reads type_id from the object header
+/// (first 8 bytes), then returns the closure pointer for the given slot.
+/// Returns 0 if no vtable or slot is found.
+#[no_mangle]
+pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64 {
+    if obj_ptr.is_null() {
+        return 0;
+    }
+    let type_id = unsafe { *(obj_ptr as *const i64) } as u32;
+    let registry = VTABLE_REGISTRY.read().unwrap();
+    if let Some(map) = registry.as_ref() {
+        if let Some(vtable) = map.get(&type_id) {
+            if (slot_index as usize) < vtable.len() {
+                return vtable[slot_index as usize];
             }
         }
     }

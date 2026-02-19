@@ -924,6 +924,18 @@ fn run_file(
         .map(|(id, _)| *id)
         .ok_or("No main function found")?;
 
+    // Find __vtable_init__ and __init__ functions (if present)
+    let vtable_init_func_id = mir_module
+        .functions
+        .iter()
+        .find(|(_, f)| f.name == "__vtable_init__")
+        .map(|(id, _)| *id);
+    let module_init_func_id = mir_module
+        .functions
+        .iter()
+        .find(|(_, f)| f.name == "__init__")
+        .map(|(id, _)| *id);
+
     // Get runtime symbols
     let plugin = rayzor_runtime::get_plugin();
     let mut symbols = plugin.runtime_symbols();
@@ -979,6 +991,18 @@ fn run_file(
         println!("  tier 1   {} functions", backend_stats.standard_functions);
         println!("  tier 2   {} functions", backend_stats.optimized_functions);
         println!("  tier 3   {} functions", backend_stats.llvm_functions);
+    }
+
+    // Execute init functions before main
+    if let Some(vtable_init_id) = vtable_init_func_id {
+        backend
+            .execute_function(vtable_init_id, vec![])
+            .map_err(|e| format!("vtable init failed: {}", e))?;
+    }
+    if let Some(init_id) = module_init_func_id {
+        backend
+            .execute_function(init_id, vec![])
+            .map_err(|e| format!("module init failed: {}", e))?;
     }
 
     // Execute main function

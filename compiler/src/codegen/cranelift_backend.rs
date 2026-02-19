@@ -3858,7 +3858,21 @@ impl CraneliftBackend {
     }
 
     pub fn call_main(&mut self, module: &crate::ir::IrModule) -> Result<(), String> {
-        // First, look for and call __init__ function if it exists
+        // Call __vtable_init__ to register class virtual dispatch tables
+        if let Some(vtable_init_func) =
+            module.functions.values().find(|f| f.name == "__vtable_init__")
+        {
+            if let Ok(vtable_init_ptr) = self.get_function_ptr(vtable_init_func.id) {
+                debug!("  🔧 Calling __vtable_init__() for virtual dispatch tables...");
+                unsafe {
+                    let vtable_init_fn: extern "C" fn(i64) =
+                        std::mem::transmute(vtable_init_ptr);
+                    vtable_init_fn(0); // null environment pointer
+                }
+            }
+        }
+
+        // Call __init__ function if it exists
         // __init__ handles module initialization like registering enum RTTI
         if let Some(init_func) = module.functions.values().find(|f| f.name == "__init__") {
             if let Ok(init_ptr) = self.get_function_ptr(init_func.id) {

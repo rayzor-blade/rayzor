@@ -3114,6 +3114,12 @@ impl StdlibMapping {
             // Reflect.copy(o:Dynamic):Dynamic
             map_method!(static "Reflect", "copy" => "haxe_reflect_copy", params: 1, returns: primitive,
                 types: &[PtrU8] => PtrU8),
+            // Reflect.compare(a:T, b:T):Int
+            map_method!(static "Reflect", "compare" => "haxe_reflect_compare", params: 2, returns: primitive,
+                types: &[PtrU8, PtrU8] => I64),
+            // Reflect.isEnumValue(v:Dynamic):Bool
+            map_method!(static "Reflect", "isEnumValue" => "haxe_reflect_is_enum_value", params: 1, returns: primitive,
+                types: &[PtrU8] => Bool),
         ];
 
         self.register_from_tuples(mappings);

@@ -174,6 +174,118 @@ pub extern "C" fn haxe_reflect_copy(obj: *mut u8) -> *mut u8 {
 }
 
 // ============================================================================
+// Reflect.compare + Reflect.isEnumValue
+// ============================================================================
+
+/// Reflect.compare(a, b) -> Int
+///
+/// Compares two Dynamic values. Returns negative if a < b, 0 if equal, positive if a > b.
+/// Both arguments are DynamicValue pointers (boxed values).
+#[no_mangle]
+pub extern "C" fn haxe_reflect_compare(a: *mut u8, b: *mut u8) -> i64 {
+    if a.is_null() && b.is_null() {
+        return 0;
+    }
+    if a.is_null() {
+        return -1;
+    }
+    if b.is_null() {
+        return 1;
+    }
+    unsafe {
+        let dv_a = *(a as *const DynamicValue);
+        let dv_b = *(b as *const DynamicValue);
+
+        // Int × Int
+        if dv_a.type_id == TYPE_INT && dv_b.type_id == TYPE_INT {
+            let va = *(dv_a.value_ptr as *const i64);
+            let vb = *(dv_b.value_ptr as *const i64);
+            return (va - vb).signum();
+        }
+
+        // Float × Float
+        if dv_a.type_id == TYPE_FLOAT && dv_b.type_id == TYPE_FLOAT {
+            let va = *(dv_a.value_ptr as *const f64);
+            let vb = *(dv_b.value_ptr as *const f64);
+            return if va < vb {
+                -1
+            } else if va > vb {
+                1
+            } else {
+                0
+            };
+        }
+
+        // Int × Float or Float × Int
+        if (dv_a.type_id == TYPE_INT && dv_b.type_id == TYPE_FLOAT)
+            || (dv_a.type_id == TYPE_FLOAT && dv_b.type_id == TYPE_INT)
+        {
+            let fa = if dv_a.type_id == TYPE_FLOAT {
+                *(dv_a.value_ptr as *const f64)
+            } else {
+                *(dv_a.value_ptr as *const i64) as f64
+            };
+            let fb = if dv_b.type_id == TYPE_FLOAT {
+                *(dv_b.value_ptr as *const f64)
+            } else {
+                *(dv_b.value_ptr as *const i64) as f64
+            };
+            return if fa < fb {
+                -1
+            } else if fa > fb {
+                1
+            } else {
+                0
+            };
+        }
+
+        // String × String
+        if dv_a.type_id == TYPE_STRING && dv_b.type_id == TYPE_STRING {
+            let sa = &*(dv_a.value_ptr as *const crate::haxe_string::HaxeString);
+            let sb = &*(dv_b.value_ptr as *const crate::haxe_string::HaxeString);
+            let bytes_a = std::slice::from_raw_parts(sa.ptr, sa.len);
+            let bytes_b = std::slice::from_raw_parts(sb.ptr, sb.len);
+            return match bytes_a.cmp(bytes_b) {
+                std::cmp::Ordering::Less => -1,
+                std::cmp::Ordering::Equal => 0,
+                std::cmp::Ordering::Greater => 1,
+            };
+        }
+
+        // Bool × Bool
+        if dv_a.type_id == TYPE_BOOL && dv_b.type_id == TYPE_BOOL {
+            let va = *(dv_a.value_ptr as *const bool) as i64;
+            let vb = *(dv_b.value_ptr as *const bool) as i64;
+            return va - vb;
+        }
+
+        // Mismatched or unhandled types
+        0
+    }
+}
+
+/// Reflect.isEnumValue(v) -> Bool
+///
+/// Returns true if v is an enum value (has enum_info in the type registry).
+/// v: DynamicValue pointer
+#[no_mangle]
+pub extern "C" fn haxe_reflect_is_enum_value(v: *mut u8) -> bool {
+    if v.is_null() {
+        return false;
+    }
+    unsafe {
+        let dv = *(v as *const DynamicValue);
+        let registry = crate::type_system::TYPE_REGISTRY.read().unwrap();
+        if let Some(ref map) = *registry {
+            if let Some(info) = map.get(&dv.type_id) {
+                return info.enum_info.is_some();
+            }
+        }
+        false
+    }
+}
+
+// ============================================================================
 // Type API
 // ============================================================================
 

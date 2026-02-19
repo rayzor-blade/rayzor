@@ -285,6 +285,26 @@ pub struct HirToMirContext<'a> {
     /// Maps class TypeId → allocation size. Populated during register_class_metadata.
     /// Used by the New handler to allocate the correct size for objects.
     class_alloc_sizes: BTreeMap<TypeId, u64>,
+
+    // === Class Virtual Method Dispatch ===
+
+    /// (child_class_symbol, method_name) for methods with is_override=true
+    override_methods: BTreeSet<(SymbolId, InternedString)>,
+
+    /// class SymbolId → parent class SymbolId (from extends)
+    class_parent_map: BTreeMap<SymbolId, SymbolId>,
+
+    /// (class_symbol, method_name) → method SymbolId (all class methods)
+    class_method_by_name: BTreeMap<(SymbolId, InternedString), SymbolId>,
+
+    /// class SymbolId → [(method_name, slot_index)] — virtual method slots
+    class_virtual_slots: BTreeMap<SymbolId, Vec<(InternedString, u32)>>,
+
+    /// class SymbolId → [method_SymbolId per slot] — most-derived implementation
+    class_vtables: BTreeMap<SymbolId, Vec<SymbolId>>,
+
+    /// base method SymbolId → (slot_index, defining_class) — checked at call sites
+    virtual_dispatch_info: BTreeMap<SymbolId, (u32, SymbolId)>,
 }
 
 /// TCC runtime function IDs for __c__ inline code lowering
@@ -439,6 +459,12 @@ impl<'a> HirToMirContext<'a> {
             abstract_forward_rules: BTreeMap::new(),
             boxed_dynamic_symbols: BTreeSet::new(),
             class_alloc_sizes: BTreeMap::new(),
+            override_methods: BTreeSet::new(),
+            class_parent_map: BTreeMap::new(),
+            class_method_by_name: BTreeMap::new(),
+            class_virtual_slots: BTreeMap::new(),
+            class_vtables: BTreeMap::new(),
+            virtual_dispatch_info: BTreeMap::new(),
         };
 
         // Pre-declare malloc so it's available for heap allocations during lowering
@@ -1472,6 +1498,9 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Build class vtables after all type metadata is registered
+        self.build_class_vtables();
+
         // CRITICAL: Two-pass lowering to avoid non-deterministic function ordering issues
         // HashMap iteration over hir_module.types is random, so class methods might be
         // lowered after module functions that call them, causing "function not found" errors.
@@ -1785,6 +1814,11 @@ impl<'a> HirToMirContext<'a> {
         // Lower globals
         for (symbol_id, global) in &hir_module.globals {
             self.lower_global(*symbol_id, global);
+        }
+
+        // Generate __vtable_init__ function for class virtual dispatch tables
+        if !self.class_vtables.is_empty() {
+            self.generate_vtable_init_function();
         }
 
         // Generate __init__ function for dynamic global initialization
@@ -6082,6 +6116,79 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
 
+                        // Check for virtual dispatch: if the method is in a class hierarchy
+                        // with overrides, dispatch through the vtable instead of calling directly.
+                        if let Some(&(slot_index, _)) = self.virtual_dispatch_info.get(field) {
+                            let obj_reg = self.lower_expression(object)?;
+
+                            // If Dynamic-typed, unbox to get raw object pointer
+                            let obj_reg = {
+                                let is_dynamic = {
+                                    let type_table = self.type_table.borrow();
+                                    type_table
+                                        .get(object.ty)
+                                        .map(|t| matches!(t.kind, TypeKind::Dynamic))
+                                        .unwrap_or(false)
+                                };
+                                if is_dynamic {
+                                    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                                    let unbox_func_id = self.get_or_register_extern_function(
+                                        "haxe_unbox_reference_ptr",
+                                        vec![ptr_u8.clone()],
+                                        ptr_u8.clone(),
+                                    );
+                                    self.builder.build_call_direct(
+                                        unbox_func_id,
+                                        vec![obj_reg],
+                                        ptr_u8,
+                                    )?
+                                } else {
+                                    obj_reg
+                                }
+                            };
+
+                            // Lower arguments
+                            let mut call_args = vec![obj_reg];
+                            for arg in args.iter() {
+                                if let Some(reg) = self.lower_expression(arg) {
+                                    call_args.push(reg);
+                                }
+                            }
+
+                            // haxe_vtable_lookup(obj, slot) -> closure_ptr (i64)
+                            let lookup_fn = self.get_or_register_extern_function(
+                                "haxe_vtable_lookup",
+                                vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32],
+                                IrType::I64,
+                            );
+                            let slot_reg =
+                                self.builder.build_const(IrValue::I32(slot_index as i32))?;
+                            let closure_ptr = self.builder.build_call_direct(
+                                lookup_fn,
+                                vec![obj_reg, slot_reg],
+                                IrType::I64,
+                            )?;
+
+                            // Build the function signature for the indirect call
+                            let mut param_types =
+                                vec![IrType::Ptr(Box::new(IrType::Void))]; // self
+                            for arg in args {
+                                param_types.push(self.convert_type(arg.ty));
+                            }
+                            let return_type = Box::new(self.convert_type(expr.ty));
+                            let func_signature = IrType::Function {
+                                params: param_types,
+                                return_type,
+                                varargs: false,
+                            };
+
+                            return self.builder.build_call_indirect(
+                                closure_ptr,
+                                call_args,
+                                func_signature,
+                            );
+                        }
+
                         // Regular method call (not extern or no runtime mapping)
                         // Lower the object (this will be the first parameter)
                         let obj_reg = self.lower_expression(object)?;
@@ -10239,6 +10346,50 @@ impl<'a> HirToMirContext<'a> {
                                 arg_regs,
                                 ir_type_args
                             );
+
+                            // Virtual dispatch: if this method is in a class hierarchy
+                            // with overrides, dispatch through the vtable.
+                            if let Some(&(slot_index, _)) =
+                                self.virtual_dispatch_info.get(symbol)
+                            {
+                                if !arg_regs.is_empty() {
+                                    let receiver_reg = arg_regs[0];
+                                    let lookup_fn = self.get_or_register_extern_function(
+                                        "haxe_vtable_lookup",
+                                        vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32],
+                                        IrType::I64,
+                                    );
+                                    let slot_reg = self
+                                        .builder
+                                        .build_const(IrValue::I32(slot_index as i32));
+                                    if let Some(slot_r) = slot_reg {
+                                        if let Some(closure_ptr) = self.builder.build_call_direct(
+                                            lookup_fn,
+                                            vec![receiver_reg, slot_r],
+                                            IrType::I64,
+                                        ) {
+                                            let mut param_types =
+                                                vec![IrType::Ptr(Box::new(IrType::Void))];
+                                            for arg in args.iter().skip(1) {
+                                                param_types.push(self.convert_type(arg.ty));
+                                            }
+                                            let return_type =
+                                                Box::new(actual_return_type.clone());
+                                            let func_signature = IrType::Function {
+                                                params: param_types,
+                                                return_type,
+                                                varargs: false,
+                                            };
+                                            return self.builder.build_call_indirect(
+                                                closure_ptr,
+                                                arg_regs,
+                                                func_signature,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+
                             let result = if ir_type_args.is_empty() {
                                 self.builder.build_call_direct(
                                     func_id,
@@ -21207,6 +21358,160 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// Build class vtables by analyzing override relationships.
+    /// Called after all type metadata is registered but before function body lowering.
+    fn build_class_vtables(&mut self) {
+        if self.override_methods.is_empty() {
+            return;
+        }
+
+        // Step 1: For each override, trace up the parent chain to find the base class
+        // that originally defines the method. Mark that base method as needing a virtual slot.
+        let mut base_virtual_methods: BTreeSet<(SymbolId, InternedString)> = BTreeSet::new();
+
+        for (child_sym, method_name) in self.override_methods.clone() {
+            // Walk up the parent chain to find the topmost class defining this method
+            let mut defining_class = None;
+            let mut current = child_sym;
+            while let Some(&parent) = self.class_parent_map.get(&current) {
+                if self.class_method_by_name.contains_key(&(parent, method_name)) {
+                    defining_class = Some(parent);
+                }
+                current = parent;
+            }
+            if let Some(base) = defining_class {
+                base_virtual_methods.insert((base, method_name));
+            }
+        }
+
+        // Step 2: Assign virtual slots for each base class
+        for (base_class, method_name) in &base_virtual_methods {
+            let slots = self.class_virtual_slots.entry(*base_class).or_default();
+            if !slots.iter().any(|(n, _)| *n == *method_name) {
+                let slot_idx = slots.len() as u32;
+                slots.push((*method_name, slot_idx));
+            }
+        }
+
+        // Step 3: Build vtables for all classes in hierarchies with virtual methods.
+        // Process topologically (parents before children).
+        let mut classes_to_process: BTreeSet<SymbolId> = BTreeSet::new();
+        // Include all classes that define or override virtual methods
+        for (base_class, _) in &base_virtual_methods {
+            classes_to_process.insert(*base_class);
+        }
+        for (child_sym, _) in &self.override_methods {
+            classes_to_process.insert(*child_sym);
+        }
+        // Also include intermediate classes in the hierarchy
+        for (child, _) in self.override_methods.clone() {
+            let mut current = child;
+            while let Some(&parent) = self.class_parent_map.get(&current) {
+                classes_to_process.insert(parent);
+                current = parent;
+            }
+        }
+
+        let mut processed: BTreeSet<SymbolId> = BTreeSet::new();
+        let mut remaining: Vec<SymbolId> = classes_to_process.into_iter().collect();
+        let max_iters = remaining.len() + 1;
+        for _ in 0..max_iters {
+            if remaining.is_empty() {
+                break;
+            }
+            let mut next_remaining = Vec::new();
+            for cls in remaining {
+                let parent_ready = self
+                    .class_parent_map
+                    .get(&cls)
+                    .map_or(true, |p| processed.contains(p));
+                if parent_ready {
+                    self.build_vtable_for_class(cls);
+                    processed.insert(cls);
+                } else {
+                    next_remaining.push(cls);
+                }
+            }
+            remaining = next_remaining;
+        }
+        for cls in remaining {
+            self.build_vtable_for_class(cls);
+        }
+
+        // Step 4: Populate virtual_dispatch_info for call sites.
+        // Map ALL method SymbolIds in virtual hierarchies (base + overrides) to their slot.
+        // This ensures calls through both base and derived types dispatch through the vtable.
+        for (class_sym, slots) in self.class_virtual_slots.clone() {
+            for (method_name, slot_idx) in &slots {
+                if let Some(&method_sym) =
+                    self.class_method_by_name.get(&(class_sym, *method_name))
+                {
+                    self.virtual_dispatch_info
+                        .insert(method_sym, (*slot_idx, class_sym));
+                }
+            }
+        }
+    }
+
+    /// Build the vtable for a single class — inherits parent's slots and uses
+    /// the most-derived implementation for each slot.
+    fn build_vtable_for_class(&mut self, class_sym: SymbolId) {
+        // Inherit parent's virtual slots
+        let parent_slots = self
+            .class_parent_map
+            .get(&class_sym)
+            .and_then(|parent| self.class_virtual_slots.get(parent))
+            .cloned()
+            .unwrap_or_default();
+
+        let mut slots = parent_slots;
+
+        // Add any new virtual slots defined at this class level
+        if let Some(own_slots) = self.class_virtual_slots.get(&class_sym).cloned() {
+            for (name, _) in own_slots {
+                if !slots.iter().any(|(n, _)| *n == name) {
+                    let idx = slots.len() as u32;
+                    slots.push((name, idx));
+                }
+            }
+        }
+
+        if slots.is_empty() {
+            return;
+        }
+
+        // Build vtable entries: for each slot, find the most-derived implementation
+        let mut vtable = Vec::new();
+        for (method_name, _) in &slots {
+            let method_sym = self
+                .class_method_by_name
+                .get(&(class_sym, *method_name))
+                .copied()
+                .or_else(|| {
+                    // Walk parent chain to find inherited implementation
+                    let mut current = class_sym;
+                    while let Some(&parent) = self.class_parent_map.get(&current) {
+                        if let Some(&sym) =
+                            self.class_method_by_name.get(&(parent, *method_name))
+                        {
+                            return Some(sym);
+                        }
+                        current = parent;
+                    }
+                    None
+                });
+
+            if let Some(sym) = method_sym {
+                vtable.push(sym);
+            }
+        }
+
+        if !vtable.is_empty() {
+            self.class_virtual_slots.insert(class_sym, slots);
+            self.class_vtables.insert(class_sym, vtable);
+        }
+    }
+
     fn register_type_metadata(&mut self, type_id: TypeId, type_decl: &HirTypeDecl) {
         // Register type definitions in MIR for runtime type information
         // This metadata is used for:
@@ -21545,6 +21850,36 @@ impl<'a> HirToMirContext<'a> {
                 method.function.symbol_id,
             );
         }
+
+        // Record method names and overrides for virtual dispatch
+        for method in &class.methods {
+            self.class_method_by_name.insert(
+                (class.symbol_id, method.function.name),
+                method.function.symbol_id,
+            );
+            if method.is_override {
+                self.override_methods
+                    .insert((class.symbol_id, method.function.name));
+            }
+        }
+
+        // Record parent class relationship
+        if let Some(extends_type_id) = class.extends {
+            let parent_symbol = {
+                let type_table = self.type_table.borrow();
+                type_table.get(extends_type_id).and_then(|t| {
+                    if let TypeKind::Class { symbol_id, .. } = &t.kind {
+                        Some(*symbol_id)
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(parent_sym) = parent_symbol {
+                self.class_parent_map
+                    .insert(class.symbol_id, parent_sym);
+            }
+        }
     }
 
     fn register_interface_metadata(&mut self, type_id: TypeId, interface: &HirInterface) {
@@ -21780,6 +22115,74 @@ impl<'a> HirToMirContext<'a> {
         };
 
         self.builder.module.add_type(typedef);
+    }
+
+    fn generate_vtable_init_function(&mut self) {
+        // Generate __vtable_init__ function that registers class vtables at startup.
+        // Called before main() by the backend (same pattern as __init__).
+
+        let sig = FunctionSignatureBuilder::new()
+            .returns(IrType::Void)
+            .calling_convention(CallingConvention::Haxe)
+            .build();
+
+        let vtable_init_symbol = SymbolId::from_raw(u32::MAX - 2);
+        let _func_id = self.builder.start_function(
+            vtable_init_symbol,
+            "__vtable_init__".to_string(),
+            sig,
+        );
+
+        let saved_symbol_map = self.symbol_map.clone();
+        self.symbol_map.clear();
+
+        // Register extern functions for vtable operations
+        let vtable_init_fn = self.get_or_register_extern_function(
+            "haxe_vtable_init",
+            vec![IrType::I32, IrType::I32],
+            IrType::Void,
+        );
+        let vtable_set_fn = self.get_or_register_extern_function(
+            "haxe_vtable_set_slot",
+            vec![IrType::I32, IrType::I32, IrType::I64],
+            IrType::Void,
+        );
+
+        let class_vtables = self.class_vtables.clone();
+        for (class_sym, vtable) in &class_vtables {
+            let type_id = class_sym.as_raw() as i32;
+            let slot_count = vtable.len() as i32;
+
+            // haxe_vtable_init(type_id, slot_count)
+            let type_id_reg = self.builder.build_const(IrValue::I32(type_id));
+            let slot_count_reg = self.builder.build_const(IrValue::I32(slot_count));
+            if let (Some(tid), Some(sc)) = (type_id_reg, slot_count_reg) {
+                self.builder
+                    .build_call_direct(vtable_init_fn, vec![tid, sc], IrType::Void);
+            }
+
+            // For each slot, create a FunctionRef closure and store it
+            for (slot_idx, method_sym) in vtable.iter().enumerate() {
+                if let Some(&func_id) = self.function_map.get(method_sym) {
+                    let closure_ptr = self.builder.build_function_ref(func_id);
+                    let slot_reg = self.builder.build_const(IrValue::I32(slot_idx as i32));
+                    let type_id_reg2 = self.builder.build_const(IrValue::I32(type_id));
+                    if let (Some(cp), Some(sr), Some(tid2)) =
+                        (closure_ptr, slot_reg, type_id_reg2)
+                    {
+                        self.builder.build_call_direct(
+                            vtable_set_fn,
+                            vec![tid2, sr, cp],
+                            IrType::Void,
+                        );
+                    }
+                }
+            }
+        }
+
+        self.builder.build_return(None);
+        self.builder.finish_function();
+        self.symbol_map = saved_symbol_map;
     }
 
     fn generate_module_init_function(&mut self) {
