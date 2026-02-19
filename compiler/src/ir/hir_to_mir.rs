@@ -2720,8 +2720,11 @@ impl<'a> HirToMirContext<'a> {
         // No need to create another block here - just use the current block
 
         // Map 'this' parameter (IrId(0) is the first parameter)
-        // We'll use a temporary symbol ID for 'this'
         let this_reg = IrId::new(0);
+
+        // Register 'this' in symbol_map so implicit this.field access works
+        self.symbol_map
+            .insert(SymbolId::from_raw(0), this_reg);
 
         // Map constructor parameters
         for (i, param) in constructor.params.iter().enumerate() {
@@ -3238,18 +3241,38 @@ impl<'a> HirToMirContext<'a> {
 
                         self.lower_lvalue_write(lhs, value);
 
-                        // Register heap-allocated value for drop tracking
-                        // This also frees any previously owned value
-                        // IMPORTANT: Check type_needs_drop, not just HirExprKind::New
-                        // This handles method calls returning heap-allocated values
-                        // e.g., z = z.mul(z).add(c) where mul/add return new Complex
-                        //
-                        // WORKAROUND: Type inference sometimes returns Dynamic for method chains.
-                        // If the LHS variable was previously tracked as needing drop, continue
-                        // tracking it even if the RHS type is Dynamic. This prevents leaks.
+                        // Register heap-allocated value for drop tracking.
+                        // Only track when the RHS actually creates a NEW allocation (New or Call).
+                        // Field access and variable reads produce borrowed references that must
+                        // NOT be freed — they point into existing objects.
+                        let rhs_is_owned_allocation = matches!(
+                            &rhs.kind,
+                            HirExprKind::New { .. } | HirExprKind::Call { .. }
+                        );
+
                         let lhs_was_tracked =
                             lhs_symbol.map_or(false, |s| self.owned_heap_values.contains_key(&s));
-                        if rhs_type_needs_drop || lhs_was_tracked {
+
+                        if lhs_was_tracked {
+                            if let Some(symbol) = lhs_symbol {
+                                if rhs_is_owned_allocation {
+                                    // RHS creates a new allocation → free old, track new
+                                    self.register_owned_value(symbol, value);
+                                } else {
+                                    // RHS is a borrowed reference (field access, variable, etc.)
+                                    // → free old owned value, STOP tracking
+                                    if let Some(old_ir_id) =
+                                        self.owned_heap_values.remove(&symbol)
+                                    {
+                                        if !self.is_terminated() {
+                                            self.builder.build_free(old_ir_id);
+                                        }
+                                    }
+                                    self.reassigned_in_scope.insert(symbol);
+                                }
+                            }
+                        } else if rhs_is_owned_allocation && rhs_type_needs_drop {
+                            // New allocation assigned to previously-untracked variable
                             if let Some(symbol) = lhs_symbol {
                                 self.register_owned_value(symbol, value);
                             }
