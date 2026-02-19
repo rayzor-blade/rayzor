@@ -228,6 +228,7 @@ impl StdlibMapping {
         mapping.register_vec_methods();
         mapping.register_stringmap_methods();
         mapping.register_intmap_methods();
+        mapping.register_objectmap_methods();
         mapping.register_date_methods();
         mapping.register_bytes_methods();
         // sys.thread.* mappings (standard Haxe threading API)
@@ -2158,6 +2159,33 @@ impl StdlibMapping {
             // IntMap<T>::toString() -> String
             // Returns pointer directly
             map_method!(instance "IntMap", "toString" => "haxe_intmap_to_string", params: 0, returns: primitive),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    fn register_objectmap_methods(&mut self) {
+        // Parameter indices (0-indexed after self):
+        // - 1: key (object pointer — already 64-bit, no conversion needed)
+        // - 2: value (T, needs raw u64 conversion for set)
+        let mappings = vec![
+            // Constructor: new ObjectMap<K,V>() -> ObjectMap<K,V>
+            map_method!(constructor "ObjectMap", "new" => "haxe_objectmap_new", params: 0, returns: primitive),
+            // ObjectMap<K,V>::set(key: K, value: V) -> Void
+            // Only value (param 2) needs raw u64 conversion; key pointer is already 64-bit
+            map_method!(instance "ObjectMap", "set" => "haxe_objectmap_set", params: 2, returns: void, raw_value_params: 0b100),
+            // ObjectMap<K,V>::get(key: K) -> V (as u64)
+            map_method!(instance "ObjectMap", "get" => "haxe_objectmap_get", params: 1, returns: raw_value),
+            // ObjectMap<K,V>::exists(key: K) -> Bool
+            map_method!(instance "ObjectMap", "exists" => "haxe_objectmap_exists", params: 1, returns: primitive),
+            // ObjectMap<K,V>::remove(key: K) -> Bool
+            map_method!(instance "ObjectMap", "remove" => "haxe_objectmap_remove", params: 1, returns: primitive),
+            // ObjectMap<K,V>::clear() -> Void
+            map_method!(instance "ObjectMap", "clear" => "haxe_objectmap_clear", params: 0, returns: void),
+            // ObjectMap<K,V>::toString() -> String
+            map_method!(instance "ObjectMap", "toString" => "haxe_objectmap_to_string", params: 0, returns: primitive),
+            // ObjectMap<K,V>::copy() -> ObjectMap<K,V>
+            map_method!(instance "ObjectMap", "copy" => "haxe_objectmap_copy", params: 0, returns: primitive),
         ];
 
         self.register_from_tuples(mappings);

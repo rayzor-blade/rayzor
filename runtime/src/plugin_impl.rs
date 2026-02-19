@@ -770,6 +770,42 @@ register_symbol!(
 );
 
 // ============================================================================
+// ObjectMap<K,V> (haxe.ds.ObjectMap) — pointer identity keys
+// ============================================================================
+register_symbol!("haxe_objectmap_new", crate::haxe_sys::haxe_objectmap_new);
+register_symbol!("haxe_objectmap_set", crate::haxe_sys::haxe_objectmap_set);
+register_symbol!("haxe_objectmap_get", crate::haxe_sys::haxe_objectmap_get);
+register_symbol!(
+    "haxe_objectmap_exists",
+    crate::haxe_sys::haxe_objectmap_exists
+);
+register_symbol!(
+    "haxe_objectmap_remove",
+    crate::haxe_sys::haxe_objectmap_remove
+);
+register_symbol!(
+    "haxe_objectmap_clear",
+    crate::haxe_sys::haxe_objectmap_clear
+);
+register_symbol!(
+    "haxe_objectmap_count",
+    crate::haxe_sys::haxe_objectmap_count
+);
+register_symbol!(
+    "haxe_objectmap_to_string",
+    crate::haxe_sys::haxe_objectmap_to_string
+);
+register_symbol!(
+    "haxe_objectmap_keys_to_array",
+    crate::haxe_sys::haxe_objectmap_keys_to_array
+);
+register_symbol!(
+    "haxe_objectmap_values_to_array",
+    crate::haxe_sys::haxe_objectmap_values_to_array
+);
+register_symbol!("haxe_objectmap_copy", crate::haxe_sys::haxe_objectmap_copy);
+
+// ============================================================================
 // Type System (Dynamic values and Std.string)
 // ============================================================================
 

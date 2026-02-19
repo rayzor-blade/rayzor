@@ -2957,3 +2957,178 @@ pub extern "C" fn haxe_intmap_values_to_array(
         arr
     }
 }
+
+// ============================================================================
+// ObjectMap<K:{}, V> — maps object pointers to values by pointer identity
+// Keys are stored as raw u64 (pointer address). Class instances are safe
+// because escaped pointers aren't freed by InsertFreePass. For anonymous
+// objects (Arc-based), the caller must keep their own reference alive.
+// ============================================================================
+
+#[repr(C)]
+pub struct HaxeObjectMap {
+    map: HashMap<u64, u64>,
+}
+
+/// Create a new ObjectMap
+#[no_mangle]
+pub extern "C" fn haxe_objectmap_new() -> *mut HaxeObjectMap {
+    Box::into_raw(Box::new(HaxeObjectMap {
+        map: HashMap::new(),
+    }))
+}
+
+/// Set a value in the ObjectMap
+/// Key is an object pointer cast to u64, value is raw u64 bits
+#[no_mangle]
+pub extern "C" fn haxe_objectmap_set(map_ptr: *mut HaxeObjectMap, key: u64, value: u64) {
+    if map_ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let map = &mut *map_ptr;
+        map.map.insert(key, value);
+    }
+}
+
+/// Get a value from the ObjectMap
+/// Returns raw u64 bits, 0 if key doesn't exist
+#[no_mangle]
+pub extern "C" fn haxe_objectmap_get(map_ptr: *mut HaxeObjectMap, key: u64) -> u64 {
+    if map_ptr.is_null() {
+        return 0;
+    }
+    unsafe {
+        let map = &*map_ptr;
+        map.map.get(&key).copied().unwrap_or(0)
+    }
+}
+
+/// Check if a key exists in the ObjectMap
+#[no_mangle]
+pub extern "C" fn haxe_objectmap_exists(map_ptr: *mut HaxeObjectMap, key: u64) -> bool {
+    if map_ptr.is_null() {
+        return false;
+    }
+    unsafe {
+        let map = &*map_ptr;
+        map.map.contains_key(&key)
+    }
+}
+
+/// Remove a key from the ObjectMap
+/// Returns true if the key existed and was removed
+#[no_mangle]
+pub extern "C" fn haxe_objectmap_remove(map_ptr: *mut HaxeObjectMap, key: u64) -> bool {
+    if map_ptr.is_null() {
+        return false;
+    }
+    unsafe {
+        let map = &mut *map_ptr;
+        map.map.remove(&key).is_some()
+    }
+}
+
+/// Clear all entries from the ObjectMap
+#[no_mangle]
+pub extern "C" fn haxe_objectmap_clear(map_ptr: *mut HaxeObjectMap) {
+    if map_ptr.is_null() {
+        return;
+    }
+    unsafe {
+        let map = &mut *map_ptr;
+        map.map.clear();
+    }
+}
+
+/// Get the number of entries in the ObjectMap
+#[no_mangle]
+pub extern "C" fn haxe_objectmap_count(map_ptr: *mut HaxeObjectMap) -> i64 {
+    if map_ptr.is_null() {
+        return 0;
+    }
+    unsafe {
+        let map = &*map_ptr;
+        map.map.len() as i64
+    }
+}
+
+/// Get all keys as a HaxeArray of u64 pointer values
+#[no_mangle]
+pub extern "C" fn haxe_objectmap_keys_to_array(
+    map_ptr: *mut HaxeObjectMap,
+) -> *mut crate::haxe_array::HaxeArray {
+    use crate::haxe_array::HaxeArray;
+    use std::alloc::{alloc, Layout};
+
+    unsafe {
+        let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
+        crate::haxe_array::haxe_array_new(arr, 8);
+
+        if !map_ptr.is_null() {
+            let map = &*map_ptr;
+            for &key in map.map.keys() {
+                crate::haxe_array::haxe_array_push_i64(arr, key as i64);
+            }
+        }
+
+        arr
+    }
+}
+
+/// Get all values as a HaxeArray of raw u64 values
+#[no_mangle]
+pub extern "C" fn haxe_objectmap_values_to_array(
+    map_ptr: *mut HaxeObjectMap,
+) -> *mut crate::haxe_array::HaxeArray {
+    use crate::haxe_array::HaxeArray;
+    use std::alloc::{alloc, Layout};
+
+    unsafe {
+        let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
+        crate::haxe_array::haxe_array_new(arr, 8);
+
+        if !map_ptr.is_null() {
+            let map = &*map_ptr;
+            for &val in map.map.values() {
+                crate::haxe_array::haxe_array_push_i64(arr, val as i64);
+            }
+        }
+
+        arr
+    }
+}
+
+/// Convert ObjectMap to string representation
+#[no_mangle]
+pub extern "C" fn haxe_objectmap_to_string(map_ptr: *mut HaxeObjectMap) -> *mut HaxeString {
+    if map_ptr.is_null() {
+        return rust_string_to_haxe("null".to_string());
+    }
+    unsafe {
+        let map = &*map_ptr;
+        let mut result = String::from("{");
+        for (i, (key, value)) in map.map.iter().enumerate() {
+            if i > 0 {
+                result.push_str(", ");
+            }
+            result.push_str(&format!("0x{:x} => {}", key, value));
+        }
+        result.push('}');
+        rust_string_to_haxe(result)
+    }
+}
+
+/// Shallow copy of the ObjectMap
+#[no_mangle]
+pub extern "C" fn haxe_objectmap_copy(map_ptr: *mut HaxeObjectMap) -> *mut HaxeObjectMap {
+    if map_ptr.is_null() {
+        return haxe_objectmap_new();
+    }
+    unsafe {
+        let map = &*map_ptr;
+        Box::into_raw(Box::new(HaxeObjectMap {
+            map: map.map.clone(),
+        }))
+    }
+}

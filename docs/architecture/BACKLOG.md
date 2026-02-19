@@ -821,7 +821,8 @@ extern class Reflect {
 **Data Structure Classes** 🟡 Partial
 - [x] IntMap<T> - Integer key hash map (runtime impl done)
 - [x] StringMap<T> - String key hash map (runtime impl done)
-- [ ] ObjectMap<K,V> - Object key hash map (needs RTTI)
+- [x] ObjectMap<K,V> - Object key hash map (pointer identity, runtime impl done)
+- [ ] EnumValueMap<K,V> - Enum value key map (pure Haxe, blocked by virtual dispatch + Reflect.compare)
 - [ ] List<T> - Linked list
 
 **Exception/Stack Trace**
@@ -869,10 +870,14 @@ extern class Reflect {
 2. Date formatting and parsing
 
 **Phase 5: Data Structures (Est. 2-3 days)**
-1. IntMap<T> with runtime backing
-2. StringMap<T> with runtime backing
-3. ObjectMap<K,V> (may need generics)
+1. ~~IntMap<T> with runtime backing~~ ✅
+2. ~~StringMap<T> with runtime backing~~ ✅
+3. ~~ObjectMap<K,V> with runtime backing~~ ✅
 4. List<T> implementation
+5. EnumValueMap<K,V> — blocked by:
+   - Virtual method dispatch for class inheritance (`override`) — BalancedTree.setLoop() must dispatch to EnumValueMap.compare()
+   - Reflect.compare() — runtime comparison function
+   - EnumValue.getIndex() / EnumValue.getParameters() — runtime enum value introspection
 
 **Phase 6: Advanced Features (Future)**
 1. Networking (requires async infrastructure)

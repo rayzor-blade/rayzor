@@ -8324,6 +8324,18 @@ impl<'a> AstLowering<'a> {
                                     .unwrap_or_else(|| type_table.dynamic_type());
                                 Some((type_table.string_type(), value_type))
                             }
+                            Some("ObjectMap") => {
+                                // ObjectMap<K, V> has two type args
+                                let key_type = type_args
+                                    .first()
+                                    .copied()
+                                    .unwrap_or_else(|| type_table.dynamic_type());
+                                let value_type = type_args
+                                    .get(1)
+                                    .copied()
+                                    .unwrap_or_else(|| type_table.dynamic_type());
+                                Some((key_type, value_type))
+                            }
                             _ => None,
                         }
                     }

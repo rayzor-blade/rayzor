@@ -3854,11 +3854,12 @@ impl<'a> HirToMirContext<'a> {
             TypeKind::Array { .. } => (Some("Array"), None, Vec::new()),
             TypeKind::Enum { .. } => (Some("Enum"), None, Vec::new()),
             TypeKind::Map { key_type, .. } => {
-                // Map types route to StringMap or IntMap based on key type
+                // Map types route to IntMap, StringMap, or ObjectMap based on key type
                 let key_kind = type_table.get(*key_type).map(|t| t.kind.clone());
                 let class = match key_kind {
                     Some(TypeKind::Int) | Some(TypeKind::Bool) => "IntMap",
-                    _ => "StringMap",
+                    Some(TypeKind::String) => "StringMap",
+                    _ => "ObjectMap",
                 };
                 (Some(class), None, Vec::new())
             }
@@ -17477,6 +17478,18 @@ impl<'a> HirToMirContext<'a> {
                             .unwrap_or_else(|| type_table.dynamic_type());
                         Some((type_table.string_type(), value_type))
                     }
+                    Some("ObjectMap") => {
+                        // ObjectMap<K, V> has two type args
+                        let key_type = type_args
+                            .first()
+                            .copied()
+                            .unwrap_or_else(|| type_table.dynamic_type());
+                        let value_type = type_args
+                            .get(1)
+                            .copied()
+                            .unwrap_or_else(|| type_table.dynamic_type());
+                        Some((key_type, value_type))
+                    }
                     _ => None,
                 }
             }
@@ -17491,6 +17504,7 @@ impl<'a> HirToMirContext<'a> {
                 key_type_kind,
                 Some(crate::tast::TypeKind::Int) | Some(crate::tast::TypeKind::Bool)
             );
+            let is_string_key = matches!(key_type_kind, Some(crate::tast::TypeKind::String));
 
             // Lower the map expression
             let Some(map_ptr) = self.lower_expression(iter_expr) else {
@@ -17501,8 +17515,10 @@ impl<'a> HirToMirContext<'a> {
             let ptr_void = IrType::Ptr(Box::new(IrType::Void));
             let keys_fn_name = if is_int_key {
                 "haxe_intmap_keys_to_array"
-            } else {
+            } else if is_string_key {
                 "haxe_stringmap_keys_to_array"
+            } else {
+                "haxe_objectmap_keys_to_array"
             };
             let keys_fn = self.get_or_register_extern_function(
                 keys_fn_name,
@@ -17527,6 +17543,7 @@ impl<'a> HirToMirContext<'a> {
                         key_type,
                         value_type,
                         is_int_key,
+                        is_string_key,
                         body,
                         label,
                     );
@@ -18068,6 +18085,7 @@ impl<'a> HirToMirContext<'a> {
         key_type_id: TypeId,
         value_type_id: TypeId,
         is_int_key: bool,
+        is_string_key: bool,
         body: &HirBlock,
         label: Option<&SymbolId>,
     ) {
@@ -18253,12 +18271,15 @@ impl<'a> HirToMirContext<'a> {
         // Look up value: map.get(key)
         let get_fn_name = if is_int_key {
             "haxe_intmap_get"
-        } else {
+        } else if is_string_key {
             "haxe_stringmap_get"
+        } else {
+            "haxe_objectmap_get"
         };
         let key_ir_type = if is_int_key {
             IrType::I64
         } else {
+            // Both StringMap and ObjectMap keys are pointers
             IrType::Ptr(Box::new(IrType::U8))
         };
         let get_fn = self.get_or_register_extern_function(
@@ -19893,9 +19914,9 @@ impl<'a> HirToMirContext<'a> {
         // Map literal: [key1 => val1, key2 => val2, ...]
         //
         // Determine key type from first entry and use appropriate runtime:
-        // - String keys → StringMap (haxe_stringmap_new/set)
         // - Int keys → IntMap (haxe_intmap_new/set)
-        // - Object keys → TODO: ObjectMap (generic HashMap by pointer identity) not yet implemented
+        // - String keys → StringMap (haxe_stringmap_new/set)
+        // - Object keys → ObjectMap (haxe_objectmap_new/set, pointer identity)
 
         if entries.is_empty() {
             // Default to StringMap for empty map literals
@@ -19920,6 +19941,7 @@ impl<'a> HirToMirContext<'a> {
             key_type_kind,
             Some(crate::tast::TypeKind::Int) | Some(crate::tast::TypeKind::Bool)
         );
+        let is_string_key = matches!(key_type_kind, Some(crate::tast::TypeKind::String));
 
         let map_ptr_type = IrType::Ptr(Box::new(IrType::Void));
 
@@ -19976,8 +19998,8 @@ impl<'a> HirToMirContext<'a> {
             }
 
             Some(map_ptr)
-        } else {
-            // StringMap (default for String keys and other types)
+        } else if is_string_key {
+            // StringMap
             let new_fn = self.get_or_register_extern_function(
                 "haxe_stringmap_new",
                 vec![],
@@ -20018,6 +20040,59 @@ impl<'a> HirToMirContext<'a> {
                 self.builder.build_call_direct(
                     set_fn,
                     vec![map_ptr, key_val, val_u64],
+                    IrType::Void,
+                );
+            }
+
+            Some(map_ptr)
+        } else {
+            // ObjectMap (object/pointer keys, identity-based)
+            let new_fn = self.get_or_register_extern_function(
+                "haxe_objectmap_new",
+                vec![],
+                map_ptr_type.clone(),
+            );
+            let map_ptr = self
+                .builder
+                .build_call_direct(new_fn, vec![], map_ptr_type.clone())?;
+
+            let set_fn = self.get_or_register_extern_function(
+                "haxe_objectmap_set",
+                vec![map_ptr_type.clone(), IrType::U64, IrType::U64],
+                IrType::Void,
+            );
+
+            for (key, value) in entries.iter() {
+                let key_val = self.lower_expression(key)?;
+                let value_val = self.lower_expression(value)?;
+
+                // Cast key pointer to u64 for identity-based lookup
+                let key_type = self.convert_type(key.ty);
+                let key_u64 = match &key_type {
+                    IrType::U64 | IrType::I64 => key_val,
+                    _ => self
+                        .builder
+                        .build_cast(key_val, key_type, IrType::U64)
+                        .unwrap_or(key_val),
+                };
+
+                // Cast value to u64 for raw storage
+                let val_type = self.convert_type(value.ty);
+                let val_u64 = match &val_type {
+                    IrType::F64 => self
+                        .builder
+                        .build_bitcast(value_val, IrType::U64)
+                        .unwrap_or(value_val),
+                    IrType::U64 => value_val,
+                    _ => self
+                        .builder
+                        .build_cast(value_val, val_type, IrType::U64)
+                        .unwrap_or(value_val),
+                };
+
+                self.builder.build_call_direct(
+                    set_fn,
+                    vec![map_ptr, key_u64, val_u64],
                     IrType::Void,
                 );
             }
