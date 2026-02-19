@@ -822,7 +822,7 @@ extern class Reflect {
 - [x] IntMap<T> - Integer key hash map (runtime impl done)
 - [x] StringMap<T> - String key hash map (runtime impl done)
 - [x] ObjectMap<K,V> - Object key hash map (pointer identity, runtime impl done)
-- [ ] EnumValueMap<K,V> - Enum value key map (pure Haxe, blocked by virtual dispatch + Reflect.compare)
+- [ ] EnumValueMap<K,V> - Enum value key map (pure Haxe, vtable dispatch + Reflect.compare done; blocked by BalancedTree generics compilation)
 - [ ] List<T> - Linked list
 
 **Exception/Stack Trace**
@@ -874,10 +874,11 @@ extern class Reflect {
 2. ~~StringMap<T> with runtime backing~~ ✅
 3. ~~ObjectMap<K,V> with runtime backing~~ ✅
 4. List<T> implementation
-5. EnumValueMap<K,V> — blocked by:
-   - Virtual method dispatch for class inheritance (`override`) — BalancedTree.setLoop() must dispatch to EnumValueMap.compare()
-   - Reflect.compare() — runtime comparison function
-   - EnumValue.getIndex() / EnumValue.getParameters() — runtime enum value introspection
+5. EnumValueMap<K,V> — prerequisites done:
+   - ~~Virtual method dispatch for class inheritance (`override`)~~ ✅ (2026-02-19) — closure-based vtable via type_id header
+   - ~~Reflect.compare()~~ ✅ (2026-02-19) — runtime comparison function
+   - ~~Reflect.isEnumValue()~~ ✅ (2026-02-19) — enum type_id check via TYPE_REGISTRY
+   - Remaining blockers: BalancedTree/TreeNode generic class compilation (recursive generics, `this == null` extern inline, `Null<V>` return), EnumValue.getIndex()/getParameters()
 
 **Phase 6: Advanced Features (Future)**
 1. Networking (requires async infrastructure)
@@ -1695,6 +1696,8 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 21 | Map literal syntax | P2 | Low | 🟢 Complete | `["key" => val]` |
 | 22 | Array comprehension | P2 | Medium | 🟢 Complete | `[for (x in arr) x*2]` |
 | 23 | `Std.is()` / `Std.downcast()` (RTTI) | P2 | Medium | 🟢 Complete | runtime type checks |
+| 24 | Class virtual dispatch (`override`) | P1 | High | 🟢 Complete | BalancedTree, EnumValueMap, polymorphism |
+| 25 | `Reflect.compare` / `Reflect.isEnumValue` | P2 | Low | 🟢 Complete | EnumValueMap, generic comparison |
 
 ---
 
@@ -2096,7 +2099,33 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 - [ ] `Type.typeof(value)` — get ValueType enum
 
-### 16.19 Macros (Compile-Time) 🔴
+### 16.19 Class Virtual Dispatch (`override`) 🟢
+
+**Priority:** P1 — Required for class hierarchy polymorphism (BalancedTree, EnumValueMap)
+**Status:** ✅ Complete (2026-02-19)
+**Related Files:**
+- `compiler/src/ir/hir_to_mir.rs` — override detection, vtable building, `__vtable_init__` generation, virtual dispatch at call sites
+- `runtime/src/type_system.rs` — `haxe_vtable_init`, `haxe_vtable_set_slot`, `haxe_vtable_lookup`
+- `runtime/src/reflect.rs` — `haxe_reflect_compare`, `haxe_reflect_is_enum_value`
+- `compiler/src/codegen/cranelift_backend.rs` — calls `__vtable_init__` before main
+- `src/main.rs` — tiered backend calls `__vtable_init__` and `__init__` before main
+
+**Architecture:** Closure-based vtable via object type_id header.
+- Objects already have `__type_id: i64` at GEP index 0 (set to `symbol_id.as_raw()`)
+- Runtime registry maps `(type_id, slot_index) → closure_ptr` (from `build_function_ref`)
+- Override detection walks parent chain to find base class defining each overridden method
+- Slot indices assigned per base class; vtables built topologically (parents before children)
+- `__vtable_init__` function generated at compile time, called by backend before main
+- Virtual dispatch at call sites: `haxe_vtable_lookup(obj, slot)` → `build_call_indirect`
+
+**What Works:**
+- [x] `override` methods dispatch correctly through base-typed references
+- [x] Multi-level hierarchies (Base → Child → GrandChild)
+- [x] Non-virtual methods (not overridden) use direct calls
+- [x] Dynamic-typed receivers unboxed before vtable lookup
+- [x] Both FieldAccess and Variable callee dispatch paths
+
+### 16.20 Macros (Compile-Time) 🔴
 
 **Priority:** P2 — Very high complexity, low near-term priority
 **Current State:** Macro parser infrastructure exists (113 unit tests). No execution.
@@ -2135,7 +2164,8 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 14. ✅ **RTTI** (16.18) — is, isOfType, Type API (getClass/getClassName/getSuperClass) (2026-02-17)
 15. ✅ **Map literals** (16.16) — literals, method dispatch, for-in iteration (2026-02-13)
 16. ✅ **Array comprehension** (16.17) — range and array for-in comprehensions (2026-02-13)
-17. **Macros** (16.19)
+17. ✅ **Class virtual dispatch** (16.19) — closure-based vtable via type_id header (2026-02-19)
+18. **Macros** (16.20)
 
 ---
 
