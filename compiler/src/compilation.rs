@@ -3278,6 +3278,11 @@ impl CompilationUnit {
                                 usings.push(using.path.join("."));
                             }
                         }
+                        // Auto-discover qualified type references in the AST
+                        // (e.g., `new haxe.ds.BalancedTree<K,V>()` without explicit import)
+                        let mut discovered = Vec::new();
+                        collect_qualified_type_refs_from_ast(&ast, &mut discovered);
+                        imports.extend(discovered);
                     }
                     (imports, usings)
                 },
@@ -3876,6 +3881,278 @@ pub struct CacheStats {
 impl CacheStats {
     pub fn total_size_mb(&self) -> f64 {
         self.total_size_bytes as f64 / (1024.0 * 1024.0)
+    }
+}
+
+/// Collect qualified type references from a parsed AST.
+/// Walks all type declarations and their type references, collecting any
+/// TypePath with a non-empty package as an implicit import.
+/// For example, `new haxe.ds.BalancedTree<Int, String>()` yields "haxe.ds.BalancedTree".
+fn collect_qualified_type_refs_from_ast(ast: &parser::HaxeFile, out: &mut Vec<String>) {
+    use parser::haxe_ast::{BlockElement, ClassFieldKind, Expr, ExprKind, Type, TypeDeclaration};
+    use std::collections::HashSet;
+
+    let mut seen = HashSet::new();
+
+    fn collect_from_type(ty: &Type, seen: &mut HashSet<String>, out: &mut Vec<String>) {
+        match ty {
+            Type::Path { path, params, .. } => {
+                if !path.package.is_empty() {
+                    let qualified = format!("{}.{}", path.package.join("."), path.name);
+                    if seen.insert(qualified.clone()) {
+                        out.push(qualified);
+                    }
+                }
+                for p in params {
+                    collect_from_type(p, seen, out);
+                }
+            }
+            Type::Function { params, ret, .. } => {
+                for p in params {
+                    collect_from_type(p, seen, out);
+                }
+                collect_from_type(ret, seen, out);
+            }
+            Type::Optional { inner, .. } | Type::Parenthesis { inner, .. } => {
+                collect_from_type(inner, seen, out);
+            }
+            Type::Intersection { left, right, .. } => {
+                collect_from_type(left, seen, out);
+                collect_from_type(right, seen, out);
+            }
+            Type::Anonymous { fields, .. } => {
+                for f in fields {
+                    collect_from_type(&f.type_hint, seen, out);
+                }
+            }
+            Type::Wildcard { .. } => {}
+        }
+    }
+
+    fn collect_from_expr(expr: &Expr, seen: &mut HashSet<String>, out: &mut Vec<String>) {
+        match &expr.kind {
+            ExprKind::New {
+                type_path,
+                params,
+                args,
+            } => {
+                if !type_path.package.is_empty() {
+                    let qualified = format!("{}.{}", type_path.package.join("."), type_path.name);
+                    if seen.insert(qualified.clone()) {
+                        out.push(qualified);
+                    }
+                }
+                for p in params {
+                    collect_from_type(p, seen, out);
+                }
+                for a in args {
+                    collect_from_expr(a, seen, out);
+                }
+            }
+            ExprKind::Block(elements) => {
+                for elem in elements {
+                    if let BlockElement::Expr(e) = elem {
+                        collect_from_expr(e, seen, out);
+                    }
+                }
+            }
+            ExprKind::Var {
+                type_hint, expr, ..
+            }
+            | ExprKind::Final {
+                type_hint, expr, ..
+            } => {
+                if let Some(ty) = type_hint {
+                    collect_from_type(ty, seen, out);
+                }
+                if let Some(init) = expr {
+                    collect_from_expr(init, seen, out);
+                }
+            }
+            ExprKind::Call { expr: callee, args } => {
+                collect_from_expr(callee, seen, out);
+                for a in args {
+                    collect_from_expr(a, seen, out);
+                }
+            }
+            ExprKind::Field { expr: obj, .. } => {
+                collect_from_expr(obj, seen, out);
+            }
+            ExprKind::If {
+                cond,
+                then_branch,
+                else_branch,
+            } => {
+                collect_from_expr(cond, seen, out);
+                collect_from_expr(then_branch, seen, out);
+                if let Some(e) = else_branch {
+                    collect_from_expr(e, seen, out);
+                }
+            }
+            ExprKind::Return(Some(e)) => collect_from_expr(e, seen, out),
+            ExprKind::Binary { left, right, .. } => {
+                collect_from_expr(left, seen, out);
+                collect_from_expr(right, seen, out);
+            }
+            ExprKind::Unary { expr: e, .. } => {
+                collect_from_expr(e, seen, out);
+            }
+            ExprKind::Assign { left, right, .. } => {
+                collect_from_expr(left, seen, out);
+                collect_from_expr(right, seen, out);
+            }
+            ExprKind::While { cond, body, .. } | ExprKind::DoWhile { body, cond } => {
+                collect_from_expr(cond, seen, out);
+                collect_from_expr(body, seen, out);
+            }
+            ExprKind::For { iter, body, .. } => {
+                collect_from_expr(iter, seen, out);
+                collect_from_expr(body, seen, out);
+            }
+            ExprKind::Switch {
+                expr: subject,
+                cases,
+                default,
+            } => {
+                collect_from_expr(subject, seen, out);
+                for case in cases {
+                    if let Some(guard) = &case.guard {
+                        collect_from_expr(guard, seen, out);
+                    }
+                    collect_from_expr(&case.body, seen, out);
+                }
+                if let Some(d) = default {
+                    collect_from_expr(d, seen, out);
+                }
+            }
+            ExprKind::Try {
+                expr: body,
+                catches,
+                ..
+            } => {
+                collect_from_expr(body, seen, out);
+                for c in catches {
+                    collect_from_expr(&c.body, seen, out);
+                }
+            }
+            ExprKind::Cast { expr: e, type_hint } => {
+                collect_from_expr(e, seen, out);
+                if let Some(ty) = type_hint {
+                    collect_from_type(ty, seen, out);
+                }
+            }
+            ExprKind::Array(items) => {
+                for item in items {
+                    collect_from_expr(item, seen, out);
+                }
+            }
+            ExprKind::Paren(e)
+            | ExprKind::Throw(e)
+            | ExprKind::Untyped(e)
+            | ExprKind::Meta { expr: e, .. } => {
+                collect_from_expr(e, seen, out);
+            }
+            ExprKind::Ternary {
+                cond,
+                then_expr,
+                else_expr,
+            } => {
+                collect_from_expr(cond, seen, out);
+                collect_from_expr(then_expr, seen, out);
+                collect_from_expr(else_expr, seen, out);
+            }
+            ExprKind::Index { expr: e, index } => {
+                collect_from_expr(e, seen, out);
+                collect_from_expr(index, seen, out);
+            }
+            ExprKind::TypeCheck { expr: e, type_hint } => {
+                collect_from_expr(e, seen, out);
+                collect_from_type(type_hint, seen, out);
+            }
+            _ => {}
+        }
+    }
+
+    // Walk class field helpers
+    fn collect_from_class_field(
+        field: &parser::haxe_ast::ClassField,
+        seen: &mut HashSet<String>,
+        out: &mut Vec<String>,
+    ) {
+        match &field.kind {
+            ClassFieldKind::Var {
+                type_hint, expr, ..
+            }
+            | ClassFieldKind::Final {
+                type_hint, expr, ..
+            } => {
+                if let Some(ty) = type_hint {
+                    collect_from_type(ty, seen, out);
+                }
+                if let Some(e) = expr {
+                    collect_from_expr(e, seen, out);
+                }
+            }
+            ClassFieldKind::Property { type_hint, .. } => {
+                if let Some(ty) = type_hint {
+                    collect_from_type(ty, seen, out);
+                }
+            }
+            ClassFieldKind::Function(func) => {
+                if let Some(ret) = &func.return_type {
+                    collect_from_type(ret, seen, out);
+                }
+                for param in &func.params {
+                    if let Some(ty) = &param.type_hint {
+                        collect_from_type(ty, seen, out);
+                    }
+                    if let Some(def) = &param.default_value {
+                        collect_from_expr(def, seen, out);
+                    }
+                }
+                if let Some(body) = &func.body {
+                    collect_from_expr(body, seen, out);
+                }
+            }
+        }
+    }
+
+    // Walk all type declarations
+    for decl in &ast.declarations {
+        match decl {
+            TypeDeclaration::Class(class) => {
+                if let Some(extends) = &class.extends {
+                    collect_from_type(extends, &mut seen, out);
+                }
+                for iface in &class.implements {
+                    collect_from_type(iface, &mut seen, out);
+                }
+                for field in &class.fields {
+                    collect_from_class_field(field, &mut seen, out);
+                }
+            }
+            TypeDeclaration::Enum(en) => {
+                for variant in &en.constructors {
+                    for param in &variant.params {
+                        if let Some(ty) = &param.type_hint {
+                            collect_from_type(ty, &mut seen, out);
+                        }
+                    }
+                }
+            }
+            TypeDeclaration::Typedef(td) => {
+                collect_from_type(&td.type_def, &mut seen, out);
+            }
+            TypeDeclaration::Abstract(ab) => {
+                if let Some(ty) = &ab.underlying {
+                    collect_from_type(ty, &mut seen, out);
+                }
+                for field in &ab.fields {
+                    collect_from_class_field(field, &mut seen, out);
+                }
+            }
+            _ => {}
+        }
     }
 }
 

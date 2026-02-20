@@ -822,7 +822,7 @@ extern class Reflect {
 - [x] IntMap<T> - Integer key hash map (runtime impl done)
 - [x] StringMap<T> - String key hash map (runtime impl done)
 - [x] ObjectMap<K,V> - Object key hash map (pointer identity, runtime impl done)
-- [ ] EnumValueMap<K,V> - Enum value key map (pure Haxe, vtable dispatch + Reflect.compare done; blocked by BalancedTree generics compilation)
+- [x] EnumValueMap<K,V> - Enum value key map (pure Haxe, set/get/exists work with enum keys via BalancedTree + virtual dispatch)
 - [ ] List<T> - Linked list
 
 **Exception/Stack Trace**
@@ -874,11 +874,7 @@ extern class Reflect {
 2. ~~StringMap<T> with runtime backing~~ ✅
 3. ~~ObjectMap<K,V> with runtime backing~~ ✅
 4. List<T> implementation
-5. EnumValueMap<K,V> — prerequisites done:
-   - ~~Virtual method dispatch for class inheritance (`override`)~~ ✅ (2026-02-19) — closure-based vtable via type_id header
-   - ~~Reflect.compare()~~ ✅ (2026-02-19) — runtime comparison function
-   - ~~Reflect.isEnumValue()~~ ✅ (2026-02-19) — enum type_id check via TYPE_REGISTRY
-   - Remaining blockers: BalancedTree/TreeNode generic class compilation (recursive generics, `this == null` extern inline, `Null<V>` return), EnumValue.getIndex()/getParameters()
+5. ~~EnumValueMap<K,V>~~ ✅ (2026-02-20) — set/get/exists work via BalancedTree + virtual dispatch + auto-import
 
 **Phase 6: Advanced Features (Future)**
 1. Networking (requires async infrastructure)
