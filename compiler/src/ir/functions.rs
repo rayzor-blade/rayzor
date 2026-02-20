@@ -49,6 +49,13 @@ pub struct IrFunction {
 
     /// Next available register ID (pub for MIR builder)
     pub next_reg_id: u32,
+
+    /// Fixups for type parameter tag constants that need resolution during monomorphization.
+    /// Each entry is (register_id_of_const_placeholder, type_param_name).
+    /// The monomorphize pass replaces the placeholder const value with the correct type tag
+    /// based on the concrete type that the type parameter resolves to.
+    #[serde(default)]
+    pub type_param_tag_fixups: Vec<(IrId, String)>,
 }
 
 /// Unique identifier for functions
@@ -236,6 +243,7 @@ impl IrFunction {
             kind: FunctionKind::UserDefined,
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
+            type_param_tag_fixups: Vec::new(),
         };
 
         // Allocate registers for parameters and register their types

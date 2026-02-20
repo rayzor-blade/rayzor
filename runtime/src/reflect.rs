@@ -264,6 +264,69 @@ pub extern "C" fn haxe_reflect_compare(a: *mut u8, b: *mut u8) -> i64 {
     }
 }
 
+/// Reflect.compare typed variant — compares raw type-erased i64 values.
+///
+/// Unlike haxe_reflect_compare (which expects DynamicValue* pointers), this function
+/// accepts raw i64 values and interprets them based on a type_tag parameter.
+/// This is used for generic code where values are type-erased to i64 and boxing
+/// would require knowing the concrete type at compile time.
+///
+/// type_tag values: 1=Int, 2=Bool, 4=Float, 5=String
+#[no_mangle]
+pub extern "C" fn haxe_reflect_compare_typed(a: i64, b: i64, type_tag: i32) -> i64 {
+    match type_tag {
+        1 | 3 => {
+            // Int comparison (type_tag 1=TYPE_INT, 3=legacy)
+            (a - b).signum()
+        }
+        2 => {
+            // Bool comparison
+            let ba = (a != 0) as i64;
+            let bb = (b != 0) as i64;
+            ba - bb
+        }
+        4 => {
+            // Float comparison — i64 bits reinterpreted as f64
+            let fa = f64::from_bits(a as u64);
+            let fb = f64::from_bits(b as u64);
+            if fa < fb {
+                -1
+            } else if fa > fb {
+                1
+            } else {
+                0
+            }
+        }
+        5 => {
+            // String comparison — i64 values are HaxeString pointers
+            if a == 0 && b == 0 {
+                return 0;
+            }
+            if a == 0 {
+                return -1;
+            }
+            if b == 0 {
+                return 1;
+            }
+            unsafe {
+                let sa = &*(a as *const crate::haxe_string::HaxeString);
+                let sb = &*(b as *const crate::haxe_string::HaxeString);
+                let bytes_a = std::slice::from_raw_parts(sa.ptr, sa.len);
+                let bytes_b = std::slice::from_raw_parts(sb.ptr, sb.len);
+                match bytes_a.cmp(bytes_b) {
+                    std::cmp::Ordering::Less => -1,
+                    std::cmp::Ordering::Equal => 0,
+                    std::cmp::Ordering::Greater => 1,
+                }
+            }
+        }
+        _ => {
+            // Unknown type: compare as raw i64
+            (a - b).signum()
+        }
+    }
+}
+
 /// Reflect.isEnumValue(v) -> Bool
 ///
 /// Returns true if v is an enum value (has enum_info in the type registry).

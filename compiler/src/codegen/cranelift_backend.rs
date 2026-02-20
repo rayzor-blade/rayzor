@@ -1776,7 +1776,39 @@ impl CraneliftBackend {
             }
 
             IrInstruction::Store { ptr, value } => {
-                Self::lower_store_static(value_map, builder, *ptr, *value)?;
+                // Widen narrow integer values when storing to wide struct field slots.
+                // All Rayzor object fields are 8-byte slots (elem_size = 8). When an
+                // i32 value is stored to a GEP-derived pointer (struct field), only 4
+                // bytes are written, leaving upper bytes uninitialized. This causes
+                // corruption when the field is later loaded as i64 (generic type params).
+                // We detect GEP targets via register_types: GEP results have Ptr(elem_ty).
+                let needs_widen = if let Some(ptr_ty) = function.register_types.get(ptr) {
+                    if let IrType::Ptr(inner) = ptr_ty {
+                        matches!(
+                            inner.as_ref(),
+                            IrType::I64 | IrType::U64 | IrType::Any
+                        )
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if needs_widen {
+                    let val = *value_map.get(value).ok_or("Store: value not found")?;
+                    let ptr_val = *value_map.get(ptr).ok_or("Store: ptr not found")?;
+                    let val_ty = builder.func.dfg.value_type(val);
+                    let val = if val_ty.bits() < 64 && val_ty.is_int() {
+                        builder.ins().sextend(types::I64, val)
+                    } else {
+                        val
+                    };
+                    let flags = MemFlags::new().with_aligned().with_notrap();
+                    builder.ins().store(flags, val, ptr_val, 0);
+                } else {
+                    Self::lower_store_static(value_map, builder, *ptr, *value)?;
+                }
             }
 
             IrInstruction::Alloc { dest, ty, count } => {

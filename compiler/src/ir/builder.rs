@@ -613,6 +613,9 @@ impl IrBuilder {
     /// Build a GEP (get element pointer) instruction
     pub fn build_gep(&mut self, ptr: IrId, indices: Vec<IrId>, ty: IrType) -> Option<IrId> {
         let dest = self.alloc_reg()?;
+        // Track GEP result type as Ptr(element_type) so downstream Store handlers
+        // can widen narrow values to match the slot width (e.g., i32 → i64 for generic fields).
+        self.set_register_type(dest, IrType::Ptr(Box::new(ty.clone())));
         self.add_instruction(IrInstruction::GetElementPtr {
             dest,
             ptr,

@@ -1708,6 +1708,30 @@ pub extern "C" fn haxe_box_string_ptr(str_ptr: *const u8) -> *mut u8 {
     Box::into_raw(boxed) as *mut u8
 }
 
+/// Box a HaxeString pointer as Dynamic.
+/// Unlike haxe_box_string_ptr (which expects a null-terminated C string),
+/// this takes a pointer to an existing HaxeString struct and wraps it directly.
+#[no_mangle]
+pub extern "C" fn haxe_box_haxestring_ptr(hs_ptr: *mut u8) -> *mut u8 {
+    if hs_ptr.is_null() {
+        let dynamic = haxe_box_null();
+        let boxed = Box::new(dynamic);
+        return Box::into_raw(boxed) as *mut u8;
+    }
+    unsafe {
+        let hs = &*(hs_ptr as *const crate::haxe_string::HaxeString);
+        eprintln!("[BOX_HAXESTRING] hs_ptr={:?} hs.ptr={:?} hs.len={} content={:?}",
+            hs_ptr, hs.ptr, hs.len,
+            std::str::from_utf8(std::slice::from_raw_parts(hs.ptr, hs.len)).unwrap_or("?"));
+    }
+    let dynamic = DynamicValue {
+        type_id: TYPE_STRING,
+        value_ptr: hs_ptr,
+    };
+    let boxed = Box::new(dynamic);
+    Box::into_raw(boxed) as *mut u8
+}
+
 /// Unbox an Int from Dynamic (takes opaque pointer to DynamicValue)
 #[no_mangle]
 pub extern "C" fn haxe_unbox_int_ptr(ptr: *mut u8) -> i64 {

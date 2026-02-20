@@ -281,6 +281,7 @@ register_symbol!(
     crate::haxe_sys::haxe_trace_string_struct
 );
 register_symbol!("haxe_trace_any", crate::haxe_sys::haxe_trace_any);
+register_symbol!("haxe_trace_typed", crate::haxe_sys::haxe_trace_typed);
 register_symbol!("haxe_trace_array", crate::haxe_sys::haxe_trace_array);
 
 // Enum RTTI
@@ -829,6 +830,10 @@ register_symbol!("haxe_box_bool_ptr", crate::type_system::haxe_box_bool_ptr);
 register_symbol!(
     "haxe_box_string_ptr",
     crate::type_system::haxe_box_string_ptr
+);
+register_symbol!(
+    "haxe_box_haxestring_ptr",
+    crate::type_system::haxe_box_haxestring_ptr
 );
 register_symbol!("haxe_unbox_int_ptr", crate::type_system::haxe_unbox_int_ptr);
 register_symbol!(
@@ -1404,6 +1409,10 @@ register_symbol!("haxe_reflect_copy", crate::reflect::haxe_reflect_copy);
 register_symbol!(
     "haxe_reflect_compare",
     crate::reflect::haxe_reflect_compare
+);
+register_symbol!(
+    "haxe_reflect_compare_typed",
+    crate::reflect::haxe_reflect_compare_typed
 );
 register_symbol!(
     "haxe_reflect_is_enum_value",

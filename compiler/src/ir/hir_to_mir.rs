@@ -4402,6 +4402,7 @@ impl<'a> HirToMirContext<'a> {
             kind: FunctionKind::MirWrapper, // Stdlib MIR function
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
+            type_param_tag_fixups: Vec::new(),
         };
 
         self.builder.module.functions.insert(func_id, function);
@@ -4599,6 +4600,7 @@ impl<'a> HirToMirContext<'a> {
             kind: crate::ir::functions::FunctionKind::ExternC, // Extern C function
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
+            type_param_tag_fixups: Vec::new(),
         };
 
         // Add to both functions and extern_functions maps
@@ -5270,10 +5272,21 @@ impl<'a> HirToMirContext<'a> {
 
                             let actual_is_vector = actual_type.is_vector();
 
+                            // Skip casts that lose semantic type info due to TypeParameter erasure.
+                            // TypeParameter converts to I64 via convert_type(), but the Let handler
+                            // may have resolved the concrete type (String, F64, F32) from the
+                            // GenericInstance return type. Casting back to I64 destroys that info,
+                            // which is needed by trace dispatch and other type-aware operations.
+                            let actual_loses_info_to_i64 = matches!(
+                                &actual_type,
+                                IrType::String | IrType::F64 | IrType::F32
+                            ) && expected_type == IrType::I64;
+
                             let should_skip_cast = (actual_is_ptr && !expected_is_ptr)  // pointer to scalar
                                 || (actual_is_specific && expected_is_void_ptr)          // specific type to void pointer
                                 || (actual_is_string_ptr && expected_is_void_ptr)        // Ptr(String) to Ptr(Void)
-                                || actual_is_vector; // vector types (SIMD) should never be cast
+                                || actual_is_vector // vector types (SIMD) should never be cast
+                                || actual_loses_info_to_i64; // TypeParameter erasure would lose concrete type
 
                             if should_skip_cast {
                                 debug!("Variable type mismatch - symbol={:?}, actual: {:?}, expected: {:?}, SKIPPING cast (would lose type info)", symbol, actual_type, expected_type);
@@ -7773,6 +7786,40 @@ impl<'a> HirToMirContext<'a> {
                                 vec![arg_reg],
                                 IrType::Void,
                             );
+                        }
+
+                        // Handle TypeParameter types that are still type-erased (I64).
+                        // Only activate when the register type didn't reveal the concrete type.
+                        // Inside generic functions, emit a fixup for the monomorphize pass.
+                        // Outside generic functions (shouldn't normally happen with proper type
+                        // resolution), fall through to traceInt.
+                        if matches!(arg_type, IrType::I64 | IrType::I32)
+                            && matches!(&hir_type_kind, Some(crate::tast::core::TypeKind::TypeParameter { .. }))
+                        {
+                            if let Some(crate::tast::core::TypeKind::TypeParameter { symbol_id, .. }) = &hir_type_kind {
+                                let type_param_name = self.symbol_table.get_symbol(*symbol_id)
+                                    .and_then(|sym| self.string_interner.get(sym.name))
+                                    .map(|s| s.to_string());
+
+                                if let Some(tp_name) = type_param_name {
+                                    let tag_reg = self.builder.build_const(IrValue::I32(0))?;
+                                    if let Some(func) = self.builder.current_function_mut() {
+                                        func.type_param_tag_fixups.push((tag_reg, tp_name));
+                                    }
+
+                                    let trace_typed_id = self.get_or_register_extern_function(
+                                        "haxe_trace_typed",
+                                        vec![IrType::I64, IrType::I32],
+                                        IrType::Void,
+                                    );
+
+                                    return self.builder.build_call_direct(
+                                        trace_typed_id,
+                                        vec![arg_reg, tag_reg],
+                                        IrType::Void,
+                                    );
+                                }
+                            }
                         }
 
                         // Determine which trace function to call based on type
@@ -10717,6 +10764,79 @@ impl<'a> HirToMirContext<'a> {
                                         }
                                     }
 
+                                    // Reflect.compare: use haxe_reflect_compare_typed which accepts
+                                    // raw type-erased i64 values + a type tag, avoiding boxing.
+                                    // For generic code, the type tag is a placeholder resolved at
+                                    // monomorphization time.
+                                    if runtime_name == "haxe_reflect_compare" {
+                                        let mut type_param_name: Option<String> = None;
+                                        let mut known_type_tag: Option<i32> = None;
+                                        let mut use_typed_compare = false;
+
+                                        if let Some(first_arg) = args.first() {
+                                            let type_table = self.type_table.borrow();
+                                            if let Some(ti) = type_table.get(first_arg.ty) {
+                                                match &ti.kind {
+                                                    TypeKind::TypeParameter { symbol_id, .. } => {
+                                                        use_typed_compare = true;
+                                                        // Get type param name from symbol table
+                                                        if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
+                                                            if let Some(name_str) = self.string_interner.get(sym.name) {
+                                                                type_param_name = Some(name_str.to_string());
+                                                            }
+                                                        }
+                                                    }
+                                                    TypeKind::Int => { use_typed_compare = true; known_type_tag = Some(1); }
+                                                    TypeKind::Float => { use_typed_compare = true; known_type_tag = Some(4); }
+                                                    TypeKind::Bool => { use_typed_compare = true; known_type_tag = Some(2); }
+                                                    TypeKind::String => { use_typed_compare = true; known_type_tag = Some(5); }
+                                                    _ => {} // Dynamic/other: fall through to boxing path
+                                                }
+                                            }
+                                        }
+
+                                        if use_typed_compare {
+                                            // Emit type tag constant (placeholder 0 for generics, real value for concrete)
+                                            let tag_reg = if let Some(tp_name) = type_param_name {
+                                                let tag = self.builder.build_const(IrValue::I32(0))?;
+                                                // Record fixup for the monomorphize pass to resolve
+                                                if let Some(func) = self.builder.current_function_mut() {
+                                                    func.type_param_tag_fixups.push((tag, tp_name));
+                                                }
+                                                tag
+                                            } else {
+                                                self.builder.build_const(IrValue::I32(known_type_tag.unwrap_or(1)))?
+                                            };
+
+                                            arg_regs.push(tag_reg);
+                                            arg_types.push(IrType::I32);
+
+                                            let extern_func_id = self.get_or_register_extern_function(
+                                                "haxe_reflect_compare_typed",
+                                                arg_types,
+                                                result_type.clone(),
+                                            );
+
+                                            return self.builder.build_call_direct(
+                                                extern_func_id,
+                                                arg_regs,
+                                                result_type,
+                                            );
+                                        } else {
+                                            // Dynamic case: box arguments for haxe_reflect_compare
+                                            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                                            for (i, arg) in args.iter().enumerate() {
+                                                if i >= arg_regs.len() {
+                                                    break;
+                                                }
+                                                if let Some(boxed) = self.box_value_for_dynamic(arg_regs[i], arg.ty) {
+                                                    arg_regs[i] = boxed;
+                                                    arg_types[i] = ptr_u8.clone();
+                                                }
+                                            }
+                                        }
+                                    }
+
                                     // Register the external runtime function
                                     let extern_func_id = self.get_or_register_extern_function(
                                         runtime_name,
@@ -11677,15 +11797,25 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
 
-                // Dynamic arithmetic: when both HIR types are Dynamic (Ptr(Void)), check actual
+                // Dynamic arithmetic: when both HIR types are actually Dynamic, check actual
                 // MIR register types after lowering to determine if values are truly boxed
                 // DynamicValue pointers vs raw concrete values (e.g., class field access on
                 // Dynamic-typed object, or integer arithmetic result with Dynamic HIR type).
+                // NOTE: We check the actual HIR TypeKind, not just MIR Ptr(Void), because
+                // class types also lower to Ptr(Void) but are NOT boxed DynamicValues.
                 {
-                    let lhs_ir = self.convert_type(lhs.ty);
-                    let rhs_ir = self.convert_type(rhs.ty);
-                    let lhs_is_dyn = matches!(&lhs_ir, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void));
-                    let rhs_is_dyn = matches!(&rhs_ir, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void));
+                    let (lhs_is_dyn, rhs_is_dyn) = {
+                        let type_table = self.type_table.borrow();
+                        let lhs_dyn = type_table
+                            .get(lhs.ty)
+                            .map(|t| matches!(t.kind, TypeKind::Dynamic))
+                            .unwrap_or(false);
+                        let rhs_dyn = type_table
+                            .get(rhs.ty)
+                            .map(|t| matches!(t.kind, TypeKind::Dynamic))
+                            .unwrap_or(false);
+                        (lhs_dyn, rhs_dyn)
+                    };
 
                     if lhs_is_dyn && rhs_is_dyn {
                         let is_supported = matches!(
@@ -20758,6 +20888,117 @@ impl<'a> HirToMirContext<'a> {
             }
         }
         None
+    }
+
+    /// Box a raw value as a DynamicValue* for functions that expect Dynamic parameters.
+    /// Resolves TypeParameter types through the current class context.
+    /// Returns Some(boxed_reg) on success, None if value is already Dynamic or can't be resolved.
+    fn box_value_for_dynamic(&mut self, value: IrId, type_id: TypeId) -> Option<IrId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+
+        // Resolve the concrete type — handles TypeParameter through class context
+        let concrete_type_id = {
+            let type_table = self.type_table.borrow();
+            if let Some(ti) = type_table.get(type_id) {
+                match &ti.kind {
+                    crate::tast::TypeKind::TypeParameter { .. } => {
+                        // Try to resolve through current class's type_args
+                        drop(type_table);
+                        if let Some(this_ty) = self.current_this_type {
+                            self.resolve_type_param_from_receiver(type_id, this_ty)
+                                .unwrap_or(type_id)
+                        } else {
+                            type_id
+                        }
+                    }
+                    crate::tast::TypeKind::Dynamic => {
+                        // Already Dynamic (boxed) — no boxing needed
+                        return None;
+                    }
+                    _ => {
+                        drop(type_table);
+                        type_id
+                    }
+                }
+            } else {
+                type_id
+            }
+        };
+
+        let ir_type = self.convert_type(concrete_type_id);
+        let is_string = {
+            let type_table = self.type_table.borrow();
+            type_table
+                .get(concrete_type_id)
+                .map(|ti| matches!(ti.kind, crate::tast::TypeKind::String))
+                .unwrap_or(false)
+        };
+
+        if is_string || matches!(&ir_type, IrType::Ptr(_)) {
+            // String or pointer type — box as HaxeString
+            // haxe_box_haxestring_ptr wraps a HaxeString* pointer in a DynamicValue.
+            // The actual register may be I64 (type-erased) even though the resolved type is Ptr.
+            let actual_reg_type = self
+                .builder
+                .get_register_type(value)
+                .unwrap_or(ir_type.clone());
+            let as_ptr = if matches!(&actual_reg_type, IrType::Ptr(_)) {
+                value
+            } else {
+                // i64 → *u8 cast (for type-erased string pointers)
+                self.builder
+                    .build_cast(value, actual_reg_type, ptr_u8.clone())
+                    .unwrap_or(value)
+            };
+            let box_func = self.get_or_register_extern_function(
+                "haxe_box_haxestring_ptr",
+                vec![ptr_u8.clone()],
+                ptr_u8.clone(),
+            );
+            self.builder
+                .build_call_direct(box_func, vec![as_ptr], ptr_u8)
+        } else if matches!(&ir_type, IrType::I32) {
+            // Int (i32) — extend to i64 and box
+            let as_i64 = self
+                .builder
+                .build_cast(value, IrType::I32, IrType::I64)
+                .unwrap_or(value);
+            let box_func = self.get_or_register_extern_function(
+                "haxe_box_int_ptr",
+                vec![IrType::I64],
+                ptr_u8.clone(),
+            );
+            self.builder
+                .build_call_direct(box_func, vec![as_i64], ptr_u8)
+        } else if matches!(&ir_type, IrType::I64) {
+            // i64 — box as int (type-erased int or fallback)
+            let box_func = self.get_or_register_extern_function(
+                "haxe_box_int_ptr",
+                vec![IrType::I64],
+                ptr_u8.clone(),
+            );
+            self.builder
+                .build_call_direct(box_func, vec![value], ptr_u8)
+        } else if matches!(&ir_type, IrType::F64) {
+            let box_func = self.get_or_register_extern_function(
+                "haxe_box_float_ptr",
+                vec![IrType::F64],
+                ptr_u8.clone(),
+            );
+            self.builder
+                .build_call_direct(box_func, vec![value], ptr_u8)
+        } else if matches!(&ir_type, IrType::Bool) {
+            let box_func = self.get_or_register_extern_function(
+                "haxe_box_bool_ptr",
+                vec![IrType::Bool],
+                ptr_u8.clone(),
+            );
+            self.builder
+                .build_call_direct(box_func, vec![value], ptr_u8)
+        } else {
+            // Unknown type — can't box
+            None
+        }
     }
 
     /// Coerce a value to i64 for anonymous object field storage.

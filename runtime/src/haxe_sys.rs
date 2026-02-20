@@ -128,6 +128,30 @@ pub extern "C" fn haxe_trace_string_struct(s_ptr: *const HaxeString) {
     }
 }
 
+/// Trace a type-erased value using a type tag for dispatch.
+/// Used for generic code where the concrete type isn't known until monomorphization.
+/// type_tag values: 1=Int, 2=Bool, 4=Float, 5=String
+#[no_mangle]
+pub extern "C" fn haxe_trace_typed(value: i64, type_tag: i32) {
+    match type_tag {
+        1 | 3 => haxe_trace_int(value),
+        2 => haxe_trace_bool(value != 0),
+        4 => {
+            let f = f64::from_bits(value as u64);
+            haxe_trace_float(f);
+        }
+        5 => {
+            // value is a HaxeString pointer
+            if value == 0 {
+                print_with_prefix("null");
+            } else {
+                haxe_trace_string_struct(value as *const HaxeString);
+            }
+        }
+        _ => haxe_trace_int(value), // fallback
+    }
+}
+
 /// Trace any Dynamic value using Std.string() for proper type dispatch
 /// The value is expected to be a pointer to a DynamicValue (boxed Dynamic)
 #[no_mangle]
