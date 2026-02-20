@@ -813,6 +813,7 @@ impl IrBuilder {
     /// Add a phi node to a block
     pub fn build_phi(&mut self, block: IrBlockId, ty: IrType) -> Option<IrId> {
         let dest = self.alloc_reg()?;
+        self.set_register_type(dest, ty.clone());
         let phi = IrPhiNode {
             dest,
             incoming: Vec::new(),

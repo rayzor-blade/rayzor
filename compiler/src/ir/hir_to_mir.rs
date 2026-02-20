@@ -5102,6 +5102,18 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
         }
+        // Also check by name — generic instantiation may create different SymbolIds
+        if let Some(sym) = self.symbol_table.get_symbol(enum_symbol) {
+            let enum_name = self.string_interner.get(sym.name).unwrap_or("");
+            for (_type_id, type_decl) in self.current_hir_types.iter() {
+                if let HirTypeDecl::Enum(enum_decl) = type_decl {
+                    let decl_name = self.string_interner.get(enum_decl.name).unwrap_or("");
+                    if decl_name == enum_name {
+                        return enum_decl.variants.iter().any(|v| !v.fields.is_empty());
+                    }
+                }
+            }
+        }
         // Fallback: check symbol table for enums from other modules (e.g. StdTypes.hx)
         if let Some(variants) = self.symbol_table.get_enum_variants(enum_symbol) {
             let type_table = self.type_table.borrow();
@@ -5360,17 +5372,30 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
                         } else if sym.kind == SymbolKind::EnumVariant {
-                            // Enum variant without parameters - return its discriminant value
-                            // Find the parent enum and get the variant index
-                            if let Some(parent_enum_id) =
+                            // Enum variant without parameters - return its discriminant value.
+                            // Use expr.ty to resolve the parent enum — symbol-based lookup
+                            // can match the wrong parent when multiple enums share variant names
+                            // (e.g., Option.None vs DisplayMode.None).
+                            let parent_enum_id = self.resolve_enum_symbol(expr.ty).or_else(|| {
                                 self.symbol_table.find_parent_enum_for_constructor(*symbol)
-                            {
+                            });
+                            if let Some(parent_enum_id) = parent_enum_id {
                                 if let Some(variants) =
                                     self.symbol_table.get_enum_variants(parent_enum_id)
                                 {
-                                    // Find the index of this variant
+                                    // Find the index of this variant by SymbolId or by name
+                                    // (generic instantiation may create different SymbolIds)
+                                    let variant_name =
+                                        self.string_interner.get(sym.name).unwrap_or("");
                                     for (idx, variant_id) in variants.iter().enumerate() {
-                                        if *variant_id == *symbol {
+                                        let id_match = *variant_id == *symbol;
+                                        let name_match = !id_match
+                                            && self
+                                                .symbol_table
+                                                .get_symbol(*variant_id)
+                                                .and_then(|vs| self.string_interner.get(vs.name))
+                                                .map_or(false, |vn| vn == variant_name);
+                                        if id_match || name_match {
                                             // If enum has parameterized variants, all variants must be boxed
                                             if self.enum_is_boxed(parent_enum_id) {
                                                 return self.build_boxed_enum_tag_only(idx as i32);
@@ -19550,8 +19575,19 @@ impl<'a> HirToMirContext<'a> {
                     return Some(tag_matches);
                 }
 
-                // Extract and test each field using byte offsets
-                let mut all_fields_match = tag_matches;
+                // Must short-circuit field extraction behind tag check.
+                // Other variants may have smaller allocations (e.g., None = 8 bytes tag only),
+                // so loading fields at offset 8+ would be out-of-bounds if tag doesn't match.
+                let false_val = self.builder.build_const(IrValue::Bool(false))?;
+                let tag_check_block = self.builder.current_block()?;
+                let fields_block = self.builder.create_block()?;
+                let merge_block = self.builder.create_block()?;
+                self.builder
+                    .build_cond_branch(tag_matches, fields_block, merge_block);
+
+                // --- fields_block: tag matched, extract and test fields ---
+                self.builder.switch_to_block(fields_block);
+                let mut all_fields_match = None;
 
                 for (i, field_pattern) in fields.iter().enumerate() {
                     // Field at byte offset 8 + i*8
@@ -19567,12 +19603,29 @@ impl<'a> HirToMirContext<'a> {
                     let field_val = self.builder.build_load(field_ptr, IrType::I64)?;
 
                     let field_match = self.lower_pattern_test(field_val, field_pattern)?;
-                    all_fields_match =
-                        self.builder
-                            .build_binop(BinaryOp::And, all_fields_match, field_match)?;
+                    all_fields_match = Some(match all_fields_match {
+                        Some(prev) => self.builder.build_binop(BinaryOp::And, prev, field_match)?,
+                        None => field_match,
+                    });
                 }
 
-                Some(all_fields_match)
+                let fields_result = all_fields_match.unwrap_or(tag_matches);
+                self.builder.build_branch(merge_block);
+                let fields_exit_block = self.builder.current_block()?;
+
+                // --- merge_block: phi(fields_result | false) ---
+                self.builder.switch_to_block(merge_block);
+                let result = self.builder.build_phi(merge_block, IrType::Bool)?;
+                self.builder.add_phi_incoming(
+                    merge_block,
+                    result,
+                    fields_exit_block,
+                    fields_result,
+                );
+                self.builder
+                    .add_phi_incoming(merge_block, result, tag_check_block, false_val);
+
+                Some(result)
             }
 
             HirPattern::Tuple(patterns) => {

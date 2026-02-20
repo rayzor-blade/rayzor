@@ -1722,7 +1722,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 - [x] Guard expressions in match arms (`case v if v > 0:`) — guards propagated from AST through TAST/HIR to MIR (2026-02-18)
 - [ ] Exhaustiveness checking (warn on missing cases)
-- [ ] Nested pattern matching (`case Pair(Some(x), _):`)
+- [x] Nested pattern matching (`case Pair(Some(x), _):`) — short-circuit field extraction behind tag check to prevent OOB reads; type-based parent enum resolution fixes cross-enum variant name collisions (2026-02-20)
 
 **Completed separately (see 16.13):**
 - [x] `EnumValue` API (`getIndex()`, `getName()`, `getParameters()`) — via runtime mapping
@@ -1743,7 +1743,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 **Not Yet Implemented:**
 
-- [ ] Multiple interface implementation (`class Foo implements Bar implements Baz`)
+- [x] Multiple interface implementation (`class Foo implements Bar implements Baz`) — parser accepts repeated `implements` keyword (2026-02-20)
 - [x] Interface inheritance (`interface A extends B`) — inherited methods in vtable, transitive parent vtables for implementing classes (2026-02-18)
 - [ ] `Std.is(obj, IMyInterface)` runtime check
 - [ ] Fat pointer lifecycle management (free on scope exit)
@@ -1770,10 +1770,14 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [x] Multiple catch blocks with type discrimination — dispatches by `rayzor_get_exception_type_id()`
 - [x] `catch (e:Dynamic)` as universal fallback
 
+**Implemented (2026-02-20):**
+
+- [x] Finally block execution — both statement and expression forms emit finally code at all exit paths (normal, catch, fallthrough)
+
+- [x] Exception propagation through uncaught functions (cross-function unwinding) — setjmp/longjmp inherently handles this (2026-02-20)
+
 **Not Yet Implemented:**
 
-- [ ] Finally block execution
-- [ ] Exception propagation through uncaught functions (cross-function unwinding)
 - [ ] `haxe.Exception` base class
 - [ ] Stack trace capture on throw
 
@@ -2066,10 +2070,14 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [x] `[for (x in arr) x * 2]` — array comprehension (desugars to for-in loop with push)
 - [x] Block expression result (`HirExprKind::Block` returns trailing expression value)
 
-**What's Missing:**
+**Implemented (2026-02-20):**
 
-- [ ] `[for (x in arr) if (x > 0) x]` — filtered comprehension (requires parser changes)
-- [ ] Nested comprehensions
+- [x] `[for (x in arr) if (x > 0) x]` — filtered comprehension (detects Conditional with no else in build_comprehension_body, wraps push in HirStatement::If)
+- [x] `[for (i in 0...3) for (j in 0...2) expr]` — nested comprehensions (already worked via recursive for_parts)
+
+**Known Issue:**
+
+- [ ] Multiple comprehensions in same function produce incorrect results (temp variable scoping bug, pre-existing)
 
 ### 16.18 RTTI (Runtime Type Information) 🟢
 
@@ -2095,9 +2103,13 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [x] `Type.resolveClass(name)` — lookup TypeId by qualified name
 - [x] TypeId consistency fix (2026-02-17) — object header uses SymbolId-based TypeId matching TYPE_REGISTRY
 
-**Not Yet Implemented:**
+**Implemented (2026-02-20):**
 
-- [ ] `Type.typeof(value)` — get ValueType enum
+- [x] `Type.typeof(value)` — returns ValueType ordinal (TNull=0, TInt=1, TFloat=2, TBool=3, TObject=4, TFunction=5, TClass=6, TEnum=7, TUnknown=8) via `haxe_type_typeof` runtime function
+
+**Deferred:**
+
+- [ ] `Type.typeof()` returns actual `ValueType` enum instead of i32 ordinal (needs enum boxing for TClass(c)/TEnum(e) params)
 
 ### 16.19 Class Virtual Dispatch (`override`) 🟢
 

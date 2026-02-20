@@ -2893,11 +2893,6 @@ impl<'a> TastToHirContext<'a> {
                 }
             };
 
-            // BACKLOG: TypedComprehensionFor doesn't have a condition field
-            // Haxe array comprehensions support filters like: [for (x in xs) if (x > 0) x * 2]
-            // Need to check how filters are represented in TAST
-            // For now, no filter support in desugaring
-
             // Create for-in loop
             let for_stmt = HirStatement::ForIn {
                 label: None,
@@ -2933,7 +2928,9 @@ impl<'a> TastToHirContext<'a> {
         HirExprKind::Block(block)
     }
 
-    /// Build the innermost body for array comprehension that pushes to the array
+    /// Build the innermost body for array comprehension that pushes to the array.
+    /// Handles filtered comprehensions: `[for (x in xs) if (cond) expr]` desugars to
+    /// `if (cond) { _tmp.push(expr); }` instead of `_tmp.push(if (cond) expr else default)`.
     fn build_comprehension_body(
         &mut self,
         expression: &TypedExpression,
@@ -2941,10 +2938,33 @@ impl<'a> TastToHirContext<'a> {
         _array_name: InternedString,
         array_type: TypeId,
     ) -> Result<HirBlock, String> {
-        // Desugar to: _tmp.push(expression)
-        // Uses the same pattern as regular method calls in HIR:
-        // Call { callee: Variable(push_sym), args: [receiver, element], is_method: true }
-        // The MIR Variable callee path resolves "push" via stdlib mapping for Array types.
+        // Check if expression is a filter: Conditional { condition, then_expr, else_expr: None }
+        // If so, wrap the push in an if-statement so filtered-out elements are skipped entirely.
+        if let TypedExpressionKind::Conditional {
+            condition,
+            then_expr,
+            else_expr: None,
+        } = &expression.kind
+        {
+            let push_block = self.build_comprehension_push(then_expr, array_symbol, array_type)?;
+            let if_stmt = HirStatement::If {
+                condition: self.lower_expression(condition),
+                then_branch: push_block,
+                else_branch: None,
+            };
+            return Ok(HirBlock::new(vec![if_stmt], self.current_scope));
+        }
+
+        self.build_comprehension_push(expression, array_symbol, array_type)
+    }
+
+    /// Emit `_tmp.push(expression)` as an HIR block.
+    fn build_comprehension_push(
+        &mut self,
+        expression: &TypedExpression,
+        array_symbol: SymbolId,
+        array_type: TypeId,
+    ) -> Result<HirBlock, String> {
         let array_ref = HirExpr::new(
             HirExprKind::Variable {
                 symbol: array_symbol,

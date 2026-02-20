@@ -61,11 +61,21 @@ pub fn class_decl<'a>(full: &'a str, input: &'a str) -> PResult<'a, ClassDecl> {
         context("[E0113] expected parent class type | help: provide the class to extend from", |i| type_expr(full, i))
     )).parse(input)?;
 
-    // Implements clause
-    let (input, implements) = opt(preceded(
-        context("[E0114] expected 'implements' keyword", keyword("implements")),
-        context("[E0115] expected comma-separated list of interface types | help: provide one or more interfaces to implement", separated_list1(symbol(","), |i| type_expr(full, i)))
-    )).parse(input)?;
+    // Implements clause: supports both `implements A implements B` (Haxe standard)
+    // and `implements A, B` (comma-separated) syntax
+    let (input, implements) = {
+        let mut ifaces = Vec::new();
+        let mut rest = input;
+        while let Ok((next, _)) = keyword("implements").parse(rest) {
+            let (next, iface_list) = context(
+                "[E0115] expected interface type",
+                separated_list1(symbol(","), |i| type_expr(full, i)),
+            ).parse(next)?;
+            ifaces.extend(iface_list);
+            rest = next;
+        }
+        (rest, ifaces)
+    };
 
     // Class body
     let (input, _) = context("[E0116] expected '{' to start class body | help: class body must be enclosed in braces", symbol("{")).parse(input)?;
@@ -83,7 +93,7 @@ pub fn class_decl<'a>(full: &'a str, input: &'a str) -> PResult<'a, ClassDecl> {
         name,
         type_params,
         extends,
-        implements: implements.unwrap_or_default(),
+        implements,
         fields,
         span: Span::new(start, end),
     }))
