@@ -239,6 +239,21 @@ impl NamespaceResolver {
     }
 
     pub fn resolve_qualified_path_to_file(&self, qualified_path: &str) -> Option<PathBuf> {
+        self.resolve_qualified_path_impl(qualified_path, true)
+    }
+
+    /// Resolve a qualified path ignoring the loaded-files check.
+    /// Used by import loading which needs to compile files even if BLADE cache
+    /// has pre-registered their symbols (BLADE doesn't preserve full TAST state).
+    pub fn resolve_qualified_path_to_file_force(&self, qualified_path: &str) -> Option<PathBuf> {
+        self.resolve_qualified_path_impl(qualified_path, false)
+    }
+
+    fn resolve_qualified_path_impl(
+        &self,
+        qualified_path: &str,
+        check_loaded: bool,
+    ) -> Option<PathBuf> {
         // Convert qualified path to file path
         // "haxe.iterators.ArrayIterator" -> "haxe/iterators/ArrayIterator.hx"
         let file_path = qualified_path.replace('.', "/") + ".hx";
@@ -247,7 +262,7 @@ impl NamespaceResolver {
         for source_path in &self.source_paths {
             let full_path = source_path.join(&file_path);
             if full_path.exists() {
-                if self.is_file_loaded(&full_path) {
+                if check_loaded && self.is_file_loaded(&full_path) {
                     // Already loaded from cache - skip
                     return None;
                 }
@@ -259,7 +274,7 @@ impl NamespaceResolver {
         for stdlib_path in &self.stdlib_paths {
             let full_path = stdlib_path.join(&file_path);
             if full_path.exists() {
-                if self.is_file_loaded(&full_path) {
+                if check_loaded && self.is_file_loaded(&full_path) {
                     // Already loaded from cache - skip
                     return None;
                 }

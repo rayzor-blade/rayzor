@@ -323,10 +323,11 @@ fn build_array_push(builder: &mut MirBuilder) {
 /// Removes and returns the last element from the array
 fn build_array_pop(builder: &mut MirBuilder) {
     let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
     let func_id = builder
         .begin_function("array_pop")
         .param("arr", IrType::Any)
-        .returns(IrType::Any)
+        .returns(ptr_u8.clone())
         .calling_convention(CallingConvention::C)
         .build();
 
@@ -340,15 +341,13 @@ fn build_array_pop(builder: &mut MirBuilder) {
     // Cast arr from Any (i64) to ptr for extern call
     let arr_ptr = builder.cast(arr, IrType::Any, ptr_void.clone());
 
-    // Call runtime function haxe_array_pop_ptr(arr: *HaxeArray) -> *mut u8
+    // Call runtime function haxe_array_pop_ptr(arr: *HaxeArray) -> *mut u8 (DynamicValue*)
     let extern_func = builder
         .get_function_by_name("haxe_array_pop_ptr")
         .expect("haxe_array_pop_ptr extern not found");
 
     if let Some(result) = builder.call(extern_func, vec![arr_ptr]) {
-        // Cast result from ptr to Any (i64)
-        let result_i64 = builder.cast(result, ptr_void, IrType::Any);
-        builder.ret(Some(result_i64));
+        builder.ret(Some(result));
     } else {
         let null_val = builder.const_value(crate::ir::IrValue::Null);
         builder.ret(Some(null_val));
@@ -551,11 +550,12 @@ fn build_array_last_index_of(builder: &mut MirBuilder) {
 /// Wrapper: removes and returns first element as boxed DynamicValue*
 fn build_array_shift(builder: &mut MirBuilder) {
     let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
 
     let func_id = builder
         .begin_function("array_shift")
         .param("arr", IrType::Any)
-        .returns(IrType::Any)
+        .returns(ptr_u8.clone())
         .calling_convention(CallingConvention::C)
         .build();
 
@@ -572,8 +572,7 @@ fn build_array_shift(builder: &mut MirBuilder) {
         .expect("haxe_array_shift_ptr extern not found");
 
     if let Some(result) = builder.call(shift_func, vec![arr_ptr]) {
-        let result_i64 = builder.cast(result, ptr_void, IrType::Any);
-        builder.ret(Some(result_i64));
+        builder.ret(Some(result));
     } else {
         let null_val = builder.const_value(crate::ir::IrValue::Null);
         builder.ret(Some(null_val));

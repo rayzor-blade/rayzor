@@ -76,6 +76,11 @@ pub struct CompilationUnit {
     /// MIR modules generated during compilation (collected from pipeline results)
     mir_modules: Vec<std::sync::Arc<crate::ir::IrModule>>,
 
+    /// MIR modules from on-demand imported stdlib files (e.g., BalancedTree.hx).
+    /// These are merged into the user module during stdlib renumbering rather than
+    /// being stored as separate modules, because their function IDs would collide.
+    import_mir_modules: Vec<crate::ir::IrModule>,
+
     /// Stdlib typed files loaded on-demand (typedefs, etc. that need to be in HIR)
     loaded_stdlib_typed_files: Vec<TypedFile>,
 
@@ -396,6 +401,7 @@ impl CompilationUnit {
             compiled_files: HashMap::new(),
             pipeline,
             mir_modules: Vec::new(),
+            import_mir_modules: Vec::new(),
             loaded_stdlib_typed_files: Vec::new(),
             stdlib_function_map: BTreeMap::new(),
             stdlib_function_name_map: BTreeMap::new(),
@@ -1784,10 +1790,12 @@ impl CompilationUnit {
             }
             visited.insert(qualified_path.clone());
 
-            // Resolve to file path
+            // Resolve to file path (use _force variant to bypass BLADE cache's
+            // is_file_loaded check — BLADE pre-registers symbols but doesn't preserve
+            // full TAST state needed for generic instantiation and method resolution)
             let file_path = if let Some(path) = self
                 .namespace_resolver
-                .resolve_qualified_path_to_file(&qualified_path)
+                .resolve_qualified_path_to_file_force(&qualified_path)
             {
                 path
             } else if !qualified_path.contains('.') {
@@ -1806,7 +1814,7 @@ impl CompilationUnit {
                     let full = format!("{}.{}", prefix, qualified_path);
                     if let Some(path) = self
                         .namespace_resolver
-                        .resolve_qualified_path_to_file(&full)
+                        .resolve_qualified_path_to_file_force(&full)
                     {
                         found = Some(path);
                         break;
@@ -1820,8 +1828,13 @@ impl CompilationUnit {
                 continue; // Skip unresolvable
             };
 
-            // Skip if already loaded
-            if self.namespace_resolver.is_file_loaded(&file_path) {
+            // Deduplicate by file path — the same file can appear under different
+            // qualified names (e.g., "BalancedTree" and "haxe.ds.BalancedTree")
+            let file_path_str = file_path.to_string_lossy().to_string();
+            if all_files
+                .values()
+                .any(|(p, _, _)| p.to_string_lossy() == file_path_str)
+            {
                 continue;
             }
 
@@ -1831,7 +1844,7 @@ impl CompilationUnit {
                 Err(_) => continue,
             };
 
-            let filename = file_path.to_string_lossy().to_string();
+            let filename = file_path_str;
             let deps = match parser::parse_haxe_file(&filename, &source, false) {
                 Ok(ast) => Self::extract_all_dependencies(&ast),
                 Err(_) => Vec::new(),
@@ -1847,6 +1860,14 @@ impl CompilationUnit {
             all_files.insert(qualified_path.clone(), (file_path, source, deps));
         }
 
+        // Debug: log collected files
+        if !all_files.is_empty() {
+            debug!(
+                "[IMPORT_LOAD] Collected {} files for import",
+                all_files.len()
+            );
+        }
+
         // Step 2: Topological sort using Kahn's algorithm
         let mut in_degree: HashMap<String, usize> = HashMap::new();
         let mut graph: HashMap<String, Vec<String>> = HashMap::new();
@@ -1854,6 +1875,10 @@ impl CompilationUnit {
         for (name, (_, _, deps)) in &all_files {
             in_degree.entry(name.clone()).or_insert(0);
             for dep in deps {
+                // Skip self-dependencies (class referencing itself in its own file)
+                if dep == name {
+                    continue;
+                }
                 if all_files.contains_key(dep) {
                     graph.entry(dep.clone()).or_default().push(name.clone());
                     *in_degree.entry(name.clone()).or_insert(0) += 1;
@@ -1883,12 +1908,19 @@ impl CompilationUnit {
             }
         }
 
+        debug!("[IMPORT_LOAD] compile_order: {:?}", compile_order);
+
         // Step 3: Compile in topological order (no retries needed!)
         // With BLADE caching: check cache first, compile only if needed
         for name in compile_order {
             if let Some((file_path, source, deps)) = all_files.remove(&name) {
                 // Skip if already compiled
                 let filename = file_path.to_string_lossy().to_string();
+                debug!(
+                    "[IMPORT_LOAD] Compiling: {} (already_compiled={})",
+                    filename,
+                    self.compiled_files.contains_key(&filename)
+                );
                 if self.compiled_files.contains_key(&filename) {
                     continue;
                 }
@@ -1909,16 +1941,86 @@ impl CompilationUnit {
                     Ok(typed_file) => {
                         self.loaded_stdlib_typed_files.push(typed_file);
 
-                        // Save to BLADE cache for next time (if caching enabled)
-                        if self.config.enable_cache {
-                            if let Some(mir) = self.mir_modules.last() {
-                                self.save_blade_cached(&filename, &source, mir, deps);
+                        // Move the MIR from mir_modules to import_mir_modules.
+                        // CRITICAL: Renumber import function IDs to a high base offset
+                        // to prevent collisions with the user module (which also starts
+                        // IDs from 0). Update stdlib_function_map/name_map so the user
+                        // module references these high IDs instead of the original ones.
+                        if let Some(mir_arc) = self.mir_modules.pop() {
+                            // Save to BLADE cache before renumbering
+                            if self.config.enable_cache {
+                                self.save_blade_cached(&filename, &source, &mir_arc, deps);
                             }
+
+                            use crate::ir::IrFunctionId;
+                            let mut import_mir = (*mir_arc).clone();
+
+                            // Use a high base to avoid collision with user module IDs
+                            let import_base: u32 =
+                                100_000 + (self.import_mir_modules.len() as u32 * 10_000);
+
+                            // Build old→new ID mapping and renumber functions
+                            let mut id_map: std::collections::HashMap<IrFunctionId, IrFunctionId> =
+                                std::collections::HashMap::new();
+                            for old_id in import_mir.functions.keys() {
+                                id_map.insert(*old_id, IrFunctionId(old_id.0 + import_base));
+                            }
+
+                            // Renumber functions in the import module
+                            let old_functions: std::collections::BTreeMap<_, _> =
+                                std::mem::take(&mut import_mir.functions);
+                            for (old_id, mut func) in old_functions {
+                                let new_id = *id_map.get(&old_id).unwrap();
+                                func.id = new_id;
+
+                                // Update internal CallDirect/FunctionRef
+                                use crate::ir::IrInstruction;
+                                for block in func.cfg.blocks.values_mut() {
+                                    for inst in &mut block.instructions {
+                                        match inst {
+                                            IrInstruction::CallDirect { func_id, .. }
+                                            | IrInstruction::FunctionRef { func_id, .. }
+                                            | IrInstruction::MakeClosure { func_id, .. } => {
+                                                if let Some(new_func_id) = id_map.get(func_id) {
+                                                    *func_id = *new_func_id;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+
+                                import_mir.functions.insert(new_id, func);
+                            }
+
+                            // Update stdlib_function_map to point to renumbered IDs
+                            for (_sym, func_id) in self.stdlib_function_map.iter_mut() {
+                                if let Some(&new_id) = id_map.get(func_id) {
+                                    *func_id = new_id;
+                                }
+                            }
+
+                            // Update stdlib_function_name_map to point to renumbered IDs
+                            for (_name, func_id) in self.stdlib_function_name_map.iter_mut() {
+                                if let Some(&new_id) = id_map.get(func_id) {
+                                    *func_id = new_id;
+                                }
+                            }
+
+                            self.import_mir_modules.push(import_mir);
                         }
                     }
                     Err(_e) => {
                         // If it still fails, fall back to old retry mechanism
                         // This handles edge cases like Placeholder typedefs
+                        debug!(
+                            "[IMPORT_LOAD] Failed to compile {}: {} error(s)",
+                            filename,
+                            _e.len()
+                        );
+                        for e in &_e {
+                            debug!("  - {}", e.message);
+                        }
                     }
                 }
             }
@@ -2838,15 +2940,13 @@ impl CompilationUnit {
         use crate::stdlib::build_stdlib_with_plugins;
         let mut stdlib_mir = build_stdlib_with_plugins(&self.compiler_plugin_registry);
 
-        // DEBUG: Check a specific extern function signature before renumbering
-        for (func_id, func) in &stdlib_mir.functions {
-            if func.name == "rayzor_channel_init" {
-                debug!(
-                    "DEBUG: BEFORE renumbering - rayzor_channel_init (ID {}): params={}, extern={}",
-                    func_id.0,
-                    func.signature.parameters.len(),
-                    func.cfg.blocks.is_empty()
-                );
+        // Merge on-demand imported MIR modules (e.g., BalancedTree.hx) into the
+        // user module. These were already renumbered to high IDs (100000+) during
+        // load_imports_efficiently, so they won't collide with either user or stdlib IDs.
+        // The user module already references these high IDs via external_function_map.
+        for import_module in self.import_mir_modules.drain(..) {
+            for (func_id, func) in import_module.functions {
+                mir_module.functions.insert(func_id, func);
             }
         }
 

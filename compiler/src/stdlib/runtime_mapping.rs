@@ -303,6 +303,18 @@ impl StdlibMapping {
         })
     }
 
+    /// Find a static stdlib method mapping by method name alone (no class specified).
+    /// Only matches methods marked as `is_static`. Used as a last-resort fallback
+    /// when the qualified class name is not available (e.g., Reflect.compare from import files).
+    pub fn find_static_method_by_name(
+        &self,
+        method: &str,
+    ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
+        self.mappings
+            .iter()
+            .find(|(sig, _)| sig.is_static && sig.method == method)
+    }
+
     /// Check if a lookup class name matches a registered class name.
     /// Supports exact match and suffix match (e.g., "Arc" matches "rayzor_concurrent_Arc").
     fn class_matches(&self, lookup: &str, registered: &str) -> bool {
@@ -1407,13 +1419,15 @@ impl StdlibMapping {
     // ============================================================================
 
     fn register_array_methods(&mut self) {
+        use IrTypeDescriptor::*;
         let mappings = vec![
             // Properties (treated as getters with 0 params)
             map_method!(instance "Array", "length" => "array_length", params: 0, returns: primitive),
             // Modification methods
             // push and pop use MIR wrappers that handle Any type parameters internally
             map_method!(instance "Array", "push" => "array_push", params: 1, returns: void),
-            map_method!(instance "Array", "pop" => "array_pop", params: 0, returns: primitive),
+            map_method!(instance "Array", "pop" => "array_pop", params: 0, mir_wrapper,
+                types: &[PtrU8] => PtrU8),
             map_method!(instance "Array", "reverse" => "haxe_array_reverse", params: 0, returns: void),
             // insert(pos:Int, x:T): arg[0]=array, arg[1]=pos (no conversion), arg[2]=value (needs ptr conversion)
             // Bitmask: 0b100 = bit 2 set (param index 2)
@@ -1433,7 +1447,8 @@ impl StdlibMapping {
             // Joins array elements with separator, returns new string
             map_method!(instance "Array", "join" => "array_join", params: 1, returns: primitive),
             // Mutation methods — MIR wrappers handle Any→Ptr conversion
-            map_method!(instance "Array", "shift" => "array_shift", params: 0, returns: primitive),
+            map_method!(instance "Array", "shift" => "array_shift", params: 0, mir_wrapper,
+                types: &[PtrU8] => PtrU8),
             map_method!(instance "Array", "unshift" => "array_unshift", params: 1, returns: void),
             map_method!(instance "Array", "resize" => "array_resize", params: 1, returns: void),
             // concat and splice use MIR wrappers that handle out-param allocation

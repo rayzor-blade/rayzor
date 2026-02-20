@@ -613,8 +613,8 @@ fn compile_haxe_to_mir(
         return Err("No MIR modules generated".to_string());
     }
 
-    // Return the last module (user code - stdlib modules are compiled first)
-    // Clone the inner IrModule from the Arc
+    // Return the last module (user code). Import MIR modules are merged during
+    // compilation (in compile_file_with_shared_state_ex's stdlib renumbering pass).
     let module = (**mir_modules.last().unwrap()).clone();
     Ok(module)
 }

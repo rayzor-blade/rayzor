@@ -482,12 +482,12 @@ impl Monomorphizer {
         match ty {
             IrType::I32 | IrType::I64 | IrType::I8 | IrType::I16 => 1, // TYPE_INT
             IrType::U8 | IrType::U16 | IrType::U32 | IrType::U64 => 1, // TYPE_INT
-            IrType::Bool => 2,                                          // TYPE_BOOL
+            IrType::Bool => 2,                                         // TYPE_BOOL
             IrType::F32 | IrType::F64 => 4,                            // TYPE_FLOAT
-            IrType::String => 5,                                        // TYPE_STRING
+            IrType::String => 5,                                       // TYPE_STRING
             IrType::Ptr(inner) if matches!(**inner, IrType::U8) => 5,  // Ptr(U8) = String
             IrType::Ptr(_) => 6,                                       // Reference/Object
-            _ => 1,                                                     // Default: Int
+            _ => 1,                                                    // Default: Int
         }
     }
 
@@ -542,8 +542,7 @@ impl Monomorphizer {
         }
 
         // Worklist: start with all initially monomorphized functions
-        let mut worklist: Vec<IrFunctionId> =
-            self.instantiation_sub_maps.keys().copied().collect();
+        let mut worklist: Vec<IrFunctionId> = self.instantiation_sub_maps.keys().copied().collect();
         let mut processed: HashSet<IrFunctionId> = HashSet::new();
 
         while let Some(func_id) = worklist.pop() {
@@ -675,8 +674,7 @@ impl Monomorphizer {
 
         // Cache
         self.instances.insert(key, new_id);
-        self.instantiation_sub_maps
-            .insert(new_id, sub_map.clone());
+        self.instantiation_sub_maps.insert(new_id, sub_map.clone());
         self.stats.instantiations_created += 1;
         self.stats
             .monomorphized_types

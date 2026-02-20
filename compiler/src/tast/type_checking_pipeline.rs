@@ -3436,23 +3436,30 @@ impl<'a> TypeCheckingPhase<'a> {
 
     /// Validate that a type satisfies a constraint type (e.g., T:Comparable<T>)
     fn validate_type_constraint(&self, type_id: TypeId, constraint_type_id: TypeId) -> bool {
-        // For now, we implement a simple check:
-        // - If types are identical, constraint is satisfied
-        // - If constraint is an interface, check if type implements it
-        // - Otherwise, reject the constraint (conservative approach)
-
         if type_id == constraint_type_id {
             return true;
         }
 
         // Check if it's an interface implementation
         if self.is_interface_type(constraint_type_id) {
-            self.type_implements_interface(type_id, constraint_type_id)
-        } else {
-            // For non-interface constraints, be conservative and reject
-            // TODO: Implement more sophisticated constraint checking
-            false
+            return self.type_implements_interface(type_id, constraint_type_id);
         }
+
+        // Abstract constraints (e.g., EnumValue, FlatEnum, NotVoid) are type-erasure
+        // markers — they serve as semantic hints, not runtime constraints.
+        // Accept any type for abstract constraints.
+        if self.is_abstract_type(constraint_type_id) {
+            return true;
+        }
+
+        false
+    }
+
+    fn is_abstract_type(&self, type_id: TypeId) -> bool {
+        let type_table = self.type_checker.type_table.borrow();
+        type_table.get(type_id).map_or(false, |ti| {
+            matches!(ti.kind, super::TypeKind::Abstract { .. })
+        })
     }
 
     /// Check if a type implements an interface

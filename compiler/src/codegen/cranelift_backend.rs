@@ -1784,10 +1784,7 @@ impl CraneliftBackend {
                 // We detect GEP targets via register_types: GEP results have Ptr(elem_ty).
                 let needs_widen = if let Some(ptr_ty) = function.register_types.get(ptr) {
                     if let IrType::Ptr(inner) = ptr_ty {
-                        matches!(
-                            inner.as_ref(),
-                            IrType::I64 | IrType::U64 | IrType::Any
-                        )
+                        matches!(inner.as_ref(), IrType::I64 | IrType::U64 | IrType::Any)
                     } else {
                         false
                     }
@@ -2798,10 +2795,17 @@ impl CraneliftBackend {
                     .get(&index_id)
                     .ok_or_else(|| format!("GEP index {:?} not found in value_map", index_id))?;
 
-                // All Rayzor object field slots are uniformly 8 bytes
-                // (class_alloc_sizes = field_index * 8). Use 8 as the element size
-                // regardless of the field's actual type to match the allocation layout.
-                let elem_size: usize = 8;
+                // Determine element size from the GEP type:
+                // - Byte-pointer types (*u8, *i8): elem_size=1, index is already a byte offset
+                // - Struct field types (*void, f64, i32, etc.): elem_size=8, all Rayzor
+                //   object field slots are uniformly 8 bytes (class_alloc_sizes = field_index * 8)
+                let elem_size: usize = match ty {
+                    IrType::Ptr(inner) => match inner.as_ref() {
+                        IrType::U8 | IrType::I8 => 1,
+                        _ => 8,
+                    },
+                    _ => 8,
+                };
                 let size_val = builder.ins().iconst(types::I64, elem_size as i64);
 
                 // Convert index to i64 if needed (only if not already i64)
@@ -3098,21 +3102,21 @@ impl CraneliftBackend {
 
             IrInstruction::Free { ptr } => {
                 // Free heap-allocated memory (Rust-style drop semantics)
-                // Get the pointer value to free
-                let ptr_val = *value_map
-                    .get(ptr)
-                    .ok_or_else(|| format!("Free ptr {:?} not found in value_map", ptr))?;
+                // Skip if ptr is not in value_map — this happens when the Free was emitted
+                // in a branch but the ptr was defined in a different (sibling) branch.
+                // At runtime, that branch's value never existed, so there's nothing to free.
+                if let Some(&ptr_val) = value_map.get(ptr) {
+                    // Get the libc free function
+                    let free_func_id = *runtime_functions
+                        .get("free")
+                        .ok_or_else(|| "libc free not found in runtime_functions".to_string())?;
+                    let free_func_ref = module.declare_func_in_func(free_func_id, builder.func);
 
-                // Get the libc free function
-                let free_func_id = *runtime_functions
-                    .get("free")
-                    .ok_or_else(|| "libc free not found in runtime_functions".to_string())?;
-                let free_func_ref = module.declare_func_in_func(free_func_id, builder.func);
+                    // Call free(ptr) - returns void
+                    builder.ins().call(free_func_ref, &[ptr_val]);
 
-                // Call free(ptr) - returns void
-                builder.ins().call(free_func_ref, &[ptr_val]);
-
-                debug!("Free: Emitted call to free for {:?}", ptr);
+                    debug!("Free: Emitted call to free for {:?}", ptr);
+                }
             }
 
             // === SIMD Vector Operations ===
@@ -3880,14 +3884,15 @@ impl CraneliftBackend {
 
     pub fn call_main(&mut self, module: &crate::ir::IrModule) -> Result<(), String> {
         // Call __vtable_init__ to register class virtual dispatch tables
-        if let Some(vtable_init_func) =
-            module.functions.values().find(|f| f.name == "__vtable_init__")
+        if let Some(vtable_init_func) = module
+            .functions
+            .values()
+            .find(|f| f.name == "__vtable_init__")
         {
             if let Ok(vtable_init_ptr) = self.get_function_ptr(vtable_init_func.id) {
                 debug!("  🔧 Calling __vtable_init__() for virtual dispatch tables...");
                 unsafe {
-                    let vtable_init_fn: extern "C" fn(i64) =
-                        std::mem::transmute(vtable_init_ptr);
+                    let vtable_init_fn: extern "C" fn(i64) = std::mem::transmute(vtable_init_ptr);
                     vtable_init_fn(0); // null environment pointer
                 }
             }

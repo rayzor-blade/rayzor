@@ -827,6 +827,7 @@ register_symbol!("haxe_unbox_string", crate::type_system::haxe_unbox_string);
 register_symbol!("haxe_box_int_ptr", crate::type_system::haxe_box_int_ptr);
 register_symbol!("haxe_box_float_ptr", crate::type_system::haxe_box_float_ptr);
 register_symbol!("haxe_box_bool_ptr", crate::type_system::haxe_box_bool_ptr);
+register_symbol!("haxe_box_typed_ptr", crate::type_system::haxe_box_typed_ptr);
 register_symbol!(
     "haxe_box_string_ptr",
     crate::type_system::haxe_box_string_ptr
@@ -1406,10 +1407,7 @@ register_symbol!(
     crate::reflect::haxe_reflect_is_function
 );
 register_symbol!("haxe_reflect_copy", crate::reflect::haxe_reflect_copy);
-register_symbol!(
-    "haxe_reflect_compare",
-    crate::reflect::haxe_reflect_compare
-);
+register_symbol!("haxe_reflect_compare", crate::reflect::haxe_reflect_compare);
 register_symbol!(
     "haxe_reflect_compare_typed",
     crate::reflect::haxe_reflect_compare_typed
@@ -1423,18 +1421,12 @@ register_symbol!("haxe_type_typeof", crate::reflect::haxe_type_typeof);
 // ============================================================================
 // Class Virtual Method Dispatch (Vtable)
 // ============================================================================
-register_symbol!(
-    "haxe_vtable_init",
-    crate::type_system::haxe_vtable_init
-);
+register_symbol!("haxe_vtable_init", crate::type_system::haxe_vtable_init);
 register_symbol!(
     "haxe_vtable_set_slot",
     crate::type_system::haxe_vtable_set_slot
 );
-register_symbol!(
-    "haxe_vtable_lookup",
-    crate::type_system::haxe_vtable_lookup
-);
+register_symbol!("haxe_vtable_lookup", crate::type_system::haxe_vtable_lookup);
 
 // ============================================================================
 // Memory Allocation (libc malloc/free for heap allocations)

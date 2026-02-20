@@ -23,6 +23,40 @@
 package haxe.ds;
 
 /**
+	A tree node of `haxe.ds.BalancedTree`.
+**/
+class TreeNode<K, V> {
+	public var left:TreeNode<K, V>;
+	public var right:TreeNode<K, V>;
+	public var key:K;
+	public var value:V;
+
+	var _height:Int;
+
+	public function new(l, k, v, r, h = -1) {
+		left = l;
+		key = k;
+		value = v;
+		right = r;
+		if (h == -1) {
+			var lh = left.get_height();
+			var rh = right.get_height();
+			if (lh > rh)
+				_height = lh + 1;
+			else
+				_height = rh + 1;
+		} else {
+			_height = h;
+		}
+	}
+
+	public function get_height():Int {
+		if (this == null) return 0;
+		return _height;
+	}
+}
+
+/**
 	BalancedTree allows key-value mapping with arbitrary keys, as long as they
 	can be ordered. By default, `Reflect.compare` is used in the `compare`
 	method, which can be overridden in subclasses.
@@ -32,7 +66,7 @@ package haxe.ds;
 	Iteration over keys and values, using `keys` and `iterator` respectively,
 	are in-order.
 **/
-class BalancedTree<K, V> implements haxe.Constraints.IMap<K, V> {
+class BalancedTree<K, V> {
 	var root:TreeNode<K, V>;
 
 	/**
@@ -82,13 +116,12 @@ class BalancedTree<K, V> implements haxe.Constraints.IMap<K, V> {
 
 		If `key` is null, the result is unspecified.
 	**/
-	public function remove(key:K) {
-		try {
-			root = removeLoop(key, root);
-			return true;
-		} catch (e:String) {
+	public function remove(key:K):Bool {
+		// Simplified: no try/catch, returns false if key not found
+		if (!exists(key))
 			return false;
-		}
+		root = removeLoop(key, root);
+		return true;
 	}
 
 	/**
@@ -112,34 +145,7 @@ class BalancedTree<K, V> implements haxe.Constraints.IMap<K, V> {
 		return false;
 	}
 
-	/**
-		Iterates over the bound values of `this` BalancedTree.
-
-		This operation is performed in-order.
-	**/
-	public function iterator():Iterator<V> {
-		var ret = [];
-		iteratorLoop(root, ret);
-		return ret.iterator();
-	}
-
-	/**
-		See `Map.keyValueIterator`
-	**/
-	@:runtime public inline function keyValueIterator():KeyValueIterator<K, V> {
-		return new haxe.iterators.MapKeyValueIterator(this);
-	}
-
-	/**
-		Iterates over the keys of `this` BalancedTree.
-
-		This operation is performed in-order.
-	**/
-	public function keys():Iterator<K> {
-		var ret = [];
-		keysLoop(root, ret);
-		return ret.iterator();
-	}
+	// TODO: iterator(), keyValueIterator(), keys() — requires Iterator/KeyValueIterator types
 
 	public function copy():BalancedTree<K, V> {
 		var copied = new BalancedTree<K, V>();
@@ -147,45 +153,36 @@ class BalancedTree<K, V> implements haxe.Constraints.IMap<K, V> {
 		return copied;
 	}
 
-	function setLoop(k:K, v:V, node:TreeNode<K, V>) {
+	function setLoop(k:K, v:V, node:TreeNode<K, V>):TreeNode<K, V> {
 		if (node == null)
 			return new TreeNode<K, V>(null, k, v, null);
 		var c = compare(k, node.key);
-		return if (c == 0) new TreeNode<K, V>(node.left, k, v, node.right, node.get_height()); else if (c < 0) {
+		if (c == 0)
+			return new TreeNode<K, V>(node.left, k, v, node.right, node.get_height());
+		else if (c < 0) {
 			var nl = setLoop(k, v, node.left);
-			balance(nl, node.key, node.value, node.right);
+			return balance(nl, node.key, node.value, node.right);
 		} else {
 			var nr = setLoop(k, v, node.right);
-			balance(node.left, node.key, node.value, nr);
+			return balance(node.left, node.key, node.value, nr);
 		}
 	}
 
-	function removeLoop(k:K, node:TreeNode<K, V>) {
+	function removeLoop(k:K, node:TreeNode<K, V>):TreeNode<K, V> {
 		if (node == null)
 			throw "Not_found";
 		var c = compare(k, node.key);
-		return if (c == 0) merge(node.left,
-			node.right); else if (c < 0) balance(removeLoop(k, node.left), node.key, node.value,
-			node.right); else balance(node.left, node.key, node.value, removeLoop(k, node.right));
+		if (c == 0)
+			return merge(node.left, node.right);
+		else if (c < 0)
+			return balance(removeLoop(k, node.left), node.key, node.value, node.right);
+		else
+			return balance(node.left, node.key, node.value, removeLoop(k, node.right));
 	}
 
-	static function iteratorLoop<K,V>(node:TreeNode<K, V>, acc:Array<V>) {
-		if (node != null) {
-			iteratorLoop(node.left, acc);
-			acc.push(node.value);
-			iteratorLoop(node.right, acc);
-		}
-	}
+	// TODO: iteratorLoop, keysLoop — used by iterator()/keys()
 
-	function keysLoop(node:TreeNode<K, V>, acc:Array<K>) {
-		if (node != null) {
-			keysLoop(node.left, acc);
-			acc.push(node.key);
-			keysLoop(node.right, acc);
-		}
-	}
-
-	function merge(t1, t2) {
+	function merge(t1:TreeNode<K, V>, t2:TreeNode<K, V>):TreeNode<K, V> {
 		if (t1 == null)
 			return t2;
 		if (t2 == null)
@@ -194,31 +191,37 @@ class BalancedTree<K, V> implements haxe.Constraints.IMap<K, V> {
 		return balance(t1, t.key, t.value, removeMinBinding(t2));
 	}
 
-	function minBinding(t:TreeNode<K, V>) {
-		return if (t == null) throw "Not_found"; else if (t.left == null) t; else minBinding(t.left);
+	function minBinding(t:TreeNode<K, V>):TreeNode<K, V> {
+		if (t == null)
+			throw "Not_found";
+		if (t.left == null)
+			return t;
+		return minBinding(t.left);
 	}
 
-	function removeMinBinding(t:TreeNode<K, V>) {
-		return if (t.left == null) t.right; else balance(removeMinBinding(t.left), t.key, t.value, t.right);
+	function removeMinBinding(t:TreeNode<K, V>):TreeNode<K, V> {
+		if (t.left == null)
+			return t.right;
+		return balance(removeMinBinding(t.left), t.key, t.value, t.right);
 	}
 
 	function balance(l:TreeNode<K, V>, k:K, v:V, r:TreeNode<K, V>):TreeNode<K, V> {
 		var hl = l.get_height();
 		var hr = r.get_height();
-		return if (hl > hr + 2) {
+		if (hl > hr + 2) {
 			if (l.left.get_height() >= l.right.get_height())
-				new TreeNode<K, V>(l.left, l.key, l.value, new TreeNode<K, V>(l.right, k, v, r));
+				return new TreeNode<K, V>(l.left, l.key, l.value, new TreeNode<K, V>(l.right, k, v, r));
 			else
-				new TreeNode<K, V>(new TreeNode<K, V>(l.left, l.key, l.value, l.right.left), l.right.key, l.right.value,
+				return new TreeNode<K, V>(new TreeNode<K, V>(l.left, l.key, l.value, l.right.left), l.right.key, l.right.value,
 					new TreeNode<K, V>(l.right.right, k, v, r));
 		} else if (hr > hl + 2) {
 			if (r.right.get_height() > r.left.get_height())
-				new TreeNode<K, V>(new TreeNode<K, V>(l, k, v, r.left), r.key, r.value, r.right);
+				return new TreeNode<K, V>(new TreeNode<K, V>(l, k, v, r.left), r.key, r.value, r.right);
 			else
-				new TreeNode<K, V>(new TreeNode<K, V>(l, k, v, r.left.left), r.left.key, r.left.value,
+				return new TreeNode<K, V>(new TreeNode<K, V>(l, k, v, r.left.left), r.left.key, r.left.value,
 					new TreeNode<K, V>(r.left.right, r.key, r.value, r.right));
 		} else {
-			new TreeNode<K, V>(l, k, v, r, (hl > hr ? hl : hr) + 1);
+			return new TreeNode<K, V>(l, k, v, r, (hl > hr ? hl : hr) + 1);
 		}
 	}
 
@@ -226,44 +229,12 @@ class BalancedTree<K, V> implements haxe.Constraints.IMap<K, V> {
 		return Reflect.compare(k1, k2);
 	}
 
-	public function toString() {
-		return root == null ? "[]" : '[${root.toString()}]';
-	}
+	// TODO: toString() — requires string interpolation
 
 	/**
 		Removes all keys from `this` BalancedTree.
 	**/
 	public function clear():Void {
 		root = null;
-	}
-}
-
-/**
-	A tree node of `haxe.ds.BalancedTree`.
-**/
-class TreeNode<K, V> {
-	public var left:TreeNode<K, V>;
-	public var right:TreeNode<K, V>;
-	public var key:K;
-	public var value:V;
-
-	var _height:Int;
-
-	public function new(l, k, v, r, h = -1) {
-		left = l;
-		key = k;
-		value = v;
-		right = r;
-		if (h == -1)
-			_height = (left.get_height() > right.get_height() ? left.get_height() : right.get_height()) + 1;
-		else
-			_height = h;
-	}
-
-	extern public inline function get_height()
-		return this == null ? 0 : _height;
-
-	public function toString() {
-		return (left == null ? "" : left.toString() + ", ") + '$key => $value' + (right == null ? "" : ", " + right.toString());
 	}
 }

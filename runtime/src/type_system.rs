@@ -1718,12 +1718,6 @@ pub extern "C" fn haxe_box_haxestring_ptr(hs_ptr: *mut u8) -> *mut u8 {
         let boxed = Box::new(dynamic);
         return Box::into_raw(boxed) as *mut u8;
     }
-    unsafe {
-        let hs = &*(hs_ptr as *const crate::haxe_string::HaxeString);
-        eprintln!("[BOX_HAXESTRING] hs_ptr={:?} hs.ptr={:?} hs.len={} content={:?}",
-            hs_ptr, hs.ptr, hs.len,
-            std::str::from_utf8(std::slice::from_raw_parts(hs.ptr, hs.len)).unwrap_or("?"));
-    }
     let dynamic = DynamicValue {
         type_id: TYPE_STRING,
         value_ptr: hs_ptr,
@@ -1768,6 +1762,50 @@ pub extern "C" fn haxe_unbox_bool_ptr(ptr: *mut u8) -> bool {
         let dynamic_ptr = ptr as *const DynamicValue;
         let dynamic = *dynamic_ptr;
         haxe_unbox_bool(dynamic)
+    }
+}
+
+/// Box a value as Dynamic with a runtime type tag.
+/// Used by monomorphized generic code where the concrete type is determined
+/// at specialization time via type_param_tag_fixups.
+/// Tags: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Object
+#[no_mangle]
+pub extern "C" fn haxe_box_typed_ptr(value: i64, type_tag: i32) -> *mut u8 {
+    match type_tag {
+        1 => {
+            // Int: allocate and store value, same as haxe_box_int_ptr
+            haxe_box_int_ptr(value)
+        }
+        2 => {
+            // Bool: box as bool
+            haxe_box_bool_ptr(value != 0)
+        }
+        4 => {
+            // Float: reinterpret bits as f64
+            haxe_box_float_ptr(f64::from_bits(value as u64))
+        }
+        5 => {
+            // String: value IS a HaxeString* pointer, store directly as value_ptr
+            if value == 0 {
+                let dynamic = haxe_box_null();
+                let boxed = Box::new(dynamic);
+                return Box::into_raw(boxed) as *mut u8;
+            }
+            let dynamic = DynamicValue {
+                type_id: TYPE_STRING,
+                value_ptr: value as *mut u8,
+            };
+            let boxed = Box::new(dynamic);
+            Box::into_raw(boxed) as *mut u8
+        }
+        6 => {
+            // Reference type: value is an object pointer, box with generic reference type
+            haxe_box_reference_ptr(value as *mut u8, 0)
+        }
+        _ => {
+            // Default: treat as Int
+            haxe_box_int_ptr(value)
+        }
     }
 }
 
