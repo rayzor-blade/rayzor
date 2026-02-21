@@ -969,22 +969,49 @@ pub extern "C" fn haxe_enum_get_parameters(
     arr
 }
 
+/// Walk the class hierarchy to check if actual_type_id is or extends expected_type_id.
+fn type_id_matches_with_hierarchy(actual_type_id: i64, expected_type_id: i64) -> bool {
+    if actual_type_id == expected_type_id {
+        return true;
+    }
+    let registry = TYPE_REGISTRY.read().unwrap();
+    if let Some(ref registry) = *registry {
+        let mut current = TypeId(actual_type_id as u32);
+        while let Some(type_info) = registry.get(&current) {
+            if let Some(class_info) = &type_info.class_info {
+                if let Some(parent_id) = class_info.super_type_id {
+                    if parent_id as i64 == expected_type_id {
+                        return true;
+                    }
+                    current = TypeId(parent_id);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+    false
+}
+
 /// Runtime type check for Dynamic/boxed values.
-/// Checks if a boxed DynamicValue has the given type_id.
+/// Checks if a boxed DynamicValue has the given type_id, walking the class hierarchy.
 /// Used by `Std.is()` and `(expr is Type)` for Dynamic-typed values.
 #[no_mangle]
 pub extern "C" fn haxe_std_is(value_ptr: *mut u8, expected_type_id: i64) -> bool {
     if value_ptr.is_null() {
         return false;
     }
-    unsafe {
+    let actual_type_id = unsafe {
         let dynamic = *(value_ptr as *const DynamicValue);
-        dynamic.type_id.0 as i64 == expected_type_id
-    }
+        dynamic.type_id.0 as i64
+    };
+    type_id_matches_with_hierarchy(actual_type_id, expected_type_id)
 }
 
 /// Runtime downcast for Dynamic/boxed values.
-/// Returns the value pointer if the type matches, null otherwise.
+/// Returns the value pointer if the type matches (with hierarchy walking), null otherwise.
 /// Used by `Std.downcast()`.
 #[no_mangle]
 pub extern "C" fn haxe_std_downcast(value_ptr: *mut u8, expected_type_id: i64) -> *mut u8 {
@@ -993,12 +1020,59 @@ pub extern "C" fn haxe_std_downcast(value_ptr: *mut u8, expected_type_id: i64) -
     }
     unsafe {
         let dynamic = *(value_ptr as *const DynamicValue);
-        if dynamic.type_id.0 as i64 == expected_type_id {
+        if type_id_matches_with_hierarchy(dynamic.type_id.0 as i64, expected_type_id) {
             dynamic.value_ptr
         } else {
             std::ptr::null_mut()
         }
     }
+}
+
+// ============================================================================
+// Type API enum wrappers (accept boxed DynamicValue* from Haxe Type API)
+// ============================================================================
+
+/// Check if an enum type uses boxed representation (any variant has parameters)
+fn is_enum_boxed(type_id: TypeId) -> bool {
+    let registry = TYPE_REGISTRY.read().unwrap();
+    if let Some(ref map) = *registry {
+        if let Some(info) = map.get(&type_id) {
+            if let Some(enum_info) = info.enum_info {
+                return enum_info.variants.iter().any(|v| v.param_count > 0);
+            }
+        }
+    }
+    false
+}
+
+/// Type.enumIndex(e:EnumValue):Int — get enum index from raw i64 value
+/// For simple enums: value is the discriminant (= index)
+/// For boxed enums: value is a pointer to [tag:i32][pad:i32][fields...]
+#[no_mangle]
+pub extern "C" fn haxe_type_enum_index(value: i64) -> i64 {
+    // Simple (unboxed) enums: discriminant IS the index
+    haxe_enum_get_index(value, 0)
+}
+
+/// Type.enumConstructor(e:EnumValue):String — get constructor name
+/// Takes raw i64 value + type_id (injected by compiler)
+#[no_mangle]
+pub extern "C" fn haxe_type_enum_constructor(
+    value: i64,
+    type_id: i32,
+) -> *mut crate::haxe_string::HaxeString {
+    haxe_enum_get_name(type_id as u32, value, 0)
+}
+
+/// Type.enumParameters(e:EnumValue):Array<Dynamic> — get parameters
+/// Takes raw i64 value + type_id (injected by compiler)
+/// For simple enums, always returns empty array
+#[no_mangle]
+pub extern "C" fn haxe_type_enum_parameters(
+    value: i64,
+    type_id: i32,
+) -> *mut crate::haxe_array::HaxeArray {
+    haxe_enum_get_parameters(type_id as u32, value, 0)
 }
 
 /// Trace an enum value by type_id and discriminant

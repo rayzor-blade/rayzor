@@ -1703,6 +1703,7 @@ impl PassManager {
                     forced_inline_model,
                 ));
                 manager.add_pass(DeadCodeEliminationPass::new());
+                manager.add_pass(UnreachableBlockEliminationPass::new());
                 manager.add_pass(super::scalar_replacement::ScalarReplacementPass::new());
                 manager.add_pass(CopyPropagationPass::new());
                 manager.add_pass(DeadCodeEliminationPass::new());

@@ -317,6 +317,19 @@ register_symbol!(
 );
 register_symbol!("haxe_std_is", crate::type_system::haxe_std_is);
 register_symbol!("haxe_std_downcast", crate::type_system::haxe_std_downcast);
+// Type API enum wrappers (accept boxed DynamicValue*)
+register_symbol!(
+    "haxe_type_enum_index",
+    crate::type_system::haxe_type_enum_index
+);
+register_symbol!(
+    "haxe_type_enum_constructor",
+    crate::type_system::haxe_type_enum_constructor
+);
+register_symbol!(
+    "haxe_type_enum_parameters",
+    crate::type_system::haxe_type_enum_parameters
+);
 // Type RTTI query functions
 register_symbol!(
     "haxe_type_get_class_name",

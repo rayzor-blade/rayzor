@@ -3135,6 +3135,12 @@ impl StdlibMapping {
             // Reflect.isEnumValue(v:Dynamic):Bool
             map_method!(static "Reflect", "isEnumValue" => "haxe_reflect_is_enum_value", params: 1, returns: primitive,
                 types: &[PtrU8] => Bool),
+            // Reflect.getProperty(o:Dynamic, field:String):Dynamic — maps to field access
+            map_method!(static "Reflect", "getProperty" => "haxe_reflect_field", params: 2, returns: primitive,
+                types: &[PtrU8, PtrU8] => PtrU8),
+            // Reflect.setProperty(o:Dynamic, field:String, value:Dynamic):Void — maps to setField
+            map_method!(static "Reflect", "setProperty" => "haxe_reflect_set_field", params: 3, returns: void,
+                types: &[PtrU8, PtrU8, PtrU8]),
         ];
 
         self.register_from_tuples(mappings);
@@ -3177,6 +3183,15 @@ impl StdlibMapping {
             // Type.createEnumIndex(e, index, ?params):T
             map_method!(static "Type", "createEnumIndex" => "haxe_type_create_enum_index", params: 3, returns: primitive,
                 types: &[I64, I64, PtrVoid] => I64),
+            // Type.enumIndex(e:EnumValue):Int — raw i64 discriminant = index
+            map_method!(static "Type", "enumIndex" => "haxe_type_enum_index", params: 1, returns: primitive,
+                types: &[I64] => I64),
+            // Type.enumConstructor(e:EnumValue):String — takes (value, type_id), type_id injected by compiler
+            map_method!(static "Type", "enumConstructor" => "haxe_type_enum_constructor", params: 1, returns: complex,
+                types: &[I64, I32] => PtrVoid),
+            // Type.enumParameters(e:EnumValue):Array<Dynamic> — takes (value, type_id), type_id injected by compiler
+            map_method!(static "Type", "enumParameters" => "haxe_type_enum_parameters", params: 1, returns: complex,
+                types: &[I64, I32] => PtrVoid),
         ];
 
         self.register_from_tuples(mappings);

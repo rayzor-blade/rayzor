@@ -51,7 +51,7 @@ class List<T> {
 		`this.length` increases by 1.
 	**/
 	public function add(item:T) {
-		var x = ListNode.create(item, null);
+		var x = new ListNode(item, null);
 		if (h == null)
 			h = x;
 		else
@@ -66,7 +66,7 @@ class List<T> {
 		`this.length` increases by 1.
 	**/
 	public function push(item:T) {
-		var x = ListNode.create(item, h);
+		var x = new ListNode(item, h);
 		h = x;
 		if (q == null)
 			q = x;

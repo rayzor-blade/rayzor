@@ -93,6 +93,29 @@ pub struct CompilationUnit {
     /// e.g., "StringTools.startsWith" -> IrFunctionId(N)
     stdlib_function_name_map: BTreeMap<String, crate::ir::IrFunctionId>,
 
+    /// Accumulated field index map from imported files (SymbolId -> (TypeId, field_index))
+    /// Passed to user file's MIR lowering so it can resolve field access on imported classes
+    import_field_index_map: BTreeMap<crate::tast::SymbolId, (crate::tast::TypeId, u32)>,
+
+    /// Accumulated property access map from imported files
+    import_property_access_map: BTreeMap<crate::tast::SymbolId, crate::tast::PropertyAccessInfo>,
+
+    /// Accumulated constructor name map from imported files (class name -> constructor IrFunctionId)
+    /// Passed to user file's MIR lowering so it can resolve `new ClassName()` for imported classes
+    import_constructor_name_map: BTreeMap<String, crate::ir::IrFunctionId>,
+
+    /// Accumulated class allocation sizes from imported files (TypeId -> byte size)
+    /// Passed to user file's MIR lowering so it knows how much memory to allocate for imported classes
+    import_class_alloc_sizes: BTreeMap<crate::tast::TypeId, u64>,
+
+    /// Accumulated class TypeId → SymbolId mapping from imported files.
+    /// Used for field disambiguation when multiple classes share the same field name.
+    import_class_type_to_symbol: BTreeMap<crate::tast::TypeId, crate::tast::SymbolId>,
+
+    /// Accumulated class method symbols from imported files
+    /// Passed to user file's MIR lowering for iterator protocol resolution
+    import_class_method_symbols: BTreeMap<(crate::tast::SymbolId, crate::tast::InternedString), crate::tast::SymbolId>,
+
     /// Compiler plugin registry (builtin + HDLL plugins)
     compiler_plugin_registry: CompilerPluginRegistry,
 
@@ -405,6 +428,12 @@ impl CompilationUnit {
             loaded_stdlib_typed_files: Vec::new(),
             stdlib_function_map: BTreeMap::new(),
             stdlib_function_name_map: BTreeMap::new(),
+            import_field_index_map: BTreeMap::new(),
+            import_property_access_map: BTreeMap::new(),
+            import_constructor_name_map: BTreeMap::new(),
+            import_class_alloc_sizes: BTreeMap::new(),
+            import_class_type_to_symbol: BTreeMap::new(),
+            import_class_method_symbols: BTreeMap::new(),
             compiler_plugin_registry: CompilerPluginRegistry::new(),
             hdll_symbols: Vec::new(),
             loaded_hdlls: HashSet::new(),
@@ -1771,16 +1800,21 @@ impl CompilationUnit {
             }
         }
 
-        deps.into_iter().collect()
+        let mut result: Vec<String> = deps.into_iter().collect();
+        result.sort();
+        result
     }
 
     /// Load imports efficiently by pre-collecting all dependencies and compiling in topological order.
     /// This avoids the fail-retry pattern that causes exponential recompilation.
     pub fn load_imports_efficiently(&mut self, imports: &[String]) -> Result<(), String> {
-        use std::collections::{HashMap, HashSet, VecDeque};
+        use std::collections::{BTreeMap, HashSet, VecDeque};
 
         // Step 1: Collect all files and their dependencies by parsing (not compiling)
-        let mut all_files: HashMap<String, (PathBuf, String, Vec<String>)> = HashMap::new(); // path -> (filepath, source, deps)
+        // Use BTreeMap for deterministic iteration order — HashMap iteration is random
+        // and causes non-deterministic import base offsets, leading to different function
+        // IDs, different inlining decisions, and ultimately wrong optimized MIR.
+        let mut all_files: BTreeMap<String, (PathBuf, String, Vec<String>)> = BTreeMap::new();
         let mut to_process: VecDeque<String> = imports.iter().cloned().collect();
         let mut visited: HashSet<String> = HashSet::new();
 
@@ -1793,9 +1827,8 @@ impl CompilationUnit {
             // Resolve to file path (use _force variant to bypass BLADE cache's
             // is_file_loaded check — BLADE pre-registers symbols but doesn't preserve
             // full TAST state needed for generic instantiation and method resolution)
-            let file_path = if let Some(path) = self
-                .namespace_resolver
-                .resolve_qualified_path_to_file_force(&qualified_path)
+            let resolved = self.namespace_resolver.resolve_qualified_path_to_file_force(&qualified_path);
+            let file_path = if let Some(path) = resolved
             {
                 path
             } else if !qualified_path.contains('.') {
@@ -1869,8 +1902,9 @@ impl CompilationUnit {
         }
 
         // Step 2: Topological sort using Kahn's algorithm
-        let mut in_degree: HashMap<String, usize> = HashMap::new();
-        let mut graph: HashMap<String, Vec<String>> = HashMap::new();
+        // Use BTreeMap for deterministic iteration order
+        let mut in_degree: BTreeMap<String, usize> = BTreeMap::new();
+        let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
         for (name, (_, _, deps)) in &all_files {
             in_degree.entry(name.clone()).or_insert(0);
@@ -1910,17 +1944,22 @@ impl CompilationUnit {
 
         debug!("[IMPORT_LOAD] compile_order: {:?}", compile_order);
 
+        // Handle cycle: if compile_order is empty but all_files is not, there's a cycle.
+        // Append remaining files in any order (they'll still compile, just without guaranteed dep order).
+        if compile_order.is_empty() && !all_files.is_empty() {
+            eprintln!("[LOAD_IMPORTS] WARNING: cycle detected, {} files stuck. in_degrees: {:?}",
+                all_files.len(), in_degree.iter().filter(|(_, &d)| d > 0).collect::<Vec<_>>());
+            // Force all remaining into compile_order
+            for name in all_files.keys() {
+                compile_order.push(name.clone());
+            }
+        }
+
         // Step 3: Compile in topological order (no retries needed!)
-        // With BLADE caching: check cache first, compile only if needed
         for name in compile_order {
             if let Some((file_path, source, deps)) = all_files.remove(&name) {
                 // Skip if already compiled
                 let filename = file_path.to_string_lossy().to_string();
-                debug!(
-                    "[IMPORT_LOAD] Compiling: {} (already_compiled={})",
-                    filename,
-                    self.compiled_files.contains_key(&filename)
-                );
                 if self.compiled_files.contains_key(&filename) {
                     continue;
                 }
@@ -1937,7 +1976,10 @@ impl CompilationUnit {
                 // returns Dynamic instead of MutexGuard<T>).
 
                 // Cache miss or caching disabled - compile normally
-                match self.compile_file_with_shared_state(&filename, &source) {
+                // Use is_stdlib_file=true so import files:
+                //   1. Skip the stdlib MIR merge (only user file should merge stdlib)
+                //   2. Collect function mappings for cross-file resolution
+                match self.compile_file_with_shared_state_ex(&filename, &source, true) {
                     Ok(typed_file) => {
                         self.loaded_stdlib_typed_files.push(typed_file);
 
@@ -2002,6 +2044,13 @@ impl CompilationUnit {
 
                             // Update stdlib_function_name_map to point to renumbered IDs
                             for (_name, func_id) in self.stdlib_function_name_map.iter_mut() {
+                                if let Some(&new_id) = id_map.get(func_id) {
+                                    *func_id = new_id;
+                                }
+                            }
+
+                            // Update import_constructor_name_map to point to renumbered IDs
+                            for (_name, func_id) in self.import_constructor_name_map.iter_mut() {
                                 if let Some(&new_id) = id_map.get(func_id) {
                                     *func_id = new_id;
                                 }
@@ -2880,6 +2929,12 @@ impl CompilationUnit {
             external_functions,
             external_functions_by_name,
             stdlib_mapping,
+            self.import_field_index_map.clone(),
+            self.import_property_access_map.clone(),
+            self.import_constructor_name_map.clone(),
+            self.import_class_alloc_sizes.clone(),
+            self.import_class_method_symbols.clone(),
+            self.import_class_type_to_symbol.clone(),
         )
         .map_err(|errors| {
             errors
@@ -2896,19 +2951,38 @@ impl CompilationUnit {
 
         let mut mir_module = mir_result.module;
 
-        // If this is a stdlib file, collect its function mappings
-        if is_stdlib_file {
-            debug!(
-                "DEBUG: Collecting {} function mappings from stdlib file: {}",
-                mir_result.function_map.len(),
-                filename
-            );
-            for (symbol_id, func_id) in mir_result.function_map {
-                self.stdlib_function_map.insert(symbol_id, func_id);
-            }
+        // Collect SymbolId-based function mappings from ALL files (stdlib + imports)
+        // This enables cross-file method calls: user file can call import file methods
+        // via the shared symbol table (SymbolIds are consistent across files)
+        debug!(
+            "DEBUG: Collecting {} function mappings from file: {}",
+            mir_result.function_map.len(),
+            filename
+        );
+        for (symbol_id, func_id) in mir_result.function_map {
+            self.stdlib_function_map.insert(symbol_id, func_id);
+        }
 
-            // Also collect name-based mappings for cross-file lookups
-            // The function `name` field contains the qualified name (e.g., "StringTools.startsWith")
+        // Collect constructor name map from ALL files
+        // Maps class qualified name -> constructor IrFunctionId
+        for (class_name, func_id) in mir_result.constructor_name_map {
+            self.import_constructor_name_map.insert(class_name, func_id);
+        }
+
+        // Collect class allocation sizes from ALL files
+        for (type_id, size) in mir_result.class_alloc_sizes {
+            self.import_class_alloc_sizes.insert(type_id, size);
+        }
+
+        // Collect class method symbols from ALL files
+        for (key, sym) in mir_result.class_method_symbols {
+            self.import_class_method_symbols.insert(key, sym);
+        }
+
+        // For stdlib files, also collect name-based mappings for cross-file lookups
+        // (Only stdlib has unique function names like "StringTools.startsWith";
+        //  import class methods have bare names like "add" which would conflict)
+        if is_stdlib_file {
             let mut added_count = 0;
             let mut skipped_count = 0;
             for (func_id, func) in &mir_module.functions {
@@ -2932,23 +3006,39 @@ impl CompilationUnit {
             );
         }
 
+        // Accumulate field index and property access maps from all compiled files
+        // (both stdlib and imports) so user files can resolve field access on imported classes
+        for (sym, val) in mir_result.field_index_map {
+            self.import_field_index_map.insert(sym, val);
+        }
+        for (sym, val) in mir_result.property_access_map {
+            self.import_property_access_map.insert(sym, val);
+        }
+        for (ty, sym) in mir_result.class_type_to_symbol {
+            self.import_class_type_to_symbol.insert(ty, sym);
+        }
+
         // NOTE: extern-only files are handled above (before MIR generation).
 
-        // Merge stdlib MIR (extern functions for Thread, Channel, Mutex, Arc, etc.)
-        // This ensures extern runtime functions are available.
-        // Uses build_stdlib_with_plugins to include HDLL extern declarations from loaded plugins.
-        use crate::stdlib::build_stdlib_with_plugins;
-        let mut stdlib_mir = build_stdlib_with_plugins(&self.compiler_plugin_registry);
+        // For stdlib/import files, skip stdlib MIR merge and import module merge.
+        // Only the final user file should merge stdlib + imports to avoid duplicate
+        // stdlib copies and function ID conflicts during renumbering.
+        if !is_stdlib_file {
+            // Merge stdlib MIR (extern functions for Thread, Channel, Mutex, Arc, etc.)
+            // This ensures extern runtime functions are available.
+            // Uses build_stdlib_with_plugins to include HDLL extern declarations from loaded plugins.
+            use crate::stdlib::build_stdlib_with_plugins;
+            let mut stdlib_mir = build_stdlib_with_plugins(&self.compiler_plugin_registry);
 
-        // Merge on-demand imported MIR modules (e.g., BalancedTree.hx) into the
-        // user module. These were already renumbered to high IDs (100000+) during
-        // load_imports_efficiently, so they won't collide with either user or stdlib IDs.
-        // The user module already references these high IDs via external_function_map.
-        for import_module in self.import_mir_modules.drain(..) {
-            for (func_id, func) in import_module.functions {
-                mir_module.functions.insert(func_id, func);
+            // Merge on-demand imported MIR modules (e.g., BalancedTree.hx) into the
+            // user module. These were already renumbered to high IDs (100000+) during
+            // load_imports_efficiently, so they won't collide with either user or stdlib IDs.
+            // The user module already references these high IDs via external_function_map.
+            for import_module in self.import_mir_modules.drain(..) {
+                for (func_id, func) in import_module.functions {
+                    mir_module.functions.insert(func_id, func);
+                }
             }
-        }
 
         // CRITICAL FIX: Renumber stdlib function IDs to avoid collisions with user functions
         // Each MIR module starts function IDs from 0, so when merging stdlib and user modules,
@@ -3065,10 +3155,12 @@ impl CompilationUnit {
         // inference issues. The stdlib version is the source of truth, so we REPLACE
         // the user's version with the stdlib's version.
 
-        // Build map of function names to IDs in the user module (before merging)
-        let mut user_func_name_to_id: HashMap<String, IrFunctionId> = HashMap::new();
+        // Build map of function names to ALL IDs in the user module (before merging)
+        // Multiple import modules can have duplicate extern declarations of the same function.
+        // We need to track ALL of them to replace every copy.
+        let mut user_func_name_to_ids: HashMap<String, Vec<IrFunctionId>> = HashMap::new();
         for (func_id, func) in &mir_module.functions {
-            user_func_name_to_id.insert(func.name.clone(), *func_id);
+            user_func_name_to_ids.entry(func.name.clone()).or_default().push(*func_id);
         }
 
         // Build a map of old ID -> new ID for all replacements
@@ -3076,30 +3168,20 @@ impl CompilationUnit {
         let mut id_replacements: HashMap<IrFunctionId, IrFunctionId> = HashMap::new();
 
         for (func_id, func) in &renumbered_functions {
-            if let Some(&existing_id) = user_func_name_to_id.get(&func.name) {
-                debug!(
-                    "DEBUG: Will replace user function '{}' (ID {}) with stdlib version (ID {})",
-                    func.name, existing_id.0, func_id.0
-                );
-                id_replacements.insert(existing_id, *func_id);
+            if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
+                for &existing_id in existing_ids {
+                    id_replacements.insert(existing_id, *func_id);
+                }
             }
         }
 
         // Now merge the stdlib functions
         for (func_id, func) in renumbered_functions {
-            // DEBUG: Check signature after renumbering
-            if func.name == "rayzor_channel_init" {
-                debug!(
-                    "DEBUG: AFTER renumbering - rayzor_channel_init (ID {}): params={}, extern={}",
-                    func_id.0,
-                    func.signature.parameters.len(),
-                    func.cfg.blocks.is_empty()
-                );
-            }
-
-            // If this function replaces an existing one, remove the old one
-            if let Some(&existing_id) = user_func_name_to_id.get(&func.name) {
-                mir_module.functions.remove(&existing_id);
+            // If this function replaces existing ones, remove ALL old copies
+            if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
+                for &existing_id in existing_ids {
+                    mir_module.functions.remove(&existing_id);
+                }
             }
 
             mir_module.functions.insert(func_id, func);
@@ -3184,6 +3266,7 @@ impl CompilationUnit {
                 );
             }
         }
+        } // end if !is_stdlib_file (stdlib merge + renumbering)
 
         // Run monomorphization pass to specialize generic functions
         let mut monomorphizer = Monomorphizer::new();

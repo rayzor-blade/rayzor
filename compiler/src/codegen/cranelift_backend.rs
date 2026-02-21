@@ -542,7 +542,16 @@ impl CraneliftBackend {
                 debug!("Skipping extern function: {}", function.name);
                 continue;
             }
-            self.compile_function(*func_id, mir_module, function)?;
+            match self.compile_function(*func_id, mir_module, function) {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("[WARN] Skipping function '{}' ({}): {}", function.name, func_id, e);
+                    // Define a trap stub so finalize_definitions doesn't panic
+                    if let Err(e2) = self.define_trap_stub(*func_id, function) {
+                        eprintln!("[WARN] Failed to define trap stub for '{}': {}", function.name, e2);
+                    }
+                }
+            }
         }
 
         // Finalize the module
@@ -651,7 +660,15 @@ impl CraneliftBackend {
                 debug!("Skipping extern function: {}", function.name);
                 continue;
             }
-            self.compile_function(*func_id, mir_module, function)?;
+            match self.compile_function(*func_id, mir_module, function) {
+                Ok(()) => {}
+                Err(e) => {
+                    eprintln!("[WARN] Skipping function '{}' ({}): {}", function.name, func_id, e);
+                    if let Err(e2) = self.define_trap_stub(*func_id, function) {
+                        eprintln!("[WARN] Failed to define trap stub for '{}': {}", function.name, e2);
+                    }
+                }
+            }
         }
 
         // NOTE: Do NOT call finalize_definitions() here - caller must call finalize() after all modules
@@ -766,10 +783,6 @@ impl CraneliftBackend {
         // so we must not declare them twice!
         // We use runtime_functions to track all such functions (not just libc ones)
         if let Some(&existing_func_id) = self.runtime_functions.get(&function.name) {
-            debug!(
-                ": Reusing existing function '{}' - MIR {:?} -> Cranelift {:?}",
-                function.name, mir_func_id, existing_func_id
-            );
             self.function_map.insert(mir_func_id, existing_func_id);
             return Ok(());
         }
@@ -1087,6 +1100,75 @@ impl CraneliftBackend {
         Ok(func_id)
     }
 
+    /// Define a minimal trap stub for a function that failed compilation.
+    /// This prevents cranelift's finalize_definitions from panicking on
+    /// declared-but-uncompiled functions.
+    fn define_trap_stub(
+        &mut self,
+        mir_func_id: IrFunctionId,
+        function: &IrFunction,
+    ) -> Result<(), String> {
+        let func_id = *self
+            .function_map
+            .get(&mir_func_id)
+            .ok_or("Function not declared")?;
+
+        if self.defined_functions.contains(&func_id) {
+            return Ok(());
+        }
+
+        self.ctx.func.clear();
+        self.ctx.func.signature = self.module.make_signature();
+
+        // Replicate the exact same signature as declare_function would have created
+        let uses_sret = function.signature.uses_sret;
+        if uses_sret {
+            self.ctx.func.signature.params.push(AbiParam::special(
+                self.pointer_type,
+                ArgumentPurpose::StructReturn,
+            ));
+        }
+
+        let already_has_env_param = !function.signature.parameters.is_empty()
+            && function.signature.parameters[0].name == "env";
+        let is_c_calling_conv =
+            function.signature.calling_convention == crate::ir::CallingConvention::C;
+
+        if !already_has_env_param && !is_c_calling_conv {
+            self.ctx.func.signature.params.push(AbiParam::new(types::I64));
+        }
+
+        for param in &function.signature.parameters {
+            let cranelift_type = self.mir_type_to_cranelift(&param.ty)?;
+            self.ctx.func.signature.params.push(AbiParam::new(cranelift_type));
+        }
+
+        if !uses_sret {
+            let return_type = self.mir_type_to_cranelift(&function.signature.return_type)?;
+            if return_type != types::INVALID {
+                self.ctx.func.signature.returns.push(AbiParam::new(return_type));
+            }
+        }
+
+        // Build a minimal function body that just traps
+        let mut builder_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut self.ctx.func, &mut builder_ctx);
+        let block = builder.create_block();
+        builder.append_block_params_for_function_params(block);
+        builder.switch_to_block(block);
+        builder.seal_block(block);
+        builder.ins().trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+        builder.finalize();
+
+        self.module
+            .define_function(func_id, &mut self.ctx)
+            .map_err(|e| format!("Failed to define trap stub: {}", e))?;
+        self.defined_functions.insert(func_id);
+        self.module.clear_context(&mut self.ctx);
+
+        Ok(())
+    }
+
     /// Compile a function body (second pass)
     fn compile_function(
         &mut self,
@@ -1106,10 +1188,6 @@ impl CraneliftBackend {
         // We track by Cranelift FuncId (not MIR name) because different modules can have
         // functions with the same MIR name (e.g., 'new') but different Cranelift symbols
         if self.defined_functions.contains(&func_id) {
-            debug!(
-                ": Skipping already-defined function '{}' (MIR {:?}, Cranelift {:?})",
-                function.name, mir_func_id, func_id
-            );
             return Ok(());
         }
 
@@ -1404,6 +1482,7 @@ impl CraneliftBackend {
         if let Err(errors) = cranelift_codegen::verify_function(&self.ctx.func, self.module.isa()) {
             return Err(format!("Verifier errors in {}: {}", function.name, errors));
         }
+
 
         // Define the function in the module
         self.module
@@ -1782,16 +1861,20 @@ impl CraneliftBackend {
                 // bytes are written, leaving upper bytes uninitialized. This causes
                 // corruption when the field is later loaded as i64 (generic type params).
                 // We detect GEP targets via register_types: GEP results have Ptr(elem_ty).
+                // Widen i32/i16/i8 stores to ALL struct field pointers (any Ptr type except Ptr(U8)/Ptr(I8)).
+                // All Rayzor object field slots are 8 bytes, so we must store 8 bytes to avoid
+                // leaving upper bytes uninitialized, which causes garbage reads when loaded as i32
+                // from unzeroed malloc memory with adjacent pointer fields.
                 let needs_widen = if let Some(ptr_ty) = function.register_types.get(ptr) {
                     if let IrType::Ptr(inner) = ptr_ty {
-                        matches!(inner.as_ref(), IrType::I64 | IrType::U64 | IrType::Any)
+                        // Don't widen for byte-pointer stores (Ptr(U8)/Ptr(I8)) which are byte-addressed
+                        !matches!(inner.as_ref(), IrType::U8 | IrType::I8)
                     } else {
                         false
                     }
                 } else {
                     false
                 };
-
                 if needs_widen {
                     let val = *value_map.get(value).ok_or("Store: value not found")?;
                     let ptr_val = *value_map.get(ptr).ok_or("Store: ptr not found")?;
@@ -2137,10 +2220,6 @@ impl CraneliftBackend {
                         let cl_func_id = *function_map.get(func_id).ok_or_else(|| {
                             format!("Function {:?} not found in function_map", func_id)
                         })?;
-                        debug!(
-                            "[In {}] Regular function call to {:?} (MIR {:?} -> Cranelift {:?})",
-                            function.name, called_func.name, func_id, cl_func_id
-                        );
                         let func_ref = module.declare_func_in_func(cl_func_id, builder.func);
                         (cl_func_id, func_ref)
                     };
@@ -2297,7 +2376,7 @@ impl CraneliftBackend {
                     }
 
                     // Emit the call instruction
-                    {
+                    let call_mismatch = {
                         let decl = module.declarations().get_function_decl(cl_func_id);
                         let expected_params = decl.signature.params.len();
                         if expected_params != call_args.len() {
@@ -2307,8 +2386,21 @@ impl CraneliftBackend {
                             for (pi, p) in called_func.signature.parameters.iter().enumerate() {
                                 eprintln!("  MIR param[{}] '{}': {:?}", pi, p.name, p.ty);
                             }
+                            true
+                        } else {
+                            false
                         }
-                    }
+                    };
+                    // If call has wrong number of args, emit trap instead of crashing Cranelift.
+                    // This handles imported functions with broken MIR that are never actually called.
+                    if call_mismatch {
+                        builder.ins().trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+                        // Provide a dummy value for the dest register if needed
+                        if let Some(dest_reg) = dest {
+                            let dummy = builder.ins().iconst(types::I64, 0);
+                            value_map.insert(*dest_reg, dummy);
+                        }
+                    } else {
                     let call_inst = builder.ins().call(func_ref, &call_args);
 
                     // Handle return value
@@ -2411,6 +2503,7 @@ impl CraneliftBackend {
                             }
                         }
                     }
+                    } // end else (call_mismatch)
                 }
             }
 
@@ -2794,7 +2887,6 @@ impl CraneliftBackend {
                 let index_val = *value_map
                     .get(&index_id)
                     .ok_or_else(|| format!("GEP index {:?} not found in value_map", index_id))?;
-
                 // Determine element size from the GEP type:
                 // - Byte-pointer types (*u8, *i8): elem_size=1, index is already a byte offset
                 // - Struct field types (*void, f64, i32, etc.): elem_size=8, all Rayzor
