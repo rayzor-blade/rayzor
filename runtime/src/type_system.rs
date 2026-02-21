@@ -1032,19 +1032,6 @@ pub extern "C" fn haxe_std_downcast(value_ptr: *mut u8, expected_type_id: i64) -
 // Type API enum wrappers (accept boxed DynamicValue* from Haxe Type API)
 // ============================================================================
 
-/// Check if an enum type uses boxed representation (any variant has parameters)
-fn is_enum_boxed(type_id: TypeId) -> bool {
-    let registry = TYPE_REGISTRY.read().unwrap();
-    if let Some(ref map) = *registry {
-        if let Some(info) = map.get(&type_id) {
-            if let Some(enum_info) = info.enum_info {
-                return enum_info.variants.iter().any(|v| v.param_count > 0);
-            }
-        }
-    }
-    false
-}
-
 /// Type.enumIndex(e:EnumValue):Int — get enum index from raw i64 value
 /// For simple enums: value is the discriminant (= index)
 /// For boxed enums: value is a pointer to [tag:i32][pad:i32][fields...]

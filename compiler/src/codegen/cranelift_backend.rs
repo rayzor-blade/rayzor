@@ -545,10 +545,16 @@ impl CraneliftBackend {
             match self.compile_function(*func_id, mir_module, function) {
                 Ok(()) => {}
                 Err(e) => {
-                    eprintln!("[WARN] Skipping function '{}' ({}): {}", function.name, func_id, e);
+                    eprintln!(
+                        "[WARN] Skipping function '{}' ({}): {}",
+                        function.name, func_id, e
+                    );
                     // Define a trap stub so finalize_definitions doesn't panic
                     if let Err(e2) = self.define_trap_stub(*func_id, function) {
-                        eprintln!("[WARN] Failed to define trap stub for '{}': {}", function.name, e2);
+                        eprintln!(
+                            "[WARN] Failed to define trap stub for '{}': {}",
+                            function.name, e2
+                        );
                     }
                 }
             }
@@ -663,9 +669,15 @@ impl CraneliftBackend {
             match self.compile_function(*func_id, mir_module, function) {
                 Ok(()) => {}
                 Err(e) => {
-                    eprintln!("[WARN] Skipping function '{}' ({}): {}", function.name, func_id, e);
+                    eprintln!(
+                        "[WARN] Skipping function '{}' ({}): {}",
+                        function.name, func_id, e
+                    );
                     if let Err(e2) = self.define_trap_stub(*func_id, function) {
-                        eprintln!("[WARN] Failed to define trap stub for '{}': {}", function.name, e2);
+                        eprintln!(
+                            "[WARN] Failed to define trap stub for '{}': {}",
+                            function.name, e2
+                        );
                     }
                 }
             }
@@ -1135,18 +1147,30 @@ impl CraneliftBackend {
             function.signature.calling_convention == crate::ir::CallingConvention::C;
 
         if !already_has_env_param && !is_c_calling_conv {
-            self.ctx.func.signature.params.push(AbiParam::new(types::I64));
+            self.ctx
+                .func
+                .signature
+                .params
+                .push(AbiParam::new(types::I64));
         }
 
         for param in &function.signature.parameters {
             let cranelift_type = self.mir_type_to_cranelift(&param.ty)?;
-            self.ctx.func.signature.params.push(AbiParam::new(cranelift_type));
+            self.ctx
+                .func
+                .signature
+                .params
+                .push(AbiParam::new(cranelift_type));
         }
 
         if !uses_sret {
             let return_type = self.mir_type_to_cranelift(&function.signature.return_type)?;
             if return_type != types::INVALID {
-                self.ctx.func.signature.returns.push(AbiParam::new(return_type));
+                self.ctx
+                    .func
+                    .signature
+                    .returns
+                    .push(AbiParam::new(return_type));
             }
         }
 
@@ -1157,7 +1181,9 @@ impl CraneliftBackend {
         builder.append_block_params_for_function_params(block);
         builder.switch_to_block(block);
         builder.seal_block(block);
-        builder.ins().trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+        builder
+            .ins()
+            .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
         builder.finalize();
 
         self.module
@@ -1482,7 +1508,6 @@ impl CraneliftBackend {
         if let Err(errors) = cranelift_codegen::verify_function(&self.ctx.func, self.module.isa()) {
             return Err(format!("Verifier errors in {}: {}", function.name, errors));
         }
-
 
         // Define the function in the module
         self.module
@@ -2394,115 +2419,117 @@ impl CraneliftBackend {
                     // If call has wrong number of args, emit trap instead of crashing Cranelift.
                     // This handles imported functions with broken MIR that are never actually called.
                     if call_mismatch {
-                        builder.ins().trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
+                        builder
+                            .ins()
+                            .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
                         // Provide a dummy value for the dest register if needed
                         if let Some(dest_reg) = dest {
                             let dummy = builder.ins().iconst(types::I64, 0);
                             value_map.insert(*dest_reg, dummy);
                         }
                     } else {
-                    let call_inst = builder.ins().call(func_ref, &call_args);
+                        let call_inst = builder.ins().call(func_ref, &call_args);
 
-                    // Handle return value
-                    // Special case: If the function returns Void but MIR has a dest register,
-                    // just ignore the dest. This can happen with lambdas where the MIR was
-                    // generated before the function signature was fully resolved.
-                    if called_func.signature.return_type == crate::ir::IrType::Void {
-                        // Void function - ignore dest register if present
-                        // (MIR may have allocated one before signature was known)
-                    } else if let Some(dest_reg) = dest {
-                        if uses_sret {
-                            // For sret, the "return value" is the pointer to the sret slot
-                            value_map.insert(*dest_reg, sret_slot.unwrap());
-                        } else {
-                            // Normal return value
-                            let results = builder.inst_results(call_inst);
-                            if !results.is_empty() {
-                                let result_val = results[0];
-
-                                // Coerce return value to match expected MIR type
-                                // IMPORTANT: Only coerce if both the function signature return type AND
-                                // the MIR dest register type are primitive integers (not pointers/refs).
-                                // Truncating pointer values would cause runtime crashes.
-                                let actual_ret_ty = builder.func.dfg.value_type(result_val);
-
-                                // Check if the function signature says this is a primitive integer return
-                                let sig_return_is_primitive_int = matches!(
-                                    &called_func.signature.return_type,
-                                    crate::ir::IrType::I8
-                                        | crate::ir::IrType::I16
-                                        | crate::ir::IrType::I32
-                                        | crate::ir::IrType::I64
-                                        | crate::ir::IrType::U8
-                                        | crate::ir::IrType::U16
-                                        | crate::ir::IrType::U32
-                                        | crate::ir::IrType::U64
-                                        | crate::ir::IrType::Bool
-                                );
-
-                                // Check if MIR dest register type is also a primitive integer
-                                let mir_dest_is_primitive_int = function
-                                    .register_types
-                                    .get(dest_reg)
-                                    .map(|ty| {
-                                        matches!(
-                                            ty,
-                                            crate::ir::IrType::I8
-                                                | crate::ir::IrType::I16
-                                                | crate::ir::IrType::I32
-                                                | crate::ir::IrType::I64
-                                                | crate::ir::IrType::U8
-                                                | crate::ir::IrType::U16
-                                                | crate::ir::IrType::U32
-                                                | crate::ir::IrType::U64
-                                                | crate::ir::IrType::Bool
-                                        )
-                                    })
-                                    .unwrap_or(false);
-
-                                let mir_expected_ty = function
-                                    .register_types
-                                    .get(dest_reg)
-                                    .map(|ty| match ty {
-                                        crate::ir::IrType::I8 => types::I8,
-                                        crate::ir::IrType::I16 => types::I16,
-                                        crate::ir::IrType::I32 => types::I32,
-                                        crate::ir::IrType::I64 => types::I64,
-                                        crate::ir::IrType::U8 => types::I8,
-                                        crate::ir::IrType::U16 => types::I16,
-                                        crate::ir::IrType::U32 => types::I32,
-                                        crate::ir::IrType::U64 => types::I64,
-                                        crate::ir::IrType::Bool => types::I8,
-                                        _ => types::I64,
-                                    })
-                                    .unwrap_or(types::I64);
-
-                                // Only coerce if BOTH signature and MIR say it's a primitive int
-                                let final_val = if sig_return_is_primitive_int
-                                    && mir_dest_is_primitive_int
-                                    && actual_ret_ty != mir_expected_ty
-                                    && actual_ret_ty.is_int()
-                                    && mir_expected_ty.is_int()
-                                {
-                                    debug!("Call return type coercion: actual={:?}, mir_expected={:?}, func={}",
-                                    actual_ret_ty, mir_expected_ty, called_func.name);
-                                    if actual_ret_ty.bits() > mir_expected_ty.bits() {
-                                        // Truncate i64 -> i32
-                                        builder.ins().ireduce(mir_expected_ty, result_val)
-                                    } else {
-                                        // Extend i32 -> i64
-                                        builder.ins().sextend(mir_expected_ty, result_val)
-                                    }
-                                } else {
-                                    result_val
-                                };
-
-                                value_map.insert(*dest_reg, final_val);
+                        // Handle return value
+                        // Special case: If the function returns Void but MIR has a dest register,
+                        // just ignore the dest. This can happen with lambdas where the MIR was
+                        // generated before the function signature was fully resolved.
+                        if called_func.signature.return_type == crate::ir::IrType::Void {
+                            // Void function - ignore dest register if present
+                            // (MIR may have allocated one before signature was known)
+                        } else if let Some(dest_reg) = dest {
+                            if uses_sret {
+                                // For sret, the "return value" is the pointer to the sret slot
+                                value_map.insert(*dest_reg, sret_slot.unwrap());
                             } else {
-                                return Err(format!("Function call expected to return value but got none (func_id={:?}, dest={:?})", func_id, dest_reg));
+                                // Normal return value
+                                let results = builder.inst_results(call_inst);
+                                if !results.is_empty() {
+                                    let result_val = results[0];
+
+                                    // Coerce return value to match expected MIR type
+                                    // IMPORTANT: Only coerce if both the function signature return type AND
+                                    // the MIR dest register type are primitive integers (not pointers/refs).
+                                    // Truncating pointer values would cause runtime crashes.
+                                    let actual_ret_ty = builder.func.dfg.value_type(result_val);
+
+                                    // Check if the function signature says this is a primitive integer return
+                                    let sig_return_is_primitive_int = matches!(
+                                        &called_func.signature.return_type,
+                                        crate::ir::IrType::I8
+                                            | crate::ir::IrType::I16
+                                            | crate::ir::IrType::I32
+                                            | crate::ir::IrType::I64
+                                            | crate::ir::IrType::U8
+                                            | crate::ir::IrType::U16
+                                            | crate::ir::IrType::U32
+                                            | crate::ir::IrType::U64
+                                            | crate::ir::IrType::Bool
+                                    );
+
+                                    // Check if MIR dest register type is also a primitive integer
+                                    let mir_dest_is_primitive_int = function
+                                        .register_types
+                                        .get(dest_reg)
+                                        .map(|ty| {
+                                            matches!(
+                                                ty,
+                                                crate::ir::IrType::I8
+                                                    | crate::ir::IrType::I16
+                                                    | crate::ir::IrType::I32
+                                                    | crate::ir::IrType::I64
+                                                    | crate::ir::IrType::U8
+                                                    | crate::ir::IrType::U16
+                                                    | crate::ir::IrType::U32
+                                                    | crate::ir::IrType::U64
+                                                    | crate::ir::IrType::Bool
+                                            )
+                                        })
+                                        .unwrap_or(false);
+
+                                    let mir_expected_ty = function
+                                        .register_types
+                                        .get(dest_reg)
+                                        .map(|ty| match ty {
+                                            crate::ir::IrType::I8 => types::I8,
+                                            crate::ir::IrType::I16 => types::I16,
+                                            crate::ir::IrType::I32 => types::I32,
+                                            crate::ir::IrType::I64 => types::I64,
+                                            crate::ir::IrType::U8 => types::I8,
+                                            crate::ir::IrType::U16 => types::I16,
+                                            crate::ir::IrType::U32 => types::I32,
+                                            crate::ir::IrType::U64 => types::I64,
+                                            crate::ir::IrType::Bool => types::I8,
+                                            _ => types::I64,
+                                        })
+                                        .unwrap_or(types::I64);
+
+                                    // Only coerce if BOTH signature and MIR say it's a primitive int
+                                    let final_val = if sig_return_is_primitive_int
+                                        && mir_dest_is_primitive_int
+                                        && actual_ret_ty != mir_expected_ty
+                                        && actual_ret_ty.is_int()
+                                        && mir_expected_ty.is_int()
+                                    {
+                                        debug!("Call return type coercion: actual={:?}, mir_expected={:?}, func={}",
+                                    actual_ret_ty, mir_expected_ty, called_func.name);
+                                        if actual_ret_ty.bits() > mir_expected_ty.bits() {
+                                            // Truncate i64 -> i32
+                                            builder.ins().ireduce(mir_expected_ty, result_val)
+                                        } else {
+                                            // Extend i32 -> i64
+                                            builder.ins().sextend(mir_expected_ty, result_val)
+                                        }
+                                    } else {
+                                        result_val
+                                    };
+
+                                    value_map.insert(*dest_reg, final_val);
+                                } else {
+                                    return Err(format!("Function call expected to return value but got none (func_id={:?}, dest={:?})", func_id, dest_reg));
+                                }
                             }
                         }
-                    }
                     } // end else (call_mismatch)
                 }
             }

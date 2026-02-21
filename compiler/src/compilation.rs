@@ -114,7 +114,8 @@ pub struct CompilationUnit {
 
     /// Accumulated class method symbols from imported files
     /// Passed to user file's MIR lowering for iterator protocol resolution
-    import_class_method_symbols: BTreeMap<(crate::tast::SymbolId, crate::tast::InternedString), crate::tast::SymbolId>,
+    import_class_method_symbols:
+        BTreeMap<(crate::tast::SymbolId, crate::tast::InternedString), crate::tast::SymbolId>,
 
     /// Compiler plugin registry (builtin + HDLL plugins)
     compiler_plugin_registry: CompilerPluginRegistry,
@@ -1827,9 +1828,10 @@ impl CompilationUnit {
             // Resolve to file path (use _force variant to bypass BLADE cache's
             // is_file_loaded check — BLADE pre-registers symbols but doesn't preserve
             // full TAST state needed for generic instantiation and method resolution)
-            let resolved = self.namespace_resolver.resolve_qualified_path_to_file_force(&qualified_path);
-            let file_path = if let Some(path) = resolved
-            {
+            let resolved = self
+                .namespace_resolver
+                .resolve_qualified_path_to_file_force(&qualified_path);
+            let file_path = if let Some(path) = resolved {
                 path
             } else if !qualified_path.contains('.') {
                 // Try common prefixes for unqualified names
@@ -1947,8 +1949,11 @@ impl CompilationUnit {
         // Handle cycle: if compile_order is empty but all_files is not, there's a cycle.
         // Append remaining files in any order (they'll still compile, just without guaranteed dep order).
         if compile_order.is_empty() && !all_files.is_empty() {
-            eprintln!("[LOAD_IMPORTS] WARNING: cycle detected, {} files stuck. in_degrees: {:?}",
-                all_files.len(), in_degree.iter().filter(|(_, &d)| d > 0).collect::<Vec<_>>());
+            eprintln!(
+                "[LOAD_IMPORTS] WARNING: cycle detected, {} files stuck. in_degrees: {:?}",
+                all_files.len(),
+                in_degree.iter().filter(|(_, &d)| d > 0).collect::<Vec<_>>()
+            );
             // Force all remaining into compile_order
             for name in all_files.keys() {
                 compile_order.push(name.clone());
@@ -3040,232 +3045,235 @@ impl CompilationUnit {
                 }
             }
 
-        // CRITICAL FIX: Renumber stdlib function IDs to avoid collisions with user functions
-        // Each MIR module starts function IDs from 0, so when merging stdlib and user modules,
-        // IDs will collide. For example:
-        //   - User module: IrFunctionId(2) = "indexOf"
-        //   - Stdlib module: IrFunctionId(2) = "free"
-        // Without renumbering, stdlib's "free" would be skipped, causing vec_u8_free to call "indexOf"!
+            // CRITICAL FIX: Renumber stdlib function IDs to avoid collisions with user functions
+            // Each MIR module starts function IDs from 0, so when merging stdlib and user modules,
+            // IDs will collide. For example:
+            //   - User module: IrFunctionId(2) = "indexOf"
+            //   - Stdlib module: IrFunctionId(2) = "free"
+            // Without renumbering, stdlib's "free" would be skipped, causing vec_u8_free to call "indexOf"!
 
-        // DEBUG: Print user functions before merging
-        debug!(
-            "DEBUG: User module has {} functions before merging:",
-            mir_module.functions.len()
-        );
-        let mut user_func_ids: Vec<_> = mir_module.functions.keys().collect();
-        user_func_ids.sort_by_key(|id| id.0);
-        for func_id in user_func_ids.iter().take(5) {
-            let func = &mir_module.functions[func_id];
-            debug!("  - User IrFunctionId({}) = '{}'", func_id.0, func.name);
-        }
+            // DEBUG: Print user functions before merging
+            debug!(
+                "DEBUG: User module has {} functions before merging:",
+                mir_module.functions.len()
+            );
+            let mut user_func_ids: Vec<_> = mir_module.functions.keys().collect();
+            user_func_ids.sort_by_key(|id| id.0);
+            for func_id in user_func_ids.iter().take(5) {
+                let func = &mir_module.functions[func_id];
+                debug!("  - User IrFunctionId({}) = '{}'", func_id.0, func.name);
+            }
 
-        // Find the maximum function ID in the user module
-        let max_user_func_id = mir_module
-            .functions
-            .keys()
-            .map(|id| id.0)
-            .max()
-            .unwrap_or(0);
+            // Find the maximum function ID in the user module
+            let max_user_func_id = mir_module
+                .functions
+                .keys()
+                .map(|id| id.0)
+                .max()
+                .unwrap_or(0);
 
-        let max_user_extern_id = mir_module
-            .extern_functions
-            .keys()
-            .map(|id| id.0)
-            .max()
-            .unwrap_or(0);
+            let max_user_extern_id = mir_module
+                .extern_functions
+                .keys()
+                .map(|id| id.0)
+                .max()
+                .unwrap_or(0);
 
-        let offset = std::cmp::max(max_user_func_id, max_user_extern_id) + 1;
+            let offset = std::cmp::max(max_user_func_id, max_user_extern_id) + 1;
 
-        debug!("DEBUG: Renumbering stdlib functions with offset {} (max_user_func={}, max_user_extern={})",
+            debug!("DEBUG: Renumbering stdlib functions with offset {} (max_user_func={}, max_user_extern={})",
                   offset, max_user_func_id, max_user_extern_id);
 
-        // Build mapping of old stdlib IDs to new renumbered IDs
-        use crate::ir::IrFunctionId;
-        use std::collections::HashMap;
-        let mut id_mapping: HashMap<IrFunctionId, IrFunctionId> = HashMap::new();
+            // Build mapping of old stdlib IDs to new renumbered IDs
+            use crate::ir::IrFunctionId;
+            use std::collections::HashMap;
+            let mut id_mapping: HashMap<IrFunctionId, IrFunctionId> = HashMap::new();
 
-        // Note: extern_functions is not used - externs are in the functions map with empty CFGs
-        // So we only need to renumber the functions map
+            // Note: extern_functions is not used - externs are in the functions map with empty CFGs
+            // So we only need to renumber the functions map
 
-        // FIRST PASS: Build complete ID mapping for all stdlib functions
-        // We must do this BEFORE updating CallDirect instructions so that all IDs are available
-        for (old_id, _) in &stdlib_mir.functions {
-            let new_id = IrFunctionId(old_id.0 + offset);
-            id_mapping.insert(*old_id, new_id);
-        }
-
-        // SECOND PASS: Renumber functions and update their internal references
-        let mut renumbered_functions = HashMap::new();
-        for (old_id, mut func) in stdlib_mir.functions {
-            let new_id = *id_mapping.get(&old_id).unwrap();
-
-            // Update the function's own ID
-            func.id = new_id;
-
-            // Update all function ID references in instructions (CallDirect, FunctionRef, MakeClosure)
-            use crate::ir::IrInstruction;
-            for block in func.cfg.blocks.values_mut() {
-                for inst in &mut block.instructions {
-                    match inst {
-                        IrInstruction::CallDirect { func_id, .. } => {
-                            if let Some(&new_func_id) = id_mapping.get(func_id) {
-                                debug!(
-                                    "DEBUG: Updated CallDirect in {} from func_id {} -> {}",
-                                    func.name, func_id.0, new_func_id.0
-                                );
-                                *func_id = new_func_id;
-                            }
-                        }
-                        IrInstruction::FunctionRef { func_id, .. } => {
-                            if let Some(&new_func_id) = id_mapping.get(func_id) {
-                                debug!(
-                                    "DEBUG: Updated FunctionRef in {} from func_id {} -> {}",
-                                    func.name, func_id.0, new_func_id.0
-                                );
-                                *func_id = new_func_id;
-                            }
-                        }
-                        IrInstruction::MakeClosure { func_id, .. } => {
-                            if let Some(&new_func_id) = id_mapping.get(func_id) {
-                                debug!(
-                                    "DEBUG: Updated MakeClosure in {} from func_id {} -> {}",
-                                    func.name, func_id.0, new_func_id.0
-                                );
-                                *func_id = new_func_id;
-                            }
-                        }
-                        _ => {}
-                    }
-                }
+            // FIRST PASS: Build complete ID mapping for all stdlib functions
+            // We must do this BEFORE updating CallDirect instructions so that all IDs are available
+            for (old_id, _) in &stdlib_mir.functions {
+                let new_id = IrFunctionId(old_id.0 + offset);
+                id_mapping.insert(*old_id, new_id);
             }
 
-            renumbered_functions.insert(new_id, func);
-            debug!(
-                "DEBUG: Renumbered function '{}': {} -> {}",
-                renumbered_functions[&new_id].name, old_id.0, new_id.0
-            );
-        }
+            // SECOND PASS: Renumber functions and update their internal references
+            let mut renumbered_functions = HashMap::new();
+            for (old_id, mut func) in stdlib_mir.functions {
+                let new_id = *id_mapping.get(&old_id).unwrap();
 
-        // Merge renumbered stdlib functions - no collisions possible now!
-        // (Note: extern functions are included in the functions map with empty CFGs)
-        //
-        // IMPORTANT: Replace user functions that have the same NAME as stdlib functions
-        // The user module might have extern declarations (e.g. rayzor_channel_init) from
-        // the lowering process, but these might have incorrect signatures due to type
-        // inference issues. The stdlib version is the source of truth, so we REPLACE
-        // the user's version with the stdlib's version.
+                // Update the function's own ID
+                func.id = new_id;
 
-        // Build map of function names to ALL IDs in the user module (before merging)
-        // Multiple import modules can have duplicate extern declarations of the same function.
-        // We need to track ALL of them to replace every copy.
-        let mut user_func_name_to_ids: HashMap<String, Vec<IrFunctionId>> = HashMap::new();
-        for (func_id, func) in &mir_module.functions {
-            user_func_name_to_ids.entry(func.name.clone()).or_default().push(*func_id);
-        }
-
-        // Build a map of old ID -> new ID for all replacements
-        // This must be done BEFORE we start modifying the module
-        let mut id_replacements: HashMap<IrFunctionId, IrFunctionId> = HashMap::new();
-
-        for (func_id, func) in &renumbered_functions {
-            if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
-                for &existing_id in existing_ids {
-                    id_replacements.insert(existing_id, *func_id);
-                }
-            }
-        }
-
-        // Now merge the stdlib functions
-        for (func_id, func) in renumbered_functions {
-            // If this function replaces existing ones, remove ALL old copies
-            if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
-                for &existing_id in existing_ids {
-                    mir_module.functions.remove(&existing_id);
-                }
-            }
-
-            mir_module.functions.insert(func_id, func);
-            // Keep next_function_id in sync so alloc_function_id() won't collide
-            mir_module.next_function_id = mir_module.next_function_id.max(func_id.0 + 1);
-        }
-
-        // Update ALL instructions that reference replaced function IDs
-        // This is done AFTER all merging to avoid ID conflicts
-        if !id_replacements.is_empty() {
-            for (_, caller_func) in mir_module.functions.iter_mut() {
-                for block in caller_func.cfg.blocks.values_mut() {
-                    for instr in &mut block.instructions {
-                        match instr {
-                            IrInstruction::CallDirect {
-                                func_id: ref mut called_func_id,
-                                ..
-                            } => {
-                                if let Some(&new_id) = id_replacements.get(called_func_id) {
-                                    *called_func_id = new_id;
+                // Update all function ID references in instructions (CallDirect, FunctionRef, MakeClosure)
+                use crate::ir::IrInstruction;
+                for block in func.cfg.blocks.values_mut() {
+                    for inst in &mut block.instructions {
+                        match inst {
+                            IrInstruction::CallDirect { func_id, .. } => {
+                                if let Some(&new_func_id) = id_mapping.get(func_id) {
+                                    debug!(
+                                        "DEBUG: Updated CallDirect in {} from func_id {} -> {}",
+                                        func.name, func_id.0, new_func_id.0
+                                    );
+                                    *func_id = new_func_id;
                                 }
                             }
-                            IrInstruction::FunctionRef {
-                                func_id: ref mut ref_func_id,
-                                ..
-                            } => {
-                                if let Some(&new_id) = id_replacements.get(ref_func_id) {
+                            IrInstruction::FunctionRef { func_id, .. } => {
+                                if let Some(&new_func_id) = id_mapping.get(func_id) {
                                     debug!(
                                         "DEBUG: Updated FunctionRef in {} from func_id {} -> {}",
-                                        caller_func.name, ref_func_id.0, new_id.0
+                                        func.name, func_id.0, new_func_id.0
                                     );
-                                    *ref_func_id = new_id;
+                                    *func_id = new_func_id;
                                 }
                             }
-                            IrInstruction::MakeClosure {
-                                func_id: ref mut closure_func_id,
-                                ..
-                            } => {
-                                if let Some(&new_id) = id_replacements.get(closure_func_id) {
+                            IrInstruction::MakeClosure { func_id, .. } => {
+                                if let Some(&new_func_id) = id_mapping.get(func_id) {
                                     debug!(
                                         "DEBUG: Updated MakeClosure in {} from func_id {} -> {}",
-                                        caller_func.name, closure_func_id.0, new_id.0
+                                        func.name, func_id.0, new_func_id.0
                                     );
-                                    *closure_func_id = new_id;
+                                    *func_id = new_func_id;
                                 }
                             }
                             _ => {}
                         }
                     }
                 }
-            }
-        }
 
-        // DEBUG: Print all function IDs in the merged module
-        debug!(
-            "DEBUG: Merged module has {} functions:",
-            mir_module.functions.len()
-        );
-        let mut func_ids: Vec<_> = mir_module.functions.keys().collect();
-        func_ids.sort_by_key(|id| id.0);
-        for func_id in func_ids.iter().take(10) {
-            // Print first 10
-            let func = &mir_module.functions[func_id];
-            debug!(
-                "  - IrFunctionId({}) = '{}' (extern: {})",
-                func_id.0,
-                func.name,
-                func.cfg.blocks.is_empty()
-            );
-        }
-
-        // Verify MIR wrapper forward refs were replaced during merge.
-        // A MirWrapper function with an empty CFG means the stdlib merge failed
-        // to find the implementation — this would cause wrong values at runtime.
-        for (func_id, func) in &mir_module.functions {
-            if matches!(func.kind, crate::ir::FunctionKind::MirWrapper)
-                && func.cfg.blocks.is_empty()
-            {
+                renumbered_functions.insert(new_id, func);
                 debug!(
-                    "Unreplaced MIR forward ref after stdlib merge: '{}' (ID {})",
-                    func.name, func_id.0
+                    "DEBUG: Renumbered function '{}': {} -> {}",
+                    renumbered_functions[&new_id].name, old_id.0, new_id.0
                 );
             }
-        }
+
+            // Merge renumbered stdlib functions - no collisions possible now!
+            // (Note: extern functions are included in the functions map with empty CFGs)
+            //
+            // IMPORTANT: Replace user functions that have the same NAME as stdlib functions
+            // The user module might have extern declarations (e.g. rayzor_channel_init) from
+            // the lowering process, but these might have incorrect signatures due to type
+            // inference issues. The stdlib version is the source of truth, so we REPLACE
+            // the user's version with the stdlib's version.
+
+            // Build map of function names to ALL IDs in the user module (before merging)
+            // Multiple import modules can have duplicate extern declarations of the same function.
+            // We need to track ALL of them to replace every copy.
+            let mut user_func_name_to_ids: HashMap<String, Vec<IrFunctionId>> = HashMap::new();
+            for (func_id, func) in &mir_module.functions {
+                user_func_name_to_ids
+                    .entry(func.name.clone())
+                    .or_default()
+                    .push(*func_id);
+            }
+
+            // Build a map of old ID -> new ID for all replacements
+            // This must be done BEFORE we start modifying the module
+            let mut id_replacements: HashMap<IrFunctionId, IrFunctionId> = HashMap::new();
+
+            for (func_id, func) in &renumbered_functions {
+                if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
+                    for &existing_id in existing_ids {
+                        id_replacements.insert(existing_id, *func_id);
+                    }
+                }
+            }
+
+            // Now merge the stdlib functions
+            for (func_id, func) in renumbered_functions {
+                // If this function replaces existing ones, remove ALL old copies
+                if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
+                    for &existing_id in existing_ids {
+                        mir_module.functions.remove(&existing_id);
+                    }
+                }
+
+                mir_module.functions.insert(func_id, func);
+                // Keep next_function_id in sync so alloc_function_id() won't collide
+                mir_module.next_function_id = mir_module.next_function_id.max(func_id.0 + 1);
+            }
+
+            // Update ALL instructions that reference replaced function IDs
+            // This is done AFTER all merging to avoid ID conflicts
+            if !id_replacements.is_empty() {
+                for (_, caller_func) in mir_module.functions.iter_mut() {
+                    for block in caller_func.cfg.blocks.values_mut() {
+                        for instr in &mut block.instructions {
+                            match instr {
+                                IrInstruction::CallDirect {
+                                    func_id: ref mut called_func_id,
+                                    ..
+                                } => {
+                                    if let Some(&new_id) = id_replacements.get(called_func_id) {
+                                        *called_func_id = new_id;
+                                    }
+                                }
+                                IrInstruction::FunctionRef {
+                                    func_id: ref mut ref_func_id,
+                                    ..
+                                } => {
+                                    if let Some(&new_id) = id_replacements.get(ref_func_id) {
+                                        debug!(
+                                        "DEBUG: Updated FunctionRef in {} from func_id {} -> {}",
+                                        caller_func.name, ref_func_id.0, new_id.0
+                                    );
+                                        *ref_func_id = new_id;
+                                    }
+                                }
+                                IrInstruction::MakeClosure {
+                                    func_id: ref mut closure_func_id,
+                                    ..
+                                } => {
+                                    if let Some(&new_id) = id_replacements.get(closure_func_id) {
+                                        debug!(
+                                        "DEBUG: Updated MakeClosure in {} from func_id {} -> {}",
+                                        caller_func.name, closure_func_id.0, new_id.0
+                                    );
+                                        *closure_func_id = new_id;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+
+            // DEBUG: Print all function IDs in the merged module
+            debug!(
+                "DEBUG: Merged module has {} functions:",
+                mir_module.functions.len()
+            );
+            let mut func_ids: Vec<_> = mir_module.functions.keys().collect();
+            func_ids.sort_by_key(|id| id.0);
+            for func_id in func_ids.iter().take(10) {
+                // Print first 10
+                let func = &mir_module.functions[func_id];
+                debug!(
+                    "  - IrFunctionId({}) = '{}' (extern: {})",
+                    func_id.0,
+                    func.name,
+                    func.cfg.blocks.is_empty()
+                );
+            }
+
+            // Verify MIR wrapper forward refs were replaced during merge.
+            // A MirWrapper function with an empty CFG means the stdlib merge failed
+            // to find the implementation — this would cause wrong values at runtime.
+            for (func_id, func) in &mir_module.functions {
+                if matches!(func.kind, crate::ir::FunctionKind::MirWrapper)
+                    && func.cfg.blocks.is_empty()
+                {
+                    debug!(
+                        "Unreplaced MIR forward ref after stdlib merge: '{}' (ID {})",
+                        func.name, func_id.0
+                    );
+                }
+            }
         } // end if !is_stdlib_file (stdlib merge + renumbering)
 
         // Run monomorphization pass to specialize generic functions

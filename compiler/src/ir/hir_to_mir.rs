@@ -3299,9 +3299,13 @@ impl<'a> HirToMirContext<'a> {
                         // to another object. If the RHS is a variable that we're tracking as
                         // an owned heap allocation, we must STOP tracking it — the pointer now
                         // lives inside another object and must NOT be freed at scope exit.
-                        let lhs_is_field = matches!(lhs, HirLValue::Field { .. } | HirLValue::Index { .. });
+                        let lhs_is_field =
+                            matches!(lhs, HirLValue::Field { .. } | HirLValue::Index { .. });
                         if lhs_is_field {
-                            if let HirExprKind::Variable { symbol: rhs_sym, .. } = &rhs.kind {
+                            if let HirExprKind::Variable {
+                                symbol: rhs_sym, ..
+                            } = &rhs.kind
+                            {
                                 if self.owned_heap_values.remove(rhs_sym).is_some() {
                                     self.reassigned_in_scope.insert(*rhs_sym);
                                 }
@@ -9573,8 +9577,11 @@ impl<'a> HirToMirContext<'a> {
                                                     .collect();
 
                                                 // Get expected types FIRST so we can auto-box before ptr_conversion
-                                                let (expected_param_types_qn, expected_return_type_qn) =
-                                                    self.get_extern_function_signature(&runtime_func)
+                                                let (
+                                                    expected_param_types_qn,
+                                                    expected_return_type_qn,
+                                                ) = self
+                                                    .get_extern_function_signature(&runtime_func)
                                                     .unwrap_or_else(|| {
                                                         let param_types: Vec<IrType> = args
                                                             .iter()
@@ -11110,16 +11117,26 @@ impl<'a> HirToMirContext<'a> {
                             // This handles cases like Type.enumIndex(Color.Red) where the enum discriminant
                             // (raw i64) needs to be boxed as DynamicValue* for the runtime function.
                             if let Some(func) = self.builder.module.functions.get(&func_id) {
-                                let expected_types: Vec<IrType> = func.signature.parameters.iter()
+                                let expected_types: Vec<IrType> = func
+                                    .signature
+                                    .parameters
+                                    .iter()
                                     .map(|p| p.ty.clone())
                                     .collect();
                                 for (i, expected_ty) in expected_types.iter().enumerate() {
                                     if i < arg_regs.len() {
                                         let is_ptr_u8 = matches!(expected_ty, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::U8));
                                         if is_ptr_u8 {
-                                            if let Some(actual_ty) = self.builder.get_register_type(arg_regs[i]) {
-                                                if !matches!(actual_ty, IrType::Ptr(_)) && i < args.len() {
-                                                    if let Some(boxed) = self.box_value_for_dynamic(arg_regs[i], args[i].ty) {
+                                            if let Some(actual_ty) =
+                                                self.builder.get_register_type(arg_regs[i])
+                                            {
+                                                if !matches!(actual_ty, IrType::Ptr(_))
+                                                    && i < args.len()
+                                                {
+                                                    if let Some(boxed) = self.box_value_for_dynamic(
+                                                        arg_regs[i],
+                                                        args[i].ty,
+                                                    ) {
                                                         arg_regs[i] = boxed;
                                                     }
                                                 }
@@ -11145,9 +11162,8 @@ impl<'a> HirToMirContext<'a> {
                                     if let Some(type_id) =
                                         self.extract_enum_type_id_from_expr(&args[0])
                                     {
-                                        if let Some(tid_reg) = self
-                                            .builder
-                                            .build_const(IrValue::I32(type_id as i32))
+                                        if let Some(tid_reg) =
+                                            self.builder.build_const(IrValue::I32(type_id as i32))
                                         {
                                             arg_regs.push(tid_reg);
                                         }
@@ -11954,7 +11970,9 @@ impl<'a> HirToMirContext<'a> {
                             if let Some(sym) = self.symbol_table.get_symbol(sym_id) {
                                 if let Some(qn) = sym.qualified_name {
                                     if let Some(qual_name) = self.string_interner.get(qn) {
-                                        if let Some(&func_id) = self.constructor_name_map.get(qual_name) {
+                                        if let Some(&func_id) =
+                                            self.constructor_name_map.get(qual_name)
+                                        {
                                             constructor_type_id = *class_type;
                                             has_constructor = true;
                                             self.constructor_map.insert(*class_type, func_id);
@@ -12273,18 +12291,32 @@ impl<'a> HirToMirContext<'a> {
                                 // via GEP + Store, same as field assignment
                                 if let Some(obj_reg) = self.lower_expression(object) {
                                     // Look up field index (with receiver-type disambiguation)
-                                    let field_idx = self.field_index_map.get(field).map(|&(_, idx)| idx)
+                                    let field_idx = self
+                                        .field_index_map
+                                        .get(field)
+                                        .map(|&(_, idx)| idx)
                                         .or_else(|| {
-                                            let field_name = self.symbol_table.get_symbol(*field).map(|s| s.name)?;
+                                            let field_name = self
+                                                .symbol_table
+                                                .get_symbol(*field)
+                                                .map(|s| s.name)?;
                                             let receiver_ty = object.ty;
-                                            self.resolve_field_index_by_name(field_name, receiver_ty)
-                                                .map(|(_, idx)| idx)
+                                            self.resolve_field_index_by_name(
+                                                field_name,
+                                                receiver_ty,
+                                            )
+                                            .map(|(_, idx)| idx)
                                         });
                                     if let Some(idx) = field_idx {
-                                        let idx_const = self.builder.build_const(IrValue::I32(idx as i32));
+                                        let idx_const =
+                                            self.builder.build_const(IrValue::I32(idx as i32));
                                         if let Some(idx_reg) = idx_const {
                                             let field_ty = result_type.clone();
-                                            let field_ptr = self.builder.build_gep(obj_reg, vec![idx_reg], field_ty.clone());
+                                            let field_ptr = self.builder.build_gep(
+                                                obj_reg,
+                                                vec![idx_reg],
+                                                field_ty.clone(),
+                                            );
                                             if let Some(ptr) = field_ptr {
                                                 self.builder.build_store(ptr, new_value);
                                             }
@@ -17055,7 +17087,8 @@ impl<'a> HirToMirContext<'a> {
 
                 // Use helper that disambiguates by receiver type when multiple classes
                 // have the same field name (e.g., StringBuf.length vs List.length)
-                let found_result = self.resolve_field_index_by_name(field_name, receiver_ty)
+                let found_result = self
+                    .resolve_field_index_by_name(field_name, receiver_ty)
                     .map(|(class_ty, idx)| {
                         let sym_type = {
                             // Find the symbol in field_index_map that matches this class_ty + idx
@@ -17353,7 +17386,8 @@ impl<'a> HirToMirContext<'a> {
             // Resolve receiver_ty through TypeAlias/GenericInstance chains to find
             // the underlying Class type and its symbol_id
             let mut resolved = receiver_ty;
-            for _ in 0..10 { // max depth
+            for _ in 0..10 {
+                // max depth
                 if let Some(ti) = type_table.get(resolved) {
                     match &ti.kind {
                         TypeKind::TypeAlias { target_type, .. } => resolved = *target_type,
@@ -17595,7 +17629,10 @@ impl<'a> HirToMirContext<'a> {
             // Field not found as a class field — try stdlib dispatch (e.g., Array.length on a
             // Dynamic-typed Array). This is only reached for actual stdlib objects whose fields
             // are runtime functions, not for user-defined classes.
-            debug!("[lower_field_access_for_class] field '{}' not in field_index_map, trying stdlib", field_name);
+            debug!(
+                "[lower_field_access_for_class] field '{}' not in field_index_map, trying stdlib",
+                field_name
+            );
             let common_stdlib_types = [
                 crate::tast::TypeKind::Array {
                     element_type: TypeId::from_raw(0),
@@ -17613,9 +17650,7 @@ impl<'a> HirToMirContext<'a> {
                                 crate::tast::TypeKind::Array { .. },
                                 crate::tast::TypeKind::Array { .. },
                             ) => true,
-                            (crate::tast::TypeKind::String, crate::tast::TypeKind::String) => {
-                                true
-                            }
+                            (crate::tast::TypeKind::String, crate::tast::TypeKind::String) => true,
                             _ => false,
                         };
                         if matches {
@@ -17685,7 +17720,10 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        debug!("[lower_field_access_for_class] Using field_index_map for field '{}'", field_name);
+        debug!(
+            "[lower_field_access_for_class] Using field_index_map for field '{}'",
+            field_name
+        );
 
         // Look up the field index from our field_index_map
         // Also get the actual field type from the symbol table, NOT from the passed-in field_ty
@@ -19114,89 +19152,84 @@ impl<'a> HirToMirContext<'a> {
         // If the class doesn't have hasNext/next directly, check for iterator() method.
         // This handles the Haxe iterator protocol: class.iterator() returns an iterator
         // with hasNext()/next() (e.g., List.iterator() -> ListIterator).
-        let (obj_reg, has_next_fn, next_fn) = if let (Some(hn_sym), Some(n_sym)) =
-            (has_next_sym, next_sym)
-        {
-            match (self.get_function_id(&hn_sym), self.get_function_id(&n_sym)) {
-                (Some(hn), Some(n)) => (obj_reg, hn, n),
-                _ => return,
-            }
-        } else {
-            // Look for iterator() method on the class via class_method_symbols
-            let iterator_name = self.string_interner.intern("iterator");
-            let iterator_sym = self
-                .class_method_symbols
-                .get(&(class_sym, iterator_name))
-                .copied();
-            let Some(iter_sym) = iterator_sym else {
-                return;
-            };
-            let Some(iter_fn) = self.get_function_id(&iter_sym) else {
-                return;
-            };
+        let (obj_reg, has_next_fn, next_fn) =
+            if let (Some(hn_sym), Some(n_sym)) = (has_next_sym, next_sym) {
+                match (self.get_function_id(&hn_sym), self.get_function_id(&n_sym)) {
+                    (Some(hn), Some(n)) => (obj_reg, hn, n),
+                    _ => return,
+                }
+            } else {
+                // Look for iterator() method on the class via class_method_symbols
+                let iterator_name = self.string_interner.intern("iterator");
+                let iterator_sym = self
+                    .class_method_symbols
+                    .get(&(class_sym, iterator_name))
+                    .copied();
+                let Some(iter_sym) = iterator_sym else {
+                    return;
+                };
+                let Some(iter_fn) = self.get_function_id(&iter_sym) else {
+                    return;
+                };
 
-            // Call iterator() to get the iterator object
-            let ptr_void = IrType::Ptr(Box::new(IrType::Void));
-            let Some(iter_obj) =
-                self.builder
-                    .build_call_direct(iter_fn, vec![obj_reg], ptr_void)
-            else {
-                return;
-            };
+                // Call iterator() to get the iterator object
+                let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                let Some(iter_obj) =
+                    self.builder
+                        .build_call_direct(iter_fn, vec![obj_reg], ptr_void)
+                else {
+                    return;
+                };
 
-            // Find the iterator class from the return type or by searching class_method_symbols
-            let iter_class_sym = {
-                let sym = self.symbol_table.get_symbol(iter_sym);
-                sym.and_then(|s| {
-                    let tt = self.type_table.borrow();
-                    let ret_ty = tt.get(s.type_id)?;
-                    if let crate::tast::TypeKind::Function { return_type, .. } = &ret_ty.kind {
-                        let ret = tt.get(*return_type)?;
-                        if let crate::tast::TypeKind::Class { symbol_id, .. } = &ret.kind {
-                            return Some(*symbol_id);
+                // Find the iterator class from the return type or by searching class_method_symbols
+                let iter_class_sym = {
+                    let sym = self.symbol_table.get_symbol(iter_sym);
+                    sym.and_then(|s| {
+                        let tt = self.type_table.borrow();
+                        let ret_ty = tt.get(s.type_id)?;
+                        if let crate::tast::TypeKind::Function { return_type, .. } = &ret_ty.kind {
+                            let ret = tt.get(*return_type)?;
+                            if let crate::tast::TypeKind::Class { symbol_id, .. } = &ret.kind {
+                                return Some(*symbol_id);
+                            }
+                        }
+                        None
+                    })
+                };
+
+                // Fallback: search class_method_symbols for any class with hasNext+next
+                let iter_class_sym = iter_class_sym.or_else(|| {
+                    for ((cls, method_name), _) in self.class_method_symbols.iter() {
+                        if *method_name == has_next_name && *cls != class_sym {
+                            if self.class_method_symbols.contains_key(&(*cls, next_name)) {
+                                return Some(*cls);
+                            }
                         }
                     }
                     None
-                })
-            };
+                });
 
-            // Fallback: search class_method_symbols for any class with hasNext+next
-            let iter_class_sym = iter_class_sym.or_else(|| {
-                for ((cls, method_name), _) in self.class_method_symbols.iter() {
-                    if *method_name == has_next_name && *cls != class_sym {
-                        if self
-                            .class_method_symbols
-                            .get(&(*cls, next_name))
-                            .is_some()
-                        {
-                            return Some(*cls);
+                let Some(iter_cls) = iter_class_sym else {
+                    return;
+                };
+                let hn_sym = self
+                    .class_method_symbols
+                    .get(&(iter_cls, has_next_name))
+                    .copied();
+                let n_sym = self
+                    .class_method_symbols
+                    .get(&(iter_cls, next_name))
+                    .copied();
+                match (hn_sym, n_sym) {
+                    (Some(hn), Some(n)) => {
+                        match (self.get_function_id(&hn), self.get_function_id(&n)) {
+                            (Some(hn_fn), Some(n_fn)) => (iter_obj, hn_fn, n_fn),
+                            _ => return,
                         }
                     }
+                    _ => return,
                 }
-                None
-            });
-
-            let Some(iter_cls) = iter_class_sym else {
-                return;
             };
-            let hn_sym = self
-                .class_method_symbols
-                .get(&(iter_cls, has_next_name))
-                .copied();
-            let n_sym = self
-                .class_method_symbols
-                .get(&(iter_cls, next_name))
-                .copied();
-            match (hn_sym, n_sym) {
-                (Some(hn), Some(n)) => {
-                    match (self.get_function_id(&hn), self.get_function_id(&n)) {
-                        (Some(hn_fn), Some(n_fn)) => (iter_obj, hn_fn, n_fn),
-                        _ => return,
-                    }
-                }
-                _ => return,
-            }
-        };
 
         // Store obj pointer to a stack slot so it survives across blocks
         let obj_ty = self
