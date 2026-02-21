@@ -1671,10 +1671,11 @@ Two optimizations applied to the shared LLVM codegen (benefits both JIT and AOT)
 
 ---
 
-## 16. Haxe Language Feature Gap Analysis 🔴
+## 16. Haxe Language Feature Gap Analysis 🟡
 
 **Priority:** Critical — these gaps block real-world Haxe code from compiling
-**Last Audit:** 2026-02-13 (cross-referenced against https://haxe.org/manual/introduction.html)
+**Last Audit:** 2026-02-21 (cross-referenced against https://haxe.org/manual/introduction.html)
+**Status:** 23/25 features complete. Remaining: structural subtyping (#18), macros (#20).
 
 ### Gap Priority Matrix
 
@@ -1691,7 +1692,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 7 | for-in range (`0...n`) | P0 | Low | 🟢 Complete | basic loops |
 | 8 | Static extensions (`using`) | P1 | Medium | 🟢 Complete | idiomatic Haxe |
 | 9 | Safe cast (`cast(expr, Type)`) | P1 | Medium | 🟢 Complete | type-safe downcasting |
-| 10 | Generics instantiation end-to-end | P1 | High | 🟢 Complete | generic classes/functions |
+| 10 | Generics end-to-end (type erasure + monomorphization) | P1 | High | 🟢 Complete | generic classes/functions |
 | 11 | Property get/set dispatch | P1 | Medium | 🟢 Complete | encapsulation |
 | 12 | EReg (regex runtime) | P1 | Medium | 🟢 Complete | text processing |
 | 13 | Enum methods + statics | P1 | Medium | 🟢 Complete | rich enums |
@@ -2180,22 +2181,23 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 4. ✅ **try/catch exception handling** (16.3) — setjmp/longjmp based
 5. ✅ **Interface dispatch** (16.2) — fat pointer vtables
 
-#### Tier 2: Idiomatic Haxe (blocks Haxe-style code)
+#### Tier 2: Idiomatic Haxe (blocks Haxe-style code) ✅ COMPLETE
 6. ✅ **Higher-order Array methods** (16.5) — map/filter/sort with closure callbacks
 7. ✅ **Static extensions** (16.8) — `using` keyword
-8. **Generics end-to-end** (16.10, existing 1.x) — unblock generic containers
+8. ✅ **Generics end-to-end** (16.10, existing 1.x) — type erasure + monomorphization (2026-02-08)
 9. ✅ **EReg** (16.12) — regex support (match, replace, split, escape, regex literals)
-10. **Abstract types** (16.10) — user-defined abstracts
+10. ✅ **Abstract types** (16.10) — @:op, @:from/@:to, @:forward, enum abstract (2026-02-10)
 
 #### Tier 3: Completeness (polish and compatibility)
 11. ✅ **Safe cast** (16.9) — primitives + Dynamic + class hierarchy downcast (2026-02-17)
 12. ✅ **Dynamic type ops** (16.11) — anon R/W, arithmetic, class fields, method calls (2026-02-18)
 13. ✅ **Null safety** (16.14) — `??`, `?.`, `Null<T>` wrapper type (2026-02-18)
-14. ✅ **RTTI** (16.18) — is, isOfType, Type API (getClass/getClassName/getSuperClass) (2026-02-17)
+14. ✅ **RTTI** (16.18) — is, isOfType, Type API, hierarchy walking, enum methods (2026-02-21)
 15. ✅ **Map literals** (16.16) — literals, method dispatch, for-in iteration (2026-02-13)
 16. ✅ **Array comprehension** (16.17) — range and array for-in comprehensions (2026-02-13)
 17. ✅ **Class virtual dispatch** (16.19) — closure-based vtable via type_id header (2026-02-19)
-18. **Macros** (16.20)
+18. **Structural subtyping** (16.15) — 🔴 Not started
+19. **Macros** (16.20) — 🔴 Not started
 
 ---
 
