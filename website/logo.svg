@@ -1,0 +1,26 @@
+<svg class="hero-logo" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <radialGradient id="bf1" cx="0" cy="0.18" r="0.35" gradientUnits="objectBoundingBox" spreadMethod="pad">
+              <stop offset="0" stop-color="#f97316" stop-opacity="0"/>
+              <stop offset="1" stop-color="#f97316"/>
+            </radialGradient>
+            <radialGradient id="bf2" cx="0" cy="0.18" r="0.35" gradientUnits="objectBoundingBox" spreadMethod="pad">
+              <stop offset="0" stop-color="#ea580c" stop-opacity="0"/>
+              <stop offset="1" stop-color="#ea580c"/>
+            </radialGradient>
+            <radialGradient id="bf3" cx="0" cy="0.18" r="0.35" gradientUnits="objectBoundingBox" spreadMethod="pad">
+              <stop offset="0" stop-color="#c2410c" stop-opacity="0"/>
+              <stop offset="1" stop-color="#c2410c"/>
+            </radialGradient>
+            <radialGradient id="bf4" cx="0" cy="0.18" r="0.35" gradientUnits="objectBoundingBox" spreadMethod="pad">
+              <stop offset="0" stop-color="#ea580c" stop-opacity="0"/>
+              <stop offset="1" stop-color="#ea580c"/>
+            </radialGradient>
+          </defs>
+          <g transform="rotate(45,32,32)">
+            <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="url(#bf1)"/>
+            <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="url(#bf2)" transform="rotate(90,32,32)"/>
+            <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="url(#bf3)" transform="rotate(180,32,32)"/>
+            <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="url(#bf4)" transform="rotate(270,32,32)"/>
+          </g>
+        </svg>
