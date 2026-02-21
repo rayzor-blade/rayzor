@@ -3,10 +3,10 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Rayzor Blade - High Performance Haxe Compiler</title>
+    <title>Rayzor — High Performance Haxe Compiler</title>
     <meta
       name="description"
-      content="High Performance Next Generation Haxe Compiler"
+      content="A next-generation Haxe compiler with 5-tier JIT, ownership-based memory, and LLVM-powered native code generation. Built with Rust."
     />
 
     <!-- Facebook Meta Tags -->
@@ -14,11 +14,11 @@
     <meta property="og:type" content="website" />
     <meta
       property="og:title"
-      content="Rayzor Blade - High Performance Haxe Compiler"
+      content="Rayzor — High Performance Haxe Compiler"
     />
     <meta
       property="og:description"
-      content="High Performance Next Generation Haxe Compiler"
+      content="A next-generation Haxe compiler with 5-tier JIT, ownership-based memory, and LLVM-powered native code generation."
     />
     <meta property="og:image" content="https://rayzor-blade.com/ograph-image.png" />
 
@@ -28,13 +28,14 @@
     <meta property="twitter:url" content="https://rayzor-blade.com/" />
     <meta
       name="twitter:title"
-      content="Rayzor Blade - High Performance Haxe Compiler"
+      content="Rayzor — High Performance Haxe Compiler"
     />
     <meta
       name="twitter:description"
-      content="High Performance Next Generation Haxe Compiler"
+      content="A next-generation Haxe compiler with 5-tier JIT, ownership-based memory, and LLVM-powered native code generation."
     />
     <meta name="twitter:image" content="https://rayzor-blade.com/ograph-image.png" />
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -42,359 +43,1393 @@
       rel="stylesheet"
     />
     <style>
+      :root {
+        /* Light theme - Mojo-inspired */
+        --bg-primary: #ffffff;
+        --bg-secondary: #f5f5f7;
+        --bg-tertiary: #eaeaee;
+        --bg-code: #1a1b26;
+        --bg-code-bar: #22232e;
+        --text-primary: #1d1d1f;
+        --text-secondary: #5a5a6e;
+        --text-tertiary: #8e8e9a;
+        --accent-primary: #ea580c;
+        --accent-primary-hover: #c2410c;
+        --accent-glow: rgba(234, 88, 12, 0.08);
+        --accent-warm: #ea580c;
+        --accent-warm-light: #f97316;
+        --border-subtle: #e5e5ea;
+        --border-card: #e0e0e6;
+        --border-hover: rgba(234, 88, 12, 0.35);
+        /* Code syntax (dark bg) */
+        --code-keyword: #c792ea;
+        --code-string: #c3e88d;
+        --code-comment: rgba(255, 255, 255, 0.35);
+        --code-flag: #89ddff;
+        --code-type: #ffcb6b;
+        --code-function: #82aaff;
+        --code-number: #f78c6c;
+      }
+
       * {
         margin: 0;
         padding: 0;
         box-sizing: border-box;
       }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
       body {
         overflow-x: hidden;
-        background: #000;
+        background: var(--bg-primary);
         font-family: "JetBrains Mono", monospace;
-        color: #fff;
+        color: var(--text-primary);
+        line-height: 1.6;
+        -webkit-font-smoothing: antialiased;
+        -moz-osx-font-smoothing: grayscale;
       }
-      #canvas {
+
+      /* ===== NAV ===== */
+      .nav {
         position: fixed;
         top: 0;
         left: 0;
-        width: 100%;
-        height: 100%;
-        z-index: 0;
-      }
-
-      .content {
-        position: relative;
-        z-index: 10;
-        min-height: 100vh;
+        right: 0;
+        z-index: 100;
+        padding: 0 2rem;
+        height: 60px;
         display: flex;
-        flex-direction: column;
+        align-items: center;
+        justify-content: space-between;
+        background: rgba(255, 255, 255, 0.85);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border-bottom: 1px solid transparent;
+        transition: all 0.3s ease;
       }
 
-      /* Hero Section */
+      .nav.scrolled {
+        background: rgba(255, 255, 255, 0.95);
+        border-bottom-color: var(--border-subtle);
+        box-shadow: 0 1px 8px rgba(0, 0, 0, 0.06);
+      }
+
+      .nav-brand {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        text-decoration: none;
+        color: var(--text-primary);
+      }
+
+      .nav-brand img,
+      .nav-brand svg {
+        width: 32px;
+        height: 32px;
+      }
+
+      .nav-brand span {
+        font-family: "Geom", sans-serif;
+        font-size: 1.1rem;
+        font-weight: 600;
+        letter-spacing: 0.02em;
+      }
+
+      .nav-links {
+        display: flex;
+        align-items: center;
+        gap: 1.5rem;
+      }
+
+      .nav-links a {
+        color: var(--text-secondary);
+        text-decoration: none;
+        font-size: 0.8rem;
+        transition: color 0.2s ease;
+      }
+
+      .nav-links a:hover {
+        color: var(--text-primary);
+      }
+
+      .nav-cta {
+        display: inline-flex;
+        align-items: center;
+        padding: 0.45rem 1rem;
+        background: var(--accent-primary);
+        color: #fff !important;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        font-weight: 500;
+        transition: all 0.2s ease;
+      }
+
+      .nav-cta:hover {
+        background: var(--accent-primary-hover) !important;
+        box-shadow: 0 4px 12px rgba(234, 88, 12, 0.25);
+      }
+
+      .nav-hamburger {
+        display: none;
+        flex-direction: column;
+        gap: 5px;
+        cursor: pointer;
+        padding: 4px;
+        background: none;
+        border: none;
+      }
+
+      .nav-hamburger span {
+        display: block;
+        width: 22px;
+        height: 2px;
+        background: var(--text-secondary);
+        border-radius: 1px;
+        transition: all 0.3s ease;
+      }
+
+      .nav-mobile {
+        display: none;
+        position: fixed;
+        top: 60px;
+        left: 0;
+        right: 0;
+        background: rgba(255, 255, 255, 0.98);
+        backdrop-filter: blur(16px);
+        -webkit-backdrop-filter: blur(16px);
+        border-bottom: 1px solid var(--border-subtle);
+        padding: 1.5rem 2rem;
+        flex-direction: column;
+        gap: 1rem;
+        z-index: 99;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+      }
+
+      .nav-mobile.open {
+        display: flex;
+      }
+
+      .nav-mobile a {
+        color: var(--text-secondary);
+        text-decoration: none;
+        font-size: 0.9rem;
+        padding: 0.5rem 0;
+        transition: color 0.2s ease;
+      }
+
+      .nav-mobile a:hover {
+        color: var(--text-primary);
+      }
+
+      /* ===== HERO ===== */
+      .hero-backdrop {
+        position: relative;
+        overflow: hidden;
+        background: var(--bg-primary);
+      }
+
+      .hero-backdrop .blob {
+        position: absolute;
+        border-radius: 50%;
+        filter: blur(90px);
+        z-index: 0;
+        will-change: transform, opacity;
+        mix-blend-mode: normal;
+      }
+
+      .hero-backdrop .blob-1 {
+        width: 60vw;
+        height: 60vw;
+        max-width: 750px;
+        max-height: 750px;
+        background: rgba(234, 140, 60, 0.4);
+        top: -25%;
+        left: -15%;
+        animation: blobMove1 8s ease-in-out infinite;
+      }
+
+      .hero-backdrop .blob-2 {
+        width: 55vw;
+        height: 55vw;
+        max-width: 700px;
+        max-height: 700px;
+        background: rgba(100, 160, 245, 0.35);
+        top: -10%;
+        right: -20%;
+        animation: blobMove2 10s ease-in-out infinite;
+      }
+
+      .hero-backdrop .blob-3 {
+        width: 50vw;
+        height: 50vw;
+        max-width: 650px;
+        max-height: 650px;
+        background: rgba(185, 130, 220, 0.3);
+        bottom: -15%;
+        left: 10%;
+        animation: blobMove3 12s ease-in-out infinite;
+      }
+
+      .hero-backdrop .blob-4 {
+        width: 45vw;
+        height: 45vw;
+        max-width: 550px;
+        max-height: 550px;
+        background: rgba(245, 200, 100, 0.3);
+        bottom: -5%;
+        right: 0%;
+        animation: blobMove4 9s ease-in-out infinite;
+      }
+
       .hero {
-        min-height: 100vh;
+        position: relative;
+        z-index: 1;
+        min-height: 90vh;
         display: flex;
         flex-direction: column;
         justify-content: center;
         align-items: center;
         text-align: center;
-        padding: 2rem;
+        padding: 7rem 2rem 4rem;
+        max-width: 900px;
+        margin: 0 auto;
       }
 
-      .title {
+      .hero-logo {
+        width: 160px;
+        height: 160px;
+        animation: fadeInUp 0.8s ease-out;
+      }
+
+      .hero-headline {
         font-family: "Geom", sans-serif;
-        font-size: clamp(3rem, 12vw, 7rem);
-        font-weight: 700;
-        letter-spacing: 0.02em;
-        white-space: nowrap;
-        color: rgba(255, 255, 255, 0.98);
-        text-shadow:
-          0 0 60px rgba(180, 100, 200, 0.6),
-          0 0 120px rgba(150, 80, 180, 0.4);
-        animation: fadeIn 1.5s ease-out;
+        font-size: clamp(1.8rem, 4.5vw, 3.2rem);
+        font-weight: 800;
+        line-height: 1.25;
+        margin-top: 2.5rem;
+        color: var(--text-primary);
+        animation: fadeInUp 0.8s ease-out 0.15s both;
       }
 
-      .subtitle {
-        font-family: "JetBrains Mono", monospace;
-        font-size: clamp(0.7rem, 1.8vw, 1.1rem);
+      .hero-headline .accent {
+        background: linear-gradient(135deg, var(--accent-primary), #f97316);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+      }
+
+      .hero-subtitle {
+        font-size: clamp(0.78rem, 1.5vw, 0.92rem);
         font-weight: 400;
-        letter-spacing: 0.04em;
-        color: rgba(200, 150, 220, 0.8);
-        margin-top: 1rem;
+        color: var(--text-secondary);
+        margin-top: 1.5rem;
         max-width: 600px;
-        animation: fadeIn 1.5s ease-out 0.3s both;
+        line-height: 1.8;
+        animation: fadeInUp 0.8s ease-out 0.3s both;
       }
 
-      .tagline {
-        font-size: clamp(0.65rem, 1.2vw, 0.85rem);
-        color: rgba(255, 255, 255, 0.5);
-        margin-top: 2rem;
-        letter-spacing: 0.15em;
-        text-transform: uppercase;
-        animation: fadeIn 1.5s ease-out 0.5s both;
-      }
-
-      /* Badges */
-      .badges {
+      .hero-badges {
         display: flex;
-        gap: 0.75rem;
+        gap: 0.5rem;
         margin-top: 1.5rem;
         flex-wrap: wrap;
         justify-content: center;
-        animation: fadeIn 1.5s ease-out 0.6s both;
+        animation: fadeInUp 0.8s ease-out 0.4s both;
       }
 
       .badge {
         display: inline-flex;
         align-items: center;
-        gap: 0.4rem;
-        padding: 0.4rem 0.8rem;
-        background: rgba(255, 255, 255, 0.08);
-        border: 1px solid rgba(255, 255, 255, 0.15);
+        gap: 0.35rem;
+        padding: 0.3rem 0.65rem;
+        background: var(--bg-secondary);
+        border: 1px solid var(--border-card);
         border-radius: 20px;
-        font-size: 0.7rem;
-        color: rgba(255, 255, 255, 0.7);
-        backdrop-filter: blur(10px);
+        font-size: 0.68rem;
+        color: var(--text-secondary);
       }
 
       .badge-dot {
         width: 6px;
         height: 6px;
         border-radius: 50%;
+        background: var(--accent-primary);
       }
 
       .badge-icon {
         width: 14px;
         height: 14px;
-        opacity: 0.8;
+        opacity: 0.7;
       }
 
-      .badge-icon.cranelift-logo {
-        width: 18px;
-        height: 14px;
-      }
-
-      .badge-icon.llvm-logo {
-        width: 16px;
-        height: 16px;
-      }
-
-      /* CTAs */
-      .ctas {
+      .hero-ctas {
         display: flex;
-        gap: 1rem;
-        margin-top: 2.5rem;
+        gap: 0.75rem;
+        margin-top: 2rem;
         flex-wrap: wrap;
         justify-content: center;
-        animation: fadeIn 1.5s ease-out 0.7s both;
+        animation: fadeInUp 0.8s ease-out 0.5s both;
       }
 
       .btn {
         display: inline-flex;
         align-items: center;
         gap: 0.5rem;
-        padding: 0.85rem 1.8rem;
+        padding: 0.75rem 1.5rem;
         font-family: "JetBrains Mono", monospace;
-        font-size: 0.85rem;
+        font-size: 0.82rem;
         font-weight: 500;
         text-decoration: none;
         border-radius: 8px;
-        transition: all 0.3s ease;
+        transition: all 0.25s ease;
         cursor: pointer;
       }
 
+      .btn svg {
+        width: 16px;
+        height: 16px;
+      }
+
       .btn-primary {
-        background: linear-gradient(
-          135deg,
-          rgba(150, 80, 180, 0.9),
-          rgba(100, 50, 150, 0.9)
-        );
+        background: var(--accent-primary);
         color: #fff;
-        border: 1px solid rgba(200, 150, 220, 0.3);
+        border: 1px solid transparent;
       }
 
       .btn-primary:hover {
-        background: linear-gradient(
-          135deg,
-          rgba(170, 100, 200, 0.95),
-          rgba(120, 70, 170, 0.95)
-        );
+        background: var(--accent-primary-hover);
         transform: translateY(-2px);
-        box-shadow: 0 10px 40px rgba(150, 80, 180, 0.4);
+        box-shadow: 0 8px 24px rgba(234, 88, 12, 0.3);
       }
 
       .btn-secondary {
-        background: rgba(255, 255, 255, 0.05);
-        color: rgba(255, 255, 255, 0.85);
-        border: 1px solid rgba(255, 255, 255, 0.2);
+        background: var(--bg-primary);
+        color: var(--text-secondary);
+        border: 1px solid var(--border-card);
       }
 
       .btn-secondary:hover {
-        background: rgba(255, 255, 255, 0.1);
-        border-color: rgba(255, 255, 255, 0.3);
+        color: var(--text-primary);
+        border-color: #ccc;
         transform: translateY(-2px);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
       }
 
-      .btn svg {
-        width: 18px;
-        height: 18px;
+      /* ===== CODE TABS (Hero) ===== */
+      .hero-code {
+        width: 100%;
+        max-width: 720px;
+        margin-top: 3rem;
+        animation: fadeInUp 0.8s ease-out 0.65s both;
       }
 
-      /* Features Section */
-      .features {
-        padding: 6rem 2rem;
-        background: linear-gradient(
-          180deg,
-          transparent 0%,
-          rgba(10, 5, 15, 0.95) 20%
-        );
+      /* Light code container for hero */
+      .hero-code .code-block {
+        background: rgba(255, 255, 255, 0.65);
+        backdrop-filter: blur(12px);
+        box-shadow:
+          0 2px 8px rgba(234, 88, 12, 0.1),
+          0 8px 24px rgba(139, 92, 246, 0.1),
+          0 20px 50px rgba(56, 189, 248, 0.12),
+          0 36px 80px rgba(0, 0, 0, 0.08);
+        border: 1px solid rgba(0, 0, 0, 0.05);
       }
 
-      .features-grid {
-        max-width: 1200px;
-        margin: 0 auto;
-        display: grid;
-        grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-        gap: 2rem;
+      .hero-code .code-tabs {
+        background: rgba(245, 245, 248, 0.8);
+        border-bottom: 1px solid rgba(0, 0, 0, 0.06);
       }
 
-      .feature {
-        padding: 2rem;
-        background: rgba(255, 255, 255, 0.03);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        border-radius: 16px;
-        transition: all 0.3s ease;
+      .hero-code .code-tab {
+        color: rgba(0, 0, 0, 0.35);
       }
 
-      .feature:hover {
-        background: rgba(255, 255, 255, 0.05);
-        border-color: rgba(150, 80, 180, 0.3);
-        transform: translateY(-4px);
+      .hero-code .code-tab:hover {
+        color: rgba(0, 0, 0, 0.6);
       }
 
-      .feature-icon {
-        font-size: 2rem;
-        margin-bottom: 1rem;
+      .hero-code .code-tab.active {
+        color: #ea580c;
+        border-bottom-color: #ea580c;
       }
 
-      .feature-title {
-        font-family: "Geom", sans-serif;
-        font-size: 1.2rem;
-        font-weight: 600;
-        margin-bottom: 0.5rem;
-        color: rgba(255, 255, 255, 0.95);
+      .hero-code .code-panel {
+        color: #334155;
+        text-align: left;
       }
 
-      .feature-desc {
-        font-size: 0.85rem;
-        line-height: 1.6;
-        color: rgba(255, 255, 255, 0.6);
-      }
-
-      .feature-stat {
-        display: inline-block;
-        margin-top: 1rem;
-        padding: 0.3rem 0.7rem;
-        background: rgba(150, 80, 180, 0.2);
-        border-radius: 4px;
-        font-size: 0.75rem;
-        font-weight: 500;
-        color: rgba(200, 150, 220, 0.9);
-      }
-
-      /* Code Example */
-      .code-section {
-        padding: 4rem 2rem 6rem;
-        background: rgba(10, 5, 15, 0.98);
-      }
-
-      .code-container {
-        max-width: 700px;
-        margin: 0 auto;
-      }
-
-      .code-header {
-        text-align: center;
-        margin-bottom: 2rem;
-      }
-
-      .code-header h2 {
-        font-family: "Geom", sans-serif;
-        font-size: 1.8rem;
-        font-weight: 600;
-        margin-bottom: 0.5rem;
-      }
-
-      .code-header p {
-        color: rgba(255, 255, 255, 0.5);
-        font-size: 0.9rem;
-      }
+      .hero-code .ck  { color: #7c3aed; }
+      .hero-code .cs  { color: #16a34a; }
+      .hero-code .cc  { color: rgba(0, 0, 0, 0.35); }
+      .hero-code .cf  { color: #0891b2; }
+      .hero-code .ct  { color: #b45309; }
+      .hero-code .cn  { color: #dc2626; }
+      .hero-code .cfn { color: #2563eb; }
 
       .code-block {
-        background: rgba(0, 0, 0, 0.5);
-        border: 1px solid rgba(255, 255, 255, 0.1);
+        background: var(--bg-code);
         border-radius: 12px;
         overflow: hidden;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.15);
       }
 
       .code-tabs {
         display: flex;
-        background: rgba(255, 255, 255, 0.05);
-        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        background: var(--bg-code-bar);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.08);
       }
 
       .code-tab {
-        padding: 0.75rem 1.25rem;
-        font-size: 0.75rem;
-        color: rgba(255, 255, 255, 0.5);
-        border-right: 1px solid rgba(255, 255, 255, 0.1);
+        padding: 0.7rem 1.2rem;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.72rem;
+        color: rgba(255, 255, 255, 0.4);
+        cursor: pointer;
+        border-bottom: 2px solid transparent;
+        transition: all 0.2s ease;
+        background: none;
+        border-top: none;
+        border-left: none;
+        border-right: none;
+        user-select: none;
+      }
+
+      .code-tab:hover {
+        color: rgba(255, 255, 255, 0.6);
       }
 
       .code-tab.active {
-        color: rgba(200, 150, 220, 0.9);
-        background: rgba(150, 80, 180, 0.1);
+        color: #f97316;
+        border-bottom-color: #f97316;
       }
 
-      .code-content {
-        padding: 1.5rem;
-        font-size: 0.8rem;
+      .code-panels-wrap {
+        position: relative;
+        overflow: hidden;
+      }
+
+      .code-panel {
+        padding: 1.25rem 1.5rem;
+        font-size: 0.78rem;
         line-height: 1.7;
         overflow-x: auto;
+        color: #e0e0e8;
+        opacity: 0;
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        pointer-events: none;
+        transform: translateX(20px);
+        transition: opacity 0.3s ease, transform 0.3s ease;
       }
 
-      .code-content pre {
+      .code-panel.active {
+        opacity: 1;
+        position: relative;
+        pointer-events: auto;
+        transform: translateX(0);
+      }
+
+      .code-panel pre {
         font-family: "JetBrains Mono", monospace;
         margin: 0;
         white-space: pre;
       }
 
-      .code-comment {
-        color: rgba(255, 255, 255, 0.35);
-      }
-      .code-keyword {
-        color: #c792ea;
-      }
-      .code-string {
-        color: #c3e88d;
-      }
-      .code-flag {
-        color: #89ddff;
+      .ck { color: var(--code-keyword); }
+      .cs { color: var(--code-string); }
+      .cc { color: var(--code-comment); }
+      .cf { color: var(--code-flag); }
+      .ct { color: var(--code-type); }
+      .cn { color: var(--code-number); }
+      .cfn { color: var(--code-function); }
+
+      /* ===== STATS BAR ===== */
+      .stats {
+        background: var(--bg-secondary);
+        padding: 3.5rem 2rem;
       }
 
-      /* Footer */
-      .footer {
-        padding: 3rem 2rem;
+      .stats-grid {
+        max-width: 1000px;
+        margin: 0 auto;
+        display: grid;
+        grid-template-columns: repeat(4, 1fr);
+        gap: 2rem;
         text-align: center;
-        background: rgba(5, 2, 8, 0.98);
-        border-top: 1px solid rgba(255, 255, 255, 0.05);
+      }
+
+      .stat-number {
+        font-family: "Geom", sans-serif;
+        font-size: clamp(1.5rem, 3vw, 2.2rem);
+        font-weight: 700;
+        color: var(--accent-warm);
+      }
+
+      .stat-label {
+        font-size: 0.75rem;
+        color: var(--text-tertiary);
+        margin-top: 0.3rem;
+      }
+
+      /* ===== SECTION SHARED ===== */
+      .section {
+        padding: 5rem 2rem;
+        max-width: 1100px;
+        margin: 0 auto;
+      }
+
+      .section-title {
+        font-family: "Geom", sans-serif;
+        font-size: clamp(1.5rem, 3vw, 2.2rem);
+        font-weight: 700;
+        text-align: center;
+        margin-bottom: 3rem;
+        color: var(--text-primary);
+      }
+
+      /* ===== FEATURES ===== */
+      .features-grid {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 1.25rem;
+      }
+
+      .feature {
+        padding: 2rem;
+        background: var(--bg-primary);
+        border: 1px solid var(--border-card);
+        border-radius: 16px;
+        transition: all 0.3s ease;
+      }
+
+      .feature:hover {
+        border-color: var(--border-hover);
+        transform: translateY(-4px);
+        box-shadow: 0 12px 32px rgba(0, 0, 0, 0.08);
+      }
+
+      .feature-icon {
+        width: 40px;
+        height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 10px;
+        background: var(--accent-glow);
+        margin-bottom: 1rem;
+        color: var(--accent-primary);
+      }
+
+      .feature-icon svg {
+        width: 20px;
+        height: 20px;
+      }
+
+      .feature-title {
+        font-family: "Geom", sans-serif;
+        font-size: 1.1rem;
+        font-weight: 600;
+        margin-bottom: 0.5rem;
+        color: var(--text-primary);
+      }
+
+      .feature-desc {
+        font-size: 0.82rem;
+        line-height: 1.65;
+        color: var(--text-secondary);
+      }
+
+      .feature-stat {
+        display: inline-block;
+        margin-top: 1rem;
+        padding: 0.25rem 0.6rem;
+        background: rgba(194, 65, 12, 0.08);
+        border-radius: 4px;
+        font-size: 0.72rem;
+        font-weight: 500;
+        color: var(--accent-warm-light);
+      }
+
+      /* ===== FEATURES SECTION BG ===== */
+      .features-bg {
+        background: var(--bg-secondary);
+      }
+
+      /* ===== PIPELINE ===== */
+      .pipeline-section {
+        padding: 5rem 2rem;
+      }
+
+      .pipeline-section .section-title {
+        margin-bottom: 2.5rem;
+      }
+
+      /* ===== TIER VISUALIZATION ===== */
+      .tier-viz-container {
+        max-width: 800px;
+        margin: 0 auto;
+      }
+
+      .tier-viz {
+        width: 100%;
+        height: auto;
+        display: block;
+      }
+
+      .tier-viz .zone-title {
+        font-family: "Geom", sans-serif;
+        font-size: 15px;
+        font-weight: 700;
+        fill: var(--text-primary);
+      }
+
+      .tier-viz .zone-sub {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 10px;
+        fill: var(--text-tertiary);
+      }
+
+      .tier-viz .zone-badge {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 0.12em;
+      }
+
+      .tier-viz .promo-label {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 9px;
+        fill: var(--text-tertiary);
+      }
+
+      .tier-viz .fn-label {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 8px;
+        fill: #fff;
+        text-anchor: middle;
+        dominant-baseline: central;
+        pointer-events: none;
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        .tier-viz circle,
+        .tier-viz text,
+        .baremetal-backdrop .blob,
+        .blade-backdrop .blob,
+        .ownership-backdrop .blob,
+        .ssa-backdrop .blob,
+        .blade-card,
+        .baremetal-fan,
+        .fan-spin,
+        .fan-svg,
+        .own-branch,
+        .own-pulse,
+        .own-card-svg,
+        .ownership-card {
+          animation: none !important;
+          transition: none !important;
+        }
+        .own-branch { stroke-dashoffset: 0 !important; }
+        .blade-card { opacity: 1 !important; }
+        .ssa-line { clip-path: none !important; animation: none !important; }
+        .ssa-line.ssa-typing::after { display: none !important; }
+      }
+
+      .pipeline-desc {
+        max-width: 700px;
+        margin: 2rem auto 0;
+        text-align: center;
+        font-size: 0.82rem;
+        line-height: 1.7;
+        color: var(--text-secondary);
+      }
+
+      /* ===== SHOWCASE SECTIONS ===== */
+      .baremetal-backdrop,
+      .blade-backdrop,
+      .ownership-backdrop,
+      .ssa-backdrop {
+        position: relative;
+        overflow: hidden;
+        padding: 5rem 2rem;
+        min-height: 100vh;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+      }
+
+      .baremetal-backdrop .blob,
+      .blade-backdrop .blob,
+      .ownership-backdrop .blob,
+      .ssa-backdrop .blob {
+        position: absolute;
+        border-radius: 50%;
+        filter: blur(90px);
+        z-index: 0;
+        will-change: transform, opacity;
+        mix-blend-mode: normal;
+      }
+
+      .showcase-section {
+        position: relative;
+        z-index: 1;
+        max-width: 520px;
+        margin: 0;
+        margin-left: 5%;
+        text-align: left;
+      }
+
+      .showcase-title {
+        font-family: "Geom", sans-serif;
+        font-size: clamp(1.5rem, 3vw, 2.2rem);
+        font-weight: 700;
+        margin-bottom: 1rem;
+        color: var(--text-primary);
+      }
+
+      .showcase-desc {
+        font-size: 0.82rem;
+        line-height: 1.7;
+        color: var(--text-secondary);
+        margin-bottom: 1.25rem;
+      }
+
+      .showcase-stat {
+        display: inline-block;
+        padding: 0.25rem 0.6rem;
+        background: rgba(194, 65, 12, 0.08);
+        border-radius: 4px;
+        font-size: 0.72rem;
+        font-weight: 500;
+        color: var(--accent-warm-light);
+      }
+
+      /* --- BARE METAL blobs (orange/amber/slate) --- */
+      .baremetal-backdrop { background: var(--bg-primary); }
+      .baremetal-backdrop .bm-blob-1 {
+        width: 55vw; height: 55vw; max-width: 700px; max-height: 700px;
+        background: rgba(234, 88, 12, 0.2);
+        top: -20%; left: -10%;
+        animation: blobMove1 9s ease-in-out infinite;
+      }
+      .baremetal-backdrop .bm-blob-2 {
+        width: 50vw; height: 50vw; max-width: 650px; max-height: 650px;
+        background: rgba(245, 158, 11, 0.18);
+        top: -5%; right: -15%;
+        animation: blobMove2 11s ease-in-out infinite;
+      }
+      .baremetal-backdrop .bm-blob-3 {
+        width: 45vw; height: 45vw; max-width: 600px; max-height: 600px;
+        background: rgba(251, 146, 60, 0.2);
+        bottom: -15%; left: 15%;
+        animation: blobMove3 13s ease-in-out infinite;
+      }
+      .baremetal-backdrop .bm-blob-4 {
+        width: 40vw; height: 40vw; max-width: 500px; max-height: 500px;
+        background: rgba(148, 163, 184, 0.18);
+        bottom: -10%; right: 5%;
+        animation: blobMove4 10s ease-in-out infinite;
+      }
+
+      /* --- Bare Metal fan --- */
+      .baremetal-fan {
+        position: absolute;
+        top: 50%;
+        right: 10%;
+        transform: translateY(-50%) perspective(900px) rotateX(12deg) rotateY(-18deg);
+        z-index: 0;
+        width: 40vw;
+        max-width: 480px;
+        opacity: 0;
+        transform-style: preserve-3d;
+        transition: opacity 1s ease-out 0.2s, transform 0.1s ease-out;
+      }
+      .baremetal-backdrop.in-view .baremetal-fan {
+        opacity: 1;
+      }
+
+      .bm-card-face {
+        position: relative;
+        width: 100%;
+        aspect-ratio: 1 / 1;
+        background: rgba(255, 255, 255, 0.7);
+        backdrop-filter: blur(12px);
+        border-radius: 2rem;
+        border: 1px solid rgba(226, 232, 240, 0.6);
+        box-shadow: 20px 40px 60px -15px rgba(0,0,0,0.08), 0 0 20px rgba(0,0,0,0.03);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 2rem;
+        overflow: hidden;
+      }
+
+
+      .fan-svg {
+        width: 100%;
+        height: 100%;
+      }
+      .baremetal-backdrop.in-view .fan-svg {
+        animation: fanVibrate 0.035s linear infinite alternate;
+      }
+      @keyframes fanVibrate {
+        from { transform: translate(-0.6px, -0.6px); }
+        to { transform: translate(0.6px, 0.6px); }
+      }
+
+      .fan-spin {
+        transform-origin: 250px 250px;
+        animation: fanRotate 0.1s linear infinite;
+        animation-play-state: paused;
+      }
+      .baremetal-backdrop.in-view .fan-spin {
+        animation-play-state: running;
+      }
+      @keyframes fanRotate {
+        to { transform: rotate(360deg); }
+      }
+
+      /* --- BLADE blobs (cyan/teal) --- */
+      .blade-backdrop { background: var(--bg-primary); }
+      .blade-backdrop .blob-1 {
+        width: 55vw; height: 55vw; max-width: 700px; max-height: 700px;
+        background: rgba(6, 182, 212, 0.3);
+        top: -20%; left: -10%;
+        animation: blobMove1 9s ease-in-out infinite;
+      }
+      .blade-backdrop .blob-2 {
+        width: 50vw; height: 50vw; max-width: 650px; max-height: 650px;
+        background: rgba(20, 184, 166, 0.25);
+        top: -5%; right: -15%;
+        animation: blobMove2 11s ease-in-out infinite;
+      }
+      .blade-backdrop .blob-3 {
+        width: 45vw; height: 45vw; max-width: 600px; max-height: 600px;
+        background: rgba(56, 189, 248, 0.25);
+        bottom: -15%; left: 15%;
+        animation: blobMove3 13s ease-in-out infinite;
+      }
+      .blade-backdrop .blob-4 {
+        width: 40vw; height: 40vw; max-width: 500px; max-height: 500px;
+        background: rgba(110, 231, 183, 0.2);
+        bottom: -10%; right: 5%;
+        animation: blobMove4 10s ease-in-out infinite;
+      }
+
+      /* --- Ownership blobs (emerald/green) --- */
+      .ownership-backdrop { background: var(--bg-secondary); }
+      .ownership-backdrop .blob-1 {
+        width: 55vw; height: 55vw; max-width: 700px; max-height: 700px;
+        background: rgba(16, 185, 129, 0.3);
+        top: -20%; left: -10%;
+        animation: blobMove1 10s ease-in-out infinite;
+      }
+      .ownership-backdrop .blob-2 {
+        width: 50vw; height: 50vw; max-width: 650px; max-height: 650px;
+        background: rgba(34, 197, 94, 0.25);
+        top: -5%; right: -15%;
+        animation: blobMove2 12s ease-in-out infinite;
+      }
+      .ownership-backdrop .blob-3 {
+        width: 45vw; height: 45vw; max-width: 600px; max-height: 600px;
+        background: rgba(132, 204, 22, 0.2);
+        bottom: -15%; left: 15%;
+        animation: blobMove3 14s ease-in-out infinite;
+      }
+      .ownership-backdrop .blob-4 {
+        width: 40vw; height: 40vw; max-width: 500px; max-height: 500px;
+        background: rgba(20, 184, 166, 0.2);
+        bottom: -10%; right: 5%;
+        animation: blobMove4 11s ease-in-out infinite;
+      }
+
+      /* --- SSA blobs (purple/indigo) --- */
+      .ssa-backdrop { background: var(--bg-primary); }
+      .ssa-backdrop .blob-1 {
+        width: 55vw; height: 55vw; max-width: 700px; max-height: 700px;
+        background: rgba(139, 92, 246, 0.3);
+        top: -20%; left: -10%;
+        animation: blobMove1 9s ease-in-out infinite;
+      }
+      .ssa-backdrop .blob-2 {
+        width: 50vw; height: 50vw; max-width: 650px; max-height: 650px;
+        background: rgba(99, 102, 241, 0.25);
+        top: -5%; right: -15%;
+        animation: blobMove2 11s ease-in-out infinite;
+      }
+      .ssa-backdrop .blob-3 {
+        width: 45vw; height: 45vw; max-width: 600px; max-height: 600px;
+        background: rgba(167, 139, 250, 0.25);
+        bottom: -15%; left: 15%;
+        animation: blobMove3 13s ease-in-out infinite;
+      }
+      .ssa-backdrop .blob-4 {
+        width: 40vw; height: 40vw; max-width: 500px; max-height: 500px;
+        background: rgba(236, 72, 153, 0.2);
+        bottom: -10%; right: 5%;
+        animation: blobMove4 10s ease-in-out infinite;
+      }
+
+      /* --- BLADE stacked cards (background) --- */
+      .blade-cards {
+        position: absolute;
+        top: 68%;
+        right: 2%;
+        transform: translateY(-50%);
+        z-index: 0;
+        perspective: 900px;
+        width: 55vw;
+        height: 70vh;
+      }
+
+      .blade-card {
+        position: absolute;
+        width: 48vw;
+        max-width: 620px;
+        height: 32vh;
+        max-height: 300px;
+        background: rgba(255, 255, 255, 0.55);
+        backdrop-filter: blur(8px);
+        border: 1px solid rgba(6, 182, 212, 0.2);
+        border-radius: 18px;
+        padding: 1.25rem 1.5rem;
+        display: flex;
+        flex-direction: column;
+        justify-content: space-between;
+        box-shadow: 0 12px 40px rgba(6, 182, 212, 0.1);
+        opacity: 0;
+      }
+
+      .blade-card-label {
+        font-family: "Geom", sans-serif;
+        font-size: 0.85rem;
+        font-weight: 600;
+        color: var(--text-primary);
+        opacity: 0.7;
+      }
+
+      .blade-card-hash {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.7rem;
+        color: #06b6d4;
+        opacity: 0.6;
+      }
+
+      .blade-card-status {
+        font-family: "JetBrains Mono", monospace;
+        font-size: 0.65rem;
+        color: var(--text-tertiary);
+        opacity: 0.6;
+      }
+
+      .blade-backdrop.in-view .blade-card-1 {
+        animation: bladeCardFan1 1s ease-out 0.2s both;
+      }
+      .blade-backdrop.in-view .blade-card-2 {
+        animation: bladeCardFan2 1s ease-out 0.5s both;
+      }
+      .blade-backdrop.in-view .blade-card-3 {
+        animation: bladeCardFan3 1s ease-out 0.8s both;
+      }
+
+      @keyframes bladeCardFan1 {
+        from { transform: perspective(900px) rotateX(0) rotateY(0) translateZ(0) translateY(60px); opacity: 0; }
+        to { transform: perspective(900px) rotateX(12deg) rotateY(-18deg) translateZ(0) translateY(-30px); opacity: 1; }
+      }
+      @keyframes bladeCardFan2 {
+        from { transform: perspective(900px) rotateX(0) rotateY(0) translateZ(0) translateY(60px); opacity: 0; }
+        to { transform: perspective(900px) rotateX(8deg) rotateY(-12deg) translateZ(-50px) translateX(20px) translateY(80px); opacity: 1; }
+      }
+      @keyframes bladeCardFan3 {
+        from { transform: perspective(900px) rotateX(0) rotateY(0) translateZ(0) translateY(60px); opacity: 0; }
+        to { transform: perspective(900px) rotateX(4deg) rotateY(-6deg) translateZ(-100px) translateX(40px) translateY(190px); opacity: 1; }
+      }
+
+      /* --- Ownership 3D Card --- */
+      .ownership-card {
+        position: absolute;
+        top: 50%;
+        right: 10%;
+        transform: translateY(-50%) perspective(900px) rotateX(12deg) rotateY(-15deg) rotateZ(2deg);
+        z-index: 0;
+        width: 40vw;
+        max-width: 480px;
+        opacity: 0;
+        transform-style: preserve-3d;
+        transition: opacity 1s ease-out 0.2s, transform 0.1s ease-out;
+      }
+      .ownership-backdrop.in-view .ownership-card {
+        opacity: 1;
+      }
+
+      .own-card-face {
+        position: relative;
+        width: 100%;
+        aspect-ratio: 3 / 4;
+        background: #ffffff;
+        border-radius: 2rem;
+        border: 1px solid #e2e8f0;
+        box-shadow: 20px 40px 60px -15px rgba(0,0,0,0.1), 0 0 20px rgba(0,0,0,0.05);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 1rem;
+        overflow: hidden;
+      }
+
+      .own-card-glow {
+        position: absolute;
+        border-radius: 50%;
+        filter: blur(100px);
+        pointer-events: none;
+      }
+      .own-card-glow-1 {
+        width: 16rem; height: 16rem;
+        background: rgba(186, 230, 253, 0.4);
+        top: 0; left: 50%; transform: translateX(-50%);
+      }
+      .own-card-glow-2 {
+        width: 16rem; height: 16rem;
+        background: rgba(199, 210, 254, 0.4);
+        bottom: 0; right: 0;
+      }
+
+      .own-card-svg { width: 100%; height: 100%; }
+
+      .own-pulse { animation: ownPulse 2s ease-in-out infinite; }
+      @keyframes ownPulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.6; }
+      }
+
+      .own-branch {
+        fill: none;
+        stroke-linecap: round;
+        stroke-dasharray: 400;
+        stroke-dashoffset: 400;
+      }
+
+      .ownership-backdrop.in-view .own-branch-1 { animation: drawOwn 1.2s ease-out 0.3s forwards; }
+      .ownership-backdrop.in-view .own-branch-2 { animation: drawOwn 1.2s ease-out 0.9s forwards; }
+      .ownership-backdrop.in-view .own-branch-3 { animation: drawOwn 1.2s ease-out 1.5s forwards; }
+      .ownership-backdrop.in-view .own-branch-4 { animation: drawOwn 1.2s ease-out 2.1s forwards; }
+
+      @keyframes drawOwn {
+        to { stroke-dashoffset: 0; }
+      }
+
+
+      /* --- SSA side-by-side layout --- */
+      #ssa-architecture {
+        max-width: 1100px;
+        margin: 0 auto;
+      }
+
+      .ssa-layout {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 2.5rem;
+        align-items: center;
+        text-align: left;
+        margin-top: 2rem;
+      }
+
+      .ssa-layout .showcase-desc {
+        margin-bottom: 0;
+      }
+
+      /* --- SSA typewriter animation --- */
+      .ssa-line {
+        display: block;
+        white-space: nowrap;
+        clip-path: inset(0 100% 0 0);
+      }
+
+      .ssa-typewriter.typing .ssa-line {
+        animation: ssaTypeReveal 0.5s steps(20) forwards;
+      }
+
+      .ssa-typewriter.typing .ssa-line:nth-child(1)  { animation-delay: 0.0s; }
+      .ssa-typewriter.typing .ssa-line:nth-child(2)  { animation-delay: 0.3s; }
+      .ssa-typewriter.typing .ssa-line:nth-child(3)  { animation-delay: 0.6s; }
+      .ssa-typewriter.typing .ssa-line:nth-child(4)  { animation-delay: 0.9s; }
+      .ssa-typewriter.typing .ssa-line:nth-child(5)  { animation-delay: 1.2s; }
+      .ssa-typewriter.typing .ssa-line:nth-child(6)  { animation-delay: 1.6s; }
+      .ssa-typewriter.typing .ssa-line:nth-child(7)  { animation-delay: 1.7s; }
+      .ssa-typewriter.typing .ssa-line:nth-child(8)  { animation-delay: 2.0s; }
+      .ssa-typewriter.typing .ssa-line:nth-child(9)  { animation-delay: 2.3s; }
+      .ssa-typewriter.typing .ssa-line:nth-child(10) { animation-delay: 2.7s; }
+      .ssa-typewriter.typing .ssa-line:nth-child(11) { animation-delay: 2.8s; }
+      .ssa-typewriter.typing .ssa-line:nth-child(12) { animation-delay: 3.1s; }
+      .ssa-typewriter.typing .ssa-line:nth-child(13) { animation-delay: 3.4s; }
+
+      @keyframes ssaTypeReveal {
+        to { clip-path: inset(0 0% 0 0); }
+      }
+
+      .ssa-line.ssa-typing::after {
+        content: '';
+        display: inline-block;
+        width: 2px;
+        height: 1.1em;
+        background: #38bdf8;
+        vertical-align: text-bottom;
+        margin-left: 2px;
+        animation: ssaCursorBlink 0.6s step-end infinite;
+      }
+
+      @keyframes ssaCursorBlink {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0; }
+      }
+
+      .ssa-diagram {
+        position: relative;
+        z-index: 1;
+      }
+
+      .ssa-diagram .code-block {
+        box-shadow: 0 8px 32px rgba(139, 92, 246, 0.12);
+      }
+
+      /* ===== GETTING STARTED ===== */
+      .gs-bg {
+        background: var(--bg-secondary);
+      }
+
+      .getting-started {
+        display: grid;
+        grid-template-columns: 1.2fr 1fr;
+        gap: 3rem;
+        align-items: start;
+      }
+
+      .terminal {
+        background: var(--bg-code);
+        border-radius: 12px;
+        overflow: hidden;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.15);
+      }
+
+      .terminal-bar {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0.75rem 1rem;
+        background: var(--bg-code-bar);
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+      }
+
+      .terminal-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+      }
+
+      .terminal-dot.red { background: #ff5f57; }
+      .terminal-dot.yellow { background: #febc2e; }
+      .terminal-dot.green { background: #28c840; }
+
+      .terminal-title {
+        font-size: 0.7rem;
+        color: rgba(255, 255, 255, 0.35);
+        margin-left: 0.5rem;
+      }
+
+      .terminal-content {
+        padding: 1.25rem 1.5rem;
+        font-size: 0.78rem;
+        line-height: 1.7;
+        overflow-x: auto;
+        color: #e0e0e8;
+      }
+
+      .terminal-content pre {
+        font-family: "JetBrains Mono", monospace;
+        margin: 0;
+        white-space: pre;
+      }
+
+      .gs-info h3 {
+        font-family: "Geom", sans-serif;
+        font-size: 1.4rem;
+        font-weight: 600;
+        margin-bottom: 0.75rem;
+      }
+
+      .gs-info p {
+        font-size: 0.82rem;
+        color: var(--text-secondary);
+        line-height: 1.7;
+        margin-bottom: 1.5rem;
+      }
+
+      .gs-links {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+      }
+
+      .gs-link {
+        display: flex;
+        align-items: center;
+        gap: 0.6rem;
+        padding: 0.75rem 1rem;
+        background: var(--bg-primary);
+        border: 1px solid var(--border-card);
+        border-radius: 8px;
+        text-decoration: none;
+        color: var(--text-secondary);
+        font-size: 0.82rem;
+        transition: all 0.2s ease;
+      }
+
+      .gs-link:hover {
+        border-color: var(--border-hover);
+        color: var(--text-primary);
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
+      }
+
+      .gs-link svg {
+        width: 16px;
+        height: 16px;
+        color: var(--accent-primary);
+        flex-shrink: 0;
+      }
+
+      /* ===== COMPARISON TABLE ===== */
+      .comparison-section {
+        padding: 5rem 2rem;
+      }
+
+      .table-wrap {
+        max-width: 900px;
+        margin: 0 auto;
+        overflow-x: auto;
+        background: var(--bg-primary);
+        border-radius: 12px;
+        border: 1px solid var(--border-card);
+      }
+
+      .comparison-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.82rem;
+      }
+
+      .comparison-table th {
+        font-family: "Geom", sans-serif;
+        font-weight: 600;
+        text-align: left;
+        padding: 0.85rem 1.25rem;
+        border-bottom: 2px solid var(--border-card);
+        color: var(--text-primary);
+        font-size: 0.85rem;
+        background: var(--bg-secondary);
+      }
+
+      .comparison-table th:first-child {
+        border-radius: 12px 0 0 0;
+      }
+
+      .comparison-table th:last-child {
+        border-radius: 0 12px 0 0;
+      }
+
+      .comparison-table td {
+        padding: 0.7rem 1.25rem;
+        color: var(--text-secondary);
+        border-bottom: 1px solid var(--border-subtle);
+      }
+
+      .comparison-table tr:last-child td {
+        border-bottom: none;
+      }
+
+      .comparison-table tr:nth-child(even) td {
+        background: var(--bg-secondary);
+      }
+
+      .comparison-table .highlight {
+        color: var(--accent-warm);
+        font-weight: 500;
+      }
+
+      .comparison-table .feature-col {
+        font-weight: 500;
+        color: var(--text-primary);
+      }
+
+      /* ===== FOOTER ===== */
+      .footer {
+        padding: 2.5rem 2rem;
+        text-align: center;
+        border-top: 1px solid var(--border-subtle);
+        background: var(--bg-secondary);
       }
 
       .footer-links {
         display: flex;
-        gap: 2rem;
+        gap: 1.5rem;
         justify-content: center;
-        margin-bottom: 1.5rem;
+        margin-bottom: 1rem;
         flex-wrap: wrap;
       }
 
       .footer-links a {
-        color: rgba(255, 255, 255, 0.5);
+        color: var(--text-tertiary);
         text-decoration: none;
-        font-size: 0.85rem;
-        transition: color 0.3s ease;
+        font-size: 0.8rem;
+        transition: color 0.2s ease;
       }
 
       .footer-links a:hover {
-        color: rgba(200, 150, 220, 0.9);
+        color: var(--accent-primary);
       }
 
       .footer-copy {
-        font-size: 0.75rem;
-        color: rgba(255, 255, 255, 0.3);
+        font-size: 0.7rem;
+        color: var(--text-tertiary);
       }
 
-      /* Animations */
-      @keyframes fadeIn {
+      /* ===== ANIMATIONS ===== */
+      @keyframes blobMove1 {
+        0%   { transform: translate(0, 0) scale(1); opacity: 0.7; }
+        25%  { transform: translate(200px, 100px) scale(1.2); opacity: 1; }
+        50%  { transform: translate(350px, 50px) scale(0.9); opacity: 0.6; }
+        75%  { transform: translate(150px, -80px) scale(1.1); opacity: 0.9; }
+        100% { transform: translate(0, 0) scale(1); opacity: 0.7; }
+      }
+
+      @keyframes blobMove2 {
+        0%   { transform: translate(0, 0) scale(1); opacity: 0.8; }
+        25%  { transform: translate(-250px, 120px) scale(1.15); opacity: 0.6; }
+        50%  { transform: translate(-150px, 200px) scale(0.95); opacity: 1; }
+        75%  { transform: translate(-300px, 60px) scale(1.1); opacity: 0.7; }
+        100% { transform: translate(0, 0) scale(1); opacity: 0.8; }
+      }
+
+      @keyframes blobMove3 {
+        0%   { transform: translate(0, 0) scale(1); opacity: 0.6; }
+        25%  { transform: translate(180px, -150px) scale(1.2); opacity: 0.9; }
+        50%  { transform: translate(100px, -250px) scale(0.85); opacity: 0.5; }
+        75%  { transform: translate(-80px, -100px) scale(1.15); opacity: 1; }
+        100% { transform: translate(0, 0) scale(1); opacity: 0.6; }
+      }
+
+      @keyframes blobMove4 {
+        0%   { transform: translate(0, 0) scale(1); opacity: 0.7; }
+        25%  { transform: translate(-200px, -130px) scale(1.1); opacity: 1; }
+        50%  { transform: translate(-100px, -200px) scale(1.2); opacity: 0.5; }
+        75%  { transform: translate(100px, -80px) scale(0.9); opacity: 0.8; }
+        100% { transform: translate(0, 0) scale(1); opacity: 0.7; }
+      }
+
+      @keyframes fadeInUp {
         from {
           opacity: 0;
           transform: translateY(20px);
@@ -405,627 +1440,1266 @@
         }
       }
 
-      /* Scroll indicator */
-      .scroll-indicator {
-        position: absolute;
-        bottom: 2rem;
-        left: 50%;
-        transform: translateX(-50%);
-        display: flex;
-        flex-direction: column;
-        align-items: center;
-        gap: 0.5rem;
-        color: rgba(255, 255, 255, 0.3);
-        font-size: 0.7rem;
-        letter-spacing: 0.1em;
-        animation: fadeIn 1.5s ease-out 1s both;
+      .fade-in {
+        opacity: 0;
+        transform: translateY(20px);
+        transition: opacity 0.6s ease, transform 0.6s ease;
       }
 
-      .scroll-indicator span {
-        animation: bounce 2s infinite;
+      .fade-in.visible {
+        opacity: 1;
+        transform: translateY(0);
       }
 
-      @keyframes bounce {
-        0%,
-        100% {
-          transform: translateY(0);
+      /* ===== RESPONSIVE ===== */
+      @media (max-width: 1023px) {
+        .features-grid {
+          grid-template-columns: repeat(2, 1fr);
         }
-        50% {
-          transform: translateY(5px);
+
+
+        .getting-started {
+          grid-template-columns: 1fr;
+        }
+
+        .stats-grid {
+          grid-template-columns: repeat(2, 1fr);
+          gap: 1.5rem;
+        }
+      }
+
+      @media (max-width: 767px) {
+        .nav-links {
+          display: none;
+        }
+
+        .nav-hamburger {
+          display: flex;
+        }
+
+        .hero {
+          padding: 5rem 1.5rem 2rem;
+          min-height: auto;
+        }
+
+        .hero-headline {
+          font-size: clamp(1.5rem, 6vw, 2rem);
+        }
+
+        .hero-logo {
+          width: 80px;
+          height: 80px;
+        }
+
+        .features-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .stats-grid {
+          grid-template-columns: repeat(2, 1fr);
+        }
+
+        .section {
+          padding: 3.5rem 1.5rem;
+        }
+
+        .pipeline-section {
+          padding: 3.5rem 1.5rem;
+        }
+
+        .baremetal-backdrop,
+        .blade-backdrop,
+        .ownership-backdrop,
+        .ssa-backdrop {
+          padding: 3.5rem 1.5rem;
+          min-height: auto;
+        }
+
+        .showcase-section {
+          max-width: 100%;
+          margin-left: 0;
+          text-align: center;
+          order: -1;
+        }
+
+        .baremetal-fan {
+          position: static;
+          transform: none;
+          width: 70vw;
+          max-width: 320px;
+          margin: 2rem auto 0;
+          opacity: 0;
+          transition: opacity 1s ease-out 0.2s;
+        }
+        .baremetal-backdrop.in-view .baremetal-fan {
+          opacity: 1;
+        }
+
+        .blade-cards {
+          position: static;
+          transform: none;
+          width: 85vw;
+          max-width: 400px;
+          height: auto;
+          min-height: 360px;
+          margin: 2rem auto 0;
+          opacity: 1;
+        }
+
+        .blade-card {
+          width: 100%;
+          max-width: 100%;
+          height: auto;
+          min-height: 100px;
+          position: relative;
+        }
+
+        .blade-card-2 {
+          margin-top: -2rem;
+          margin-left: 1rem;
+        }
+        .blade-card-3 {
+          margin-top: -2rem;
+          margin-left: 2rem;
+        }
+
+        .ownership-card {
+          position: static;
+          transform: none;
+          width: 65vw;
+          max-width: 300px;
+          margin: 2rem auto 0;
+          opacity: 0;
+          transition: opacity 1s ease-out 0.2s;
+        }
+        .ownership-backdrop.in-view .ownership-card {
+          opacity: 1;
+        }
+
+        .ssa-layout {
+          grid-template-columns: 1fr;
+          gap: 2rem;
+          text-align: center;
+        }
+
+        .ssa-layout .code-editor,
+        .ssa-layout .code-panel,
+        .ssa-layout pre {
+          text-align: left;
+        }
+
+        .blade-backdrop.in-view .blade-card-1 {
+          animation: bladeCardMobile1 0.8s ease-out 0.2s both;
+        }
+        .blade-backdrop.in-view .blade-card-2 {
+          animation: bladeCardMobile2 0.8s ease-out 0.4s both;
+        }
+        .blade-backdrop.in-view .blade-card-3 {
+          animation: bladeCardMobile3 0.8s ease-out 0.6s both;
+        }
+
+        @keyframes bladeCardMobile1 {
+          from { transform: translateY(30px); opacity: 0; }
+          to { transform: translateY(0); opacity: 1; }
+        }
+        @keyframes bladeCardMobile2 {
+          from { transform: translateY(30px); opacity: 0; }
+          to { transform: translateY(0); opacity: 1; }
+        }
+        @keyframes bladeCardMobile3 {
+          from { transform: translateY(30px); opacity: 0; }
+          to { transform: translateY(0); opacity: 1; }
+        }
+
+        .code-tabs {
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+          scrollbar-width: none;
+        }
+        .code-tabs::-webkit-scrollbar {
+          display: none;
+        }
+        .code-tab {
+          flex-shrink: 0;
+          padding: 0.6rem 0.9rem;
+          font-size: 0.65rem;
+        }
+
+        .code-panel {
+          font-size: 0.68rem;
+          padding: 1rem;
         }
       }
     </style>
   </head>
   <body>
-    <canvas id="canvas"></canvas>
+    <!-- NAV -->
+    <nav class="nav" id="nav">
+      <a href="#" class="nav-brand">
+        <svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <g transform="rotate(45,32,32)">
+            <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="#f97316"/>
+            <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="#ea580c" transform="rotate(90,32,32)"/>
+            <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="#c2410c" transform="rotate(180,32,32)"/>
+            <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="#ea580c" transform="rotate(270,32,32)"/>
+          </g>
+        </svg>
+        <span>Rayzor</span>
+      </a>
+      <div class="nav-links">
+        <a href="https://github.com/darmie/rayzor" target="_blank">GitHub</a>
+        <a href="https://darmie.github.io/rayzor/benchmarks/" target="_blank">Benchmarks</a>
+        <a href="https://github.com/darmie/rayzor/blob/main/README.md" target="_blank">Docs</a>
+        <a href="#getting-started" class="nav-cta">Get Started</a>
+      </div>
+      <button class="nav-hamburger" id="hamburger" aria-label="Menu">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+    </nav>
 
-    <div class="content">
-      <section class="hero">
-        <div
-          style="
-            width: 100%;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-          "
-        >
-          <img
-            style="width: 200px; height: auto"
-            src="rayzor-blade-logo.png"
-            alt="Rayzor Blade Logo"
-            class="logo"
-          />
-        </div>
-        <h1 class="title">Rayzor Blade</h1>
-        <p class="subtitle">
-          High Performance Next Generation Compiler & Runtime for The Haxe
-          Language
+    <div class="nav-mobile" id="mobileMenu">
+      <a href="https://github.com/darmie/rayzor" target="_blank">GitHub</a>
+      <a href="https://darmie.github.io/rayzor/benchmarks/" target="_blank">Benchmarks</a>
+      <a href="https://github.com/darmie/rayzor/blob/main/README.md" target="_blank">Docs</a>
+      <a href="#getting-started">Get Started</a>
+    </div>
+
+    <main>
+      <!-- HERO -->
+      <div class="hero-backdrop">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+        <div class="blob blob-4"></div>
+      <section class="hero" id="hero">
+        <svg class="hero-logo" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <defs>
+            <radialGradient id="bf1" cx="0" cy="0.18" r="0.35" gradientUnits="objectBoundingBox" spreadMethod="pad">
+              <stop offset="0" stop-color="#f97316" stop-opacity="0"/>
+              <stop offset="1" stop-color="#f97316"/>
+            </radialGradient>
+            <radialGradient id="bf2" cx="0" cy="0.18" r="0.35" gradientUnits="objectBoundingBox" spreadMethod="pad">
+              <stop offset="0" stop-color="#ea580c" stop-opacity="0"/>
+              <stop offset="1" stop-color="#ea580c"/>
+            </radialGradient>
+            <radialGradient id="bf3" cx="0" cy="0.18" r="0.35" gradientUnits="objectBoundingBox" spreadMethod="pad">
+              <stop offset="0" stop-color="#c2410c" stop-opacity="0"/>
+              <stop offset="1" stop-color="#c2410c"/>
+            </radialGradient>
+            <radialGradient id="bf4" cx="0" cy="0.18" r="0.35" gradientUnits="objectBoundingBox" spreadMethod="pad">
+              <stop offset="0" stop-color="#ea580c" stop-opacity="0"/>
+              <stop offset="1" stop-color="#ea580c"/>
+            </radialGradient>
+          </defs>
+          <g transform="rotate(45,32,32)">
+            <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="url(#bf1)"/>
+            <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="url(#bf2)" transform="rotate(90,32,32)"/>
+            <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="url(#bf3)" transform="rotate(180,32,32)"/>
+            <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="url(#bf4)" transform="rotate(270,32,32)"/>
+          </g>
+        </svg>
+
+        <h1 class="hero-headline">
+          Fast compilation. Native performance.<br />
+          Ownership-based memory.<br />
+          <span class="accent">Garbage collection only where it matters.</span>
+        </h1>
+
+        <p class="hero-subtitle">
+          A next-generation Haxe compiler with 5-tier JIT, ownership-based memory,
+          and LLVM-powered native code generation.
         </p>
-        <p class="tagline">
-          Fast compilation • Native performance • Ownership-based memory
-        </p>
 
-        <div class="badges">
-          <span class="badge">
-            <svg
-              class="badge-icon cranelift-logo"
-              viewBox="0 0 100 80"
-              fill="white"
-            >
-              <!-- Top row -->
-              <rect x="8" y="0" width="50" height="12" rx="6" />
-              <rect x="68" y="0" width="24" height="12" rx="6" />
-              <!-- Second row -->
-              <rect x="8" y="17" width="84" height="12" rx="6" />
-              <!-- Middle connector -->
-              <rect x="44" y="17" width="12" height="46" rx="6" />
-              <!-- Fourth row -->
-              <rect x="8" y="51" width="84" height="12" rx="6" />
-              <!-- Bottom row -->
-              <circle cx="14" cy="74" r="6" />
-              <rect x="32" y="68" width="24" height="12" rx="6" />
-              <rect x="68" y="68" width="24" height="12" rx="6" />
-            </svg>
-            Cranelift
-          </span>
-          <span class="badge">
-            <svg
-              class="badge-icon llvm-logo"
-              viewBox="0 0 128 128"
-              fill="white"
-            >
-              <path
-                d="M82.625 103.785c-1.48-.203-3.551-.723-5.164-1.301a22.87 22.87 0 0 1-1.992-.875c-3.031-1.496-4.984-3.203-8.324-7.281-.609-.746-1.066-1.254-1.141-1.266s-.531.18-1.027.418c-1.711.824-5.727 2.488-7.871 3.262-6.113 2.203-10.492 3.074-14.324 2.848-2.918-.172-5.246-.676-6.93-1.5-1.246-.609-2-1.258-2.605-2.242-.375-.609-.684-1.402-.582-1.5.074-.074.168-.016 1.047.668.754.59 1.383.973 1.969 1.207.91.363 2.332.688 3.906.887.883.109 3.887.109 4.637-.004 2.254-.336 6.117-1.441 8.777-2.512 1.09-.441 4.414-2.039 7.375-3.547 2.387-1.219 3.113-1.617 3.383-1.859.191-.168.191-.176.117-.457-.043-.16-.367-1.023-.727-1.922-.691-1.746-1.523-4.035-2.324-6.391-1.023-3.008-1.309-3.734-1.465-3.734-.172 0-.734.738-2.133 2.797-1.051 1.543-1.227 1.746-1.543 1.746-.324 0-.758-.184-1.355-.574-.859-.559-1.625-1.234-3.234-2.859-.973-.98-1.578-1.547-1.656-1.547-.359 0-.582.699-.625 1.945-.027.836.008 1.199.145 1.563.023.063.008.102-.039.102-.141 0-.852-.5-1.109-.777-.324-.352-.73-1.215-.91-1.934-.078-.316-.16-.609-.184-.645-.086-.141-.281-.055-.551.246-.52.574-.852 1.66-.852 2.766 0 .688-.047.73-.41.367-.508-.508-.965-1.457-1.09-2.27-.191-1.215-.27-1.309-.687-.855-.387.418-.789 1.285-.902 1.949-.051.309-.117.586-.148.617-.062.066-.402-.391-.594-.801-.5-1.074-.445-2.586.141-3.727.496-.973.57-1.148.699-1.625.32-1.18.895-1.785 2.117-2.23.293-.105.547-.129 1.645-.152 1.992-.047 3.23.109 4.012.508.363.184 1.055.898 2.371 2.453 1.402 1.66 1.738 2.012 1.898 1.988.152-.02.621-.777.914-1.48.168-.395.207-.59.25-1.246.031-.426.098-.93.152-1.117.266-.914.906-1.676 1.914-2.27l.602-.355-.027-.227a18.65 18.65 0 0 1-.066-.75c-.051-.75-.141-1.109-.309-1.242-.109-.086-.348-.133-.973-.187a19.47 19.47 0 0 1-3.414-.676c-1.93-.582-5.559-2.359-10.211-5-3.344-1.898-4.945-2.59-6.902-2.984-1.305-.266-2.648-.328-3.559-.164-.922.164-2.328.836-2.895 1.383-.359.348-.445.539-.57 1.266-.109.652-.203.813-.203.359 0-.145-.027-.445-.062-.668-.055-.363-.09-.43-.324-.645-.402-.367-1.285-.766-1.941-.879-.719-.125-2.703-.129-3.273-.008-1.656.355-4.082 2.102-5.82 4.195-.582.695-.641.793-.68 1.09-.117.902-.242 1.598-.293 1.598-.027 0-.055-.387-.055-.859 0-1 .055-.902-.809-1.461-2.102-1.355-4.074-1.59-5.789-.691-2.684 1.406-4.75 5.344-6.223 11.855-.633 2.805-.652 4.008-.09 6.465l.246 1.047c.016.043.004.078-.02.078-.105 0-.754-1.965-1.293-3.922C1.66 74.691.719 69.727.348 66.164c-.25-2.371-.285-7.445-.07-9.336.352-3.094.676-4.531 1.719-7.672 1.184-3.574 2.297-5.937 4.027-8.574 2.074-3.164 4.801-6.199 7.898-8.789a61.3 61.3 0 0 1 1.988-1.547c.723-.543 1.348-1.031 1.387-1.082s.07-.156.059-.234c-.02-.125-.07-.148-.426-.195-.422-.051-3.945-.008-4.996.063-.402.027-.605.02-.605-.023 0-.082.145-.109 1.398-.266 1.656-.203 2.512-.254 4.918-.293 3.125-.047 5.746.094 7.875.426 1.328.207 1.742.215 2.148.051.281-.113.402-.129.699-.094.387.051 3.801.895 6.238 1.551 1.813.484 2.707.688 2.836.637.219-.082.051-.543-.512-1.426-.648-1.016-1.199-1.652-2.941-3.418-.699-.711-1.25-1.312-1.223-1.34.059-.059 1.121.5 1.84.965 1.574 1.016 2.914 2.395 3.707 3.813.652 1.16.797 1.391 1.184 1.848.602.727.734 1.289.441 1.918-.145.309-.254.422-.895.906-.281.211-.371.34-.637.883-.777 1.609-2.16 6.383-3.047 10.512-.176.809-.316 1.52-.316 1.578s.113.234.258.395c.332.375.785 1.309.859 1.773.035.203.09.402.129.449s.215.113.391.152c.512.109 7.863 1.309 8.035 1.309.125 0 .195-.074.379-.398.121-.219.262-.434.309-.473s1.047-.191 2.223-.344c2.867-.371 5.738-.816 9.266-1.437 1.664-.297 1.988-.336 2.16-.277.16.059.234.055.402-.031.238-.121 3.094-2.977 4.594-4.594 1.215-1.312 1.625-1.84 2.043-2.645.625-1.211.848-2.105.805-3.273-.031-.937-.172-1.348-.609-1.785-.418-.422-.598-.461-2.082-.457-1.391.004-2.047.082-3.531.43-1.285.301-1.406.363-1.762.898-.344.527-.59.746-1.285 1.152-.812.477-1.316.883-2.473 1.977-1.277 1.211-1.875 1.715-2.227 1.867-.25.113-.266.113-.652-.008-.457-.145-.801-.336-.801-.453 0-.105.258-.344.996-.93 1.027-.816 1.875-1.746 2.336-2.57.34-.613.465-1.07.465-1.715 0-.52-.012-.574-.16-.723-.141-.141-.187-.152-.445-.117-.387.059-1.281.387-1.477.543-.215.168-.199.316.066.609.121.137.215.273.203.305s-.219.004-.457-.059c-.602-.16-1.09-.156-1.301.008-.09.07-.164.184-.164.246s.141.301.313.523.313.426.313.445c0 .086-.582-.039-1.035-.223-.715-.285-1.02-.242-1.02.141 0 .238.086.398.387.707.156.164.223.273.176.301-.09.059-.66-.113-1.34-.402-.309-.133-.754-.273-.988-.309s-.512-.113-.613-.164c-.32-.164-.711-.609-.93-1.059-.187-.387-.207-.48-.207-.977 0-.523.008-.559.168-.695.098-.086.32-.176.527-.215 1.461-.273 2.098-.543 2.723-1.145.227-.219.418-.461.445-.562s.008-.371-.039-.602c-.109-.582-.051-1.094.168-1.504.922-1.727 5.48-4.035 9.613-4.871.773-.156 1.609-.211 1.609-.105 0 .031-.227.203-.508.387-1.492.969-3.535 3.113-3.535 3.711 0 .137.035.223.102.25.219.082 2.469-.461 3.109-.754.18-.082.543-.359.84-.637.809-.762 1.371-1.105 2.328-1.414 1.219-.395 3.473-.633 3.297-.348-.02.031-.406.238-.859.453-1.352.645-2.098 1.113-2.098 1.32 0 .156.191.211 1.063.301 1.969.203 2 .203 2.891-.09.855-.277 1.469-.367 2.559-.367.816-.004 1.77.066 1.77.125 0 .051-.434.223-1.543.609-.879.309-1.023.398-1 .621.016.129.172.277.707.68a8.24 8.24 0 0 0 2.195 1.223c1.129.434 2.469 1.215 2.328 1.355-.039.043-.316.031-.832-.039a8.54 8.54 0 0 0-1.141-.086l-.375.02-.02.262c-.008.145.039.492.105.777s.141.66.164.828.055.395.074.496c.023.125.352.504 1.086 1.258.914.941 1.172 1.266 1.008 1.266-.023 0-.387-.109-.805-.246-.836-.273-.969-.293-1.078-.164-.082.102-.211.801-.32 1.762l-.078.695.344.578c.395.668.609 1.078.609 1.172 0 .117-.121.066-.547-.219-.461-.309-.539-.328-.625-.168-.082.148-1.094 3.766-1.32 4.711-.219.918-.227 1.066-.059 1.152.426.23 6.484 1.313 10.082 1.805l2.086.289c.832.113 1.098.227 1.164.504.027.109.129.258.223.332.152.125.219.133.73.102.566-.031 4.191-.594 4.961-.766.68-.152.777-.254 1.047-1.062.266-.797.379-1 .773-1.387.152-.152.281-.316.281-.363 0-.164-.93-4.187-1.305-5.645-.434-1.68-.93-3.375-1.359-4.637-.687-2.02-.871-2.332-1.805-3.102-.414-.34-.594-.68-.598-1.133-.008-.477.168-.883.578-1.336.195-.215.531-.711.754-1.117 1.188-2.141 2.359-3.422 4.195-4.578.742-.465 1.828-1.031 1.883-.977.02.02-.281.34-.668.707-.914.871-1.789 1.777-2.375 2.465-.953 1.113-1.805 2.465-1.773 2.816.027.344.211.316 3.293-.504 2.484-.66 5.074-1.301 5.664-1.402.426-.07.477-.066.762.059.383.172.797.172 1.832.012 2.117-.328 4.672-.5 7.488-.5 2.637 0 5.074.16 6.68.441.645.109.508.207-.234.16-1.207-.074-4.309-.121-4.855-.074-.395.031-.559.07-.586.137-.055.145.348.516 1.57 1.441 4.609 3.5 7.984 7.176 10.637 11.582 1.563 2.598 2.676 5.32 3.863 9.434.547 1.895.82 3.367 1.07 5.758.137 1.309.16 6.234.035 7.688-.359 4.141-.984 7.84-2.043 12.074-.684 2.734-1.691 5.914-1.703 5.375 0-.059.195-.961.438-2.008l.438-1.902-.223-1.262c-.547-3.086-1.375-6.18-2.254-8.418-1.215-3.082-3.094-5.434-4.902-6.137-.637-.246-1.184-.324-2.02-.289-.844.035-1.324.176-2.402.699-.828.402-1.418.777-1.559.992-.082.125-.113.359-.141 1-.016.465-.051.84-.078.84s-.066-.145-.09-.324c-.098-.777-.297-1.59-.449-1.852-.34-.582-2.469-2.629-3.512-3.375-.668-.477-2.113-1.195-2.664-1.32-.523-.121-2.855-.141-3.379-.031-.418.09-1.484.555-1.773.777s-.434.57-.484 1.191c-.023.285-.066.516-.098.516s-.07-.133-.094-.297c-.117-.863-.215-1.125-.535-1.477-.617-.676-1.613-1.191-2.789-1.441-.734-.156-2.539-.156-3.332 0-2.109.414-4.043 1.223-7.094 2.965-2.074 1.184-4.062 2.266-5.418 2.945-1.664.828-3.812 1.801-4.496 2.027a17.58 17.58 0 0 1-4.211.84c-.949.078-1.066.098-1.164.219-.137.168-.203.66-.207 1.5l-.004.652.594.047c1.215.09 2.051.395 2.676.965.668.613.984 1.391 1.113 2.711.078.813.223 1.27.641 2.035.289.535.461.75.609.75.105 0 .676-.625 1.988-2.18 1.375-1.625 1.832-2.094 2.262-2.297.781-.367 1.766-.504 3.586-.504 1.781 0 2.527.199 3.258.867.438.402.691.848.887 1.559.102.371.277.789.469 1.121.477.832.633 1.379.668 2.305.023.598.008.867-.07 1.18-.129.496-.348.984-.574 1.281-.16.211-.18.219-.254.113-.043-.059-.082-.187-.082-.277 0-.262-.238-.98-.477-1.437-.555-1.059-1.078-1.242-1.078-.379 0 .754-.453 1.871-1.066 2.613-.492.602-.523.57-.574-.605-.043-1.059-.355-1.93-.898-2.504-.254-.273-.574-.203-.574.125 0 .305-.199.934-.496 1.539-.227.469-.383.699-.633.938-.344.328-.902.691-.965.629-.02-.02.004-.184.051-.367.129-.508.098-1.84-.059-2.398s-.281-.762-.473-.762c-.176 0-.836.598-2.426 2.191-1.309 1.309-2.242 2.078-2.945 2.426-.633.316-.996.367-1.258.18-.102-.07-.523-.633-.937-1.242-.676-1-.797-2.543-2.195-3.02-.176-.211-.359-.187-.359.039 0 .242.281 1.891.684 4 .645 3.371.961 4.754 1.098 4.805.047.02.441-.121.879-.309 2.055-.883 3.941-1.418 6.52-1.848 1.555-.258 2.469-.324 4.449-.324 2.43 0 3.746.133 5.387.547 4.281 1.082 7.035 3.156 8.285 6.242.684 1.695.84 3.219.516 5.145-.137.832-.336 1.402-.785 2.277-1.621 3.141-5.523 5.785-9.387 6.367-.812.125-4.008.121-4.918 0zm3.641-6.66c1.176-.254 2.336-.918 3.301-1.891 1.063-1.07 1.461-1.824 1.422-2.711-.027-.598-.203-.996-.723-1.621-1.027-1.25-2.824-2.117-5.273-2.547-1.379-.242-4.699-.242-6.801 0-1.887.219-4.621 1.234-4.621 1.715 0 .16 1.129 1.641 1.922 2.523 1.047 1.164 2.047 2.035 3.293 2.867 1.305.871 3.012 1.613 4.047 1.758.641.09 2.879.027 3.434-.094z"
-              />
-            </svg>
-            LLVM
-          </span>
-          <span class="badge">
-            <svg class="badge-icon" viewBox="0 0 24 24" fill="white">
-              <path
-                d="M20.93 2C20.93 2 14.28 3.45 10.5 7.23C6.72 11.01 3.27 19.93 3.27 19.93L4.07 20.73C4.07 20.73 5.7 18.69 7.93 17.07C8.5 17.5 9.17 17.82 9.93 17.93C9.93 17.93 10.12 15.9 11.5 14.53C11.5 14.53 12.07 15.11 13.07 15.46C13.27 14.63 13.75 13.55 14.93 12.36C14.93 12.36 15.64 13.07 16.64 13.36C17.14 12.19 18 10.61 19.64 9C19.64 9 20.21 9.5 21.07 9.86C21.36 9.07 21.57 8.07 22 6.5L20.93 2Z"
-              />
-            </svg>
-            Apache 2.0
-          </span>
+        <div class="hero-badges">
+          <span class="badge"><svg class="badge-icon" style="opacity:1" viewBox="44 97 710 500" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M117 197C117 165.519 142.519 140 174 140H563C594.481 140 620 165.519 620 197C620 228.481 594.481 254 563 254H334C316.327 254 302 268.327 302 286V314C302 331.673 316.327 346 334 346H681C712.481 346 738 371.519 738 403C738 434.481 712.481 460 681 460H334C316.327 460 302 474.327 302 492V520C302 551.481 276.481 577 245 577C213.519 577 188 551.481 188 520V492C188 474.327 173.673 460 156 460H144C112.519 460 87 434.481 87 403C87 371.519 112.519 346 144 346H466C483.673 346 498 331.673 498 314V286C498 268.327 483.673 254 466 254H174C142.519 254 117 228.481 117 197Z" fill="#000"/><circle cx="682" cy="177" r="37" fill="#000"/><circle cx="153" cy="540" r="43" fill="#000"/><rect x="618" y="492" width="120" height="85" rx="42.5" fill="#000"/></svg> Cranelift</span>
+          <span class="badge"><img class="badge-icon" src="https://cdn.simpleicons.org/llvm/000000" style="opacity:1" alt="LLVM"> LLVM</span>
+          <span class="badge"><img class="badge-icon" src="https://cdn.simpleicons.org/apache/D22128" alt="Apache"> Apache 2.0</span>
         </div>
 
-        <div class="ctas">
+        <div class="hero-ctas">
+          <a href="#getting-started" class="btn btn-primary">Get Started</a>
           <a
             href="https://github.com/darmie/rayzor"
-            class="btn btn-primary"
-            target="_blank"
-          >
-            <svg viewBox="0 0 24 24" fill="currentColor">
-              <path
-                d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"
-              />
-            </svg>
-            View on GitHub
-          </a>
-          <a
-            href="https://darmie.github.io/rayzor/benchmarks/"
             class="btn btn-secondary"
             target="_blank"
           >
-            <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
-              <path
-                d="M3 3v18h18v-2H5V3H3zm16 2h-4v2h1.59L12 11.59l-3-3-4.71 4.7 1.42 1.42L9 11.41l3 3 5.59-5.59V10h2V5z"
-              />
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
             </svg>
-            View Benchmarks
+            View on GitHub
           </a>
         </div>
 
-        <div class="scroll-indicator">
-          <span>↓</span>
-          SCROLL
+        <!-- Interactive Code Tabs -->
+        <div class="hero-code">
+          <div class="code-block">
+            <div class="code-tabs">
+              <button class="code-tab active" data-tab="generics">Generics</button>
+              <button class="code-tab" data-tab="ownership">Ownership</button>
+              <button class="code-tab" data-tab="concurrency">Concurrency</button>
+              <button class="code-tab" data-tab="channels">Channels</button>
+              <button class="code-tab" data-tab="mutex">Mutex</button>
+              <button class="code-tab" data-tab="atomics">Atomics</button>
+              <button class="code-tab" data-tab="simd">SIMD</button>
+              <button class="code-tab" data-tab="embedc">Embed C</button>
+            </div>
+            <div class="code-panels-wrap">
+            <div class="code-panel active" id="tab-generics">
+              <pre><span class="cc">// Rayzor monomorphizes generics to specialized native code</span>
+
+<span class="ck">@:generic</span>
+<span class="ck">class</span> <span class="ct">Container</span>&lt;<span class="ct">T</span>&gt; {
+    <span class="ck">var</span> value: <span class="ct">T</span>;
+
+    <span class="ck">public function</span> <span class="cfn">new</span>(v: <span class="ct">T</span>) {
+        <span class="ck">this</span>.value = v;
+    }
+
+    <span class="ck">public function</span> <span class="cfn">get</span>(): <span class="ct">T</span> {
+        <span class="ck">return this</span>.value;
+    }
+}
+
+<span class="cc">// Compiles to Container__i32, Container__String</span>
+<span class="ck">var</span> nums = <span class="ck">new</span> <span class="ct">Container</span>&lt;<span class="ct">Int</span>&gt;(<span class="cn">42</span>);
+<span class="ck">var</span> text = <span class="ck">new</span> <span class="ct">Container</span>&lt;<span class="ct">String</span>&gt;(<span class="cs">"hello"</span>);</pre>
+            </div>
+            <div class="code-panel" id="tab-ownership">
+              <pre><span class="cc">// Ownership-based memory — no GC for static types</span>
+
+<span class="ck">@:move</span>
+<span class="ck">class</span> <span class="ct">UniqueBuffer</span> {
+    <span class="ck">var</span> data: <span class="ct">haxe.io.Bytes</span>;
+
+    <span class="ck">public function</span> <span class="cfn">new</span>(size: <span class="ct">Int</span>) {
+        <span class="ck">this</span>.data = <span class="ct">haxe.io.Bytes</span>.<span class="cfn">alloc</span>(size);
+    }
+}
+
+<span class="cc">// Ownership transfer — freed at last use, no GC</span>
+<span class="ck">var</span> buf = <span class="ck">new</span> <span class="ct">UniqueBuffer</span>(<span class="cn">1024</span>);
+<span class="cfn">process</span>(buf);  <span class="cc">// buf moves here</span>
+<span class="cc">// buf is no longer valid — compile-time error if accessed</span>
+
+<span class="cc">// Reference-counted when sharing is needed</span>
+<span class="ck">@:arc</span>
+<span class="ck">class</span> <span class="ct">SharedState</span> {
+    <span class="ck">var</span> value: <span class="ct">Int</span>;
+}</pre>
+            </div>
+            <div class="code-panel" id="tab-concurrency">
+              <pre><span class="cc">// Safe fearless concurrency with Send types</span>
+
+<span class="ck">@:derive</span>([<span class="ct">Send</span>])
+<span class="ck">class</span> <span class="ct">Message</span> {
+    <span class="ck">public var</span> value: <span class="ct">Int</span>;
+    <span class="ck">public function</span> <span class="cfn">new</span>(v: <span class="ct">Int</span>) {
+        <span class="ck">this</span>.value = v;
+    }
+}
+
+<span class="ck">class</span> <span class="ct">Main</span> {
+    <span class="ck">static function</span> <span class="cfn">main</span>() {
+        <span class="ck">var</span> msg = <span class="ck">new</span> <span class="ct">Message</span>(<span class="cn">42</span>);
+        <span class="ck">var</span> handle = <span class="ct">rayzor.concurrent.Thread</span>.<span class="cfn">spawn</span>(() -> {
+            <span class="ck">return</span> msg.value;
+        });
+        <span class="ck">var</span> result = handle.<span class="cfn">join</span>();
+    }
+}</pre>
+            </div>
+            <div class="code-panel" id="tab-channels">
+              <pre><span class="cc">// Message passing with channels</span>
+
+<span class="ck">import</span> <span class="ct">rayzor.concurrent.Thread</span>;
+<span class="ck">import</span> <span class="ct">rayzor.concurrent.Channel</span>;
+<span class="ck">import</span> <span class="ct">rayzor.concurrent.Arc</span>;
+
+<span class="ck">static function</span> <span class="cfn">main</span>() {
+    <span class="ck">var</span> channel = <span class="ck">new</span> <span class="ct">Arc</span>(<span class="ck">new</span> <span class="ct">Channel</span>(<span class="cn">10</span>));
+    <span class="ck">var</span> threadChannel = channel.<span class="cfn">clone</span>();
+
+    <span class="ck">var</span> sender = <span class="ct">Thread</span>.<span class="cfn">spawn</span>(() -> {
+        threadChannel.<span class="cfn">get</span>().<span class="cfn">send</span>(<span class="cn">42</span>);
+        threadChannel.<span class="cfn">get</span>().<span class="cfn">send</span>(<span class="cn">43</span>);
+        threadChannel.<span class="cfn">get</span>().<span class="cfn">send</span>(<span class="cn">44</span>);
+        <span class="ck">return</span> <span class="cn">3</span>;
+    });
+
+    sender.<span class="cfn">join</span>();
+    <span class="ck">var</span> v1 = channel.<span class="cfn">get</span>().<span class="cfn">tryReceive</span>();
+    <span class="ck">var</span> v2 = channel.<span class="cfn">get</span>().<span class="cfn">tryReceive</span>();
+    <span class="ck">var</span> v3 = channel.<span class="cfn">get</span>().<span class="cfn">tryReceive</span>();
+}</pre>
+            </div>
+            <div class="code-panel" id="tab-mutex">
+              <pre><span class="cc">// Rust-like mutex guards for safe shared state</span>
+
+<span class="ck">import</span> <span class="ct">rayzor.concurrent.Mutex</span>;
+
+<span class="ck">@:derive</span>([<span class="ct">Send</span>])
+<span class="ck">class</span> <span class="ct">Counter</span> {
+    <span class="ck">public var</span> value: <span class="ct">Int</span>;
+    <span class="ck">public function</span> <span class="cfn">new</span>() {
+        <span class="ck">this</span>.value = <span class="cn">0</span>;
+    }
+}
+
+<span class="ck">static function</span> <span class="cfn">main</span>() {
+    <span class="ck">var</span> counter = <span class="ck">new</span> <span class="ct">Mutex</span>(<span class="ck">new</span> <span class="ct">Counter</span>());
+    <span class="ck">var</span> guard = counter.<span class="cfn">lock</span>();
+    <span class="ck">var</span> c = guard.<span class="cfn">get</span>();
+    <span class="cfn">trace</span>(<span class="cn">42</span>);
+}</pre>
+            </div>
+            <div class="code-panel" id="tab-atomics">
+              <pre><span class="cc">// Atomic shared data with Arc and Send+Sync</span>
+
+<span class="ck">import</span> <span class="ct">rayzor.concurrent.Thread</span>;
+<span class="ck">import</span> <span class="ct">rayzor.concurrent.Arc</span>;
+
+<span class="ck">@:derive</span>([<span class="ct">Send</span>, <span class="ct">Sync</span>])
+<span class="ck">class</span> <span class="ct">SharedData</span> {
+    <span class="ck">public var</span> value: <span class="ct">Int</span>;
+    <span class="ck">public function</span> <span class="cfn">new</span>(v: <span class="ct">Int</span>) {
+        <span class="ck">this</span>.value = v;
+    }
+}
+
+<span class="ck">static function</span> <span class="cfn">main</span>() {
+    <span class="ck">var</span> shared = <span class="ck">new</span> <span class="ct">Arc</span>(<span class="ck">new</span> <span class="ct">SharedData</span>(<span class="cn">42</span>));
+    <span class="ck">var</span> shared_clone = shared.<span class="cfn">clone</span>();
+    <span class="ck">var</span> handle = <span class="ct">Thread</span>.<span class="cfn">spawn</span>(() -> {
+        <span class="ck">return</span> shared_clone.<span class="cfn">get</span>().value;
+    });
+    <span class="ck">var</span> result = handle.<span class="cfn">join</span>();
+}</pre>
+            </div>
+            <div class="code-panel" id="tab-simd">
+              <pre><span class="cc">// Zero-cost SIMD — maps to native SSE/NEON registers</span>
+
+<span class="ck">import</span> rayzor.SIMD4f;
+<span class="ck">class</span> <span class="ct">Main</span> {
+    <span class="ck">static function</span> <span class="cfn">main</span>() {
+        <span class="ck">var</span> a = <span class="ct">SIMD4f</span>.<span class="cfn">splat</span>(<span class="cn">1.0</span>);
+        <span class="ck">var</span> b = <span class="ct">SIMD4f</span>.<span class="cfn">splat</span>(<span class="cn">2.0</span>);
+        <span class="ck">var</span> c = a + b;
+        <span class="cfn">trace</span>(c);
+    }
+}</pre>
+            </div>
+
+            <div class="code-panel" id="tab-embedc">
+              <pre><span class="cc">// Embed C code directly — call native libraries</span>
+
+<span class="ck">@:cInclude</span>([<span class="cs">"/opt/homebrew/include"</span>])
+<span class="ck">class</span> <span class="ct">Main</span> {
+    <span class="ck">static function</span> <span class="cfn">main</span>() {
+        <span class="ck">var</span> result = <span class="ck">untyped</span> <span class="cfn">__c__</span>(<span class="cs">'
+            #include &lt;raymath.h&gt;
+            long __entry__() {
+                Vector2 v = { 3.0f, 4.0f };
+                float len = Vector2Length(v);
+                float c = Clamp(15.0f, 0.0f, 10.0f);
+                float l = Lerp(0.0f, 100.0f, 0.25f);
+                return (long)(len * 10000.0f
+                    + c * 100.0f + l);
+            }
+        '</span>);
+        <span class="cfn">trace</span>(result);  <span class="cc">// 51025</span>
+    }
+}</pre>
+            </div>
+            </div><!-- .code-panels-wrap -->
+          </div>
+        </div>
+      </section>
+      </div>
+
+      <!-- STATS BAR -->
+      <section class="stats">
+        <div class="stats-grid fade-in">
+          <div class="stat">
+            <div class="stat-number">&lt;200ms</div>
+            <div class="stat-label">full JIT compile</div>
+          </div>
+          <div class="stat">
+            <div class="stat-number">1.5–3.5x</div>
+            <div class="stat-label">faster than JVM · Matches HXCPP</div>
+          </div>
+          <div class="stat">
+            <div class="stat-number">Up to 150x</div>
+            <div class="stat-label">interpreter speed (tiered)</div>
+          </div>
+          <div class="stat">
+            <div class="stat-number">Zero</div>
+            <div class="stat-label">GC pauses for static types</div>
+          </div>
         </div>
       </section>
 
-      <section class="features">
+      <!-- FEATURES -->
+      <div class="features-bg">
+      <section class="section" id="features">
+        <h2 class="section-title fade-in">Why Rayzor?</h2>
         <div class="features-grid">
-          <div class="feature">
-            <div class="feature-icon">⚡</div>
+          <div class="feature fade-in">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="13 17 18 12 13 7"></polyline>
+                <polyline points="6 17 11 12 6 7"></polyline>
+              </svg>
+            </div>
             <h3 class="feature-title">5-Tier JIT Compilation</h3>
             <p class="feature-desc">
               Adaptive optimization from MIR interpreter through Cranelift to
               LLVM. Hot paths automatically tier-up for maximum performance.
             </p>
-            <span class="feature-stat">~3ms/function → ~500ms LLVM</span>
+            <span class="feature-stat">Interpreter → Cranelift → LLVM</span>
           </div>
 
-          <div class="feature">
-            <div class="feature-icon">🚀</div>
-            <h3 class="feature-title">100x Faster Compilation</h3>
+          <div class="feature fade-in">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
+              </svg>
+            </div>
+            <h3 class="feature-title">Sub-Second Compilation</h3>
             <p class="feature-desc">
-              Cranelift JIT compiles in ~3ms per function vs 2-5 seconds for C++
-              targets. Instant feedback during development.
+              Cranelift JIT compiles entire programs in under 200ms. With
+              BLADE cache, rebuilds drop to under 6ms. Instant feedback
+              during development.
             </p>
-            <span class="feature-stat">~3ms vs 2-5s C++</span>
+            <span class="feature-stat">< 1ms cached startup</span>
           </div>
 
-          <div class="feature">
-            <div class="feature-icon">🔒</div>
-            <h3 class="feature-title">Ownership-Based Memory</h3>
-            <p class="feature-desc">
-              Rust-inspired ownership tracking with compile-time drop analysis.
-              No garbage collection for statically-typed code.
-            </p>
-            <span class="feature-stat">Zero GC pauses</span>
-          </div>
-
-          <div class="feature">
-            <div class="feature-icon">📦</div>
-            <h3 class="feature-title">BLADE Incremental Cache</h3>
-            <p class="feature-desc">
-              Per-module binary caching with source hash validation. Skip
-              unchanged modules entirely for lightning-fast rebuilds.
-            </p>
-            <span class="feature-stat">~30x faster rebuilds</span>
-          </div>
-
-          <div class="feature">
-            <div class="feature-icon">🎯</div>
+          <div class="feature fade-in">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"></polygon>
+              </svg>
+            </div>
             <h3 class="feature-title">Native Performance</h3>
             <p class="feature-desc">
-              LLVM -O3 optimization delivers 45-50x interpreter speed.
-              Profile-guided optimization for hot code paths.
+              Tiered optimization through Cranelift and LLVM delivers
+              up to 150x interpreter speed. Hot paths automatically
+              tier-up for maximum throughput.
             </p>
-            <span class="feature-stat">45-50x interpreter</span>
-          </div>
-
-          <div class="feature">
-            <div class="feature-icon">🏗️</div>
-            <h3 class="feature-title">Modern SSA Architecture</h3>
-            <p class="feature-desc">
-              Full SSA-based IR with optimization passes, monomorphization, and
-              SIMD vectorization infrastructure.
-            </p>
-            <span class="feature-stat">31k LOC MIR</span>
+            <span class="feature-stat">Up to 150x interpreter</span>
           </div>
         </div>
       </section>
+      </div>
 
-      <section class="code-section">
-        <div class="code-container">
-          <div class="code-header">
-            <h2>Quick Start</h2>
-            <p>Get up and running in seconds</p>
+      <!-- BARE METAL PERFORMANCE -->
+      <div class="baremetal-backdrop">
+        <div class="blob bm-blob-1"></div>
+        <div class="blob bm-blob-2"></div>
+        <div class="blob bm-blob-3"></div>
+        <div class="blob bm-blob-4"></div>
+
+        <div class="baremetal-fan">
+          <div class="bm-card-face">
+            <svg class="fan-svg" viewBox="0 0 500 500" xmlns="http://www.w3.org/2000/svg">
+              <defs>
+                <filter id="fan-blur">
+                  <feGaussianBlur in="SourceGraphic" stdDeviation="6"/>
+                </filter>
+                <linearGradient id="blade-grad" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0%" stop-color="#94a3b8"/>
+                  <stop offset="100%" stop-color="#64748b"/>
+                </linearGradient>
+              </defs>
+              <!-- Outer ring -->
+              <circle cx="250" cy="250" r="200" fill="none" stroke="#e2e8f0" stroke-width="1.5"/>
+              <!-- Inner ring -->
+              <circle cx="250" cy="250" r="180" fill="#fafafa" stroke="#f1f5f9" stroke-width="1"/>
+              <!-- Spinning blades -->
+              <g class="fan-spin">
+                <g filter="url(#fan-blur)">
+                  <path d="M250 250 Q220 160 250 70 Q280 160 250 250" fill="url(#blade-grad)" opacity="0.85"/>
+                  <path d="M250 250 Q340 220 430 250 Q340 280 250 250" fill="url(#blade-grad)" opacity="0.85"/>
+                  <path d="M250 250 Q280 340 250 430 Q220 340 250 250" fill="url(#blade-grad)" opacity="0.85"/>
+                  <path d="M250 250 Q160 280 70 250 Q160 220 250 250" fill="url(#blade-grad)" opacity="0.85"/>
+                  <path d="M250 250 Q197 170 170 80 Q247 157 250 250" fill="url(#blade-grad)" opacity="0.6"/>
+                </g>
+                <!-- Hub -->
+                <circle cx="250" cy="250" r="30" fill="#ffffff" stroke="#e2e8f0" stroke-width="2"/>
+                <circle cx="250" cy="250" r="6" fill="#64748b"/>
+              </g>
+              <!-- Subtle outer tick marks -->
+              <g stroke="#e2e8f0" stroke-width="1" opacity="0.5">
+                <line x1="250" y1="48" x2="250" y2="58"/>
+                <line x1="250" y1="442" x2="250" y2="452"/>
+                <line x1="48" y1="250" x2="58" y2="250"/>
+                <line x1="442" y1="250" x2="452" y2="250"/>
+              </g>
+            </svg>
           </div>
+        </div>
 
-          <div class="code-block">
-            <div class="code-tabs">
-              <span class="code-tab active">Terminal</span>
+        <section class="showcase-section" id="bare-metal">
+          <div class="showcase-content fade-in">
+            <h2 class="showcase-title">Bare Metal Performance</h2>
+            <p class="showcase-desc">
+              Direct compilation to native machine code through LLVM and Cranelift
+              backends. No interpreter overhead, no virtual machine — your code
+              runs directly on hardware with predictable, zero-cost abstractions
+              and inline assembly where you need it.
+            </p>
+            <span class="showcase-stat">1.5–3.5x faster than JIT runtimes</span>
+          </div>
+        </section>
+      </div>
+
+      <!-- BLADE INCREMENTAL CACHE -->
+      <div class="blade-backdrop">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+        <div class="blob blob-4"></div>
+        <div class="blade-cards">
+          <div class="blade-card blade-card-1">
+            <span class="blade-card-label">std/Math.hx</span>
+            <span class="blade-card-status">cached · no changes</span>
+            <span class="blade-card-hash">#a3f2c1 ✓</span>
+          </div>
+          <div class="blade-card blade-card-2">
+            <span class="blade-card-label">haxe/io/Bytes.hx</span>
+            <span class="blade-card-status">recompiled · 2ms</span>
+            <span class="blade-card-hash">#7d9e4b</span>
+          </div>
+          <div class="blade-card blade-card-3">
+            <span class="blade-card-label">haxe/ds/StringMap.hx</span>
+            <span class="blade-card-status">cached · no changes</span>
+            <span class="blade-card-hash">#e5c830 ✓</span>
+          </div>
+        </div>
+        <section class="showcase-section" id="blade-cache">
+          <div class="showcase-content fade-in">
+            <h2 class="showcase-title">BLADE Incremental Cache</h2>
+            <p class="showcase-desc">
+              Per-module binary caching with source hash validation.
+              Skip unchanged modules entirely for lightning-fast rebuilds.
+              Only recompile what changed — everything else loads from
+              pre-validated binary cache in milliseconds.
+            </p>
+            <span class="showcase-stat">~30x faster rebuilds</span>
+          </div>
+        </section>
+      </div>
+
+      <!-- OWNERSHIP-BASED MEMORY -->
+      <div class="ownership-backdrop">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+        <div class="blob blob-4"></div>
+        <div class="ownership-card">
+          <div class="own-card-face">
+            <div class="own-card-glow own-card-glow-1"></div>
+            <div class="own-card-glow own-card-glow-2"></div>
+            <svg viewBox="0 0 400 600" class="own-card-svg">
+              <defs><path id="own-spine-path" d="M 150,50 L 150,550"/></defs>
+              <!-- Central Spine -->
+              <line x1="150" y1="50" x2="150" y2="550" stroke="#0284c7" stroke-width="4" stroke-linecap="round" opacity="0.1"/>
+              <line x1="150" y1="50" x2="150" y2="550" stroke="#0284c7" stroke-width="4" stroke-linecap="round" stroke-dasharray="10,20" opacity="0.5">
+                <animate attributeName="stroke-dashoffset" from="100" to="0" dur="3s" repeatCount="indefinite"/>
+              </line>
+              <!-- 1. OWNER node -->
+              <circle cx="150" cy="50" r="10" fill="#0284c7" class="own-pulse"/>
+              <circle cx="150" cy="50" r="15" fill="none" stroke="#0284c7" stroke-width="1" opacity="0.2">
+                <animate attributeName="r" from="10" to="25" dur="2s" repeatCount="indefinite"/>
+                <animate attributeName="opacity" from="0.2" to="0" dur="2s" repeatCount="indefinite"/>
+              </circle>
+              <g transform="translate(68,35) scale(0.65)" fill="none" stroke="#0284c7" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
+                <path d="M9 12l2 2 4-4"/>
+              </g>
+              <text x="62" y="50" fill="#0284c7" font-size="10" font-weight="700" font-family="sans-serif" letter-spacing="1" text-anchor="end">OWNER</text>
+              <!-- 2. COPY branch -->
+              <path d="M 150,120 Q 280,120 280,170" fill="none" stroke="#16a34a" stroke-width="3" class="own-branch own-branch-1"/>
+              <circle cx="280" cy="170" r="7" fill="#16a34a"/>
+              <g transform="translate(292,142) scale(0.65)" fill="none" stroke="#16a34a" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+                <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+              </g>
+              <text x="295" y="180" fill="#16a34a" font-size="10" font-weight="700" font-family="sans-serif" letter-spacing="1">COPY</text>
+              <!-- 3. MOVE branch -->
+              <path d="M 150,250 Q 320,250 320,320" fill="none" stroke="#dc2626" stroke-width="3" class="own-branch own-branch-2"/>
+              <line x1="150" y1="270" x2="150" y2="320" stroke="#ffffff" stroke-width="6"/>
+              <line x1="150" y1="270" x2="150" y2="320" stroke="#dc2626" stroke-width="2" stroke-dasharray="4,4" opacity="0.4"/>
+              <circle cx="320" cy="320" r="7" fill="#dc2626"/>
+              <g transform="translate(332,275) scale(0.65)" fill="none" stroke="#dc2626" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 5v14"/><path d="M21 12H7"/><path d="M15 18l6-6-6-6"/>
+              </g>
+              <text x="335" y="315" fill="#dc2626" font-size="10" font-weight="700" font-family="sans-serif" letter-spacing="1">MOVE</text>
+              <!-- 4. DROP branch (left) -->
+              <path d="M 150,430 Q 50,430 50,490" fill="none" stroke="#7c3aed" stroke-width="3" class="own-branch own-branch-3"/>
+              <circle cx="50" cy="490" r="7" fill="#7c3aed"/>
+              <g transform="translate(16,455) scale(0.65)" fill="none" stroke="#7c3aed" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/>
+              </g>
+              <text x="18" y="500" fill="#7c3aed" font-size="10" font-weight="700" font-family="sans-serif" letter-spacing="1">DROP</text>
+              <!-- 5. RC branch (right) -->
+              <path d="M 150,500 L 300,500" fill="none" stroke="#2563eb" stroke-width="3" class="own-branch own-branch-4"/>
+              <circle cx="300" cy="500" r="10" fill="#2563eb" class="own-pulse"/>
+              <line x1="300" y1="500" x2="260" y2="540" stroke="#2563eb" stroke-width="2" opacity="0.3"/>
+              <circle cx="260" cy="540" r="4" fill="#2563eb"/>
+              <line x1="300" y1="500" x2="300" y2="550" stroke="#2563eb" stroke-width="2" opacity="0.3"/>
+              <circle cx="300" cy="550" r="4" fill="#2563eb"/>
+              <line x1="300" y1="500" x2="350" y2="540" stroke="#2563eb" stroke-width="2" opacity="0.3"/>
+              <circle cx="350" cy="540" r="4" fill="#2563eb"/>
+              <g transform="translate(312,505) scale(0.65)" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>
+              </g>
+              <text x="315" y="525" fill="#2563eb" font-size="10" font-weight="700" font-family="sans-serif" letter-spacing="1">RC / ARC</text>
+              <!-- Bottom endpoint -->
+              <circle cx="150" cy="550" r="8" fill="#0284c7" opacity="0.2"/>
+              <text x="146" y="554" fill="#64748b" font-size="10" font-weight="bold">×</text>
+              <!-- Animated pulse -->
+              <circle r="4" fill="#0284c7" opacity="0.8">
+                <animateMotion dur="5s" repeatCount="indefinite" begin="1s">
+                  <mpath href="#own-spine-path"/>
+                </animateMotion>
+              </circle>
+            </svg>
+          </div>
+        </div>
+        <section class="showcase-section" id="ownership-memory">
+          <div class="showcase-content fade-in">
+            <h2 class="showcase-title">Ownership-Based Memory</h2>
+            <p class="showcase-desc">
+              Rust-inspired ownership tracking with compile-time drop analysis.
+              Values are freed deterministically at their last use — no garbage
+              collector needed for statically-typed code. Reference counting
+              activates only when explicit sharing is required.
+            </p>
+            <span class="showcase-stat">Zero GC pauses</span>
+          </div>
+        </section>
+      </div>
+
+      <!-- MODERN SSA ARCHITECTURE -->
+      <div class="ssa-backdrop">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+        <div class="blob blob-4"></div>
+        <section class="showcase-section" id="ssa-architecture">
+          <div class="ssa-layout">
+            <div class="showcase-content fade-in">
+              <h2 class="showcase-title">Modern SSA Architecture</h2>
+              <p class="showcase-desc">
+                Full SSA-based intermediate representation with optimization passes,
+                monomorphization for generics, and SIMD vectorization infrastructure.
+                Every function is lowered to a graph of basic blocks with phi nodes,
+                enabling powerful dataflow analysis and dead code elimination.
+              </p>
             </div>
-            <div class="code-content">
-              <pre><span class="code-comment"># Clone and build</span>
+            <div class="ssa-diagram fade-in">
+            <div class="code-block">
+              <div class="code-tabs">
+                <span class="code-tab active" style="cursor:default; pointer-events:none;">code.mir</span>
+              </div>
+              <div class="code-panels-wrap">
+              <div class="code-panel active">
+                <pre class="ssa-typewriter"><span class="ssa-line"><span class="cc">// bb0:</span></span>
+<span class="ssa-line"><span class="ck">%0</span> = <span class="cfn">const</span> <span class="cn">42</span> : <span class="ct">i32</span></span>
+<span class="ssa-line"><span class="ck">%1</span> = <span class="cfn">const</span> <span class="cn">10</span> : <span class="ct">i32</span></span>
+<span class="ssa-line"><span class="ck">%2</span> = <span class="cfn">add</span> <span class="ck">%0</span>, <span class="ck">%1</span> : <span class="ct">i32</span></span>
+<span class="ssa-line"><span class="cf">br</span> <span class="cs">bb1</span>(<span class="ck">%2</span>)</span>
+<span class="ssa-line">&nbsp;</span>
+<span class="ssa-line"><span class="cc">// bb1(%3: i32):</span></span>
+<span class="ssa-line"><span class="ck">%4</span> = <span class="cfn">gt</span> <span class="ck">%3</span>, <span class="cfn">const</span> <span class="cn">0</span></span>
+<span class="ssa-line"><span class="cf">cbr</span> <span class="ck">%4</span>, <span class="cs">bb2</span>, <span class="cs">bb3</span></span>
+<span class="ssa-line">&nbsp;</span>
+<span class="ssa-line"><span class="cc">// bb2:</span></span>
+<span class="ssa-line"><span class="ck">%5</span> = <span class="cfn">call</span> <span class="ct">@process</span>(<span class="ck">%3</span>)</span>
+<span class="ssa-line"><span class="cf">ret</span> <span class="ck">%5</span></span></pre>
+              </div>
+              </div>
+            </div>
+          </div>
+          </div>
+        </section>
+      </div>
+
+      <!-- TIERED RUNTIME -->
+      <section class="pipeline-section" id="tiered-runtime">
+        <h2 class="section-title fade-in">Tiered Runtime for High Throughput</h2>
+        <div class="tier-viz-container fade-in">
+          <svg class="tier-viz" viewBox="0 0 800 480" xmlns="http://www.w3.org/2000/svg"
+               preserveAspectRatio="xMidYMid meet" role="img"
+               aria-label="Animated visualization showing functions promoted from cold interpreter through JIT tiers as they become hot">
+            <defs>
+              <filter id="hotGlow" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur stdDeviation="3" result="blur"/>
+                <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
+            </defs>
+
+            <!-- Zone 0: MIR Interpreter -->
+            <text x="400" y="24" text-anchor="middle" class="zone-title">TIER 0 : MIR Interpreter</text>
+            <text x="400" y="42" text-anchor="middle" class="zone-sub">Cold path · instant execution</text>
+            <text x="760" y="24" text-anchor="end" class="zone-badge" fill="#94a3b8">COLD</text>
+            <g id="tier0-beads"></g>
+
+            <!-- Divider 0→1 -->
+            <line x1="60" y1="160" x2="740" y2="160" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="6 4"/>
+            <text x="400" y="178" text-anchor="middle" class="promo-label">&#8595; promoted after ~1,000 calls</text>
+
+            <!-- Zone 1: Cranelift JIT -->
+            <text x="400" y="208" text-anchor="middle" class="zone-title">TIER 1-2 : Cranelift JIT</text>
+            <text x="400" y="226" text-anchor="middle" class="zone-sub">Warm path · ~3ms compile</text>
+            <text x="760" y="208" text-anchor="end" class="zone-badge" fill="#f97316">WARM</text>
+            <g id="tier1-beads"></g>
+
+            <!-- Divider 1→3 -->
+            <line x1="60" y1="340" x2="740" y2="340" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="6 4"/>
+            <text x="400" y="358" text-anchor="middle" class="promo-label">&#8595; promoted after ~10,000 calls</text>
+
+            <!-- Zone 3: LLVM -O3 -->
+            <text x="400" y="388" text-anchor="middle" class="zone-title">TIER 3 : LLVM -O3</text>
+            <text x="400" y="406" text-anchor="middle" class="zone-sub">Hot path · maximum native speed</text>
+            <text x="760" y="388" text-anchor="end" class="zone-badge" fill="#ef4444">HOT</text>
+            <g id="tier3-beads"></g>
+          </svg>
+        </div>
+        <p class="pipeline-desc fade-in">
+          Functions start in the MIR interpreter for instant execution. As they get
+          called repeatedly, Rayzor automatically promotes them to Cranelift JIT (~3ms),
+          then to LLVM -O3 for maximum native speed — all while your program runs.
+        </p>
+      </section>
+
+      <!-- GETTING STARTED -->
+      <div class="gs-bg">
+      <section class="section" id="getting-started">
+        <h2 class="section-title fade-in">Getting Started</h2>
+        <div class="getting-started fade-in">
+          <div class="terminal">
+            <div class="terminal-bar">
+              <div class="terminal-dot red"></div>
+              <div class="terminal-dot yellow"></div>
+              <div class="terminal-dot green"></div>
+              <span class="terminal-title">Terminal</span>
+            </div>
+            <div class="terminal-content">
+              <pre><span class="cc"># Clone and build</span>
 git clone https://github.com/darmie/rayzor.git
 cd rayzor
-cargo build <span class="code-flag">--release</span>
+cargo build <span class="cf">--release</span>
 
-<span class="code-comment"># Run with tiered JIT</span>
-rayzor run hello.hx <span class="code-flag">--preset</span> application
+<span class="cc"># Run with tiered JIT</span>
+rayzor run hello.hx <span class="cf">--preset</span> application
 
-<span class="code-comment"># Compile to native</span>
-rayzor compile hello.hx <span class="code-flag">--stage</span> native
+<span class="cc"># Compile to native</span>
+rayzor compile hello.hx <span class="cf">--stage</span> native
 
-<span class="code-comment"># Create single-file executable</span>
-rayzor bundle main.hx <span class="code-flag">--output</span> app.rzb</pre>
+<span class="cc"># Create single-file executable</span>
+rayzor bundle main.hx <span class="cf">--output</span> app.rzb</pre>
+            </div>
+          </div>
+
+          <div class="gs-info">
+            <h3>Up and running in seconds</h3>
+            <p>
+              Rayzor requires the Rust toolchain (1.70+). Clone the repo, build
+              with Cargo, and start compiling Haxe files with native performance.
+            </p>
+            <div class="gs-links">
+              <a href="https://github.com/darmie/rayzor/blob/main/README.md" target="_blank" class="gs-link">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                  <polyline points="14 2 14 8 20 8"></polyline>
+                  <line x1="16" y1="13" x2="8" y2="13"></line>
+                  <line x1="16" y1="17" x2="8" y2="17"></line>
+                </svg>
+                Read the Documentation
+              </a>
+              <a href="https://darmie.github.io/rayzor/benchmarks/" target="_blank" class="gs-link">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <line x1="18" y1="20" x2="18" y2="10"></line>
+                  <line x1="12" y1="20" x2="12" y2="4"></line>
+                  <line x1="6" y1="20" x2="6" y2="14"></line>
+                </svg>
+                View Benchmarks
+              </a>
+              <a href="https://github.com/darmie/rayzor/tree/main/compiler/examples" target="_blank" class="gs-link">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="16 18 22 12 16 6"></polyline>
+                  <polyline points="8 6 2 12 8 18"></polyline>
+                </svg>
+                Browse Examples
+              </a>
             </div>
           </div>
         </div>
       </section>
+      </div>
 
-      <footer class="footer">
-        <div class="footer-links">
-          <a href="https://github.com/darmie/rayzor" target="_blank">GitHub</a>
-          <a href="https://darmie.github.io/rayzor/benchmarks/" target="_blank"
-            >Benchmarks</a
-          >
-          <a
-            href="https://github.com/darmie/rayzor/blob/main/LICENSE"
-            target="_blank"
-            >License</a
-          >
-          <a href="https://github.com/darmie/rayzor/issues" target="_blank"
-            >Issues</a
-          >
-          <a href="https://github.com/darmie/rayzor/discussions" target="_blank"
-            >Discussions</a
-          >
+      <!-- COMPARISON TABLE -->
+      <section class="comparison-section">
+        <h2 class="section-title fade-in">Rayzor vs. Official Haxe Compiler</h2>
+        <div class="table-wrap fade-in">
+          <table class="comparison-table">
+            <thead>
+              <tr>
+                <th>Feature</th>
+                <th>Haxe (official)</th>
+                <th>Rayzor</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td class="feature-col">Language Support</td>
+                <td>Full Haxe 4.x</td>
+                <td>Haxe 4.x (in progress)</td>
+              </tr>
+              <tr>
+                <td class="feature-col">JS/Python/PHP</td>
+                <td>Excellent</td>
+                <td>Not a goal</td>
+              </tr>
+              <tr>
+                <td class="feature-col">C++ Target</td>
+                <td>Slow compile, fast runtime</td>
+                <td class="highlight">Fast compile, fast runtime</td>
+              </tr>
+              <tr>
+                <td class="feature-col">Compile Speed</td>
+                <td>2-5s (C++)</td>
+                <td class="highlight">~3ms (Cranelift Tier 1)</td>
+              </tr>
+              <tr>
+                <td class="feature-col">JIT Runtime</td>
+                <td>No</td>
+                <td class="highlight">5-tier (Interp→Cranelift→LLVM)</td>
+              </tr>
+              <tr>
+                <td class="feature-col">Hot Path Optimization</td>
+                <td>No</td>
+                <td class="highlight">Profile-guided tier-up</td>
+              </tr>
+              <tr>
+                <td class="feature-col">Memory Model</td>
+                <td>Garbage collected</td>
+                <td class="highlight">Ownership-based (compile-time)</td>
+              </tr>
+              <tr>
+                <td class="feature-col">Incremental Builds</td>
+                <td>Limited</td>
+                <td class="highlight">BLADE cache (~30x speedup)</td>
+              </tr>
+              <tr>
+                <td class="feature-col">Type Checking</td>
+                <td>Production</td>
+                <td>Production</td>
+              </tr>
+              <tr>
+                <td class="feature-col">Macro System</td>
+                <td>Full (eval-based)</td>
+                <td>Interpreter, reification, @:build</td>
+              </tr>
+              <tr>
+                <td class="feature-col">Optimizations</td>
+                <td>Backend-specific</td>
+                <td class="highlight">SSA-based (universal)</td>
+              </tr>
+            </tbody>
+          </table>
         </div>
-        <p class="footer-copy">Apache License 2.0 • Built with Rust</p>
-      </footer>
-    </div>
+      </section>
+    </main>
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- FOOTER -->
+    <footer class="footer">
+      <div class="footer-links">
+        <a href="https://github.com/darmie/rayzor" target="_blank">GitHub</a>
+        <a href="https://darmie.github.io/rayzor/benchmarks/" target="_blank">Benchmarks</a>
+        <a href="https://github.com/darmie/rayzor/blob/main/README.md" target="_blank">Documentation</a>
+        <a href="https://github.com/darmie/rayzor/blob/main/LICENSE" target="_blank">License</a>
+        <a href="https://github.com/darmie/rayzor/issues" target="_blank">Issues</a>
+        <a href="https://github.com/darmie/rayzor/discussions" target="_blank">Discussions</a>
+      </div>
+      <p class="footer-copy">Apache License 2.0 — Built with Rust</p>
+    </footer>
+
     <script>
-      const noiseGLSL = `
-      vec4 permute(vec4 x) { return mod(((x*34.0)+1.0)*x, 289.0); }
-      vec4 taylorInvSqrt(vec4 r) { return 1.79284291400159 - 0.85373472095314 * r; }
+      // Tab switching
+      document.querySelectorAll('.code-tab').forEach(tab => {
+        tab.addEventListener('click', () => {
+          const target = tab.dataset.tab;
+          document.querySelectorAll('.code-tab').forEach(t => t.classList.remove('active'));
+          document.querySelectorAll('.code-panel').forEach(p => p.classList.remove('active'));
+          tab.classList.add('active');
+          document.getElementById('tab-' + target).classList.add('active');
+        });
+      });
 
-      float snoise(vec3 v) { 
-        const vec2 C = vec2(1.0/6.0, 1.0/3.0);
-        const vec4 D = vec4(0.0, 0.5, 1.0, 2.0);
-        vec3 i = floor(v + dot(v, C.yyy));
-        vec3 x0 = v - i + dot(i, C.xxx);
-        vec3 g = step(x0.yzx, x0.xyz);
-        vec3 l = 1.0 - g;
-        vec3 i1 = min(g.xyz, l.zxy);
-        vec3 i2 = max(g.xyz, l.zxy);
-        vec3 x1 = x0 - i1 + C.xxx;
-        vec3 x2 = x0 - i2 + C.yyy;
-        vec3 x3 = x0 - D.yyy;
-        i = mod(i, 289.0);
-        vec4 p = permute(permute(permute(
-                  i.z + vec4(0.0, i1.z, i2.z, 1.0))
-                + i.y + vec4(0.0, i1.y, i2.y, 1.0))
-                + i.x + vec4(0.0, i1.x, i2.x, 1.0));
-        float n_ = 1.0/7.0;
-        vec3 ns = n_ * D.wyz - D.xzx;
-        vec4 j = p - 49.0 * floor(p * ns.z * ns.z);
-        vec4 x_ = floor(j * ns.z);
-        vec4 y_ = floor(j - 7.0 * x_);
-        vec4 x = x_ * ns.x + ns.yyyy;
-        vec4 y = y_ * ns.x + ns.yyyy;
-        vec4 h = 1.0 - abs(x) - abs(y);
-        vec4 b0 = vec4(x.xy, y.xy);
-        vec4 b1 = vec4(x.zw, y.zw);
-        vec4 s0 = floor(b0)*2.0 + 1.0;
-        vec4 s1 = floor(b1)*2.0 + 1.0;
-        vec4 sh = -step(h, vec4(0.0));
-        vec4 a0 = b0.xzyw + s0.xzyw*sh.xxyy;
-        vec4 a1 = b1.xzyw + s1.xzyw*sh.zzww;
-        vec3 p0 = vec3(a0.xy, h.x);
-        vec3 p1 = vec3(a0.zw, h.y);
-        vec3 p2 = vec3(a1.xy, h.z);
-        vec3 p3 = vec3(a1.zw, h.w);
-        vec4 norm = taylorInvSqrt(vec4(dot(p0,p0), dot(p1,p1), dot(p2,p2), dot(p3,p3)));
-        p0 *= norm.x; p1 *= norm.y; p2 *= norm.z; p3 *= norm.w;
-        vec4 m = max(0.6 - vec4(dot(x0,x0), dot(x1,x1), dot(x2,x2), dot(x3,x3)), 0.0);
-        m = m * m;
-        return 42.0 * dot(m*m, vec4(dot(p0,x0), dot(p1,x1), dot(p2,x2), dot(p3,x3)));
+      // Nav scroll effect
+      window.addEventListener('scroll', () => {
+        document.getElementById('nav').classList.toggle('scrolled', window.scrollY > 50);
+      }, { passive: true });
+
+      // Mobile menu toggle
+      document.getElementById('hamburger').addEventListener('click', () => {
+        document.getElementById('mobileMenu').classList.toggle('open');
+      });
+
+      // Close mobile menu on link click
+      document.querySelectorAll('.nav-mobile a').forEach(link => {
+        link.addEventListener('click', () => {
+          document.getElementById('mobileMenu').classList.remove('open');
+        });
+      });
+
+      // Scroll-triggered fade-in animations
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('visible');
+            observer.unobserve(entry.target);
+          }
+        });
+      }, { threshold: 0.1 });
+
+      document.querySelectorAll('.fade-in').forEach(el => observer.observe(el));
+
+      // Backdrop scroll-trigger for card/circuit animations
+      const bdObserver = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('in-view');
+          } else {
+            // Remove and re-add to replay animations on next scroll-in
+            entry.target.classList.remove('in-view');
+          }
+        });
+      }, { threshold: 0.15 });
+      document.querySelectorAll('.baremetal-backdrop, .blade-backdrop, .ownership-backdrop').forEach(el => bdObserver.observe(el));
+
+      // Bare metal fan 3D tilt
+      const bmBackdrop = document.querySelector('.baremetal-backdrop');
+      const bmFan = document.querySelector('.baremetal-fan');
+      const bmDefaultTransform = 'translateY(-50%) perspective(900px) rotateX(12deg) rotateY(-18deg)';
+      if (bmBackdrop && bmFan) {
+        bmBackdrop.addEventListener('mousemove', (e) => {
+          const rect = bmBackdrop.getBoundingClientRect();
+          const centerX = rect.left + rect.width / 2;
+          const centerY = rect.top + rect.height / 2;
+          const xAxis = (centerX - e.clientX) / 15;
+          const yAxis = (e.clientY - centerY) / 15;
+          bmFan.style.transform = `translateY(-50%) perspective(900px) rotateY(${-18 + xAxis}deg) rotateX(${12 + yAxis}deg)`;
+        });
+        bmBackdrop.addEventListener('mouseleave', () => {
+          bmFan.style.transition = 'transform 0.5s ease-out';
+          bmFan.style.transform = bmDefaultTransform;
+          setTimeout(() => { bmFan.style.transition = 'transform 0.1s ease-out'; }, 500);
+        });
       }
 
-      float turbulence(vec3 p, int octaves) {
-        float value = 0.0;
-        float amplitude = 1.0;
-        float frequency = 1.0;
-        float maxValue = 0.0;
-        for(int i = 0; i < 8; i++) {
-          if(i >= octaves) break;
-          value += amplitude * abs(snoise(p * frequency));
-          maxValue += amplitude;
-          amplitude *= 0.5;
-          frequency *= 2.0;
+      // --- Ownership 3D Tilt ---
+      const ownBackdrop = document.querySelector('.ownership-backdrop');
+      const ownCard = document.querySelector('.ownership-card');
+      const ownDefaultTransform = 'translateY(-50%) perspective(900px) rotateX(12deg) rotateY(-15deg) rotateZ(2deg)';
+      if (ownBackdrop && ownCard) {
+        ownBackdrop.addEventListener('mousemove', (e) => {
+          const rect = ownBackdrop.getBoundingClientRect();
+          const centerX = rect.left + rect.width / 2;
+          const centerY = rect.top + rect.height / 2;
+          const xAxis = (centerX - e.clientX) / 15;
+          const yAxis = (e.clientY - centerY) / 15;
+          ownCard.style.transform = `translateY(-50%) perspective(900px) rotateY(${-15 + xAxis}deg) rotateX(${12 + yAxis}deg) rotateZ(2deg)`;
+        });
+        ownBackdrop.addEventListener('mouseleave', () => {
+          ownCard.style.transition = 'transform 0.5s ease-out';
+          ownCard.style.transform = ownDefaultTransform;
+          setTimeout(() => { ownCard.style.transition = 'transform 0.1s ease-out'; }, 500);
+        });
+      }
+
+
+      // SSA typewriter animation with moving cursor
+      const ssaPre = document.querySelector('.ssa-typewriter');
+      if (ssaPre) {
+        const ssaLines = ssaPre.querySelectorAll('.ssa-line');
+        const ssaDelays = [0, 300, 600, 900, 1200, 1600, 1700, 2000, 2300, 2700, 2800, 3100, 3400];
+        const ssaLineDur = 500;
+        let ssaTimers = [];
+
+        const ssaObs = new IntersectionObserver((entries) => {
+          entries.forEach(entry => {
+            if (entry.isIntersecting) {
+              ssaPre.classList.add('typing');
+              // Move cursor to each line as it types
+              ssaLines.forEach((line, i) => {
+                const t1 = setTimeout(() => {
+                  ssaLines.forEach(l => l.classList.remove('ssa-typing'));
+                  line.classList.add('ssa-typing');
+                }, ssaDelays[i]);
+                ssaTimers.push(t1);
+              });
+              // Remove cursor after last line finishes
+              const tEnd = setTimeout(() => {
+                ssaLines.forEach(l => l.classList.remove('ssa-typing'));
+              }, ssaDelays[ssaDelays.length - 1] + ssaLineDur);
+              ssaTimers.push(tEnd);
+            } else {
+              ssaPre.classList.remove('typing');
+              ssaLines.forEach(l => l.classList.remove('ssa-typing'));
+              ssaTimers.forEach(t => clearTimeout(t));
+              ssaTimers = [];
+            }
+          });
+        }, { threshold: 0.3 });
+        ssaObs.observe(ssaPre);
+      }
+
+      // Tiered Runtime Bead Animation
+      (function() {
+        const svg = document.querySelector('.tier-viz');
+        if (!svg) return;
+        const NS = 'http://www.w3.org/2000/svg';
+        const fnNames = ['init','update','render','calc','parse','sort','hash','eval','map','filter','reduce','fetch'];
+        const zones = [
+          { id: 'tier0-beads', yMin: 55, yMax: 145, color: '#94a3b8', r: 8, speed: 1.2 },
+          { id: 'tier1-beads', yMin: 235, yMax: 325, color: '#f97316', r: 10, speed: 3 },
+          { id: 'tier3-beads', yMin: 415, yMax: 465, color: '#ef4444', r: 13, speed: 7 }
+        ];
+        const beads = [];
+        let animating = false, rafId = null;
+
+        function rand(min, max) { return min + Math.random() * (max - min); }
+
+        function makeBead(tier, x, y, name) {
+          const z = zones[tier];
+          const g = document.createElementNS(NS, 'g');
+          const c = document.createElementNS(NS, 'circle');
+          c.setAttribute('cx', x); c.setAttribute('cy', y);
+          c.setAttribute('r', z.r); c.setAttribute('fill', z.color);
+          if (tier === 2) c.setAttribute('filter', 'url(#hotGlow)');
+          const t = document.createElementNS(NS, 'text');
+          t.setAttribute('x', x); t.setAttribute('y', y);
+          t.setAttribute('class', 'fn-label');
+          t.textContent = name;
+          g.appendChild(c); g.appendChild(t);
+          document.getElementById(z.id).appendChild(g);
+          const sp = z.speed;
+          const b = { el: g, circle: c, text: t, x, y, vx: rand(-sp, sp), vy: rand(-sp, sp), tier, name };
+          beads.push(b);
+          return b;
         }
-        return value / maxValue;
-      }
-      
-      float ridgedNoise(vec3 p, int octaves) {
-        float value = 0.0;
-        float amplitude = 1.0;
-        float frequency = 1.0;
-        float maxValue = 0.0;
-        float prev = 1.0;
-        for(int i = 0; i < 8; i++) {
-          if(i >= octaves) break;
-          float n = 1.0 - abs(snoise(p * frequency));
-          n = n * n;
-          n = n * prev;
-          prev = n;
-          value += amplitude * n;
-          maxValue += amplitude;
-          amplitude *= 0.5;
-          frequency *= 2.2;
+
+        function initBeads() {
+          for (let i = 0; i < 6; i++) {
+            makeBead(0, rand(80, 720), rand(zones[0].yMin, zones[0].yMax), fnNames[i % fnNames.length]);
+          }
+          for (let i = 0; i < 3; i++) {
+            makeBead(1, rand(120, 680), rand(zones[1].yMin, zones[1].yMax), fnNames[(i + 5) % fnNames.length]);
+          }
+          makeBead(2, rand(200, 600), rand(zones[2].yMin, zones[2].yMax), fnNames[7]);
+          makeBead(2, rand(200, 600), rand(zones[2].yMin, zones[2].yMax), fnNames[9]);
         }
-        return value / maxValue;
-      }
-    `;
 
-      const nebulaVS = `
-      varying vec2 vUv;
-      void main() {
-        vUv = uv;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-      }
-    `;
+        function tick() {
+          for (const b of beads) {
+            if (b.promoting) continue;
+            const z = zones[b.tier];
+            b.x += b.vx; b.y += b.vy;
+            // Bounce off zone edges
+            if (b.x < 60 + z.r) { b.x = 60 + z.r; b.vx = Math.abs(b.vx); }
+            if (b.x > 740 - z.r) { b.x = 740 - z.r; b.vx = -Math.abs(b.vx); }
+            if (b.y < z.yMin) { b.y = z.yMin; b.vy = Math.abs(b.vy); }
+            if (b.y > z.yMax) { b.y = z.yMax; b.vy = -Math.abs(b.vy); }
+            // Small random wobble
+            b.vx += rand(-0.02, 0.02); b.vy += rand(-0.02, 0.02);
+            // Clamp speed
+            const sp = zones[b.tier].speed;
+            const mag = Math.sqrt(b.vx * b.vx + b.vy * b.vy);
+            if (mag > sp * 1.5) { b.vx *= 0.95; b.vy *= 0.95; }
+            b.circle.setAttribute('cx', b.x);
+            b.circle.setAttribute('cy', b.y);
+            b.text.setAttribute('x', b.x);
+            b.text.setAttribute('y', b.y);
+          }
+          if (animating) rafId = requestAnimationFrame(tick);
+        }
 
-      const nebulaFS = `
-      uniform float uTime;
-      uniform vec2 uResolution;
-      uniform float uMouseX;
-      uniform float uMouseY;
-      varying vec2 vUv;
-      
-      ${noiseGLSL}
-      
-      void main() {
-        vec2 uv = vUv;
-        vec2 p = (uv - 0.5) * 2.0;
-        float aspect = uResolution.x / uResolution.y;
-        p.x *= aspect;
-        
-        vec2 mouse = vec2(uMouseX, uMouseY) * 0.05;
-        p += mouse * 0.2;
-        
-        float time = uTime * 0.008;
-        float drift = uTime * 0.015;
-        
-        vec2 cloudP = p;
-        cloudP.y += 0.6;
-        cloudP.x += drift;
-        
-        vec3 p1 = vec3(cloudP * 0.4, time * 0.8);
-        float backCloud = ridgedNoise(p1 + vec3(0.0, 0.0, 10.0), 5);
-        backCloud = smoothstep(0.2, 0.65, backCloud);
-        
-        vec3 p2 = vec3(cloudP * 0.6, time * 0.5);
-        float midCloud = ridgedNoise(p2 + vec3(50.0, 0.0, 0.0), 6);
-        float midCloud2 = turbulence(p2 * 1.2 + vec3(100.0, 50.0, 0.0), 5);
-        midCloud = smoothstep(0.2, 0.7, midCloud * 0.7 + midCloud2 * 0.3);
-        
-        vec3 p3 = vec3(cloudP * 0.9, time * 0.6);
-        float frontCloud = turbulence(p3 + vec3(200.0, 100.0, 0.0), 5);
-        frontCloud = smoothstep(0.25, 0.75, frontCloud);
-        
-        vec2 flowOffset = vec2(
-          snoise(vec3(cloudP * 0.3, time * 0.4)) * 0.18,
-          snoise(vec3(cloudP * 0.3 + 100.0, time * 0.3)) * 0.18
-        );
-        
-        vec2 warpedP = cloudP + flowOffset;
-        vec3 shapePos = vec3(warpedP * 0.5, 0.0);
-        
-        float mainShape = ridgedNoise(shapePos + vec3(30.0, 20.0, time * 0.35), 6);
-        float shapeModifier = turbulence(shapePos * 1.5 + vec3(80.0, 40.0, 0.0), 4);
-        float shapeModifier2 = ridgedNoise(shapePos * 0.8 + vec3(120.0, 60.0, 0.0), 5);
-        mainShape = mainShape * 0.5 + shapeModifier * 0.3 + shapeModifier2 * 0.2;
-        
-        float cloudMask = smoothstep(0.18, 0.5, mainShape);
-        float bottomMask = smoothstep(0.8, -0.5, p.y);
-        cloudMask *= bottomMask;
-        
-        float darkLanes = turbulence(vec3(warpedP * 0.8, time * 0.2), 5);
-        darkLanes = smoothstep(0.3, 0.55, darkLanes);
-        
-        float density = cloudMask * (0.7 + backCloud * 0.2 + midCloud * 0.15 + frontCloud * 0.1);
-        density *= mix(0.5, 1.0, darkLanes);
-        
-        float fillCloud = turbulence(vec3(warpedP * 0.35, 20.0), 4);
-        density += smoothstep(0.3, 0.6, fillCloud) * 0.25 * cloudMask;
-        
-        density = clamp(density, 0.0, 1.0);
-        
-        float coreNoise = ridgedNoise(vec3(warpedP * 0.7, time * 0.2), 4);
-        float brightCore = smoothstep(0.4, 0.85, coreNoise * mainShape);
-        float glowRegions = smoothstep(0.45, 0.8, midCloud * mainShape);
-        
-        vec3 spaceColor = vec3(0.0);
-        vec3 deepPurple = vec3(0.15, 0.03, 0.2);
-        vec3 magenta = vec3(0.5, 0.1, 0.35);
-        vec3 hotPink = vec3(0.75, 0.2, 0.45);
-        vec3 purple = vec3(0.35, 0.1, 0.45);
-        vec3 blue = vec3(0.15, 0.25, 0.5);
-        vec3 cyan = vec3(0.2, 0.5, 0.6);
-        vec3 orange = vec3(0.85, 0.45, 0.12);
-        vec3 gold = vec3(0.95, 0.7, 0.25);
-        vec3 white = vec3(1.0, 0.95, 0.98);
-        
-        float colorVar1 = turbulence(vec3(warpedP * 0.4, 5.0), 4);
-        float colorVar2 = snoise(vec3(warpedP * 0.3, 10.0)) * 0.5 + 0.5;
-        float colorVar3 = ridgedNoise(vec3(warpedP * 0.5, 15.0), 3);
-        
-        vec3 nebulaColor = deepPurple;
-        nebulaColor = mix(nebulaColor, purple, smoothstep(0.2, 0.5, colorVar1));
-        nebulaColor = mix(nebulaColor, magenta, smoothstep(0.3, 0.6, colorVar2) * 0.8);
-        nebulaColor = mix(nebulaColor, blue, smoothstep(0.4, 0.7, colorVar3) * 0.4);
-        nebulaColor = mix(nebulaColor, cyan, smoothstep(0.5, 0.85, colorVar1 * colorVar2) * 0.3);
-        nebulaColor = mix(nebulaColor, hotPink, glowRegions * 0.6);
-        nebulaColor = mix(nebulaColor, orange, smoothstep(0.6, 0.9, brightCore) * 0.5);
-        nebulaColor = mix(nebulaColor, gold, smoothstep(0.75, 1.0, brightCore) * 0.4);
-        nebulaColor = mix(nebulaColor, white, smoothstep(0.8, 1.0, brightCore) * 0.6);
-        
-        nebulaColor *= (0.6 + density * 1.5);
-        nebulaColor += hotPink * brightCore * 0.35;
-        nebulaColor += orange * glowRegions * 0.25;
-        
-        float edgeDetect = abs(mainShape - 0.5) * 2.0;
-        edgeDetect = smoothstep(0.3, 0.7, edgeDetect) * density;
-        nebulaColor += vec3(0.5, 0.25, 0.4) * edgeDetect * 0.25;
-        
-        vec3 color = mix(spaceColor, nebulaColor, density);
-        
-        float ambient = smoothstep(0.0, 0.5, density) * 0.04;
-        color += deepPurple * ambient;
-        
-        color = color / (1.0 + color * 0.2);
-        color = pow(color, vec3(0.92));
-        
-        float luma = dot(color, vec3(0.299, 0.587, 0.114));
-        color = mix(vec3(luma), color, 1.15);
-        
-        gl_FragColor = vec4(color, 1.0);
-      }
-    `;
+        function promote(fromTier, toTier) {
+          const candidates = beads.filter(b => b.tier === fromTier && !b.promoting);
+          if (candidates.length < 2) return;
+          const b = candidates[Math.floor(Math.random() * candidates.length)];
+          b.promoting = true;
+          const destZ = zones[toTier];
+          const destY = rand(destZ.yMin + destZ.r, destZ.yMax - destZ.r);
+          const startY = b.y;
+          const startX = b.x;
+          const dur = 1200;
+          const startTime = performance.now();
 
-      const starVS = `
-      uniform float uPixelRatio;
-      attribute float aScale;
-      attribute vec3 aColor;
-      varying vec3 vColor;
-      varying float vAlpha;
-      
-      void main() {
-        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-        vAlpha = 0.6 + aScale * 0.4;
-        vColor = aColor;
-        float size = aScale * 65.0 * uPixelRatio;
-        gl_PointSize = size * (1.0 / -mvPosition.z);
-        gl_Position = projectionMatrix * mvPosition;
-      }
-    `;
+          // Animate the transition
+          function step(now) {
+            const t = Math.min((now - startTime) / dur, 1);
+            const ease = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+            b.y = startY + (destY - startY) * ease;
+            b.x = startX + (400 - startX) * ease * 0.3; // slight drift toward center
+            // Color transition
+            b.circle.setAttribute('fill', t < 0.3 ? zones[fromTier].color : destZ.color);
+            if (toTier === 2 && t > 0.5) b.circle.setAttribute('filter', 'url(#hotGlow)');
+            // Scale pulse at start
+            const scale = t < 0.2 ? 1 + 0.4 * (t / 0.2) : 1 + 0.4 * (1 - Math.min((t - 0.2) / 0.3, 1));
+            b.circle.setAttribute('r', destZ.r * scale);
+            b.circle.setAttribute('cx', b.x); b.circle.setAttribute('cy', b.y);
+            b.text.setAttribute('x', b.x); b.text.setAttribute('y', b.y);
+            if (t < 1) {
+              requestAnimationFrame(step);
+            } else {
+              // Finalize: move to destination tier group
+              b.tier = toTier;
+              b.promoting = false;
+              b.circle.setAttribute('r', destZ.r);
+              b.circle.setAttribute('fill', destZ.color);
+              const sp = destZ.speed;
+              b.vx = rand(-sp, sp); b.vy = rand(-sp, sp);
+              document.getElementById(destZ.id).appendChild(b.el);
+              // Cap destination tier
+              const inTier = beads.filter(bb => bb.tier === toTier);
+              if (inTier.length > 4) {
+                const old = inTier[0];
+                old.el.style.transition = 'opacity 0.5s';
+                old.el.style.opacity = '0';
+                setTimeout(() => { old.el.remove(); beads.splice(beads.indexOf(old), 1); }, 500);
+              }
+              // Replenish tier 0
+              if (fromTier === 0) {
+                makeBead(0, rand(600, 720), rand(zones[0].yMin, zones[0].yMax),
+                  fnNames[Math.floor(Math.random() * fnNames.length)]);
+              }
+            }
+          }
+          requestAnimationFrame(step);
+        }
 
-      const starFS = `
-      varying vec3 vColor;
-      varying float vAlpha;
-      
-      void main() {
-        float dist = length(gl_PointCoord - 0.5);
-        float core = 1.0 - smoothstep(0.0, 0.12, dist);
-        float glow = 1.0 - smoothstep(0.0, 0.5, dist);
-        float alpha = (core * 0.85 + glow * 0.4) * vAlpha;
-        vec3 finalColor = mix(vColor, vec3(1.0), core * 0.6);
-        if(alpha < 0.01) discard;
-        gl_FragColor = vec4(finalColor, alpha);
-      }
-    `;
+        function start() {
+          if (animating) return;
+          animating = true;
+          initBeads();
+          tick();
+          setInterval(() => promote(0, 1), 3000);
+          setInterval(() => promote(1, 2), 9000);
+        }
 
-      const canvas = document.getElementById("canvas");
-      const scene = new THREE.Scene();
-      const camera = new THREE.PerspectiveCamera(
-        60,
-        window.innerWidth / window.innerHeight,
-        0.1,
-        100,
-      );
-      camera.position.z = 3;
-
-      const renderer = new THREE.WebGLRenderer({ canvas, antialias: false });
-      renderer.setSize(window.innerWidth, window.innerHeight);
-      // Cap at 1x to reduce GPU load on high-DPI displays (M1 Macs render 4x fewer pixels)
-      renderer.setPixelRatio(1);
-      renderer.setClearColor(0x000000);
-
-      const nebulaGeo = new THREE.PlaneGeometry(14, 14);
-      const nebulaMat = new THREE.ShaderMaterial({
-        vertexShader: nebulaVS,
-        fragmentShader: nebulaFS,
-        uniforms: {
-          uTime: { value: 0 },
-          uResolution: {
-            value: new THREE.Vector2(window.innerWidth, window.innerHeight),
-          },
-          uMouseX: { value: 0 },
-          uMouseY: { value: 0 },
-        },
-      });
-      const nebula = new THREE.Mesh(nebulaGeo, nebulaMat);
-      nebula.position.z = -5;
-      scene.add(nebula);
-
-      const starCount = 600;
-      const starPos = new Float32Array(starCount * 3);
-      const starScales = new Float32Array(starCount);
-      const starColors = new Float32Array(starCount * 3);
-      const palette = [
-        0xffffff, 0xeeeeff, 0xffeef8, 0xe8eeff, 0xffffff, 0xfff8ff,
-      ];
-
-      for (let i = 0; i < starCount; i++) {
-        const i3 = i * 3;
-        const theta = Math.random() * Math.PI * 2;
-        const phi = Math.acos(2 * Math.random() - 1);
-        const r = 1.0 + Math.random() * 4.5;
-        starPos[i3] = r * Math.sin(phi) * Math.cos(theta);
-        starPos[i3 + 1] = r * Math.sin(phi) * Math.sin(theta);
-        starPos[i3 + 2] = r * Math.cos(phi) - 2.0;
-
-        const bright = Math.random();
-        if (bright < 0.1) starScales[i] = 0.5 + Math.random() * 0.4;
-        else if (bright < 0.3) starScales[i] = 0.28 + Math.random() * 0.22;
-        else starScales[i] = 0.1 + Math.random() * 0.18;
-
-        const c = new THREE.Color(
-          palette[Math.floor(Math.random() * palette.length)],
-        );
-        starColors[i3] = c.r;
-        starColors[i3 + 1] = c.g;
-        starColors[i3 + 2] = c.b;
-      }
-
-      const starGeo = new THREE.BufferGeometry();
-      starGeo.setAttribute("position", new THREE.BufferAttribute(starPos, 3));
-      starGeo.setAttribute("aScale", new THREE.BufferAttribute(starScales, 1));
-      starGeo.setAttribute("aColor", new THREE.BufferAttribute(starColors, 3));
-
-      const starMat = new THREE.ShaderMaterial({
-        vertexShader: starVS,
-        fragmentShader: starFS,
-        uniforms: {
-          uPixelRatio: { value: Math.min(window.devicePixelRatio, 2) },
-        },
-        transparent: true,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-      });
-      scene.add(new THREE.Points(starGeo, starMat));
-
-      const mouse = { x: 0, y: 0 };
-      window.addEventListener("mousemove", (e) => {
-        mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
-        mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
-      });
-
-      window.addEventListener("resize", () => {
-        camera.aspect = window.innerWidth / window.innerHeight;
-        camera.updateProjectionMatrix();
-        renderer.setSize(window.innerWidth, window.innerHeight);
-        renderer.setPixelRatio(1);
-        nebulaMat.uniforms.uResolution.value.set(
-          window.innerWidth,
-          window.innerHeight,
-        );
-        starMat.uniforms.uPixelRatio.value = 1;
-      });
-
-      const clock = new THREE.Clock();
-      let lastFrame = 0;
-      const targetFPS = 30; // Limit to 30fps for power efficiency
-      const frameInterval = 1 / targetFPS;
-
-      function animate() {
-        requestAnimationFrame(animate);
-        const t = clock.getElapsedTime();
-
-        // Frame limiting - skip render if too soon
-        if (t - lastFrame < frameInterval) return;
-        lastFrame = t;
-
-        nebulaMat.uniforms.uTime.value = t;
-        nebulaMat.uniforms.uMouseX.value +=
-          (mouse.x - nebulaMat.uniforms.uMouseX.value) * 0.012;
-        nebulaMat.uniforms.uMouseY.value +=
-          (mouse.y - nebulaMat.uniforms.uMouseY.value) * 0.012;
-
-        camera.position.x += (mouse.x * 0.05 - camera.position.x) * 0.012;
-        camera.position.y += (mouse.y * 0.03 - camera.position.y) * 0.012;
-        camera.lookAt(0, 0, -2);
-
-        renderer.render(scene, camera);
-      }
-      animate();
+        const vizObs = new IntersectionObserver((entries) => {
+          entries.forEach(e => { if (e.isIntersecting) { start(); vizObs.unobserve(e.target); } });
+        }, { threshold: 0.15 });
+        vizObs.observe(svg);
+      })();
     </script>
   </body>
 </html>

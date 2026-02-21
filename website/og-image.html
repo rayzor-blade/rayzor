@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=1200">
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Geom:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@300;400;500&display=swap" rel="stylesheet" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      width: 1200px;
+      height: 630px;
+      overflow: hidden;
+      background: #ffffff;
+      font-family: "JetBrains Mono", monospace;
+      position: relative;
+    }
+
+    /* Blobs */
+    .blob {
+      position: absolute;
+      border-radius: 50%;
+      filter: blur(90px);
+      z-index: 0;
+    }
+    .blob-1 {
+      width: 720px; height: 720px;
+      background: rgba(234, 140, 60, 0.4);
+      top: -30%; left: -10%;
+    }
+    .blob-2 {
+      width: 660px; height: 660px;
+      background: rgba(100, 160, 245, 0.35);
+      top: -15%; right: -15%;
+    }
+    .blob-3 {
+      width: 600px; height: 600px;
+      background: rgba(185, 130, 220, 0.3);
+      bottom: -25%; left: 5%;
+    }
+    .blob-4 {
+      width: 540px; height: 540px;
+      background: rgba(245, 200, 100, 0.3);
+      bottom: -10%; right: -5%;
+    }
+
+    /* Content */
+    .content {
+      position: relative;
+      z-index: 1;
+      width: 100%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      align-items: center;
+      text-align: center;
+      padding: 3rem 4rem;
+    }
+
+    .logo {
+      width: 100px;
+      height: 100px;
+    }
+
+    .headline {
+      font-family: "Geom", sans-serif;
+      font-size: 2.6rem;
+      font-weight: 800;
+      line-height: 1.25;
+      margin-top: 1.5rem;
+      color: #1d1d1f;
+    }
+
+    .accent {
+      background: linear-gradient(135deg, #ea580c, #f97316);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    .subtitle {
+      font-size: 0.85rem;
+      font-weight: 400;
+      color: #5a5a6e;
+      margin-top: 1.2rem;
+      max-width: 650px;
+      line-height: 1.8;
+    }
+
+    .badges {
+      display: flex;
+      gap: 0.75rem;
+      margin-top: 1.5rem;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.5rem 1rem;
+      background: #f5f5f7;
+      border: 1px solid #e0e0e6;
+      border-radius: 24px;
+      font-size: 0.9rem;
+      color: #5a5a6e;
+    }
+
+    .badge-icon {
+      width: 22px;
+      height: 22px;
+    }
+
+    /* Brand mark */
+    .brand {
+      position: absolute;
+      bottom: 1.5rem;
+      left: 50%;
+      transform: translateX(-50%);
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      z-index: 1;
+    }
+    .brand-logo {
+      width: 28px;
+      height: 28px;
+    }
+    .brand-name {
+      font-family: "Geom", sans-serif;
+      font-size: 1.1rem;
+      font-weight: 700;
+      color: #1d1d1f;
+    }
+  </style>
+</head>
+<body>
+  <div class="blob blob-1"></div>
+  <div class="blob blob-2"></div>
+  <div class="blob blob-3"></div>
+  <div class="blob blob-4"></div>
+
+  <div class="content">
+    <svg class="logo" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <radialGradient id="bf1" cx="0" cy="0.18" r="0.35" gradientUnits="objectBoundingBox" spreadMethod="pad">
+          <stop offset="0" stop-color="#f97316" stop-opacity="0"/>
+          <stop offset="1" stop-color="#f97316"/>
+        </radialGradient>
+        <radialGradient id="bf2" cx="0" cy="0.18" r="0.35" gradientUnits="objectBoundingBox" spreadMethod="pad">
+          <stop offset="0" stop-color="#ea580c" stop-opacity="0"/>
+          <stop offset="1" stop-color="#ea580c"/>
+        </radialGradient>
+        <radialGradient id="bf3" cx="0" cy="0.18" r="0.35" gradientUnits="objectBoundingBox" spreadMethod="pad">
+          <stop offset="0" stop-color="#c2410c" stop-opacity="0"/>
+          <stop offset="1" stop-color="#c2410c"/>
+        </radialGradient>
+        <radialGradient id="bf4" cx="0" cy="0.18" r="0.35" gradientUnits="objectBoundingBox" spreadMethod="pad">
+          <stop offset="0" stop-color="#ea580c" stop-opacity="0"/>
+          <stop offset="1" stop-color="#ea580c"/>
+        </radialGradient>
+      </defs>
+      <g transform="rotate(45,32,32)">
+        <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="url(#bf1)"/>
+        <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="url(#bf2)" transform="rotate(90,32,32)"/>
+        <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="url(#bf3)" transform="rotate(180,32,32)"/>
+        <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="url(#bf4)" transform="rotate(270,32,32)"/>
+      </g>
+    </svg>
+
+    <h1 class="headline">
+      Fast compilation. Native performance.<br>
+      Ownership-based memory.<br>
+      <span class="accent">Garbage collection only where it matters.</span>
+    </h1>
+
+    <p class="subtitle">
+      A next-generation Haxe compiler with 5-tier JIT, ownership-based memory,
+      and LLVM-powered native code generation.
+    </p>
+
+    <div class="badges">
+      <span class="badge"><svg class="badge-icon" viewBox="44 97 710 500" fill="none"><path d="M117 197C117 165.519 142.519 140 174 140H563C594.481 140 620 165.519 620 197C620 228.481 594.481 254 563 254H334C316.327 254 302 268.327 302 286V314C302 331.673 316.327 346 334 346H681C712.481 346 738 371.519 738 403C738 434.481 712.481 460 681 460H334C316.327 460 302 474.327 302 492V520C302 551.481 276.481 577 245 577C213.519 577 188 551.481 188 520V492C188 474.327 173.673 460 156 460H144C112.519 460 87 434.481 87 403C87 371.519 112.519 346 144 346H466C483.673 346 498 331.673 498 314V286C498 268.327 483.673 254 466 254H174C142.519 254 117 228.481 117 197Z" fill="#000"/><circle cx="682" cy="177" r="37" fill="#000"/><circle cx="153" cy="540" r="43" fill="#000"/><rect x="618" y="492" width="120" height="85" rx="42.5" fill="#000"/></svg> Cranelift</span>
+      <span class="badge"><img class="badge-icon" src="https://cdn.simpleicons.org/llvm/000000" alt="LLVM"> LLVM</span>
+      <span class="badge"><img class="badge-icon" src="https://cdn.simpleicons.org/apache/D22128" alt="Apache"> Apache 2.0</span>
+    </div>
+  </div>
+
+  <div class="brand">
+    <svg class="brand-logo" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <radialGradient id="bf1b" cx="0" cy="0.18" r="0.35" gradientUnits="objectBoundingBox" spreadMethod="pad">
+          <stop offset="0" stop-color="#f97316" stop-opacity="0"/>
+          <stop offset="1" stop-color="#f97316"/>
+        </radialGradient>
+        <radialGradient id="bf2b" cx="0" cy="0.18" r="0.35" gradientUnits="objectBoundingBox" spreadMethod="pad">
+          <stop offset="0" stop-color="#ea580c" stop-opacity="0"/>
+          <stop offset="1" stop-color="#ea580c"/>
+        </radialGradient>
+        <radialGradient id="bf3b" cx="0" cy="0.18" r="0.35" gradientUnits="objectBoundingBox" spreadMethod="pad">
+          <stop offset="0" stop-color="#c2410c" stop-opacity="0"/>
+          <stop offset="1" stop-color="#c2410c"/>
+        </radialGradient>
+        <radialGradient id="bf4b" cx="0" cy="0.18" r="0.35" gradientUnits="objectBoundingBox" spreadMethod="pad">
+          <stop offset="0" stop-color="#ea580c" stop-opacity="0"/>
+          <stop offset="1" stop-color="#ea580c"/>
+        </radialGradient>
+      </defs>
+      <g transform="rotate(45,32,32)">
+        <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="url(#bf1b)"/>
+        <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="url(#bf2b)" transform="rotate(90,32,32)"/>
+        <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="url(#bf3b)" transform="rotate(180,32,32)"/>
+        <path d="M 22,8 C 24,4 32,1 40,3 C 45,5 44,12 40,20 C 37,26 35,30 34,34 L 32,32 C 33,28 35,22 37,16 C 39,10 38,6 34,5 C 28,4 24,6 22,8 Z" fill="url(#bf4b)" transform="rotate(270,32,32)"/>
+      </g>
+    </svg>
+    <span class="brand-name">Rayzor</span>
+  </div>
+</body>
+</html>
