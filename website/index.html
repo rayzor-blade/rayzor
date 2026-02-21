@@ -1512,16 +1512,68 @@
         .ownership-backdrop,
         .ssa-backdrop {
           padding: 3.5rem 1.5rem;
-        }
-
-        .baremetal-fan {
-          opacity: 0.2;
+          min-height: auto;
         }
 
         .showcase-section {
           max-width: 100%;
           margin-left: 0;
           text-align: center;
+          order: -1;
+        }
+
+        .baremetal-fan {
+          position: static;
+          transform: none;
+          width: 70vw;
+          max-width: 320px;
+          margin: 2rem auto 0;
+          opacity: 0;
+          transition: opacity 1s ease-out 0.2s;
+        }
+        .baremetal-backdrop.in-view .baremetal-fan {
+          opacity: 1;
+        }
+
+        .blade-cards {
+          position: static;
+          transform: none;
+          width: 85vw;
+          max-width: 400px;
+          height: auto;
+          min-height: 360px;
+          margin: 2rem auto 0;
+          opacity: 1;
+        }
+
+        .blade-card {
+          width: 100%;
+          max-width: 100%;
+          height: auto;
+          min-height: 100px;
+          position: relative;
+        }
+
+        .blade-card-2 {
+          margin-top: -2rem;
+          margin-left: 1rem;
+        }
+        .blade-card-3 {
+          margin-top: -2rem;
+          margin-left: 2rem;
+        }
+
+        .ownership-card {
+          position: static;
+          transform: none;
+          width: 65vw;
+          max-width: 300px;
+          margin: 2rem auto 0;
+          opacity: 0;
+          transition: opacity 1s ease-out 0.2s;
+        }
+        .ownership-backdrop.in-view .ownership-card {
+          opacity: 1;
         }
 
         .ssa-layout {
@@ -1530,12 +1582,47 @@
           text-align: center;
         }
 
-        .blade-cards {
-          opacity: 0.2;
+        .ssa-layout .code-editor,
+        .ssa-layout .code-panel,
+        .ssa-layout pre {
+          text-align: left;
         }
 
-        .ownership-card {
-          opacity: 0.2;
+        .blade-backdrop.in-view .blade-card-1 {
+          animation: bladeCardMobile1 0.8s ease-out 0.2s both;
+        }
+        .blade-backdrop.in-view .blade-card-2 {
+          animation: bladeCardMobile2 0.8s ease-out 0.4s both;
+        }
+        .blade-backdrop.in-view .blade-card-3 {
+          animation: bladeCardMobile3 0.8s ease-out 0.6s both;
+        }
+
+        @keyframes bladeCardMobile1 {
+          from { transform: translateY(30px); opacity: 0; }
+          to { transform: translateY(0); opacity: 1; }
+        }
+        @keyframes bladeCardMobile2 {
+          from { transform: translateY(30px); opacity: 0; }
+          to { transform: translateY(0); opacity: 1; }
+        }
+        @keyframes bladeCardMobile3 {
+          from { transform: translateY(30px); opacity: 0; }
+          to { transform: translateY(0); opacity: 1; }
+        }
+
+        .code-tabs {
+          overflow-x: auto;
+          -webkit-overflow-scrolling: touch;
+          scrollbar-width: none;
+        }
+        .code-tabs::-webkit-scrollbar {
+          display: none;
+        }
+        .code-tab {
+          flex-shrink: 0;
+          padding: 0.6rem 0.9rem;
+          font-size: 0.65rem;
         }
 
         .code-panel {
@@ -1655,6 +1742,7 @@
               <button class="code-tab" data-tab="channels">Channels</button>
               <button class="code-tab" data-tab="mutex">Mutex</button>
               <button class="code-tab" data-tab="atomics">Atomics</button>
+              <button class="code-tab" data-tab="simd">SIMD</button>
               <button class="code-tab" data-tab="embedc">Embed C</button>
             </div>
             <div class="code-panels-wrap">
@@ -1789,6 +1877,20 @@
     <span class="ck">var</span> result = handle.<span class="cfn">join</span>();
 }</pre>
             </div>
+            <div class="code-panel" id="tab-simd">
+              <pre><span class="cc">// Zero-cost SIMD — maps to native SSE/NEON registers</span>
+
+<span class="ck">import</span> rayzor.SIMD4f;
+<span class="ck">class</span> <span class="ct">Main</span> {
+    <span class="ck">static function</span> <span class="cfn">main</span>() {
+        <span class="ck">var</span> a = <span class="ct">SIMD4f</span>.<span class="cfn">splat</span>(<span class="cn">1.0</span>);
+        <span class="ck">var</span> b = <span class="ct">SIMD4f</span>.<span class="cfn">splat</span>(<span class="cn">2.0</span>);
+        <span class="ck">var</span> c = a + b;
+        <span class="cfn">trace</span>(c);
+    }
+}</pre>
+            </div>
+
             <div class="code-panel" id="tab-embedc">
               <pre><span class="cc">// Embed C code directly — call native libraries</span>
 
