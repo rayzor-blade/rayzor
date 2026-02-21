@@ -1282,6 +1282,37 @@ impl<'a> TypeChecker<'a> {
             // Unknown types should trigger type errors to help find bugs
             (TypeKind::Unknown, _) | (_, TypeKind::Unknown) => TypeCompatibility::Incompatible,
 
+            // === Structural Subtyping: Anonymous ← Anonymous (width subtyping) ===
+            (
+                TypeKind::Anonymous {
+                    fields: src_fields, ..
+                },
+                TypeKind::Anonymous {
+                    fields: tgt_fields, ..
+                },
+            ) => {
+                // All target fields must exist in source (by name)
+                let all_found = tgt_fields
+                    .iter()
+                    .all(|tf| src_fields.iter().any(|sf| sf.name == tf.name));
+                if all_found {
+                    if src_fields.len() == tgt_fields.len() {
+                        TypeCompatibility::Identical
+                    } else {
+                        TypeCompatibility::Assignable
+                    }
+                } else {
+                    TypeCompatibility::Incompatible
+                }
+            }
+
+            // === Structural Subtyping: Anonymous ← Class ===
+            (TypeKind::Class { .. }, TypeKind::Anonymous { .. }) => {
+                // Class instances can satisfy anonymous structural types.
+                // Actual field checking is done at the MIR level during materialization.
+                TypeCompatibility::Assignable
+            }
+
             // === Default: Incompatible ===
             _ => TypeCompatibility::Incompatible,
         }

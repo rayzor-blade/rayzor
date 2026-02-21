@@ -314,9 +314,39 @@ pub struct HirToMirContext<'a> {
     /// Only populated for functions that have at least one parameter with a default value.
     function_param_defaults: BTreeMap<IrFunctionId, Vec<Option<HirExpr>>>,
 
+    /// HIR parameter types for functions/constructors.
+    /// Keyed by IrFunctionId, value is Vec<TypeId> of param types (excludes implicit 'this').
+    /// Used for structural subtyping: detecting class→anon or wider-anon→anon at call sites.
+    function_param_hir_types: BTreeMap<IrFunctionId, Vec<TypeId>>,
+
     /// Current function's return TypeId, set in lower_function_body.
     /// Used by the Return handler to box values for Null<T> return types.
     current_function_return_type: Option<TypeId>,
+
+    /// Structural subtyping: tracks variables where an anon-typed variable is backed by
+    /// a different runtime representation (class pointer or wider anonymous object).
+    /// Field access is redirected at compile time; materialization only at escape points.
+    anon_views: BTreeMap<SymbolId, AnonBacking>,
+}
+
+/// Tracks the backing representation of an anonymous-typed variable.
+/// Used for deferred structural subtyping: the variable holds the original value
+/// (class pointer or wider anon handle), and field access is redirected at compile time.
+#[derive(Debug, Clone)]
+enum AnonBacking {
+    /// Value is a class pointer. Access fields via GEP at mapped indices.
+    Class {
+        class_symbol: SymbolId,
+        class_type: TypeId,
+        /// (target_field_name, gep_index, field_type_id)
+        field_map: Vec<(String, u32, TypeId)>,
+    },
+    /// Value is a wider anonymous object. Access fields via remapped sorted index.
+    WiderAnon {
+        source_type: TypeId,
+        /// (target_field_name, source_sorted_index, field_type_id)
+        field_map: Vec<(String, usize, TypeId)>,
+    },
 }
 
 /// TCC runtime function IDs for __c__ inline code lowering
@@ -402,6 +432,7 @@ struct SavedLoweringState {
     current_drop_points: Option<DropPoints>,
     current_stmt_index: usize,
     boxed_dynamic_symbols: BTreeSet<SymbolId>,
+    anon_views: BTreeMap<SymbolId, AnonBacking>,
 }
 
 impl<'a> HirToMirContext<'a> {
@@ -479,7 +510,9 @@ impl<'a> HirToMirContext<'a> {
             class_vtables: BTreeMap::new(),
             virtual_dispatch_info: BTreeMap::new(),
             function_param_defaults: BTreeMap::new(),
+            function_param_hir_types: BTreeMap::new(),
             current_function_return_type: None,
+            anon_views: BTreeMap::new(),
         };
 
         // Pre-declare malloc so it's available for heap allocations during lowering
@@ -1931,6 +1964,10 @@ impl<'a> HirToMirContext<'a> {
             self.function_param_defaults.insert(func_id, defaults);
         }
 
+        // Store parameter HIR types for structural subtyping materialization at call sites
+        let param_types: Vec<TypeId> = hir_func.params.iter().map(|p| p.ty).collect();
+        self.function_param_hir_types.insert(func_id, param_types);
+
         // Record constrained type parameter info for call-site fat pointer wrapping
         self.record_constrained_params(func_id, hir_func, this_type.is_some());
 
@@ -2005,6 +2042,10 @@ impl<'a> HirToMirContext<'a> {
             self.function_param_defaults.insert(func_id, defaults);
         }
 
+        // Store parameter HIR types for structural subtyping materialization at call sites
+        let param_types: Vec<TypeId> = hir_func.params.iter().map(|p| p.ty).collect();
+        self.function_param_hir_types.insert(func_id, param_types);
+
         // Record constrained type parameter info for call-site fat pointer wrapping
         self.record_constrained_params(func_id, hir_func, this_type.is_some());
 
@@ -2076,6 +2117,10 @@ impl<'a> HirToMirContext<'a> {
             self.function_param_defaults.insert(func_id, defaults);
         }
 
+        // Store parameter HIR types for structural subtyping materialization at call sites
+        let param_types: Vec<TypeId> = constructor.params.iter().map(|p| p.ty).collect();
+        self.function_param_hir_types.insert(func_id, param_types);
+
         let fallback_type_id = TypeId::from_raw(class_symbol.as_raw());
         if fallback_type_id != type_id {
             self.constructor_map.insert(fallback_type_id, func_id);
@@ -2134,6 +2179,10 @@ impl<'a> HirToMirContext<'a> {
         if defaults.iter().any(|d| d.is_some()) {
             self.function_param_defaults.insert(func_id, defaults);
         }
+
+        // Store parameter HIR types for structural subtyping materialization at call sites
+        let param_types: Vec<TypeId> = constructor.params.iter().map(|p| p.ty).collect();
+        self.function_param_hir_types.insert(func_id, param_types);
 
         // Also register with TypeId derived from class SymbolId as a fallback
         let fallback_type_id = TypeId::from_raw(class_symbol.as_raw());
@@ -3073,15 +3122,57 @@ impl<'a> HirToMirContext<'a> {
                             final_value
                         };
 
-                        // Clone anonymous object handles for COW semantics.
-                        // Object literals create fresh handles, so skip cloning for those.
-                        // All other sources (variables, calls, field access) need their own handle.
-                        let final_value =
-                            if !matches!(&init_expr.kind, HirExprKind::ObjectLiteral { .. }) {
-                                self.maybe_clone_anonymous(final_value, init_expr.ty)
+                        // Structural subtyping: register anon view for class→anon or wider-anon→narrower
+                        let is_anon_view =
+                            if let (HirPattern::Variable { symbol, .. }, Some(target_ty)) =
+                                (pattern, var_type)
+                            {
+                                self.try_register_anon_view(
+                                    *symbol,
+                                    final_value,
+                                    init_expr.ty,
+                                    target_ty,
+                                )
                             } else {
-                                final_value
+                                false
                             };
+
+                        // Propagate existing anon view when copying from a backed variable
+                        if !is_anon_view {
+                            if let HirExprKind::Variable {
+                                symbol: src_symbol, ..
+                            } = &init_expr.kind
+                            {
+                                if let Some(backing) = self.anon_views.get(src_symbol).cloned() {
+                                    if let HirPattern::Variable {
+                                        symbol: dst_symbol, ..
+                                    } = pattern
+                                    {
+                                        self.anon_views.insert(*dst_symbol, backing);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Clone anonymous object handles for COW semantics.
+                        // Skip if: object literal (fresh), anon view (backed by class/wider anon),
+                        // or copying from a backed variable (shares backing reference).
+                        let src_has_view = if let HirExprKind::Variable {
+                            symbol: src_sym, ..
+                        } = &init_expr.kind
+                        {
+                            self.anon_views.contains_key(src_sym)
+                        } else {
+                            false
+                        };
+                        let final_value = if !is_anon_view
+                            && !src_has_view
+                            && !matches!(&init_expr.kind, HirExprKind::ObjectLiteral { .. })
+                        {
+                            self.maybe_clone_anonymous(final_value, init_expr.ty)
+                        } else {
+                            final_value
+                        };
 
                         self.bind_pattern_with_type(pattern, final_value, var_type, *is_mutable);
 
@@ -5585,6 +5676,65 @@ impl<'a> HirToMirContext<'a> {
                 }
 
                 let receiver_ty = object.ty; // The type of the object being accessed
+
+                // Structural subtyping: if object is a variable with an anon view,
+                // redirect field access to the backing representation
+                if let HirExprKind::Variable {
+                    symbol: obj_sym, ..
+                } = &object.kind
+                {
+                    if let Some(backing) = self.anon_views.get(obj_sym).cloned() {
+                        let field_name = self
+                            .symbol_table
+                            .get_symbol(*field)
+                            .and_then(|s| self.string_interner.get(s.name))
+                            .map(|s| s.to_string());
+
+                        if let Some(field_name) = field_name {
+                            match &backing {
+                                AnonBacking::Class { field_map, .. } => {
+                                    if let Some((_, gep_idx, field_type_id)) =
+                                        field_map.iter().find(|(n, ..)| *n == field_name)
+                                    {
+                                        let field_ir_ty = self.convert_type(*field_type_id);
+                                        let idx_const = self
+                                            .builder
+                                            .build_const(IrValue::I64(*gep_idx as i64))?;
+                                        let field_ptr = self.builder.build_gep(
+                                            obj_reg,
+                                            vec![idx_const],
+                                            field_ir_ty.clone(),
+                                        )?;
+                                        return Some(
+                                            self.builder.build_load(field_ptr, field_ir_ty)?,
+                                        );
+                                    }
+                                }
+                                AnonBacking::WiderAnon { field_map, .. } => {
+                                    if let Some((_, src_idx, field_type_id)) =
+                                        field_map.iter().find(|(n, ..)| *n == field_name)
+                                    {
+                                        let anon_get_id = self.get_or_register_extern_function(
+                                            "rayzor_anon_get_field_by_index",
+                                            vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32],
+                                            IrType::I64,
+                                        );
+                                        let idx_val = self
+                                            .builder
+                                            .build_const(IrValue::I32(*src_idx as i32))?;
+                                        let raw_val = self.builder.build_call_direct(
+                                            anon_get_id,
+                                            vec![obj_reg, idx_val],
+                                            IrType::I64,
+                                        )?;
+                                        return self.coerce_from_i64(raw_val, *field_type_id);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let result = self.lower_field_access(obj_reg, *field, receiver_ty, expr.ty);
                 debug!(
                     "[Field expression] lower_field_access returned {:?}",
@@ -10902,6 +11052,19 @@ impl<'a> HirToMirContext<'a> {
 
                             for (i, arg) in args.iter().enumerate() {
                                 if let Some(reg) = self.lower_expression(arg) {
+                                    // Materialize anon-backed variables at call boundary (skip receiver)
+                                    // For method calls, args[0] is receiver, args[1..] are params
+                                    // HIR param_types don't include `this`, so param_index = i - 1
+                                    let reg = if i > 0 {
+                                        self.maybe_materialize_for_call(
+                                            arg,
+                                            reg,
+                                            Some(func_id),
+                                            i - 1,
+                                        )
+                                    } else {
+                                        reg
+                                    };
                                     if i == 0 && receiver_is_dynamic && callee_is_user_defined {
                                         // Dynamic receiver: unbox DynamicValue* to get raw object pointer
                                         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
@@ -11093,8 +11256,15 @@ impl<'a> HirToMirContext<'a> {
                                 .unwrap_or(false);
 
                             let mut arg_regs = Vec::new();
-                            for arg in args.iter() {
+                            for (param_idx, arg) in args.iter().enumerate() {
                                 if let Some(reg) = self.lower_expression(arg) {
+                                    // Materialize anon-backed variables at call boundary
+                                    let reg = self.maybe_materialize_for_call(
+                                        arg,
+                                        reg,
+                                        Some(func_id),
+                                        param_idx,
+                                    );
                                     if callee_is_user_defined {
                                         let is_heap_intermediate = matches!(
                                             &arg.kind,
@@ -15529,6 +15699,699 @@ impl<'a> HirToMirContext<'a> {
             .unwrap_or(value)
     }
 
+    /// Try to register a structural subtyping view for an anonymous-typed variable.
+    /// If source is a class or wider anon and target is a narrower anonymous type,
+    /// records an AnonBacking so field access can be redirected at compile time.
+    /// Returns true if a view was registered (caller should skip clone).
+    fn try_register_anon_view(
+        &mut self,
+        symbol: SymbolId,
+        _value: IrId,
+        source_type: TypeId,
+        target_type: TypeId,
+    ) -> bool {
+        let resolved_source = self.resolve_through_aliases(source_type);
+        let resolved_target = self.resolve_through_aliases(target_type);
+
+        // Target must be Anonymous
+        let target_fields = {
+            let type_table = self.type_table.borrow();
+            if let Some(ty_info) = type_table.get(resolved_target) {
+                if let TypeKind::Anonymous { fields } = &ty_info.kind {
+                    let mut named: Vec<(String, TypeId)> = fields
+                        .iter()
+                        .filter_map(|f| {
+                            self.string_interner
+                                .get(f.name)
+                                .map(|s| (s.to_string(), f.type_id))
+                        })
+                        .collect();
+                    named.sort_by(|a, b| a.0.cmp(&b.0));
+                    named
+                } else {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        };
+
+        if target_fields.is_empty() {
+            return false;
+        }
+
+        // Check source kind
+        let source_kind = {
+            let type_table = self.type_table.borrow();
+            type_table.get(resolved_source).map(|t| t.kind.clone())
+        };
+
+        // Extract class symbol if source is a class or generic instance of a class
+        let class_symbol_opt = match &source_kind {
+            Some(TypeKind::Class { symbol_id, .. }) => Some(*symbol_id),
+            Some(TypeKind::GenericInstance { base_type, .. }) => {
+                let type_table = self.type_table.borrow();
+                if let Some(base_info) = type_table.get(*base_type) {
+                    if let TypeKind::Class { symbol_id, .. } = &base_info.kind {
+                        Some(*symbol_id)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+
+        if let Some(class_symbol) = class_symbol_opt {
+            // Source is a class — build name → (gep_index, type) map from field_index_map
+            let mut class_field_by_name: BTreeMap<String, (u32, TypeId)> = BTreeMap::new();
+            for (field_sym, (class_ty, idx)) in &self.field_index_map {
+                // Match by class type_id or by class symbol
+                let matches = *class_ty == resolved_source || {
+                    self.class_type_to_symbol
+                        .get(class_ty)
+                        .map_or(false, |s| *s == class_symbol)
+                };
+                if matches {
+                    if let Some(sym) = self.symbol_table.get_symbol(*field_sym) {
+                        if let Some(name) = self.string_interner.get(sym.name) {
+                            class_field_by_name.insert(name.to_string(), (*idx, sym.type_id));
+                        }
+                    }
+                }
+            }
+
+            // Check all target fields exist in the class
+            let mut field_map = Vec::new();
+            for (tgt_name, tgt_ty) in &target_fields {
+                if let Some((gep_idx, _field_ty)) = class_field_by_name.get(tgt_name) {
+                    field_map.push((tgt_name.clone(), *gep_idx, *tgt_ty));
+                } else {
+                    return false; // Target field not found in class
+                }
+            }
+
+            self.anon_views.insert(
+                symbol,
+                AnonBacking::Class {
+                    class_symbol,
+                    class_type: resolved_source,
+                    field_map,
+                },
+            );
+            return true;
+        }
+
+        // Source is anonymous — check for wider-to-narrower
+        if let Some(TypeKind::Anonymous { fields: src_fields }) = source_kind {
+            let mut src_named: Vec<(String, TypeId)> = src_fields
+                .iter()
+                .filter_map(|f| {
+                    self.string_interner
+                        .get(f.name)
+                        .map(|s| (s.to_string(), f.type_id))
+                })
+                .collect();
+            src_named.sort_by(|a, b| a.0.cmp(&b.0));
+
+            // If same field names, no remapping needed
+            let src_names: Vec<&str> = src_named.iter().map(|(n, _)| n.as_str()).collect();
+            let tgt_names: Vec<&str> = target_fields.iter().map(|(n, _)| n.as_str()).collect();
+            if src_names == tgt_names {
+                return false;
+            }
+
+            // Check all target fields exist in source, build remap
+            let mut field_map = Vec::new();
+            for (tgt_name, tgt_ty) in &target_fields {
+                if let Some(src_idx) = src_named.iter().position(|(n, _)| n == tgt_name) {
+                    field_map.push((tgt_name.clone(), src_idx, *tgt_ty));
+                } else {
+                    return false; // Target field not found in source
+                }
+            }
+
+            self.anon_views.insert(
+                symbol,
+                AnonBacking::WiderAnon {
+                    source_type: resolved_source,
+                    field_map,
+                },
+            );
+            return true;
+        }
+
+        false
+    }
+
+    /// Materialize an anon-backed variable into a real AnonObject handle.
+    /// Called at escape points (function call args, return) where the callee
+    /// expects a real `rayzor_anon_*`-compatible handle.
+    fn materialize_anon_view(
+        &mut self,
+        value: IrId,
+        symbol: SymbolId,
+        target_type: TypeId,
+    ) -> Option<IrId> {
+        let backing = self.anon_views.get(&symbol)?.clone();
+
+        // Get target anonymous fields sorted alphabetically
+        let resolved_target = self.resolve_through_aliases(target_type);
+        let target_fields = {
+            let type_table = self.type_table.borrow();
+            if let Some(ty_info) = type_table.get(resolved_target) {
+                if let TypeKind::Anonymous { fields } = &ty_info.kind {
+                    let mut named: Vec<(String, TypeId)> = fields
+                        .iter()
+                        .filter_map(|f| {
+                            self.string_interner
+                                .get(f.name)
+                                .map(|s| (s.to_string(), f.type_id))
+                        })
+                        .collect();
+                    named.sort_by(|a, b| a.0.cmp(&b.0));
+                    named
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        };
+
+        let total_field_count = target_fields.len();
+
+        // Build shape key and get/create shape ID
+        let shape_key: String = target_fields
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let shape_id = if let Some(&existing_id) = self.anonymous_shapes.get(&shape_key) {
+            existing_id
+        } else {
+            let id = self.next_anon_shape_id;
+            self.next_anon_shape_id += 1;
+            self.anonymous_shapes.insert(shape_key, id);
+            id
+        };
+
+        // Build descriptor string
+        let descriptor = {
+            let mut parts = Vec::with_capacity(target_fields.len());
+            for (name, type_id) in &target_fields {
+                let runtime_tid = self.runtime_type_id(*type_id);
+                parts.push(format!("{}:{}", name, runtime_tid));
+            }
+            parts.join(",")
+        };
+
+        // Emit rayzor_ensure_shape + rayzor_anon_new
+        let ensure_shape_id = self.get_or_register_extern_function(
+            "rayzor_ensure_shape",
+            vec![IrType::I32, IrType::String],
+            IrType::Void,
+        );
+        let anon_new_id = self.get_or_register_extern_function(
+            "rayzor_anon_new",
+            vec![IrType::I32, IrType::I32],
+            IrType::Ptr(Box::new(IrType::U8)),
+        );
+        let anon_set_id = self.get_or_register_extern_function(
+            "rayzor_anon_set_field_by_index",
+            vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32, IrType::I64],
+            IrType::Void,
+        );
+
+        let shape_id_const = self.builder.build_const(IrValue::I32(shape_id as i32))?;
+        let desc_str = self.builder.build_const(IrValue::String(descriptor))?;
+        self.builder.build_call_direct(
+            ensure_shape_id,
+            vec![shape_id_const, desc_str],
+            IrType::Void,
+        );
+
+        let shape_id_val = self.builder.build_const(IrValue::I32(shape_id as i32))?;
+        let field_count_val = self
+            .builder
+            .build_const(IrValue::I32(total_field_count as i32))?;
+        let handle = self.builder.build_call_direct(
+            anon_new_id,
+            vec![shape_id_val, field_count_val],
+            IrType::Ptr(Box::new(IrType::U8)),
+        )?;
+
+        // Copy fields from backing source into the new AnonObject
+        match &backing {
+            AnonBacking::Class { field_map, .. } => {
+                for (sorted_idx, (name, _)) in target_fields.iter().enumerate() {
+                    if let Some((_, gep_idx, field_type_id)) =
+                        field_map.iter().find(|(n, ..)| n == name)
+                    {
+                        let field_ir_ty = self.convert_type(*field_type_id);
+                        let idx_const = self.builder.build_const(IrValue::I64(*gep_idx as i64))?;
+                        let field_ptr =
+                            self.builder
+                                .build_gep(value, vec![idx_const], field_ir_ty.clone())?;
+                        let field_val = self.builder.build_load(field_ptr, field_ir_ty)?;
+                        let val_as_i64 = self.coerce_to_i64(field_val, *field_type_id)?;
+                        let idx_val = self.builder.build_const(IrValue::I32(sorted_idx as i32))?;
+                        self.builder.build_call_direct(
+                            anon_set_id,
+                            vec![handle, idx_val, val_as_i64],
+                            IrType::Void,
+                        );
+                    }
+                }
+            }
+            AnonBacking::WiderAnon { field_map, .. } => {
+                let anon_get_id = self.get_or_register_extern_function(
+                    "rayzor_anon_get_field_by_index",
+                    vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32],
+                    IrType::I64,
+                );
+                for (sorted_idx, (name, _)) in target_fields.iter().enumerate() {
+                    if let Some((_, src_idx, _field_type_id)) =
+                        field_map.iter().find(|(n, ..)| n == name)
+                    {
+                        let src_idx_val =
+                            self.builder.build_const(IrValue::I32(*src_idx as i32))?;
+                        let raw_val = self.builder.build_call_direct(
+                            anon_get_id,
+                            vec![value, src_idx_val],
+                            IrType::I64,
+                        )?;
+                        let idx_val = self.builder.build_const(IrValue::I32(sorted_idx as i32))?;
+                        self.builder.build_call_direct(
+                            anon_set_id,
+                            vec![handle, idx_val, raw_val],
+                            IrType::Void,
+                        );
+                    }
+                }
+            }
+        }
+
+        Some(handle)
+    }
+
+    /// Check if an expression produces a value backed by an anon view, and if so,
+    /// materialize it into a real AnonObject handle. Used at escape points (call args).
+    /// Also handles direct class→anon or wider-anon→anon conversion at call boundaries
+    /// when the callee expects an anonymous-typed parameter.
+    fn maybe_materialize_for_call(
+        &mut self,
+        arg_expr: &HirExpr,
+        arg_reg: IrId,
+        callee_func_id: Option<IrFunctionId>,
+        param_index: usize,
+    ) -> IrId {
+        // Path 1: Variable with existing anon_views entry → materialize from backing
+        if let HirExprKind::Variable { symbol, .. } = &arg_expr.kind {
+            if self.anon_views.contains_key(symbol) {
+                if let Some(materialized) =
+                    self.materialize_anon_view(arg_reg, *symbol, arg_expr.ty)
+                {
+                    return materialized;
+                }
+            }
+        }
+
+        // Path 2: Direct class→anon or wider-anon→anon conversion at call boundary
+        // Check if callee parameter expects anonymous type but arg provides class/wider-anon
+        if let Some(func_id) = callee_func_id {
+            if let Some(param_types) = self.function_param_hir_types.get(&func_id).cloned() {
+                if let Some(&param_type_id) = param_types.get(param_index) {
+                    let resolved_param = self.resolve_through_aliases(param_type_id);
+                    let resolved_arg = self.resolve_through_aliases(arg_expr.ty);
+
+                    let param_is_anon = {
+                        let type_table = self.type_table.borrow();
+                        type_table
+                            .get(resolved_param)
+                            .map(|t| matches!(t.kind, TypeKind::Anonymous { .. }))
+                            .unwrap_or(false)
+                    };
+
+                    if param_is_anon {
+                        let arg_kind = {
+                            let type_table = self.type_table.borrow();
+                            type_table.get(resolved_arg).map(|t| t.kind.clone())
+                        };
+
+                        match arg_kind {
+                            Some(TypeKind::Class { .. }) => {
+                                // Class→anon: build temporary AnonBacking::Class and materialize
+                                if let Some(handle) = self.materialize_class_to_anon(
+                                    arg_reg,
+                                    resolved_arg,
+                                    resolved_param,
+                                ) {
+                                    return handle;
+                                }
+                            }
+                            Some(TypeKind::Anonymous { .. }) => {
+                                // Wider-anon→narrower-anon: materialize with index remapping
+                                if resolved_arg != resolved_param {
+                                    if let Some(handle) = self.materialize_wider_anon_to_anon(
+                                        arg_reg,
+                                        resolved_arg,
+                                        resolved_param,
+                                    ) {
+                                        return handle;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+
+        arg_reg
+    }
+
+    /// Materialize a class-typed value into an AnonObject for a callee that expects anonymous type.
+    fn materialize_class_to_anon(
+        &mut self,
+        class_ptr: IrId,
+        class_type: TypeId,
+        target_anon_type: TypeId,
+    ) -> Option<IrId> {
+        // Get class symbol to look up fields
+        let class_symbol = {
+            let type_table = self.type_table.borrow();
+            if let Some(ty_info) = type_table.get(class_type) {
+                match &ty_info.kind {
+                    TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                    TypeKind::GenericInstance { base_type, .. } => {
+                        if let Some(base_info) = type_table.get(*base_type) {
+                            if let TypeKind::Class { symbol_id, .. } = &base_info.kind {
+                                Some(*symbol_id)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        }?;
+
+        // Get target anonymous fields
+        let target_fields = {
+            let type_table = self.type_table.borrow();
+            if let Some(ty_info) = type_table.get(target_anon_type) {
+                if let TypeKind::Anonymous { fields } = &ty_info.kind {
+                    let mut named: Vec<(String, TypeId)> = fields
+                        .iter()
+                        .filter_map(|f| {
+                            self.string_interner
+                                .get(f.name)
+                                .map(|s| (s.to_string(), f.type_id))
+                        })
+                        .collect();
+                    named.sort_by(|a, b| a.0.cmp(&b.0));
+                    named
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        };
+
+        // Build field_map from field_index_map (same approach as try_register_anon_view)
+        let mut class_field_by_name: BTreeMap<String, (u32, TypeId)> = BTreeMap::new();
+        for (field_sym, (fclass_ty, idx)) in &self.field_index_map {
+            let matches = *fclass_ty == class_type || {
+                self.class_type_to_symbol
+                    .get(fclass_ty)
+                    .map_or(false, |s| *s == class_symbol)
+            };
+            if matches {
+                if let Some(sym) = self.symbol_table.get_symbol(*field_sym) {
+                    if let Some(name) = self.string_interner.get(sym.name) {
+                        class_field_by_name.insert(name.to_string(), (*idx, sym.type_id));
+                    }
+                }
+            }
+        }
+
+        let mut field_map: Vec<(String, u32, TypeId)> = Vec::new();
+        for (name, target_field_ty) in &target_fields {
+            if let Some((gep_idx, _field_ty)) = class_field_by_name.get(name) {
+                field_map.push((name.clone(), *gep_idx, *target_field_ty));
+            } else {
+                return None; // Target field not found in class
+            }
+        }
+
+        // Now build a temporary AnonBacking::Class and call materialize_anon_view logic
+        // We'll inline the materialization here to avoid needing a temporary symbol
+        let total_field_count = target_fields.len();
+
+        let shape_key: String = target_fields
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let shape_id = if let Some(&existing_id) = self.anonymous_shapes.get(&shape_key) {
+            existing_id
+        } else {
+            let id = self.next_anon_shape_id;
+            self.next_anon_shape_id += 1;
+            self.anonymous_shapes.insert(shape_key, id);
+            id
+        };
+
+        let descriptor = {
+            let mut parts = Vec::with_capacity(target_fields.len());
+            for (name, type_id) in &target_fields {
+                let runtime_tid = self.runtime_type_id(*type_id);
+                parts.push(format!("{}:{}", name, runtime_tid));
+            }
+            parts.join(",")
+        };
+
+        let ensure_shape_id = self.get_or_register_extern_function(
+            "rayzor_ensure_shape",
+            vec![IrType::I32, IrType::String],
+            IrType::Void,
+        );
+        let anon_new_id = self.get_or_register_extern_function(
+            "rayzor_anon_new",
+            vec![IrType::I32, IrType::I32],
+            IrType::Ptr(Box::new(IrType::U8)),
+        );
+        let anon_set_id = self.get_or_register_extern_function(
+            "rayzor_anon_set_field_by_index",
+            vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32, IrType::I64],
+            IrType::Void,
+        );
+
+        let shape_id_const = self.builder.build_const(IrValue::I32(shape_id as i32))?;
+        let desc_str = self.builder.build_const(IrValue::String(descriptor))?;
+        self.builder.build_call_direct(
+            ensure_shape_id,
+            vec![shape_id_const, desc_str],
+            IrType::Void,
+        );
+
+        let shape_id_val = self.builder.build_const(IrValue::I32(shape_id as i32))?;
+        let field_count_val = self
+            .builder
+            .build_const(IrValue::I32(total_field_count as i32))?;
+        let handle = self.builder.build_call_direct(
+            anon_new_id,
+            vec![shape_id_val, field_count_val],
+            IrType::Ptr(Box::new(IrType::U8)),
+        )?;
+
+        // Copy fields from class via GEP+Load
+        for (sorted_idx, (name, _)) in target_fields.iter().enumerate() {
+            if let Some((_, gep_idx, field_type_id)) = field_map.iter().find(|(n, ..)| n == name) {
+                let field_ir_ty = self.convert_type(*field_type_id);
+                let idx_const = self.builder.build_const(IrValue::I64(*gep_idx as i64))?;
+                let field_ptr =
+                    self.builder
+                        .build_gep(class_ptr, vec![idx_const], field_ir_ty.clone())?;
+                let field_val = self.builder.build_load(field_ptr, field_ir_ty)?;
+                let val_as_i64 = self.coerce_to_i64(field_val, *field_type_id)?;
+                let idx_val = self.builder.build_const(IrValue::I32(sorted_idx as i32))?;
+                self.builder.build_call_direct(
+                    anon_set_id,
+                    vec![handle, idx_val, val_as_i64],
+                    IrType::Void,
+                );
+            }
+        }
+
+        Some(handle)
+    }
+
+    /// Materialize a wider anonymous object into a narrower anonymous object.
+    fn materialize_wider_anon_to_anon(
+        &mut self,
+        source_handle: IrId,
+        source_type: TypeId,
+        target_anon_type: TypeId,
+    ) -> Option<IrId> {
+        // Get source fields sorted alphabetically
+        let source_fields = {
+            let type_table = self.type_table.borrow();
+            if let Some(ty_info) = type_table.get(source_type) {
+                if let TypeKind::Anonymous { fields } = &ty_info.kind {
+                    let mut named: Vec<(String, TypeId)> = fields
+                        .iter()
+                        .filter_map(|f| {
+                            self.string_interner
+                                .get(f.name)
+                                .map(|s| (s.to_string(), f.type_id))
+                        })
+                        .collect();
+                    named.sort_by(|a, b| a.0.cmp(&b.0));
+                    named
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        };
+
+        // Get target fields sorted alphabetically
+        let target_fields = {
+            let type_table = self.type_table.borrow();
+            if let Some(ty_info) = type_table.get(target_anon_type) {
+                if let TypeKind::Anonymous { fields } = &ty_info.kind {
+                    let mut named: Vec<(String, TypeId)> = fields
+                        .iter()
+                        .filter_map(|f| {
+                            self.string_interner
+                                .get(f.name)
+                                .map(|s| (s.to_string(), f.type_id))
+                        })
+                        .collect();
+                    named.sort_by(|a, b| a.0.cmp(&b.0));
+                    named
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        };
+
+        // Build source index map: field_name → sorted index in source
+        let source_index_map: std::collections::HashMap<&str, usize> = source_fields
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| (name.as_str(), i))
+            .collect();
+
+        // Verify all target fields exist in source
+        for (name, _) in &target_fields {
+            if !source_index_map.contains_key(name.as_str()) {
+                return None;
+            }
+        }
+
+        let total_field_count = target_fields.len();
+
+        let shape_key: String = target_fields
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(",");
+
+        let shape_id = if let Some(&existing_id) = self.anonymous_shapes.get(&shape_key) {
+            existing_id
+        } else {
+            let id = self.next_anon_shape_id;
+            self.next_anon_shape_id += 1;
+            self.anonymous_shapes.insert(shape_key, id);
+            id
+        };
+
+        let descriptor = {
+            let mut parts = Vec::with_capacity(target_fields.len());
+            for (name, type_id) in &target_fields {
+                let runtime_tid = self.runtime_type_id(*type_id);
+                parts.push(format!("{}:{}", name, runtime_tid));
+            }
+            parts.join(",")
+        };
+
+        let ensure_shape_id = self.get_or_register_extern_function(
+            "rayzor_ensure_shape",
+            vec![IrType::I32, IrType::String],
+            IrType::Void,
+        );
+        let anon_new_id = self.get_or_register_extern_function(
+            "rayzor_anon_new",
+            vec![IrType::I32, IrType::I32],
+            IrType::Ptr(Box::new(IrType::U8)),
+        );
+        let anon_set_id = self.get_or_register_extern_function(
+            "rayzor_anon_set_field_by_index",
+            vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32, IrType::I64],
+            IrType::Void,
+        );
+        let anon_get_id = self.get_or_register_extern_function(
+            "rayzor_anon_get_field_by_index",
+            vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32],
+            IrType::I64,
+        );
+
+        let shape_id_const = self.builder.build_const(IrValue::I32(shape_id as i32))?;
+        let desc_str = self.builder.build_const(IrValue::String(descriptor))?;
+        self.builder.build_call_direct(
+            ensure_shape_id,
+            vec![shape_id_const, desc_str],
+            IrType::Void,
+        );
+
+        let shape_id_val = self.builder.build_const(IrValue::I32(shape_id as i32))?;
+        let field_count_val = self
+            .builder
+            .build_const(IrValue::I32(total_field_count as i32))?;
+        let handle = self.builder.build_call_direct(
+            anon_new_id,
+            vec![shape_id_val, field_count_val],
+            IrType::Ptr(Box::new(IrType::U8)),
+        )?;
+
+        // Copy fields from source anon with remapped indices
+        for (sorted_idx, (name, _)) in target_fields.iter().enumerate() {
+            if let Some(&src_idx) = source_index_map.get(name.as_str()) {
+                let src_idx_val = self.builder.build_const(IrValue::I32(src_idx as i32))?;
+                let raw_val = self.builder.build_call_direct(
+                    anon_get_id,
+                    vec![source_handle, src_idx_val],
+                    IrType::I64,
+                )?;
+                let idx_val = self.builder.build_const(IrValue::I32(sorted_idx as i32))?;
+                self.builder.build_call_direct(
+                    anon_set_id,
+                    vec![handle, idx_val, raw_val],
+                    IrType::Void,
+                );
+            }
+        }
+
+        Some(handle)
+    }
+
     /// Insert automatic unboxing if needed when reading from Dynamic
     /// Returns the (potentially unboxed) value
     fn maybe_unbox_value(
@@ -16288,6 +17151,74 @@ impl<'a> HirToMirContext<'a> {
                             crate::tast::PropertyAccessor::Default
                             | crate::tast::PropertyAccessor::Dynamic => {
                                 // Fall through to direct field access
+                            }
+                        }
+                    }
+
+                    // Structural subtyping: if object is a variable with an anon view,
+                    // redirect field store to the backing representation
+                    if let HirExprKind::Variable {
+                        symbol: obj_sym, ..
+                    } = &object.kind
+                    {
+                        if let Some(backing) = self.anon_views.get(obj_sym).cloned() {
+                            let field_name = self
+                                .symbol_table
+                                .get_symbol(*field)
+                                .and_then(|s| self.string_interner.get(s.name))
+                                .map(|s| s.to_string());
+
+                            if let Some(field_name) = field_name {
+                                match &backing {
+                                    AnonBacking::Class { field_map, .. } => {
+                                        if let Some((_, gep_idx, field_type_id)) =
+                                            field_map.iter().find(|(n, ..)| *n == field_name)
+                                        {
+                                            let field_ir_ty = self.convert_type(*field_type_id);
+                                            let idx_const = self
+                                                .builder
+                                                .build_const(IrValue::I64(*gep_idx as i64));
+                                            if let Some(idx_c) = idx_const {
+                                                let field_ptr = self.builder.build_gep(
+                                                    obj_reg,
+                                                    vec![idx_c],
+                                                    field_ir_ty.clone(),
+                                                );
+                                                if let Some(fp) = field_ptr {
+                                                    self.builder.build_store(fp, value);
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                    }
+                                    AnonBacking::WiderAnon { field_map, .. } => {
+                                        if let Some((_, src_idx, field_type_id)) =
+                                            field_map.iter().find(|(n, ..)| *n == field_name)
+                                        {
+                                            let anon_set_id = self.get_or_register_extern_function(
+                                                "rayzor_anon_set_field_by_index",
+                                                vec![
+                                                    IrType::Ptr(Box::new(IrType::U8)),
+                                                    IrType::I32,
+                                                    IrType::I64,
+                                                ],
+                                                IrType::Void,
+                                            );
+                                            let coerced = self.coerce_to_i64(value, *field_type_id);
+                                            let idx_val = self
+                                                .builder
+                                                .build_const(IrValue::I32(*src_idx as i32));
+                                            if let (Some(cv), Some(iv)) = (coerced, idx_val) {
+                                                self.builder.build_call_direct(
+                                                    anon_set_id,
+                                                    vec![obj_reg, iv, cv],
+                                                    IrType::Void,
+                                                );
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -20684,6 +21615,7 @@ impl<'a> HirToMirContext<'a> {
             current_drop_points: self.current_drop_points.clone(),
             current_stmt_index: self.current_stmt_index,
             boxed_dynamic_symbols: self.boxed_dynamic_symbols.clone(),
+            anon_views: self.anon_views.clone(),
         }
     }
 
@@ -20700,6 +21632,7 @@ impl<'a> HirToMirContext<'a> {
         self.current_drop_points = state.current_drop_points;
         self.current_stmt_index = state.current_stmt_index;
         self.boxed_dynamic_symbols = state.boxed_dynamic_symbols;
+        self.anon_views = state.anon_views;
     }
 
     /// PASS 1: Create lambda skeleton with placeholder signature
