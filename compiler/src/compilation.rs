@@ -2778,7 +2778,13 @@ impl CompilationUnit {
 
         // Stage 1.5: Macro expansion (if enabled)
         let ast_file = if self.config.pipeline_config.enable_macro_expansion {
-            let expansion = crate::macro_system::expand_macros(ast_file);
+            // Build class registry from all available sources for macro interpreter
+            let mut class_registry = crate::macro_system::ClassRegistry::new();
+            class_registry.register_files(&self.stdlib_files);
+            class_registry.register_files(&self.import_hx_files);
+            class_registry.register_file(&ast_file);
+            let expansion =
+                crate::macro_system::expand_macros_with_class_registry(ast_file, class_registry);
             // Log macro diagnostics as warnings (non-fatal in multi-file context)
             for diag in &expansion.diagnostics {
                 if matches!(diag.severity, crate::macro_system::MacroSeverity::Error) {
