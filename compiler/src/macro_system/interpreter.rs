@@ -10,6 +10,7 @@
 //! - Built-in functions (trace, Std.string, etc.)
 
 use super::ast_bridge::{self, span_to_location};
+use super::class_registry::ClassRegistry;
 use super::environment::Environment;
 use super::errors::MacroError;
 use super::registry::MacroRegistry;
@@ -17,6 +18,7 @@ use super::reification::ReificationEngine;
 use super::value::{MacroFunction, MacroParam, MacroValue};
 use crate::tast::SourceLocation;
 use parser::{AssignOp, BinaryOp, Expr, ExprKind, Span, UnaryOp};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Maximum call depth for macro function calls
@@ -34,6 +36,11 @@ pub struct MacroInterpreter {
     max_call_depth: usize,
     /// Accumulated trace output
     trace_output: Vec<String>,
+    /// Import map: short class name → fully qualified name
+    /// e.g., "Context" → "haxe.macro.Context"
+    import_map: HashMap<String, String>,
+    /// Class registry for fallback dispatch to any imported/user class
+    class_registry: Option<Arc<ClassRegistry>>,
 }
 
 impl MacroInterpreter {
@@ -44,6 +51,38 @@ impl MacroInterpreter {
             call_depth: 0,
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
             trace_output: Vec::new(),
+            import_map: HashMap::new(),
+            class_registry: None,
+        }
+    }
+
+    /// Create an interpreter with import mappings from the source file.
+    pub fn with_imports(registry: MacroRegistry, import_map: HashMap<String, String>) -> Self {
+        Self {
+            env: Environment::new(),
+            registry,
+            call_depth: 0,
+            max_call_depth: DEFAULT_MAX_CALL_DEPTH,
+            trace_output: Vec::new(),
+            import_map,
+            class_registry: None,
+        }
+    }
+
+    /// Create an interpreter with import mappings and a class registry for extended dispatch.
+    pub fn with_class_registry(
+        registry: MacroRegistry,
+        import_map: HashMap<String, String>,
+        class_registry: Arc<ClassRegistry>,
+    ) -> Self {
+        Self {
+            env: Environment::new(),
+            registry,
+            call_depth: 0,
+            max_call_depth: DEFAULT_MAX_CALL_DEPTH,
+            trace_output: Vec::new(),
+            import_map,
+            class_registry: Some(class_registry),
         }
     }
 
@@ -481,14 +520,50 @@ impl MacroInterpreter {
                     arg_vals.push(self.eval_expr(arg)?);
                 }
 
+                // Resolve through imports (e.g., "Process" → "sys.io.Process")
+                let resolved_name = self.resolve_class_name(&name);
+
                 // Special handling for known types
-                match name.as_str() {
+                match resolved_name {
                     "Map" | "haxe.ds.Map" => Ok(MacroValue::Object(Arc::new(
                         std::collections::HashMap::new(),
                     ))),
                     "Array" => Ok(MacroValue::Array(Arc::new(Vec::new()))),
+                    "sys.io.Process" => {
+                        self.construct_process(arg_vals, location)
+                    }
+                    "sys.io.File" => {
+                        self.construct_file(arg_vals, location)
+                    }
                     _ => {
-                        // Generic object construction
+                        // Check ClassRegistry for user-defined constructor
+                        // Extract data to avoid borrow conflict with &mut self
+                        let registry_hit = self.class_registry.as_ref().and_then(|cr| {
+                            cr.find_class(resolved_name).map(|ci| {
+                                (
+                                    ci.qualified_name.clone(),
+                                    ci.instance_vars
+                                        .iter()
+                                        .map(|v| (v.name.clone(), v.init_expr.clone()))
+                                        .collect::<Vec<_>>(),
+                                    ci.constructor.as_ref().map(|c| {
+                                        (c.body.clone(), c.params.clone())
+                                    }),
+                                )
+                            })
+                        });
+
+                        if let Some((qname, instance_vars, ctor)) = registry_hit {
+                            return self.construct_from_registry_data(
+                                &qname,
+                                &instance_vars,
+                                ctor.as_ref(),
+                                arg_vals,
+                                location,
+                            );
+                        }
+
+                        // Generic object construction (no class found)
                         let mut obj = std::collections::HashMap::new();
                         obj.insert(
                             "__type__".to_string(),
@@ -699,6 +774,10 @@ impl MacroInterpreter {
                 self.env.set(name, value);
                 Ok(())
             }
+            ExprKind::This => {
+                self.env.set("this", value);
+                Ok(())
+            }
             _ => Ok(()), // nested assignments on temporaries are discarded
         }
     }
@@ -738,10 +817,20 @@ impl MacroInterpreter {
             ExprKind::Field {
                 expr: base, field, ..
             } => {
-                // Check for well-known static class calls before evaluating base
+                // Check for static class calls: Class.method(...) or qualified.path.Class.method(...)
                 if let ExprKind::Ident(class_name) = &base.kind {
+                    // Simple: Context.parse(...)
                     if let Some(result) =
                         self.try_static_call(class_name, field, &arg_vals, location)?
+                    {
+                        return Ok(result);
+                    }
+                } else if let Some((qualified_class, method_name)) =
+                    extract_qualified_call(base, field)
+                {
+                    // Qualified: haxe.macro.Context.parse(...)
+                    if let Some(result) =
+                        self.try_static_call(&qualified_class, method_name, &arg_vals, location)?
                     {
                         return Ok(result);
                     }
@@ -880,6 +969,17 @@ impl MacroInterpreter {
         }
     }
 
+    /// Resolve a class name through imports.
+    /// Returns the fully qualified name if the bare name was imported,
+    /// otherwise returns the original name.
+    fn resolve_class_name<'a>(&'a self, class_name: &'a str) -> &'a str {
+        if let Some(qualified) = self.import_map.get(class_name) {
+            qualified.as_str()
+        } else {
+            class_name
+        }
+    }
+
     /// Try to dispatch a static class method call (e.g., Context.parse, Std.string)
     fn try_static_call(
         &mut self,
@@ -888,8 +988,10 @@ impl MacroInterpreter {
         args: &[MacroValue],
         location: SourceLocation,
     ) -> Result<Option<MacroValue>, MacroError> {
-        match class_name {
-            "Context" | "haxe.macro.Context" => {
+        // Resolve bare class names through imports
+        let resolved = self.resolve_class_name(class_name);
+        match resolved {
+            "haxe.macro.Context" => {
                 let mut ctx = super::context_api::MacroContext::new();
                 let result = ctx.dispatch(method, args, location)?;
                 Ok(Some(result))
@@ -964,7 +1066,104 @@ impl MacroInterpreter {
                 }
                 _ => Ok(None),
             },
-            _ => Ok(None),
+            "sys.io.File" => match method {
+                "getContent" => {
+                    let path = args
+                        .first()
+                        .map(|v| value_to_string(v))
+                        .unwrap_or_default();
+                    match std::fs::read_to_string(&path) {
+                        Ok(content) => Ok(Some(MacroValue::String(Arc::from(content.as_str())))),
+                        Err(e) => Err(MacroError::RuntimeError {
+                            message: format!("File.getContent('{}') failed: {}", path, e),
+                            location,
+                        }),
+                    }
+                }
+                "saveContent" => {
+                    let path = args
+                        .first()
+                        .map(|v| value_to_string(v))
+                        .unwrap_or_default();
+                    let content = args
+                        .get(1)
+                        .map(|v| value_to_string(v))
+                        .unwrap_or_default();
+                    std::fs::write(&path, &content).map_err(|e| MacroError::RuntimeError {
+                        message: format!("File.saveContent('{}') failed: {}", path, e),
+                        location,
+                    })?;
+                    Ok(Some(MacroValue::Null))
+                }
+                _ => Ok(None),
+            },
+            "Sys" | "sys.Sys" => match method {
+                "getCwd" => {
+                    let cwd = std::env::current_dir()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    Ok(Some(MacroValue::String(Arc::from(cwd.as_str()))))
+                }
+                "getEnv" => {
+                    let key = args
+                        .first()
+                        .map(|v| value_to_string(v))
+                        .unwrap_or_default();
+                    let val = std::env::var(&key).unwrap_or_default();
+                    Ok(Some(MacroValue::String(Arc::from(val.as_str()))))
+                }
+                "systemName" => {
+                    let name = if cfg!(target_os = "macos") {
+                        "Mac"
+                    } else if cfg!(target_os = "linux") {
+                        "Linux"
+                    } else if cfg!(target_os = "windows") {
+                        "Windows"
+                    } else {
+                        "Unknown"
+                    };
+                    Ok(Some(MacroValue::String(Arc::from(name))))
+                }
+                _ => Ok(None),
+            },
+            "StringTools" | "haxe.StringTools" => match method {
+                "trim" => {
+                    let s = args.first().and_then(|v| v.as_string()).unwrap_or("");
+                    Ok(Some(MacroValue::String(Arc::from(s.trim()))))
+                }
+                "replace" => {
+                    let s = args.first().and_then(|v| v.as_string()).unwrap_or("").to_string();
+                    let from = args.get(1).and_then(|v| v.as_string()).unwrap_or("");
+                    let to = args.get(2).and_then(|v| v.as_string()).unwrap_or("");
+                    Ok(Some(MacroValue::String(Arc::from(
+                        s.replace(from, to).as_str(),
+                    ))))
+                }
+                _ => Ok(None),
+            },
+            _ => {
+                // Fallback: check ClassRegistry for user/stdlib class
+                if let Some(ref cr) = self.class_registry {
+                    if let Some(method_info) = cr.find_static_method(resolved, method) {
+                        let body = method_info.body.clone();
+                        let params = method_info.params.clone();
+                        self.env.push_scope();
+                        for (i, param) in params.iter().enumerate() {
+                            let val = args.get(i).cloned().unwrap_or(MacroValue::Null);
+                            self.env.define(&param.name, val);
+                        }
+                        let result = self.eval_expr(&body);
+                        self.env.pop_scope();
+                        return match result {
+                            Ok(val) => Ok(Some(val)),
+                            Err(MacroError::Return { value: Some(v) }) => Ok(Some(*v)),
+                            Err(MacroError::Return { value: None }) => Ok(Some(MacroValue::Null)),
+                            Err(e) => Err(e),
+                        };
+                    }
+                }
+                Ok(None)
+            }
         }
     }
 
@@ -1164,16 +1363,238 @@ impl MacroInterpreter {
 
     /// Built-in object methods
     fn object_method(
-        &self,
-        _obj: &std::collections::HashMap<String, MacroValue>,
+        &mut self,
+        obj: &std::collections::HashMap<String, MacroValue>,
         method: &str,
         _args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
-        Err(MacroError::UnsupportedOperation {
-            operation: format!("Object.{}()", method),
-            location,
-        })
+        // Check __type__ for type-specific method dispatch
+        let type_name = obj
+            .get("__type__")
+            .and_then(|v| v.as_string().map(|s| s.to_string()));
+
+        match type_name.as_deref() {
+            Some("sys.io.ProcessOutput" | "sys.io.ProcessStdout") => match method {
+                "readAll" | "readLine" => {
+                    // Return the stored data as a string (Bytes → String via toString)
+                    Ok(obj
+                        .get("__data__")
+                        .cloned()
+                        .unwrap_or(MacroValue::String(Arc::from(""))))
+                }
+                "toString" => Ok(obj
+                    .get("__data__")
+                    .cloned()
+                    .unwrap_or(MacroValue::String(Arc::from("")))),
+                _ => Err(MacroError::UnsupportedOperation {
+                    operation: format!("ProcessOutput.{}()", method),
+                    location,
+                }),
+            },
+            Some("sys.io.Process") => match method {
+                "close" | "kill" => Ok(MacroValue::Null),
+                "exitCode" => Ok(obj
+                    .get("__exitCode__")
+                    .cloned()
+                    .unwrap_or(MacroValue::Int(0))),
+                _ => Err(MacroError::UnsupportedOperation {
+                    operation: format!("Process.{}()", method),
+                    location,
+                }),
+            },
+            _ => {
+                // Fallback: check ClassRegistry for instance methods
+                if let Some(ref tn) = type_name {
+                    if let Some(ref cr) = self.class_registry {
+                        if let Some(method_info) = cr.find_instance_method(tn, method) {
+                            let body = method_info.body.clone();
+                            let params = method_info.params.clone();
+                            self.env.push_scope();
+                            self.env.define(
+                                "this",
+                                MacroValue::Object(Arc::new(obj.clone())),
+                            );
+                            for (i, param) in params.iter().enumerate() {
+                                let val =
+                                    _args.get(i).cloned().unwrap_or(MacroValue::Null);
+                                self.env.define(&param.name, val);
+                            }
+                            let result = self.eval_expr(&body);
+                            self.env.pop_scope();
+                            return match result {
+                                Ok(val) => Ok(val),
+                                Err(MacroError::Return { value: Some(v) }) => Ok(*v),
+                                Err(MacroError::Return { value: None }) => {
+                                    Ok(MacroValue::Null)
+                                }
+                                Err(e) => Err(e),
+                            };
+                        }
+                    }
+                }
+                Err(MacroError::UnsupportedOperation {
+                    operation: format!("Object.{}()", method),
+                    location,
+                })
+            }
+        }
+    }
+
+    /// Construct a sys.io.Process — runs a real subprocess at compile time
+    fn construct_process(
+        &self,
+        args: Vec<MacroValue>,
+        location: SourceLocation,
+    ) -> Result<MacroValue, MacroError> {
+        let cmd = args
+            .first()
+            .map(|v| value_to_string(v))
+            .ok_or_else(|| MacroError::TypeError {
+                message: "sys.io.Process requires a command string".to_string(),
+                location,
+            })?;
+
+        let proc_args: Vec<String> = if let Some(arr_val) = args.get(1) {
+            // Unwrap Expr if needed
+            let unwrapped = ast_bridge::unwrap_expr_value(arr_val);
+            match unwrapped {
+                MacroValue::Array(arr) => arr
+                    .iter()
+                    .map(|v| value_to_string(v))
+                    .collect(),
+                _ => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Execute the process
+        let output = std::process::Command::new(&cmd)
+            .args(&proc_args)
+            .output()
+            .map_err(|e| MacroError::RuntimeError {
+                message: format!("failed to execute '{}': {}", cmd, e),
+                location,
+            })?;
+
+        let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_code = output.status.code().unwrap_or(-1) as i64;
+
+        // Build stdout pseudo-object (supports .readAll() / .toString())
+        let mut stdout_obj = std::collections::HashMap::new();
+        stdout_obj.insert(
+            "__type__".to_string(),
+            MacroValue::String(Arc::from("sys.io.ProcessStdout")),
+        );
+        stdout_obj.insert(
+            "__data__".to_string(),
+            MacroValue::String(Arc::from(stdout_str.as_str())),
+        );
+
+        // Build stderr pseudo-object
+        let mut stderr_obj = std::collections::HashMap::new();
+        stderr_obj.insert(
+            "__type__".to_string(),
+            MacroValue::String(Arc::from("sys.io.ProcessOutput")),
+        );
+        stderr_obj.insert(
+            "__data__".to_string(),
+            MacroValue::String(Arc::from(stderr_str.as_str())),
+        );
+
+        // Build Process object
+        let mut proc_obj = std::collections::HashMap::new();
+        proc_obj.insert(
+            "__type__".to_string(),
+            MacroValue::String(Arc::from("sys.io.Process")),
+        );
+        proc_obj.insert("stdout".to_string(), MacroValue::Object(Arc::new(stdout_obj)));
+        proc_obj.insert("stderr".to_string(), MacroValue::Object(Arc::new(stderr_obj)));
+        proc_obj.insert("__exitCode__".to_string(), MacroValue::Int(exit_code));
+
+        Ok(MacroValue::Object(Arc::new(proc_obj)))
+    }
+
+    /// Construct a sys.io.File — compile-time file I/O
+    fn construct_file(
+        &self,
+        _args: Vec<MacroValue>,
+        _location: SourceLocation,
+    ) -> Result<MacroValue, MacroError> {
+        // File construction is typically done via static methods (File.getContent)
+        let mut obj = std::collections::HashMap::new();
+        obj.insert(
+            "__type__".to_string(),
+            MacroValue::String(Arc::from("sys.io.File")),
+        );
+        Ok(MacroValue::Object(Arc::new(obj)))
+    }
+
+    /// Construct an object from pre-extracted ClassRegistry data.
+    /// Takes cloned data to avoid borrow conflicts with &mut self.
+    fn construct_from_registry_data(
+        &mut self,
+        qualified_name: &str,
+        instance_vars: &[(String, Option<Arc<Expr>>)],
+        constructor: Option<&(Arc<Expr>, Vec<parser::FunctionParam>)>,
+        args: Vec<MacroValue>,
+        _location: SourceLocation,
+    ) -> Result<MacroValue, MacroError> {
+        // Create the object with __type__ and instance var defaults
+        let mut obj = std::collections::HashMap::new();
+        obj.insert(
+            "__type__".to_string(),
+            MacroValue::String(Arc::from(qualified_name)),
+        );
+
+        // Initialize instance vars with their default init expressions
+        for (name, init_expr) in instance_vars {
+            let val = if let Some(ref init) = init_expr {
+                self.eval_expr(init).unwrap_or(MacroValue::Null)
+            } else {
+                MacroValue::Null
+            };
+            obj.insert(name.clone(), val);
+        }
+
+        // If there's a constructor, run it with `this` bound to the object
+        if let Some((ctor_body, ctor_params)) = constructor {
+            let ctor_body = ctor_body.clone();
+            let ctor_params = ctor_params.clone();
+
+            self.env.push_scope();
+            self.env
+                .define("this", MacroValue::Object(Arc::new(obj.clone())));
+
+            // Bind constructor params
+            for (i, param) in ctor_params.iter().enumerate() {
+                let val = args.get(i).cloned().unwrap_or(MacroValue::Null);
+                self.env.define(&param.name, val);
+            }
+
+            // Execute constructor body
+            let result = self.eval_expr(&ctor_body);
+            match result {
+                Ok(_) | Err(MacroError::Return { .. }) => {}
+                Err(e) => {
+                    self.env.pop_scope();
+                    return Err(e);
+                }
+            }
+
+            // Extract the (potentially mutated) `this` from the environment
+            let final_obj = self
+                .env
+                .get("this")
+                .cloned()
+                .unwrap_or(MacroValue::Object(Arc::new(obj)));
+            self.env.pop_scope();
+            Ok(final_obj)
+        } else {
+            Ok(MacroValue::Object(Arc::new(obj)))
+        }
     }
 
     /// Access a field on a value
@@ -1542,6 +1963,90 @@ fn get_free_vars_for_closure(
     let mut free = std::collections::HashSet::new();
     collect_free_vars(body, &mut bound, &mut free);
     free
+}
+
+/// Extract a string from a MacroValue, unwrapping Expr wrappers.
+fn value_to_string(val: &MacroValue) -> String {
+    match val {
+        MacroValue::String(s) => s.to_string(),
+        MacroValue::Int(n) => n.to_string(),
+        MacroValue::Float(f) => f.to_string(),
+        MacroValue::Expr(_) => {
+            let unwrapped = ast_bridge::unwrap_expr_value(val);
+            if matches!(unwrapped, MacroValue::Expr(_)) {
+                val.to_display_string()
+            } else {
+                value_to_string(&unwrapped)
+            }
+        }
+        _ => val.to_display_string(),
+    }
+}
+
+/// Extract a qualified class name and method from a nested Field chain.
+///
+/// For `haxe.macro.Context.parse(...)`, the callee is:
+///   Field { expr: Field { expr: Field { Ident("haxe"), "macro" }, "Context" }, "parse" }
+///
+/// This function is called with `base = Field{..., "Context"}` and `method = "parse"`.
+/// It walks the nested Field chain to build "haxe.macro.Context" and returns it
+/// along with the method name.
+fn extract_qualified_call<'a>(base: &'a Expr, method: &'a str) -> Option<(String, &'a str)> {
+    // base should be a Field chain ending in the class name
+    // Walk the chain to collect path segments
+    let mut segments = Vec::new();
+    let mut current = base;
+    loop {
+        match &current.kind {
+            ExprKind::Field {
+                expr: inner, field, ..
+            } => {
+                segments.push(field.as_str());
+                current = inner;
+            }
+            ExprKind::Ident(name) => {
+                segments.push(name.as_str());
+                break;
+            }
+            _ => return None,
+        }
+    }
+    // segments are in reverse order: ["Context", "macro", "haxe"]
+    segments.reverse();
+    let qualified = segments.join(".");
+    Some((qualified, method))
+}
+
+/// Build an import map from a parsed file's import declarations.
+///
+/// Maps short class names to their fully qualified paths:
+/// - `import haxe.macro.Context;` → "Context" → "haxe.macro.Context"
+/// - `import haxe.macro.Context as Ctx;` → "Ctx" → "haxe.macro.Context"
+/// - `import haxe.macro.*;` → not resolved here (wildcard)
+pub fn build_import_map(imports: &[parser::Import]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for import in imports {
+        match &import.mode {
+            parser::ImportMode::Normal => {
+                // import haxe.macro.Context → short name is last segment
+                if let Some(last) = import.path.last() {
+                    let qualified = import.path.join(".");
+                    map.insert(last.clone(), qualified);
+                }
+            }
+            parser::ImportMode::Alias(alias) => {
+                // import haxe.macro.Context as Ctx → alias maps to full path
+                let qualified = import.path.join(".");
+                map.insert(alias.clone(), qualified);
+            }
+            parser::ImportMode::Field(_)
+            | parser::ImportMode::Wildcard
+            | parser::ImportMode::WildcardWithExclusions(_) => {
+                // Wildcard and field imports not tracked for class resolution
+            }
+        }
+    }
+    map
 }
 
 #[cfg(test)]

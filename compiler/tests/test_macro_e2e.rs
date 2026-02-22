@@ -136,6 +136,7 @@ class Main {
 #[test]
 fn test_reification_identifier_splice() {
     let source = r#"
+import haxe.macro.Context;
 class MacroTools {
     macro static function callByName(name:haxe.macro.Expr, arg:haxe.macro.Expr):haxe.macro.Expr {
         return macro $i{name}($e{arg});
@@ -163,6 +164,7 @@ class Main {
 #[test]
 fn test_context_parse_code_generation() {
     let source = r#"
+import haxe.macro.Context;
 class MacroTools {
     macro static function genExpr(code:haxe.macro.Expr):haxe.macro.Expr {
         var parsed = Context.parse(code, Context.currentPos());
@@ -189,6 +191,7 @@ class Main {
 #[test]
 fn test_context_parse_dynamic_code() {
     let source = r#"
+import haxe.macro.Context;
 class MacroTools {
     macro static function makeAdder(a:haxe.macro.Expr, b:haxe.macro.Expr):haxe.macro.Expr {
         var code = a + " + " + b;
@@ -398,6 +401,7 @@ class Main {
 #[test]
 fn test_macro_memoization() {
     let source = r#"
+import haxe.macro.Context;
 class MacroTools {
     macro static function compute(x:haxe.macro.Expr):haxe.macro.Expr {
         return x * x + 1;
@@ -427,6 +431,7 @@ class Main {
 #[test]
 fn test_full_metaprogramming_integration() {
     let source = r#"
+import haxe.macro.Context;
 class MacroTools {
     macro static function add(a:haxe.macro.Expr, b:haxe.macro.Expr):haxe.macro.Expr {
         return a + b;
@@ -715,6 +720,7 @@ class Main {
 #[test]
 fn test_compile_time_lookup_table() {
     let source = r#"
+import haxe.macro.Context;
 class MacroTools {
     macro static function factorial(n:haxe.macro.Expr):haxe.macro.Expr {
         var result = 1;
@@ -760,6 +766,7 @@ class Main {
 #[test]
 fn test_context_parse_computed_expression() {
     let source = r#"
+import haxe.macro.Context;
 class MacroTools {
     macro static function sum3(a:haxe.macro.Expr, b:haxe.macro.Expr, c:haxe.macro.Expr):haxe.macro.Expr {
         var code = a + " + " + b + " + " + c;
@@ -1467,6 +1474,7 @@ class Main {
 #[test]
 fn test_macro_multi_return_paths() {
     let source = r#"
+import haxe.macro.Context;
 class MacroTools {
     macro static function classify(n:haxe.macro.Expr):haxe.macro.Expr {
         if (n < 0) return "negative";
@@ -1512,6 +1520,7 @@ class Main {
 #[test]
 fn test_context_parse_complex_generation() {
     let source = r#"
+import haxe.macro.Context;
 class MacroTools {
     macro static function buildMulChain(a:haxe.macro.Expr, b:haxe.macro.Expr, c:haxe.macro.Expr):haxe.macro.Expr {
         var code = a + " * " + b + " * " + c;
@@ -1569,4 +1578,926 @@ class Main {
     assert!(success, "compilation failed: {}", stderr);
     let lines = extract_trace_lines(&stdout);
     assert_eq!(lines, vec!["55", "120", "175", "done"]);
+}
+
+// ================================================================
+// CODE GENERATION: macros that produce runtime code via $e{} splicing
+// ================================================================
+
+/// Macro generates `(x * x)` expression — x is a RUNTIME variable, not a constant.
+/// The macro produces code structure at compile time; values are computed at runtime.
+#[test]
+fn test_codegen_runtime_variable_square() {
+    let source = r#"
+class MacroTools {
+    macro static function square(e:haxe.macro.Expr):haxe.macro.Expr {
+        return macro ($e{e} * $e{e});
+    }
+}
+class Main {
+    static function main() {
+        var x = 7;
+        trace(MacroTools.square(x));
+        var y = 3;
+        trace(MacroTools.square(y));
+        trace(MacroTools.square(x + y));
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // square(x) generates (x * x) = (7*7) = 49
+    // square(y) generates (y * y) = (3*3) = 9
+    // square(x + y) generates ((x+y) * (x+y)) = (10*10) = 100
+    assert_eq!(lines, vec!["49", "9", "100", "done"]);
+}
+
+/// Macro generates `(0 - e)` negate and `(a + b)` sum on runtime variables.
+#[test]
+fn test_codegen_runtime_arithmetic_transforms() {
+    let source = r#"
+class M {
+    macro static function negate(e:haxe.macro.Expr):haxe.macro.Expr {
+        return macro (0 - $e{e});
+    }
+    macro static function sum(a:haxe.macro.Expr, b:haxe.macro.Expr):haxe.macro.Expr {
+        return macro ($e{a} + $e{b});
+    }
+    macro static function diff(a:haxe.macro.Expr, b:haxe.macro.Expr):haxe.macro.Expr {
+        return macro ($e{a} - $e{b});
+    }
+}
+class Main {
+    static function main() {
+        var x = 10;
+        var y = 3;
+        trace(M.negate(x));
+        trace(M.sum(x, y));
+        trace(M.diff(x, y));
+        trace(M.sum(M.negate(x), y));
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // negate(x) → (0 - x) = -10
+    // sum(x, y) → (x + y) = 13
+    // diff(x, y) → (x - y) = 7
+    // sum(negate(x), y) → negate(x) generates (0 - x), then sum(that, y) → ((0-x) + y) = -7
+    assert_eq!(lines, vec!["-10", "13", "7", "-7", "done"]);
+}
+
+/// Macro generates `(e * 2)` and `(e + 1)` — compose to produce complex runtime expressions.
+/// Tests that macro-generated code composes correctly with runtime state.
+#[test]
+fn test_codegen_composed_runtime_transforms() {
+    let source = r#"
+class M {
+    macro static function double(e:haxe.macro.Expr):haxe.macro.Expr {
+        return macro ($e{e} * 2);
+    }
+    macro static function inc(e:haxe.macro.Expr):haxe.macro.Expr {
+        return macro ($e{e} + 1);
+    }
+}
+class Main {
+    static function main() {
+        var x = 5;
+        trace(M.double(x));
+        trace(M.inc(x));
+        trace(M.double(M.inc(x)));
+        trace(M.inc(M.double(x)));
+        trace(M.double(M.double(x)));
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // double(x) → (x * 2) = 10
+    // inc(x) → (x + 1) = 6
+    // double(inc(x)) → inc(x) = 6, double(6) = 12... no, nested:
+    //   inc(x) expands to (x + 1), double(that) expands to ((x + 1) * 2) = 12
+    // inc(double(x)) → double(x) = (x * 2), inc(that) = ((x * 2) + 1) = 11
+    // double(double(x)) → double(x) = (x * 2), double(that) = ((x * 2) * 2) = 20
+    assert_eq!(lines, vec!["10", "6", "12", "11", "20", "done"]);
+}
+
+// ================================================================
+// CODE GENERATION: Context.parse producing runtime code from strings
+// ================================================================
+
+/// Context.parse generates a multiplication chain as runtime code.
+/// The macro BUILDS a code string at compile time, then parses it into
+/// an expression AST that runs at runtime.
+#[test]
+fn test_codegen_context_parse_multiply_chain() {
+    let source = r#"
+import haxe.macro.Context;
+class MacroTools {
+    macro static function genFactorialExpr(n:haxe.macro.Expr):haxe.macro.Expr {
+        var code = "1";
+        var i = 1;
+        while (i <= n) {
+            code = code + " * " + i;
+            i = i + 1;
+        }
+        return Context.parse(code, Context.currentPos());
+    }
+}
+class Main {
+    static function main() {
+        trace(MacroTools.genFactorialExpr(5));
+        trace(MacroTools.genFactorialExpr(3));
+        trace(MacroTools.genFactorialExpr(1));
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // genFactorialExpr(5) → "1 * 1 * 2 * 3 * 4 * 5" → 120
+    // genFactorialExpr(3) → "1 * 1 * 2 * 3" → 6
+    // genFactorialExpr(1) → "1 * 1" → 1
+    assert_eq!(lines, vec!["120", "6", "1", "done"]);
+}
+
+/// Context.parse generates a sum-of-additions chain as runtime code.
+/// Demonstrates generating `x + x + x + ...` where x is a RUNTIME variable.
+#[test]
+fn test_codegen_context_parse_runtime_var_chain() {
+    let source = r#"
+import haxe.macro.Context;
+class MacroTools {
+    macro static function repeatAdd(varName:haxe.macro.Expr, n:haxe.macro.Expr):haxe.macro.Expr {
+        var code = varName;
+        var i = 1;
+        while (i < n) {
+            code = code + " + " + varName;
+            i = i + 1;
+        }
+        return Context.parse(code, Context.currentPos());
+    }
+}
+class Main {
+    static function main() {
+        var x = 10;
+        trace(MacroTools.repeatAdd("x", 3));
+        var y = 7;
+        trace(MacroTools.repeatAdd("y", 4));
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // repeatAdd("x", 3) → generates "x + x + x" = 30
+    // repeatAdd("y", 4) → generates "y + y + y + y" = 28
+    assert_eq!(lines, vec!["30", "28", "done"]);
+}
+
+/// Context.parse generates a complete trace call as runtime code.
+/// The macro builds the ENTIRE `trace(expr)` call from a code string.
+#[test]
+fn test_codegen_context_parse_trace_call() {
+    let source = r#"
+import haxe.macro.Context;
+class MacroTools {
+    macro static function genTraceCall(value:haxe.macro.Expr):haxe.macro.Expr {
+        var code = "trace(" + value + ")";
+        return Context.parse(code, Context.currentPos());
+    }
+}
+class Main {
+    static function main() {
+        MacroTools.genTraceCall("42");
+        MacroTools.genTraceCall("100 + 200");
+        MacroTools.genTraceCall("7 * 8");
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // genTraceCall("42") → generates `trace(42)` → 42
+    // genTraceCall("100 + 200") → generates `trace(100 + 200)` → 300
+    // genTraceCall("7 * 8") → generates `trace(7 * 8)` → 56
+    assert_eq!(lines, vec!["42", "300", "56", "done"]);
+}
+
+// ================================================================
+// CODE GENERATION: debug instrumentation — macros generating trace wrappers
+// ================================================================
+
+/// Macro generates `trace("label = " + expr)` where label is a compile-time
+/// computed string and expr is runtime code. Demonstrates mixed compile-time
+/// and runtime code generation.
+#[test]
+fn test_codegen_debug_var_instrumentation() {
+    let source = r#"
+class MacroTools {
+    macro static function debugVar(label:haxe.macro.Expr, e:haxe.macro.Expr):haxe.macro.Expr {
+        var prefix = label + " = ";
+        return macro trace($v{prefix} + $e{e});
+    }
+}
+class Main {
+    static function main() {
+        var x = 42;
+        var y = 7;
+        MacroTools.debugVar("x", x);
+        MacroTools.debugVar("y", y);
+        MacroTools.debugVar("x+y", x + y);
+        MacroTools.debugVar("x*y", x * y);
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // debugVar("x", x) → generates trace("x = " + x) → "x = 42"
+    // debugVar("y", y) → generates trace("y = " + y) → "y = 7"
+    // debugVar("x+y", x + y) → generates trace("x+y = " + (x+y)) → "x+y = 49"
+    // debugVar("x*y", x * y) → generates trace("x*y = " + (x*y)) → "x*y = 294"
+    assert_eq!(
+        lines,
+        vec!["x = 42", "y = 7", "x+y = 49", "x*y = 294", "done"]
+    );
+}
+
+/// Macro generates trace calls with compile-time computed prefix strings.
+/// The entire trace("prefix: " + value) is macro-generated runtime code.
+#[test]
+fn test_codegen_trace_with_compile_time_labels() {
+    let source = r#"
+class MacroTools {
+    macro static function traceUpper(label:haxe.macro.Expr, e:haxe.macro.Expr):haxe.macro.Expr {
+        var upperLabel = "[" + label + "] ";
+        return macro trace($v{upperLabel} + $e{e});
+    }
+}
+class Main {
+    static function main() {
+        var result = 100;
+        MacroTools.traceUpper("RESULT", result);
+        MacroTools.traceUpper("DOUBLED", result * 2);
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    assert_eq!(
+        lines,
+        vec!["[RESULT] 100", "[DOUBLED] 200", "done"]
+    );
+}
+
+// ================================================================
+// CODE GENERATION: expression structure generation via $e{} splicing
+// ================================================================
+
+/// Macro generates Pythagorean distance expression: sqrt(a*a + b*b)
+/// Demonstrates generating compound runtime expressions from $e{} splicing.
+#[test]
+fn test_codegen_pythagorean_expression() {
+    let source = r#"
+class MacroTools {
+    macro static function sumOfSquares(a:haxe.macro.Expr, b:haxe.macro.Expr):haxe.macro.Expr {
+        return macro ($e{a} * $e{a} + $e{b} * $e{b});
+    }
+}
+class Main {
+    static function main() {
+        var x = 3;
+        var y = 4;
+        trace(MacroTools.sumOfSquares(x, y));
+        trace(MacroTools.sumOfSquares(5, 12));
+        var a = 1;
+        var b = 1;
+        trace(MacroTools.sumOfSquares(a, b));
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // sumOfSquares(x, y) → (x*x + y*y) = (9 + 16) = 25
+    // sumOfSquares(5, 12) → (5*5 + 12*12) = (25 + 144) = 169
+    // sumOfSquares(a, b) → (a*a + b*b) = (1 + 1) = 2
+    assert_eq!(lines, vec!["25", "169", "2", "done"]);
+}
+
+/// Macro generates linear expression `a*x + b` where a,b are compile-time
+/// constants and x is a runtime variable. Classic code generation pattern.
+#[test]
+fn test_codegen_linear_expression() {
+    let source = r#"
+import haxe.macro.Context;
+class MacroTools {
+    macro static function linear(a:haxe.macro.Expr, x:haxe.macro.Expr, b:haxe.macro.Expr):haxe.macro.Expr {
+        return macro ($v{a} * $e{x} + $v{b});
+    }
+}
+class Main {
+    static function main() {
+        var x = 10;
+        trace(MacroTools.linear(2, x, 5));
+        trace(MacroTools.linear(3, x, 1));
+        var y = 0;
+        trace(MacroTools.linear(7, y, 3));
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // linear(2, x, 5) → (2 * x + 5) = (20 + 5) = 25
+    // linear(3, x, 1) → (3 * x + 1) = (30 + 1) = 31
+    // linear(7, y, 3) → (7 * y + 3) = (0 + 3) = 3
+    assert_eq!(lines, vec!["25", "31", "3", "done"]);
+}
+
+// ================================================================
+// CODE GENERATION: Context.parse generating expressions with variables
+// ================================================================
+
+/// Context.parse generates code string referencing runtime variables.
+/// The generated code is a string built at compile time, parsed to AST,
+/// then compiled as normal runtime code.
+#[test]
+fn test_codegen_context_parse_variable_expression() {
+    let source = r#"
+import haxe.macro.Context;
+class MacroTools {
+    macro static function genExpr(code:haxe.macro.Expr):haxe.macro.Expr {
+        return Context.parse(code, Context.currentPos());
+    }
+}
+class Main {
+    static function main() {
+        var a = 10;
+        var b = 20;
+        var c = 5;
+        trace(MacroTools.genExpr("a + b"));
+        trace(MacroTools.genExpr("a * b + c"));
+        trace(MacroTools.genExpr("(a + b) * c"));
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // genExpr("a + b") → parses to `a + b` → 30
+    // genExpr("a * b + c") → parses to `a * b + c` → 205
+    // genExpr("(a + b) * c") → parses to `(a + b) * c` → 150
+    assert_eq!(lines, vec!["30", "205", "150", "done"]);
+}
+
+/// Context.parse generating code that calls trace with runtime computation.
+/// The macro builds the ENTIRE function call as a code string.
+#[test]
+fn test_codegen_context_parse_generated_function_call() {
+    let source = r#"
+import haxe.macro.Context;
+class MacroTools {
+    macro static function genCode(code:haxe.macro.Expr):haxe.macro.Expr {
+        return Context.parse(code, Context.currentPos());
+    }
+}
+class Main {
+    static function main() {
+        var x = 42;
+        MacroTools.genCode("trace(x)");
+        MacroTools.genCode("trace(x + 1)");
+        MacroTools.genCode("trace(x * 2)");
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // genCode("trace(x)") → generates `trace(x)` → 42
+    // genCode("trace(x + 1)") → generates `trace(x + 1)` → 43
+    // genCode("trace(x * 2)") → generates `trace(x * 2)` → 84
+    assert_eq!(lines, vec!["42", "43", "84", "done"]);
+}
+
+// ================================================================
+// CODE GENERATION: $i{} identifier splicing for dynamic dispatch
+// ================================================================
+
+/// Macro generates calls to different functions via $i{} identifier splicing.
+/// The function name is determined at compile time, but the call executes at runtime.
+#[test]
+fn test_codegen_identifier_splice_function_dispatch() {
+    let source = r#"
+class MacroTools {
+    macro static function call(name:haxe.macro.Expr, arg:haxe.macro.Expr):haxe.macro.Expr {
+        return macro $i{name}($e{arg});
+    }
+}
+class Main {
+    static function double(x:Int):Int { return x * 2; }
+    static function triple(x:Int):Int { return x * 3; }
+
+    static function main() {
+        var x = 10;
+        trace(MacroTools.call("double", x));
+        trace(MacroTools.call("triple", x));
+        trace(MacroTools.call("double", 7));
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // call("double", x) → generates `double(x)` → 20
+    // call("triple", x) → generates `triple(x)` → 30
+    // call("double", 7) → generates `double(7)` → 14
+    assert_eq!(lines, vec!["20", "30", "14", "done"]);
+}
+
+// ================================================================
+// CODE GENERATION: compile-time computation + runtime code generation
+// ================================================================
+
+/// Macro computes a coefficient at compile time, then generates runtime
+/// multiplication code using that coefficient. Demonstrates the boundary
+/// between compile-time and runtime: coefficient is computed by the macro,
+/// but the multiplication with the runtime variable happens at runtime.
+#[test]
+fn test_codegen_compile_time_coefficient() {
+    let source = r#"
+import haxe.macro.Context;
+class MacroTools {
+    macro static function scaleByPower(base:haxe.macro.Expr, exp:haxe.macro.Expr, e:haxe.macro.Expr):haxe.macro.Expr {
+        var coeff = 1;
+        var i = 0;
+        while (i < exp) {
+            coeff = coeff * base;
+            i = i + 1;
+        }
+        return macro ($v{coeff} * $e{e});
+    }
+}
+class Main {
+    static function main() {
+        var x = 3;
+        trace(MacroTools.scaleByPower(2, 3, x));
+        trace(MacroTools.scaleByPower(10, 2, x));
+        var y = 7;
+        trace(MacroTools.scaleByPower(2, 4, y));
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // scaleByPower(2, 3, x) → coeff=8, generates (8 * x) = 24
+    // scaleByPower(10, 2, x) → coeff=100, generates (100 * x) = 300
+    // scaleByPower(2, 4, y) → coeff=16, generates (16 * y) = 112
+    assert_eq!(lines, vec!["24", "300", "112", "done"]);
+}
+
+/// Macro builds an addition expression from a compile-time computed string
+/// using Context.parse. The STRUCTURE is built at compile time via string
+/// operations, then parsed into an AST that runs at runtime.
+#[test]
+fn test_codegen_context_parse_build_sum_expression() {
+    let source = r#"
+import haxe.macro.Context;
+class MacroTools {
+    macro static function genSumTo(n:haxe.macro.Expr):haxe.macro.Expr {
+        var code = "0";
+        var i = 1;
+        while (i <= n) {
+            code = code + " + " + i;
+            i = i + 1;
+        }
+        return Context.parse(code, Context.currentPos());
+    }
+}
+class Main {
+    static function main() {
+        trace(MacroTools.genSumTo(5));
+        trace(MacroTools.genSumTo(10));
+        trace(MacroTools.genSumTo(1));
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // genSumTo(5) → "0 + 1 + 2 + 3 + 4 + 5" → 15
+    // genSumTo(10) → "0 + 1 + 2 + ... + 10" → 55
+    // genSumTo(1) → "0 + 1" → 1
+    assert_eq!(lines, vec!["15", "55", "1", "done"]);
+}
+
+// ================================================================
+// CODE GENERATION: complex compile+runtime hybrid patterns
+// ================================================================
+
+/// Macro generates a polynomial expression at compile time using Context.parse.
+/// Given coefficients (compile time), generates `c0 + c1*x + c2*x*x + ...`
+/// where x is a runtime variable.
+#[test]
+fn test_codegen_polynomial_expression() {
+    let source = r#"
+import haxe.macro.Context;
+class MacroTools {
+    macro static function poly2(c0:haxe.macro.Expr, c1:haxe.macro.Expr, c2:haxe.macro.Expr, varName:haxe.macro.Expr):haxe.macro.Expr {
+        var code = c0 + " + " + c1 + " * " + varName + " + " + c2 + " * " + varName + " * " + varName;
+        return Context.parse(code, Context.currentPos());
+    }
+}
+class Main {
+    static function main() {
+        var x = 3;
+        trace(MacroTools.poly2(1, 2, 3, "x"));
+        var y = 2;
+        trace(MacroTools.poly2(5, 0, 1, "y"));
+        trace(MacroTools.poly2(0, 0, 1, "x"));
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // poly2(1, 2, 3, "x") → "1 + 2 * x + 3 * x * x" → 1 + 6 + 27 = 34
+    // poly2(5, 0, 1, "y") → "5 + 0 * y + 1 * y * y" → 5 + 0 + 4 = 9
+    // poly2(0, 0, 1, "x") → "0 + 0 * x + 1 * x * x" → 0 + 0 + 9 = 9
+    assert_eq!(lines, vec!["34", "9", "9", "done"]);
+}
+
+/// Mixed pattern: compile-time string building + $v{} splice + $e{} runtime var.
+/// Macro computes a string prefix at compile time, then generates runtime
+/// string concatenation code.
+#[test]
+fn test_codegen_mixed_compile_runtime_string() {
+    let source = r#"
+class MacroTools {
+    macro static function formatPrefix(prefix:haxe.macro.Expr, sep:haxe.macro.Expr, e:haxe.macro.Expr):haxe.macro.Expr {
+        var fullPrefix = "[" + prefix + "]" + sep;
+        return macro ($v{fullPrefix} + $e{e});
+    }
+}
+class Main {
+    static function main() {
+        var msg = "world";
+        trace(MacroTools.formatPrefix("INFO", " ", msg));
+        trace(MacroTools.formatPrefix("ERR", ": ", msg));
+        var num = 42;
+        trace(MacroTools.formatPrefix("VAL", "=", num));
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // formatPrefix("INFO", " ", msg) → "[INFO] " + msg → "[INFO] world"
+    // formatPrefix("ERR", ": ", msg) → "[ERR]: " + msg → "[ERR]: world"
+    // formatPrefix("VAL", "=", num) → "[VAL]=" + num → "[VAL]=42"
+    assert_eq!(
+        lines,
+        vec!["[INFO] world", "[ERR]: world", "[VAL]=42", "done"]
+    );
+}
+
+// ================================================================
+// COMPILE-TIME I/O: sys.io.Process, sys.io.File, Sys
+// ================================================================
+
+/// Test sys.io.Process — run a subprocess at compile time to embed its output.
+/// This is the classic Haxe macro pattern for embedding git commit hashes.
+#[test]
+fn test_sys_io_process_echo() {
+    let source = r#"
+import haxe.macro.Context;
+class MacroTools {
+    macro static function embedCommand(cmd:haxe.macro.Expr, a:haxe.macro.Expr):haxe.macro.Expr {
+        var p = new sys.io.Process(cmd, [a]);
+        var out = p.stdout.readAll();
+        p.close();
+        return macro $v{out};
+    }
+}
+class Main {
+    static function main() {
+        var result = MacroTools.embedCommand("echo", "hello_from_macro");
+        trace(result);
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // echo outputs with trailing newline, which gets trimmed or not depending on OS
+    assert!(
+        lines[0].contains("hello_from_macro"),
+        "expected 'hello_from_macro' in output, got: {:?}",
+        lines
+    );
+    assert_eq!(lines.last().unwrap(), &"done");
+}
+
+/// Test git rev-parse pattern — the canonical use case for compile-time Process.
+/// Uses `git rev-parse --short HEAD` to embed current commit hash.
+#[test]
+fn test_sys_io_process_git_hash() {
+    let source = r#"
+import haxe.macro.Context;
+class BuildInfo {
+    macro static function getGitHash():haxe.macro.Expr {
+        var p = new sys.io.Process("git", ["rev-parse", "--short", "HEAD"]);
+        var hash = p.stdout.readAll();
+        p.close();
+        return macro $v{hash};
+    }
+}
+class Main {
+    static function main() {
+        var hash = BuildInfo.getGitHash();
+        trace(hash);
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // Should be a 7-char hex string (git short hash) possibly with trailing whitespace
+    let hash = lines[0].trim();
+    assert!(
+        hash.len() >= 7 && hash.chars().all(|c| c.is_ascii_hexdigit()),
+        "expected git short hash, got: '{}'",
+        hash
+    );
+    assert_eq!(lines.last().unwrap(), &"done");
+}
+
+/// Test sys.io.File.getContent — read a file at compile time and embed its content.
+#[test]
+fn test_sys_io_file_get_content() {
+    // Create a temporary file to read at compile time
+    let tmp_path = std::env::temp_dir().join("rayzor_macro_test_file.txt");
+    std::fs::write(&tmp_path, "compile-time-content").expect("write temp file");
+    let tmp_path_str = tmp_path.to_str().unwrap().replace('\\', "/");
+
+    let source = format!(
+        r#"
+import haxe.macro.Context;
+class MacroTools {{
+    macro static function embedFile(path:haxe.macro.Expr):haxe.macro.Expr {{
+        var content = sys.io.File.getContent(path);
+        return macro $v{{content}};
+    }}
+}}
+class Main {{
+    static function main() {{
+        var text = MacroTools.embedFile("{}");
+        trace(text);
+        trace("done");
+    }}
+}}
+"#,
+        tmp_path_str
+    );
+    let (stdout, stderr, success) = run_haxe_source(&source);
+    // Clean up
+    let _ = std::fs::remove_file(&tmp_path);
+
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    assert_eq!(lines, vec!["compile-time-content", "done"]);
+}
+
+/// Test Sys.getCwd() — embed current working directory at compile time.
+#[test]
+fn test_sys_get_cwd() {
+    let source = r#"
+import haxe.macro.Context;
+class MacroTools {
+    macro static function embedCwd():haxe.macro.Expr {
+        var cwd = Sys.getCwd();
+        return macro $v{cwd};
+    }
+}
+class Main {
+    static function main() {
+        var dir = MacroTools.embedCwd();
+        trace(dir);
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // Should output a valid directory path
+    assert!(
+        !lines[0].is_empty() && (lines[0].starts_with('/') || lines[0].contains(':')),
+        "expected a directory path, got: '{}'",
+        lines[0]
+    );
+    assert_eq!(lines.last().unwrap(), &"done");
+}
+
+/// Test Sys.systemName() — embed platform name at compile time.
+#[test]
+fn test_sys_system_name() {
+    let source = r#"
+import haxe.macro.Context;
+class MacroTools {
+    macro static function platform():haxe.macro.Expr {
+        var name = Sys.systemName();
+        return macro $v{name};
+    }
+}
+class Main {
+    static function main() {
+        trace(MacroTools.platform());
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    assert!(
+        ["Mac", "Linux", "Windows"].contains(&&*lines[0]),
+        "expected platform name, got: '{}'",
+        lines[0]
+    );
+    assert_eq!(lines.last().unwrap(), &"done");
+}
+
+/// Test Process with import — import sys.io.Process and use bare name.
+#[test]
+fn test_sys_io_process_with_import() {
+    let source = r#"
+import haxe.macro.Context;
+import sys.io.Process;
+class BuildInfo {
+    macro static function runCommand(cmd:haxe.macro.Expr):haxe.macro.Expr {
+        var p = new Process(cmd, []);
+        var out = p.stdout.readAll();
+        return macro $v{out};
+    }
+}
+class Main {
+    static function main() {
+        var result = BuildInfo.runCommand("whoami");
+        trace(result);
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    // whoami should return a non-empty username
+    assert!(
+        !lines[0].trim().is_empty(),
+        "expected username from whoami, got: '{}'",
+        lines[0]
+    );
+    assert_eq!(lines.last().unwrap(), &"done");
+}
+
+// =====================================================
+// ClassRegistry E2E tests
+// =====================================================
+
+#[test]
+fn test_class_registry_static_method() {
+    // Macro calls a static method on a non-macro class in the same file
+    let source = r#"
+import haxe.macro.Context;
+class MathHelper {
+    static function square(x:Int):Int {
+        return x * x;
+    }
+    static function add(a:Int, b:Int):Int {
+        return a + b;
+    }
+}
+class MacroTools {
+    macro static function compileSquare(x:Int):haxe.macro.Expr {
+        var result = MathHelper.square(x);
+        return macro $v{result};
+    }
+    macro static function compileAdd(a:Int, b:Int):haxe.macro.Expr {
+        var result = MathHelper.add(a, b);
+        return macro $v{result};
+    }
+}
+class Main {
+    static function main() {
+        trace(MacroTools.compileSquare(7));
+        trace(MacroTools.compileAdd(10, 20));
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    assert_eq!(lines[0], "49");
+    assert_eq!(lines[1], "30");
+    assert_eq!(lines[2], "done");
+}
+
+#[test]
+fn test_class_registry_constructor_and_instance_method() {
+    // Macro constructs a user-defined class and calls an instance method
+    let source = r#"
+import haxe.macro.Context;
+class Point {
+    var x:Int;
+    var y:Int;
+    function new(x:Int, y:Int) {
+        this.x = x;
+        this.y = y;
+    }
+    function sum():Int {
+        return this.x + this.y;
+    }
+}
+class MacroTools {
+    macro static function compilePointSum(px:Int, py:Int):haxe.macro.Expr {
+        var p = new Point(px, py);
+        var result = p.sum();
+        return macro $v{result};
+    }
+}
+class Main {
+    static function main() {
+        trace(MacroTools.compilePointSum(3, 4));
+        trace(MacroTools.compilePointSum(10, 20));
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    assert_eq!(lines[0], "7");
+    assert_eq!(lines[1], "30");
+    assert_eq!(lines[2], "done");
+}
+
+#[test]
+fn test_class_registry_constructor_field_access() {
+    // Macro constructs a class and reads its fields directly
+    let source = r#"
+import haxe.macro.Context;
+class Config {
+    var name:String;
+    var value:Int;
+    function new(name:String, value:Int) {
+        this.name = name;
+        this.value = value;
+    }
+}
+class MacroTools {
+    macro static function getConfigValue():haxe.macro.Expr {
+        var c = new Config("test", 42);
+        var v = c.value;
+        return macro $v{v};
+    }
+}
+class Main {
+    static function main() {
+        trace(MacroTools.getConfigValue());
+        trace("done");
+    }
+}
+"#;
+    let (stdout, stderr, success) = run_haxe_source(source);
+    assert!(success, "compilation failed: {}", stderr);
+    let lines = extract_trace_lines(&stdout);
+    assert_eq!(lines[0], "42");
+    assert_eq!(lines[1], "done");
 }

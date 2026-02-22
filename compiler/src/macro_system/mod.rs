@@ -13,6 +13,7 @@
 
 pub mod ast_bridge;
 pub mod build_macros;
+pub mod class_registry;
 pub mod context_api;
 pub mod environment;
 pub mod errors;
@@ -24,13 +25,17 @@ pub mod value;
 
 pub use ast_bridge::{apply_binary_op, expr_to_value, value_to_expr};
 pub use build_macros::{process_build_macros, BuildMacroResult};
+pub use class_registry::ClassRegistry;
 pub use context_api::{
     BuildClassContext, BuildField, BuildFieldKind, DefinedType, DefinedTypeKind, FieldAccess,
     FieldMeta, MacroContext,
 };
 pub use environment::Environment;
 pub use errors::{MacroDiagnostic, MacroError, MacroSeverity, PipelineDiagnostic};
-pub use expander::{expand_macros, expand_macros_with_registry, ExpansionResult, MacroExpander};
+pub use expander::{
+    expand_macros, expand_macros_with_class_registry, expand_macros_with_registry,
+    ExpansionResult, MacroExpander,
+};
 pub use interpreter::MacroInterpreter;
 pub use registry::{BuildMacroEntry, MacroDefinition, MacroRegistry};
 pub use reification::ReificationEngine;

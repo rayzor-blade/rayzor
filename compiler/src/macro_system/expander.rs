@@ -15,6 +15,7 @@
 //!    - `macro { ... }` reification blocks
 //!    - `$v{}`, `$i{}`, `$e{}`, `$a{}`, `$p{}`, `$b{}` dollar identifiers
 
+use super::class_registry::ClassRegistry;
 use super::context_api::MacroContext;
 use super::errors::{MacroDiagnostic, MacroError};
 use super::interpreter::MacroInterpreter;
@@ -72,6 +73,10 @@ pub struct MacroExpander {
     expansion_origins: Vec<ExpansionOrigin>,
     /// Memoization cache: (macro_name, args_hash) -> expanded Expr
     call_cache: HashMap<(String, u64), Expr>,
+    /// Import map for the current file: short name → qualified name
+    import_map: HashMap<String, String>,
+    /// Class registry for macro interpreter fallback dispatch
+    class_registry: Arc<ClassRegistry>,
 }
 
 impl MacroExpander {
@@ -84,6 +89,8 @@ impl MacroExpander {
             max_iterations: 100,
             expansion_origins: Vec::new(),
             call_cache: HashMap::new(),
+            import_map: HashMap::new(),
+            class_registry: Arc::new(ClassRegistry::new()),
         }
     }
 
@@ -96,6 +103,22 @@ impl MacroExpander {
             max_iterations: 100,
             expansion_origins: Vec::new(),
             call_cache: HashMap::new(),
+            import_map: HashMap::new(),
+            class_registry: Arc::new(ClassRegistry::new()),
+        }
+    }
+
+    /// Create an expander with a class registry for extended class dispatch
+    pub fn with_class_registry(class_registry: ClassRegistry) -> Self {
+        Self {
+            registry: MacroRegistry::new(),
+            context: MacroContext::new(),
+            expansions_count: 0,
+            max_iterations: 100,
+            expansion_origins: Vec::new(),
+            call_cache: HashMap::new(),
+            import_map: HashMap::new(),
+            class_registry: Arc::new(class_registry),
         }
     }
 
@@ -132,6 +155,9 @@ impl MacroExpander {
     /// 3. Returns the modified file with diagnostics
     pub fn expand_file(&mut self, mut file: HaxeFile) -> ExpansionResult {
         self.expansions_count = 0;
+
+        // Build import map from file imports for macro interpreter resolution
+        self.import_map = super::interpreter::build_import_map(&file.imports);
 
         // Phase 1: Scan and register macro definitions from this file
         if let Err(e) = self.registry.scan_and_register(&file, &file.filename) {
@@ -821,7 +847,11 @@ impl MacroExpander {
     /// Evaluate a `macro expr` node — run the expression at compile time
     fn eval_macro_expr(&mut self, expr: &Expr) -> Result<Expr, MacroError> {
         let call_site = super::errors::span_to_location(expr.span);
-        let mut interp = MacroInterpreter::new(self.registry.clone());
+        let mut interp = MacroInterpreter::with_class_registry(
+            self.registry.clone(),
+            self.import_map.clone(),
+            self.class_registry.clone(),
+        );
         let result = interp.eval_expr(expr);
 
         // Collect trace output
@@ -918,7 +948,11 @@ impl MacroExpander {
         }
 
         // Create interpreter and bind arguments
-        let mut interp = MacroInterpreter::new(self.registry.clone());
+        let mut interp = MacroInterpreter::with_class_registry(
+            self.registry.clone(),
+            self.import_map.clone(),
+            self.class_registry.clone(),
+        );
 
         // Bind parameters in the interpreter environment
         for (i, param) in macro_def.params.iter().enumerate() {
@@ -1096,6 +1130,18 @@ pub fn expand_macros(file: HaxeFile) -> ExpansionResult {
 /// The registry may contain macro definitions from previously compiled files.
 pub fn expand_macros_with_registry(file: HaxeFile, registry: MacroRegistry) -> ExpansionResult {
     let mut expander = MacroExpander::with_state(registry, MacroContext::new());
+    expander.expand_file(file)
+}
+
+/// Expand macros with a class registry for extended class dispatch.
+///
+/// The class registry allows the macro interpreter to call methods on any
+/// class found in stdlib, imports, or user files — not just hardcoded builtins.
+pub fn expand_macros_with_class_registry(
+    file: HaxeFile,
+    class_registry: ClassRegistry,
+) -> ExpansionResult {
+    let mut expander = MacroExpander::with_class_registry(class_registry);
     expander.expand_file(file)
 }
 
