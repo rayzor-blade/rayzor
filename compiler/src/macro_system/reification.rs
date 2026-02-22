@@ -247,52 +247,15 @@ impl ReificationEngine {
         let location = span_to_location(span);
 
         match (name, arg) {
-            // $v{expr} — value splice
-            ("v", Some(_arg_expr)) => {
-                // In a full implementation, we'd evaluate arg_expr in the macro
-                // environment to get a MacroValue, then convert it to an AST literal.
-                // For now, we look up the expression and convert.
-                Err(MacroError::ReificationError {
-                    message: "$v{} requires interpreter evaluation (implemented in Phase 3)"
-                        .to_string(),
-                    location,
-                })
+            // $v{expr}, $i{expr}, $e{expr}, $a{expr}, $p{expr}, $b{expr}
+            // Evaluate the arg expression against the environment, then splice.
+            (kind @ ("v" | "i" | "e" | "a" | "p" | "b"), Some(arg_expr)) => {
+                // Evaluate the argument: for simple Ident, look up in env;
+                // for literals, convert directly; otherwise error.
+                let val = Self::eval_simple_expr(arg_expr, env, span)?;
+                let result = Self::splice_value(kind, val, span)?;
+                Ok(result)
             }
-
-            // $i{expr} — identifier splice
-            ("i", Some(_arg_expr)) => Err(MacroError::ReificationError {
-                message: "$i{} requires interpreter evaluation (implemented in Phase 3)"
-                    .to_string(),
-                location,
-            }),
-
-            // $e{expr} — expression splice
-            ("e", Some(_arg_expr)) => Err(MacroError::ReificationError {
-                message: "$e{} requires interpreter evaluation (implemented in Phase 3)"
-                    .to_string(),
-                location,
-            }),
-
-            // $a{expr} — array splice
-            ("a", Some(_arg_expr)) => Err(MacroError::ReificationError {
-                message: "$a{} requires interpreter evaluation (implemented in Phase 3)"
-                    .to_string(),
-                location,
-            }),
-
-            // $p{expr} — path splice
-            ("p", Some(_arg_expr)) => Err(MacroError::ReificationError {
-                message: "$p{} requires interpreter evaluation (implemented in Phase 3)"
-                    .to_string(),
-                location,
-            }),
-
-            // $b{expr} — block splice
-            ("b", Some(_arg_expr)) => Err(MacroError::ReificationError {
-                message: "$b{} requires interpreter evaluation (implemented in Phase 3)"
-                    .to_string(),
-                location,
-            }),
 
             // $name (no argument) — simple variable splice from environment
             (var_name, None) => {
@@ -314,6 +277,96 @@ impl ReificationEngine {
         }
     }
 
+    /// Evaluate a simple expression against the environment.
+    ///
+    /// Handles common patterns in dollar-brace args:
+    /// - `$e{varName}` → look up varName in env
+    /// - `$v{literal}` → convert literal to value
+    /// - `$v{expr + expr}` → basic binary ops on env values
+    fn eval_simple_expr(
+        expr: &Expr,
+        env: &Environment,
+        span: Span,
+    ) -> Result<MacroValue, MacroError> {
+        let location = span_to_location(span);
+        match &expr.kind {
+            ExprKind::Ident(name) => env.get(name).cloned().ok_or(MacroError::UndefinedVariable {
+                name: name.clone(),
+                location,
+            }),
+            ExprKind::Int(i) => Ok(MacroValue::Int(*i)),
+            ExprKind::Float(f) => Ok(MacroValue::Float(*f)),
+            ExprKind::String(s) => Ok(MacroValue::String(Arc::from(s.as_str()))),
+            ExprKind::Bool(b) => Ok(MacroValue::Bool(*b)),
+            ExprKind::Null => Ok(MacroValue::Null),
+            ExprKind::Binary { left, op, right } => {
+                let left_val = Self::eval_simple_expr(left, env, span)?;
+                let right_val = Self::eval_simple_expr(right, env, span)?;
+                ast_bridge::apply_binary_op(op, &left_val, &right_val, location)
+            }
+            ExprKind::Call { expr: callee, args } => {
+                // Handle Std.string() and similar
+                if let ExprKind::Field {
+                    expr: base, field, ..
+                } = &callee.kind
+                {
+                    if let ExprKind::Ident(class_name) = &base.kind {
+                        if class_name == "Std" && field == "string" {
+                            if let Some(arg) = args.first() {
+                                let val = Self::eval_simple_expr(arg, env, span)?;
+                                return Ok(MacroValue::String(Arc::from(
+                                    val.to_display_string().as_str(),
+                                )));
+                            }
+                        }
+                    }
+                }
+                Err(MacroError::ReificationError {
+                    message: "complex expression in dollar-brace requires interpreter evaluation"
+                        .to_string(),
+                    location,
+                })
+            }
+            ExprKind::Field {
+                expr: base, field, ..
+            } => {
+                let base_val = Self::eval_simple_expr(base, env, span)?;
+                match &base_val {
+                    MacroValue::Object(map) => {
+                        Ok(map.get(field).cloned().unwrap_or(MacroValue::Null))
+                    }
+                    MacroValue::String(s) => match field.as_str() {
+                        "length" => Ok(MacroValue::Int(s.len() as i64)),
+                        _ => Err(MacroError::ReificationError {
+                            message: format!("String has no field '{}'", field),
+                            location,
+                        }),
+                    },
+                    MacroValue::Array(arr) => match field.as_str() {
+                        "length" => Ok(MacroValue::Int(arr.len() as i64)),
+                        _ => Err(MacroError::ReificationError {
+                            message: format!("Array has no field '{}'", field),
+                            location,
+                        }),
+                    },
+                    _ => Err(MacroError::ReificationError {
+                        message: format!(
+                            "cannot access field '{}' on {}",
+                            field,
+                            base_val.type_name()
+                        ),
+                        location,
+                    }),
+                }
+            }
+            _ => Err(MacroError::ReificationError {
+                message: "complex expression in dollar-brace requires interpreter evaluation"
+                    .to_string(),
+                location,
+            }),
+        }
+    }
+
     /// Process a dollar identifier with an already-evaluated argument value.
     ///
     /// This is the version called by the interpreter after evaluating the
@@ -323,27 +376,36 @@ impl ReificationEngine {
 
         match kind {
             // $v{value} — convert value to a constant expression
-            "v" => Ok(ast_bridge::value_to_expr(&value)),
+            "v" => {
+                // Unwrap Expr-wrapped values to concrete values first
+                let concrete = ast_bridge::unwrap_expr_value(&value);
+                Ok(ast_bridge::value_to_expr(&concrete))
+            }
 
             // $i{value} — value must be a string, used as identifier
-            "i" => match value {
-                MacroValue::String(name) => Ok(Expr {
-                    kind: ExprKind::Ident(name.to_string()),
-                    span,
-                }),
-                _ => Err(MacroError::ReificationError {
-                    message: format!("$i{{}} expects a String value, got {}", value.type_name()),
-                    location,
-                }),
-            },
+            "i" => {
+                // Unwrap Expr-wrapped values to get the string
+                let concrete = ast_bridge::unwrap_expr_value(&value);
+                match concrete {
+                    MacroValue::String(name) => Ok(Expr {
+                        kind: ExprKind::Ident(name.to_string()),
+                        span,
+                    }),
+                    _ => Err(MacroError::ReificationError {
+                        message: format!(
+                            "$i{{}} expects a String value, got {}",
+                            concrete.type_name()
+                        ),
+                        location,
+                    }),
+                }
+            }
 
-            // $e{value} — value must be an Expr, splice directly
+            // $e{value} — splice as expression directly
             "e" => match value {
                 MacroValue::Expr(expr) => Ok((*expr).clone()),
-                _ => Err(MacroError::ReificationError {
-                    message: format!("$e{{}} expects an Expr value, got {}", value.type_name()),
-                    location,
-                }),
+                // For non-Expr values, convert to expression
+                other => Ok(ast_bridge::value_to_expr(&other)),
             },
 
             // $a{value} — value must be Array<Expr>, splice as array literal

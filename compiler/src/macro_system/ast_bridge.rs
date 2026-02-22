@@ -477,6 +477,176 @@ fn compare_values(
     Ok(MacroValue::Bool(pred(ordering)))
 }
 
+/// Convert an ExprKind to a MacroValue representation.
+///
+/// Maps Haxe ExprDef enum variants to MacroValue::Enum for pattern matching
+/// in macro bodies. E.g., `expr.expr` on a `trace(42)` call returns
+/// `Enum("ExprDef", "ECall", [callee_expr, args_array])`.
+pub fn expr_kind_to_value(kind: &ExprKind, span: Span) -> MacroValue {
+    match kind {
+        ExprKind::Int(i) => MacroValue::Enum(
+            Arc::from("ExprDef"),
+            Arc::from("EConst"),
+            Arc::new(vec![MacroValue::Enum(
+                Arc::from("Constant"),
+                Arc::from("CInt"),
+                Arc::new(vec![MacroValue::String(Arc::from(i.to_string().as_str()))]),
+            )]),
+        ),
+        ExprKind::Float(f) => MacroValue::Enum(
+            Arc::from("ExprDef"),
+            Arc::from("EConst"),
+            Arc::new(vec![MacroValue::Enum(
+                Arc::from("Constant"),
+                Arc::from("CFloat"),
+                Arc::new(vec![MacroValue::String(Arc::from(f.to_string().as_str()))]),
+            )]),
+        ),
+        ExprKind::String(s) => MacroValue::Enum(
+            Arc::from("ExprDef"),
+            Arc::from("EConst"),
+            Arc::new(vec![MacroValue::Enum(
+                Arc::from("Constant"),
+                Arc::from("CString"),
+                Arc::new(vec![MacroValue::String(Arc::from(s.as_str()))]),
+            )]),
+        ),
+        ExprKind::Bool(true) => MacroValue::Enum(
+            Arc::from("ExprDef"),
+            Arc::from("EConst"),
+            Arc::new(vec![MacroValue::Enum(
+                Arc::from("Constant"),
+                Arc::from("CIdent"),
+                Arc::new(vec![MacroValue::String(Arc::from("true"))]),
+            )]),
+        ),
+        ExprKind::Bool(false) => MacroValue::Enum(
+            Arc::from("ExprDef"),
+            Arc::from("EConst"),
+            Arc::new(vec![MacroValue::Enum(
+                Arc::from("Constant"),
+                Arc::from("CIdent"),
+                Arc::new(vec![MacroValue::String(Arc::from("false"))]),
+            )]),
+        ),
+        ExprKind::Null => MacroValue::Enum(
+            Arc::from("ExprDef"),
+            Arc::from("EConst"),
+            Arc::new(vec![MacroValue::Enum(
+                Arc::from("Constant"),
+                Arc::from("CIdent"),
+                Arc::new(vec![MacroValue::String(Arc::from("null"))]),
+            )]),
+        ),
+        ExprKind::Ident(name) => MacroValue::Enum(
+            Arc::from("ExprDef"),
+            Arc::from("EConst"),
+            Arc::new(vec![MacroValue::Enum(
+                Arc::from("Constant"),
+                Arc::from("CIdent"),
+                Arc::new(vec![MacroValue::String(Arc::from(name.as_str()))]),
+            )]),
+        ),
+        ExprKind::Call { expr: callee, args } => {
+            let callee_val = MacroValue::Expr(Arc::new(callee.as_ref().clone()));
+            let args_val: Vec<MacroValue> = args
+                .iter()
+                .map(|a| MacroValue::Expr(Arc::new(a.clone())))
+                .collect();
+            MacroValue::Enum(
+                Arc::from("ExprDef"),
+                Arc::from("ECall"),
+                Arc::new(vec![callee_val, MacroValue::Array(Arc::new(args_val))]),
+            )
+        }
+        ExprKind::Field {
+            expr: base, field, ..
+        } => {
+            let base_val = MacroValue::Expr(Arc::new(base.as_ref().clone()));
+            MacroValue::Enum(
+                Arc::from("ExprDef"),
+                Arc::from("EField"),
+                Arc::new(vec![
+                    base_val,
+                    MacroValue::String(Arc::from(field.as_str())),
+                ]),
+            )
+        }
+        ExprKind::Binary { left, op, right } => {
+            let left_val = MacroValue::Expr(Arc::new(left.as_ref().clone()));
+            let right_val = MacroValue::Expr(Arc::new(right.as_ref().clone()));
+            let op_name = format!("{:?}", op);
+            MacroValue::Enum(
+                Arc::from("ExprDef"),
+                Arc::from("EBinop"),
+                Arc::new(vec![
+                    MacroValue::String(Arc::from(op_name.as_str())),
+                    left_val,
+                    right_val,
+                ]),
+            )
+        }
+        ExprKind::Block(elements) => {
+            let exprs: Vec<MacroValue> = elements
+                .iter()
+                .filter_map(|e| match e {
+                    parser::BlockElement::Expr(expr) => {
+                        Some(MacroValue::Expr(Arc::new(expr.clone())))
+                    }
+                    _ => None,
+                })
+                .collect();
+            MacroValue::Enum(
+                Arc::from("ExprDef"),
+                Arc::from("EBlock"),
+                Arc::new(vec![MacroValue::Array(Arc::new(exprs))]),
+            )
+        }
+        ExprKind::Function(func) => {
+            let func_val = MacroValue::Object(Arc::new({
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "name".to_string(),
+                    MacroValue::String(Arc::from(func.name.as_str())),
+                );
+                let params: Vec<MacroValue> = func
+                    .params
+                    .iter()
+                    .map(|p| {
+                        let mut pm = std::collections::HashMap::new();
+                        pm.insert(
+                            "name".to_string(),
+                            MacroValue::String(Arc::from(p.name.as_str())),
+                        );
+                        MacroValue::Object(Arc::new(pm))
+                    })
+                    .collect();
+                m.insert("args".to_string(), MacroValue::Array(Arc::new(params)));
+                if let Some(body) = &func.body {
+                    m.insert(
+                        "expr".to_string(),
+                        MacroValue::Expr(Arc::new(body.as_ref().clone())),
+                    );
+                }
+                m
+            }));
+            MacroValue::Enum(
+                Arc::from("ExprDef"),
+                Arc::from("EFunction"),
+                Arc::new(vec![MacroValue::Null, func_val]),
+            )
+        }
+        // Fallback: wrap the expression as-is
+        _ => {
+            let expr = Expr {
+                kind: kind.clone(),
+                span,
+            };
+            MacroValue::Expr(Arc::new(expr))
+        }
+    }
+}
+
 /// Convert a parser Span to a SourceLocation
 pub fn span_to_location(span: Span) -> SourceLocation {
     super::errors::span_to_location(span)

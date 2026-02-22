@@ -532,8 +532,9 @@ impl MacroInterpreter {
 
             // --- Macro expression ---
             ExprKind::Macro(inner) => {
-                // macro expr — the expression should be reified into an Expr value
-                Ok(MacroValue::Expr(Arc::from(inner.as_ref().clone())))
+                // macro expr — reify the expression, resolving dollar-idents from the environment
+                // e.g., `macro trace($e{msg})` resolves $e{msg} using the current env
+                ReificationEngine::reify_expr(inner, &self.env)
             }
 
             // --- Reification block ---
@@ -737,6 +738,15 @@ impl MacroInterpreter {
             ExprKind::Field {
                 expr: base, field, ..
             } => {
+                // Check for well-known static class calls before evaluating base
+                if let ExprKind::Ident(class_name) = &base.kind {
+                    if let Some(result) =
+                        self.try_static_call(class_name, field, &arg_vals, location)?
+                    {
+                        return Ok(result);
+                    }
+                }
+
                 // Method call: base.field(args)
                 let base_val = self.eval_expr(base)?;
                 let result = self.method_call(&base_val, field, arg_vals, location)?;
@@ -866,6 +876,94 @@ impl MacroInterpreter {
                 self.trace_output.push(msg);
                 Ok(Some(MacroValue::Null))
             }
+            _ => Ok(None),
+        }
+    }
+
+    /// Try to dispatch a static class method call (e.g., Context.parse, Std.string)
+    fn try_static_call(
+        &mut self,
+        class_name: &str,
+        method: &str,
+        args: &[MacroValue],
+        location: SourceLocation,
+    ) -> Result<Option<MacroValue>, MacroError> {
+        match class_name {
+            "Context" | "haxe.macro.Context" => {
+                let mut ctx = super::context_api::MacroContext::new();
+                let result = ctx.dispatch(method, args, location)?;
+                Ok(Some(result))
+            }
+            "Std" => match method {
+                "string" => {
+                    let val = args.first().unwrap_or(&MacroValue::Null);
+                    Ok(Some(MacroValue::String(Arc::from(
+                        val.to_display_string().as_str(),
+                    ))))
+                }
+                "int" | "parseInt" => {
+                    let val = args.first().unwrap_or(&MacroValue::Null);
+                    match val {
+                        MacroValue::String(s) => {
+                            let n = s.parse::<i64>().unwrap_or(0);
+                            Ok(Some(MacroValue::Int(n)))
+                        }
+                        MacroValue::Int(n) => Ok(Some(MacroValue::Int(*n))),
+                        MacroValue::Float(f) => Ok(Some(MacroValue::Int(*f as i64))),
+                        _ => Ok(Some(MacroValue::Int(0))),
+                    }
+                }
+                "parseFloat" => {
+                    let val = args.first().unwrap_or(&MacroValue::Null);
+                    match val {
+                        MacroValue::String(s) => {
+                            let f = s.parse::<f64>().unwrap_or(0.0);
+                            Ok(Some(MacroValue::Float(f)))
+                        }
+                        MacroValue::Float(f) => Ok(Some(MacroValue::Float(*f))),
+                        MacroValue::Int(n) => Ok(Some(MacroValue::Float(*n as f64))),
+                        _ => Ok(Some(MacroValue::Float(0.0))),
+                    }
+                }
+                _ => Ok(None),
+            },
+            "Math" => match method {
+                "abs" => {
+                    let val = args.first().unwrap_or(&MacroValue::Null);
+                    match val {
+                        MacroValue::Int(n) => Ok(Some(MacroValue::Int(n.abs()))),
+                        MacroValue::Float(f) => Ok(Some(MacroValue::Float(f.abs()))),
+                        _ => Ok(None),
+                    }
+                }
+                "floor" => {
+                    let val = args.first().unwrap_or(&MacroValue::Null);
+                    match val {
+                        MacroValue::Float(f) => Ok(Some(MacroValue::Int(f.floor() as i64))),
+                        MacroValue::Int(n) => Ok(Some(MacroValue::Int(*n))),
+                        _ => Ok(None),
+                    }
+                }
+                "ceil" => {
+                    let val = args.first().unwrap_or(&MacroValue::Null);
+                    match val {
+                        MacroValue::Float(f) => Ok(Some(MacroValue::Int(f.ceil() as i64))),
+                        MacroValue::Int(n) => Ok(Some(MacroValue::Int(*n))),
+                        _ => Ok(None),
+                    }
+                }
+                "max" => {
+                    let a = args.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+                    let b = args.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
+                    Ok(Some(MacroValue::Float(a.max(b))))
+                }
+                "min" => {
+                    let a = args.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+                    let b = args.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
+                    Ok(Some(MacroValue::Float(a.min(b))))
+                }
+                _ => Ok(None),
+            },
             _ => Ok(None),
         }
     }
@@ -1091,6 +1189,10 @@ impl MacroInterpreter {
                 // Field access on reified expressions (e.g., expr.expr, expr.pos)
                 match field {
                     "pos" => Ok(MacroValue::Position(span_to_location(expr.span))),
+                    "expr" => {
+                        // Return the ExprDef as an enum-like value
+                        Ok(ast_bridge::expr_kind_to_value(&expr.kind, expr.span))
+                    }
                     _ => Err(MacroError::TypeError {
                         message: format!("Expr has no field '{}'", field),
                         location,
