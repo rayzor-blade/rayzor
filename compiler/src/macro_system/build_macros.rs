@@ -27,6 +27,7 @@ use parser::{
     ClassDecl, ClassField, ClassFieldKind, Expr, ExprKind, HaxeFile, InterfaceDecl, Metadata,
     Modifier, TypeDeclaration,
 };
+use std::sync::Arc;
 
 /// Result of processing build macros in a file
 pub struct BuildMacroResult {
@@ -329,7 +330,7 @@ fn class_field_to_build_field(field: &ClassField) -> BuildField {
             params: m
                 .params
                 .iter()
-                .map(|p| MacroValue::Expr(Box::new(p.clone())))
+                .map(|p| MacroValue::Expr(Arc::new(p.clone())))
                 .collect(),
             pos: super::errors::span_to_location(m.span),
         })
@@ -436,7 +437,7 @@ fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
     if let Some(arr) = access_arr {
         for a in arr {
             if let MacroValue::String(s) = a {
-                match s.as_str() {
+                match &**s {
                     "Public" => access_val = Some(parser::Access::Public),
                     "Private" => access_val = Some(parser::Access::Private),
                     "Static" => modifiers.push(Modifier::Static),
@@ -605,8 +606,8 @@ mod tests {
     #[test]
     fn test_value_to_class_field_simple() {
         let mut obj = std::collections::HashMap::new();
-        obj.insert("name".to_string(), MacroValue::String("myVar".to_string()));
-        let field = value_to_class_field(&MacroValue::Object(obj));
+        obj.insert("name".to_string(), MacroValue::from_str("myVar"));
+        let field = value_to_class_field(&MacroValue::Object(Arc::new(obj)));
         assert!(field.is_some());
         let field = field.unwrap();
         match &field.kind {
@@ -618,15 +619,15 @@ mod tests {
     #[test]
     fn test_value_to_class_field_with_access() {
         let mut obj = std::collections::HashMap::new();
-        obj.insert("name".to_string(), MacroValue::String("test".to_string()));
+        obj.insert("name".to_string(), MacroValue::from_str("test"));
         obj.insert(
             "access".to_string(),
-            MacroValue::Array(vec![
-                MacroValue::String("Public".to_string()),
-                MacroValue::String("Static".to_string()),
-            ]),
+            MacroValue::Array(Arc::new(vec![
+                MacroValue::from_str("Public"),
+                MacroValue::from_str("Static"),
+            ])),
         );
-        let field = value_to_class_field(&MacroValue::Object(obj));
+        let field = value_to_class_field(&MacroValue::Object(Arc::new(obj)));
         assert!(field.is_some());
         let field = field.unwrap();
         assert_eq!(field.access, Some(parser::Access::Public));

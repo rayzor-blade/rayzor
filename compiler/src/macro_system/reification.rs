@@ -18,6 +18,7 @@ use super::environment::Environment;
 use super::errors::MacroError;
 use super::value::MacroValue;
 use parser::{Expr, ExprKind, Span};
+use std::sync::Arc;
 
 /// The reification engine processes macro blocks and dollar identifiers.
 pub struct ReificationEngine;
@@ -31,7 +32,7 @@ impl ReificationEngine {
     /// provided environment and spliced into the result.
     pub fn reify_expr(expr: &Expr, env: &Environment) -> Result<MacroValue, MacroError> {
         let reified = Self::process_expr(expr, env)?;
-        Ok(MacroValue::Expr(Box::new(reified)))
+        Ok(MacroValue::Expr(Arc::new(reified)))
     }
 
     /// Process an expression, resolving dollar identifiers against the environment.
@@ -327,7 +328,7 @@ impl ReificationEngine {
             // $i{value} — value must be a string, used as identifier
             "i" => match value {
                 MacroValue::String(name) => Ok(Expr {
-                    kind: ExprKind::Ident(name),
+                    kind: ExprKind::Ident(name.to_string()),
                     span,
                 }),
                 _ => Err(MacroError::ReificationError {
@@ -338,7 +339,7 @@ impl ReificationEngine {
 
             // $e{value} — value must be an Expr, splice directly
             "e" => match value {
-                MacroValue::Expr(expr) => Ok(*expr),
+                MacroValue::Expr(expr) => Ok((*expr).clone()),
                 _ => Err(MacroError::ReificationError {
                     message: format!("$e{{}} expects an Expr value, got {}", value.type_name()),
                     location,
@@ -349,10 +350,10 @@ impl ReificationEngine {
             "a" => match value {
                 MacroValue::Array(items) => {
                     let exprs: Result<Vec<Expr>, MacroError> = items
-                        .into_iter()
+                        .iter()
                         .map(|item| match item {
-                            MacroValue::Expr(e) => Ok(*e),
-                            other => Ok(ast_bridge::value_to_expr(&other)),
+                            MacroValue::Expr(e) => Ok((**e).clone()),
+                            other => Ok(ast_bridge::value_to_expr(other)),
                         })
                         .collect();
                     Ok(Expr {
@@ -403,12 +404,12 @@ impl ReificationEngine {
             "b" => match value {
                 MacroValue::Array(items) => {
                     let elements: Result<Vec<parser::BlockElement>, MacroError> = items
-                        .into_iter()
+                        .iter()
                         .map(|item| match item {
-                            MacroValue::Expr(e) => Ok(parser::BlockElement::Expr(*e)),
-                            other => Ok(parser::BlockElement::Expr(ast_bridge::value_to_expr(
-                                &other,
-                            ))),
+                            MacroValue::Expr(e) => Ok(parser::BlockElement::Expr((**e).clone())),
+                            other => {
+                                Ok(parser::BlockElement::Expr(ast_bridge::value_to_expr(other)))
+                            }
                         })
                         .collect();
                     Ok(Expr {
@@ -494,12 +495,9 @@ mod tests {
 
     #[test]
     fn test_splice_value_i() {
-        let result = ReificationEngine::splice_value(
-            "i",
-            MacroValue::String("myVar".to_string()),
-            Span::default(),
-        )
-        .unwrap();
+        let result =
+            ReificationEngine::splice_value("i", MacroValue::from_str("myVar"), Span::default())
+                .unwrap();
         assert_eq!(result.kind, ExprKind::Ident("myVar".to_string()));
     }
 
@@ -517,7 +515,7 @@ mod tests {
         };
         let result = ReificationEngine::splice_value(
             "e",
-            MacroValue::Expr(Box::new(inner_expr.clone())),
+            MacroValue::Expr(Arc::new(inner_expr.clone())),
             Span::default(),
         )
         .unwrap();
@@ -528,7 +526,7 @@ mod tests {
     fn test_splice_value_p() {
         let result = ReificationEngine::splice_value(
             "p",
-            MacroValue::String("com.example.MyClass".to_string()),
+            MacroValue::from_str("com.example.MyClass"),
             Span::default(),
         )
         .unwrap();
@@ -557,18 +555,21 @@ mod tests {
     #[test]
     fn test_splice_value_a() {
         let items = vec![
-            MacroValue::Expr(Box::new(Expr {
+            MacroValue::Expr(Arc::new(Expr {
                 kind: ExprKind::Int(1),
                 span: Span::default(),
             })),
-            MacroValue::Expr(Box::new(Expr {
+            MacroValue::Expr(Arc::new(Expr {
                 kind: ExprKind::Int(2),
                 span: Span::default(),
             })),
         ];
-        let result =
-            ReificationEngine::splice_value("a", MacroValue::Array(items), Span::default())
-                .unwrap();
+        let result = ReificationEngine::splice_value(
+            "a",
+            MacroValue::Array(Arc::new(items)),
+            Span::default(),
+        )
+        .unwrap();
         match &result.kind {
             ExprKind::Array(elems) => {
                 assert_eq!(elems.len(), 2);
@@ -581,16 +582,19 @@ mod tests {
 
     #[test]
     fn test_splice_value_b() {
-        let items = vec![MacroValue::Expr(Box::new(Expr {
+        let items = vec![MacroValue::Expr(Arc::new(Expr {
             kind: ExprKind::Return(Some(Box::new(Expr {
                 kind: ExprKind::Int(42),
                 span: Span::default(),
             }))),
             span: Span::default(),
         }))];
-        let result =
-            ReificationEngine::splice_value("b", MacroValue::Array(items), Span::default())
-                .unwrap();
+        let result = ReificationEngine::splice_value(
+            "b",
+            MacroValue::Array(Arc::new(items)),
+            Span::default(),
+        )
+        .unwrap();
         match &result.kind {
             ExprKind::Block(elements) => {
                 assert_eq!(elements.len(), 1);
@@ -602,7 +606,7 @@ mod tests {
     #[test]
     fn test_reify_block_with_dollar() {
         let mut env = Environment::new();
-        env.define("val", MacroValue::String("test".to_string()));
+        env.define("val", MacroValue::from_str("test"));
 
         let expr = Expr {
             kind: ExprKind::Block(vec![

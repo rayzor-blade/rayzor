@@ -11,6 +11,7 @@ use super::value::MacroValue;
 use crate::tast::SourceLocation;
 use parser::{BinaryOp, Expr, ExprKind, Span};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Convert a parser AST expression literal to a MacroValue.
 ///
@@ -20,7 +21,7 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
     match &expr.kind {
         ExprKind::Int(i) => Ok(MacroValue::Int(*i)),
         ExprKind::Float(f) => Ok(MacroValue::Float(*f)),
-        ExprKind::String(s) => Ok(MacroValue::String(s.clone())),
+        ExprKind::String(s) => Ok(MacroValue::String(Arc::from(s.as_str()))),
         ExprKind::Bool(b) => Ok(MacroValue::Bool(*b)),
         ExprKind::Null => Ok(MacroValue::Null),
 
@@ -29,7 +30,7 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
             for elem in elements {
                 values.push(expr_to_value(elem)?);
             }
-            Ok(MacroValue::Array(values))
+            Ok(MacroValue::Array(Arc::new(values)))
         }
 
         ExprKind::Object(fields) => {
@@ -38,7 +39,7 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
                 let value = expr_to_value(&field.expr)?;
                 map.insert(field.name.clone(), value);
             }
-            Ok(MacroValue::Object(map))
+            Ok(MacroValue::Object(Arc::new(map)))
         }
 
         ExprKind::Map(entries) => {
@@ -59,7 +60,7 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
                 };
                 map.insert(key_str, expr_to_value(value)?);
             }
-            Ok(MacroValue::Object(map))
+            Ok(MacroValue::Object(Arc::new(map)))
         }
 
         // Unary negation of a literal
@@ -69,12 +70,12 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
         } => match &inner.kind {
             ExprKind::Int(i) => Ok(MacroValue::Int(-i)),
             ExprKind::Float(f) => Ok(MacroValue::Float(-f)),
-            _ => Ok(MacroValue::Expr(Box::new(expr.clone()))),
+            _ => Ok(MacroValue::Expr(Arc::new(expr.clone()))),
         },
 
         // For non-literal expressions, wrap as an Expr value
         // The interpreter will evaluate these when needed
-        _ => Ok(MacroValue::Expr(Box::new(expr.clone()))),
+        _ => Ok(MacroValue::Expr(Arc::new(expr.clone()))),
     }
 }
 
@@ -132,7 +133,7 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
             }
         }
         MacroValue::String(s) => Expr {
-            kind: ExprKind::String(s.clone()),
+            kind: ExprKind::String(s.to_string()),
             span,
         },
         MacroValue::Array(items) => {
@@ -161,10 +162,10 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
             let base = Expr {
                 kind: ExprKind::Field {
                     expr: Box::new(Expr {
-                        kind: ExprKind::Ident(enum_name.clone()),
+                        kind: ExprKind::Ident(enum_name.to_string()),
                         span,
                     }),
-                    field: variant.clone(),
+                    field: variant.to_string(),
                     is_optional: false,
                 },
                 span,
@@ -182,7 +183,7 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
                 }
             }
         }
-        MacroValue::Expr(expr) => *expr.clone(),
+        MacroValue::Expr(expr) => expr.as_ref().clone(),
         MacroValue::Type(_type_id) => {
             // Type references can't be directly expressed; use a placeholder
             Expr {
@@ -233,15 +234,39 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
     }
 }
 
+/// Unwrap a `MacroValue::Expr` to a concrete value.
+///
+/// When macro parameters are passed as Expr (AST nodes), this function
+/// extracts the concrete compile-time value from simple literal expressions.
+/// For non-literal expressions, the Expr is returned as-is.
+pub fn unwrap_expr_value(val: &MacroValue) -> MacroValue {
+    match val {
+        MacroValue::Expr(expr) => {
+            // Try to extract a concrete value from the expression
+            match expr_to_value(expr) {
+                Ok(MacroValue::Expr(_)) => val.clone(), // Still an Expr, leave as-is
+                Ok(concrete) => concrete,
+                Err(_) => val.clone(),
+            }
+        }
+        other => other.clone(),
+    }
+}
+
 /// Apply a binary operation on two MacroValues.
 ///
 /// Used by the interpreter for evaluating binary expressions.
+/// Automatically unwraps Expr-wrapped values (from macro parameters) to
+/// concrete values before performing the operation.
 pub fn apply_binary_op(
     op: &BinaryOp,
     left: &MacroValue,
     right: &MacroValue,
     location: SourceLocation,
 ) -> Result<MacroValue, MacroError> {
+    // Unwrap Expr-wrapped values (macro parameters) to concrete values
+    let left = &unwrap_expr_value(left);
+    let right = &unwrap_expr_value(right);
     match op {
         // Arithmetic
         BinaryOp::Add => apply_add(left, right, location),
@@ -310,7 +335,7 @@ pub fn apply_binary_op(
                 location,
             })?;
             let arr: Vec<MacroValue> = (start..end).map(MacroValue::Int).collect();
-            Ok(MacroValue::Array(arr))
+            Ok(MacroValue::Array(Arc::new(arr)))
         }
 
         // Arrow (for function types, not typically used in macro values)
@@ -345,15 +370,11 @@ fn apply_add(
 ) -> Result<MacroValue, MacroError> {
     match (left, right) {
         // String concatenation
-        (MacroValue::String(a), b) => Ok(MacroValue::String(format!(
-            "{}{}",
-            a,
-            b.to_display_string()
+        (MacroValue::String(a), b) => Ok(MacroValue::String(Arc::from(
+            format!("{}{}", a, b.to_display_string()).as_str(),
         ))),
-        (a, MacroValue::String(b)) => Ok(MacroValue::String(format!(
-            "{}{}",
-            a.to_display_string(),
-            b
+        (a, MacroValue::String(b)) => Ok(MacroValue::String(Arc::from(
+            format!("{}{}", a.to_display_string(), b).as_str(),
         ))),
         // Numeric addition
         (MacroValue::Int(a), MacroValue::Int(b)) => Ok(MacroValue::Int(a + b)),
@@ -362,9 +383,9 @@ fn apply_add(
         (MacroValue::Float(a), MacroValue::Int(b)) => Ok(MacroValue::Float(a + *b as f64)),
         // Array concatenation
         (MacroValue::Array(a), MacroValue::Array(b)) => {
-            let mut result = a.clone();
+            let mut result = a.as_ref().clone();
             result.extend(b.iter().cloned());
-            Ok(MacroValue::Array(result))
+            Ok(MacroValue::Array(Arc::new(result)))
         }
         _ => Err(MacroError::TypeError {
             message: format!("cannot add {} and {}", left.type_name(), right.type_name()),
@@ -483,7 +504,7 @@ mod tests {
             span: Span::default(),
         };
         let val = expr_to_value(&expr).unwrap();
-        assert_eq!(val, MacroValue::String("hello".to_string()));
+        assert_eq!(val, MacroValue::String(Arc::from("hello")));
         let back = value_to_expr(&val);
         assert_eq!(back.kind, ExprKind::String("hello".to_string()));
 
@@ -611,12 +632,12 @@ mod tests {
         assert_eq!(
             apply_binary_op(
                 &BinaryOp::Add,
-                &MacroValue::String("hello".to_string()),
-                &MacroValue::String(" world".to_string()),
+                &MacroValue::String(Arc::from("hello")),
+                &MacroValue::String(Arc::from(" world")),
                 loc
             )
             .unwrap(),
-            MacroValue::String("hello world".to_string())
+            MacroValue::String(Arc::from("hello world"))
         );
 
         // Comparison

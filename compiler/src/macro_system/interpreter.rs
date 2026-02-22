@@ -17,6 +17,7 @@ use super::reification::ReificationEngine;
 use super::value::{MacroFunction, MacroParam, MacroValue};
 use crate::tast::SourceLocation;
 use parser::{AssignOp, BinaryOp, Expr, ExprKind, Span, UnaryOp};
+use std::sync::Arc;
 
 /// Maximum call depth for macro function calls
 const DEFAULT_MAX_CALL_DEPTH: usize = 256;
@@ -89,7 +90,7 @@ impl MacroInterpreter {
             // --- Literals ---
             ExprKind::Int(i) => Ok(MacroValue::Int(*i)),
             ExprKind::Float(f) => Ok(MacroValue::Float(*f)),
-            ExprKind::String(s) => Ok(MacroValue::String(s.clone())),
+            ExprKind::String(s) => Ok(MacroValue::String(Arc::from(s.as_str()))),
             ExprKind::Bool(b) => Ok(MacroValue::Bool(*b)),
             ExprKind::Null => Ok(MacroValue::Null),
             ExprKind::This => self
@@ -338,7 +339,7 @@ impl MacroInterpreter {
                     }
                     Err(e) if !e.is_control_flow() => {
                         // Try to match a catch block (use first matching catch)
-                        let err_val = MacroValue::String(e.to_string());
+                        let err_val = MacroValue::String(Arc::from(e.to_string().as_str()));
                         if let Some(catch) = catches.first() {
                             self.env.push_scope();
                             self.env.define(&catch.var, err_val);
@@ -390,7 +391,7 @@ impl MacroInterpreter {
                 for elem in elements {
                     values.push(self.eval_expr(elem)?);
                 }
-                Ok(MacroValue::Array(values))
+                Ok(MacroValue::Array(Arc::new(values)))
             }
 
             // --- Object literal ---
@@ -400,7 +401,7 @@ impl MacroInterpreter {
                     let val = self.eval_expr(&field.expr)?;
                     map.insert(field.name.clone(), val);
                 }
-                Ok(MacroValue::Object(map))
+                Ok(MacroValue::Object(Arc::new(map)))
             }
 
             // --- Map literal ---
@@ -412,7 +413,7 @@ impl MacroInterpreter {
                     let key_str = k.to_display_string();
                     map.insert(key_str, v);
                 }
-                Ok(MacroValue::Object(map))
+                Ok(MacroValue::Object(Arc::new(map)))
             }
 
             // --- Function literal ---
@@ -423,17 +424,24 @@ impl MacroInterpreter {
                     .map(|p| MacroParam::from_function_param(p))
                     .collect();
 
-                let body = func.body.as_ref().cloned().unwrap_or(Box::new(Expr {
-                    kind: ExprKind::Null,
-                    span: Span::default(),
-                }));
+                let body: Arc<Expr> = func
+                    .body
+                    .as_ref()
+                    .map(|b| Arc::from(b.as_ref().clone()))
+                    .unwrap_or_else(|| {
+                        Arc::new(Expr {
+                            kind: ExprKind::Null,
+                            span: Span::default(),
+                        })
+                    });
 
-                Ok(MacroValue::Function(MacroFunction {
+                let free_vars = get_free_vars_for_closure(&body, &params);
+                Ok(MacroValue::Function(Arc::new(MacroFunction {
                     name: func.name.clone(),
                     params,
                     body,
-                    captures: self.env.capture_all(),
-                }))
+                    captures: self.env.capture_used(&free_vars),
+                })))
             }
 
             // --- Arrow function ---
@@ -448,12 +456,14 @@ impl MacroInterpreter {
                     })
                     .collect();
 
-                Ok(MacroValue::Function(MacroFunction {
+                let arrow_body = Arc::from(body.as_ref().clone());
+                let free_vars = get_free_vars_for_closure(&arrow_body, &macro_params);
+                Ok(MacroValue::Function(Arc::new(MacroFunction {
                     name: String::new(),
                     params: macro_params,
-                    body: body.clone(),
-                    captures: self.env.capture_all(),
-                }))
+                    body: arrow_body,
+                    captures: self.env.capture_used(&free_vars),
+                })))
             }
 
             // --- New object construction ---
@@ -473,16 +483,22 @@ impl MacroInterpreter {
 
                 // Special handling for known types
                 match name.as_str() {
-                    "Map" | "haxe.ds.Map" => {
-                        Ok(MacroValue::Object(std::collections::HashMap::new()))
-                    }
-                    "Array" => Ok(MacroValue::Array(Vec::new())),
+                    "Map" | "haxe.ds.Map" => Ok(MacroValue::Object(Arc::new(
+                        std::collections::HashMap::new(),
+                    ))),
+                    "Array" => Ok(MacroValue::Array(Arc::new(Vec::new()))),
                     _ => {
                         // Generic object construction
                         let mut obj = std::collections::HashMap::new();
-                        obj.insert("__type__".to_string(), MacroValue::String(name));
-                        obj.insert("__args__".to_string(), MacroValue::Array(arg_vals));
-                        Ok(MacroValue::Object(obj))
+                        obj.insert(
+                            "__type__".to_string(),
+                            MacroValue::String(Arc::from(name.as_str())),
+                        );
+                        obj.insert(
+                            "__args__".to_string(),
+                            MacroValue::Array(Arc::new(arg_vals)),
+                        );
+                        Ok(MacroValue::Object(Arc::new(obj)))
                     }
                 }
             }
@@ -499,7 +515,7 @@ impl MacroInterpreter {
                         }
                     }
                 }
-                Ok(MacroValue::String(result))
+                Ok(MacroValue::String(Arc::from(result.as_str())))
             }
 
             // --- Cast ---
@@ -517,7 +533,7 @@ impl MacroInterpreter {
             // --- Macro expression ---
             ExprKind::Macro(inner) => {
                 // macro expr — the expression should be reified into an Expr value
-                Ok(MacroValue::Expr(inner.clone()))
+                Ok(MacroValue::Expr(Arc::from(inner.as_ref().clone())))
             }
 
             // --- Reification block ---
@@ -532,7 +548,7 @@ impl MacroInterpreter {
                     // $kind{expr} — evaluate the arg and splice
                     let val = self.eval_expr(arg_expr)?;
                     let result_expr = ReificationEngine::splice_value(name, val, expr.span)?;
-                    Ok(MacroValue::Expr(Box::new(result_expr)))
+                    Ok(MacroValue::Expr(Arc::new(result_expr)))
                 } else {
                     // $name — lookup in environment
                     self.env
@@ -628,8 +644,8 @@ impl MacroInterpreter {
                 expr: base, field, ..
             } => {
                 let mut base_val = self.eval_expr(base)?;
-                if let MacroValue::Object(ref mut map) = base_val {
-                    map.insert(field.clone(), new_val.clone());
+                if let MacroValue::Object(ref mut arc_map) = base_val {
+                    Arc::make_mut(arc_map).insert(field.clone(), new_val.clone());
                     // Re-assign the modified object back
                     self.assign_base(base, base_val)?;
                     Ok(new_val)
@@ -648,16 +664,17 @@ impl MacroInterpreter {
                 let mut base_val = self.eval_expr(base)?;
                 let idx = self.eval_expr(index)?;
                 match (&mut base_val, &idx) {
-                    (MacroValue::Array(arr), MacroValue::Int(i)) => {
+                    (MacroValue::Array(arc_arr), MacroValue::Int(i)) => {
                         let idx = *i as usize;
+                        let arr = Arc::make_mut(arc_arr);
                         if idx < arr.len() {
                             arr[idx] = new_val.clone();
                         }
                         self.assign_base(base, base_val)?;
                         Ok(new_val)
                     }
-                    (MacroValue::Object(map), _) => {
-                        map.insert(idx.to_display_string(), new_val.clone());
+                    (MacroValue::Object(arc_map), _) => {
+                        Arc::make_mut(arc_map).insert(idx.to_display_string(), new_val.clone());
                         self.assign_base(base, base_val)?;
                         Ok(new_val)
                     }
@@ -722,7 +739,26 @@ impl MacroInterpreter {
             } => {
                 // Method call: base.field(args)
                 let base_val = self.eval_expr(base)?;
-                self.method_call(&base_val, field, arg_vals, location)
+                let result = self.method_call(&base_val, field, arg_vals, location)?;
+
+                // For mutating array methods (push, pop, splice, unshift, etc.),
+                // update the variable in-place so the mutation is visible.
+                let is_mutating = matches!(
+                    field.as_str(),
+                    "push" | "pop" | "shift" | "unshift" | "splice" | "sort" | "reverse"
+                );
+                if is_mutating {
+                    if let ExprKind::Ident(var_name) = &base.kind {
+                        if matches!(result, MacroValue::Array(_)) {
+                            // Update the variable with the new array
+                            if !self.env.set(var_name, result.clone()) {
+                                self.env.define(var_name, result.clone());
+                            }
+                        }
+                    }
+                }
+
+                Ok(result)
             }
             _ => {
                 // Evaluate callee as expression (e.g., function variable)
@@ -739,8 +775,8 @@ impl MacroInterpreter {
         args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
-        match func {
-            MacroValue::Function(macro_func) => self.call_function(&macro_func, args, location),
+        match &func {
+            MacroValue::Function(macro_func) => self.call_function(macro_func, args, location),
             _ => Err(MacroError::TypeError {
                 message: format!("cannot call {}", func.type_name()),
                 location,
@@ -810,7 +846,7 @@ impl MacroInterpreter {
         let func = MacroFunction {
             name: def.name.clone(),
             params: def.params.clone(),
-            body: def.body.clone(),
+            body: Arc::from(def.body.as_ref().clone()),
             captures: std::collections::HashMap::new(),
         };
         self.call_function(&func, args, location)
@@ -849,13 +885,13 @@ impl MacroInterpreter {
         }
 
         match base {
-            MacroValue::Array(arr) => self.array_method(arr, method, args, location),
+            MacroValue::Array(arr) => self.array_method(arr.as_ref(), method, args, location),
             MacroValue::Object(obj) => {
                 // Check if the field is a function
                 if let Some(MacroValue::Function(func)) = obj.get(method) {
-                    self.call_function(func, args, location)
+                    self.call_function(func.as_ref(), args, location)
                 } else {
-                    self.object_method(obj, method, args, location)
+                    self.object_method(obj.as_ref(), method, args, location)
                 }
             }
             _ => {
@@ -885,7 +921,7 @@ impl MacroInterpreter {
                 for arg in args {
                     new_arr.push(arg);
                 }
-                Ok(MacroValue::Array(new_arr))
+                Ok(MacroValue::Array(Arc::new(new_arr)))
             }
             "pop" => {
                 let mut new_arr = arr.to_vec();
@@ -896,24 +932,25 @@ impl MacroInterpreter {
                 let mut new_arr = arr.to_vec();
                 for arg in args {
                     if let MacroValue::Array(other) = arg {
-                        new_arr.extend(other);
+                        new_arr.extend(other.iter().cloned());
                     }
                 }
-                Ok(MacroValue::Array(new_arr))
+                Ok(MacroValue::Array(Arc::new(new_arr)))
             }
             "join" => {
                 let sep = args.first().and_then(|a| a.as_string()).unwrap_or(",");
                 let parts: Vec<String> = arr.iter().map(|v| v.to_display_string()).collect();
-                Ok(MacroValue::String(parts.join(sep)))
+                Ok(MacroValue::String(Arc::from(parts.join(sep).as_str())))
             }
             "map" => {
                 if let Some(MacroValue::Function(func)) = args.first() {
                     let mut result = Vec::with_capacity(arr.len());
                     for item in arr {
-                        let mapped = self.call_function(func, vec![item.clone()], location)?;
+                        let mapped =
+                            self.call_function(func.as_ref(), vec![item.clone()], location)?;
                         result.push(mapped);
                     }
-                    Ok(MacroValue::Array(result))
+                    Ok(MacroValue::Array(Arc::new(result)))
                 } else {
                     Err(MacroError::TypeError {
                         message: "Array.map() requires a function argument".to_string(),
@@ -925,12 +962,13 @@ impl MacroInterpreter {
                 if let Some(MacroValue::Function(func)) = args.first() {
                     let mut result = Vec::new();
                     for item in arr {
-                        let keep = self.call_function(func, vec![item.clone()], location)?;
+                        let keep =
+                            self.call_function(func.as_ref(), vec![item.clone()], location)?;
                         if keep.is_truthy() {
                             result.push(item.clone());
                         }
                     }
-                    Ok(MacroValue::Array(result))
+                    Ok(MacroValue::Array(Arc::new(result)))
                 } else {
                     Err(MacroError::TypeError {
                         message: "Array.filter() requires a function argument".to_string(),
@@ -970,12 +1008,13 @@ impl MacroInterpreter {
             "length" => Ok(MacroValue::Int(s.len() as i64)),
             "charAt" => {
                 let idx = args.first().and_then(|a| a.as_int()).unwrap_or(0) as usize;
-                Ok(MacroValue::String(
+                Ok(MacroValue::String(Arc::from(
                     s.chars()
                         .nth(idx)
                         .map(|c| c.to_string())
-                        .unwrap_or_default(),
-                ))
+                        .unwrap_or_default()
+                        .as_str(),
+                )))
             }
             "indexOf" => {
                 let needle = args.first().and_then(|a| a.as_string()).unwrap_or("");
@@ -987,9 +1026,9 @@ impl MacroInterpreter {
                 let delim = args.first().and_then(|a| a.as_string()).unwrap_or("");
                 let parts: Vec<MacroValue> = s
                     .split(delim)
-                    .map(|part| MacroValue::String(part.to_string()))
+                    .map(|part| MacroValue::String(Arc::from(part)))
                     .collect();
-                Ok(MacroValue::Array(parts))
+                Ok(MacroValue::Array(Arc::new(parts)))
             }
             "substring" | "substr" => {
                 let start = args.first().and_then(|a| a.as_int()).unwrap_or(0).max(0) as usize;
@@ -999,11 +1038,11 @@ impl MacroInterpreter {
                     .map(|e| e.max(0) as usize)
                     .unwrap_or(s.len());
                 let result: String = s.chars().skip(start).take(end - start).collect();
-                Ok(MacroValue::String(result))
+                Ok(MacroValue::String(Arc::from(result.as_str())))
             }
-            "toUpperCase" => Ok(MacroValue::String(s.to_uppercase())),
-            "toLowerCase" => Ok(MacroValue::String(s.to_lowercase())),
-            "toString" => Ok(MacroValue::String(s.to_string())),
+            "toUpperCase" => Ok(MacroValue::String(Arc::from(s.to_uppercase().as_str()))),
+            "toLowerCase" => Ok(MacroValue::String(Arc::from(s.to_lowercase().as_str()))),
+            "toString" => Ok(MacroValue::String(Arc::from(s))),
             _ => Err(MacroError::UnsupportedOperation {
                 operation: format!("String.{}()", method),
                 location,
@@ -1078,7 +1117,7 @@ impl MacroInterpreter {
                 Ok(arr.get(idx).cloned().unwrap_or(MacroValue::Null))
             }
             (MacroValue::Object(map), MacroValue::String(key)) => {
-                Ok(map.get(key.as_str()).cloned().unwrap_or(MacroValue::Null))
+                Ok(map.get(&**key).cloned().unwrap_or(MacroValue::Null))
             }
             (MacroValue::Object(map), other) => {
                 let key = other.to_display_string();
@@ -1086,12 +1125,13 @@ impl MacroInterpreter {
             }
             (MacroValue::String(s), MacroValue::Int(i)) => {
                 let idx = *i as usize;
-                Ok(MacroValue::String(
+                Ok(MacroValue::String(Arc::from(
                     s.chars()
                         .nth(idx)
                         .map(|c| c.to_string())
-                        .unwrap_or_default(),
-                ))
+                        .unwrap_or_default()
+                        .as_str(),
+                )))
             }
             _ => Err(MacroError::TypeError {
                 message: format!(
@@ -1154,10 +1194,13 @@ impl MacroInterpreter {
         location: SourceLocation,
     ) -> Result<Vec<MacroValue>, MacroError> {
         match value {
-            MacroValue::Array(arr) => Ok(arr.clone()),
+            MacroValue::Array(arr) => Ok(arr.as_ref().clone()),
             MacroValue::Object(map) => {
                 // Iterate over keys
-                Ok(map.keys().map(|k| MacroValue::String(k.clone())).collect())
+                Ok(map
+                    .keys()
+                    .map(|k| MacroValue::String(Arc::from(k.as_str())))
+                    .collect())
             }
             _ => Err(MacroError::TypeError {
                 message: format!("cannot iterate over {}", value.type_name()),
@@ -1189,6 +1232,187 @@ impl MacroInterpreter {
             }
         }
     }
+}
+
+/// Collect all free variable references from an expression AST.
+///
+/// Walks the expression tree and collects all `Ident` names that appear,
+/// excluding names that are bound by local `var` declarations or function parameters.
+/// This is used for selective closure capture — only variables actually referenced
+/// in the closure body need to be captured from the enclosing scope.
+fn collect_free_vars(
+    expr: &Expr,
+    bound: &mut std::collections::HashSet<String>,
+    free: &mut std::collections::HashSet<String>,
+) {
+    match &expr.kind {
+        ExprKind::Ident(name) => {
+            if !bound.contains(name) {
+                free.insert(name.clone());
+            }
+        }
+        ExprKind::Var {
+            name, expr: init, ..
+        }
+        | ExprKind::Final {
+            name, expr: init, ..
+        } => {
+            if let Some(init) = init {
+                collect_free_vars(init, bound, free);
+            }
+            bound.insert(name.clone());
+        }
+        ExprKind::Function(func) => {
+            let mut inner_bound = bound.clone();
+            for p in &func.params {
+                inner_bound.insert(p.name.clone());
+            }
+            if let Some(body) = &func.body {
+                collect_free_vars(body, &mut inner_bound, free);
+            }
+        }
+        ExprKind::Arrow { params, expr: body } => {
+            let mut inner_bound = bound.clone();
+            for p in params {
+                inner_bound.insert(p.name.clone());
+            }
+            collect_free_vars(body, &mut inner_bound, free);
+        }
+        ExprKind::Block(elements) => {
+            let mut block_bound = bound.clone();
+            for elem in elements {
+                if let parser::BlockElement::Expr(e) = elem {
+                    collect_free_vars(e, &mut block_bound, free);
+                }
+            }
+        }
+        ExprKind::For {
+            var, iter, body, ..
+        } => {
+            collect_free_vars(iter, bound, free);
+            let mut for_bound = bound.clone();
+            for_bound.insert(var.clone());
+            collect_free_vars(body, &mut for_bound, free);
+        }
+        ExprKind::While { cond, body } | ExprKind::DoWhile { body, cond } => {
+            collect_free_vars(cond, bound, free);
+            collect_free_vars(body, bound, free);
+        }
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_free_vars(cond, bound, free);
+            collect_free_vars(then_branch, bound, free);
+            if let Some(e) = else_branch {
+                collect_free_vars(e, bound, free);
+            }
+        }
+        ExprKind::Binary { left, right, .. } => {
+            collect_free_vars(left, bound, free);
+            collect_free_vars(right, bound, free);
+        }
+        ExprKind::Unary { expr: inner, .. } => {
+            collect_free_vars(inner, bound, free);
+        }
+        ExprKind::Call { expr: callee, args } => {
+            collect_free_vars(callee, bound, free);
+            for a in args {
+                collect_free_vars(a, bound, free);
+            }
+        }
+        ExprKind::Field { expr: obj, .. } => {
+            collect_free_vars(obj, bound, free);
+        }
+        ExprKind::Index { expr: obj, index } => {
+            collect_free_vars(obj, bound, free);
+            collect_free_vars(index, bound, free);
+        }
+        ExprKind::Array(items) => {
+            for item in items {
+                collect_free_vars(item, bound, free);
+            }
+        }
+        ExprKind::Object(fields) => {
+            for f in fields {
+                collect_free_vars(&f.expr, bound, free);
+            }
+        }
+        ExprKind::Assign { left, right, .. } => {
+            collect_free_vars(left, bound, free);
+            collect_free_vars(right, bound, free);
+        }
+        ExprKind::Return(Some(inner)) | ExprKind::Throw(inner) | ExprKind::Paren(inner) => {
+            collect_free_vars(inner, bound, free);
+        }
+        ExprKind::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            collect_free_vars(cond, bound, free);
+            collect_free_vars(then_expr, bound, free);
+            collect_free_vars(else_expr, bound, free);
+        }
+        ExprKind::Switch {
+            expr: scrutinee,
+            cases,
+            default,
+        } => {
+            collect_free_vars(scrutinee, bound, free);
+            for case in cases {
+                collect_free_vars(&case.body, bound, free);
+            }
+            if let Some(d) = default {
+                collect_free_vars(d, bound, free);
+            }
+        }
+        ExprKind::Try {
+            expr: body,
+            catches,
+            ..
+        } => {
+            collect_free_vars(body, bound, free);
+            for c in catches {
+                let mut catch_bound = bound.clone();
+                catch_bound.insert(c.var.clone());
+                collect_free_vars(&c.body, &mut catch_bound, free);
+            }
+        }
+        ExprKind::StringInterpolation(parts) => {
+            for part in parts {
+                if let parser::StringPart::Interpolation(e) = part {
+                    collect_free_vars(e, bound, free);
+                }
+            }
+        }
+        ExprKind::Cast { expr: inner, .. }
+        | ExprKind::Macro(inner)
+        | ExprKind::TypeCheck { expr: inner, .. } => {
+            collect_free_vars(inner, bound, free);
+        }
+        ExprKind::New { args, .. } => {
+            for a in args {
+                collect_free_vars(a, bound, free);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Get the set of free variables in a function body, excluding parameter names
+fn get_free_vars_for_closure(
+    body: &Expr,
+    params: &[MacroParam],
+) -> std::collections::HashSet<String> {
+    let mut bound = std::collections::HashSet::new();
+    for p in params {
+        bound.insert(p.name.clone());
+    }
+    let mut free = std::collections::HashSet::new();
+    collect_free_vars(body, &mut bound, &mut free);
+    free
 }
 
 #[cfg(test)]
@@ -1232,7 +1456,7 @@ mod tests {
         assert_eq!(eval("return 42;").unwrap(), MacroValue::Int(42));
         assert_eq!(
             eval("return \"hello\";").unwrap(),
-            MacroValue::String("hello".to_string())
+            MacroValue::from_str("hello")
         );
         assert_eq!(eval("return true;").unwrap(), MacroValue::Bool(true));
         assert_eq!(eval("return null;").unwrap(), MacroValue::Null);
@@ -1251,7 +1475,7 @@ mod tests {
     fn test_string_concat() {
         assert_eq!(
             eval("return \"hello\" + \" world\";").unwrap(),
-            MacroValue::String("hello world".to_string())
+            MacroValue::from_str("hello world")
         );
     }
 
