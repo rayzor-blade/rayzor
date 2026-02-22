@@ -3,6 +3,7 @@ use super::value::MacroParam;
 use crate::tast::SourceLocation;
 use parser::{ClassDecl, ClassField, ClassFieldKind, Expr, HaxeFile, Modifier, TypeDeclaration};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Default maximum macro expansion depth
 const DEFAULT_MAX_DEPTH: usize = 256;
@@ -16,8 +17,8 @@ pub struct MacroDefinition {
     pub qualified_name: String,
     /// Parameters
     pub params: Vec<MacroParam>,
-    /// The function body AST
-    pub body: Box<Expr>,
+    /// The function body AST (Arc for O(1) clone on each macro invocation)
+    pub body: Arc<Expr>,
     /// Whether this is a @:build macro
     pub is_build_macro: bool,
     /// Source file where defined
@@ -164,7 +165,7 @@ impl MacroRegistry {
                 .collect();
 
             let body = match &func.body {
-                Some(body) => body.clone(),
+                Some(body) => Arc::new(body.as_ref().clone()),
                 None => {
                     return Err(MacroError::InvalidDefinition {
                         message: format!("macro function '{}' must have a body", qualified_name),

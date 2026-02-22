@@ -173,7 +173,8 @@ impl ClassRegistry {
 
     /// Find a constructor on a class.
     pub fn find_constructor(&self, class_name: &str) -> Option<&MethodInfo> {
-        self.find_class(class_name).and_then(|c| c.constructor.as_ref())
+        self.find_class(class_name)
+            .and_then(|c| c.constructor.as_ref())
     }
 
     /// Find an instance method on a class.

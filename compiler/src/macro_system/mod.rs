@@ -33,8 +33,8 @@ pub use context_api::{
 pub use environment::Environment;
 pub use errors::{MacroDiagnostic, MacroError, MacroSeverity, PipelineDiagnostic};
 pub use expander::{
-    expand_macros, expand_macros_with_class_registry, expand_macros_with_registry,
-    ExpansionResult, MacroExpander,
+    expand_macros, expand_macros_with_class_registry, expand_macros_with_registry, ExpansionResult,
+    MacroExpander,
 };
 pub use interpreter::MacroInterpreter;
 pub use registry::{BuildMacroEntry, MacroDefinition, MacroRegistry};
