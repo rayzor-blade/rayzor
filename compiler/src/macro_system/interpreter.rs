@@ -976,6 +976,20 @@ impl MacroInterpreter {
         args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
+        // Unwrap Expr-wrapped values so method calls work on concrete types
+        // (e.g., s.charAt(0) where s is MacroValue::Expr(String("hello")))
+        let unwrapped = if matches!(base, MacroValue::Expr(_)) {
+            let u = ast_bridge::unwrap_expr_value(base);
+            if matches!(u, MacroValue::Expr(_)) {
+                None
+            } else {
+                Some(u)
+            }
+        } else {
+            None
+        };
+        let base = unwrapped.as_ref().unwrap_or(base);
+
         // Check for static method calls (e.g., Std.string(), Math.abs())
         if let MacroValue::String(ref s) = base {
             // String methods would be handled here in a full implementation
@@ -1169,6 +1183,19 @@ impl MacroInterpreter {
         field: &str,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
+        // Unwrap Expr-wrapped values so field access works on the concrete type
+        // (e.g., s.length where s is MacroValue::Expr(String("hello")))
+        let unwrapped = if matches!(base, MacroValue::Expr(_)) {
+            let u = ast_bridge::unwrap_expr_value(base);
+            if matches!(u, MacroValue::Expr(_)) {
+                None
+            } else {
+                Some(u)
+            }
+        } else {
+            None
+        };
+        let base = unwrapped.as_ref().unwrap_or(base);
         match base {
             MacroValue::Object(map) => Ok(map.get(field).cloned().unwrap_or(MacroValue::Null)),
             MacroValue::Array(arr) => match field {

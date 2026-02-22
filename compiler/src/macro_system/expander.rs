@@ -864,8 +864,17 @@ impl MacroExpander {
     ) -> Result<Expr, MacroError> {
         let location = super::errors::span_to_location(call_expr.span);
 
+        // Expand nested macro calls in arguments BEFORE entering expansion tracking.
+        // This prevents false circular-dependency detection when the same macro is
+        // used in both the call and its arguments (e.g., square(square(3))).
+        let mut expanded_args = Vec::with_capacity(args.len());
+        for arg in args {
+            let (expanded, _) = self.walk_expr(arg.clone())?;
+            expanded_args.push(expanded);
+        }
+
         // Memoization: check if we've already expanded this exact call
-        let args_hash = hash_exprs(args);
+        let args_hash = hash_exprs(&expanded_args);
         let cache_key = (name.to_string(), args_hash);
         if let Some(cached) = self.call_cache.get(&cache_key) {
             self.expansions_count += 1;
@@ -885,9 +894,9 @@ impl MacroExpander {
             })?
             .clone();
 
-        // Build argument values
-        // In Haxe macros, arguments are passed as Expr values (not evaluated)
-        let arg_values: Vec<MacroValue> = args
+        // Build argument values — args are passed as Expr values (not evaluated),
+        // but nested macro calls have already been expanded above.
+        let arg_values: Vec<MacroValue> = expanded_args
             .iter()
             .map(|a| MacroValue::Expr(Arc::new(a.clone())))
             .collect();
