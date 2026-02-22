@@ -24,6 +24,14 @@ use std::sync::Arc;
 /// Maximum call depth for macro function calls
 const DEFAULT_MAX_CALL_DEPTH: usize = 256;
 
+/// Cached data extracted from ClassRegistry for a user-defined class.
+/// Avoids re-cloning instance_vars, constructor body, and params on every `new`.
+struct CachedClassData {
+    qualified_name: String,
+    instance_vars: Vec<(String, Option<Arc<Expr>>)>,
+    constructor: Option<(Arc<Expr>, Vec<parser::FunctionParam>)>,
+}
+
 /// The macro interpreter evaluates Haxe AST expressions at compile time.
 pub struct MacroInterpreter {
     /// Variable environment with lexical scoping
@@ -41,6 +49,8 @@ pub struct MacroInterpreter {
     import_map: HashMap<String, String>,
     /// Class registry for fallback dispatch to any imported/user class
     class_registry: Option<Arc<ClassRegistry>>,
+    /// Cache of extracted class data for constructor calls (avoids re-cloning)
+    class_data_cache: HashMap<String, Arc<CachedClassData>>,
 }
 
 impl MacroInterpreter {
@@ -53,6 +63,7 @@ impl MacroInterpreter {
             trace_output: Vec::new(),
             import_map: HashMap::new(),
             class_registry: None,
+            class_data_cache: HashMap::new(),
         }
     }
 
@@ -66,6 +77,7 @@ impl MacroInterpreter {
             trace_output: Vec::new(),
             import_map,
             class_registry: None,
+            class_data_cache: HashMap::new(),
         }
     }
 
@@ -83,6 +95,7 @@ impl MacroInterpreter {
             trace_output: Vec::new(),
             import_map,
             class_registry: Some(class_registry),
+            class_data_cache: HashMap::new(),
         }
     }
 
@@ -529,35 +542,43 @@ impl MacroInterpreter {
                         std::collections::HashMap::new(),
                     ))),
                     "Array" => Ok(MacroValue::Array(Arc::new(Vec::new()))),
-                    "sys.io.Process" => {
-                        self.construct_process(arg_vals, location)
-                    }
-                    "sys.io.File" => {
-                        self.construct_file(arg_vals, location)
-                    }
+                    "sys.io.Process" => self.construct_process(arg_vals, location),
+                    "sys.io.File" => self.construct_file(arg_vals, location),
                     _ => {
-                        // Check ClassRegistry for user-defined constructor
-                        // Extract data to avoid borrow conflict with &mut self
-                        let registry_hit = self.class_registry.as_ref().and_then(|cr| {
-                            cr.find_class(resolved_name).map(|ci| {
-                                (
-                                    ci.qualified_name.clone(),
-                                    ci.instance_vars
-                                        .iter()
-                                        .map(|v| (v.name.clone(), v.init_expr.clone()))
-                                        .collect::<Vec<_>>(),
-                                    ci.constructor.as_ref().map(|c| {
-                                        (c.body.clone(), c.params.clone())
-                                    }),
-                                )
-                            })
-                        });
+                        // Check cache first, then ClassRegistry for user-defined constructor
+                        let cached = if let Some(cached) = self.class_data_cache.get(resolved_name)
+                        {
+                            Some(Arc::clone(cached))
+                        } else {
+                            // Cache miss: extract from registry and cache
+                            let data = self.class_registry.as_ref().and_then(|cr| {
+                                cr.find_class(resolved_name).map(|ci| {
+                                    Arc::new(CachedClassData {
+                                        qualified_name: ci.qualified_name.clone(),
+                                        instance_vars: ci
+                                            .instance_vars
+                                            .iter()
+                                            .map(|v| (v.name.clone(), v.init_expr.clone()))
+                                            .collect(),
+                                        constructor: ci
+                                            .constructor
+                                            .as_ref()
+                                            .map(|c| (c.body.clone(), c.params.clone())),
+                                    })
+                                })
+                            });
+                            if let Some(ref data) = data {
+                                self.class_data_cache
+                                    .insert(resolved_name.to_string(), Arc::clone(data));
+                            }
+                            data
+                        };
 
-                        if let Some((qname, instance_vars, ctor)) = registry_hit {
+                        if let Some(cd) = cached {
                             return self.construct_from_registry_data(
-                                &qname,
-                                &instance_vars,
-                                ctor.as_ref(),
+                                &cd.qualified_name,
+                                &cd.instance_vars,
+                                cd.constructor.as_ref(),
                                 arg_vals,
                                 location,
                             );
@@ -719,6 +740,23 @@ impl MacroInterpreter {
             ExprKind::Field {
                 expr: base, field, ..
             } => {
+                // Fast path: this.field = value or ident.field = value
+                // Mutates the object in-place in the environment, avoiding
+                // eval→clone→COW→reassign overhead (O(N²) for N-field constructors)
+                let base_var_name = match &base.kind {
+                    ExprKind::This => Some("this"),
+                    ExprKind::Ident(name) => Some(name.as_str()),
+                    _ => None,
+                };
+                if let Some(var_name) = base_var_name {
+                    if self
+                        .env
+                        .mutate_object_field(var_name, field, new_val.clone())
+                    {
+                        return Ok(new_val);
+                    }
+                }
+                // Fallback: complex base expressions (e.g. a.b.field = value)
                 let mut base_val = self.eval_expr(base)?;
                 if let MacroValue::Object(ref mut arc_map) = base_val {
                     Arc::make_mut(arc_map).insert(field.clone(), new_val.clone());
@@ -909,7 +947,7 @@ impl MacroInterpreter {
             self.env.define(name, value.clone());
         }
 
-        // Bind parameters
+        // Bind parameters (use define_owned to avoid &str → to_string() allocation)
         for (i, param) in func.params.iter().enumerate() {
             let value = if let Some(arg) = args.get(i) {
                 arg.clone()
@@ -920,7 +958,7 @@ impl MacroInterpreter {
             } else {
                 MacroValue::Null
             };
-            self.env.define(&param.name, value);
+            self.env.define_owned(param.name.clone(), value);
         }
 
         // Execute body
@@ -945,7 +983,7 @@ impl MacroInterpreter {
         let func = MacroFunction {
             name: def.name.clone(),
             params: def.params.clone(),
-            body: Arc::from(def.body.as_ref().clone()),
+            body: def.body.clone(),
             captures: std::collections::HashMap::new(),
         };
         self.call_function(&func, args, location)
@@ -1068,10 +1106,7 @@ impl MacroInterpreter {
             },
             "sys.io.File" => match method {
                 "getContent" => {
-                    let path = args
-                        .first()
-                        .map(|v| value_to_string(v))
-                        .unwrap_or_default();
+                    let path = args.first().map(|v| value_to_string(v)).unwrap_or_default();
                     match std::fs::read_to_string(&path) {
                         Ok(content) => Ok(Some(MacroValue::String(Arc::from(content.as_str())))),
                         Err(e) => Err(MacroError::RuntimeError {
@@ -1081,14 +1116,8 @@ impl MacroInterpreter {
                     }
                 }
                 "saveContent" => {
-                    let path = args
-                        .first()
-                        .map(|v| value_to_string(v))
-                        .unwrap_or_default();
-                    let content = args
-                        .get(1)
-                        .map(|v| value_to_string(v))
-                        .unwrap_or_default();
+                    let path = args.first().map(|v| value_to_string(v)).unwrap_or_default();
+                    let content = args.get(1).map(|v| value_to_string(v)).unwrap_or_default();
                     std::fs::write(&path, &content).map_err(|e| MacroError::RuntimeError {
                         message: format!("File.saveContent('{}') failed: {}", path, e),
                         location,
@@ -1105,10 +1134,7 @@ impl MacroInterpreter {
                     Ok(Some(MacroValue::String(Arc::from(cwd.as_str()))))
                 }
                 "getEnv" => {
-                    let key = args
-                        .first()
-                        .map(|v| value_to_string(v))
-                        .unwrap_or_default();
+                    let key = args.first().map(|v| value_to_string(v)).unwrap_or_default();
                     let val = std::env::var(&key).unwrap_or_default();
                     Ok(Some(MacroValue::String(Arc::from(val.as_str()))))
                 }
@@ -1132,7 +1158,11 @@ impl MacroInterpreter {
                     Ok(Some(MacroValue::String(Arc::from(s.trim()))))
                 }
                 "replace" => {
-                    let s = args.first().and_then(|v| v.as_string()).unwrap_or("").to_string();
+                    let s = args
+                        .first()
+                        .and_then(|v| v.as_string())
+                        .unwrap_or("")
+                        .to_string();
                     let from = args.get(1).and_then(|v| v.as_string()).unwrap_or("");
                     let to = args.get(2).and_then(|v| v.as_string()).unwrap_or("");
                     Ok(Some(MacroValue::String(Arc::from(
@@ -1411,13 +1441,10 @@ impl MacroInterpreter {
                             let body = method_info.body.clone();
                             let params = method_info.params.clone();
                             self.env.push_scope();
-                            self.env.define(
-                                "this",
-                                MacroValue::Object(Arc::new(obj.clone())),
-                            );
+                            self.env
+                                .define("this", MacroValue::Object(Arc::new(obj.clone())));
                             for (i, param) in params.iter().enumerate() {
-                                let val =
-                                    _args.get(i).cloned().unwrap_or(MacroValue::Null);
+                                let val = _args.get(i).cloned().unwrap_or(MacroValue::Null);
                                 self.env.define(&param.name, val);
                             }
                             let result = self.eval_expr(&body);
@@ -1425,9 +1452,7 @@ impl MacroInterpreter {
                             return match result {
                                 Ok(val) => Ok(val),
                                 Err(MacroError::Return { value: Some(v) }) => Ok(*v),
-                                Err(MacroError::Return { value: None }) => {
-                                    Ok(MacroValue::Null)
-                                }
+                                Err(MacroError::Return { value: None }) => Ok(MacroValue::Null),
                                 Err(e) => Err(e),
                             };
                         }
@@ -1447,22 +1472,19 @@ impl MacroInterpreter {
         args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
-        let cmd = args
-            .first()
-            .map(|v| value_to_string(v))
-            .ok_or_else(|| MacroError::TypeError {
-                message: "sys.io.Process requires a command string".to_string(),
-                location,
-            })?;
+        let cmd =
+            args.first()
+                .map(|v| value_to_string(v))
+                .ok_or_else(|| MacroError::TypeError {
+                    message: "sys.io.Process requires a command string".to_string(),
+                    location,
+                })?;
 
         let proc_args: Vec<String> = if let Some(arr_val) = args.get(1) {
             // Unwrap Expr if needed
             let unwrapped = ast_bridge::unwrap_expr_value(arr_val);
             match unwrapped {
-                MacroValue::Array(arr) => arr
-                    .iter()
-                    .map(|v| value_to_string(v))
-                    .collect(),
+                MacroValue::Array(arr) => arr.iter().map(|v| value_to_string(v)).collect(),
                 _ => Vec::new(),
             }
         } else {
@@ -1510,8 +1532,14 @@ impl MacroInterpreter {
             "__type__".to_string(),
             MacroValue::String(Arc::from("sys.io.Process")),
         );
-        proc_obj.insert("stdout".to_string(), MacroValue::Object(Arc::new(stdout_obj)));
-        proc_obj.insert("stderr".to_string(), MacroValue::Object(Arc::new(stderr_obj)));
+        proc_obj.insert(
+            "stdout".to_string(),
+            MacroValue::Object(Arc::new(stdout_obj)),
+        );
+        proc_obj.insert(
+            "stderr".to_string(),
+            MacroValue::Object(Arc::new(stderr_obj)),
+        );
         proc_obj.insert("__exitCode__".to_string(), MacroValue::Int(exit_code));
 
         Ok(MacroValue::Object(Arc::new(proc_obj)))

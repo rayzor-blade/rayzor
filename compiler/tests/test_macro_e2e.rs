@@ -1857,10 +1857,7 @@ class Main {
     let (stdout, stderr, success) = run_haxe_source(source);
     assert!(success, "compilation failed: {}", stderr);
     let lines = extract_trace_lines(&stdout);
-    assert_eq!(
-        lines,
-        vec!["[RESULT] 100", "[DOUBLED] 200", "done"]
-    );
+    assert_eq!(lines, vec!["[RESULT] 100", "[DOUBLED] 200", "done"]);
 }
 
 // ================================================================
