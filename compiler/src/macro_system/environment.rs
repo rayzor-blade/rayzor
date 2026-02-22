@@ -108,6 +108,27 @@ impl Environment {
         }
         captured
     }
+
+    /// Selectively capture only the specified variables (for closures)
+    ///
+    /// Only clones values for variables that are actually referenced in the closure body.
+    /// This is much cheaper than `capture_all()` when the closure only uses a few variables
+    /// from a large enclosing scope.
+    pub fn capture_used(
+        &self,
+        used_names: &std::collections::HashSet<String>,
+    ) -> HashMap<String, MacroValue> {
+        let mut captured = HashMap::new();
+        // From outermost to innermost so inner scopes shadow outer
+        for scope in &self.scopes {
+            for (name, value) in scope {
+                if used_names.contains(name) {
+                    captured.insert(name.clone(), value.clone());
+                }
+            }
+        }
+        captured
+    }
 }
 
 impl Default for Environment {

@@ -15,6 +15,7 @@
 
 use compiler::macro_system::*;
 use parser::{BinaryOp, Expr, ExprKind, Span};
+use std::sync::Arc;
 
 // ================================================================
 // HELPERS
@@ -84,10 +85,10 @@ fn test_macro_value_type_names() {
     assert_eq!(MacroValue::Bool(true).type_name(), "Bool");
     assert_eq!(MacroValue::Int(42).type_name(), "Int");
     assert_eq!(MacroValue::Float(1.23).type_name(), "Float");
-    assert_eq!(MacroValue::String("hi".to_string()).type_name(), "String");
-    assert_eq!(MacroValue::Array(vec![]).type_name(), "Array");
+    assert_eq!(MacroValue::from_str("hi").type_name(), "String");
+    assert_eq!(MacroValue::Array(Arc::new(vec![])).type_name(), "Array");
     assert_eq!(
-        MacroValue::Object(std::collections::HashMap::new()).type_name(),
+        MacroValue::Object(Arc::new(std::collections::HashMap::new())).type_name(),
         "Object"
     );
 }
@@ -99,17 +100,17 @@ fn test_macro_value_truthiness() {
     assert!(!MacroValue::Bool(false).is_truthy());
     assert!(!MacroValue::Int(0).is_truthy());
     assert!(!MacroValue::Float(0.0).is_truthy());
-    assert!(!MacroValue::String(String::new()).is_truthy());
-    assert!(!MacroValue::Array(vec![]).is_truthy());
+    assert!(!MacroValue::from_str("").is_truthy());
+    assert!(!MacroValue::Array(Arc::new(vec![])).is_truthy());
 
     // Truthy values
     assert!(MacroValue::Bool(true).is_truthy());
     assert!(MacroValue::Int(1).is_truthy());
     assert!(MacroValue::Int(-1).is_truthy());
     assert!(MacroValue::Float(0.1).is_truthy());
-    assert!(MacroValue::String("x".to_string()).is_truthy());
-    assert!(MacroValue::Array(vec![MacroValue::Null]).is_truthy());
-    assert!(MacroValue::Object(std::collections::HashMap::new()).is_truthy());
+    assert!(MacroValue::from_str("x").is_truthy());
+    assert!(MacroValue::Array(Arc::new(vec![MacroValue::Null])).is_truthy());
+    assert!(MacroValue::Object(Arc::new(std::collections::HashMap::new())).is_truthy());
 }
 
 #[test]
@@ -119,7 +120,7 @@ fn test_macro_value_conversions() {
     assert_eq!(MacroValue::Float(3.7).as_int(), Some(3));
     assert_eq!(MacroValue::Bool(true).as_int(), Some(1));
     assert_eq!(MacroValue::Bool(false).as_int(), Some(0));
-    assert_eq!(MacroValue::String("x".to_string()).as_int(), None);
+    assert_eq!(MacroValue::from_str("x").as_int(), None);
 
     // as_float
     assert_eq!(MacroValue::Float(1.23).as_float(), Some(1.23));
@@ -127,10 +128,7 @@ fn test_macro_value_conversions() {
     assert_eq!(MacroValue::Null.as_float(), None);
 
     // as_string
-    assert_eq!(
-        MacroValue::String("hello".to_string()).as_string(),
-        Some("hello")
-    );
+    assert_eq!(MacroValue::from_str("hello").as_string(), Some("hello"));
     assert_eq!(MacroValue::Int(42).as_string(), None);
 
     // as_bool
@@ -144,21 +142,18 @@ fn test_macro_value_display_string() {
     assert_eq!(MacroValue::Null.to_display_string(), "null");
     assert_eq!(MacroValue::Bool(true).to_display_string(), "true");
     assert_eq!(MacroValue::Int(42).to_display_string(), "42");
-    assert_eq!(
-        MacroValue::String("hi".to_string()).to_display_string(),
-        "hi"
-    );
+    assert_eq!(MacroValue::from_str("hi").to_display_string(), "hi");
 
-    let arr = MacroValue::Array(vec![MacroValue::Int(1), MacroValue::Int(2)]);
+    let arr = MacroValue::Array(Arc::new(vec![MacroValue::Int(1), MacroValue::Int(2)]));
     assert_eq!(arr.to_display_string(), "[1,2]");
 
-    let enumv = MacroValue::Enum("Color".to_string(), "Red".to_string(), vec![]);
+    let enumv = MacroValue::Enum(Arc::from("Color"), Arc::from("Red"), Arc::new(vec![]));
     assert_eq!(enumv.to_display_string(), "Color.Red");
 
     let enumv_args = MacroValue::Enum(
-        "Option".to_string(),
-        "Some".to_string(),
-        vec![MacroValue::Int(5)],
+        Arc::from("Option"),
+        Arc::from("Some"),
+        Arc::new(vec![MacroValue::Int(5)]),
     );
     assert_eq!(enumv_args.to_display_string(), "Option.Some(5)");
 }
@@ -170,10 +165,7 @@ fn test_macro_value_equality() {
     assert_ne!(MacroValue::Bool(true), MacroValue::Bool(false));
     assert_eq!(MacroValue::Int(42), MacroValue::Int(42));
     assert_ne!(MacroValue::Int(1), MacroValue::Int(2));
-    assert_eq!(
-        MacroValue::String("a".to_string()),
-        MacroValue::String("a".to_string())
-    );
+    assert_eq!(MacroValue::from_str("a"), MacroValue::from_str("a"));
 
     // Cross-type int/float equality
     assert_eq!(MacroValue::Int(5), MacroValue::Float(5.0));
@@ -182,12 +174,12 @@ fn test_macro_value_equality() {
 
     // Array equality
     assert_eq!(
-        MacroValue::Array(vec![MacroValue::Int(1)]),
-        MacroValue::Array(vec![MacroValue::Int(1)])
+        MacroValue::Array(Arc::new(vec![MacroValue::Int(1)])),
+        MacroValue::Array(Arc::new(vec![MacroValue::Int(1)]))
     );
     assert_ne!(
-        MacroValue::Array(vec![MacroValue::Int(1)]),
-        MacroValue::Array(vec![MacroValue::Int(2)])
+        MacroValue::Array(Arc::new(vec![MacroValue::Int(1)])),
+        MacroValue::Array(Arc::new(vec![MacroValue::Int(2)]))
     );
 }
 
@@ -387,7 +379,7 @@ fn test_ast_bridge_literal_round_trips() {
 
     // String
     let val = expr_to_value(&str_expr("hello")).unwrap();
-    assert_eq!(val, MacroValue::String("hello".to_string()));
+    assert_eq!(val, MacroValue::from_str("hello"));
     let back = value_to_expr(&val);
     assert!(matches!(back.kind, ExprKind::String(ref s) if s == "hello"));
 
@@ -528,24 +520,24 @@ fn test_binary_operations_comprehensive() {
     assert_eq!(
         apply_binary_op(
             &BinaryOp::Add,
-            &MacroValue::String("hello".to_string()),
-            &MacroValue::String(" world".to_string()),
+            &MacroValue::from_str("hello"),
+            &MacroValue::from_str(" world"),
             loc
         )
         .unwrap(),
-        MacroValue::String("hello world".to_string())
+        MacroValue::from_str("hello world")
     );
 
     // String + non-string
     assert_eq!(
         apply_binary_op(
             &BinaryOp::Add,
-            &MacroValue::String("count: ".to_string()),
+            &MacroValue::from_str("count: "),
             &MacroValue::Int(42),
             loc
         )
         .unwrap(),
-        MacroValue::String("count: 42".to_string())
+        MacroValue::from_str("count: 42")
     );
 
     // Comparison
@@ -658,13 +650,13 @@ fn test_binary_operations_comprehensive() {
     .unwrap();
     assert_eq!(
         range,
-        MacroValue::Array(vec![
+        MacroValue::Array(Arc::new(vec![
             MacroValue::Int(0),
             MacroValue::Int(1),
             MacroValue::Int(2),
             MacroValue::Int(3),
             MacroValue::Int(4),
-        ])
+        ]))
     );
 
     // Division by zero
@@ -724,7 +716,7 @@ fn test_interpreter_string_concat() {
         span: default_span(),
     };
     let result = interp.eval_expr(&expr).unwrap();
-    assert_eq!(result, MacroValue::String("hello world".to_string()));
+    assert_eq!(result, MacroValue::from_str("hello world"));
 }
 
 #[test]
@@ -816,11 +808,11 @@ fn test_interpreter_array_construction() {
     let result = interp.eval_expr(&expr).unwrap();
     assert_eq!(
         result,
-        MacroValue::Array(vec![
+        MacroValue::Array(Arc::new(vec![
             MacroValue::Int(10),
             MacroValue::Int(20),
             MacroValue::Int(30)
-        ])
+        ]))
     );
 }
 

@@ -22,6 +22,9 @@ use super::registry::MacroRegistry;
 use super::value::MacroValue;
 use crate::tast::SourceLocation;
 use parser::{BlockElement, ClassFieldKind, Expr, ExprKind, HaxeFile, Metadata, TypeDeclaration};
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
 // Note: parser::ObjectField, Case, Catch are used via `parser::` prefix in walk handlers
 
 /// Records where a macro expansion originated, for error diagnostics.
@@ -67,6 +70,8 @@ pub struct MacroExpander {
     max_iterations: usize,
     /// Tracked expansion origins for diagnostics
     expansion_origins: Vec<ExpansionOrigin>,
+    /// Memoization cache: (macro_name, args_hash) -> expanded Expr
+    call_cache: HashMap<(String, u64), Expr>,
 }
 
 impl MacroExpander {
@@ -78,6 +83,7 @@ impl MacroExpander {
             expansions_count: 0,
             max_iterations: 100,
             expansion_origins: Vec::new(),
+            call_cache: HashMap::new(),
         }
     }
 
@@ -89,6 +95,7 @@ impl MacroExpander {
             expansions_count: 0,
             max_iterations: 100,
             expansion_origins: Vec::new(),
+            call_cache: HashMap::new(),
         }
     }
 
@@ -134,16 +141,26 @@ impl MacroExpander {
             ));
         }
 
-        // Phase 2: Identify @:build metadata (collected for later processing)
+        // Phase 2: Identify and process @:build/@:autoBuild metadata
         let build_macros = collect_build_macros(&file);
-        for bm in &build_macros {
-            self.context.diagnostics.push(MacroDiagnostic::info(
-                format!(
-                    "@:build macro '{}' registered for class '{}'",
-                    bm.macro_name, bm.class_name
-                ),
-                bm.location,
-            ));
+        if !build_macros.is_empty() {
+            for bm in &build_macros {
+                self.context.diagnostics.push(MacroDiagnostic::info(
+                    format!(
+                        "@:build macro '{}' registered for class '{}'",
+                        bm.macro_name, bm.class_name
+                    ),
+                    bm.location,
+                ));
+            }
+
+            // Phase 2b: Execute @:build macros — modify class fields before expression expansion
+            let build_result = super::build_macros::process_build_macros(file, &self.registry);
+            file = build_result.file;
+            self.expansions_count += build_result.applied_count;
+            for diag in build_result.diagnostics {
+                self.context.diagnostics.push(diag);
+            }
         }
 
         // Fast path: if no macros are registered and no build macros found,
@@ -162,22 +179,35 @@ impl MacroExpander {
         }
 
         // Phase 3: Walk and expand expressions in all declarations
+        // Uses dirty-set tracking: after iteration 1, only re-expand declarations
+        // that changed in the previous iteration (and their dependents).
         let mut iteration = 0;
         let mut changed = true;
+        let num_decls = file.declarations.len();
+        let mut dirty: std::collections::HashSet<usize> = (0..num_decls).collect();
 
         while changed && iteration < self.max_iterations {
             changed = false;
             iteration += 1;
 
-            let mut new_decls = Vec::with_capacity(file.declarations.len());
-            for decl in file.declarations.drain(..) {
-                let (expanded, did_change) = self.expand_declaration(decl);
-                if did_change {
-                    changed = true;
+            let mut new_decls = Vec::with_capacity(num_decls);
+            let mut next_dirty = std::collections::HashSet::new();
+
+            for (idx, decl) in file.declarations.drain(..).enumerate() {
+                if dirty.contains(&idx) {
+                    let (expanded, did_change) = self.expand_declaration(decl);
+                    if did_change {
+                        changed = true;
+                        next_dirty.insert(idx);
+                    }
+                    new_decls.push(expanded);
+                } else {
+                    new_decls.push(decl);
                 }
-                new_decls.push(expanded);
             }
+
             file.declarations = new_decls;
+            dirty = next_dirty;
         }
 
         if iteration >= self.max_iterations {
@@ -220,6 +250,12 @@ impl MacroExpander {
                 let mut changed = false;
                 let mut new_fields = Vec::with_capacity(class.fields.len());
                 for field in class.fields.drain(..) {
+                    // Strip macro function definitions — they're compile-time only
+                    // and their types (haxe.macro.Expr) shouldn't reach TAST lowering
+                    if field.modifiers.contains(&parser::Modifier::Macro) {
+                        changed = true;
+                        continue;
+                    }
                     let (expanded, did_change) = self.expand_class_field(field);
                     if did_change {
                         changed = true;
@@ -828,6 +864,14 @@ impl MacroExpander {
     ) -> Result<Expr, MacroError> {
         let location = super::errors::span_to_location(call_expr.span);
 
+        // Memoization: check if we've already expanded this exact call
+        let args_hash = hash_exprs(args);
+        let cache_key = (name.to_string(), args_hash);
+        if let Some(cached) = self.call_cache.get(&cache_key) {
+            self.expansions_count += 1;
+            return Ok(cached.clone());
+        }
+
         // Enter expansion tracking (depth + circular dep checks)
         self.registry.enter_expansion(name)?;
 
@@ -845,7 +889,7 @@ impl MacroExpander {
         // In Haxe macros, arguments are passed as Expr values (not evaluated)
         let arg_values: Vec<MacroValue> = args
             .iter()
-            .map(|a| MacroValue::Expr(Box::new(a.clone())))
+            .map(|a| MacroValue::Expr(Arc::new(a.clone())))
             .collect();
 
         // Check argument count
@@ -871,7 +915,7 @@ impl MacroExpander {
         for (i, param) in macro_def.params.iter().enumerate() {
             let value = if param.rest {
                 // Rest parameter: collect remaining args into an array
-                MacroValue::Array(arg_values[i..].to_vec())
+                MacroValue::Array(Arc::new(arg_values[i..].to_vec()))
             } else if let Some(val) = arg_values.get(i) {
                 val.clone()
             } else if param.optional {
@@ -916,6 +960,9 @@ impl MacroExpander {
             expanded_span: expanded.span,
         });
 
+        // Store in memoization cache for future identical calls
+        self.call_cache.insert(cache_key, expanded.clone());
+
         Ok(expanded)
     }
 }
@@ -929,6 +976,18 @@ impl Default for MacroExpander {
 // ==========================================================
 // Helper functions
 // ==========================================================
+
+/// Hash a slice of expressions for memoization cache key.
+///
+/// Uses the Debug representation as a stable, content-based hash.
+/// This is fast enough since macro args are typically small expressions.
+fn hash_exprs(exprs: &[Expr]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for expr in exprs {
+        format!("{:?}", expr.kind).hash(&mut hasher);
+    }
+    hasher.finish()
+}
 
 /// Extract the name of a potential macro call from a callee expression.
 ///
