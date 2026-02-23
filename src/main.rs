@@ -78,6 +78,10 @@ enum Commands {
         /// Load .rpkg packages (repeatable)
         #[arg(long = "rpkg", value_name = "FILE")]
         rpkg_files: Vec<PathBuf>,
+
+        /// Arguments to pass to the Haxe program (after --)
+        #[arg(last = true)]
+        program_args: Vec<String>,
     },
 
     /// JIT compile with interactive REPL
@@ -445,9 +449,20 @@ fn main() {
             release,
             compute,
             rpkg_files,
+            program_args,
         } => run_file(
-            file, verbose, stats, tier, llvm, preset, !no_cache, cache_dir, release, compute,
+            file,
+            verbose,
+            stats,
+            tier,
+            llvm,
+            preset,
+            !no_cache,
+            cache_dir,
+            release,
+            compute,
             rpkg_files,
+            program_args,
         ),
         Commands::Jit {
             file,
@@ -779,6 +794,7 @@ fn run_file(
     release: bool,
     compute: bool,
     rpkg_files: Vec<PathBuf>,
+    program_args: Vec<String>,
 ) -> Result<(), String> {
     use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
 
@@ -1004,6 +1020,9 @@ fn run_file(
             .execute_function(init_id, vec![])
             .map_err(|e| format!("module init failed: {}", e))?;
     }
+
+    // Initialize Sys.args() before running Haxe code
+    rayzor_runtime::haxe_sys::init_program_args(&program_args);
 
     // Execute main function
     backend

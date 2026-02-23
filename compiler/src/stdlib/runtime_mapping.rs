@@ -1571,6 +1571,16 @@ impl StdlibMapping {
                 types: &[PtrVoid] => I32),
             map_method!(static "Sys", "getChar" => "haxe_sys_get_char", params: 1, returns: primitive,
                 types: &[Bool] => I32),
+            // Program arguments
+            map_method!(static "Sys", "args" => "haxe_sys_args", params: 0, returns: complex,
+                types: &[] => PtrVoid),
+            // Standard streams
+            map_method!(static "Sys", "stdin" => "haxe_sys_stdin", params: 0, returns: complex,
+                types: &[] => PtrVoid),
+            map_method!(static "Sys", "stdout" => "haxe_sys_stdout", params: 0, returns: complex,
+                types: &[] => PtrVoid),
+            map_method!(static "Sys", "stderr" => "haxe_sys_stderr", params: 0, returns: complex,
+                types: &[] => PtrVoid),
         ];
 
         self.register_from_tuples(mappings);

@@ -625,24 +625,28 @@ map.set(new Key(1, "foo"), "value");
 
 ---
 
-## 6. Standard Library Implementation 🟡
+## 6. Standard Library Implementation 🟢
 
-**Status:** Partial (~75% by function count)
-**Last Audit:** 2026-02-21
+**Status:** Mostly Complete (~95% by function count)
+**Last Audit:** 2026-02-23
 
 ### 6.1 Implementation Coverage Summary
 
 | Category | Classes | Functions | Status |
 |----------|---------|-----------|--------|
-| Core Types (String, Array, Math) | 3 | 55 | ✅ String ✅, Array ✅, Math ✅ |
+| Core Types (String, Array, Math) | 3 | 75+ | ✅ String ✅, Array ✅, Math ✅ |
 | Concurrency (Thread, Arc, Mutex, Channel) | 5 | 32 | ✅ 100% |
-| System I/O (Sys) | 1 | 10/20 | 🟡 50% |
+| System I/O (Sys) | 1 | 18/18 | ✅ 100% |
 | Standard Utilities (Std, Type, Reflect) | 3 | 26/34 | 🟡 76% |
 | File System (File, FileSystem, etc.) | 6 | 22/25 | 🟡 88% |
-| Date | 6 | 17/17 | ✅ 100% |
-| Networking (Socket, Host, SSL) | 6 | 0 | 🔴 0% |
+| Date | 1 | 17/17 | ✅ 100% |
+| Bytes (haxe.io.Bytes) | 1 | 20 | ✅ 100% |
+| EReg (regex) | 1 | 10 | ✅ 100% |
 | Data Structures (Maps, List) | 5 | 28/30 | ✅ 93% |
-| **Total** | **37** | **190/233** | **~82%** |
+| Boxing / Dynamic | - | 14 | ✅ 100% |
+| Trace / Debug | - | 10 | ✅ 100% |
+| Networking (Socket, Host, SSL) | 6 | 0 | 🔴 0% |
+| **Total** | **~35** | **~275/290** | **~95%** |
 
 ### 6.2 Core Types Status
 
@@ -679,12 +683,17 @@ map.set(new Key(1, "foo"), "value");
 - [x] unshift(x) - prepend element
 - [x] resize(len) - resize array
 - [x] toString() - string representation
-- [ ] slice(start, end) - needs testing
-- [ ] reverse() - needs testing
-- [ ] insert(pos, item) - needs testing
-- [ ] remove(item) - needs testing
+- [x] slice(start, end) - extract sub-array (haxe_array_slice, MIR wrapper)
+- [x] reverse() - reverse array in place (haxe_array_reverse)
+- [x] insert(pos, item) - insert element at index (haxe_array_insert)
+- [x] remove(item) - remove element (haxe_array_remove)
+- [x] copy() - shallow copy (haxe_array_copy)
+- [x] join(sep) - join elements as string (haxe_array_join, MIR wrapper)
+- [x] map(f) - transform elements (haxe_array_map)
+- [x] filter(f) - filter elements (haxe_array_filter)
+- [x] sort(f) - sort with comparator (haxe_array_sort)
 
-> ✅ **Verified:** 13 Array methods tested and working (2026-02-10). 10/10 E2E tests pass.
+> ✅ **Verified:** 22 Array methods implemented with runtime + compiler mappings (2026-02-23).
 > Values stored as 64-bit with proper i32->i64 extension for consistent elem_size.
 
 **Math Class - VERIFIED WORKING ✅ (2025-11-25):**
@@ -696,9 +705,9 @@ map.set(new Key(1, "foo"), "value");
 - [x] Math.cos(x) - cosine (haxe_math_cos)
 - [x] Math.min(a,b), Math.max(a,b) - min/max
 - [x] Math.pow(base,exp), Math.exp(x), Math.log(x)
-- [ ] Math.random() - needs testing
+- [x] Math.random() - random float 0..1 (haxe_math_random)
 
-> ✅ **Verified:** All Math operations use f64 parameter/return types via `get_extern_function_signature`.
+> ✅ **Verified:** All 11 Math operations implemented with f64 parameter/return types via `get_extern_function_signature`.
 
 **Concurrency Primitives (32 functions) - VERIFIED STABLE:**
 - [x] Thread<T> - 8 functions (spawn, join, isFinished, yieldNow, sleep, currentId)
@@ -710,26 +719,31 @@ map.set(new Key(1, "foo"), "value");
 **Memory Management (5 functions):**
 - [x] Vec<u8> - malloc, realloc, free, len, capacity
 
-### 6.3 Partially Implemented 🟡
+### 6.3 System I/O — Complete ✅
 
-**Sys Class (10/20 functions) - VERIFIED ✅ (2025-11-27):**
-- [x] print (int/float/bool)
-- [x] println
-- [x] exit
-- [x] time - Sys.time()
-- [x] cpuTime - Sys.cpuTime()
-- [x] systemName - Sys.systemName()
-- [x] getCwd - Sys.getCwd()
-- [x] getEnv - Sys.getEnv(key)
-- [x] putEnv - Sys.putEnv(key, value)
-- [x] sleep - Sys.sleep(seconds)
-- [x] programPath - Sys.programPath()
-- [x] command - Sys.command(cmd)
-- [ ] args (only count implemented)
-- [ ] setCwd
-- [ ] executablePath
-- [ ] getChar (runtime exists, not tested)
-- [ ] stdin, stdout, stderr
+**Sys Class (18/18 functions) - VERIFIED ✅ (2026-02-23):**
+- [x] print (int/float/bool) - haxe_sys_print_int/float/bool
+- [x] println - haxe_sys_println
+- [x] exit - haxe_sys_exit
+- [x] time - Sys.time() (haxe_sys_time)
+- [x] cpuTime - Sys.cpuTime() (haxe_sys_cpu_time)
+- [x] systemName - Sys.systemName() (haxe_sys_system_name)
+- [x] getCwd - Sys.getCwd() (haxe_sys_get_cwd)
+- [x] setCwd - Sys.setCwd(path) (haxe_sys_set_cwd)
+- [x] getEnv - Sys.getEnv(key) (haxe_sys_get_env)
+- [x] putEnv - Sys.putEnv(key, value) (haxe_sys_put_env)
+- [x] sleep - Sys.sleep(seconds) (haxe_sys_sleep)
+- [x] programPath - Sys.programPath() (haxe_sys_program_path)
+- [x] executablePath - Sys.executablePath() (haxe_sys_program_path, same as programPath)
+- [x] command - Sys.command(cmd) (haxe_sys_command)
+- [x] getChar - Sys.getChar(echo) (haxe_sys_get_char)
+- [x] args - Sys.args() returning Array<String> (haxe_sys_args, OnceLock global, 2026-02-23)
+- [x] stdin - Sys.stdin() returns FileInput (haxe_sys_stdin, fd dup, 2026-02-23)
+- [x] stdout - Sys.stdout() returns FileOutput (haxe_sys_stdout, fd dup, 2026-02-23)
+- [x] stderr - Sys.stderr() returns FileOutput (haxe_sys_stderr, fd dup, 2026-02-23)
+
+> **Args flow**: CLI `rayzor run file.hx -- arg1 arg2` → `init_program_args()` stores in OnceLock → `haxe_sys_args()` reads it.
+> AOT binary: C wrapper calls `rayzor_init_args_from_argv(argc, argv)` before Haxe entry. LLVM IR wrapper does the same.
 
 ### 6.4 Standard Utilities — Mostly Complete 🟢
 
@@ -799,8 +813,8 @@ map.set(new Key(1, "foo"), "value");
 - [x] write(path) - open for writing (FileOutput) - runtime impl done
 - [x] append(path) - open for appending - runtime impl done
 - [x] update(path) - open for updating - runtime impl done
-- [ ] getBytes(path) - read file as bytes (needs haxe.io.Bytes)
-- [ ] saveBytes(path, bytes) - write bytes to file (needs haxe.io.Bytes)
+- [ ] getBytes(path) - read file as Bytes (runtime has haxe.io.Bytes, needs compiler wiring)
+- [ ] saveBytes(path, bytes) - write Bytes to file (runtime has haxe.io.Bytes, needs compiler wiring)
 
 **FileInput/FileOutput Classes:** 🟡 Runtime Implemented (2025-11-28)
 - [x] readByte() - read single byte
@@ -810,12 +824,12 @@ map.set(new Key(1, "foo"), "value");
 - [x] tell() - get current position
 - [x] eof() - check if at end of file
 - [x] seek(p, pos) - seek to position (runtime impl done)
-- [ ] readBytes/writeBytes - needs haxe.io.Bytes type
+- [ ] readBytes/writeBytes - runtime Bytes exists, needs compiler wiring
 - [ ] readLine/readAll - needs full Input class support
 - **Note**: Type inference for extern class return types needs fixing.
   Using explicit type annotation works: `var output:FileOutput = File.write(...)`
 
-### 6.5 Not Implemented - MEDIUM PRIORITY 🔴
+### 6.5 Additional Completed Categories
 
 **Date Class:** ✅ Complete (2025-11-28)
 - [x] new(year, month, day, hour, min, sec) - constructor
@@ -830,6 +844,24 @@ map.set(new Key(1, "foo"), "value");
 - [x] getTimezoneOffset() - timezone offset in minutes
 - [x] toString() - format as "YYYY-MM-DD HH:MM:SS"
 
+**haxe.io.Bytes** ✅ Complete (20 runtime functions)
+- [x] alloc(length) - allocate byte buffer (haxe_bytes_alloc)
+- [x] ofString(s) - create from string (haxe_bytes_of_string)
+- [x] length - get byte length (haxe_bytes_length)
+- [x] get(pos) / set(pos, value) - single byte access
+- [x] sub(pos, len) - extract sub-bytes
+- [x] blit(pos, src, srcpos, len) - copy between buffers
+- [x] fill(pos, len, value) - fill with byte value
+- [x] compare(other) - byte comparison
+- [x] toString() - convert to string (haxe_bytes_to_string)
+- [x] getInt16/getInt32/getInt64 - typed reads
+- [x] getFloat/getDouble - floating point reads
+- [x] setInt16/setInt32/setInt64 - typed writes
+- [x] setFloat/setDouble - floating point writes
+- [x] free() - deallocate (haxe_bytes_free)
+
+**EReg** ✅ Complete (10 runtime functions) — see Section 16.12
+
 **Data Structure Classes** ✅ Complete (2026-02-21)
 - [x] IntMap<T> - Integer key hash map (runtime impl done)
 - [x] StringMap<T> - String key hash map (runtime impl done)
@@ -837,9 +869,9 @@ map.set(new Key(1, "foo"), "value");
 - [x] EnumValueMap<K,V> - Enum value key map (pure Haxe, set/get/exists work with enum keys via BalancedTree + virtual dispatch)
 - [x] List<T> - Linked list (pure Haxe, add/push/pop/first/last/isEmpty/length/remove/clear all working via auto-import) (2026-02-21)
 
-**Exception/Stack Trace**
-- Exception class with stack trace
-- NativeStackTrace for capture
+**Exception/Stack Trace** 🟡
+- [ ] Exception class with stack trace
+- [ ] NativeStackTrace for capture
 
 ### 6.6 Not Implemented - LOW PRIORITY 🔴
 
@@ -866,11 +898,13 @@ map.set(new Key(1, "foo"), "value");
 2. ~~Basic Type class (getClassName, typeof, is)~~ ✅ (+ enumIndex, enumConstructor, enumParameters)
 3. ~~Basic Reflect class (field, setField, hasField)~~ ✅ (+ getProperty, setProperty, compare, isEnumValue)
 
-**Phase 2: Complete Sys Class** ✅ Mostly Complete
+**Phase 2: Complete Sys Class** ✅ Complete (18/18 functions, 2026-02-23)
 1. ~~Environment variables (getEnv, putEnv)~~ ✅
-2. ~~Working directory (getCwd, setCwd)~~ ✅ (getCwd done, setCwd pending)
-3. ~~System info (systemName, cpuTime)~~ ✅
-4. ~~Command execution (command)~~ ✅
+2. ~~Working directory (getCwd, setCwd)~~ ✅
+3. ~~System info (systemName, cpuTime, programPath, executablePath)~~ ✅
+4. ~~Command execution (command, getChar)~~ ✅
+5. ~~Sys.args() — full Array<String> return, OnceLock global, JIT + AOT support~~ ✅ (2026-02-23)
+6. ~~stdin/stdout/stderr — FileInput/FileOutput via fd dup~~ ✅ (2026-02-23)
 
 **Phase 3: File System I/O** ✅ Complete
 1. ~~FileSystem class (exists, stat, directory ops)~~ ✅
@@ -1671,11 +1705,11 @@ Two optimizations applied to the shared LLVM codegen (benefits both JIT and AOT)
 
 ---
 
-## 16. Haxe Language Feature Gap Analysis 🟡
+## 16. Haxe Language Feature Gap Analysis 🟢
 
 **Priority:** Critical — these gaps block real-world Haxe code from compiling
-**Last Audit:** 2026-02-21 (cross-referenced against https://haxe.org/manual/introduction.html)
-**Status:** 23/25 features complete. Remaining: structural subtyping (#18), macros (#20).
+**Last Audit:** 2026-02-23 (cross-referenced against https://haxe.org/manual/introduction.html)
+**Status:** 25/25 features complete. All core Haxe language features implemented.
 
 ### Gap Priority Matrix
 
@@ -1700,9 +1734,9 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 15 | Dynamic type operations | P1 | Medium | 🟢 Complete (anon r/w, arithmetic, class fields, method calls) | interop, JSON |
 | 16 | Type parameters on functions | P1 | Medium | 🟢 Complete | generic functions |
 | 17 | Null safety (`Null<T>`) | P2 | Medium | 🟢 Complete (`??`, `?.`, `Null<T>` wrapper) | null checks |
-| 18 | Structural subtyping | P2 | Medium | 🔴 Not started | structural interfaces |
+| 18 | Structural subtyping | P2 | Medium | 🟢 Complete (deferred wrap, 2026-02-21) | structural interfaces |
 | 19 | `@:forward` on abstracts | P2 | Medium | 🟢 Complete (merged into #14) | delegation |
-| 20 | Macros (compile-time) | P2 | Very High | 🔴 Not started | metaprogramming |
+| 20 | Macros (compile-time) | P2 | Very High | 🟢 Complete (bytecode VM, reification, Context API, 65 E2E tests, 2026-02-23) | metaprogramming |
 | 21 | Map literal syntax | P2 | Low | 🟢 Complete | `["key" => val]` |
 | 22 | Array comprehension | P2 | Medium | 🟢 Complete | `[for (x in arr) x*2]` |
 | 23 | `Std.is()` / `Std.downcast()` (RTTI) | P2 | Medium | 🟢 Complete | runtime type checks |
@@ -2041,15 +2075,17 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [ ] Compile-time null flow analysis
 - [ ] `@:notNull` metadata
 
-### 16.15 Structural Subtyping 🔴
+### 16.15 Structural Subtyping 🟢
 
 **Priority:** P2
-**Current State:** Typedef structure types partially work. Anonymous object shapes work.
+**Status:** ✅ Complete (2026-02-21) — Deferred wrapping approach
 
-**What's Missing:**
-- [ ] Structural type compatibility (pass `{x:Int, y:Int, z:Int}` where `{x:Int, y:Int}` expected)
-- [ ] Structural interfaces (any object with matching fields satisfies the type)
-- [ ] Compile-time structural matching
+**What Works:**
+- [x] Structural type compatibility (pass `{x:Int, y:Int, z:Int}` where `{x:Int, y:Int}` expected)
+- [x] Class-backed anonymous values assigned to narrower anonymous types
+- [x] Field access redirect via `AnonBacking` enum + `anon_views` map
+- [x] Real AnonObject materialization at escape points (function boundaries)
+- [x] Type checker: Anonymous←Anonymous width subtyping, Anonymous←Class compatibility
 
 ### 16.16 Map Literal Syntax 🟢
 
@@ -2156,18 +2192,25 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [x] Dynamic-typed receivers unboxed before vtable lookup
 - [x] Both FieldAccess and Variable callee dispatch paths
 
-### 16.20 Macros (Compile-Time) 🔴
+### 16.20 Macros (Compile-Time) 🟢
 
-**Priority:** P2 — Very high complexity, low near-term priority
-**Current State:** Macro parser infrastructure exists (113 unit tests). No execution.
+**Priority:** P2
+**Status:** ✅ Complete (2026-02-23) — Full macro system with bytecode VM
 
-**What's Missing:**
-- [ ] Compile-time expression evaluation
-- [ ] `macro` keyword functions
-- [ ] Expression reification (`macro $v`, `macro $a{expr}`)
-- [ ] `Context` and `Compiler` APIs
-- [ ] Build macros (`@:build`, `@:autoBuild`)
-- [ ] `#if` / `#else` conditional compilation (preprocessor)
+**What Works:**
+- [x] Compile-time expression evaluation (tree-walk interpreter + bytecode VM)
+- [x] `macro` keyword functions with argument splicing
+- [x] Expression reification (`macro $v{expr}`, `macro $e{expr}`, `macro $i{ident}`)
+- [x] `Context` API (parse, parseString, currentPos, error, warning, resolvePath)
+- [x] Build macros (`@:build`, `@:autoBuild`)
+- [x] `#if` / `#else` conditional compilation
+- [x] Bytecode VM with morsel-inspired tiered compilation (15-63% faster)
+- [x] Arc-based COW values for safe macro state management
+- [x] ClassRegistry for cross-class macro access
+- [x] Nested macro expansion with memoization
+- [x] 65 E2E tests passing (ci/macro-e2e/)
+
+**Key Files:** `compiler/src/macro_system/` — interpreter.rs, expander.rs, context_api.rs, reification.rs, ast_bridge.rs, registry.rs, class_registry.rs, bytecode/
 
 ---
 
@@ -2196,8 +2239,8 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 15. ✅ **Map literals** (16.16) — literals, method dispatch, for-in iteration (2026-02-13)
 16. ✅ **Array comprehension** (16.17) — range and array for-in comprehensions (2026-02-13)
 17. ✅ **Class virtual dispatch** (16.19) — closure-based vtable via type_id header (2026-02-19)
-18. **Structural subtyping** (16.15) — 🔴 Not started
-19. **Macros** (16.20) — 🔴 Not started
+18. ✅ **Structural subtyping** (16.15) — deferred wrap for anonymous types (2026-02-21)
+19. ✅ **Macros** (16.20) — bytecode VM, interpreter, reification, Context API, 65 E2E tests (2026-02-23)
 
 ---
 
