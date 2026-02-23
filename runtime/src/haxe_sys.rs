@@ -1831,6 +1831,41 @@ pub extern "C" fn haxe_fileinput_read_bytes(
     }
 }
 
+/// Read multiple bytes into a Bytes buffer at given offset
+/// FileInput.readBytes(s: Bytes, pos: Int, len: Int): Int
+#[no_mangle]
+pub extern "C" fn haxe_fileinput_read_bytes_buf(
+    handle: *mut HaxeFileInput,
+    bytes: *mut HaxeBytes,
+    pos: i32,
+    len: i32,
+) -> i32 {
+    if handle.is_null() || bytes.is_null() || pos < 0 || len <= 0 {
+        return 0;
+    }
+    unsafe {
+        let b = &mut *bytes;
+        let pos = pos as usize;
+        let len = len as usize;
+        if pos + len > b.len {
+            return 0;
+        }
+        let buf = std::slice::from_raw_parts_mut(b.ptr.add(pos), len);
+        let input = &mut *handle;
+        match input.reader.read(buf) {
+            Ok(0) => {
+                input.eof_reached = true;
+                0
+            }
+            Ok(n) => n as i32,
+            Err(_) => {
+                input.eof_reached = true;
+                0
+            }
+        }
+    }
+}
+
 /// Seek to position in FileInput
 /// FileInput.seek(p: Int, pos: FileSeek): Void
 #[no_mangle]
@@ -1921,6 +1956,34 @@ pub extern "C" fn haxe_fileoutput_write_bytes(
     unsafe {
         let output = &mut *handle;
         let slice = std::slice::from_raw_parts(buf, len as usize);
+        match output.writer.write(slice) {
+            Ok(n) => n as i32,
+            Err(_) => 0,
+        }
+    }
+}
+
+/// Write multiple bytes from a Bytes buffer at given offset
+/// FileOutput.writeBytes(s: Bytes, pos: Int, len: Int): Int
+#[no_mangle]
+pub extern "C" fn haxe_fileoutput_write_bytes_buf(
+    handle: *mut HaxeFileOutput,
+    bytes: *const HaxeBytes,
+    pos: i32,
+    len: i32,
+) -> i32 {
+    if handle.is_null() || bytes.is_null() || pos < 0 || len <= 0 {
+        return 0;
+    }
+    unsafe {
+        let b = &*bytes;
+        let pos = pos as usize;
+        let len = len as usize;
+        if pos + len > b.len {
+            return 0;
+        }
+        let output = &mut *handle;
+        let slice = std::slice::from_raw_parts(b.ptr.add(pos), len);
         match output.writer.write(slice) {
             Ok(n) => n as i32,
             Err(_) => 0,

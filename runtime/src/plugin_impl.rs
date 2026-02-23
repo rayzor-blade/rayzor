@@ -522,6 +522,10 @@ register_symbol!(
     "haxe_fileinput_read_bytes",
     crate::haxe_sys::haxe_fileinput_read_bytes
 );
+register_symbol!(
+    "haxe_fileinput_read_bytes_buf",
+    crate::haxe_sys::haxe_fileinput_read_bytes_buf
+);
 register_symbol!("haxe_fileinput_seek", crate::haxe_sys::haxe_fileinput_seek);
 register_symbol!("haxe_fileinput_tell", crate::haxe_sys::haxe_fileinput_tell);
 register_symbol!("haxe_fileinput_eof", crate::haxe_sys::haxe_fileinput_eof);
@@ -540,6 +544,10 @@ register_symbol!(
 register_symbol!(
     "haxe_fileoutput_write_bytes",
     crate::haxe_sys::haxe_fileoutput_write_bytes
+);
+register_symbol!(
+    "haxe_fileoutput_write_bytes_buf",
+    crate::haxe_sys::haxe_fileoutput_write_bytes_buf
 );
 register_symbol!(
     "haxe_fileoutput_seek",
