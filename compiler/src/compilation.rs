@@ -2067,8 +2067,8 @@ impl CompilationUnit {
         // Handle cycle: if compile_order is empty but all_files is not, there's a cycle.
         // Append remaining files in any order (they'll still compile, just without guaranteed dep order).
         if compile_order.is_empty() && !all_files.is_empty() {
-            eprintln!(
-                "[LOAD_IMPORTS] WARNING: cycle detected, {} files stuck. in_degrees: {:?}",
+            warn!(
+                "Cycle detected, {} files stuck. in_degrees: {:?}",
                 all_files.len(),
                 in_degree.iter().filter(|(_, &d)| d > 0).collect::<Vec<_>>()
             );
