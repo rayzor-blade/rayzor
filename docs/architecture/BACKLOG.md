@@ -786,7 +786,7 @@ map.set(new Key(1, "foo"), "value");
 - [x] Reflect.isEnumValue(v) - check if enum value (2026-02-19)
 - [x] Reflect.getProperty(o, name) - get via property accessor, falls back to field (2026-02-21)
 - [x] Reflect.setProperty(o, name, value) - set via property accessor, falls back to setField (2026-02-21)
-- [ ] Reflect.isFunction(f) - check if function value
+- [x] Reflect.isFunction(f) - check if function value (runtime + stdlib mapped)
 - [ ] Reflect.callMethod(o, func, args) - reflective method call
 - [ ] Reflect.makeVarArgs(f) - wrap function as varargs
 
@@ -816,18 +816,16 @@ map.set(new Key(1, "foo"), "value");
 - [x] getBytes(path) - read file as Bytes (haxe_file_get_bytes, stdlib mapped)
 - [x] saveBytes(path, bytes) - write Bytes to file (haxe_file_save_bytes, stdlib mapped)
 
-**FileInput/FileOutput Classes:** 🟡 Runtime Implemented (2025-11-28)
+**FileInput/FileOutput Classes:** ✅ Core Ops Verified (2026-02-23)
 - [x] readByte() - read single byte
 - [x] writeByte(c) - write single byte
 - [x] close() - close file handle
 - [x] flush() - flush output buffer
 - [x] tell() - get current position
 - [x] eof() - check if at end of file
-- [x] seek(p, pos) - seek to position (runtime impl done)
+- [x] seek(p, pos) - seek to position
 - [ ] readBytes/writeBytes - stream-level byte buffer read/write (needs Input/Output base class wiring)
 - [ ] readLine/readAll - needs full Input class support
-- **Note**: Type inference for extern class return types needs fixing.
-  Using explicit type annotation works: `var output:FileOutput = File.write(...)`
 
 ### 6.5 Additional Completed Categories
 
