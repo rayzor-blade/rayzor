@@ -1022,13 +1022,14 @@ impl Default for MacroExpander {
 
 /// Hash a slice of expressions for memoization cache key.
 ///
-/// Uses source spans as a stable, zero-allocation hash. Different macro call
-/// sites have different spans, so this preserves cache semantics while avoiding
-/// the O(n) `format!("{:?}")` string allocation per argument.
+/// Hash expressions for memoization cache key. Uses both source spans AND
+/// a Debug representation of the expression kind, so expanded macro results
+/// with Span::default() (from nested macro calls) don't collide.
 fn hash_exprs(exprs: &[Expr]) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     for expr in exprs {
         expr.span.hash(&mut hasher);
+        format!("{:?}", expr.kind).hash(&mut hasher);
     }
     hasher.finish()
 }
