@@ -2343,7 +2343,7 @@ class Main {
     assert!(success, "compilation failed: {}", stderr);
     let lines = extract_trace_lines(&stdout);
     assert!(
-        ["Mac", "Linux", "Windows"].contains(&&*lines[0]),
+        lines[0] == "Mac" || lines[0] == "Linux" || lines[0] == "Windows",
         "expected platform name, got: '{}'",
         lines[0]
     );
