@@ -12574,9 +12574,13 @@ impl<'a> HirToMirContext<'a> {
                             .unwrap_or(rhs_type.clone());
 
                         let lhs_is_string_mir = matches!(&lhs_mir_type, IrType::String)
-                            || matches!(&lhs_mir_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::String));
+                            || matches!(&lhs_mir_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::String))
+                            // Defensive: if HIR type says String but MIR register is Ptr(Void)
+                            // (e.g. extern/stdlib string returns), trust the HIR type
+                            || (lhs_is_string && matches!(&lhs_mir_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void)));
                         let rhs_is_string_mir = matches!(&rhs_mir_type, IrType::String)
-                            || matches!(&rhs_mir_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::String));
+                            || matches!(&rhs_mir_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::String))
+                            || (rhs_is_string && matches!(&rhs_mir_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void)));
 
                         // Convert non-string operand to string if needed
                         // For class instances with toString(), call it directly at compile time

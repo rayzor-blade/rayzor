@@ -4,7 +4,7 @@
 /// used as the backing storage for strings and byte buffers.
 ///
 /// Memory layout:
-/// ```
+/// ```ignore
 /// struct Vec<u8> {
 ///     ptr: *u8,      // Pointer to heap-allocated array
 ///     len: u64,      // Number of elements

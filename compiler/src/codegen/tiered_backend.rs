@@ -807,7 +807,7 @@ impl TieredBackend {
     /// Create a tiered backend from a preset
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// use compiler::codegen::tiered_backend::{TieredBackend, TierPreset};
     ///
     /// let backend = TieredBackend::from_preset(TierPreset::Script)?;
@@ -819,7 +819,7 @@ impl TieredBackend {
     /// Create a tiered backend from a preset with runtime symbols
     ///
     /// # Example
-    /// ```
+    /// ```ignore
     /// use compiler::codegen::tiered_backend::{TieredBackend, TierPreset};
     ///
     /// let symbols = get_runtime_symbols();

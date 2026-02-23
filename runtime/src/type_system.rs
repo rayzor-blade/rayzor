@@ -12,17 +12,17 @@
 //! ## Usage
 //!
 //! 1. Boxing: Convert a concrete value to Dynamic
-//!    ```
+//!    ```ignore
 //!    let dynamic = box_int(42);  // Returns (TYPE_INT, ptr)
 //!    ```
 //!
 //! 2. Unboxing: Extract concrete value from Dynamic
-//!    ```
+//!    ```ignore
 //!    let value = unbox_int(dynamic);  // Returns 42
 //!    ```
 //!
 //! 3. toString: Convert any Dynamic value to String
-//!    ```
+//!    ```ignore
 //!    let s = dynamic_to_string(dynamic);  // Dispatches based on type_id
 //!    ```
 

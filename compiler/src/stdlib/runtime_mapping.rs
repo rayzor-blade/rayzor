@@ -1548,12 +1548,12 @@ impl StdlibMapping {
                 types: &[] => F64),
             // Environment
             map_method!(static "Sys", "getEnv" => "haxe_sys_get_env", params: 1, returns: complex,
-                types: &[PtrVoid] => PtrVoid),
+                types: &[PtrVoid] => PtrString),
             map_method!(static "Sys", "putEnv" => "haxe_sys_put_env", params: 2, returns: void,
                 types: &[PtrVoid, PtrVoid]),
             // Working directory
             map_method!(static "Sys", "getCwd" => "haxe_sys_get_cwd", params: 0, returns: complex,
-                types: &[] => PtrVoid),
+                types: &[] => PtrString),
             map_method!(static "Sys", "setCwd" => "haxe_sys_set_cwd", params: 1, returns: void,
                 types: &[PtrVoid]),
             // Sleep
@@ -1561,11 +1561,11 @@ impl StdlibMapping {
                 types: &[F64]),
             // System info
             map_method!(static "Sys", "systemName" => "haxe_sys_system_name", params: 0, returns: complex,
-                types: &[] => PtrVoid),
+                types: &[] => PtrString),
             map_method!(static "Sys", "programPath" => "haxe_sys_program_path", params: 0, returns: complex,
-                types: &[] => PtrVoid),
+                types: &[] => PtrString),
             map_method!(static "Sys", "executablePath" => "haxe_sys_program_path", params: 0, returns: complex,
-                types: &[] => PtrVoid),
+                types: &[] => PtrString),
             // Command execution
             map_method!(static "Sys", "command" => "haxe_sys_command", params: 1, returns: primitive,
                 types: &[PtrVoid] => I32),
@@ -1596,7 +1596,7 @@ impl StdlibMapping {
         let mappings = vec![
             // Std.string(v: Dynamic) -> String
             map_method!(static "Std", "string" => "haxe_std_string_ptr", params: 1, returns: complex,
-                types: &[PtrVoid] => PtrVoid),
+                types: &[PtrVoid] => PtrString),
             // Std.int(x: Float) -> Int
             map_method!(static "Std", "int" => "haxe_std_int", params: 1, returns: primitive,
                 types: &[F64] => I64),
@@ -1636,7 +1636,7 @@ impl StdlibMapping {
         let mappings = vec![
             // File.getContent(path: String) -> String
             map_method!(static "File", "getContent" => "haxe_file_get_content", params: 1, returns: complex,
-                types: &[PtrVoid] => PtrVoid),
+                types: &[PtrVoid] => PtrString),
             // File.saveContent(path: String, content: String) -> Void
             map_method!(static "File", "saveContent" => "haxe_file_save_content", params: 2, returns: void,
                 types: &[PtrVoid, PtrVoid]),
@@ -3168,7 +3168,7 @@ impl StdlibMapping {
                 types: &[PtrVoid] => I64),
             // Type.getClassName(c:Class<Dynamic>):String
             map_method!(static "Type", "getClassName" => "haxe_type_get_class_name", params: 1, returns: complex,
-                types: &[I64] => PtrVoid),
+                types: &[I64] => PtrString),
             // Type.getSuperClass(c:Class<Dynamic>):Class<Dynamic>
             map_method!(static "Type", "getSuperClass" => "haxe_type_get_super_class", params: 1, returns: primitive,
                 types: &[I64] => I64),
@@ -3186,7 +3186,7 @@ impl StdlibMapping {
                 types: &[I64] => PtrVoid),
             // Type.getEnumName(e:Enum<Dynamic>):String
             map_method!(static "Type", "getEnumName" => "haxe_type_get_enum_name", params: 1, returns: complex,
-                types: &[I64] => PtrVoid),
+                types: &[I64] => PtrString),
             // Type.createEnum(e, constr, ?params):T
             map_method!(static "Type", "createEnum" => "haxe_type_create_enum", params: 3, returns: primitive,
                 types: &[I64, PtrVoid, PtrVoid] => I64),
@@ -3198,7 +3198,7 @@ impl StdlibMapping {
                 types: &[I64] => I64),
             // Type.enumConstructor(e:EnumValue):String — takes (value, type_id), type_id injected by compiler
             map_method!(static "Type", "enumConstructor" => "haxe_type_enum_constructor", params: 1, returns: complex,
-                types: &[I64, I32] => PtrVoid),
+                types: &[I64, I32] => PtrString),
             // Type.enumParameters(e:EnumValue):Array<Dynamic> — takes (value, type_id), type_id injected by compiler
             map_method!(static "Type", "enumParameters" => "haxe_type_enum_parameters", params: 1, returns: complex,
                 types: &[I64, I32] => PtrVoid),
