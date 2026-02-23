@@ -824,7 +824,7 @@ map.set(new Key(1, "foo"), "value");
 - [x] tell() - get current position
 - [x] eof() - check if at end of file
 - [x] seek(p, pos) - seek to position
-- [ ] readBytes/writeBytes - stream-level byte buffer read/write (needs Input/Output base class wiring)
+- [x] readBytes(s, pos, len) / writeBytes(s, pos, len) - stream-level byte buffer read/write (2026-02-23)
 - [ ] readLine/readAll - needs full Input class support
 
 ### 6.5 Additional Completed Categories

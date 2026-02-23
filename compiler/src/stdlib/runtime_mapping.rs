@@ -1689,6 +1689,9 @@ impl StdlibMapping {
             // FileInput.close() -> Void
             map_method!(instance "FileInput", "close" => "haxe_fileinput_close", params: 0, returns: void,
                 types: &[PtrVoid]),
+            // FileInput.readBytes(s: Bytes, pos: Int, len: Int) -> Int
+            map_method!(instance "FileInput", "readBytes" => "haxe_fileinput_read_bytes_buf", params: 3, returns: primitive,
+                types: &[PtrVoid, PtrVoid, I32, I32] => I32),
         ];
 
         self.register_from_tuples(mappings);
@@ -1717,6 +1720,9 @@ impl StdlibMapping {
             // FileOutput.close() -> Void
             map_method!(instance "FileOutput", "close" => "haxe_fileoutput_close", params: 0, returns: void,
                 types: &[PtrVoid]),
+            // FileOutput.writeBytes(s: Bytes, pos: Int, len: Int) -> Int
+            map_method!(instance "FileOutput", "writeBytes" => "haxe_fileoutput_write_bytes_buf", params: 3, returns: primitive,
+                types: &[PtrVoid, PtrVoid, I32, I32] => I32),
         ];
 
         self.register_from_tuples(mappings);
