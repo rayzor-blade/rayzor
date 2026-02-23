@@ -1043,7 +1043,7 @@ impl MacroInterpreter {
                 match vm.execute(chunk, args.clone()) {
                     Ok(result) => {
                         // Collect trace output from VM
-                        self.trace_output.extend(vm.trace_output.drain(..));
+                        self.trace_output.append(&mut vm.trace_output);
                         return Ok(result);
                     }
                     Err(_) => {
