@@ -7,8 +7,9 @@ use crate::compiler_plugin::CompilerPluginRegistry;
 use crate::dependency_graph::{CircularDependency, DependencyAnalysis, DependencyGraph};
 use crate::ir::{
     blade::{
-        load_blade, load_symbol_manifest, save_blade, BladeAbstractInfo, BladeClassInfo,
-        BladeEnumInfo, BladeMetadata, BladeMethodInfo, BladeSymbolManifest, BladeTypeAliasInfo,
+        load_blade, load_symbol_manifest, save_blade_with_state, BladeCachedMaps,
+        BladeAbstractInfo, BladeClassInfo, BladeEnumInfo, BladeFieldEntry, BladeFuncEntry,
+        BladeMetadata, BladeMethodInfo, BladeSymbolManifest, BladeTypeAliasInfo, BladeTypeInfo,
     },
     IrInstruction, IrModule, Monomorphizer,
 };
@@ -125,6 +126,12 @@ pub struct CompilationUnit {
 
     /// Set of already-loaded HDLL library names to avoid duplicate loading
     loaded_hdlls: HashSet<String>,
+
+    /// Type info extracted from the last compiled file (for BLADE cache save)
+    last_compiled_type_info: Option<BladeTypeInfo>,
+
+    /// MIR cross-reference maps from the last compiled file (for BLADE cache save)
+    last_compiled_cached_maps: Option<BladeCachedMaps>,
 }
 
 /// Configuration for compilation
@@ -438,6 +445,8 @@ impl CompilationUnit {
             compiler_plugin_registry: CompilerPluginRegistry::new(),
             hdll_symbols: Vec::new(),
             loaded_hdlls: HashSet::new(),
+            last_compiled_type_info: None,
+            last_compiled_cached_maps: None,
         }
     }
 
@@ -540,7 +549,7 @@ impl CompilationUnit {
         }
 
         match load_blade(&blade_path) {
-            Ok((mir, metadata)) => {
+            Ok((mir, metadata, _symbols, _cached_maps)) => {
                 // Validate cache by checking source hash
                 let current_hash = Self::hash_source(source);
                 if metadata.source_hash == current_hash {
@@ -562,13 +571,15 @@ impl CompilationUnit {
         }
     }
 
-    /// Save a MIR module to BLADE cache
+    /// Save a MIR module to BLADE cache with optional type info and cross-reference maps
     fn save_blade_cached(
         &self,
         source_path: &str,
         source: &str,
         mir: &IrModule,
         dependencies: Vec<String>,
+        symbols: Option<BladeTypeInfo>,
+        cached_maps: Option<BladeCachedMaps>,
     ) {
         if !self.config.enable_cache {
             return;
@@ -604,7 +615,7 @@ impl CompilationUnit {
             compiler_version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
-        match save_blade(&blade_path, mir, metadata) {
+        match save_blade_with_state(&blade_path, mir, metadata, symbols, cached_maps) {
             Ok(()) => {
                 debug!(
                     "[BLADE] Cached: {} -> {}",
@@ -616,6 +627,115 @@ impl CompilationUnit {
                 trace!("[BLADE] Failed to cache {}: {}", source_path, e);
             }
         }
+    }
+
+    /// Build name-keyed cached maps from MIR lowering result for BLADE cache storage.
+    /// Converts SymbolId/TypeId-keyed maps to name-keyed maps that survive across compilations.
+    fn build_cached_maps_from_mir_result(
+        &self,
+        function_map: &BTreeMap<crate::tast::SymbolId, crate::ir::IrFunctionId>,
+        field_index_map: &BTreeMap<crate::tast::SymbolId, (crate::tast::TypeId, u32)>,
+        constructor_name_map: &BTreeMap<String, crate::ir::IrFunctionId>,
+        class_alloc_sizes: &BTreeMap<crate::tast::TypeId, u64>,
+    ) -> BladeCachedMaps {
+        let mut functions = Vec::new();
+        let mut fields = Vec::new();
+        let mut class_sizes = Vec::new();
+
+        // Convert function_map: SymbolId → IrFunctionId to (class_name, method_name, func_id)
+        for (symbol_id, func_id) in function_map {
+            if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
+                let method_name = self
+                    .string_interner
+                    .get(sym.name)
+                    .unwrap_or("<unknown>")
+                    .to_string();
+
+                // Find the class this method belongs to by looking at its scope
+                let class_name = self.find_class_name_for_scope(sym.scope_id);
+
+                functions.push(BladeFuncEntry {
+                    class_name: class_name.unwrap_or_default(),
+                    method_name,
+                    func_id: func_id.0,
+                    is_constructor: false,
+                });
+            }
+        }
+
+        // Add constructors from constructor_name_map (already name-keyed)
+        for (class_name, func_id) in constructor_name_map {
+            functions.push(BladeFuncEntry {
+                class_name: class_name.clone(),
+                method_name: "new".to_string(),
+                func_id: func_id.0,
+                is_constructor: true,
+            });
+        }
+
+        // Convert field_index_map: SymbolId → (TypeId, field_index) to (class_name, field_name, field_index)
+        for (symbol_id, (_type_id, field_index)) in field_index_map {
+            if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
+                let field_name = self
+                    .string_interner
+                    .get(sym.name)
+                    .unwrap_or("<unknown>")
+                    .to_string();
+                let class_name = self.find_class_name_for_scope(sym.scope_id);
+
+                fields.push(BladeFieldEntry {
+                    class_name: class_name.unwrap_or_default(),
+                    field_name,
+                    field_index: *field_index,
+                });
+            }
+        }
+
+        // Convert class_alloc_sizes: TypeId → u64 to (class_name, size)
+        for (type_id, size) in class_alloc_sizes {
+            let type_table = self.type_table.borrow();
+            if let Some(ty) = type_table.get(*type_id) {
+                if let crate::tast::TypeKind::Class { symbol_id, .. } = &ty.kind {
+                    if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
+                        let name = sym
+                            .qualified_name
+                            .and_then(|n| self.string_interner.get(n))
+                            .or_else(|| self.string_interner.get(sym.name))
+                            .unwrap_or("<unknown>")
+                            .to_string();
+                        class_sizes.push((name, *size));
+                    }
+                }
+            }
+        }
+
+        BladeCachedMaps {
+            functions,
+            fields,
+            class_sizes,
+        }
+    }
+
+    /// Find the qualified class name that owns a given scope.
+    /// Used to convert scope-based symbol lookups to name-based keys for cache.
+    fn find_class_name_for_scope(&self, scope_id: ScopeId) -> Option<String> {
+        // Search all symbols for a class whose scope_id matches
+        // Class symbols have their scope_id set to the class member scope
+        for i in 0..self.symbol_table.len() {
+            let sym_id = crate::tast::SymbolId::from_raw(i as u32);
+            if let Some(sym) = self.symbol_table.get_symbol(sym_id) {
+                if matches!(sym.kind, crate::tast::SymbolKind::Class)
+                    && sym.scope_id == scope_id
+                {
+                    return sym
+                        .qualified_name
+                        .and_then(|n| self.string_interner.get(n))
+                        .or_else(|| self.string_interner.get(sym.name))
+                        .map(|s| s.to_string());
+                }
+            }
+        }
+        None
     }
 
     // === BLADE Symbol Loading Methods ===
@@ -1972,108 +2092,46 @@ impl CompilationUnit {
                 // Mark as loaded
                 self.namespace_resolver.mark_file_loaded(file_path.clone());
 
-                // NOTE: BLADE cache is intentionally NOT used here.
-                // The BLADE cache stores compiled MIR but does NOT preserve type system
-                // state (symbol scopes, class_methods, method signatures). When importing
-                // files, we need lower_file() to run so that class symbols get their
-                // scope_id set and methods are registered in the shared symbol_table.
-                // Without this, cross-file method resolution fails (e.g., Mutex.lock()
-                // returns Dynamic instead of MutexGuard<T>).
+                // Try BLADE cache first: if we have type info + cached maps, we can
+                // skip the full Parse → TAST → HIR → MIR pipeline entirely.
+                let cache_hit = if self.config.enable_cache {
+                    self.try_load_import_from_cache(&filename, &source)
+                } else {
+                    false
+                };
 
-                // Cache miss or caching disabled - compile normally
-                // Use is_stdlib_file=true so import files:
-                //   1. Skip the stdlib MIR merge (only user file should merge stdlib)
-                //   2. Collect function mappings for cross-file resolution
-                match self.compile_file_with_shared_state_ex(&filename, &source, true) {
-                    Ok(typed_file) => {
-                        self.loaded_stdlib_typed_files.push(typed_file);
+                if !cache_hit {
+                    // Cache miss or caching disabled - compile normally
+                    // Use is_stdlib_file=true so import files:
+                    //   1. Skip the stdlib MIR merge (only user file should merge stdlib)
+                    //   2. Collect function mappings for cross-file resolution
+                    match self.compile_file_with_shared_state_ex(&filename, &source, true) {
+                        Ok(typed_file) => {
+                            self.loaded_stdlib_typed_files.push(typed_file);
 
-                        // Move the MIR from mir_modules to import_mir_modules.
-                        // CRITICAL: Renumber import function IDs to a high base offset
-                        // to prevent collisions with the user module (which also starts
-                        // IDs from 0). Update stdlib_function_map/name_map so the user
-                        // module references these high IDs instead of the original ones.
-                        if let Some(mir_arc) = self.mir_modules.pop() {
-                            // Save to BLADE cache before renumbering
-                            if self.config.enable_cache {
-                                self.save_blade_cached(&filename, &source, &mir_arc, deps);
-                            }
-
-                            use crate::ir::IrFunctionId;
-                            let mut import_mir = (*mir_arc).clone();
-
-                            // Use a high base to avoid collision with user module IDs
-                            let import_base: u32 =
-                                100_000 + (self.import_mir_modules.len() as u32 * 10_000);
-
-                            // Build old→new ID mapping and renumber functions
-                            let mut id_map: std::collections::HashMap<IrFunctionId, IrFunctionId> =
-                                std::collections::HashMap::new();
-                            for old_id in import_mir.functions.keys() {
-                                id_map.insert(*old_id, IrFunctionId(old_id.0 + import_base));
-                            }
-
-                            // Renumber functions in the import module
-                            let old_functions: std::collections::BTreeMap<_, _> =
-                                std::mem::take(&mut import_mir.functions);
-                            for (old_id, mut func) in old_functions {
-                                let new_id = *id_map.get(&old_id).unwrap();
-                                func.id = new_id;
-
-                                // Update internal CallDirect/FunctionRef
-                                use crate::ir::IrInstruction;
-                                for block in func.cfg.blocks.values_mut() {
-                                    for inst in &mut block.instructions {
-                                        match inst {
-                                            IrInstruction::CallDirect { func_id, .. }
-                                            | IrInstruction::FunctionRef { func_id, .. }
-                                            | IrInstruction::MakeClosure { func_id, .. } => {
-                                                if let Some(new_func_id) = id_map.get(func_id) {
-                                                    *func_id = *new_func_id;
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                    }
+                            // Move the MIR from mir_modules to import_mir_modules.
+                            if let Some(mir_arc) = self.mir_modules.pop() {
+                                // Save to BLADE cache before renumbering (with type info + maps)
+                                if self.config.enable_cache {
+                                    let type_info = self.last_compiled_type_info.take();
+                                    let cached_maps = self.last_compiled_cached_maps.take();
+                                    self.save_blade_cached(
+                                        &filename, &source, &mir_arc, deps, type_info, cached_maps,
+                                    );
                                 }
 
-                                import_mir.functions.insert(new_id, func);
+                                self.renumber_and_push_import_mir((*mir_arc).clone());
                             }
-
-                            // Update stdlib_function_map to point to renumbered IDs
-                            for (_sym, func_id) in self.stdlib_function_map.iter_mut() {
-                                if let Some(&new_id) = id_map.get(func_id) {
-                                    *func_id = new_id;
-                                }
-                            }
-
-                            // Update stdlib_function_name_map to point to renumbered IDs
-                            for (_name, func_id) in self.stdlib_function_name_map.iter_mut() {
-                                if let Some(&new_id) = id_map.get(func_id) {
-                                    *func_id = new_id;
-                                }
-                            }
-
-                            // Update import_constructor_name_map to point to renumbered IDs
-                            for (_name, func_id) in self.import_constructor_name_map.iter_mut() {
-                                if let Some(&new_id) = id_map.get(func_id) {
-                                    *func_id = new_id;
-                                }
-                            }
-
-                            self.import_mir_modules.push(import_mir);
                         }
-                    }
-                    Err(_e) => {
-                        // If it still fails, fall back to old retry mechanism
-                        // This handles edge cases like Placeholder typedefs
-                        debug!(
-                            "[IMPORT_LOAD] Failed to compile {}: {} error(s)",
-                            filename,
-                            _e.len()
-                        );
-                        for e in &_e {
-                            debug!("  - {}", e.message);
+                        Err(_e) => {
+                            debug!(
+                                "[IMPORT_LOAD] Failed to compile {}: {} error(s)",
+                                filename,
+                                _e.len()
+                            );
+                            for e in &_e {
+                                debug!("  - {}", e.message);
+                            }
                         }
                     }
                 }
@@ -2081,6 +2139,247 @@ impl CompilationUnit {
         }
 
         Ok(())
+    }
+
+    /// Try to load an import file from BLADE cache.
+    /// Returns true if cache hit (MIR loaded + symbols registered), false if miss.
+    fn try_load_import_from_cache(&mut self, filename: &str, source: &str) -> bool {
+        // Try to load from BLADE cache
+        let (mir, _metadata, symbols, cached_maps) =
+            match self.try_load_blade_cached_full(filename, source) {
+                Some(data) => data,
+                None => return false,
+            };
+
+        // We need both type info and cached maps for a full cache restore
+        let (symbols, cached_maps) = match (symbols, cached_maps) {
+            (Some(s), Some(m)) => (s, m),
+            _ => {
+                debug!("[BLADE] Cache hit but missing type info/maps: {}", filename);
+                return false;
+            }
+        };
+
+        debug!("[BLADE] Import cache hit: {} ({} functions, {} fields, {} class sizes)",
+            filename, cached_maps.functions.len(), cached_maps.fields.len(),
+            cached_maps.class_sizes.len());
+
+        // Step 1: Register symbols from type info (restores type system state)
+        let registered = self.register_symbols_from_type_info(&symbols);
+
+        // Step 2: Rebuild MIR-level maps from cached maps using fresh IDs
+        self.restore_cached_maps(&cached_maps, &registered);
+
+        // Step 3: Build name-based function map from MIR
+        for (func_id, func) in &mir.functions {
+            if !func.cfg.blocks.is_empty() {
+                self.stdlib_function_name_map
+                    .insert(func.name.clone(), *func_id);
+            }
+        }
+
+        // Step 4: Renumber and push to import_mir_modules
+        self.renumber_and_push_import_mir(mir);
+
+        true
+    }
+
+    /// Load a BLADE cached file and return all components including type info and cached maps
+    fn try_load_blade_cached_full(
+        &self,
+        source_path: &str,
+        source: &str,
+    ) -> Option<(IrModule, BladeMetadata, Option<BladeTypeInfo>, Option<BladeCachedMaps>)> {
+        if !self.config.enable_cache {
+            return None;
+        }
+
+        let blade_path = self.blade_cache_path(source_path)?;
+        if !blade_path.exists() {
+            return None;
+        }
+
+        match load_blade(&blade_path) {
+            Ok((mir, metadata, symbols, cached_maps)) => {
+                let current_hash = Self::hash_source(source);
+                if metadata.source_hash == current_hash {
+                    Some((mir, metadata, symbols, cached_maps))
+                } else {
+                    debug!("[BLADE] Cache stale (hash mismatch): {}", source_path);
+                    None
+                }
+            }
+            Err(e) => {
+                debug!("[BLADE] Cache read error for {}: {}", source_path, e);
+                None
+            }
+        }
+    }
+
+    /// Register type system symbols from BladeTypeInfo (for cache restore).
+    /// Returns a mapping of class names to their fresh IDs for map reconstruction.
+    fn register_symbols_from_type_info(
+        &mut self,
+        symbols: &BladeTypeInfo,
+    ) -> HashMap<String, (crate::tast::SymbolId, crate::tast::TypeId, ScopeId)> {
+        let mut class_map = HashMap::new();
+
+        for class_info in &symbols.classes {
+            let symbol_id = self.register_class_from_blade(class_info);
+            let qualified_name = if class_info.package.is_empty() {
+                class_info.name.clone()
+            } else {
+                format!("{}.{}", class_info.package.join("."), class_info.name)
+            };
+            // Get the type ID and scope ID we just created
+            if let Some(sym) = self.symbol_table.get_symbol(symbol_id) {
+                let type_id = sym.type_id;
+                let scope_id = sym.scope_id;
+                class_map.insert(qualified_name, (symbol_id, type_id, scope_id));
+            }
+        }
+
+        for enum_info in &symbols.enums {
+            self.register_enum_from_blade(enum_info);
+        }
+
+        for alias_info in &symbols.type_aliases {
+            self.register_type_alias_from_blade(alias_info);
+        }
+
+        for abstract_info in &symbols.abstracts {
+            self.register_abstract_from_blade(abstract_info);
+        }
+
+        class_map
+    }
+
+    /// Restore MIR-level cross-reference maps from cached data using fresh symbol IDs.
+    fn restore_cached_maps(
+        &mut self,
+        cached_maps: &BladeCachedMaps,
+        registered: &HashMap<String, (crate::tast::SymbolId, crate::tast::TypeId, ScopeId)>,
+    ) {
+        use crate::ir::IrFunctionId;
+
+        // Restore function mappings: find method SymbolId in registered class scopes
+        for entry in &cached_maps.functions {
+            if entry.is_constructor {
+                // Constructors are keyed by class name
+                self.import_constructor_name_map
+                    .insert(entry.class_name.clone(), IrFunctionId(entry.func_id));
+                continue;
+            }
+
+            // Look up the class, then find the method symbol in its scope
+            if let Some((_class_sym, _class_type, class_scope)) =
+                registered.get(&entry.class_name)
+            {
+                let method_name_interned = self.string_interner.intern(&entry.method_name);
+                if let Some(scope) = self.scope_tree.get_scope(*class_scope) {
+                    if let Some(method_sym) = scope.get_symbol(method_name_interned) {
+                        self.stdlib_function_map
+                            .insert(method_sym, IrFunctionId(entry.func_id));
+                    }
+                }
+            }
+        }
+
+        // Restore field index mappings
+        for entry in &cached_maps.fields {
+            if let Some((_class_sym, class_type, class_scope)) =
+                registered.get(&entry.class_name)
+            {
+                let field_name_interned = self.string_interner.intern(&entry.field_name);
+                if let Some(scope) = self.scope_tree.get_scope(*class_scope) {
+                    if let Some(field_sym) = scope.get_symbol(field_name_interned) {
+                        self.import_field_index_map
+                            .insert(field_sym, (*class_type, entry.field_index));
+                    }
+                }
+            }
+        }
+
+        // Restore class allocation sizes
+        for (class_name, size) in &cached_maps.class_sizes {
+            if let Some((_class_sym, class_type, _)) = registered.get(class_name) {
+                self.import_class_alloc_sizes.insert(*class_type, *size);
+            }
+        }
+
+        // Restore class_type_to_symbol and class_method_symbols mappings
+        for (class_name, (class_sym, class_type, class_scope)) in registered {
+            self.import_class_type_to_symbol
+                .insert(*class_type, *class_sym);
+            // Restore class_method_symbols by iterating symbols in the class scope
+            if let Some(scope) = self.scope_tree.get_scope(*class_scope) {
+                for &method_sym in &scope.symbols {
+                    if let Some(sym) = self.symbol_table.get_symbol(method_sym) {
+                        self.import_class_method_symbols
+                            .insert((*class_sym, sym.name), method_sym);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Renumber import MIR function IDs to avoid collisions and push to import_mir_modules
+    fn renumber_and_push_import_mir(&mut self, mut import_mir: IrModule) {
+        use crate::ir::{IrFunctionId, IrInstruction};
+
+        let import_base: u32 = 100_000 + (self.import_mir_modules.len() as u32 * 10_000);
+
+        // Build old→new ID mapping
+        let mut id_map: std::collections::HashMap<IrFunctionId, IrFunctionId> =
+            std::collections::HashMap::new();
+        for old_id in import_mir.functions.keys() {
+            id_map.insert(*old_id, IrFunctionId(old_id.0 + import_base));
+        }
+
+        // Renumber functions
+        let old_functions: std::collections::BTreeMap<_, _> =
+            std::mem::take(&mut import_mir.functions);
+        for (old_id, mut func) in old_functions {
+            let new_id = *id_map.get(&old_id).unwrap();
+            func.id = new_id;
+
+            // Update internal CallDirect/FunctionRef/MakeClosure
+            for block in func.cfg.blocks.values_mut() {
+                for inst in &mut block.instructions {
+                    match inst {
+                        IrInstruction::CallDirect { func_id, .. }
+                        | IrInstruction::FunctionRef { func_id, .. }
+                        | IrInstruction::MakeClosure { func_id, .. } => {
+                            if let Some(new_func_id) = id_map.get(func_id) {
+                                *func_id = *new_func_id;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            import_mir.functions.insert(new_id, func);
+        }
+
+        // Update all accumulated maps to point to renumbered IDs
+        for (_sym, func_id) in self.stdlib_function_map.iter_mut() {
+            if let Some(&new_id) = id_map.get(func_id) {
+                *func_id = new_id;
+            }
+        }
+        for (_name, func_id) in self.stdlib_function_name_map.iter_mut() {
+            if let Some(&new_id) = id_map.get(func_id) {
+                *func_id = new_id;
+            }
+        }
+        for (_name, func_id) in self.import_constructor_name_map.iter_mut() {
+            if let Some(&new_id) = id_map.get(func_id) {
+                *func_id = new_id;
+            }
+        }
+
+        self.import_mir_modules.push(import_mir);
     }
 
     /// Load a single file on-demand for import resolution (legacy - uses retry pattern)
@@ -2776,6 +3075,12 @@ impl CompilationUnit {
         let _source_map = parse_result.source_map;
         let file_id = diagnostics::FileId::new(0);
 
+        // Extract type info from AST for BLADE cache (before macros may modify it)
+        if self.config.enable_cache {
+            let type_info = crate::tools::preblade::extract_type_info_from_ast(&ast_file);
+            self.last_compiled_type_info = Some(type_info);
+        }
+
         // Stage 1.5: Macro expansion (if enabled)
         let ast_file = if self.config.pipeline_config.enable_macro_expansion {
             // Build class registry from all available sources for macro interpreter
@@ -2961,6 +3266,17 @@ impl CompilationUnit {
         })?;
 
         let mut mir_module = mir_result.module;
+
+        // Build BladeCachedMaps for BLADE cache (name-keyed, before ID-keyed accumulation consumes the data)
+        if self.config.enable_cache {
+            let cached_maps = self.build_cached_maps_from_mir_result(
+                &mir_result.function_map,
+                &mir_result.field_index_map,
+                &mir_result.constructor_name_map,
+                &mir_result.class_alloc_sizes,
+            );
+            self.last_compiled_cached_maps = Some(cached_maps);
+        }
 
         // Collect SymbolId-based function mappings from ALL files (stdlib + imports)
         // This enables cross-file method calls: user file can call import file methods
@@ -3609,7 +3925,7 @@ impl CompilationUnit {
         }
 
         // Load BLADE file
-        let (mir_module, metadata) = match load_blade(&cache_path) {
+        let (mir_module, metadata, _symbols, _cached_maps) = match load_blade(&cache_path) {
             Ok(data) => data,
             Err(e) => {
                 warn!("Failed to load cache for {:?}: {}", source_path, e);
@@ -3698,8 +4014,8 @@ impl CompilationUnit {
             compiler_version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
-        // Save to BLADE file
-        save_blade(&cache_path, module, metadata)
+        // Save to BLADE file (no type info/maps for standalone compile command)
+        save_blade_with_state(&cache_path, module, metadata, None, None)
             .map_err(|e| format!("Failed to save cache: {}", e))?;
 
         if self.config.enable_cache {
