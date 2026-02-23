@@ -723,6 +723,7 @@
         .tier-viz text,
         .baremetal-backdrop .blob,
         .blade-backdrop .blob,
+        .macro-backdrop .blob,
         .ownership-backdrop .blob,
         .ssa-backdrop .blob,
         .blade-card,
@@ -754,6 +755,7 @@
       /* ===== SHOWCASE SECTIONS ===== */
       .baremetal-backdrop,
       .blade-backdrop,
+      .macro-backdrop,
       .ownership-backdrop,
       .ssa-backdrop {
         position: relative;
@@ -767,6 +769,7 @@
 
       .baremetal-backdrop .blob,
       .blade-backdrop .blob,
+      .macro-backdrop .blob,
       .ownership-backdrop .blob,
       .ssa-backdrop .blob {
         position: absolute;
@@ -921,6 +924,112 @@
         background: rgba(110, 231, 183, 0.2);
         bottom: -10%; right: 5%;
         animation: blobMove4 10s ease-in-out infinite;
+      }
+
+      /* --- Macro Expansion blobs (orange/amber) --- */
+      .macro-backdrop { background: var(--bg-secondary); }
+      .macro-backdrop .blob-1 {
+        width: 55vw; height: 55vw; max-width: 700px; max-height: 700px;
+        background: rgba(249, 115, 22, 0.25);
+        top: -20%; left: -10%;
+        animation: blobMove1 10s ease-in-out infinite;
+      }
+      .macro-backdrop .blob-2 {
+        width: 50vw; height: 50vw; max-width: 650px; max-height: 650px;
+        background: rgba(251, 146, 60, 0.2);
+        top: -5%; right: -15%;
+        animation: blobMove2 12s ease-in-out infinite;
+      }
+      .macro-backdrop .blob-3 {
+        width: 45vw; height: 45vw; max-width: 600px; max-height: 600px;
+        background: rgba(245, 158, 11, 0.22);
+        bottom: -15%; left: 15%;
+        animation: blobMove3 14s ease-in-out infinite;
+      }
+      .macro-backdrop .blob-4 {
+        width: 40vw; height: 40vw; max-width: 500px; max-height: 500px;
+        background: rgba(234, 88, 12, 0.18);
+        bottom: -10%; right: 5%;
+        animation: blobMove4 11s ease-in-out infinite;
+      }
+
+      /* --- Macro canvas card --- */
+      .macro-canvas-card {
+        position: absolute;
+        top: 50%;
+        right: 10%;
+        transform: translateY(-50%) perspective(900px) rotateX(8deg) rotateY(-14deg);
+        z-index: 0;
+        width: 40vw;
+        max-width: 420px;
+        opacity: 0;
+        transform-style: preserve-3d;
+        transition: opacity 1s ease-out 0.2s, transform 0.1s ease-out;
+      }
+      .macro-backdrop.in-view .macro-canvas-card {
+        opacity: 1;
+      }
+
+      .macro-card-face {
+        position: relative;
+        width: 100%;
+        aspect-ratio: 1 / 1;
+        background: rgba(255, 255, 255, 0.7);
+        backdrop-filter: blur(12px);
+        border-radius: 2rem;
+        border: 1px solid rgba(249, 115, 22, 0.15);
+        box-shadow: 20px 40px 60px -15px rgba(0,0,0,0.08), 0 0 20px rgba(0,0,0,0.03);
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        padding: 1.5rem;
+        overflow: hidden;
+      }
+
+      .macro-canvas-wrap {
+        position: relative;
+        width: 100%;
+        aspect-ratio: 1 / 1;
+        border-radius: 1rem;
+        border: 1px solid rgba(249, 115, 22, 0.1);
+        overflow: hidden;
+        background: #fff;
+      }
+
+      .macro-canvas-wrap canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+      }
+
+      .macro-canvas-label {
+        position: absolute;
+        top: 0.75rem;
+        left: 0.75rem;
+        font-family: "JetBrains Mono", monospace;
+        font-size: 9px;
+        text-transform: uppercase;
+        letter-spacing: 0.15em;
+        color: rgba(249, 115, 22, 0.6);
+        font-weight: 700;
+        display: flex;
+        align-items: center;
+        gap: 0.4rem;
+        z-index: 1;
+      }
+
+      .macro-canvas-label .pulse-dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: #f97316;
+        animation: macroPulse 2s ease-in-out infinite;
+      }
+
+      @keyframes macroPulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.3; }
       }
 
       /* --- Ownership blobs (emerald/green) --- */
@@ -1512,6 +1621,7 @@
 
         .baremetal-backdrop,
         .blade-backdrop,
+        .macro-backdrop,
         .ownership-backdrop,
         .ssa-backdrop {
           padding: 3.5rem 1.5rem;
@@ -1564,6 +1674,19 @@
         .blade-card-3 {
           margin-top: -2rem;
           margin-left: 2rem;
+        }
+
+        .macro-canvas-card {
+          position: static;
+          transform: none;
+          width: 70vw;
+          max-width: 320px;
+          margin: 2rem auto 0;
+          opacity: 0;
+          transition: opacity 1s ease-out 0.2s;
+        }
+        .macro-backdrop.in-view .macro-canvas-card {
+          opacity: 1;
         }
 
         .ownership-card {
@@ -2095,6 +2218,37 @@
         </section>
       </div>
 
+      <!-- FASTER MACRO EXPANSION -->
+      <div class="macro-backdrop">
+        <div class="blob blob-1"></div>
+        <div class="blob blob-2"></div>
+        <div class="blob blob-3"></div>
+        <div class="blob blob-4"></div>
+        <div class="macro-canvas-card">
+          <div class="macro-card-face">
+            <div class="macro-canvas-wrap">
+              <canvas id="macroCanvas"></canvas>
+              <div class="macro-canvas-label">
+                <span class="pulse-dot"></span>
+                Optimized Expansion
+              </div>
+            </div>
+          </div>
+        </div>
+        <section class="showcase-section" id="macro-expansion">
+          <div class="showcase-content fade-in">
+            <h2 class="showcase-title">Faster Macro Expansion</h2>
+            <p class="showcase-desc">
+              Tiered execution inspired by morsel-parallelism. Cold macros
+              run through a zero-overhead tree-walking interpreter. Hot macros
+              automatically promote to bytecode — batch-compiled with all
+              class dependencies into morsels, then executed by a stack-based VM.
+            </p>
+            <span class="showcase-stat">Adaptive cold → hot promotion</span>
+          </div>
+        </section>
+      </div>
+
       <!-- OWNERSHIP-BASED MEMORY -->
       <div class="ownership-backdrop">
         <div class="blob blob-1"></div>
@@ -2485,7 +2639,7 @@ rayzor bundle main.hx <span class="cf">--output</span> app.rzb</pre>
           }
         });
       }, { threshold: 0.15 });
-      document.querySelectorAll('.baremetal-backdrop, .blade-backdrop, .ownership-backdrop').forEach(el => bdObserver.observe(el));
+      document.querySelectorAll('.baremetal-backdrop, .blade-backdrop, .macro-backdrop, .ownership-backdrop').forEach(el => bdObserver.observe(el));
 
       // Bare metal fan 3D tilt
       const bmBackdrop = document.querySelector('.baremetal-backdrop');
@@ -2506,6 +2660,169 @@ rayzor bundle main.hx <span class="cf">--output</span> app.rzb</pre>
           setTimeout(() => { bmFan.style.transition = 'transform 0.1s ease-out'; }, 500);
         });
       }
+
+      // --- Macro Canvas 3D Tilt ---
+      const macroBackdrop = document.querySelector('.macro-backdrop');
+      const macroCard = document.querySelector('.macro-canvas-card');
+      const macroDefaultTransform = 'translateY(-50%) perspective(900px) rotateX(8deg) rotateY(-14deg)';
+      if (macroBackdrop && macroCard) {
+        macroBackdrop.addEventListener('mousemove', (e) => {
+          const rect = macroBackdrop.getBoundingClientRect();
+          const centerX = rect.left + rect.width / 2;
+          const centerY = rect.top + rect.height / 2;
+          const xAxis = (centerX - e.clientX) / 15;
+          const yAxis = (e.clientY - centerY) / 15;
+          macroCard.style.transform = `translateY(-50%) perspective(900px) rotateY(${-14 + xAxis}deg) rotateX(${8 + yAxis}deg)`;
+        });
+        macroBackdrop.addEventListener('mouseleave', () => {
+          macroCard.style.transition = 'transform 0.5s ease-out';
+          macroCard.style.transform = macroDefaultTransform;
+          setTimeout(() => { macroCard.style.transition = 'transform 0.1s ease-out'; }, 500);
+        });
+      }
+
+      // --- Macro Canvas Animation ---
+      (function() {
+        const canvas = document.getElementById('macroCanvas');
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        const wrap = canvas.parentElement;
+        let animId = null;
+        let running = false;
+
+        // Pre-generate block data
+        const divisions = 10;
+        const blocks = [];
+        for (let row = 0; row < divisions; row++) {
+          for (let col = 0; col < divisions; col++) {
+            blocks.push({
+              row: row,
+              col: col,
+              offsetX: (Math.random() - 0.5) * 0.4,
+              offsetY: (Math.random() - 0.5) * 0.4,
+              sizeScale: 0.4 + Math.random() * 0.6
+            });
+          }
+        }
+
+        // Spring physics state — target starts at 1 so it expands immediately on scroll-in
+        const state = { current: 0, target: 1, velocity: 0, lastToggle: 0 };
+        const spring = { stiffness: 0.18, damping: 0.72 };
+        const gridBase = '249, 115, 22';
+        const primaryColor = '#f97316';
+
+        function resizeCanvas() {
+          const dpr = window.devicePixelRatio || 1;
+          const rect = wrap.getBoundingClientRect();
+          canvas.style.width = rect.width + 'px';
+          canvas.style.height = rect.height + 'px';
+          canvas.width = rect.width * dpr;
+          canvas.height = rect.height * dpr;
+          ctx.setTransform(1, 0, 0, 1, 0, 0);
+          ctx.scale(dpr, dpr);
+        }
+
+        function render(time) {
+          // Toggle every 1s
+          if (time - state.lastToggle > 1000) {
+            state.target = state.target === 0 ? 1 : 0;
+            state.lastToggle = time;
+          }
+
+          // Update spring physics
+          var force = (state.target - state.current) * spring.stiffness;
+          state.velocity += force;
+          state.velocity *= spring.damping;
+          state.current += state.velocity;
+
+          // Clear
+          var dpr = window.devicePixelRatio || 1;
+          var lw = canvas.width / dpr;
+          var lh = canvas.height / dpr;
+          ctx.fillStyle = '#ffffff';
+          ctx.fillRect(0, 0, lw, lh);
+
+          var cx = lw / 2;
+          var cy = lh / 2;
+          var minSize = 12;
+          var maxSize = Math.min(lw, lh) * 0.8;
+          var currentSize = minSize + (maxSize - minSize) * state.current;
+          var half = currentSize / 2;
+          var x = cx - half;
+          var y = cy - half;
+
+          // Draw fragmented grid
+          if (state.current > 0.05) {
+            var baseCellSize = currentSize / divisions;
+            ctx.shadowBlur = 0;
+            ctx.shadowColor = 'transparent';
+
+            for (var i = 0; i < blocks.length; i++) {
+              var b = blocks[i];
+              var cellX = x + b.col * baseCellSize;
+              var cellY = y + b.row * baseCellSize;
+              var jitterX = b.offsetX * baseCellSize * state.current;
+              var jitterY = b.offsetY * baseCellSize * state.current;
+              var rectSize = baseCellSize * 0.5 * b.sizeScale * state.current;
+
+              ctx.fillStyle = 'rgba(' + gridBase + ', ' + (state.current * 0.8) + ')';
+              ctx.fillRect(
+                cellX + (baseCellSize / 2) - (rectSize / 2) + jitterX,
+                cellY + (baseCellSize / 2) - (rectSize / 2) + jitterY,
+                rectSize,
+                rectSize
+              );
+            }
+          }
+
+          // Draw central seed
+          if (state.current < 0.6) {
+            var seedAlpha = Math.max(0, 1 - state.current * 2);
+            ctx.globalAlpha = seedAlpha;
+            ctx.fillStyle = primaryColor;
+            var seedSize = minSize + (currentSize - minSize) * 0.1;
+            ctx.fillRect(cx - seedSize / 2, cy - seedSize / 2, seedSize, seedSize);
+            ctx.globalAlpha = 1.0;
+          }
+
+          // Subtle glow on active blocks
+          if (state.current > 0.4) {
+            ctx.shadowBlur = 15 * state.current;
+            ctx.shadowColor = 'rgba(' + gridBase + ', 0.3)';
+          } else {
+            ctx.shadowBlur = 0;
+          }
+
+          if (running) animId = requestAnimationFrame(render);
+        }
+
+        function start() {
+          if (running) return;
+          running = true;
+          resizeCanvas();
+          state.lastToggle = performance.now();
+          animId = requestAnimationFrame(render);
+        }
+
+        function stop() {
+          running = false;
+          if (animId) { cancelAnimationFrame(animId); animId = null; }
+        }
+
+        window.addEventListener('resize', function() { if (running) resizeCanvas(); });
+
+        // Start/stop based on visibility
+        var macroObs = new IntersectionObserver(function(entries) {
+          entries.forEach(function(entry) {
+            if (entry.isIntersecting) {
+              start();
+            } else {
+              stop();
+            }
+          });
+        }, { threshold: 0.15 });
+        macroObs.observe(canvas.closest('.macro-backdrop'));
+      })();
 
       // --- Ownership 3D Tilt ---
       const ownBackdrop = document.querySelector('.ownership-backdrop');
