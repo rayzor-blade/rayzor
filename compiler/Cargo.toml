@@ -51,6 +51,10 @@ criterion = { version = "0.5", features = ["html_reports"] }
 name = "type_system_bench"
 harness = false
 
+[[bench]]
+name = "macro_bench"
+harness = false
+
 [features]
 default = ["cranelift-backend"]
 cranelift-backend = []

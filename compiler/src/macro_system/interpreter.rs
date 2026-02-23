@@ -10,6 +10,8 @@
 //! - Built-in functions (trace, Std.string, etc.)
 
 use super::ast_bridge::{self, span_to_location};
+use super::bytecode::{BytecodeCompiler, MacroVm};
+use super::class_registry::ClassRegistry;
 use super::environment::Environment;
 use super::errors::MacroError;
 use super::registry::MacroRegistry;
@@ -17,9 +19,36 @@ use super::reification::ReificationEngine;
 use super::value::{MacroFunction, MacroParam, MacroValue};
 use crate::tast::SourceLocation;
 use parser::{AssignOp, BinaryOp, Expr, ExprKind, Span, UnaryOp};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Maximum call depth for macro function calls
 const DEFAULT_MAX_CALL_DEPTH: usize = 256;
+
+/// Morsel-parallelism-inspired tiering scheduler.
+///
+/// Tracks per-macro call counts and promotes hot macros to bytecode.
+/// A "morsel" is a macro + its transitive class dependencies — when a macro
+/// crosses the call threshold, the scheduler batch-compiles the macro and
+/// all classes it might use (the full connected subgraph).
+///
+/// Cold macros (called < threshold times) never pay compilation cost.
+struct MorselScheduler {
+    /// Per-macro call counts (keyed by qualified name).
+    call_counts: HashMap<String, u32>,
+    /// Promotion threshold: compile after this many tree-walker calls.
+    threshold: u32,
+    /// Whether class chunks have been compiled and transferred to the VM.
+    classes_compiled: bool,
+}
+
+/// Cached data extracted from ClassRegistry for a user-defined class.
+/// Avoids re-cloning instance_vars, constructor body, and params on every `new`.
+struct CachedClassData {
+    qualified_name: String,
+    instance_vars: Vec<(String, Option<Arc<Expr>>)>,
+    constructor: Option<(Arc<Expr>, Vec<parser::FunctionParam>)>,
+}
 
 /// The macro interpreter evaluates Haxe AST expressions at compile time.
 pub struct MacroInterpreter {
@@ -33,16 +62,93 @@ pub struct MacroInterpreter {
     max_call_depth: usize,
     /// Accumulated trace output
     trace_output: Vec<String>,
+    /// Import map: short class name → fully qualified name
+    /// e.g., "Context" → "haxe.macro.Context"
+    import_map: HashMap<String, String>,
+    /// Class registry for fallback dispatch to any imported/user class
+    class_registry: Option<Arc<ClassRegistry>>,
+    /// Cache of extracted class data for constructor calls (avoids re-cloning)
+    class_data_cache: HashMap<String, Arc<CachedClassData>>,
+    /// Bytecode VM instance (created when RAYZOR_MACRO_VM=1).
+    vm: Option<MacroVm>,
+    /// Morsel scheduler for tiered compilation (only active when VM is present).
+    scheduler: Option<MorselScheduler>,
 }
 
 impl MacroInterpreter {
+    /// Create a new scheduler+VM pair if bytecode tiering is enabled.
+    fn make_vm_and_scheduler() -> (Option<MacroVm>, Option<MorselScheduler>) {
+        if std::env::var("RAYZOR_MACRO_VM").is_ok() {
+            let threshold = std::env::var("RAYZOR_MACRO_VM_THRESHOLD")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2u32);
+            (
+                Some(MacroVm::new()),
+                Some(MorselScheduler {
+                    call_counts: HashMap::new(),
+                    threshold,
+                    classes_compiled: false,
+                }),
+            )
+        } else {
+            (None, None)
+        }
+    }
+
     pub fn new(registry: MacroRegistry) -> Self {
+        let (vm, scheduler) = Self::make_vm_and_scheduler();
         Self {
             env: Environment::new(),
             registry,
             call_depth: 0,
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
             trace_output: Vec::new(),
+            import_map: HashMap::new(),
+            class_registry: None,
+            class_data_cache: HashMap::new(),
+            vm,
+            scheduler,
+        }
+    }
+
+    /// Create an interpreter with import mappings from the source file.
+    pub fn with_imports(registry: MacroRegistry, import_map: HashMap<String, String>) -> Self {
+        let (vm, scheduler) = Self::make_vm_and_scheduler();
+        Self {
+            env: Environment::new(),
+            registry,
+            call_depth: 0,
+            max_call_depth: DEFAULT_MAX_CALL_DEPTH,
+            trace_output: Vec::new(),
+            import_map,
+            class_registry: None,
+            class_data_cache: HashMap::new(),
+            vm,
+            scheduler,
+        }
+    }
+
+    /// Create an interpreter with import mappings and a class registry for extended dispatch.
+    /// Class compilation is deferred — the morsel scheduler compiles classes on-demand
+    /// when the first macro crosses the call-count threshold.
+    pub fn with_class_registry(
+        registry: MacroRegistry,
+        import_map: HashMap<String, String>,
+        class_registry: Arc<ClassRegistry>,
+    ) -> Self {
+        let (vm, scheduler) = Self::make_vm_and_scheduler();
+        Self {
+            env: Environment::new(),
+            registry,
+            call_depth: 0,
+            max_call_depth: DEFAULT_MAX_CALL_DEPTH,
+            trace_output: Vec::new(),
+            import_map,
+            class_registry: Some(class_registry),
+            class_data_cache: HashMap::new(),
+            vm,
+            scheduler,
         }
     }
 
@@ -89,7 +195,7 @@ impl MacroInterpreter {
             // --- Literals ---
             ExprKind::Int(i) => Ok(MacroValue::Int(*i)),
             ExprKind::Float(f) => Ok(MacroValue::Float(*f)),
-            ExprKind::String(s) => Ok(MacroValue::String(s.clone())),
+            ExprKind::String(s) => Ok(MacroValue::String(Arc::from(s.as_str()))),
             ExprKind::Bool(b) => Ok(MacroValue::Bool(*b)),
             ExprKind::Null => Ok(MacroValue::Null),
             ExprKind::This => self
@@ -338,7 +444,7 @@ impl MacroInterpreter {
                     }
                     Err(e) if !e.is_control_flow() => {
                         // Try to match a catch block (use first matching catch)
-                        let err_val = MacroValue::String(e.to_string());
+                        let err_val = MacroValue::String(Arc::from(e.to_string().as_str()));
                         if let Some(catch) = catches.first() {
                             self.env.push_scope();
                             self.env.define(&catch.var, err_val);
@@ -390,7 +496,7 @@ impl MacroInterpreter {
                 for elem in elements {
                     values.push(self.eval_expr(elem)?);
                 }
-                Ok(MacroValue::Array(values))
+                Ok(MacroValue::Array(Arc::new(values)))
             }
 
             // --- Object literal ---
@@ -400,7 +506,7 @@ impl MacroInterpreter {
                     let val = self.eval_expr(&field.expr)?;
                     map.insert(field.name.clone(), val);
                 }
-                Ok(MacroValue::Object(map))
+                Ok(MacroValue::Object(Arc::new(map)))
             }
 
             // --- Map literal ---
@@ -412,7 +518,7 @@ impl MacroInterpreter {
                     let key_str = k.to_display_string();
                     map.insert(key_str, v);
                 }
-                Ok(MacroValue::Object(map))
+                Ok(MacroValue::Object(Arc::new(map)))
             }
 
             // --- Function literal ---
@@ -423,17 +529,24 @@ impl MacroInterpreter {
                     .map(|p| MacroParam::from_function_param(p))
                     .collect();
 
-                let body = func.body.as_ref().cloned().unwrap_or(Box::new(Expr {
-                    kind: ExprKind::Null,
-                    span: Span::default(),
-                }));
+                let body: Arc<Expr> = func
+                    .body
+                    .as_ref()
+                    .map(|b| Arc::from(b.as_ref().clone()))
+                    .unwrap_or_else(|| {
+                        Arc::new(Expr {
+                            kind: ExprKind::Null,
+                            span: Span::default(),
+                        })
+                    });
 
-                Ok(MacroValue::Function(MacroFunction {
+                let free_vars = get_free_vars_for_closure(&body, &params);
+                Ok(MacroValue::Function(Arc::new(MacroFunction {
                     name: func.name.clone(),
                     params,
                     body,
-                    captures: self.env.capture_all(),
-                }))
+                    captures: self.env.capture_used(&free_vars),
+                })))
             }
 
             // --- Arrow function ---
@@ -448,12 +561,14 @@ impl MacroInterpreter {
                     })
                     .collect();
 
-                Ok(MacroValue::Function(MacroFunction {
+                let arrow_body = Arc::from(body.as_ref().clone());
+                let free_vars = get_free_vars_for_closure(&arrow_body, &macro_params);
+                Ok(MacroValue::Function(Arc::new(MacroFunction {
                     name: String::new(),
                     params: macro_params,
-                    body: body.clone(),
-                    captures: self.env.capture_all(),
-                }))
+                    body: arrow_body,
+                    captures: self.env.capture_used(&free_vars),
+                })))
             }
 
             // --- New object construction ---
@@ -471,18 +586,68 @@ impl MacroInterpreter {
                     arg_vals.push(self.eval_expr(arg)?);
                 }
 
+                // Resolve through imports (e.g., "Process" → "sys.io.Process")
+                let resolved_name = self.resolve_class_name(&name);
+
                 // Special handling for known types
-                match name.as_str() {
-                    "Map" | "haxe.ds.Map" => {
-                        Ok(MacroValue::Object(std::collections::HashMap::new()))
-                    }
-                    "Array" => Ok(MacroValue::Array(Vec::new())),
+                match resolved_name {
+                    "Map" | "haxe.ds.Map" => Ok(MacroValue::Object(Arc::new(
+                        std::collections::HashMap::new(),
+                    ))),
+                    "Array" => Ok(MacroValue::Array(Arc::new(Vec::new()))),
+                    "sys.io.Process" => self.construct_process(arg_vals, location),
+                    "sys.io.File" => self.construct_file(arg_vals, location),
                     _ => {
-                        // Generic object construction
+                        // Check cache first, then ClassRegistry for user-defined constructor
+                        let cached = if let Some(cached) = self.class_data_cache.get(resolved_name)
+                        {
+                            Some(Arc::clone(cached))
+                        } else {
+                            // Cache miss: extract from registry and cache
+                            let data = self.class_registry.as_ref().and_then(|cr| {
+                                cr.find_class(resolved_name).map(|ci| {
+                                    Arc::new(CachedClassData {
+                                        qualified_name: ci.qualified_name.clone(),
+                                        instance_vars: ci
+                                            .instance_vars
+                                            .iter()
+                                            .map(|v| (v.name.clone(), v.init_expr.clone()))
+                                            .collect(),
+                                        constructor: ci
+                                            .constructor
+                                            .as_ref()
+                                            .map(|c| (c.body.clone(), c.params.clone())),
+                                    })
+                                })
+                            });
+                            if let Some(ref data) = data {
+                                self.class_data_cache
+                                    .insert(resolved_name.to_string(), Arc::clone(data));
+                            }
+                            data
+                        };
+
+                        if let Some(cd) = cached {
+                            return self.construct_from_registry_data(
+                                &cd.qualified_name,
+                                &cd.instance_vars,
+                                cd.constructor.as_ref(),
+                                arg_vals,
+                                location,
+                            );
+                        }
+
+                        // Generic object construction (no class found)
                         let mut obj = std::collections::HashMap::new();
-                        obj.insert("__type__".to_string(), MacroValue::String(name));
-                        obj.insert("__args__".to_string(), MacroValue::Array(arg_vals));
-                        Ok(MacroValue::Object(obj))
+                        obj.insert(
+                            "__type__".to_string(),
+                            MacroValue::String(Arc::from(name.as_str())),
+                        );
+                        obj.insert(
+                            "__args__".to_string(),
+                            MacroValue::Array(Arc::new(arg_vals)),
+                        );
+                        Ok(MacroValue::Object(Arc::new(obj)))
                     }
                 }
             }
@@ -499,7 +664,7 @@ impl MacroInterpreter {
                         }
                     }
                 }
-                Ok(MacroValue::String(result))
+                Ok(MacroValue::String(Arc::from(result.as_str())))
             }
 
             // --- Cast ---
@@ -516,8 +681,9 @@ impl MacroInterpreter {
 
             // --- Macro expression ---
             ExprKind::Macro(inner) => {
-                // macro expr — the expression should be reified into an Expr value
-                Ok(MacroValue::Expr(inner.clone()))
+                // macro expr — reify the expression, resolving dollar-idents from the environment
+                // e.g., `macro trace($e{msg})` resolves $e{msg} using the current env
+                ReificationEngine::reify_expr(inner, &self.env)
             }
 
             // --- Reification block ---
@@ -532,7 +698,7 @@ impl MacroInterpreter {
                     // $kind{expr} — evaluate the arg and splice
                     let val = self.eval_expr(arg_expr)?;
                     let result_expr = ReificationEngine::splice_value(name, val, expr.span)?;
-                    Ok(MacroValue::Expr(Box::new(result_expr)))
+                    Ok(MacroValue::Expr(Arc::new(result_expr)))
                 } else {
                     // $name — lookup in environment
                     self.env
@@ -627,9 +793,26 @@ impl MacroInterpreter {
             ExprKind::Field {
                 expr: base, field, ..
             } => {
+                // Fast path: this.field = value or ident.field = value
+                // Mutates the object in-place in the environment, avoiding
+                // eval→clone→COW→reassign overhead (O(N²) for N-field constructors)
+                let base_var_name = match &base.kind {
+                    ExprKind::This => Some("this"),
+                    ExprKind::Ident(name) => Some(name.as_str()),
+                    _ => None,
+                };
+                if let Some(var_name) = base_var_name {
+                    if self
+                        .env
+                        .mutate_object_field(var_name, field, new_val.clone())
+                    {
+                        return Ok(new_val);
+                    }
+                }
+                // Fallback: complex base expressions (e.g. a.b.field = value)
                 let mut base_val = self.eval_expr(base)?;
-                if let MacroValue::Object(ref mut map) = base_val {
-                    map.insert(field.clone(), new_val.clone());
+                if let MacroValue::Object(ref mut arc_map) = base_val {
+                    Arc::make_mut(arc_map).insert(field.clone(), new_val.clone());
                     // Re-assign the modified object back
                     self.assign_base(base, base_val)?;
                     Ok(new_val)
@@ -648,16 +831,17 @@ impl MacroInterpreter {
                 let mut base_val = self.eval_expr(base)?;
                 let idx = self.eval_expr(index)?;
                 match (&mut base_val, &idx) {
-                    (MacroValue::Array(arr), MacroValue::Int(i)) => {
+                    (MacroValue::Array(arc_arr), MacroValue::Int(i)) => {
                         let idx = *i as usize;
+                        let arr = Arc::make_mut(arc_arr);
                         if idx < arr.len() {
                             arr[idx] = new_val.clone();
                         }
                         self.assign_base(base, base_val)?;
                         Ok(new_val)
                     }
-                    (MacroValue::Object(map), _) => {
-                        map.insert(idx.to_display_string(), new_val.clone());
+                    (MacroValue::Object(arc_map), _) => {
+                        Arc::make_mut(arc_map).insert(idx.to_display_string(), new_val.clone());
                         self.assign_base(base, base_val)?;
                         Ok(new_val)
                     }
@@ -679,6 +863,10 @@ impl MacroInterpreter {
         match &base.kind {
             ExprKind::Ident(name) => {
                 self.env.set(name, value);
+                Ok(())
+            }
+            ExprKind::This => {
+                self.env.set("this", value);
                 Ok(())
             }
             _ => Ok(()), // nested assignments on temporaries are discarded
@@ -720,9 +908,47 @@ impl MacroInterpreter {
             ExprKind::Field {
                 expr: base, field, ..
             } => {
+                // Check for static class calls: Class.method(...) or qualified.path.Class.method(...)
+                if let ExprKind::Ident(class_name) = &base.kind {
+                    // Simple: Context.parse(...)
+                    if let Some(result) =
+                        self.try_static_call(class_name, field, &arg_vals, location)?
+                    {
+                        return Ok(result);
+                    }
+                } else if let Some((qualified_class, method_name)) =
+                    extract_qualified_call(base, field)
+                {
+                    // Qualified: haxe.macro.Context.parse(...)
+                    if let Some(result) =
+                        self.try_static_call(&qualified_class, method_name, &arg_vals, location)?
+                    {
+                        return Ok(result);
+                    }
+                }
+
                 // Method call: base.field(args)
                 let base_val = self.eval_expr(base)?;
-                self.method_call(&base_val, field, arg_vals, location)
+                let result = self.method_call(&base_val, field, arg_vals, location)?;
+
+                // For mutating array methods (push, pop, splice, unshift, etc.),
+                // update the variable in-place so the mutation is visible.
+                let is_mutating = matches!(
+                    field.as_str(),
+                    "push" | "pop" | "shift" | "unshift" | "splice" | "sort" | "reverse"
+                );
+                if is_mutating {
+                    if let ExprKind::Ident(var_name) = &base.kind {
+                        if matches!(result, MacroValue::Array(_)) {
+                            // Update the variable with the new array
+                            if !self.env.set(var_name, result.clone()) {
+                                self.env.define(var_name, result.clone());
+                            }
+                        }
+                    }
+                }
+
+                Ok(result)
             }
             _ => {
                 // Evaluate callee as expression (e.g., function variable)
@@ -739,8 +965,8 @@ impl MacroInterpreter {
         args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
-        match func {
-            MacroValue::Function(macro_func) => self.call_function(&macro_func, args, location),
+        match &func {
+            MacroValue::Function(macro_func) => self.call_function(macro_func, args, location),
             _ => Err(MacroError::TypeError {
                 message: format!("cannot call {}", func.type_name()),
                 location,
@@ -774,7 +1000,7 @@ impl MacroInterpreter {
             self.env.define(name, value.clone());
         }
 
-        // Bind parameters
+        // Bind parameters (use define_owned to avoid &str → to_string() allocation)
         for (i, param) in func.params.iter().enumerate() {
             let value = if let Some(arg) = args.get(i) {
                 arg.clone()
@@ -785,7 +1011,7 @@ impl MacroInterpreter {
             } else {
                 MacroValue::Null
             };
-            self.env.define(&param.name, value);
+            self.env.define_owned(param.name.clone(), value);
         }
 
         // Execute body
@@ -800,20 +1026,92 @@ impl MacroInterpreter {
         result
     }
 
-    /// Call a registered macro definition
+    /// Call a registered macro definition.
+    ///
+    /// Uses morsel-parallelism-inspired tiered execution:
+    /// 1. If already compiled → execute via bytecode VM (fast path)
+    /// 2. Otherwise → tree-walker, then profile and maybe promote
     fn call_macro_def(
         &mut self,
         def: &super::registry::MacroDefinition,
         args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
+        // Fast path: already promoted to bytecode → execute via VM
+        if let Some(vm) = &mut self.vm {
+            if let Some(chunk) = self.registry.get_compiled(&def.qualified_name) {
+                match vm.execute(chunk, args.clone()) {
+                    Ok(result) => {
+                        // Collect trace output from VM
+                        self.trace_output.append(&mut vm.trace_output);
+                        return Ok(result);
+                    }
+                    Err(_) => {
+                        // Bytecode execution failed — fall through to tree-walker
+                    }
+                }
+            }
+        }
+
+        // Slow path: tree-walker
         let func = MacroFunction {
             name: def.name.clone(),
             params: def.params.clone(),
             body: def.body.clone(),
             captures: std::collections::HashMap::new(),
         };
-        self.call_function(&func, args, location)
+        let result = self.call_function(&func, args, location)?;
+
+        // Profile: check if this macro should be promoted to bytecode.
+        // Morsel scheduling: when a macro crosses the threshold, batch-compile
+        // the macro + all its class dependencies (the "morsel").
+        if let Some(scheduler) = &mut self.scheduler {
+            let count = scheduler
+                .call_counts
+                .entry(def.qualified_name.clone())
+                .or_insert(0);
+            *count += 1;
+            if *count == scheduler.threshold {
+                // Promote this macro: compile to bytecode
+                if let Ok(chunk) =
+                    BytecodeCompiler::compile(&def.qualified_name, &def.params, &def.body)
+                {
+                    self.registry
+                        .insert_compiled(def.qualified_name.clone(), Arc::new(chunk));
+                }
+
+                // Compile class morsel: batch-compile all class dependencies
+                // on first promotion (deferred from interpreter construction).
+                if !scheduler.classes_compiled {
+                    if let Some(cr) = &self.class_registry {
+                        self.registry.compile_classes(cr);
+                        // Transfer compiled classes to the VM
+                        let class_chunks = self
+                            .registry
+                            .get_compiled_classes()
+                            .iter()
+                            .map(|(k, v)| {
+                                (
+                                    k.clone(),
+                                    super::bytecode::CompiledClassInfo {
+                                        constructor: v.constructor.clone(),
+                                        instance_methods: v.instance_methods.clone(),
+                                        static_methods: v.static_methods.clone(),
+                                        instance_vars: v.instance_vars.clone(),
+                                    },
+                                )
+                            })
+                            .collect();
+                        if let Some(vm) = &mut self.vm {
+                            vm.set_class_chunks(class_chunks);
+                        }
+                    }
+                    scheduler.classes_compiled = true;
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     /// Try to execute a built-in function
@@ -834,6 +1132,196 @@ impl MacroInterpreter {
         }
     }
 
+    /// Resolve a class name through imports.
+    /// Returns the fully qualified name if the bare name was imported,
+    /// otherwise returns the original name.
+    fn resolve_class_name<'a>(&'a self, class_name: &'a str) -> &'a str {
+        if let Some(qualified) = self.import_map.get(class_name) {
+            qualified.as_str()
+        } else {
+            class_name
+        }
+    }
+
+    /// Try to dispatch a static class method call (e.g., Context.parse, Std.string)
+    fn try_static_call(
+        &mut self,
+        class_name: &str,
+        method: &str,
+        args: &[MacroValue],
+        location: SourceLocation,
+    ) -> Result<Option<MacroValue>, MacroError> {
+        // Resolve bare class names through imports
+        let resolved = self.resolve_class_name(class_name);
+        match resolved {
+            "haxe.macro.Context" => {
+                let mut ctx = super::context_api::MacroContext::new();
+                let result = ctx.dispatch(method, args, location)?;
+                Ok(Some(result))
+            }
+            "Std" => match method {
+                "string" => {
+                    let val = args.first().unwrap_or(&MacroValue::Null);
+                    Ok(Some(MacroValue::String(Arc::from(
+                        val.to_display_string().as_str(),
+                    ))))
+                }
+                "int" | "parseInt" => {
+                    let val = args.first().unwrap_or(&MacroValue::Null);
+                    match val {
+                        MacroValue::String(s) => {
+                            let n = s.parse::<i64>().unwrap_or(0);
+                            Ok(Some(MacroValue::Int(n)))
+                        }
+                        MacroValue::Int(n) => Ok(Some(MacroValue::Int(*n))),
+                        MacroValue::Float(f) => Ok(Some(MacroValue::Int(*f as i64))),
+                        _ => Ok(Some(MacroValue::Int(0))),
+                    }
+                }
+                "parseFloat" => {
+                    let val = args.first().unwrap_or(&MacroValue::Null);
+                    match val {
+                        MacroValue::String(s) => {
+                            let f = s.parse::<f64>().unwrap_or(0.0);
+                            Ok(Some(MacroValue::Float(f)))
+                        }
+                        MacroValue::Float(f) => Ok(Some(MacroValue::Float(*f))),
+                        MacroValue::Int(n) => Ok(Some(MacroValue::Float(*n as f64))),
+                        _ => Ok(Some(MacroValue::Float(0.0))),
+                    }
+                }
+                _ => Ok(None),
+            },
+            "Math" => match method {
+                "abs" => {
+                    let val = args.first().unwrap_or(&MacroValue::Null);
+                    match val {
+                        MacroValue::Int(n) => Ok(Some(MacroValue::Int(n.abs()))),
+                        MacroValue::Float(f) => Ok(Some(MacroValue::Float(f.abs()))),
+                        _ => Ok(None),
+                    }
+                }
+                "floor" => {
+                    let val = args.first().unwrap_or(&MacroValue::Null);
+                    match val {
+                        MacroValue::Float(f) => Ok(Some(MacroValue::Int(f.floor() as i64))),
+                        MacroValue::Int(n) => Ok(Some(MacroValue::Int(*n))),
+                        _ => Ok(None),
+                    }
+                }
+                "ceil" => {
+                    let val = args.first().unwrap_or(&MacroValue::Null);
+                    match val {
+                        MacroValue::Float(f) => Ok(Some(MacroValue::Int(f.ceil() as i64))),
+                        MacroValue::Int(n) => Ok(Some(MacroValue::Int(*n))),
+                        _ => Ok(None),
+                    }
+                }
+                "max" => {
+                    let a = args.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+                    let b = args.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
+                    Ok(Some(MacroValue::Float(a.max(b))))
+                }
+                "min" => {
+                    let a = args.first().and_then(|v| v.as_float()).unwrap_or(0.0);
+                    let b = args.get(1).and_then(|v| v.as_float()).unwrap_or(0.0);
+                    Ok(Some(MacroValue::Float(a.min(b))))
+                }
+                _ => Ok(None),
+            },
+            "sys.io.File" => match method {
+                "getContent" => {
+                    let path = args.first().map(|v| value_to_string(v)).unwrap_or_default();
+                    match std::fs::read_to_string(&path) {
+                        Ok(content) => Ok(Some(MacroValue::String(Arc::from(content.as_str())))),
+                        Err(e) => Err(MacroError::RuntimeError {
+                            message: format!("File.getContent('{}') failed: {}", path, e),
+                            location,
+                        }),
+                    }
+                }
+                "saveContent" => {
+                    let path = args.first().map(|v| value_to_string(v)).unwrap_or_default();
+                    let content = args.get(1).map(|v| value_to_string(v)).unwrap_or_default();
+                    std::fs::write(&path, &content).map_err(|e| MacroError::RuntimeError {
+                        message: format!("File.saveContent('{}') failed: {}", path, e),
+                        location,
+                    })?;
+                    Ok(Some(MacroValue::Null))
+                }
+                _ => Ok(None),
+            },
+            "Sys" | "sys.Sys" => match method {
+                "getCwd" => {
+                    let cwd = std::env::current_dir()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    Ok(Some(MacroValue::String(Arc::from(cwd.as_str()))))
+                }
+                "getEnv" => {
+                    let key = args.first().map(|v| value_to_string(v)).unwrap_or_default();
+                    let val = std::env::var(&key).unwrap_or_default();
+                    Ok(Some(MacroValue::String(Arc::from(val.as_str()))))
+                }
+                "systemName" => {
+                    let name = if cfg!(target_os = "macos") {
+                        "Mac"
+                    } else if cfg!(target_os = "linux") {
+                        "Linux"
+                    } else if cfg!(target_os = "windows") {
+                        "Windows"
+                    } else {
+                        "Unknown"
+                    };
+                    Ok(Some(MacroValue::String(Arc::from(name))))
+                }
+                _ => Ok(None),
+            },
+            "StringTools" | "haxe.StringTools" => match method {
+                "trim" => {
+                    let s = args.first().and_then(|v| v.as_string()).unwrap_or("");
+                    Ok(Some(MacroValue::String(Arc::from(s.trim()))))
+                }
+                "replace" => {
+                    let s = args
+                        .first()
+                        .and_then(|v| v.as_string())
+                        .unwrap_or("")
+                        .to_string();
+                    let from = args.get(1).and_then(|v| v.as_string()).unwrap_or("");
+                    let to = args.get(2).and_then(|v| v.as_string()).unwrap_or("");
+                    Ok(Some(MacroValue::String(Arc::from(
+                        s.replace(from, to).as_str(),
+                    ))))
+                }
+                _ => Ok(None),
+            },
+            _ => {
+                // Fallback: check ClassRegistry for user/stdlib class
+                if let Some(ref cr) = self.class_registry {
+                    if let Some(method_info) = cr.find_static_method(resolved, method) {
+                        let body = method_info.body.clone();
+                        let params = method_info.params.clone();
+                        self.env.push_scope();
+                        for (i, param) in params.iter().enumerate() {
+                            let val = args.get(i).cloned().unwrap_or(MacroValue::Null);
+                            self.env.define(&param.name, val);
+                        }
+                        let result = self.eval_expr(&body);
+                        self.env.pop_scope();
+                        return match result {
+                            Ok(val) => Ok(Some(val)),
+                            Err(MacroError::Return { value: Some(v) }) => Ok(Some(*v)),
+                            Err(MacroError::Return { value: None }) => Ok(Some(MacroValue::Null)),
+                            Err(e) => Err(e),
+                        };
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+
     /// Call a method on a value
     fn method_call(
         &mut self,
@@ -842,6 +1330,20 @@ impl MacroInterpreter {
         args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
+        // Unwrap Expr-wrapped values so method calls work on concrete types
+        // (e.g., s.charAt(0) where s is MacroValue::Expr(String("hello")))
+        let unwrapped = if matches!(base, MacroValue::Expr(_)) {
+            let u = ast_bridge::unwrap_expr_value(base);
+            if matches!(u, MacroValue::Expr(_)) {
+                None
+            } else {
+                Some(u)
+            }
+        } else {
+            None
+        };
+        let base = unwrapped.as_ref().unwrap_or(base);
+
         // Check for static method calls (e.g., Std.string(), Math.abs())
         if let MacroValue::String(ref s) = base {
             // String methods would be handled here in a full implementation
@@ -849,13 +1351,13 @@ impl MacroInterpreter {
         }
 
         match base {
-            MacroValue::Array(arr) => self.array_method(arr, method, args, location),
+            MacroValue::Array(arr) => self.array_method(arr.as_ref(), method, args, location),
             MacroValue::Object(obj) => {
                 // Check if the field is a function
                 if let Some(MacroValue::Function(func)) = obj.get(method) {
-                    self.call_function(func, args, location)
+                    self.call_function(func.as_ref(), args, location)
                 } else {
-                    self.object_method(obj, method, args, location)
+                    self.object_method(obj.as_ref(), method, args, location)
                 }
             }
             _ => {
@@ -885,7 +1387,7 @@ impl MacroInterpreter {
                 for arg in args {
                     new_arr.push(arg);
                 }
-                Ok(MacroValue::Array(new_arr))
+                Ok(MacroValue::Array(Arc::new(new_arr)))
             }
             "pop" => {
                 let mut new_arr = arr.to_vec();
@@ -896,24 +1398,25 @@ impl MacroInterpreter {
                 let mut new_arr = arr.to_vec();
                 for arg in args {
                     if let MacroValue::Array(other) = arg {
-                        new_arr.extend(other);
+                        new_arr.extend(other.iter().cloned());
                     }
                 }
-                Ok(MacroValue::Array(new_arr))
+                Ok(MacroValue::Array(Arc::new(new_arr)))
             }
             "join" => {
                 let sep = args.first().and_then(|a| a.as_string()).unwrap_or(",");
                 let parts: Vec<String> = arr.iter().map(|v| v.to_display_string()).collect();
-                Ok(MacroValue::String(parts.join(sep)))
+                Ok(MacroValue::String(Arc::from(parts.join(sep).as_str())))
             }
             "map" => {
                 if let Some(MacroValue::Function(func)) = args.first() {
                     let mut result = Vec::with_capacity(arr.len());
                     for item in arr {
-                        let mapped = self.call_function(func, vec![item.clone()], location)?;
+                        let mapped =
+                            self.call_function(func.as_ref(), vec![item.clone()], location)?;
                         result.push(mapped);
                     }
-                    Ok(MacroValue::Array(result))
+                    Ok(MacroValue::Array(Arc::new(result)))
                 } else {
                     Err(MacroError::TypeError {
                         message: "Array.map() requires a function argument".to_string(),
@@ -925,12 +1428,13 @@ impl MacroInterpreter {
                 if let Some(MacroValue::Function(func)) = args.first() {
                     let mut result = Vec::new();
                     for item in arr {
-                        let keep = self.call_function(func, vec![item.clone()], location)?;
+                        let keep =
+                            self.call_function(func.as_ref(), vec![item.clone()], location)?;
                         if keep.is_truthy() {
                             result.push(item.clone());
                         }
                     }
-                    Ok(MacroValue::Array(result))
+                    Ok(MacroValue::Array(Arc::new(result)))
                 } else {
                     Err(MacroError::TypeError {
                         message: "Array.filter() requires a function argument".to_string(),
@@ -970,12 +1474,13 @@ impl MacroInterpreter {
             "length" => Ok(MacroValue::Int(s.len() as i64)),
             "charAt" => {
                 let idx = args.first().and_then(|a| a.as_int()).unwrap_or(0) as usize;
-                Ok(MacroValue::String(
+                Ok(MacroValue::String(Arc::from(
                     s.chars()
                         .nth(idx)
                         .map(|c| c.to_string())
-                        .unwrap_or_default(),
-                ))
+                        .unwrap_or_default()
+                        .as_str(),
+                )))
             }
             "indexOf" => {
                 let needle = args.first().and_then(|a| a.as_string()).unwrap_or("");
@@ -987,9 +1492,9 @@ impl MacroInterpreter {
                 let delim = args.first().and_then(|a| a.as_string()).unwrap_or("");
                 let parts: Vec<MacroValue> = s
                     .split(delim)
-                    .map(|part| MacroValue::String(part.to_string()))
+                    .map(|part| MacroValue::String(Arc::from(part)))
                     .collect();
-                Ok(MacroValue::Array(parts))
+                Ok(MacroValue::Array(Arc::new(parts)))
             }
             "substring" | "substr" => {
                 let start = args.first().and_then(|a| a.as_int()).unwrap_or(0).max(0) as usize;
@@ -999,11 +1504,11 @@ impl MacroInterpreter {
                     .map(|e| e.max(0) as usize)
                     .unwrap_or(s.len());
                 let result: String = s.chars().skip(start).take(end - start).collect();
-                Ok(MacroValue::String(result))
+                Ok(MacroValue::String(Arc::from(result.as_str())))
             }
-            "toUpperCase" => Ok(MacroValue::String(s.to_uppercase())),
-            "toLowerCase" => Ok(MacroValue::String(s.to_lowercase())),
-            "toString" => Ok(MacroValue::String(s.to_string())),
+            "toUpperCase" => Ok(MacroValue::String(Arc::from(s.to_uppercase().as_str()))),
+            "toLowerCase" => Ok(MacroValue::String(Arc::from(s.to_lowercase().as_str()))),
+            "toString" => Ok(MacroValue::String(Arc::from(s))),
             _ => Err(MacroError::UnsupportedOperation {
                 operation: format!("String.{}()", method),
                 location,
@@ -1013,16 +1518,236 @@ impl MacroInterpreter {
 
     /// Built-in object methods
     fn object_method(
-        &self,
-        _obj: &std::collections::HashMap<String, MacroValue>,
+        &mut self,
+        obj: &std::collections::HashMap<String, MacroValue>,
         method: &str,
         _args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
-        Err(MacroError::UnsupportedOperation {
-            operation: format!("Object.{}()", method),
-            location,
-        })
+        // Check __type__ for type-specific method dispatch
+        let type_name = obj
+            .get("__type__")
+            .and_then(|v| v.as_string().map(|s| s.to_string()));
+
+        match type_name.as_deref() {
+            Some("sys.io.ProcessOutput" | "sys.io.ProcessStdout") => match method {
+                "readAll" | "readLine" => {
+                    // Return the stored data as a string (Bytes → String via toString)
+                    Ok(obj
+                        .get("__data__")
+                        .cloned()
+                        .unwrap_or(MacroValue::String(Arc::from(""))))
+                }
+                "toString" => Ok(obj
+                    .get("__data__")
+                    .cloned()
+                    .unwrap_or(MacroValue::String(Arc::from("")))),
+                _ => Err(MacroError::UnsupportedOperation {
+                    operation: format!("ProcessOutput.{}()", method),
+                    location,
+                }),
+            },
+            Some("sys.io.Process") => match method {
+                "close" | "kill" => Ok(MacroValue::Null),
+                "exitCode" => Ok(obj
+                    .get("__exitCode__")
+                    .cloned()
+                    .unwrap_or(MacroValue::Int(0))),
+                _ => Err(MacroError::UnsupportedOperation {
+                    operation: format!("Process.{}()", method),
+                    location,
+                }),
+            },
+            _ => {
+                // Fallback: check ClassRegistry for instance methods
+                if let Some(ref tn) = type_name {
+                    if let Some(ref cr) = self.class_registry {
+                        if let Some(method_info) = cr.find_instance_method(tn, method) {
+                            let body = method_info.body.clone();
+                            let params = method_info.params.clone();
+                            self.env.push_scope();
+                            self.env
+                                .define("this", MacroValue::Object(Arc::new(obj.clone())));
+                            for (i, param) in params.iter().enumerate() {
+                                let val = _args.get(i).cloned().unwrap_or(MacroValue::Null);
+                                self.env.define(&param.name, val);
+                            }
+                            let result = self.eval_expr(&body);
+                            self.env.pop_scope();
+                            return match result {
+                                Ok(val) => Ok(val),
+                                Err(MacroError::Return { value: Some(v) }) => Ok(*v),
+                                Err(MacroError::Return { value: None }) => Ok(MacroValue::Null),
+                                Err(e) => Err(e),
+                            };
+                        }
+                    }
+                }
+                Err(MacroError::UnsupportedOperation {
+                    operation: format!("Object.{}()", method),
+                    location,
+                })
+            }
+        }
+    }
+
+    /// Construct a sys.io.Process — runs a real subprocess at compile time
+    fn construct_process(
+        &self,
+        args: Vec<MacroValue>,
+        location: SourceLocation,
+    ) -> Result<MacroValue, MacroError> {
+        let cmd =
+            args.first()
+                .map(|v| value_to_string(v))
+                .ok_or_else(|| MacroError::TypeError {
+                    message: "sys.io.Process requires a command string".to_string(),
+                    location,
+                })?;
+
+        let proc_args: Vec<String> = if let Some(arr_val) = args.get(1) {
+            // Unwrap Expr if needed
+            let unwrapped = ast_bridge::unwrap_expr_value(arr_val);
+            match unwrapped {
+                MacroValue::Array(arr) => arr.iter().map(|v| value_to_string(v)).collect(),
+                _ => Vec::new(),
+            }
+        } else {
+            Vec::new()
+        };
+
+        // Execute the process
+        let output = std::process::Command::new(&cmd)
+            .args(&proc_args)
+            .output()
+            .map_err(|e| MacroError::RuntimeError {
+                message: format!("failed to execute '{}': {}", cmd, e),
+                location,
+            })?;
+
+        let stdout_str = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr_str = String::from_utf8_lossy(&output.stderr).to_string();
+        let exit_code = output.status.code().unwrap_or(-1) as i64;
+
+        // Build stdout pseudo-object (supports .readAll() / .toString())
+        let mut stdout_obj = std::collections::HashMap::new();
+        stdout_obj.insert(
+            "__type__".to_string(),
+            MacroValue::String(Arc::from("sys.io.ProcessStdout")),
+        );
+        stdout_obj.insert(
+            "__data__".to_string(),
+            MacroValue::String(Arc::from(stdout_str.as_str())),
+        );
+
+        // Build stderr pseudo-object
+        let mut stderr_obj = std::collections::HashMap::new();
+        stderr_obj.insert(
+            "__type__".to_string(),
+            MacroValue::String(Arc::from("sys.io.ProcessOutput")),
+        );
+        stderr_obj.insert(
+            "__data__".to_string(),
+            MacroValue::String(Arc::from(stderr_str.as_str())),
+        );
+
+        // Build Process object
+        let mut proc_obj = std::collections::HashMap::new();
+        proc_obj.insert(
+            "__type__".to_string(),
+            MacroValue::String(Arc::from("sys.io.Process")),
+        );
+        proc_obj.insert(
+            "stdout".to_string(),
+            MacroValue::Object(Arc::new(stdout_obj)),
+        );
+        proc_obj.insert(
+            "stderr".to_string(),
+            MacroValue::Object(Arc::new(stderr_obj)),
+        );
+        proc_obj.insert("__exitCode__".to_string(), MacroValue::Int(exit_code));
+
+        Ok(MacroValue::Object(Arc::new(proc_obj)))
+    }
+
+    /// Construct a sys.io.File — compile-time file I/O
+    fn construct_file(
+        &self,
+        _args: Vec<MacroValue>,
+        _location: SourceLocation,
+    ) -> Result<MacroValue, MacroError> {
+        // File construction is typically done via static methods (File.getContent)
+        let mut obj = std::collections::HashMap::new();
+        obj.insert(
+            "__type__".to_string(),
+            MacroValue::String(Arc::from("sys.io.File")),
+        );
+        Ok(MacroValue::Object(Arc::new(obj)))
+    }
+
+    /// Construct an object from pre-extracted ClassRegistry data.
+    /// Takes cloned data to avoid borrow conflicts with &mut self.
+    fn construct_from_registry_data(
+        &mut self,
+        qualified_name: &str,
+        instance_vars: &[(String, Option<Arc<Expr>>)],
+        constructor: Option<&(Arc<Expr>, Vec<parser::FunctionParam>)>,
+        args: Vec<MacroValue>,
+        _location: SourceLocation,
+    ) -> Result<MacroValue, MacroError> {
+        // Create the object with __type__ and instance var defaults
+        let mut obj = std::collections::HashMap::new();
+        obj.insert(
+            "__type__".to_string(),
+            MacroValue::String(Arc::from(qualified_name)),
+        );
+
+        // Initialize instance vars with their default init expressions
+        for (name, init_expr) in instance_vars {
+            let val = if let Some(ref init) = init_expr {
+                self.eval_expr(init).unwrap_or(MacroValue::Null)
+            } else {
+                MacroValue::Null
+            };
+            obj.insert(name.clone(), val);
+        }
+
+        // If there's a constructor, run it with `this` bound to the object
+        if let Some((ctor_body, ctor_params)) = constructor {
+            let ctor_body = ctor_body.clone();
+            let ctor_params = ctor_params.clone();
+
+            self.env.push_scope();
+            self.env
+                .define("this", MacroValue::Object(Arc::new(obj.clone())));
+
+            // Bind constructor params
+            for (i, param) in ctor_params.iter().enumerate() {
+                let val = args.get(i).cloned().unwrap_or(MacroValue::Null);
+                self.env.define(&param.name, val);
+            }
+
+            // Execute constructor body
+            let result = self.eval_expr(&ctor_body);
+            match result {
+                Ok(_) | Err(MacroError::Return { .. }) => {}
+                Err(e) => {
+                    self.env.pop_scope();
+                    return Err(e);
+                }
+            }
+
+            // Extract the (potentially mutated) `this` from the environment
+            let final_obj = self
+                .env
+                .get("this")
+                .cloned()
+                .unwrap_or(MacroValue::Object(Arc::new(obj)));
+            self.env.pop_scope();
+            Ok(final_obj)
+        } else {
+            Ok(MacroValue::Object(Arc::new(obj)))
+        }
     }
 
     /// Access a field on a value
@@ -1032,6 +1757,19 @@ impl MacroInterpreter {
         field: &str,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
+        // Unwrap Expr-wrapped values so field access works on the concrete type
+        // (e.g., s.length where s is MacroValue::Expr(String("hello")))
+        let unwrapped = if matches!(base, MacroValue::Expr(_)) {
+            let u = ast_bridge::unwrap_expr_value(base);
+            if matches!(u, MacroValue::Expr(_)) {
+                None
+            } else {
+                Some(u)
+            }
+        } else {
+            None
+        };
+        let base = unwrapped.as_ref().unwrap_or(base);
         match base {
             MacroValue::Object(map) => Ok(map.get(field).cloned().unwrap_or(MacroValue::Null)),
             MacroValue::Array(arr) => match field {
@@ -1052,6 +1790,10 @@ impl MacroInterpreter {
                 // Field access on reified expressions (e.g., expr.expr, expr.pos)
                 match field {
                     "pos" => Ok(MacroValue::Position(span_to_location(expr.span))),
+                    "expr" => {
+                        // Return the ExprDef as an enum-like value
+                        Ok(ast_bridge::expr_kind_to_value(&expr.kind, expr.span))
+                    }
                     _ => Err(MacroError::TypeError {
                         message: format!("Expr has no field '{}'", field),
                         location,
@@ -1078,7 +1820,7 @@ impl MacroInterpreter {
                 Ok(arr.get(idx).cloned().unwrap_or(MacroValue::Null))
             }
             (MacroValue::Object(map), MacroValue::String(key)) => {
-                Ok(map.get(key.as_str()).cloned().unwrap_or(MacroValue::Null))
+                Ok(map.get(&**key).cloned().unwrap_or(MacroValue::Null))
             }
             (MacroValue::Object(map), other) => {
                 let key = other.to_display_string();
@@ -1086,12 +1828,13 @@ impl MacroInterpreter {
             }
             (MacroValue::String(s), MacroValue::Int(i)) => {
                 let idx = *i as usize;
-                Ok(MacroValue::String(
+                Ok(MacroValue::String(Arc::from(
                     s.chars()
                         .nth(idx)
                         .map(|c| c.to_string())
-                        .unwrap_or_default(),
-                ))
+                        .unwrap_or_default()
+                        .as_str(),
+                )))
             }
             _ => Err(MacroError::TypeError {
                 message: format!(
@@ -1154,10 +1897,13 @@ impl MacroInterpreter {
         location: SourceLocation,
     ) -> Result<Vec<MacroValue>, MacroError> {
         match value {
-            MacroValue::Array(arr) => Ok(arr.clone()),
+            MacroValue::Array(arr) => Ok(arr.as_ref().clone()),
             MacroValue::Object(map) => {
                 // Iterate over keys
-                Ok(map.keys().map(|k| MacroValue::String(k.clone())).collect())
+                Ok(map
+                    .keys()
+                    .map(|k| MacroValue::String(Arc::from(k.as_str())))
+                    .collect())
             }
             _ => Err(MacroError::TypeError {
                 message: format!("cannot iterate over {}", value.type_name()),
@@ -1189,6 +1935,271 @@ impl MacroInterpreter {
             }
         }
     }
+}
+
+/// Collect all free variable references from an expression AST.
+///
+/// Walks the expression tree and collects all `Ident` names that appear,
+/// excluding names that are bound by local `var` declarations or function parameters.
+/// This is used for selective closure capture — only variables actually referenced
+/// in the closure body need to be captured from the enclosing scope.
+fn collect_free_vars(
+    expr: &Expr,
+    bound: &mut std::collections::HashSet<String>,
+    free: &mut std::collections::HashSet<String>,
+) {
+    match &expr.kind {
+        ExprKind::Ident(name) => {
+            if !bound.contains(name) {
+                free.insert(name.clone());
+            }
+        }
+        ExprKind::Var {
+            name, expr: init, ..
+        }
+        | ExprKind::Final {
+            name, expr: init, ..
+        } => {
+            if let Some(init) = init {
+                collect_free_vars(init, bound, free);
+            }
+            bound.insert(name.clone());
+        }
+        ExprKind::Function(func) => {
+            let mut inner_bound = bound.clone();
+            for p in &func.params {
+                inner_bound.insert(p.name.clone());
+            }
+            if let Some(body) = &func.body {
+                collect_free_vars(body, &mut inner_bound, free);
+            }
+        }
+        ExprKind::Arrow { params, expr: body } => {
+            let mut inner_bound = bound.clone();
+            for p in params {
+                inner_bound.insert(p.name.clone());
+            }
+            collect_free_vars(body, &mut inner_bound, free);
+        }
+        ExprKind::Block(elements) => {
+            let mut block_bound = bound.clone();
+            for elem in elements {
+                if let parser::BlockElement::Expr(e) = elem {
+                    collect_free_vars(e, &mut block_bound, free);
+                }
+            }
+        }
+        ExprKind::For {
+            var, iter, body, ..
+        } => {
+            collect_free_vars(iter, bound, free);
+            let mut for_bound = bound.clone();
+            for_bound.insert(var.clone());
+            collect_free_vars(body, &mut for_bound, free);
+        }
+        ExprKind::While { cond, body } | ExprKind::DoWhile { body, cond } => {
+            collect_free_vars(cond, bound, free);
+            collect_free_vars(body, bound, free);
+        }
+        ExprKind::If {
+            cond,
+            then_branch,
+            else_branch,
+        } => {
+            collect_free_vars(cond, bound, free);
+            collect_free_vars(then_branch, bound, free);
+            if let Some(e) = else_branch {
+                collect_free_vars(e, bound, free);
+            }
+        }
+        ExprKind::Binary { left, right, .. } => {
+            collect_free_vars(left, bound, free);
+            collect_free_vars(right, bound, free);
+        }
+        ExprKind::Unary { expr: inner, .. } => {
+            collect_free_vars(inner, bound, free);
+        }
+        ExprKind::Call { expr: callee, args } => {
+            collect_free_vars(callee, bound, free);
+            for a in args {
+                collect_free_vars(a, bound, free);
+            }
+        }
+        ExprKind::Field { expr: obj, .. } => {
+            collect_free_vars(obj, bound, free);
+        }
+        ExprKind::Index { expr: obj, index } => {
+            collect_free_vars(obj, bound, free);
+            collect_free_vars(index, bound, free);
+        }
+        ExprKind::Array(items) => {
+            for item in items {
+                collect_free_vars(item, bound, free);
+            }
+        }
+        ExprKind::Object(fields) => {
+            for f in fields {
+                collect_free_vars(&f.expr, bound, free);
+            }
+        }
+        ExprKind::Assign { left, right, .. } => {
+            collect_free_vars(left, bound, free);
+            collect_free_vars(right, bound, free);
+        }
+        ExprKind::Return(Some(inner)) | ExprKind::Throw(inner) | ExprKind::Paren(inner) => {
+            collect_free_vars(inner, bound, free);
+        }
+        ExprKind::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            collect_free_vars(cond, bound, free);
+            collect_free_vars(then_expr, bound, free);
+            collect_free_vars(else_expr, bound, free);
+        }
+        ExprKind::Switch {
+            expr: scrutinee,
+            cases,
+            default,
+        } => {
+            collect_free_vars(scrutinee, bound, free);
+            for case in cases {
+                collect_free_vars(&case.body, bound, free);
+            }
+            if let Some(d) = default {
+                collect_free_vars(d, bound, free);
+            }
+        }
+        ExprKind::Try {
+            expr: body,
+            catches,
+            ..
+        } => {
+            collect_free_vars(body, bound, free);
+            for c in catches {
+                let mut catch_bound = bound.clone();
+                catch_bound.insert(c.var.clone());
+                collect_free_vars(&c.body, &mut catch_bound, free);
+            }
+        }
+        ExprKind::StringInterpolation(parts) => {
+            for part in parts {
+                if let parser::StringPart::Interpolation(e) = part {
+                    collect_free_vars(e, bound, free);
+                }
+            }
+        }
+        ExprKind::Cast { expr: inner, .. }
+        | ExprKind::Macro(inner)
+        | ExprKind::TypeCheck { expr: inner, .. } => {
+            collect_free_vars(inner, bound, free);
+        }
+        ExprKind::New { args, .. } => {
+            for a in args {
+                collect_free_vars(a, bound, free);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Get the set of free variables in a function body, excluding parameter names
+fn get_free_vars_for_closure(
+    body: &Expr,
+    params: &[MacroParam],
+) -> std::collections::HashSet<String> {
+    let mut bound = std::collections::HashSet::new();
+    for p in params {
+        bound.insert(p.name.clone());
+    }
+    let mut free = std::collections::HashSet::new();
+    collect_free_vars(body, &mut bound, &mut free);
+    free
+}
+
+/// Extract a string from a MacroValue, unwrapping Expr wrappers.
+fn value_to_string(val: &MacroValue) -> String {
+    match val {
+        MacroValue::String(s) => s.to_string(),
+        MacroValue::Int(n) => n.to_string(),
+        MacroValue::Float(f) => f.to_string(),
+        MacroValue::Expr(_) => {
+            let unwrapped = ast_bridge::unwrap_expr_value(val);
+            if matches!(unwrapped, MacroValue::Expr(_)) {
+                val.to_display_string()
+            } else {
+                value_to_string(&unwrapped)
+            }
+        }
+        _ => val.to_display_string(),
+    }
+}
+
+/// Extract a qualified class name and method from a nested Field chain.
+///
+/// For `haxe.macro.Context.parse(...)`, the callee is:
+///   Field { expr: Field { expr: Field { Ident("haxe"), "macro" }, "Context" }, "parse" }
+///
+/// This function is called with `base = Field{..., "Context"}` and `method = "parse"`.
+/// It walks the nested Field chain to build "haxe.macro.Context" and returns it
+/// along with the method name.
+fn extract_qualified_call<'a>(base: &'a Expr, method: &'a str) -> Option<(String, &'a str)> {
+    // base should be a Field chain ending in the class name
+    // Walk the chain to collect path segments
+    let mut segments = Vec::new();
+    let mut current = base;
+    loop {
+        match &current.kind {
+            ExprKind::Field {
+                expr: inner, field, ..
+            } => {
+                segments.push(field.as_str());
+                current = inner;
+            }
+            ExprKind::Ident(name) => {
+                segments.push(name.as_str());
+                break;
+            }
+            _ => return None,
+        }
+    }
+    // segments are in reverse order: ["Context", "macro", "haxe"]
+    segments.reverse();
+    let qualified = segments.join(".");
+    Some((qualified, method))
+}
+
+/// Build an import map from a parsed file's import declarations.
+///
+/// Maps short class names to their fully qualified paths:
+/// - `import haxe.macro.Context;` → "Context" → "haxe.macro.Context"
+/// - `import haxe.macro.Context as Ctx;` → "Ctx" → "haxe.macro.Context"
+/// - `import haxe.macro.*;` → not resolved here (wildcard)
+pub fn build_import_map(imports: &[parser::Import]) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for import in imports {
+        match &import.mode {
+            parser::ImportMode::Normal => {
+                // import haxe.macro.Context → short name is last segment
+                if let Some(last) = import.path.last() {
+                    let qualified = import.path.join(".");
+                    map.insert(last.clone(), qualified);
+                }
+            }
+            parser::ImportMode::Alias(alias) => {
+                // import haxe.macro.Context as Ctx → alias maps to full path
+                let qualified = import.path.join(".");
+                map.insert(alias.clone(), qualified);
+            }
+            parser::ImportMode::Field(_)
+            | parser::ImportMode::Wildcard
+            | parser::ImportMode::WildcardWithExclusions(_) => {
+                // Wildcard and field imports not tracked for class resolution
+            }
+        }
+    }
+    map
 }
 
 #[cfg(test)]
@@ -1232,7 +2243,7 @@ mod tests {
         assert_eq!(eval("return 42;").unwrap(), MacroValue::Int(42));
         assert_eq!(
             eval("return \"hello\";").unwrap(),
-            MacroValue::String("hello".to_string())
+            MacroValue::from_str("hello")
         );
         assert_eq!(eval("return true;").unwrap(), MacroValue::Bool(true));
         assert_eq!(eval("return null;").unwrap(), MacroValue::Null);
@@ -1251,7 +2262,7 @@ mod tests {
     fn test_string_concat() {
         assert_eq!(
             eval("return \"hello\" + \" world\";").unwrap(),
-            MacroValue::String("hello world".to_string())
+            MacroValue::from_str("hello world")
         );
     }
 

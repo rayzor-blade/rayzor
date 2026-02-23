@@ -45,7 +45,7 @@ use std::path::Path;
 const BLADE_MAGIC: &[u8; 4] = b"BLAD";
 
 /// Current BLADE format version
-const BLADE_VERSION: u32 = 1;
+const BLADE_VERSION: u32 = 2;
 
 /// Metadata about the compiled module
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +73,43 @@ pub struct BladeMetadata {
     pub compiler_version: String,
 }
 
+/// MIR-level cross-reference maps for cache restoration.
+/// Keyed by name (not SymbolId/TypeId) so they survive across compilations
+/// where IDs are re-assigned.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BladeCachedMaps {
+    /// Function entries: (class_name, method_name, ir_func_id, is_constructor)
+    pub functions: Vec<BladeFuncEntry>,
+    /// Field entries: (class_name, field_name, field_index)
+    pub fields: Vec<BladeFieldEntry>,
+    /// Class allocation sizes: (class_qualified_name, alloc_bytes)
+    pub class_sizes: Vec<(String, u64)>,
+}
+
+/// A function entry in the cached maps
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BladeFuncEntry {
+    /// Qualified class name (e.g., "haxe.ds.BalancedTree")
+    pub class_name: String,
+    /// Method name (e.g., "set", "new")
+    pub method_name: String,
+    /// Original MIR function ID (pre-renumber)
+    pub func_id: u32,
+    /// Whether this is a constructor
+    pub is_constructor: bool,
+}
+
+/// A field entry in the cached maps
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BladeFieldEntry {
+    /// Qualified class name
+    pub class_name: String,
+    /// Field name
+    pub field_name: String,
+    /// Field index in the class struct (0 = header, 1+ = user fields)
+    pub field_index: u32,
+}
+
 /// A complete BLADE module ready for serialization
 #[derive(Debug, Serialize, Deserialize)]
 struct BladeModule {
@@ -87,6 +124,12 @@ struct BladeModule {
 
     /// The actual MIR module (directly serialized)
     mir: IrModule,
+
+    /// Type info for symbol registration on cache load (added in v2)
+    symbols: Option<BladeTypeInfo>,
+
+    /// MIR-level cross-reference maps, keyed by name (added in v2)
+    cached_maps: Option<BladeCachedMaps>,
 }
 
 /// Errors that can occur during BLADE operations
@@ -160,11 +203,24 @@ pub fn save_blade(
     module: &IrModule,
     metadata: BladeMetadata,
 ) -> Result<(), BladeError> {
+    save_blade_with_state(path, module, metadata, None, None)
+}
+
+/// Save a MIR module with optional type info and cached maps
+pub fn save_blade_with_state(
+    path: impl AsRef<Path>,
+    module: &IrModule,
+    metadata: BladeMetadata,
+    symbols: Option<BladeTypeInfo>,
+    cached_maps: Option<BladeCachedMaps>,
+) -> Result<(), BladeError> {
     let blade = BladeModule {
         magic: *BLADE_MAGIC,
         version: BLADE_VERSION,
         metadata,
         mir: module.clone(),
+        symbols,
+        cached_maps,
     };
 
     // Serialize using postcard
@@ -192,7 +248,17 @@ pub fn save_blade(
 /// let (mir_module, metadata) = load_blade("Main.blade")?;
 /// println!("Loaded module: {}", metadata.name);
 /// ```
-pub fn load_blade(path: impl AsRef<Path>) -> Result<(IrModule, BladeMetadata), BladeError> {
+pub fn load_blade(
+    path: impl AsRef<Path>,
+) -> Result<
+    (
+        IrModule,
+        BladeMetadata,
+        Option<BladeTypeInfo>,
+        Option<BladeCachedMaps>,
+    ),
+    BladeError,
+> {
     // Read file
     let bytes = fs::read(path)?;
 
@@ -209,7 +275,7 @@ pub fn load_blade(path: impl AsRef<Path>) -> Result<(IrModule, BladeMetadata), B
         return Err(BladeError::UnsupportedVersion(blade.version));
     }
 
-    Ok((blade.mir, blade.metadata))
+    Ok((blade.mir, blade.metadata, blade.symbols, blade.cached_maps))
 }
 
 // ============================================================================
@@ -805,6 +871,8 @@ mod tests {
             version: BLADE_VERSION,
             metadata: metadata.clone(),
             mir: module.clone(),
+            symbols: None,
+            cached_maps: None,
         };
 
         let bytes = postcard::to_allocvec(&blade).unwrap();

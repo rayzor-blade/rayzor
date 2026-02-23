@@ -366,7 +366,7 @@ fn discover_files_recursive(
     }
 }
 
-fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo {
+pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo {
     let mut type_info = BladeTypeInfo::default();
 
     let package: Vec<String> = haxe_file

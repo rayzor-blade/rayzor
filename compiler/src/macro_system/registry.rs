@@ -1,8 +1,10 @@
+use super::bytecode::{BytecodeCompiler, Chunk, CompiledClassInfo};
 use super::errors::{MacroDiagnostic, MacroError};
 use super::value::MacroParam;
 use crate::tast::SourceLocation;
 use parser::{ClassDecl, ClassField, ClassFieldKind, Expr, HaxeFile, Modifier, TypeDeclaration};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Default maximum macro expansion depth
 const DEFAULT_MAX_DEPTH: usize = 256;
@@ -16,8 +18,8 @@ pub struct MacroDefinition {
     pub qualified_name: String,
     /// Parameters
     pub params: Vec<MacroParam>,
-    /// The function body AST
-    pub body: Box<Expr>,
+    /// The function body AST (Arc for O(1) clone on each macro invocation)
+    pub body: Arc<Expr>,
     /// Whether this is a @:build macro
     pub is_build_macro: bool,
     /// Source file where defined
@@ -55,6 +57,11 @@ pub struct MacroRegistry {
     expanding: Vec<String>,
     /// Diagnostics accumulated during scanning
     diagnostics: Vec<MacroDiagnostic>,
+    /// Compiled bytecode chunks for macro functions (keyed by qualified name).
+    /// Only populated when RAYZOR_MACRO_VM=1 is set.
+    compiled: HashMap<String, Arc<Chunk>>,
+    /// Compiled class data for VM class dispatch (keyed by class name).
+    compiled_classes: HashMap<String, CompiledClassInfo>,
 }
 
 impl MacroRegistry {
@@ -66,6 +73,8 @@ impl MacroRegistry {
             max_depth: DEFAULT_MAX_DEPTH,
             expanding: Vec::new(),
             diagnostics: Vec::new(),
+            compiled: HashMap::new(),
+            compiled_classes: HashMap::new(),
         }
     }
 
@@ -164,7 +173,7 @@ impl MacroRegistry {
                 .collect();
 
             let body = match &func.body {
-                Some(body) => body.clone(),
+                Some(body) => Arc::new(body.as_ref().clone()),
                 None => {
                     return Err(MacroError::InvalidDefinition {
                         message: format!("macro function '{}' must have a body", qualified_name),
@@ -182,6 +191,10 @@ impl MacroRegistry {
                 source_file: source_file.to_string(),
                 location: SourceLocation::new(0, 0, 0, field.span.start as u32),
             };
+
+            // Bytecode compilation is deferred — the tiering scheduler in the
+            // interpreter will compile hot macros on-demand after they cross the
+            // call-count threshold (morsel-parallelism-inspired scheduling).
 
             self.macros.insert(qualified_name, definition);
         }
@@ -221,6 +234,16 @@ impl MacroRegistry {
     /// Look up a macro by its qualified name
     pub fn get_macro(&self, qualified_name: &str) -> Option<&MacroDefinition> {
         self.macros.get(qualified_name)
+    }
+
+    /// Look up a compiled bytecode chunk by qualified name.
+    pub fn get_compiled(&self, qualified_name: &str) -> Option<Arc<Chunk>> {
+        self.compiled.get(qualified_name).cloned()
+    }
+
+    /// Insert a compiled bytecode chunk (used by the tiering scheduler).
+    pub fn insert_compiled(&mut self, qualified_name: String, chunk: Arc<Chunk>) {
+        self.compiled.insert(qualified_name, chunk);
     }
 
     /// Look up a macro by simple name (searches all registered macros)
@@ -294,6 +317,107 @@ impl MacroRegistry {
     /// Check if a name refers to a registered macro
     pub fn is_macro(&self, name: &str) -> bool {
         self.macros.contains_key(name) || self.macros.values().any(|def| def.name == name)
+    }
+
+    /// Compile class constructors/methods from a ClassRegistry for VM dispatch.
+    /// Called when RAYZOR_MACRO_VM=1 is set.
+    pub fn compile_classes(&mut self, class_registry: &super::class_registry::ClassRegistry) {
+        use super::class_registry::ClassInfo;
+        use super::value::MacroValue;
+
+        // Iterate all classes in the registry
+        for class_name in class_registry.iter_class_names() {
+            if let Some(class_info) = class_registry.find_class(class_name) {
+                let mut compiled = CompiledClassInfo {
+                    constructor: None,
+                    instance_methods: std::collections::HashMap::new(),
+                    static_methods: std::collections::HashMap::new(),
+                    instance_vars: Vec::new(),
+                };
+
+                // Compile instance var defaults
+                for var in &class_info.instance_vars {
+                    let default_val = if let Some(ref init) = var.init_expr {
+                        // Try to evaluate simple literal defaults
+                        Self::eval_simple_literal(init)
+                    } else {
+                        MacroValue::Null
+                    };
+                    compiled.instance_vars.push((var.name.clone(), default_val));
+                }
+
+                // Compile constructor
+                if let Some(ref ctor) = class_info.constructor {
+                    if let Ok(chunk) = BytecodeCompiler::compile_method(
+                        &format!("{}.new", class_info.name),
+                        &ctor.params,
+                        &ctor.body,
+                        true, // is_constructor
+                    ) {
+                        compiled.constructor = Some(Arc::new(chunk));
+                    }
+                }
+
+                // Compile instance methods
+                for (method_name, method_info) in &class_info.instance_methods {
+                    if let Ok(chunk) = BytecodeCompiler::compile_method(
+                        &format!("{}.{}", class_info.name, method_name),
+                        &method_info.params,
+                        &method_info.body,
+                        false,
+                    ) {
+                        compiled
+                            .instance_methods
+                            .insert(method_name.clone(), Arc::new(chunk));
+                    }
+                }
+
+                // Compile static methods
+                for (method_name, method_info) in &class_info.static_methods {
+                    if let Ok(chunk) = BytecodeCompiler::compile_method(
+                        &format!("{}.{}", class_info.name, method_name),
+                        &method_info.params,
+                        &method_info.body,
+                        false,
+                    ) {
+                        compiled
+                            .static_methods
+                            .insert(method_name.clone(), Arc::new(chunk));
+                    }
+                }
+
+                // Store under both simple and qualified names
+                self.compiled_classes
+                    .insert(class_info.name.clone(), compiled);
+            }
+        }
+    }
+
+    /// Evaluate a simple literal expression to a MacroValue.
+    fn eval_simple_literal(expr: &Expr) -> super::value::MacroValue {
+        use super::value::MacroValue;
+        match &expr.kind {
+            parser::ExprKind::Int(i) => MacroValue::Int(*i),
+            parser::ExprKind::Float(f) => MacroValue::Float(*f),
+            parser::ExprKind::String(s) => MacroValue::from_str(s),
+            parser::ExprKind::Bool(b) => MacroValue::Bool(*b),
+            parser::ExprKind::Null => MacroValue::Null,
+            // Negative literal: -N
+            parser::ExprKind::Unary {
+                op: parser::UnaryOp::Neg,
+                expr,
+            } => match &expr.kind {
+                parser::ExprKind::Int(i) => MacroValue::Int(-i),
+                parser::ExprKind::Float(f) => MacroValue::Float(-f),
+                _ => MacroValue::Null,
+            },
+            _ => MacroValue::Null,
+        }
+    }
+
+    /// Get compiled class data for VM dispatch.
+    pub fn get_compiled_classes(&self) -> &HashMap<String, CompiledClassInfo> {
+        &self.compiled_classes
     }
 }
 
