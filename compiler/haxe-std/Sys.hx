@@ -47,6 +47,7 @@ extern class Sys {
 
 		(cs) Non-ASCII Unicode arguments will not work correctly.
 	**/
+	@:native("haxe_sys_args")
 	static function args():Array<String>;
 
 	/**
@@ -181,15 +182,18 @@ extern class Sys {
 		Usually it will block until the user sends a full input line.
 		See `getChar` for an alternative.
 	**/
+	@:native("haxe_sys_stdin")
 	static function stdin():haxe.io.Input;
 
 	/**
 		Returns the standard output of the process, to which program output can be written.
 	**/
+	@:native("haxe_sys_stdout")
 	static function stdout():haxe.io.Output;
 
 	/**
 		Returns the standard error of the process, to which program errors can be written.
 	**/
+	@:native("haxe_sys_stderr")
 	static function stderr():haxe.io.Output;
 }

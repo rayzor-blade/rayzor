@@ -434,7 +434,7 @@ impl AotCompiler {
         };
         let main_c_path = output_path.with_extension("_main.c");
         let main_c = format!(
-            "extern void {}(long);\nint main(int argc, char** argv) {{ {}(0); return 0; }}\n",
+            "extern void rayzor_init_args_from_argv(int, char**);\nextern void {}(long);\nint main(int argc, char** argv) {{ rayzor_init_args_from_argv(argc, argv); {}(0); return 0; }}\n",
             actual_entry, actual_entry
         );
         std::fs::write(&main_c_path, &main_c)

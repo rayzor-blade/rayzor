@@ -457,6 +457,11 @@ register_symbol!(
 register_symbol!("haxe_sys_exit", crate::haxe_sys::haxe_sys_exit);
 register_symbol!("haxe_sys_time", crate::haxe_sys::haxe_sys_time);
 register_symbol!("haxe_sys_args_count", crate::haxe_sys::haxe_sys_args_count);
+register_symbol!("haxe_sys_args", crate::haxe_sys::haxe_sys_args);
+register_symbol!(
+    "rayzor_init_args_from_argv",
+    crate::haxe_sys::rayzor_init_args_from_argv
+);
 
 // Environment
 register_symbol!("haxe_sys_get_env", crate::haxe_sys::haxe_sys_get_env);
@@ -552,6 +557,11 @@ register_symbol!(
     "haxe_fileoutput_close",
     crate::haxe_sys::haxe_fileoutput_close
 );
+
+// Standard streams (Sys.stdin/stdout/stderr)
+register_symbol!("haxe_sys_stdin", crate::haxe_sys::haxe_sys_stdin);
+register_symbol!("haxe_sys_stdout", crate::haxe_sys::haxe_sys_stdout);
+register_symbol!("haxe_sys_stderr", crate::haxe_sys::haxe_sys_stderr);
 
 // ============================================================================
 // FileSystem (sys.FileSystem)

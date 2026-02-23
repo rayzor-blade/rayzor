@@ -382,7 +382,7 @@ pub fn emit_assembly(
 
 /// Generate a C main() wrapper that calls the Haxe entry point.
 ///
-/// Creates: `int main(int argc, char** argv) { <entry>(0); return 0; }`
+/// Creates: `int main(int argc, char** argv) { rayzor_init_args_from_argv(argc, argv); <entry>(0); return 0; }`
 /// If entry is named "main", renames it to "_haxe_main" first.
 #[cfg(feature = "llvm-backend")]
 pub fn generate_main_wrapper(module: &Module, entry_func_name: &str) -> Result<(), String> {
@@ -421,6 +421,22 @@ pub fn generate_main_wrapper(module: &Module, entry_func_name: &str) -> Result<(
     let builder = context.create_builder();
     builder.position_at_end(entry_bb);
 
+    // Declare and call rayzor_init_args_from_argv(argc, argv) to initialize Sys.args()
+    let init_args_type = context
+        .void_type()
+        .fn_type(&[i32_type.into(), i8_ptr_type.into()], false);
+    let init_args_fn = module.add_function(
+        "rayzor_init_args_from_argv",
+        init_args_type,
+        Some(inkwell::module::Linkage::External),
+    );
+    let argc_val = main_fn.get_nth_param(0).unwrap();
+    let argv_val = main_fn.get_nth_param(1).unwrap();
+    builder
+        .build_call(init_args_fn, &[argc_val.into(), argv_val.into()], "")
+        .map_err(|e| format!("Failed to build call to rayzor_init_args_from_argv: {}", e))?;
+
+    // Call the Haxe entry point
     let haxe_entry = module
         .get_function(actual_name)
         .ok_or_else(|| format!("Renamed entry function '{}' not found", actual_name))?;

@@ -881,6 +881,116 @@ pub extern "C" fn haxe_sys_args_count() -> i32 {
 }
 
 // ============================================================================
+// Program Arguments (Sys.args())
+// ============================================================================
+
+struct ArgsStorage(*mut crate::haxe_array::HaxeArray);
+unsafe impl Send for ArgsStorage {}
+unsafe impl Sync for ArgsStorage {}
+
+static PROGRAM_ARGS: std::sync::OnceLock<ArgsStorage> = std::sync::OnceLock::new();
+
+/// Build a HaxeArray of HaxeString pointers from a slice of Rust strings.
+/// Returns a heap-allocated HaxeArray pointer.
+fn build_args_array(args: &[&str]) -> *mut crate::haxe_array::HaxeArray {
+    use crate::haxe_array::HaxeArray;
+    use std::alloc::{alloc, Layout};
+
+    let count = args.len();
+    let elem_size = 8; // size of pointer (i64)
+
+    let data_ptr = if count > 0 {
+        unsafe {
+            let total_size = count * elem_size;
+            let layout = Layout::from_size_align_unchecked(total_size, 8);
+            let ptr = alloc(layout);
+            if ptr.is_null() {
+                panic!("Failed to allocate memory for args array");
+            }
+
+            let i64_ptr = ptr as *mut i64;
+            for (i, arg) in args.iter().enumerate() {
+                let bytes = arg.as_bytes();
+                let len = bytes.len();
+                // Allocate a copy of the string bytes
+                let str_layout = Layout::from_size_align_unchecked(len.max(1), 1);
+                let str_ptr = alloc(str_layout);
+                if !str_ptr.is_null() {
+                    std::ptr::copy_nonoverlapping(bytes.as_ptr(), str_ptr, len);
+                }
+                let hs = Box::into_raw(Box::new(HaxeString {
+                    ptr: str_ptr,
+                    len,
+                    cap: len,
+                }));
+                *i64_ptr.add(i) = hs as i64;
+            }
+            ptr
+        }
+    } else {
+        std::ptr::null_mut()
+    };
+
+    let arr = Box::new(HaxeArray {
+        ptr: data_ptr,
+        len: count,
+        cap: count,
+        elem_size,
+    });
+    Box::into_raw(arr)
+}
+
+/// C-callable: Initialize program args from argc/argv (used by AOT C wrapper).
+/// Skips argv[0] (the binary name) to match Haxe convention.
+#[no_mangle]
+pub extern "C" fn rayzor_init_args_from_argv(argc: i32, argv: *const *const i8) {
+    if argv.is_null() || argc <= 1 {
+        let arr = build_args_array(&[]);
+        let _ = PROGRAM_ARGS.set(ArgsStorage(arr));
+        return;
+    }
+
+    unsafe {
+        let mut args: Vec<&str> = Vec::new();
+        // Skip argv[0] (binary name)
+        for i in 1..argc as usize {
+            let c_str = *argv.add(i);
+            if c_str.is_null() {
+                break;
+            }
+            let len = libc::strlen(c_str);
+            let slice = std::slice::from_raw_parts(c_str as *const u8, len);
+            // Best-effort UTF-8; lossy conversion not needed since we just store bytes
+            match std::str::from_utf8(slice) {
+                Ok(s) => args.push(s),
+                Err(_) => args.push(""),
+            }
+        }
+        let arr = build_args_array(&args);
+        let _ = PROGRAM_ARGS.set(ArgsStorage(arr));
+    }
+}
+
+/// Rust-callable: Initialize program args from string slice (used by JIT run_file).
+pub fn init_program_args(args: &[String]) {
+    let str_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let arr = build_args_array(&str_refs);
+    let _ = PROGRAM_ARGS.set(ArgsStorage(arr));
+}
+
+/// Sys.args() — returns Array<String> of program arguments
+#[no_mangle]
+pub extern "C" fn haxe_sys_args() -> *mut crate::haxe_array::HaxeArray {
+    match PROGRAM_ARGS.get() {
+        Some(storage) => storage.0,
+        None => {
+            // Return empty array if not initialized
+            build_args_array(&[])
+        }
+    }
+}
+
+// ============================================================================
 // Environment Variables
 // ============================================================================
 
@@ -1880,6 +1990,75 @@ pub extern "C" fn haxe_fileoutput_close(handle: *mut HaxeFileOutput) {
         let mut output = Box::from_raw(handle);
         let _ = output.writer.flush();
         // Box drops here, closing the file
+    }
+}
+
+// ============================================================================
+// Standard Streams (Sys.stdin/stdout/stderr)
+// ============================================================================
+
+/// Sys.stdin() — returns a FileInput-compatible handle wrapping process stdin.
+/// Uses dup() to duplicate the fd so close() won't close the real stdin.
+#[no_mangle]
+pub extern "C" fn haxe_sys_stdin() -> *mut HaxeFileInput {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::FromRawFd;
+        let fd = unsafe { libc::dup(0) }; // duplicate stdin fd
+        if fd < 0 {
+            return std::ptr::null_mut();
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        Box::into_raw(Box::new(HaxeFileInput {
+            reader: BufReader::new(file),
+            eof_reached: false,
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        std::ptr::null_mut()
+    }
+}
+
+/// Sys.stdout() — returns a FileOutput-compatible handle wrapping process stdout.
+#[no_mangle]
+pub extern "C" fn haxe_sys_stdout() -> *mut HaxeFileOutput {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::FromRawFd;
+        let fd = unsafe { libc::dup(1) }; // duplicate stdout fd
+        if fd < 0 {
+            return std::ptr::null_mut();
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        Box::into_raw(Box::new(HaxeFileOutput {
+            writer: BufWriter::new(file),
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        std::ptr::null_mut()
+    }
+}
+
+/// Sys.stderr() — returns a FileOutput-compatible handle wrapping process stderr.
+#[no_mangle]
+pub extern "C" fn haxe_sys_stderr() -> *mut HaxeFileOutput {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::FromRawFd;
+        let fd = unsafe { libc::dup(2) }; // duplicate stderr fd
+        if fd < 0 {
+            return std::ptr::null_mut();
+        }
+        let file = unsafe { File::from_raw_fd(fd) };
+        Box::into_raw(Box::new(HaxeFileOutput {
+            writer: BufWriter::new(file),
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        std::ptr::null_mut()
     }
 }
 
