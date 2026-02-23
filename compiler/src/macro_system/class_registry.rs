@@ -187,4 +187,9 @@ impl ClassRegistry {
     pub fn class_count(&self) -> usize {
         self.classes.len()
     }
+
+    /// Iterate over all registered class names.
+    pub fn iter_class_names(&self) -> impl Iterator<Item = &str> {
+        self.classes.keys().map(|s| s.as_str())
+    }
 }
