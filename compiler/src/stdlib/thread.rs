@@ -4,7 +4,7 @@
 /// The actual threading is delegated to extern runtime functions.
 ///
 /// Memory layout:
-/// ```
+/// ```ignore
 /// struct Thread<T> {
 ///     handle: *u8,    // Opaque OS thread handle
 ///     result: *T,     // Pointer to result (set when joined)

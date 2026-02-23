@@ -4,7 +4,7 @@
 /// The actual channel implementation is delegated to extern runtime functions.
 ///
 /// Memory layout:
-/// ```
+/// ```ignore
 /// struct Channel<T> {
 ///     inner: *u8,     // Opaque channel handle
 ///     capacity: i32,  // Buffer capacity (0 = unbounded)

@@ -4,14 +4,14 @@
 /// The actual implementations are delegated to extern runtime functions.
 ///
 /// Arc<T> memory layout:
-/// ```
+/// ```ignore
 /// struct Arc<T> {
 ///     inner: *u8,     // Pointer to ArcInner { strong: AtomicUsize, data: T }
 /// }
 /// ```
 ///
 /// Mutex<T> memory layout:
-/// ```
+/// ```ignore
 /// struct Mutex<T> {
 ///     inner: *u8,     // Pointer to OS mutex + data
 /// }
