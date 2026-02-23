@@ -638,7 +638,7 @@ map.set(new Key(1, "foo"), "value");
 | Concurrency (Thread, Arc, Mutex, Channel) | 5 | 32 | ✅ 100% |
 | System I/O (Sys) | 1 | 18/18 | ✅ 100% |
 | Standard Utilities (Std, Type, Reflect) | 3 | 26/34 | 🟡 76% |
-| File System (File, FileSystem, etc.) | 6 | 22/25 | 🟡 88% |
+| File System (File, FileSystem, etc.) | 6 | 24/25 | ✅ 96% |
 | Date | 1 | 17/17 | ✅ 100% |
 | Bytes (haxe.io.Bytes) | 1 | 20 | ✅ 100% |
 | EReg (regex) | 1 | 10 | ✅ 100% |
@@ -646,7 +646,7 @@ map.set(new Key(1, "foo"), "value");
 | Boxing / Dynamic | - | 14 | ✅ 100% |
 | Trace / Debug | - | 10 | ✅ 100% |
 | Networking (Socket, Host, SSL) | 6 | 0 | 🔴 0% |
-| **Total** | **~35** | **~275/290** | **~95%** |
+| **Total** | **~35** | **~277/290** | **~96%** |
 
 ### 6.2 Core Types Status
 
@@ -813,8 +813,8 @@ map.set(new Key(1, "foo"), "value");
 - [x] write(path) - open for writing (FileOutput) - runtime impl done
 - [x] append(path) - open for appending - runtime impl done
 - [x] update(path) - open for updating - runtime impl done
-- [ ] getBytes(path) - read file as Bytes (runtime has haxe.io.Bytes, needs compiler wiring)
-- [ ] saveBytes(path, bytes) - write Bytes to file (runtime has haxe.io.Bytes, needs compiler wiring)
+- [x] getBytes(path) - read file as Bytes (haxe_file_get_bytes, stdlib mapped)
+- [x] saveBytes(path, bytes) - write Bytes to file (haxe_file_save_bytes, stdlib mapped)
 
 **FileInput/FileOutput Classes:** 🟡 Runtime Implemented (2025-11-28)
 - [x] readByte() - read single byte
@@ -824,7 +824,7 @@ map.set(new Key(1, "foo"), "value");
 - [x] tell() - get current position
 - [x] eof() - check if at end of file
 - [x] seek(p, pos) - seek to position (runtime impl done)
-- [ ] readBytes/writeBytes - runtime Bytes exists, needs compiler wiring
+- [ ] readBytes/writeBytes - stream-level byte buffer read/write (needs Input/Output base class wiring)
 - [ ] readLine/readAll - needs full Input class support
 - **Note**: Type inference for extern class return types needs fixing.
   Using explicit type annotation works: `var output:FileOutput = File.write(...)`
