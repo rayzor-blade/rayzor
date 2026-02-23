@@ -59,9 +59,9 @@ enum Commands {
         #[arg(long, value_enum, default_value = "application")]
         preset: Preset,
 
-        /// Enable BLADE cache for incremental compilation
+        /// Disable BLADE cache for incremental compilation
         #[arg(long)]
-        cache: bool,
+        no_cache: bool,
 
         /// Cache directory (defaults to target/debug/cache or target/release/cache)
         #[arg(long)]
@@ -133,9 +133,9 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
 
-        /// Enable BLADE cache for incremental compilation
+        /// Disable BLADE cache for incremental compilation
         #[arg(long)]
-        cache: bool,
+        no_cache: bool,
 
         /// Cache directory (defaults to target/debug/cache or target/release/cache)
         #[arg(long)]
@@ -203,9 +203,9 @@ enum Commands {
         #[arg(long)]
         no_compress: bool,
 
-        /// Enable BLADE incremental cache
+        /// Disable BLADE incremental cache
         #[arg(long)]
-        cache: bool,
+        no_cache: bool,
 
         /// Custom BLADE cache directory
         #[arg(long)]
@@ -258,9 +258,9 @@ enum Commands {
         #[arg(long)]
         sysroot: Option<PathBuf>,
 
-        /// Enable BLADE incremental cache
+        /// Disable BLADE incremental cache
         #[arg(long)]
-        cache: bool,
+        no_cache: bool,
 
         /// Custom BLADE cache directory
         #[arg(long)]
@@ -440,13 +440,13 @@ fn main() {
             tier,
             llvm,
             preset,
-            cache,
+            no_cache,
             cache_dir,
             release,
             compute,
             rpkg_files,
         } => run_file(
-            file, verbose, stats, tier, llvm, preset, cache, cache_dir, release, compute,
+            file, verbose, stats, tier, llvm, preset, !no_cache, cache_dir, release, compute,
             rpkg_files,
         ),
         Commands::Jit {
@@ -466,10 +466,10 @@ fn main() {
             stage,
             show_ir,
             output,
-            cache,
+            no_cache,
             cache_dir,
             release,
-        } => compile_file(file, stage, show_ir, output, cache, cache_dir, release),
+        } => compile_file(file, stage, show_ir, output, !no_cache, cache_dir, release),
         Commands::Build {
             file,
             verbose,
@@ -490,7 +490,7 @@ fn main() {
             opt_level,
             strip,
             no_compress,
-            cache,
+            no_cache,
             cache_dir,
             verbose,
         } => cmd_bundle(
@@ -499,7 +499,7 @@ fn main() {
             opt_level,
             strip,
             no_compress,
-            cache,
+            !no_cache,
             cache_dir,
             verbose,
         ),
@@ -514,7 +514,7 @@ fn main() {
             runtime_dir,
             linker,
             sysroot,
-            cache,
+            no_cache,
             cache_dir,
             verbose,
         } => cmd_aot(
@@ -528,7 +528,7 @@ fn main() {
             runtime_dir,
             linker,
             sysroot,
-            cache,
+            !no_cache,
             cache_dir,
             verbose,
         ),
@@ -1344,7 +1344,7 @@ fn compile_file(
         return Ok(());
     }
 
-    // Create compilation unit with cache configuration
+    // Create compilation unit with cache configuration (cache on by default)
     let cache_dir_resolved = if let Some(dir) = cache_dir {
         Some(dir)
     } else if cache {
