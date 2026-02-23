@@ -13775,6 +13775,11 @@ impl<'a> HirToMirContext<'a> {
         // Collect all variables referenced in body
         self.collect_referenced_variables_in_block(body, &mut referenced_vars);
 
+        // Also collect variables referenced in continue_update if present
+        if let Some(upd) = continue_update {
+            self.collect_referenced_variables_in_block(upd, &mut referenced_vars);
+        }
+
         // Only include variables that were declared before the loop
         // (i.e., they're already in the symbol_map)
         // Exclude function parameters since they're immutable
@@ -14113,6 +14118,10 @@ impl<'a> HirToMirContext<'a> {
         for stmt in &block.statements {
             self.collect_referenced_variables_in_stmt(stmt, vars);
         }
+        // Also check the block's trailing expression (block-as-value)
+        if let Some(expr) = &block.expr {
+            self.collect_referenced_variables_in_expr(expr, vars);
+        }
     }
 
     /// Collect all variables referenced in a statement
@@ -14215,6 +14224,10 @@ impl<'a> HirToMirContext<'a> {
 
         for stmt in &block.statements {
             self.find_modified_variables_in_statement(stmt, &mut modified);
+        }
+        // Also check the block's trailing expression (block-as-value)
+        if let Some(expr) = &block.expr {
+            self.find_modified_variables_in_expression(expr, &mut modified);
         }
 
         modified

@@ -11,6 +11,7 @@ use super::value::MacroValue;
 use crate::tast::SourceLocation;
 use parser::{BinaryOp, Expr, ExprKind, Span};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Convert a parser AST expression literal to a MacroValue.
 ///
@@ -20,7 +21,7 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
     match &expr.kind {
         ExprKind::Int(i) => Ok(MacroValue::Int(*i)),
         ExprKind::Float(f) => Ok(MacroValue::Float(*f)),
-        ExprKind::String(s) => Ok(MacroValue::String(s.clone())),
+        ExprKind::String(s) => Ok(MacroValue::String(Arc::from(s.as_str()))),
         ExprKind::Bool(b) => Ok(MacroValue::Bool(*b)),
         ExprKind::Null => Ok(MacroValue::Null),
 
@@ -29,7 +30,7 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
             for elem in elements {
                 values.push(expr_to_value(elem)?);
             }
-            Ok(MacroValue::Array(values))
+            Ok(MacroValue::Array(Arc::new(values)))
         }
 
         ExprKind::Object(fields) => {
@@ -38,7 +39,7 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
                 let value = expr_to_value(&field.expr)?;
                 map.insert(field.name.clone(), value);
             }
-            Ok(MacroValue::Object(map))
+            Ok(MacroValue::Object(Arc::new(map)))
         }
 
         ExprKind::Map(entries) => {
@@ -59,7 +60,7 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
                 };
                 map.insert(key_str, expr_to_value(value)?);
             }
-            Ok(MacroValue::Object(map))
+            Ok(MacroValue::Object(Arc::new(map)))
         }
 
         // Unary negation of a literal
@@ -69,12 +70,12 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
         } => match &inner.kind {
             ExprKind::Int(i) => Ok(MacroValue::Int(-i)),
             ExprKind::Float(f) => Ok(MacroValue::Float(-f)),
-            _ => Ok(MacroValue::Expr(Box::new(expr.clone()))),
+            _ => Ok(MacroValue::Expr(Arc::new(expr.clone()))),
         },
 
         // For non-literal expressions, wrap as an Expr value
         // The interpreter will evaluate these when needed
-        _ => Ok(MacroValue::Expr(Box::new(expr.clone()))),
+        _ => Ok(MacroValue::Expr(Arc::new(expr.clone()))),
     }
 }
 
@@ -132,7 +133,7 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
             }
         }
         MacroValue::String(s) => Expr {
-            kind: ExprKind::String(s.clone()),
+            kind: ExprKind::String(s.to_string()),
             span,
         },
         MacroValue::Array(items) => {
@@ -161,10 +162,10 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
             let base = Expr {
                 kind: ExprKind::Field {
                     expr: Box::new(Expr {
-                        kind: ExprKind::Ident(enum_name.clone()),
+                        kind: ExprKind::Ident(enum_name.to_string()),
                         span,
                     }),
-                    field: variant.clone(),
+                    field: variant.to_string(),
                     is_optional: false,
                 },
                 span,
@@ -182,7 +183,7 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
                 }
             }
         }
-        MacroValue::Expr(expr) => *expr.clone(),
+        MacroValue::Expr(expr) => expr.as_ref().clone(),
         MacroValue::Type(_type_id) => {
             // Type references can't be directly expressed; use a placeholder
             Expr {
@@ -233,15 +234,39 @@ pub fn value_to_expr(value: &MacroValue) -> Expr {
     }
 }
 
+/// Unwrap a `MacroValue::Expr` to a concrete value.
+///
+/// When macro parameters are passed as Expr (AST nodes), this function
+/// extracts the concrete compile-time value from simple literal expressions.
+/// For non-literal expressions, the Expr is returned as-is.
+pub fn unwrap_expr_value(val: &MacroValue) -> MacroValue {
+    match val {
+        MacroValue::Expr(expr) => {
+            // Try to extract a concrete value from the expression
+            match expr_to_value(expr) {
+                Ok(MacroValue::Expr(_)) => val.clone(), // Still an Expr, leave as-is
+                Ok(concrete) => concrete,
+                Err(_) => val.clone(),
+            }
+        }
+        other => other.clone(),
+    }
+}
+
 /// Apply a binary operation on two MacroValues.
 ///
 /// Used by the interpreter for evaluating binary expressions.
+/// Automatically unwraps Expr-wrapped values (from macro parameters) to
+/// concrete values before performing the operation.
 pub fn apply_binary_op(
     op: &BinaryOp,
     left: &MacroValue,
     right: &MacroValue,
     location: SourceLocation,
 ) -> Result<MacroValue, MacroError> {
+    // Unwrap Expr-wrapped values (macro parameters) to concrete values
+    let left = &unwrap_expr_value(left);
+    let right = &unwrap_expr_value(right);
     match op {
         // Arithmetic
         BinaryOp::Add => apply_add(left, right, location),
@@ -310,7 +335,7 @@ pub fn apply_binary_op(
                 location,
             })?;
             let arr: Vec<MacroValue> = (start..end).map(MacroValue::Int).collect();
-            Ok(MacroValue::Array(arr))
+            Ok(MacroValue::Array(Arc::new(arr)))
         }
 
         // Arrow (for function types, not typically used in macro values)
@@ -345,15 +370,11 @@ fn apply_add(
 ) -> Result<MacroValue, MacroError> {
     match (left, right) {
         // String concatenation
-        (MacroValue::String(a), b) => Ok(MacroValue::String(format!(
-            "{}{}",
-            a,
-            b.to_display_string()
+        (MacroValue::String(a), b) => Ok(MacroValue::String(Arc::from(
+            format!("{}{}", a, b.to_display_string()).as_str(),
         ))),
-        (a, MacroValue::String(b)) => Ok(MacroValue::String(format!(
-            "{}{}",
-            a.to_display_string(),
-            b
+        (a, MacroValue::String(b)) => Ok(MacroValue::String(Arc::from(
+            format!("{}{}", a.to_display_string(), b).as_str(),
         ))),
         // Numeric addition
         (MacroValue::Int(a), MacroValue::Int(b)) => Ok(MacroValue::Int(a + b)),
@@ -362,9 +383,9 @@ fn apply_add(
         (MacroValue::Float(a), MacroValue::Int(b)) => Ok(MacroValue::Float(a + *b as f64)),
         // Array concatenation
         (MacroValue::Array(a), MacroValue::Array(b)) => {
-            let mut result = a.clone();
+            let mut result = a.as_ref().clone();
             result.extend(b.iter().cloned());
-            Ok(MacroValue::Array(result))
+            Ok(MacroValue::Array(Arc::new(result)))
         }
         _ => Err(MacroError::TypeError {
             message: format!("cannot add {} and {}", left.type_name(), right.type_name()),
@@ -456,6 +477,176 @@ fn compare_values(
     Ok(MacroValue::Bool(pred(ordering)))
 }
 
+/// Convert an ExprKind to a MacroValue representation.
+///
+/// Maps Haxe ExprDef enum variants to MacroValue::Enum for pattern matching
+/// in macro bodies. E.g., `expr.expr` on a `trace(42)` call returns
+/// `Enum("ExprDef", "ECall", [callee_expr, args_array])`.
+pub fn expr_kind_to_value(kind: &ExprKind, span: Span) -> MacroValue {
+    match kind {
+        ExprKind::Int(i) => MacroValue::Enum(
+            Arc::from("ExprDef"),
+            Arc::from("EConst"),
+            Arc::new(vec![MacroValue::Enum(
+                Arc::from("Constant"),
+                Arc::from("CInt"),
+                Arc::new(vec![MacroValue::String(Arc::from(i.to_string().as_str()))]),
+            )]),
+        ),
+        ExprKind::Float(f) => MacroValue::Enum(
+            Arc::from("ExprDef"),
+            Arc::from("EConst"),
+            Arc::new(vec![MacroValue::Enum(
+                Arc::from("Constant"),
+                Arc::from("CFloat"),
+                Arc::new(vec![MacroValue::String(Arc::from(f.to_string().as_str()))]),
+            )]),
+        ),
+        ExprKind::String(s) => MacroValue::Enum(
+            Arc::from("ExprDef"),
+            Arc::from("EConst"),
+            Arc::new(vec![MacroValue::Enum(
+                Arc::from("Constant"),
+                Arc::from("CString"),
+                Arc::new(vec![MacroValue::String(Arc::from(s.as_str()))]),
+            )]),
+        ),
+        ExprKind::Bool(true) => MacroValue::Enum(
+            Arc::from("ExprDef"),
+            Arc::from("EConst"),
+            Arc::new(vec![MacroValue::Enum(
+                Arc::from("Constant"),
+                Arc::from("CIdent"),
+                Arc::new(vec![MacroValue::String(Arc::from("true"))]),
+            )]),
+        ),
+        ExprKind::Bool(false) => MacroValue::Enum(
+            Arc::from("ExprDef"),
+            Arc::from("EConst"),
+            Arc::new(vec![MacroValue::Enum(
+                Arc::from("Constant"),
+                Arc::from("CIdent"),
+                Arc::new(vec![MacroValue::String(Arc::from("false"))]),
+            )]),
+        ),
+        ExprKind::Null => MacroValue::Enum(
+            Arc::from("ExprDef"),
+            Arc::from("EConst"),
+            Arc::new(vec![MacroValue::Enum(
+                Arc::from("Constant"),
+                Arc::from("CIdent"),
+                Arc::new(vec![MacroValue::String(Arc::from("null"))]),
+            )]),
+        ),
+        ExprKind::Ident(name) => MacroValue::Enum(
+            Arc::from("ExprDef"),
+            Arc::from("EConst"),
+            Arc::new(vec![MacroValue::Enum(
+                Arc::from("Constant"),
+                Arc::from("CIdent"),
+                Arc::new(vec![MacroValue::String(Arc::from(name.as_str()))]),
+            )]),
+        ),
+        ExprKind::Call { expr: callee, args } => {
+            let callee_val = MacroValue::Expr(Arc::new(callee.as_ref().clone()));
+            let args_val: Vec<MacroValue> = args
+                .iter()
+                .map(|a| MacroValue::Expr(Arc::new(a.clone())))
+                .collect();
+            MacroValue::Enum(
+                Arc::from("ExprDef"),
+                Arc::from("ECall"),
+                Arc::new(vec![callee_val, MacroValue::Array(Arc::new(args_val))]),
+            )
+        }
+        ExprKind::Field {
+            expr: base, field, ..
+        } => {
+            let base_val = MacroValue::Expr(Arc::new(base.as_ref().clone()));
+            MacroValue::Enum(
+                Arc::from("ExprDef"),
+                Arc::from("EField"),
+                Arc::new(vec![
+                    base_val,
+                    MacroValue::String(Arc::from(field.as_str())),
+                ]),
+            )
+        }
+        ExprKind::Binary { left, op, right } => {
+            let left_val = MacroValue::Expr(Arc::new(left.as_ref().clone()));
+            let right_val = MacroValue::Expr(Arc::new(right.as_ref().clone()));
+            let op_name = format!("{:?}", op);
+            MacroValue::Enum(
+                Arc::from("ExprDef"),
+                Arc::from("EBinop"),
+                Arc::new(vec![
+                    MacroValue::String(Arc::from(op_name.as_str())),
+                    left_val,
+                    right_val,
+                ]),
+            )
+        }
+        ExprKind::Block(elements) => {
+            let exprs: Vec<MacroValue> = elements
+                .iter()
+                .filter_map(|e| match e {
+                    parser::BlockElement::Expr(expr) => {
+                        Some(MacroValue::Expr(Arc::new(expr.clone())))
+                    }
+                    _ => None,
+                })
+                .collect();
+            MacroValue::Enum(
+                Arc::from("ExprDef"),
+                Arc::from("EBlock"),
+                Arc::new(vec![MacroValue::Array(Arc::new(exprs))]),
+            )
+        }
+        ExprKind::Function(func) => {
+            let func_val = MacroValue::Object(Arc::new({
+                let mut m = std::collections::HashMap::new();
+                m.insert(
+                    "name".to_string(),
+                    MacroValue::String(Arc::from(func.name.as_str())),
+                );
+                let params: Vec<MacroValue> = func
+                    .params
+                    .iter()
+                    .map(|p| {
+                        let mut pm = std::collections::HashMap::new();
+                        pm.insert(
+                            "name".to_string(),
+                            MacroValue::String(Arc::from(p.name.as_str())),
+                        );
+                        MacroValue::Object(Arc::new(pm))
+                    })
+                    .collect();
+                m.insert("args".to_string(), MacroValue::Array(Arc::new(params)));
+                if let Some(body) = &func.body {
+                    m.insert(
+                        "expr".to_string(),
+                        MacroValue::Expr(Arc::new(body.as_ref().clone())),
+                    );
+                }
+                m
+            }));
+            MacroValue::Enum(
+                Arc::from("ExprDef"),
+                Arc::from("EFunction"),
+                Arc::new(vec![MacroValue::Null, func_val]),
+            )
+        }
+        // Fallback: wrap the expression as-is
+        _ => {
+            let expr = Expr {
+                kind: kind.clone(),
+                span,
+            };
+            MacroValue::Expr(Arc::new(expr))
+        }
+    }
+}
+
 /// Convert a parser Span to a SourceLocation
 pub fn span_to_location(span: Span) -> SourceLocation {
     super::errors::span_to_location(span)
@@ -483,7 +674,7 @@ mod tests {
             span: Span::default(),
         };
         let val = expr_to_value(&expr).unwrap();
-        assert_eq!(val, MacroValue::String("hello".to_string()));
+        assert_eq!(val, MacroValue::String(Arc::from("hello")));
         let back = value_to_expr(&val);
         assert_eq!(back.kind, ExprKind::String("hello".to_string()));
 
@@ -611,12 +802,12 @@ mod tests {
         assert_eq!(
             apply_binary_op(
                 &BinaryOp::Add,
-                &MacroValue::String("hello".to_string()),
-                &MacroValue::String(" world".to_string()),
+                &MacroValue::String(Arc::from("hello")),
+                &MacroValue::String(Arc::from(" world")),
                 loc
             )
             .unwrap(),
-            MacroValue::String("hello world".to_string())
+            MacroValue::String(Arc::from("hello world"))
         );
 
         // Comparison

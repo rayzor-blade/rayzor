@@ -13,6 +13,7 @@ use parser::HaxeFile;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 /// The expansion context available to macro functions.
 ///
@@ -287,7 +288,7 @@ impl MacroContext {
     /// `Context.getLocalClass()` — Get the current class name (or Null)
     pub fn get_local_class(&self) -> MacroValue {
         match &self.current_class {
-            Some(name) => MacroValue::String(name.clone()),
+            Some(name) => MacroValue::String(Arc::from(name.as_str())),
             None => MacroValue::Null,
         }
     }
@@ -295,7 +296,7 @@ impl MacroContext {
     /// `Context.getLocalModule()` — Get the current module path
     pub fn get_local_module(&self) -> MacroValue {
         match &self.current_module {
-            Some(path) => MacroValue::String(path.clone()),
+            Some(path) => MacroValue::String(Arc::from(path.as_str())),
             None => MacroValue::Null,
         }
     }
@@ -303,7 +304,7 @@ impl MacroContext {
     /// `Context.getLocalMethod()` — Get the current method name (or Null)
     pub fn get_local_method(&self) -> MacroValue {
         match &self.current_method {
-            Some(name) => MacroValue::String(name.clone()),
+            Some(name) => MacroValue::String(Arc::from(name.as_str())),
             None => MacroValue::Null,
         }
     }
@@ -316,7 +317,7 @@ impl MacroContext {
     /// `Context.definedValue(key)` — Get value of a conditional compilation flag
     pub fn defined_value(&self, key: &str) -> MacroValue {
         match self.defines.get(key) {
-            Some(val) => MacroValue::String(val.clone()),
+            Some(val) => MacroValue::String(Arc::from(val.as_str())),
             None => MacroValue::Null,
         }
     }
@@ -325,9 +326,9 @@ impl MacroContext {
     pub fn get_defines(&self) -> MacroValue {
         let mut obj = HashMap::new();
         for (k, v) in &self.defines {
-            obj.insert(k.clone(), MacroValue::String(v.clone()));
+            obj.insert(k.clone(), MacroValue::String(Arc::from(v.as_str())));
         }
-        MacroValue::Object(obj)
+        MacroValue::Object(Arc::new(obj))
     }
 
     /// `Context.getType(name)` — Resolve a type by its qualified name
@@ -411,7 +412,7 @@ impl MacroContext {
 
         // Extract the expression from the parsed wrapper
         if let Some(expr) = extract_body_expr(&file) {
-            Ok(MacroValue::Expr(Box::new(expr)))
+            Ok(MacroValue::Expr(Arc::new(expr)))
         } else {
             Err(MacroError::ContextError {
                 method: "parse".to_string(),
@@ -428,7 +429,7 @@ impl MacroContext {
         _location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
         let expr = super::ast_bridge::value_to_expr(value);
-        Ok(MacroValue::Expr(Box::new(expr)))
+        Ok(MacroValue::Expr(Arc::new(expr)))
     }
 
     /// `Context.getBuildFields()` — Get fields of the class being built
@@ -447,7 +448,7 @@ impl MacroContext {
         // Convert build fields to an array of objects
         let field_values: Vec<MacroValue> = fields.iter().map(build_field_to_value).collect();
 
-        Ok(MacroValue::Array(field_values))
+        Ok(MacroValue::Array(Arc::new(field_values)))
     }
 
     /// `Context.defineType(typeDefinition)` — Define a new type at compile time
@@ -492,7 +493,7 @@ impl MacroContext {
         obj.insert("file".to_string(), MacroValue::Int(pos.file_id as i64));
         obj.insert("min".to_string(), MacroValue::Int(pos.byte_offset as i64));
         obj.insert("max".to_string(), MacroValue::Int(pos.byte_offset as i64));
-        MacroValue::Object(obj)
+        MacroValue::Object(Arc::new(obj))
     }
 
     /// `Context.makePosition(inf)` — Build a position from info object
@@ -656,7 +657,7 @@ fn arg_as_string(
     location: SourceLocation,
 ) -> Result<String, MacroError> {
     match args.get(index) {
-        Some(MacroValue::String(s)) => Ok(s.clone()),
+        Some(MacroValue::String(s)) => Ok(s.to_string()),
         Some(other) => Ok(other.to_display_string()),
         None => Err(MacroError::ContextError {
             method: method.to_string(),
@@ -679,29 +680,38 @@ fn arg_as_position(args: &[MacroValue], index: usize) -> Option<SourceLocation> 
 /// Matches the `haxe.macro.Expr.Field` structure.
 fn build_field_to_value(field: &BuildField) -> MacroValue {
     let mut obj = HashMap::new();
-    obj.insert("name".to_string(), MacroValue::String(field.name.clone()));
+    obj.insert(
+        "name".to_string(),
+        MacroValue::String(Arc::from(field.name.as_str())),
+    );
     obj.insert("pos".to_string(), MacroValue::Position(field.pos));
 
     // Access modifiers
     let access: Vec<MacroValue> = field
         .access
         .iter()
-        .map(|a| MacroValue::String(format!("{:?}", a)))
+        .map(|a| MacroValue::String(Arc::from(format!("{:?}", a).as_str())))
         .collect();
-    obj.insert("access".to_string(), MacroValue::Array(access));
+    obj.insert("access".to_string(), MacroValue::Array(Arc::new(access)));
 
     // Kind
     let kind_value = match &field.kind {
         BuildFieldKind::Var { type_hint, expr } => {
             let mut kind_obj = HashMap::new();
-            kind_obj.insert("kind".to_string(), MacroValue::String("FVar".to_string()));
+            kind_obj.insert("kind".to_string(), MacroValue::String(Arc::from("FVar")));
             if let Some(t) = type_hint {
-                kind_obj.insert("type".to_string(), MacroValue::String(t.clone()));
+                kind_obj.insert(
+                    "type".to_string(),
+                    MacroValue::String(Arc::from(t.as_str())),
+                );
             }
             if let Some(e) = expr {
-                kind_obj.insert("expr".to_string(), MacroValue::Expr(e.clone()));
+                kind_obj.insert(
+                    "expr".to_string(),
+                    MacroValue::Expr(Arc::from(e.as_ref().clone())),
+                );
             }
-            MacroValue::Object(kind_obj)
+            MacroValue::Object(Arc::new(kind_obj))
         }
         BuildFieldKind::Function {
             params,
@@ -709,23 +719,29 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
             body,
         } => {
             let mut kind_obj = HashMap::new();
-            kind_obj.insert("kind".to_string(), MacroValue::String("FFun".to_string()));
+            kind_obj.insert("kind".to_string(), MacroValue::String(Arc::from("FFun")));
             kind_obj.insert(
                 "args".to_string(),
-                MacroValue::Array(
+                MacroValue::Array(Arc::new(
                     params
                         .iter()
-                        .map(|p| MacroValue::String(p.clone()))
+                        .map(|p| MacroValue::String(Arc::from(p.as_str())))
                         .collect(),
-                ),
+                )),
             );
             if let Some(rt) = return_type {
-                kind_obj.insert("ret".to_string(), MacroValue::String(rt.clone()));
+                kind_obj.insert(
+                    "ret".to_string(),
+                    MacroValue::String(Arc::from(rt.as_str())),
+                );
             }
             if let Some(b) = body {
-                kind_obj.insert("expr".to_string(), MacroValue::Expr(b.clone()));
+                kind_obj.insert(
+                    "expr".to_string(),
+                    MacroValue::Expr(Arc::from(b.as_ref().clone())),
+                );
             }
-            MacroValue::Object(kind_obj)
+            MacroValue::Object(Arc::new(kind_obj))
         }
         BuildFieldKind::Property {
             get,
@@ -733,20 +749,32 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
             type_hint,
         } => {
             let mut kind_obj = HashMap::new();
-            kind_obj.insert("kind".to_string(), MacroValue::String("FProp".to_string()));
-            kind_obj.insert("get".to_string(), MacroValue::String(get.clone()));
-            kind_obj.insert("set".to_string(), MacroValue::String(set.clone()));
+            kind_obj.insert("kind".to_string(), MacroValue::String(Arc::from("FProp")));
+            kind_obj.insert(
+                "get".to_string(),
+                MacroValue::String(Arc::from(get.as_str())),
+            );
+            kind_obj.insert(
+                "set".to_string(),
+                MacroValue::String(Arc::from(set.as_str())),
+            );
             if let Some(t) = type_hint {
-                kind_obj.insert("type".to_string(), MacroValue::String(t.clone()));
+                kind_obj.insert(
+                    "type".to_string(),
+                    MacroValue::String(Arc::from(t.as_str())),
+                );
             }
-            MacroValue::Object(kind_obj)
+            MacroValue::Object(Arc::new(kind_obj))
         }
     };
     obj.insert("kind".to_string(), kind_value);
 
     // Documentation
     if let Some(doc) = &field.doc {
-        obj.insert("doc".to_string(), MacroValue::String(doc.clone()));
+        obj.insert(
+            "doc".to_string(),
+            MacroValue::String(Arc::from(doc.as_str())),
+        );
     }
 
     // Metadata
@@ -755,15 +783,21 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
         .iter()
         .map(|m| {
             let mut meta_obj = HashMap::new();
-            meta_obj.insert("name".to_string(), MacroValue::String(m.name.clone()));
-            meta_obj.insert("params".to_string(), MacroValue::Array(m.params.clone()));
+            meta_obj.insert(
+                "name".to_string(),
+                MacroValue::String(Arc::from(m.name.as_str())),
+            );
+            meta_obj.insert(
+                "params".to_string(),
+                MacroValue::Array(Arc::new(m.params.clone())),
+            );
             meta_obj.insert("pos".to_string(), MacroValue::Position(m.pos));
-            MacroValue::Object(meta_obj)
+            MacroValue::Object(Arc::new(meta_obj))
         })
         .collect();
-    obj.insert("meta".to_string(), MacroValue::Array(meta));
+    obj.insert("meta".to_string(), MacroValue::Array(Arc::new(meta)));
 
-    MacroValue::Object(obj)
+    MacroValue::Object(Arc::new(obj))
 }
 
 /// Extract the body expression from a parsed wrapper file
@@ -926,7 +960,7 @@ mod tests {
         ctx.current_class = Some("MyClass".to_string());
         assert_eq!(
             ctx.get_local_class(),
-            MacroValue::String("MyClass".to_string())
+            MacroValue::String(Arc::from("MyClass"))
         );
     }
 
@@ -939,7 +973,7 @@ mod tests {
         assert_eq!(ctx.defined("release"), MacroValue::Bool(false));
         assert_eq!(
             ctx.defined_value("debug"),
-            MacroValue::String("1".to_string())
+            MacroValue::String(Arc::from("1"))
         );
         assert_eq!(ctx.defined_value("release"), MacroValue::Null);
     }
@@ -1033,7 +1067,7 @@ mod tests {
         let mut ctx = MacroContext::new();
         let result = ctx.dispatch(
             "error",
-            &[MacroValue::String("test error".to_string())],
+            &[MacroValue::String(Arc::from("test error"))],
             SourceLocation::unknown(),
         );
         assert!(result.is_err());
@@ -1045,7 +1079,7 @@ mod tests {
         let mut ctx = MacroContext::new();
         let result = ctx.dispatch(
             "warning",
-            &[MacroValue::String("test warning".to_string())],
+            &[MacroValue::String(Arc::from("test warning"))],
             SourceLocation::unknown(),
         );
         assert!(result.is_ok());
@@ -1058,7 +1092,7 @@ mod tests {
         ctx.defines.insert("debug".to_string(), "1".to_string());
         let result = ctx.dispatch(
             "defined",
-            &[MacroValue::String("debug".to_string())],
+            &[MacroValue::String(Arc::from("debug"))],
             SourceLocation::unknown(),
         );
         assert_eq!(result.unwrap(), MacroValue::Bool(true));
@@ -1101,7 +1135,7 @@ mod tests {
         info.insert("file".to_string(), MacroValue::Int(3));
         info.insert("min".to_string(), MacroValue::Int(100));
         info.insert("max".to_string(), MacroValue::Int(200));
-        let result = ctx.make_position(&MacroValue::Object(info));
+        let result = ctx.make_position(&MacroValue::Object(Arc::new(info)));
         assert!(result.is_ok());
         if let MacroValue::Position(pos) = result.unwrap() {
             assert_eq!(pos.file_id, 3);

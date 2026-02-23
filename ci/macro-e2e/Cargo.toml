@@ -1,0 +1,9 @@
+[package]
+name = "macro-e2e"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[test]]
+name = "test_macro_e2e"
+path = "test_macro_e2e.rs"

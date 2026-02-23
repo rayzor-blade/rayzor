@@ -1,5 +1,6 @@
 use super::value::MacroValue;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 /// Scoped variable environment for the macro interpreter.
 ///
@@ -51,9 +52,27 @@ impl Environment {
     /// occurrence found. Returns true if the variable was found and updated.
     pub fn set(&mut self, name: &str, value: MacroValue) -> bool {
         for scope in self.scopes.iter_mut().rev() {
-            if scope.contains_key(name) {
-                scope.insert(name.to_string(), value);
+            if let Some(slot) = scope.get_mut(name) {
+                *slot = value;
                 return true;
+            }
+        }
+        false
+    }
+
+    /// Mutate a single field on an Object variable in-place.
+    ///
+    /// Avoids the clone→COW→reassign cycle for `this.field = value` patterns.
+    /// Finds the variable by name, checks it is an Object, and inserts the field
+    /// directly. Returns true if the variable was found and is an Object.
+    pub fn mutate_object_field(&mut self, var_name: &str, field: &str, value: MacroValue) -> bool {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(mac_val) = scope.get_mut(var_name) {
+                if let MacroValue::Object(ref mut arc_map) = mac_val {
+                    Arc::make_mut(arc_map).insert(field.to_string(), value);
+                    return true;
+                }
+                return false;
             }
         }
         false
@@ -66,6 +85,16 @@ impl Environment {
     pub fn define(&mut self, name: &str, value: MacroValue) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), value);
+        }
+    }
+
+    /// Define a new variable using an already-owned String key.
+    ///
+    /// Avoids the `&str` → `to_string()` allocation in `define()` when the caller
+    /// already has an owned String (e.g., cloned param names in function calls).
+    pub fn define_owned(&mut self, name: String, value: MacroValue) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name, value);
         }
     }
 
@@ -104,6 +133,27 @@ impl Environment {
         for scope in &self.scopes {
             for (name, value) in scope {
                 captured.insert(name.clone(), value.clone());
+            }
+        }
+        captured
+    }
+
+    /// Selectively capture only the specified variables (for closures)
+    ///
+    /// Only clones values for variables that are actually referenced in the closure body.
+    /// This is much cheaper than `capture_all()` when the closure only uses a few variables
+    /// from a large enclosing scope.
+    pub fn capture_used(
+        &self,
+        used_names: &std::collections::HashSet<String>,
+    ) -> HashMap<String, MacroValue> {
+        let mut captured = HashMap::new();
+        // From outermost to innermost so inner scopes shadow outer
+        for scope in &self.scopes {
+            for (name, value) in scope {
+                if used_names.contains(name) {
+                    captured.insert(name.clone(), value.clone());
+                }
             }
         }
         captured
