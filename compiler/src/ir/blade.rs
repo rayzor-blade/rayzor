@@ -250,8 +250,15 @@ pub fn save_blade_with_state(
 /// ```
 pub fn load_blade(
     path: impl AsRef<Path>,
-) -> Result<(IrModule, BladeMetadata, Option<BladeTypeInfo>, Option<BladeCachedMaps>), BladeError>
-{
+) -> Result<
+    (
+        IrModule,
+        BladeMetadata,
+        Option<BladeTypeInfo>,
+        Option<BladeCachedMaps>,
+    ),
+    BladeError,
+> {
     // Read file
     let bytes = fs::read(path)?;
 
