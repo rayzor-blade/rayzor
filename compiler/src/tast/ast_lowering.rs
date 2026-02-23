@@ -7176,6 +7176,357 @@ impl<'a> AstLowering<'a> {
                     }
                 }
 
+                // Handle multi-segment qualified static method calls
+                // e.g., haxe.io.Bytes.alloc(8), sys.io.File.getContent(path)
+                // extract_qualified_path recursively collects dotted path segments
+                fn extract_qualified_path_for_call(expr: &parser::Expr) -> Option<Vec<String>> {
+                    match &expr.kind {
+                        ExprKind::Ident(name) => Some(vec![name.clone()]),
+                        ExprKind::Field {
+                            expr: inner_expr,
+                            field,
+                            ..
+                        } => {
+                            let mut path = extract_qualified_path_for_call(inner_expr)?;
+                            path.push(field.clone());
+                            Some(path)
+                        }
+                        _ => None,
+                    }
+                }
+
+                if let Some(qualified_parts) = extract_qualified_path_for_call(obj_expr) {
+                    if qualified_parts.len() >= 2 {
+                        // qualified_parts = ["haxe", "io", "Bytes"], field = "alloc"
+                        let class_name = qualified_parts.last().unwrap();
+                        let class_name_interned = self.context.intern_string(class_name);
+                        let qualified_class_name = qualified_parts.join(".");
+                        let qualified_class_interned =
+                            self.context.intern_string(&qualified_class_name);
+
+                        // Build QualifiedPath for namespace resolver
+                        let package_interned: Vec<_> = qualified_parts[..qualified_parts.len() - 1]
+                            .iter()
+                            .map(|p| self.context.intern_string(p))
+                            .collect();
+                        let qpath = crate::tast::namespace::QualifiedPath::new(
+                            package_interned,
+                            class_name_interned,
+                        );
+
+                        // Try to resolve the class
+                        let symbol_id_opt = self
+                            .context
+                            .namespace_resolver
+                            .lookup_symbol(&qpath)
+                            .or_else(|| {
+                                self.context
+                                    .symbol_table
+                                    .lookup_symbol(
+                                        crate::tast::ScopeId::first(),
+                                        qualified_class_interned,
+                                    )
+                                    .map(|s| s.id)
+                            })
+                            .or_else(|| {
+                                self.resolve_symbol_in_scope_hierarchy(qualified_class_interned)
+                            })
+                            .or_else(|| {
+                                self.resolve_symbol_in_scope_hierarchy(class_name_interned)
+                            });
+
+                        if let Some(symbol_id) = symbol_id_opt {
+                            if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
+                                // For TypeAlias, resolve through the alias chain to find
+                                // the underlying class (e.g., haxe.io.Bytes -> rayzor.Bytes)
+                                // For TypeAlias, resolve through alias chain to find underlying class
+                                let (resolved_symbol_id, resolved_kind) = if symbol.kind
+                                    == crate::tast::symbols::SymbolKind::TypeAlias
+                                {
+                                    // Extract placeholder name if target is unresolved
+                                    let (resolved_type, placeholder_name) = {
+                                        let type_table = self.context.type_table.borrow();
+                                        let resolved =
+                                            Self::resolve_alias_chain(&type_table, symbol.type_id);
+                                        let ph_name = type_table.get(resolved).and_then(|ti| {
+                                            if let crate::tast::core::TypeKind::Placeholder {
+                                                name,
+                                            } = &ti.kind
+                                            {
+                                                self.context
+                                                    .string_interner
+                                                    .get(*name)
+                                                    .map(|s| s.to_string())
+                                            } else {
+                                                None
+                                            }
+                                        });
+                                        (resolved, ph_name)
+                                    };
+
+                                    if let Some(ref ph_name) = placeholder_name {
+                                        // TypeAlias target is unresolved — try to find
+                                        // the class by the placeholder name in scope
+                                        let ph_interned = self.context.intern_string(ph_name);
+                                        if let Some(target_sym_id) =
+                                            self.resolve_symbol_in_scope_hierarchy(ph_interned)
+                                        {
+                                            if let Some(target_sym) =
+                                                self.context.symbol_table.get_symbol(target_sym_id)
+                                            {
+                                                if target_sym.kind
+                                                    == crate::tast::symbols::SymbolKind::Class
+                                                {
+                                                    (target_sym_id, target_sym.kind)
+                                                } else {
+                                                    // Found but not a class — trigger loading
+                                                    return Err(LoweringError::UnresolvedType {
+                                                        type_name: ph_name.clone(),
+                                                        location: self
+                                                            .context
+                                                            .create_location_from_span(
+                                                                expression.span,
+                                                            ),
+                                                    });
+                                                }
+                                            } else {
+                                                return Err(LoweringError::UnresolvedType {
+                                                    type_name: ph_name.clone(),
+                                                    location: self
+                                                        .context
+                                                        .create_location_from_span(expression.span),
+                                                });
+                                            }
+                                        } else {
+                                            // Not in scope — trigger on-demand loading
+                                            return Err(LoweringError::UnresolvedType {
+                                                type_name: ph_name.clone(),
+                                                location: self
+                                                    .context
+                                                    .create_location_from_span(expression.span),
+                                            });
+                                        }
+                                    } else {
+                                        // Target resolved — check if it's a Class
+                                        let type_table = self.context.type_table.borrow();
+                                        if let Some(type_info) = type_table.get(resolved_type) {
+                                            if let crate::tast::core::TypeKind::Class {
+                                                symbol_id: class_sym,
+                                                ..
+                                            } = &type_info.kind
+                                            {
+                                                let kind = self
+                                                    .context
+                                                    .symbol_table
+                                                    .get_symbol(*class_sym)
+                                                    .map(|s| s.kind)
+                                                    .unwrap_or(symbol.kind);
+                                                (*class_sym, kind)
+                                            } else {
+                                                (symbol_id, symbol.kind)
+                                            }
+                                        } else {
+                                            (symbol_id, symbol.kind)
+                                        }
+                                    }
+                                } else {
+                                    (symbol_id, symbol.kind)
+                                };
+
+                                if resolved_kind == crate::tast::symbols::SymbolKind::Class {
+                                    // Resolved the qualified class — now handle as static method call
+                                    let class_symbol = if let Ok(type_table) =
+                                        self.context.type_table.try_borrow()
+                                    {
+                                        if let Some(type_info) = self
+                                            .context
+                                            .symbol_table
+                                            .get_symbol(resolved_symbol_id)
+                                            .and_then(|s| type_table.get(s.type_id))
+                                        {
+                                            if let crate::tast::core::TypeKind::Class {
+                                                symbol_id: ts_symbol,
+                                                ..
+                                            } = &type_info.kind
+                                            {
+                                                *ts_symbol
+                                            } else {
+                                                resolved_symbol_id
+                                            }
+                                        } else {
+                                            resolved_symbol_id
+                                        }
+                                    } else {
+                                        resolved_symbol_id
+                                    };
+
+                                    let method_name = self.context.intern_string(field);
+
+                                    let method_symbol = {
+                                        let from_local = self
+                                            .class_methods
+                                            .get(&class_symbol)
+                                            .and_then(|methods| {
+                                                methods
+                                                    .iter()
+                                                    .find(|(name, _, _)| *name == method_name)
+                                                    .map(|(_, symbol, _)| *symbol)
+                                            });
+
+                                        if let Some(sym) = from_local {
+                                            sym
+                                        } else {
+                                            let from_scope = self
+                                                .context
+                                                .symbol_table
+                                                .get_symbol(class_symbol)
+                                                .map(|s| s.scope_id)
+                                                .and_then(|scope_id| {
+                                                    self.context
+                                                        .symbol_table
+                                                        .lookup_symbol(scope_id, method_name)
+                                                        .map(|sym| sym.id)
+                                                });
+
+                                            if let Some(sym) = from_scope {
+                                                sym
+                                            } else {
+                                                let new_symbol = self
+                                                    .context
+                                                    .symbol_table
+                                                    .create_function(method_name);
+                                                if let Some(class_sym) = self
+                                                    .context
+                                                    .symbol_table
+                                                    .get_symbol(class_symbol)
+                                                {
+                                                    if let Some(class_qname) =
+                                                        class_sym.qualified_name.and_then(|qn| {
+                                                            self.context.string_interner.get(qn)
+                                                        })
+                                                    {
+                                                        let method_qname = format!(
+                                                            "{}.{}",
+                                                            class_qname,
+                                                            self.context
+                                                                .string_interner
+                                                                .get(method_name)
+                                                                .unwrap_or("")
+                                                        );
+                                                        let method_qname_interned = self
+                                                            .context
+                                                            .intern_string(&method_qname);
+                                                        if let Some(sym_mut) = self
+                                                            .context
+                                                            .symbol_table
+                                                            .get_symbol_mut(new_symbol)
+                                                        {
+                                                            sym_mut.qualified_name =
+                                                                Some(method_qname_interned);
+                                                        }
+                                                    }
+                                                }
+                                                new_symbol
+                                            }
+                                        }
+                                    };
+
+                                    let expr_type = if let Some(symbol) =
+                                        self.context.symbol_table.get_symbol(method_symbol)
+                                    {
+                                        let type_table = self.context.type_table.borrow();
+                                        if let Some(method_type) = type_table.get(symbol.type_id) {
+                                            match &method_type.kind {
+                                                crate::tast::core::TypeKind::Function {
+                                                    return_type,
+                                                    params,
+                                                    ..
+                                                } => {
+                                                    let ret = *return_type;
+                                                    let params_owned = params.clone();
+                                                    if type_table.is_type_parameter(ret) {
+                                                        let mut inferred = ret;
+                                                        for (i, param_ty) in
+                                                            params_owned.iter().enumerate()
+                                                        {
+                                                            if *param_ty == ret
+                                                                && i < arg_exprs.len()
+                                                            {
+                                                                inferred = arg_exprs[i].expr_type;
+                                                                break;
+                                                            }
+                                                        }
+                                                        inferred
+                                                    } else {
+                                                        ret
+                                                    }
+                                                }
+                                                _ => symbol.type_id,
+                                            }
+                                        } else {
+                                            symbol.type_id
+                                        }
+                                    } else {
+                                        self.context.type_table.borrow().dynamic_type()
+                                    };
+
+                                    let kind = TypedExpressionKind::StaticMethodCall {
+                                        class_symbol,
+                                        method_symbol,
+                                        arguments: arg_exprs,
+                                        type_arguments: Vec::new(),
+                                    };
+
+                                    let usage = VariableUsage::Copy;
+                                    let lifetime_id = self.assign_lifetime(&kind, &expr_type);
+                                    let metadata = self.analyze_expression_metadata(&kind);
+
+                                    let field_span = parser::haxe_ast::Span::new(
+                                        obj_expr.span.end + 1,
+                                        obj_expr.span.end + 1 + field.len(),
+                                    );
+
+                                    return Ok(TypedExpression {
+                                        expr_type,
+                                        kind,
+                                        usage,
+                                        lifetime_id,
+                                        source_location: self.context.span_to_location(&field_span),
+                                        metadata,
+                                    });
+                                }
+                            }
+                        } else {
+                            // Class not found — only return UnresolvedType if the first
+                            // segment is a known package prefix. Otherwise fall through
+                            // to field access (e.g., a.b.c.process() is field chain, not package)
+                            let first_part = &qualified_parts[0];
+                            if matches!(
+                                first_part.as_str(),
+                                "haxe"
+                                    | "rayzor"
+                                    | "sys"
+                                    | "cpp"
+                                    | "cs"
+                                    | "java"
+                                    | "python"
+                                    | "lua"
+                                    | "eval"
+                                    | "neko"
+                                    | "hl"
+                                    | "flash"
+                            ) {
+                                return Err(LoweringError::UnresolvedType {
+                                    type_name: qualified_class_name,
+                                    location: self
+                                        .context
+                                        .create_location_from_span(expression.span),
+                                });
+                            }
+                        }
+                    }
+                }
+
                 // Not a static call, proceed with instance method call
                 let receiver_expr = self.lower_expression(obj_expr)?;
                 let method_name = self.context.intern_string(field);

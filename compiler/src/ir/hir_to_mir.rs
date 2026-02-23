@@ -12580,7 +12580,8 @@ impl<'a> HirToMirContext<'a> {
                             || (lhs_is_string && matches!(&lhs_mir_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void)));
                         let rhs_is_string_mir = matches!(&rhs_mir_type, IrType::String)
                             || matches!(&rhs_mir_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::String))
-                            || (rhs_is_string && matches!(&rhs_mir_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void)));
+                            || (rhs_is_string
+                                && matches!(&rhs_mir_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void)));
 
                         // Convert non-string operand to string if needed
                         // For class instances with toString(), call it directly at compile time
