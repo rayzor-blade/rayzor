@@ -7,8 +7,8 @@ use crate::compiler_plugin::CompilerPluginRegistry;
 use crate::dependency_graph::{CircularDependency, DependencyAnalysis, DependencyGraph};
 use crate::ir::{
     blade::{
-        load_blade, load_symbol_manifest, save_blade_with_state, BladeCachedMaps,
-        BladeAbstractInfo, BladeClassInfo, BladeEnumInfo, BladeFieldEntry, BladeFuncEntry,
+        load_blade, load_symbol_manifest, save_blade_with_state, BladeAbstractInfo,
+        BladeCachedMaps, BladeClassInfo, BladeEnumInfo, BladeFieldEntry, BladeFuncEntry,
         BladeMetadata, BladeMethodInfo, BladeSymbolManifest, BladeTypeAliasInfo, BladeTypeInfo,
     },
     IrInstruction, IrModule, Monomorphizer,
@@ -724,9 +724,7 @@ impl CompilationUnit {
         for i in 0..self.symbol_table.len() {
             let sym_id = crate::tast::SymbolId::from_raw(i as u32);
             if let Some(sym) = self.symbol_table.get_symbol(sym_id) {
-                if matches!(sym.kind, crate::tast::SymbolKind::Class)
-                    && sym.scope_id == scope_id
-                {
+                if matches!(sym.kind, crate::tast::SymbolKind::Class) && sym.scope_id == scope_id {
                     return sym
                         .qualified_name
                         .and_then(|n| self.string_interner.get(n))
@@ -2116,7 +2114,12 @@ impl CompilationUnit {
                                     let type_info = self.last_compiled_type_info.take();
                                     let cached_maps = self.last_compiled_cached_maps.take();
                                     self.save_blade_cached(
-                                        &filename, &source, &mir_arc, deps, type_info, cached_maps,
+                                        &filename,
+                                        &source,
+                                        &mir_arc,
+                                        deps,
+                                        type_info,
+                                        cached_maps,
                                     );
                                 }
 
@@ -2160,9 +2163,13 @@ impl CompilationUnit {
             }
         };
 
-        debug!("[BLADE] Import cache hit: {} ({} functions, {} fields, {} class sizes)",
-            filename, cached_maps.functions.len(), cached_maps.fields.len(),
-            cached_maps.class_sizes.len());
+        debug!(
+            "[BLADE] Import cache hit: {} ({} functions, {} fields, {} class sizes)",
+            filename,
+            cached_maps.functions.len(),
+            cached_maps.fields.len(),
+            cached_maps.class_sizes.len()
+        );
 
         // Step 1: Register symbols from type info (restores type system state)
         let registered = self.register_symbols_from_type_info(&symbols);
@@ -2189,7 +2196,12 @@ impl CompilationUnit {
         &self,
         source_path: &str,
         source: &str,
-    ) -> Option<(IrModule, BladeMetadata, Option<BladeTypeInfo>, Option<BladeCachedMaps>)> {
+    ) -> Option<(
+        IrModule,
+        BladeMetadata,
+        Option<BladeTypeInfo>,
+        Option<BladeCachedMaps>,
+    )> {
         if !self.config.enable_cache {
             return None;
         }
@@ -2272,8 +2284,7 @@ impl CompilationUnit {
             }
 
             // Look up the class, then find the method symbol in its scope
-            if let Some((_class_sym, _class_type, class_scope)) =
-                registered.get(&entry.class_name)
+            if let Some((_class_sym, _class_type, class_scope)) = registered.get(&entry.class_name)
             {
                 let method_name_interned = self.string_interner.intern(&entry.method_name);
                 if let Some(scope) = self.scope_tree.get_scope(*class_scope) {
@@ -2287,9 +2298,7 @@ impl CompilationUnit {
 
         // Restore field index mappings
         for entry in &cached_maps.fields {
-            if let Some((_class_sym, class_type, class_scope)) =
-                registered.get(&entry.class_name)
-            {
+            if let Some((_class_sym, class_type, class_scope)) = registered.get(&entry.class_name) {
                 let field_name_interned = self.string_interner.intern(&entry.field_name);
                 if let Some(scope) = self.scope_tree.get_scope(*class_scope) {
                     if let Some(field_sym) = scope.get_symbol(field_name_interned) {
