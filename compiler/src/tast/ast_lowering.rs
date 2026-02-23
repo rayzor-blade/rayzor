@@ -5335,6 +5335,38 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// Get the class name for a given TypeId, if it resolves to a class.
+    /// Prefers qualified_name (e.g. "sys.io.FileOutput") over bare name.
+    fn get_class_name_for_type(&self, type_id: TypeId) -> Option<String> {
+        if let Some(class_symbol) = self.resolve_type_to_class_symbol(type_id) {
+            if let Some(sym) = self.context.symbol_table.get_symbol(class_symbol) {
+                // Prefer qualified name for disambiguation
+                if let Some(qname) = sym.qualified_name {
+                    if let Some(qname_str) = self.context.string_interner.get(qname) {
+                        return Some(qname_str.to_string());
+                    }
+                }
+                return self
+                    .context
+                    .string_interner
+                    .get(sym.name)
+                    .map(|s| s.to_string());
+            }
+        }
+        // Fallback: check if the type is a Placeholder with a recognizable name
+        let type_table = self.context.type_table.borrow();
+        if let Some(type_info) = type_table.get(type_id) {
+            if let crate::tast::core::TypeKind::Placeholder { name } = &type_info.kind {
+                return self
+                    .context
+                    .string_interner
+                    .get(*name)
+                    .map(|s| s.to_string());
+            }
+        }
+        None
+    }
+
     /// Find a field in a class by symbol
     fn find_field_in_class(
         &self,
@@ -5509,33 +5541,66 @@ impl<'a> AstLowering<'a> {
             }
         }
 
-        // Last resort: scan ALL class_methods for a unique match by name.
+        // Last resort: scan ALL class_methods for a match by name.
         // This handles extern classes where TypeId is invalid but the method
         // definition symbols have full metadata (qualified_name, native_name, etc.).
         {
-            let mut found: Option<SymbolId> = None;
+            let mut found: Option<(SymbolId, SymbolId)> = None; // (class_sym, method_sym)
             let mut ambiguous = false;
-            for (_class_sym, methods) in &self.class_methods {
+            let mut all_matches: Vec<(SymbolId, SymbolId)> = Vec::new();
+            for (class_sym, methods) in &self.class_methods {
                 if let Some((_, method_symbol, _)) =
                     methods.iter().find(|(name, _, _)| *name == method_name)
                 {
+                    all_matches.push((*class_sym, *method_symbol));
                     if found.is_some() {
                         ambiguous = true;
-                        break;
                     }
-                    found = Some(*method_symbol);
+                    found = Some((*class_sym, *method_symbol));
                 }
             }
-            if let Some(method_symbol) = found {
+            if let Some((_, method_symbol)) = found {
                 if !ambiguous {
                     return method_symbol;
+                }
+                // Ambiguous: try to disambiguate using receiver's class name
+                // Get receiver class name from the expression type (may be qualified)
+                let receiver_class_name = self.get_class_name_for_type(receiver.expr_type);
+                if let Some(ref class_name) = receiver_class_name {
+                    // Extract bare name from qualified (e.g., "sys.io.FileOutput" -> "FileOutput")
+                    let bare_name = class_name.rsplit('.').next().unwrap_or(class_name);
+                    for (class_sym, method_sym) in &all_matches {
+                        if let Some(sym) = self.context.symbol_table.get_symbol(*class_sym) {
+                            // Match against bare name or qualified name
+                            let sym_name = self.context.string_interner.get(sym.name).unwrap_or("");
+                            let sym_qname = sym
+                                .qualified_name
+                                .and_then(|qn| self.context.string_interner.get(qn))
+                                .unwrap_or("");
+                            if sym_name == bare_name
+                                || sym_name == class_name.as_str()
+                                || sym_qname == class_name.as_str()
+                            {
+                                return *method_sym;
+                            }
+                        }
+                    }
                 }
             }
         }
 
         // Create a method symbol placeholder if we can't resolve it
-        // The type checker will resolve this properly during type checking
-        self.context.symbol_table.create_function(method_name)
+        // Set qualified name based on receiver's class to help MIR disambiguation
+        let new_symbol = self.context.symbol_table.create_function(method_name);
+        if let Some(class_name) = self.get_class_name_for_type(receiver.expr_type) {
+            let method_name_str = self.context.string_interner.get(method_name).unwrap_or("");
+            let qname = format!("{}.{}", class_name, method_name_str);
+            let qname_interned = self.context.intern_string(&qname);
+            if let Some(sym) = self.context.symbol_table.get_symbol_mut(new_symbol) {
+                sym.qualified_name = Some(qname_interned);
+            }
+        }
+        new_symbol
     }
 
     /// Try to find a static extension method in using modules
