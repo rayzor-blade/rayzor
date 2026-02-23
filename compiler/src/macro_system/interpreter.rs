@@ -10,6 +10,7 @@
 //! - Built-in functions (trace, Std.string, etc.)
 
 use super::ast_bridge::{self, span_to_location};
+use super::bytecode::{BytecodeCompiler, MacroVm};
 use super::class_registry::ClassRegistry;
 use super::environment::Environment;
 use super::errors::MacroError;
@@ -23,6 +24,23 @@ use std::sync::Arc;
 
 /// Maximum call depth for macro function calls
 const DEFAULT_MAX_CALL_DEPTH: usize = 256;
+
+/// Morsel-parallelism-inspired tiering scheduler.
+///
+/// Tracks per-macro call counts and promotes hot macros to bytecode.
+/// A "morsel" is a macro + its transitive class dependencies — when a macro
+/// crosses the call threshold, the scheduler batch-compiles the macro and
+/// all classes it might use (the full connected subgraph).
+///
+/// Cold macros (called < threshold times) never pay compilation cost.
+struct MorselScheduler {
+    /// Per-macro call counts (keyed by qualified name).
+    call_counts: HashMap<String, u32>,
+    /// Promotion threshold: compile after this many tree-walker calls.
+    threshold: u32,
+    /// Whether class chunks have been compiled and transferred to the VM.
+    classes_compiled: bool,
+}
 
 /// Cached data extracted from ClassRegistry for a user-defined class.
 /// Avoids re-cloning instance_vars, constructor body, and params on every `new`.
@@ -51,10 +69,35 @@ pub struct MacroInterpreter {
     class_registry: Option<Arc<ClassRegistry>>,
     /// Cache of extracted class data for constructor calls (avoids re-cloning)
     class_data_cache: HashMap<String, Arc<CachedClassData>>,
+    /// Bytecode VM instance (created when RAYZOR_MACRO_VM=1).
+    vm: Option<MacroVm>,
+    /// Morsel scheduler for tiered compilation (only active when VM is present).
+    scheduler: Option<MorselScheduler>,
 }
 
 impl MacroInterpreter {
+    /// Create a new scheduler+VM pair if bytecode tiering is enabled.
+    fn make_vm_and_scheduler() -> (Option<MacroVm>, Option<MorselScheduler>) {
+        if std::env::var("RAYZOR_MACRO_VM").is_ok() {
+            let threshold = std::env::var("RAYZOR_MACRO_VM_THRESHOLD")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(2u32);
+            (
+                Some(MacroVm::new()),
+                Some(MorselScheduler {
+                    call_counts: HashMap::new(),
+                    threshold,
+                    classes_compiled: false,
+                }),
+            )
+        } else {
+            (None, None)
+        }
+    }
+
     pub fn new(registry: MacroRegistry) -> Self {
+        let (vm, scheduler) = Self::make_vm_and_scheduler();
         Self {
             env: Environment::new(),
             registry,
@@ -64,11 +107,14 @@ impl MacroInterpreter {
             import_map: HashMap::new(),
             class_registry: None,
             class_data_cache: HashMap::new(),
+            vm,
+            scheduler,
         }
     }
 
     /// Create an interpreter with import mappings from the source file.
     pub fn with_imports(registry: MacroRegistry, import_map: HashMap<String, String>) -> Self {
+        let (vm, scheduler) = Self::make_vm_and_scheduler();
         Self {
             env: Environment::new(),
             registry,
@@ -78,15 +124,20 @@ impl MacroInterpreter {
             import_map,
             class_registry: None,
             class_data_cache: HashMap::new(),
+            vm,
+            scheduler,
         }
     }
 
     /// Create an interpreter with import mappings and a class registry for extended dispatch.
+    /// Class compilation is deferred — the morsel scheduler compiles classes on-demand
+    /// when the first macro crosses the call-count threshold.
     pub fn with_class_registry(
         registry: MacroRegistry,
         import_map: HashMap<String, String>,
         class_registry: Arc<ClassRegistry>,
     ) -> Self {
+        let (vm, scheduler) = Self::make_vm_and_scheduler();
         Self {
             env: Environment::new(),
             registry,
@@ -96,6 +147,8 @@ impl MacroInterpreter {
             import_map,
             class_registry: Some(class_registry),
             class_data_cache: HashMap::new(),
+            vm,
+            scheduler,
         }
     }
 
@@ -973,20 +1026,92 @@ impl MacroInterpreter {
         result
     }
 
-    /// Call a registered macro definition
+    /// Call a registered macro definition.
+    ///
+    /// Uses morsel-parallelism-inspired tiered execution:
+    /// 1. If already compiled → execute via bytecode VM (fast path)
+    /// 2. Otherwise → tree-walker, then profile and maybe promote
     fn call_macro_def(
         &mut self,
         def: &super::registry::MacroDefinition,
         args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
+        // Fast path: already promoted to bytecode → execute via VM
+        if let Some(vm) = &mut self.vm {
+            if let Some(chunk) = self.registry.get_compiled(&def.qualified_name) {
+                match vm.execute(chunk, args.clone()) {
+                    Ok(result) => {
+                        // Collect trace output from VM
+                        self.trace_output.extend(vm.trace_output.drain(..));
+                        return Ok(result);
+                    }
+                    Err(_) => {
+                        // Bytecode execution failed — fall through to tree-walker
+                    }
+                }
+            }
+        }
+
+        // Slow path: tree-walker
         let func = MacroFunction {
             name: def.name.clone(),
             params: def.params.clone(),
             body: def.body.clone(),
             captures: std::collections::HashMap::new(),
         };
-        self.call_function(&func, args, location)
+        let result = self.call_function(&func, args, location)?;
+
+        // Profile: check if this macro should be promoted to bytecode.
+        // Morsel scheduling: when a macro crosses the threshold, batch-compile
+        // the macro + all its class dependencies (the "morsel").
+        if let Some(scheduler) = &mut self.scheduler {
+            let count = scheduler
+                .call_counts
+                .entry(def.qualified_name.clone())
+                .or_insert(0);
+            *count += 1;
+            if *count == scheduler.threshold {
+                // Promote this macro: compile to bytecode
+                if let Ok(chunk) =
+                    BytecodeCompiler::compile(&def.qualified_name, &def.params, &def.body)
+                {
+                    self.registry
+                        .insert_compiled(def.qualified_name.clone(), Arc::new(chunk));
+                }
+
+                // Compile class morsel: batch-compile all class dependencies
+                // on first promotion (deferred from interpreter construction).
+                if !scheduler.classes_compiled {
+                    if let Some(cr) = &self.class_registry {
+                        self.registry.compile_classes(cr);
+                        // Transfer compiled classes to the VM
+                        let class_chunks = self
+                            .registry
+                            .get_compiled_classes()
+                            .iter()
+                            .map(|(k, v)| {
+                                (
+                                    k.clone(),
+                                    super::bytecode::CompiledClassInfo {
+                                        constructor: v.constructor.clone(),
+                                        instance_methods: v.instance_methods.clone(),
+                                        static_methods: v.static_methods.clone(),
+                                        instance_vars: v.instance_vars.clone(),
+                                    },
+                                )
+                            })
+                            .collect();
+                        if let Some(vm) = &mut self.vm {
+                            vm.set_class_chunks(class_chunks);
+                        }
+                    }
+                    scheduler.classes_compiled = true;
+                }
+            }
+        }
+
+        Ok(result)
     }
 
     /// Try to execute a built-in function

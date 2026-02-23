@@ -13,6 +13,7 @@
 
 pub mod ast_bridge;
 pub mod build_macros;
+pub mod bytecode;
 pub mod class_registry;
 pub mod context_api;
 pub mod environment;
