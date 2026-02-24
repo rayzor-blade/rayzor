@@ -1919,6 +1919,26 @@ impl CompilationUnit {
             }
         }
 
+        // Qualify bare type names with the file's package.
+        // e.g., if File.hx has `package sys.io;` and references `FileInput`,
+        // also add `sys.io.FileInput` so the import loader can find it.
+        if let Some(package) = &ast.package {
+            if !package.path.is_empty() {
+                let package_prefix = package.path.join(".");
+                let qualified: Vec<String> = deps
+                    .iter()
+                    .filter(|d| {
+                        !d.contains('.')
+                            && d.chars().next().map(|c| c.is_uppercase()).unwrap_or(false)
+                    })
+                    .map(|d| format!("{}.{}", package_prefix, d))
+                    .collect();
+                for q in qualified {
+                    deps.insert(q);
+                }
+            }
+        }
+
         let mut result: Vec<String> = deps.into_iter().collect();
         result.sort();
         result
@@ -2064,17 +2084,22 @@ impl CompilationUnit {
 
         debug!("[IMPORT_LOAD] compile_order: {:?}", compile_order);
 
-        // Handle cycle: if compile_order is empty but all_files is not, there's a cycle.
+        // Handle cycle: if compile_order doesn't include all files, some are stuck in a cycle.
         // Append remaining files in any order (they'll still compile, just without guaranteed dep order).
-        if compile_order.is_empty() && !all_files.is_empty() {
-            warn!(
-                "Cycle detected, {} files stuck. in_degrees: {:?}",
-                all_files.len(),
-                in_degree.iter().filter(|(_, &d)| d > 0).collect::<Vec<_>>()
-            );
-            // Force all remaining into compile_order
-            for name in all_files.keys() {
-                compile_order.push(name.clone());
+        if compile_order.len() < all_files.len() {
+            let stuck_count = all_files.len() - compile_order.len();
+            if stuck_count > 0 {
+                debug!(
+                    "Cycle detected, {} files stuck in dependency cycle. Forcing compilation.",
+                    stuck_count
+                );
+                let in_order: std::collections::HashSet<_> =
+                    compile_order.iter().cloned().collect();
+                for name in all_files.keys() {
+                    if !in_order.contains(name) {
+                        compile_order.push(name.clone());
+                    }
+                }
             }
         }
 

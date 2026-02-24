@@ -1643,18 +1643,19 @@ impl StdlibMapping {
             // File.copy(srcPath: String, dstPath: String) -> Void
             map_method!(static "File", "copy" => "haxe_file_copy", params: 2, returns: void,
                 types: &[PtrVoid, PtrVoid]),
-            // File.read(path: String, binary: Bool) -> FileInput
-            map_method!(static "File", "read" => "haxe_file_read", params: 2, returns: primitive,
-                types: &[PtrVoid, Bool] => PtrVoid),
-            // File.write(path: String, binary: Bool) -> FileOutput
-            map_method!(static "File", "write" => "haxe_file_write", params: 2, returns: primitive,
-                types: &[PtrVoid, Bool] => PtrVoid),
-            // File.append(path: String, binary: Bool) -> FileOutput
-            map_method!(static "File", "append" => "haxe_file_append", params: 2, returns: primitive,
-                types: &[PtrVoid, Bool] => PtrVoid),
-            // File.update(path: String, binary: Bool) -> FileOutput
-            map_method!(static "File", "update" => "haxe_file_update", params: 2, returns: primitive,
-                types: &[PtrVoid, Bool] => PtrVoid),
+            // File.read(path: String, ?binary: Bool = true) -> FileInput
+            // Uses MIR wrapper that defaults binary=true (1-param variant)
+            map_method!(static "File", "read" => "file_read_default", params: 1, returns: primitive,
+                types: &[PtrVoid] => PtrVoid),
+            // File.write(path: String, ?binary: Bool = true) -> FileOutput
+            map_method!(static "File", "write" => "file_write_default", params: 1, returns: primitive,
+                types: &[PtrVoid] => PtrVoid),
+            // File.append(path: String, ?binary: Bool = true) -> FileOutput
+            map_method!(static "File", "append" => "file_append_default", params: 1, returns: primitive,
+                types: &[PtrVoid] => PtrVoid),
+            // File.update(path: String, ?binary: Bool = true) -> FileOutput
+            map_method!(static "File", "update" => "file_update_default", params: 1, returns: primitive,
+                types: &[PtrVoid] => PtrVoid),
             // File.getBytes(path: String) -> haxe.io.Bytes
             map_method!(static "File", "getBytes" => "haxe_file_get_bytes", params: 1, returns: primitive,
                 types: &[PtrVoid] => PtrVoid),
@@ -1692,6 +1693,12 @@ impl StdlibMapping {
             // FileInput.readBytes(s: Bytes, pos: Int, len: Int) -> Int
             map_method!(instance "FileInput", "readBytes" => "haxe_fileinput_read_bytes_buf", params: 3, returns: primitive,
                 types: &[PtrVoid, PtrVoid, I32, I32] => I32),
+            // FileInput.readLine() -> String
+            map_method!(instance "FileInput", "readLine" => "haxe_fileinput_read_line", params: 0, returns: primitive,
+                types: &[PtrVoid] => PtrString),
+            // FileInput.readAll() -> Bytes
+            map_method!(instance "FileInput", "readAll" => "haxe_fileinput_read_all", params: 0, returns: primitive,
+                types: &[PtrVoid] => PtrVoid),
         ];
 
         self.register_from_tuples(mappings);
