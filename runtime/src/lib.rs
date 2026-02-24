@@ -44,6 +44,7 @@ pub mod haxe_array; // Dynamic Array API
 pub mod haxe_math; // Math functions
 pub mod haxe_string; // Comprehensive String API
 pub mod haxe_sys; // System/IO functions
+pub mod native_stack_trace; // NativeStackTrace (Rust backtrace capture)
 pub mod reflect; // Reflect + Type API for anonymous objects
 pub mod safety; // Safety validation and error reporting
 pub mod type_system; // Runtime type information for Dynamic values

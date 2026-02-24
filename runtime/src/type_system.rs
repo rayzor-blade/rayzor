@@ -970,7 +970,7 @@ pub extern "C" fn haxe_enum_get_parameters(
 }
 
 /// Walk the class hierarchy to check if actual_type_id is or extends expected_type_id.
-fn type_id_matches_with_hierarchy(actual_type_id: i64, expected_type_id: i64) -> bool {
+pub(crate) fn type_id_matches_with_hierarchy(actual_type_id: i64, expected_type_id: i64) -> bool {
     if actual_type_id == expected_type_id {
         return true;
     }

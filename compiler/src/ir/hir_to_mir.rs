@@ -13469,10 +13469,40 @@ impl<'a> HirToMirContext<'a> {
                                 .builder
                                 .build_const(IrValue::I32(expected_type_id as i32))
                                 .expect("const");
-                            let type_match = self
-                                .builder
-                                .build_cmp(CompareOp::Eq, exc_type_id, expected_const)
-                                .expect("cmp");
+
+                            // Use polymorphic matching for class types (walks inheritance),
+                            // exact match for primitives
+                            let is_class_type = matches!(
+                                catch_type_kind,
+                                Some(crate::tast::TypeKind::Class { .. })
+                            );
+
+                            let type_match = if is_class_type {
+                                let match_fn = self.get_or_register_extern_function(
+                                    "rayzor_exception_type_matches",
+                                    vec![IrType::I32, IrType::I32],
+                                    IrType::I32,
+                                );
+                                let result = self
+                                    .builder
+                                    .build_call_direct(
+                                        match_fn,
+                                        vec![exc_type_id, expected_const],
+                                        IrType::I32,
+                                    )
+                                    .unwrap_or_else(|| {
+                                        self.builder.build_const(IrValue::I32(0)).expect("const")
+                                    });
+                                let zero_val =
+                                    self.builder.build_const(IrValue::I32(0)).expect("const");
+                                self.builder
+                                    .build_cmp(CompareOp::Ne, result, zero_val)
+                                    .expect("cmp")
+                            } else {
+                                self.builder
+                                    .build_cmp(CompareOp::Eq, exc_type_id, expected_const)
+                                    .expect("cmp")
+                            };
 
                             let next_block = self.builder.create_block().expect("create block");
                             self.builder.build_cond_branch(
@@ -21462,16 +21492,49 @@ impl<'a> HirToMirContext<'a> {
                     self.builder.build_branch(catch_body_block);
                     next_test_block = None;
                 } else {
-                    // Test: exc_type_id == expected_type_id
                     let expected_type_id = self.runtime_type_id(catch_clause.exception_type);
                     let expected_const = self
                         .builder
                         .build_const(IrValue::I32(expected_type_id as i32))
                         .expect("failed to create type_id const");
-                    let type_match = self
-                        .builder
-                        .build_cmp(CompareOp::Eq, exc_type_id, expected_const)
-                        .expect("failed to build type cmp");
+
+                    // Use polymorphic matching for class types (walks inheritance),
+                    // exact match for primitives (Int, String, etc.)
+                    let is_class_type =
+                        matches!(catch_type_kind, Some(crate::tast::TypeKind::Class { .. }));
+
+                    let type_match = if is_class_type {
+                        // Call rayzor_exception_type_matches(actual, expected) -> i32
+                        let match_fn = self.get_or_register_extern_function(
+                            "rayzor_exception_type_matches",
+                            vec![IrType::I32, IrType::I32],
+                            IrType::I32,
+                        );
+                        let result = self
+                            .builder
+                            .build_call_direct(
+                                match_fn,
+                                vec![exc_type_id, expected_const],
+                                IrType::I32,
+                            )
+                            .unwrap_or_else(|| {
+                                self.builder
+                                    .build_const(IrValue::I32(0))
+                                    .expect("failed to create const")
+                            });
+                        let zero_val = self
+                            .builder
+                            .build_const(IrValue::I32(0))
+                            .expect("failed to create const");
+                        self.builder
+                            .build_cmp(CompareOp::Ne, result, zero_val)
+                            .expect("failed to build type cmp")
+                    } else {
+                        // Exact match for primitive types
+                        self.builder
+                            .build_cmp(CompareOp::Eq, exc_type_id, expected_const)
+                            .expect("failed to build type cmp")
+                    };
 
                     let next_block = self.builder.create_block().expect("failed to create block");
                     self.builder
