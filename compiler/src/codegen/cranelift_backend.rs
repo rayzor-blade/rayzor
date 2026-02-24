@@ -545,16 +545,10 @@ impl CraneliftBackend {
             match self.compile_function(*func_id, mir_module, function) {
                 Ok(()) => {}
                 Err(e) => {
-                    eprintln!(
-                        "[WARN] Skipping function '{}' ({}): {}",
-                        function.name, func_id, e
-                    );
+                    warn!("Skipping function '{}' ({}): {}", function.name, func_id, e);
                     // Define a trap stub so finalize_definitions doesn't panic
                     if let Err(e2) = self.define_trap_stub(*func_id, function) {
-                        eprintln!(
-                            "[WARN] Failed to define trap stub for '{}': {}",
-                            function.name, e2
-                        );
+                        warn!("Failed to define trap stub for '{}': {}", function.name, e2);
                     }
                 }
             }
@@ -669,15 +663,9 @@ impl CraneliftBackend {
             match self.compile_function(*func_id, mir_module, function) {
                 Ok(()) => {}
                 Err(e) => {
-                    eprintln!(
-                        "[WARN] Skipping function '{}' ({}): {}",
-                        function.name, func_id, e
-                    );
+                    warn!("Skipping function '{}' ({}): {}", function.name, func_id, e);
                     if let Err(e2) = self.define_trap_stub(*func_id, function) {
-                        eprintln!(
-                            "[WARN] Failed to define trap stub for '{}': {}",
-                            function.name, e2
-                        );
+                        warn!("Failed to define trap stub for '{}': {}", function.name, e2);
                     }
                 }
             }
@@ -2405,11 +2393,11 @@ impl CraneliftBackend {
                         let decl = module.declarations().get_function_decl(cl_func_id);
                         let expected_params = decl.signature.params.len();
                         if expected_params != call_args.len() {
-                            eprintln!("[CALL MISMATCH] In '{}': calling '{}' (MIR {:?}, CL {:?}): expected {} params, providing {} args, is_extern={}, env_added={}, sret={}",
+                            warn!("Call mismatch in '{}': calling '{}' (MIR {:?}, CL {:?}): expected {} params, providing {} args, is_extern={}, env_added={}, sret={}",
                                 function.name, called_func.name, func_id, cl_func_id,
                                 expected_params, call_args.len(), is_extern_func, should_add_env, uses_sret);
                             for (pi, p) in called_func.signature.parameters.iter().enumerate() {
-                                eprintln!("  MIR param[{}] '{}': {:?}", pi, p.name, p.ty);
+                                debug!("  MIR param[{}] '{}': {:?}", pi, p.name, p.ty);
                             }
                             true
                         } else {
@@ -3625,9 +3613,9 @@ impl CraneliftBackend {
                     if let Some(val_id) = value {
                         // debug!("Cranelift: Looking up return value {:?} in value_map", val_id);
                         let val = *value_map.get(val_id).ok_or_else(|| {
-                            eprintln!("ERROR: Return value {:?} NOT FOUND in value_map!", val_id);
-                            eprintln!(
-                                "ERROR: Available values: {:?}",
+                            warn!("Return value {:?} not found in value_map", val_id);
+                            debug!(
+                                "Available values: {:?}",
                                 value_map.keys().collect::<Vec<_>>()
                             );
                             format!("Return value {:?} not found", val_id)

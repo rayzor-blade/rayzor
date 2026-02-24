@@ -24,6 +24,7 @@ struct ExceptionState {
     handlers: Vec<ExceptionHandler>,
     current_exception: i64,
     current_exception_type_id: u32,
+    current_stack_trace: String,
 }
 
 thread_local! {
@@ -31,6 +32,7 @@ thread_local! {
         handlers: Vec::new(),
         current_exception: 0,
         current_exception_type_id: TYPE_DYNAMIC,
+        current_stack_trace: String::new(),
     }) };
 }
 
@@ -73,6 +75,9 @@ pub extern "C" fn rayzor_throw_typed(exception_value: i64, type_id: u32) {
         let mut state = state.borrow_mut();
         state.current_exception = exception_value;
         state.current_exception_type_id = type_id;
+        // Capture backtrace at throw time
+        let bt = backtrace::Backtrace::new();
+        state.current_stack_trace = format!("{:?}", bt);
 
         if let Some(handler) = state.handlers.last_mut() {
             let buf_ptr = handler.jmp_buf.as_mut_ptr();
@@ -99,4 +104,31 @@ pub extern "C" fn rayzor_get_exception() -> i64 {
 #[no_mangle]
 pub extern "C" fn rayzor_get_exception_type_id() -> u32 {
     STATE.with(|state| state.borrow().current_exception_type_id)
+}
+
+/// Get the stored exception stack trace (for NativeStackTrace module).
+pub fn get_exception_stack_trace() -> String {
+    STATE.with(|state| state.borrow().current_stack_trace.clone())
+}
+
+/// Polymorphic type matching for catch dispatch.
+/// Returns 1 if actual_type_id matches expected_type_id (including via inheritance), 0 otherwise.
+/// Both IDs use the +1000 offset convention from runtime_type_id().
+#[no_mangle]
+pub extern "C" fn rayzor_exception_type_matches(actual_type_id: i32, expected_type_id: i32) -> i32 {
+    if actual_type_id == expected_type_id {
+        return 1;
+    }
+    // Only class types use +1000 offset
+    if actual_type_id < 1000 || expected_type_id < 1000 {
+        return 0;
+    }
+    // Convert +1000 throw/catch IDs to raw TYPE_REGISTRY keys
+    let actual_raw = (actual_type_id - 1000) as i64;
+    let expected_raw = (expected_type_id - 1000) as i64;
+    if crate::type_system::type_id_matches_with_hierarchy(actual_raw, expected_raw) {
+        1
+    } else {
+        0
+    }
 }

@@ -1589,6 +1589,30 @@ register_symbol!(
     "rayzor_get_exception_type_id",
     crate::exception::rayzor_get_exception_type_id
 );
+register_symbol!(
+    "rayzor_exception_type_matches",
+    crate::exception::rayzor_exception_type_matches
+);
+
+// ============================================================================
+// NativeStackTrace (haxe.NativeStackTrace — Rust backtrace capture)
+// ============================================================================
+register_symbol!(
+    "rayzor_native_stack_trace_save_stack",
+    crate::native_stack_trace::rayzor_native_stack_trace_save_stack
+);
+register_symbol!(
+    "rayzor_native_stack_trace_call_stack",
+    crate::native_stack_trace::rayzor_native_stack_trace_call_stack
+);
+register_symbol!(
+    "rayzor_native_stack_trace_exception_stack",
+    crate::native_stack_trace::rayzor_native_stack_trace_exception_stack
+);
+register_symbol!(
+    "rayzor_native_stack_trace_to_haxe",
+    crate::native_stack_trace::rayzor_native_stack_trace_to_haxe
+);
 
 // ============================================================================
 // EReg Functions (Regular Expressions)

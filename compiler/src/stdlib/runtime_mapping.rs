@@ -255,6 +255,8 @@ impl StdlibMapping {
         mapping.register_type_methods();
         // EReg (regular expressions)
         mapping.register_ereg_methods();
+        // NativeStackTrace (haxe.NativeStackTrace)
+        mapping.register_native_stack_trace_methods();
         // Enum built-in methods (getIndex, getName, getParameters)
         mapping.register_enum_methods();
         mapping
@@ -3245,6 +3247,23 @@ impl StdlibMapping {
             map_method!(instance "EReg", "replace" => "haxe_ereg_replace", params: 2, returns: primitive),
             // static escape(s:String):String
             map_method!(static "EReg", "escape" => "haxe_ereg_escape", params: 1, returns: primitive),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    fn register_native_stack_trace_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            // saveStack(exception:Any):Void
+            map_method!(static "NativeStackTrace", "saveStack" => "rayzor_native_stack_trace_save_stack", params: 1, returns: void, types: &[PtrVoid]),
+            // callStack():Any
+            map_method!(static "NativeStackTrace", "callStack" => "rayzor_native_stack_trace_call_stack", params: 0, returns: primitive, types: &[] => PtrVoid),
+            // exceptionStack():Any
+            map_method!(static "NativeStackTrace", "exceptionStack" => "rayzor_native_stack_trace_exception_stack", params: 0, returns: primitive, types: &[] => PtrVoid),
+            // toHaxe(nativeStackTrace:Any, skip:Int = 0):Array<StackItem>
+            map_method!(static "NativeStackTrace", "toHaxe" => "rayzor_native_stack_trace_to_haxe", params: 2, returns: primitive, types: &[PtrVoid, I32] => PtrVoid),
         ];
 
         self.register_from_tuples(mappings);
