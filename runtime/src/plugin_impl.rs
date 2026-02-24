@@ -533,6 +533,14 @@ register_symbol!(
     "haxe_fileinput_close",
     crate::haxe_sys::haxe_fileinput_close
 );
+register_symbol!(
+    "haxe_fileinput_read_line",
+    crate::haxe_sys::haxe_fileinput_read_line
+);
+register_symbol!(
+    "haxe_fileinput_read_all",
+    crate::haxe_sys::haxe_fileinput_read_all
+);
 
 // ============================================================================
 // FileOutput (sys.io.FileOutput)

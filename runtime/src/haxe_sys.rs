@@ -1659,7 +1659,7 @@ pub extern "C" fn haxe_filesystem_read_directory(
 // Extends haxe.io.Input which provides readByte() as the core method.
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom};
+use std::io::{BufRead, BufReader, BufWriter, Read, Seek, SeekFrom};
 
 /// File input handle for reading
 #[repr(C)]
@@ -1861,6 +1861,67 @@ pub extern "C" fn haxe_fileinput_read_bytes_buf(
             Err(_) => {
                 input.eof_reached = true;
                 0
+            }
+        }
+    }
+}
+
+/// Read a line from FileInput (until \n or EOF)
+/// FileInput.readLine(): String
+#[no_mangle]
+pub extern "C" fn haxe_fileinput_read_line(handle: *mut HaxeFileInput) -> *mut HaxeString {
+    if handle.is_null() {
+        return haxe_string_from_string(std::ptr::null(), 0);
+    }
+    unsafe {
+        let input = &mut *handle;
+        let mut line = String::new();
+        match input.reader.read_line(&mut line) {
+            Ok(0) => {
+                input.eof_reached = true;
+                haxe_string_from_string(std::ptr::null(), 0)
+            }
+            Ok(_) => {
+                // Strip trailing \n and \r\n (Haxe readLine strips newline)
+                if line.ends_with('\n') {
+                    line.pop();
+                    if line.ends_with('\r') {
+                        line.pop();
+                    }
+                }
+                haxe_string_from_string(line.as_ptr(), line.len())
+            }
+            Err(_) => {
+                input.eof_reached = true;
+                haxe_string_from_string(std::ptr::null(), 0)
+            }
+        }
+    }
+}
+
+/// Read all remaining bytes from FileInput
+/// FileInput.readAll(?bufsize:Int): Bytes
+#[no_mangle]
+pub extern "C" fn haxe_fileinput_read_all(handle: *mut HaxeFileInput) -> *mut HaxeBytes {
+    if handle.is_null() {
+        return haxe_bytes_alloc(0);
+    }
+    unsafe {
+        let input = &mut *handle;
+        let mut buf = Vec::new();
+        match input.reader.read_to_end(&mut buf) {
+            Ok(_) => {
+                input.eof_reached = true;
+                let len = buf.len();
+                let cap = buf.capacity();
+                let ptr = buf.as_mut_ptr();
+                std::mem::forget(buf);
+                let bytes = Box::into_raw(Box::new(HaxeBytes { ptr, len, cap }));
+                bytes
+            }
+            Err(_) => {
+                input.eof_reached = true;
+                haxe_bytes_alloc(0)
             }
         }
     }

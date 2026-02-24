@@ -75,6 +75,13 @@ pub fn build_systems_types(builder: &mut MirBuilder) {
     build_simd4f_normalize(builder);
     build_simd4f_cross3(builder);
     build_simd4f_distance(builder);
+
+    // Build sys.io.File MIR wrappers (default binary=true for read/write/append/update)
+    declare_file_externs(builder);
+    build_file_read_default(builder);
+    build_file_write_default(builder);
+    build_file_append_default(builder);
+    build_file_update_default(builder);
 }
 
 // ============================================================================
@@ -1197,4 +1204,102 @@ fn build_simd4f_distance(builder: &mut MirBuilder) {
     let sqrt_f32 = builder.vector_extract(sqrt_vec, 0, f32_ty.clone());
     let result = builder.cast(sqrt_f32, f32_ty, f64_ty);
     builder.ret(Some(result));
+}
+
+// ============================================================================
+// sys.io.File — MIR wrappers for default binary=true parameter
+// ============================================================================
+
+fn declare_file_externs(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let bool_ty = IrType::Bool;
+
+    let fid = builder
+        .begin_function("haxe_file_read")
+        .param("path", ptr_void.clone())
+        .param("binary", bool_ty.clone())
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(fid);
+
+    let fid = builder
+        .begin_function("haxe_file_write")
+        .param("path", ptr_void.clone())
+        .param("binary", bool_ty.clone())
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(fid);
+
+    let fid = builder
+        .begin_function("haxe_file_append")
+        .param("path", ptr_void.clone())
+        .param("binary", bool_ty.clone())
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(fid);
+
+    let fid = builder
+        .begin_function("haxe_file_update")
+        .param("path", ptr_void.clone())
+        .param("binary", bool_ty)
+        .returns(ptr_void)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(fid);
+}
+
+/// Helper to build a File method wrapper that defaults binary=true.
+/// Creates: fn {wrapper_name}(path: *void) -> *void
+/// Calls:   fn {extern_name}(path: *void, binary: bool) -> *void
+fn build_file_method_default_binary(
+    builder: &mut MirBuilder,
+    wrapper_name: &str,
+    extern_name: &str,
+) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let bool_ty = IrType::Bool;
+
+    let func_id = builder
+        .begin_function(wrapper_name)
+        .param("path", ptr_void.clone())
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let path = builder.get_param(0);
+    let binary_true = builder.const_i64(1); // true as i64
+
+    let target_func = builder
+        .get_function_by_name(extern_name)
+        .unwrap_or_else(|| panic!("{} extern not found", extern_name));
+
+    if let Some(result) = builder.call(target_func, vec![path, binary_true]) {
+        builder.ret(Some(result));
+    } else {
+        let null = builder.const_i64(0);
+        builder.ret(Some(null));
+    }
+}
+
+fn build_file_read_default(builder: &mut MirBuilder) {
+    build_file_method_default_binary(builder, "file_read_default", "haxe_file_read");
+}
+
+fn build_file_write_default(builder: &mut MirBuilder) {
+    build_file_method_default_binary(builder, "file_write_default", "haxe_file_write");
+}
+
+fn build_file_append_default(builder: &mut MirBuilder) {
+    build_file_method_default_binary(builder, "file_append_default", "haxe_file_append");
+}
+
+fn build_file_update_default(builder: &mut MirBuilder) {
+    build_file_method_default_binary(builder, "file_update_default", "haxe_file_update");
 }

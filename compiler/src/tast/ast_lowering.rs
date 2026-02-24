@@ -5328,6 +5328,51 @@ impl<'a> AstLowering<'a> {
                     // For type aliases like `typedef Bytes = rayzor.Bytes`, follow the target type
                     self.resolve_type_to_class_symbol_inner(type_table, *target_type)
                 }
+                crate::tast::core::TypeKind::Placeholder { name } => {
+                    // For extern classes (Placeholder types), look up by name in the symbol table
+                    // These classes may have been compiled in a different unit (stdlib)
+                    let placeholder_name = *name;
+
+                    // Try exact match first (bare name like "Bytes")
+                    let results = self.context.symbol_table.find_symbols(|sym| {
+                        sym.name == placeholder_name
+                            && sym.kind == crate::tast::symbols::SymbolKind::Class
+                    });
+                    if let Some(sym) = results.first() {
+                        return Some(sym.id);
+                    }
+
+                    // Try matching qualified placeholder name against symbol's qualified_name
+                    // e.g., placeholder "rayzor.Bytes" matches symbol with qualified_name "rayzor.Bytes"
+                    let results = self.context.symbol_table.find_symbols(|sym| {
+                        sym.kind == crate::tast::symbols::SymbolKind::Class
+                            && sym.qualified_name == Some(placeholder_name)
+                    });
+                    if let Some(sym) = results.first() {
+                        return Some(sym.id);
+                    }
+
+                    // Try matching bare name extracted from qualified placeholder
+                    // e.g., "rayzor.Bytes" -> try matching symbol name "Bytes"
+                    let name_str = self
+                        .context
+                        .string_interner
+                        .get(placeholder_name)
+                        .unwrap_or("");
+                    let bare_name = name_str.rsplit('.').next().unwrap_or(name_str);
+                    if bare_name != name_str {
+                        let bare_interned = self.context.string_interner.intern(bare_name);
+                        let results = self.context.symbol_table.find_symbols(|sym| {
+                            sym.name == bare_interned
+                                && sym.kind == crate::tast::symbols::SymbolKind::Class
+                        });
+                        if let Some(sym) = results.first() {
+                            return Some(sym.id);
+                        }
+                    }
+
+                    None
+                }
                 _ => None,
             }
         } else {
