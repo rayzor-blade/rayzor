@@ -1916,8 +1916,7 @@ pub extern "C" fn haxe_fileinput_read_all(handle: *mut HaxeFileInput) -> *mut Ha
                 let cap = buf.capacity();
                 let ptr = buf.as_mut_ptr();
                 std::mem::forget(buf);
-                let bytes = Box::into_raw(Box::new(HaxeBytes { ptr, len, cap }));
-                bytes
+                Box::into_raw(Box::new(HaxeBytes { ptr, len, cap }))
             }
             Err(_) => {
                 input.eof_reached = true;
