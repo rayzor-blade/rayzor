@@ -2393,7 +2393,7 @@ impl CraneliftBackend {
                         let decl = module.declarations().get_function_decl(cl_func_id);
                         let expected_params = decl.signature.params.len();
                         if expected_params != call_args.len() {
-                            warn!("Call mismatch in '{}': calling '{}' (MIR {:?}, CL {:?}): expected {} params, providing {} args, is_extern={}, env_added={}, sret={}",
+                            warn!("CALL MISMATCH in '{}': calling '{}' (MIR {:?}, CL {:?}): expected {} params, providing {} args, is_extern={}, env_added={}, sret={}",
                                 function.name, called_func.name, func_id, cl_func_id,
                                 expected_params, call_args.len(), is_extern_func, should_add_env, uses_sret);
                             for (pi, p) in called_func.signature.parameters.iter().enumerate() {
@@ -2407,14 +2407,15 @@ impl CraneliftBackend {
                     // If call has wrong number of args, emit trap instead of crashing Cranelift.
                     // This handles imported functions with broken MIR that are never actually called.
                     if call_mismatch {
-                        builder
-                            .ins()
-                            .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
-                        // Provide a dummy value for the dest register if needed
+                        // Provide a dummy value for the dest register BEFORE trap
+                        // (trap is a terminator that fills the block)
                         if let Some(dest_reg) = dest {
                             let dummy = builder.ins().iconst(types::I64, 0);
                             value_map.insert(*dest_reg, dummy);
                         }
+                        builder
+                            .ins()
+                            .trap(cranelift_codegen::ir::TrapCode::user(1).unwrap());
                     } else {
                         let call_inst = builder.ins().call(func_ref, &call_args);
 

@@ -290,6 +290,9 @@ pub struct HirToMirContext<'a> {
     /// Used for field disambiguation when multiple classes have same-named fields.
     class_type_to_symbol: BTreeMap<TypeId, SymbolId>,
 
+    /// Maps field SymbolId → class name string for BLADE cache serialization.
+    field_class_names: BTreeMap<SymbolId, String>,
+
     // === Class Virtual Method Dispatch ===
     /// (child_class_symbol, method_name) for methods with is_override=true
     override_methods: BTreeSet<(SymbolId, InternedString)>,
@@ -313,6 +316,10 @@ pub struct HirToMirContext<'a> {
     /// Keyed by IrFunctionId, value is Vec matching user-visible params (excludes implicit 'this').
     /// Only populated for functions that have at least one parameter with a default value.
     function_param_defaults: BTreeMap<IrFunctionId, Vec<Option<HirExpr>>>,
+
+    /// Constructor param counts from import modules (for BLADE-cached constructors).
+    /// fill_default_args uses this when the constructor isn't in the local module yet.
+    external_constructor_param_counts: BTreeMap<IrFunctionId, usize>,
 
     /// HIR parameter types for functions/constructors.
     /// Keyed by IrFunctionId, value is Vec<TypeId> of param types (excludes implicit 'this').
@@ -503,6 +510,7 @@ impl<'a> HirToMirContext<'a> {
             boxed_dynamic_symbols: BTreeSet::new(),
             class_alloc_sizes: BTreeMap::new(),
             class_type_to_symbol: BTreeMap::new(),
+            field_class_names: BTreeMap::new(),
             override_methods: BTreeSet::new(),
             class_parent_map: BTreeMap::new(),
             class_method_by_name: BTreeMap::new(),
@@ -510,6 +518,7 @@ impl<'a> HirToMirContext<'a> {
             class_vtables: BTreeMap::new(),
             virtual_dispatch_info: BTreeMap::new(),
             function_param_defaults: BTreeMap::new(),
+            external_constructor_param_counts: BTreeMap::new(),
             function_param_hir_types: BTreeMap::new(),
             current_function_return_type: None,
             anon_views: BTreeMap::new(),
@@ -3569,6 +3578,11 @@ impl<'a> HirToMirContext<'a> {
             HirStatement::Throw(expr) => {
                 let thrown_type_id = self.runtime_type_id(expr.ty);
                 if let Some(exception_reg) = self.lower_expression(expr) {
+                    // Stack trace is captured at runtime in rayzor_throw_typed()
+                    // and stored on thread-local state. Accessible via:
+                    // - NativeStackTrace.exceptionStack() for caught exceptions
+                    // - Exception.stackTrace field (populated by runtime for class exceptions)
+
                     // Cast exception to i64 for uniform storage
                     let reg_type = self
                         .builder
@@ -3992,112 +4006,9 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // FALLBACK 2: No qualified name and no valid receiver type.
-            // This happens for extern classes (like CC) loaded via BLADE cache where
-            // method symbols lack qualified names. Search all stdlib classes for the method,
-            // but only use it if exactly ONE class matches (to avoid ambiguity).
-            if qualified_name.is_none() {
-                let mut matches: Vec<(
-                    &crate::stdlib::runtime_mapping::MethodSignature,
-                    &crate::stdlib::RuntimeFunctionCall,
-                )> = Vec::new();
-                for class_name in self.stdlib_mapping.get_all_classes() {
-                    if let Some(count) = param_count {
-                        if let Some(m) = self
-                            .stdlib_mapping
-                            .find_by_name_and_params(class_name, method_name, count)
-                            .or_else(|| {
-                                self.stdlib_mapping.find_by_name_and_params(
-                                    class_name,
-                                    method_name,
-                                    count + 1,
-                                )
-                            })
-                        {
-                            matches.push(m);
-                        }
-                    } else if let Some(m) =
-                        self.stdlib_mapping.find_by_name(class_name, method_name)
-                    {
-                        matches.push(m);
-                    }
-                }
-                if matches.len() == 1 {
-                    let (sig, mapping) = matches[0];
-                    debug!(
-                        "[FALLBACK2] Found unique {}.{} via brute-force class search -> {}",
-                        sig.class, sig.method, mapping.runtime_name
-                    );
-                    return Some((sig.class, sig.method, mapping));
-                } else if matches.len() > 1 {
-                    // Multiple matches — try to disambiguate:
-                    // 1. Exclude SIMD4f (uses f32x4 types, not i64 opaque pointers)
-                    // 2. Exclude static methods when this is an instance method call
-                    // 3. If receiver_class_hint is provided, prefer matches that match the hint
-                    debug!(
-                        "[FALLBACK2] {} matches for method '{}': {:?}",
-                        matches.len(),
-                        method_name,
-                        matches.iter().map(|(s, _)| &s.class).collect::<Vec<_>>()
-                    );
-                    let mut filtered: Vec<_> = matches
-                        .iter()
-                        .filter(|(sig, _)| !sig.class.contains("SIMD") && !sig.is_static)
-                        .collect();
-                    debug!("[FALLBACK2] After filter: {} matches", filtered.len());
-
-                    // If we have a receiver class hint, use it for further disambiguation
-                    if let Some(hint) = receiver_class_hint {
-                        let hint_filtered: Vec<_> = filtered
-                            .iter()
-                            .filter(|(sig, _)| sig.class == hint)
-                            .copied()
-                            .collect();
-                        if !hint_filtered.is_empty() {
-                            debug!(
-                                "[FALLBACK2] After hint filter ({}): {} matches",
-                                hint,
-                                hint_filtered.len()
-                            );
-                            filtered = hint_filtered;
-                        }
-                    }
-
-                    if filtered.len() == 1 {
-                        let (sig, mapping) = filtered[0];
-                        debug!(
-                            "[FALLBACK2] Disambiguated {}.{} by filtering -> {}",
-                            sig.class, sig.method, mapping.runtime_name
-                        );
-                        return Some((sig.class, sig.method, mapping));
-                    }
-
-                    // Additional disambiguation: check which matching class's runtime function
-                    // is actually registered as an extern function in the current module.
-                    if filtered.len() > 1 {
-                        let extern_filtered: Vec<_> = filtered
-                            .iter()
-                            .filter(|(_, mapping)| {
-                                self.builder
-                                    .module
-                                    .extern_functions
-                                    .values()
-                                    .any(|ef| ef.name == mapping.runtime_name)
-                            })
-                            .copied()
-                            .collect();
-                        if extern_filtered.len() == 1 {
-                            let (sig, mapping) = extern_filtered[0];
-                            debug!(
-                                "[FALLBACK2] Disambiguated {}.{} by extern function presence -> {}",
-                                sig.class, sig.method, mapping.runtime_name
-                            );
-                            return Some((sig.class, sig.method, mapping));
-                        }
-                    }
-                }
-            }
-
+            // No qualified name and no valid receiver type — cannot resolve stdlib method.
+            // Do NOT brute-force search all stdlib classes by bare method name, as this
+            // causes false positives (e.g., user field "current" matching Thread.current).
             return None;
         }
 
@@ -4579,13 +4490,6 @@ impl<'a> HirToMirContext<'a> {
         mut param_types: Vec<IrType>,
         mut return_type: IrType,
     ) -> IrFunctionId {
-        if name.contains("Channel") || name.contains("init") {
-            debug!(
-                "[get_or_register_extern] Called with name='{}', {} params",
-                name,
-                param_types.len()
-            );
-        }
 
         // Override with correct signature if this is a known extern function
         // This is critical for Math functions to get f64 types instead of inferred i64
@@ -5526,7 +5430,21 @@ impl<'a> HirToMirContext<'a> {
 
                     // First check field_index_map - this is more reliable than SymbolKind::Field
                     // because field symbols may be registered with SymbolKind::Variable
-                    if let Some(&(field_class_type, _field_idx)) = self.field_index_map.get(symbol)
+                    let field_entry = self.field_index_map.get(symbol).copied().or_else(|| {
+                        // Name-based fallback: SymbolIds differ between compilation contexts
+                        // (e.g., ArrayIterator.current in stdlib vs user code)
+                        if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
+                            if let Some(this_type) = self.current_this_type {
+                                let field_name = sym_info.name;
+                                self.resolve_field_index_by_name(field_name, this_type)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some((field_class_type, _field_idx)) = field_entry
                     {
                         // Get 'this' pointer (SymbolId(0) is the special 'this' mapping)
                         if let Some(&this_reg) = self.symbol_map.get(&SymbolId::from_raw(0)) {
@@ -5607,7 +5525,9 @@ impl<'a> HirToMirContext<'a> {
                     }
 
                     // If we get here, we couldn't resolve the variable
-                    warn!("Could not resolve variable symbol {:?}", symbol);
+                    let sym_name = self.symbol_table.get_symbol(*symbol)
+                        .and_then(|s| self.string_interner.get(s.name));
+                    debug!("[UNRESOLVED_VAR] Could not resolve variable {:?} (name={:?})", symbol, sym_name);
                     None
                 }
             }
@@ -12374,8 +12294,12 @@ impl<'a> HirToMirContext<'a> {
                         .chain(args.iter().filter_map(|a| self.lower_expression(a)))
                         .collect();
 
+                    let pre_fill = arg_regs.len();
                     // Fill in default values for any missing optional parameters
                     self.fill_default_args(constructor_func_id, &mut arg_regs, true);
+                    let post_fill = arg_regs.len();
+                    let sig_params = self.builder.module.functions.get(&constructor_func_id)
+                        .map(|f| f.signature.parameters.len()).unwrap_or(0);
 
                     // Constructor returns void, so we ignore the result
                     self.builder
@@ -14715,25 +14639,43 @@ impl<'a> HirToMirContext<'a> {
         arg_regs: &mut Vec<IrId>,
         has_implicit_this: bool,
     ) {
-        // Clone defaults to release immutable borrow before calling lower_expression
-        let defaults = match self.function_param_defaults.get(&func_id) {
-            Some(d) => d.clone(),
-            None => return,
-        };
-
         let user_arg_count = if has_implicit_this {
             arg_regs.len().saturating_sub(1)
         } else {
             arg_regs.len()
         };
 
-        if user_arg_count >= defaults.len() {
-            return; // All args provided
+        // Try HIR-level defaults first (available for freshly compiled functions)
+        if let Some(defaults) = self.function_param_defaults.get(&func_id).cloned() {
+            if user_arg_count >= defaults.len() {
+                return; // All args provided
+            }
+            for i in user_arg_count..defaults.len() {
+                if let Some(ref default_expr) = defaults[i] {
+                    if let Some(reg) = self.lower_expression(default_expr) {
+                        arg_regs.push(reg);
+                    }
+                }
+            }
+            return;
         }
 
-        for i in user_arg_count..defaults.len() {
-            if let Some(ref default_expr) = defaults[i] {
-                if let Some(reg) = self.lower_expression(default_expr) {
+        // Fallback for BLADE-cached functions: HIR defaults aren't available.
+        // Fill missing params with null (0) based on the function's known param count.
+        let sig_param_count = self
+            .builder
+            .module
+            .functions
+            .get(&func_id)
+            .map(|f| f.signature.parameters.len())
+            .or_else(|| self.external_constructor_param_counts.get(&func_id).copied())
+            .unwrap_or(0);
+
+        let total_provided = arg_regs.len();
+        if total_provided < sig_param_count {
+            for _ in total_provided..sig_param_count {
+                // Default optional params to null/zero (i64 0 works for null pointers and ints)
+                if let Some(reg) = self.builder.build_const(IrValue::I64(0)) {
                     arg_regs.push(reg);
                 }
             }
@@ -17823,17 +17765,25 @@ impl<'a> HirToMirContext<'a> {
         // SPECIAL CASE: Check if this is a property access on a @:coreType extern class
         // For example, Array.length should map to haxe_array_length() runtime call
         // These classes have no actual fields - all access must go through runtime functions
+        //
+        // IMPORTANT: Skip this check if the field is a known user class field.
+        // Without this guard, brute-force fallback in get_stdlib_runtime_info can match
+        // user fields to unrelated stdlib methods with the same bare name (e.g.,
+        // ArrayIterator.current matched to Thread.current → sys_thread_current).
+        let is_known_user_field = self.field_index_map.contains_key(&field)
+            || self.resolve_field_index_by_name(
+                self.symbol_table.get_symbol(field).map(|s| s.name).unwrap_or_default(),
+                receiver_ty,
+            ).is_some();
+
         let field_name_debug = self
             .symbol_table
             .get_symbol(field)
             .and_then(|s| self.string_interner.get(s.name))
             .unwrap_or("<unknown>");
-        debug!(
-            "[lower_field_access] Checking stdlib for field='{}', field={:?}, receiver_ty={:?}",
-            field_name_debug, field, receiver_ty
-        );
 
-        if let Some((_class, _method, runtime_call)) =
+        if !is_known_user_field {
+        if let Some((_class_match, _method, runtime_call)) =
             self.get_stdlib_runtime_info(field, receiver_ty, None, None)
         {
             let runtime_func = runtime_call.runtime_name;
@@ -17906,10 +17856,8 @@ impl<'a> HirToMirContext<'a> {
             return result_reg;
         } else {
             debug!("[lower_field_access] get_stdlib_runtime_info returned None for field='{}' ({:?}), receiver_ty={:?}", field_name_debug, field, receiver_ty);
-            // receiver_ty is known and didn't match any stdlib class — this is a user-defined field.
-            // Do NOT brute-force search other stdlib types (would incorrectly intercept fields
-            // like "length" on user classes by matching them to Array.length).
         }
+        } // end if !is_known_user_field
 
         // Check if this is a property with a custom getter
         if let Some(property_info) = self.property_access_map.get(&field) {
@@ -18063,6 +18011,8 @@ impl<'a> HirToMirContext<'a> {
                     .get_symbol(field)
                     .map(|s| s.name)
                     .or_else(|| None)?;
+
+                let field_name_str = self.string_interner.get(field_name).unwrap_or("<unknown>");
 
                 // Use helper that disambiguates by receiver type when multiple classes
                 // have the same field name (e.g., StringBuf.length vs List.length)
@@ -18341,15 +18291,33 @@ impl<'a> HirToMirContext<'a> {
         receiver_ty: TypeId,
     ) -> Option<(TypeId, u32)> {
         let mut all_matches: Vec<(TypeId, u32)> = Vec::new();
+        let target_name_str = self.string_interner.get(field_name).unwrap_or("<unknown>");
         for (_sym, &(class_ty, idx)) in &self.field_index_map {
             if let Some(sym_info) = self.symbol_table.get_symbol(*_sym) {
-                if sym_info.name == field_name {
+                // Compare by InternedString ID first (fast), then by string content (handles
+                // cross-context InternedString mismatches where same string gets different IDs)
+                let id_match = sym_info.name == field_name;
+                let str_match = {
+                    let a = self.string_interner.get(sym_info.name);
+                    let b = self.string_interner.get(field_name);
+                    a.is_some() && a == b
+                };
+                if id_match || str_match {
                     all_matches.push((class_ty, idx));
                 }
+            } else {
+                debug!(
+                    "[RESOLVE_FIELD] symbol_table.get_symbol({:?}) returned None (looking for '{}')",
+                    _sym, target_name_str
+                );
             }
         }
 
         if all_matches.is_empty() {
+            debug!(
+                "[RESOLVE_FIELD] No matches found for '{}' in {} field_index_map entries",
+                target_name_str, self.field_index_map.len()
+            );
             return None;
         }
 
@@ -23992,10 +23960,17 @@ impl<'a> HirToMirContext<'a> {
         self.collect_inherited_fields(parent_class.extends, child_type, fields, field_index);
 
         // Then add parent's own fields
+        let parent_class_name = self.symbol_table.get_symbol(parent_class.symbol_id)
+            .and_then(|sym| sym.qualified_name.and_then(|n| self.string_interner.get(n)))
+            .or_else(|| self.string_interner.get(parent_class.name))
+            .unwrap_or("<unknown>")
+            .to_string();
         for parent_field in &parent_class.fields {
             // Map parent field symbol to child class's type with the correct index
             self.field_index_map
                 .insert(parent_field.symbol_id, (child_type, *field_index));
+            self.field_class_names
+                .insert(parent_field.symbol_id, parent_class_name.clone());
 
             fields.push(IrField {
                 name: self
@@ -24073,6 +24048,14 @@ impl<'a> HirToMirContext<'a> {
             // Store field index mapping for field access lowering (instance fields only)
             self.field_index_map
                 .insert(field.symbol_id, (type_id, field_index));
+
+            // Store qualified class name for BLADE cache serialization
+            let class_name_str = self.symbol_table.get_symbol(class.symbol_id)
+                .and_then(|sym| sym.qualified_name.and_then(|n| self.string_interner.get(n)))
+                .or_else(|| self.string_interner.get(class.name))
+                .unwrap_or("<unknown>");
+            self.field_class_names
+                .insert(field.symbol_id, class_name_str.to_string());
 
             // Store property accessor info if this is a property with custom getters/setters
             if let Some(ref property_info) = field.property_access {
@@ -24638,6 +24621,9 @@ pub struct MirLoweringResult {
     /// Class TypeId → SymbolId mapping. Survives type_table overwrites.
     /// Used for field disambiguation when multiple classes have same-named fields.
     pub class_type_to_symbol: BTreeMap<TypeId, SymbolId>,
+    /// Field SymbolId → class name string. Used by BLADE cache to store field entries
+    /// with class names that survive across compilation contexts (where TypeIds differ).
+    pub field_class_names: BTreeMap<SymbolId, String>,
 }
 
 /// Lower HIR to MIR and return both the module and function mappings
@@ -24658,6 +24644,7 @@ pub fn lower_hir_to_mir_with_function_map(
     external_class_alloc_sizes: BTreeMap<TypeId, u64>,
     external_class_method_symbols: BTreeMap<(SymbolId, InternedString), SymbolId>,
     external_class_type_to_symbol: BTreeMap<TypeId, SymbolId>,
+    external_constructor_param_counts: BTreeMap<IrFunctionId, usize>,
 ) -> Result<MirLoweringResult, Vec<LoweringError>> {
     let mut context = HirToMirContext::new(
         hir_module.name.clone(),
@@ -24689,6 +24676,9 @@ pub fn lower_hir_to_mir_with_function_map(
     // Seed class_type_to_symbol from previously compiled imports
     context.class_type_to_symbol = external_class_type_to_symbol;
 
+    // Seed constructor param counts for fill_default_args fallback
+    context.external_constructor_param_counts = external_constructor_param_counts;
+
     let module = context.lower_module(hir_module)?;
 
     Ok(MirLoweringResult {
@@ -24700,5 +24690,6 @@ pub fn lower_hir_to_mir_with_function_map(
         class_alloc_sizes: context.class_alloc_sizes,
         class_method_symbols: context.class_method_symbols,
         class_type_to_symbol: context.class_type_to_symbol,
+        field_class_names: context.field_class_names,
     })
 }

@@ -1613,6 +1613,16 @@ register_symbol!(
     "rayzor_native_stack_trace_to_haxe",
     crate::native_stack_trace::rayzor_native_stack_trace_to_haxe
 );
+register_symbol!(
+    "rayzor_register_function_source",
+    crate::native_stack_trace::rayzor_register_function_source
+);
+register_symbol!(
+    "rayzor_set_stack_traces_enabled",
+    crate::native_stack_trace::rayzor_set_stack_traces_enabled
+);
+register_symbol!("rayzor_push_call_frame", crate::native_stack_trace::rayzor_push_call_frame);
+register_symbol!("rayzor_pop_call_frame", crate::native_stack_trace::rayzor_pop_call_frame);
 
 // ============================================================================
 // EReg Functions (Regular Expressions)
