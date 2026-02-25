@@ -98,6 +98,10 @@ pub struct CompilationUnit {
     /// Passed to user file's MIR lowering so it can resolve field access on imported classes
     import_field_index_map: BTreeMap<crate::tast::SymbolId, (crate::tast::TypeId, u32)>,
 
+    /// Accumulated field class names from imported files (SymbolId -> qualified class name)
+    /// Used by BLADE cache to serialize field entries with correct class names
+    import_field_class_names: BTreeMap<crate::tast::SymbolId, String>,
+
     /// Accumulated property access map from imported files
     import_property_access_map: BTreeMap<crate::tast::SymbolId, crate::tast::PropertyAccessInfo>,
 
@@ -437,6 +441,7 @@ impl CompilationUnit {
             stdlib_function_map: BTreeMap::new(),
             stdlib_function_name_map: BTreeMap::new(),
             import_field_index_map: BTreeMap::new(),
+            import_field_class_names: BTreeMap::new(),
             import_property_access_map: BTreeMap::new(),
             import_constructor_name_map: BTreeMap::new(),
             import_class_alloc_sizes: BTreeMap::new(),
@@ -637,6 +642,7 @@ impl CompilationUnit {
         field_index_map: &BTreeMap<crate::tast::SymbolId, (crate::tast::TypeId, u32)>,
         constructor_name_map: &BTreeMap<String, crate::ir::IrFunctionId>,
         class_alloc_sizes: &BTreeMap<crate::tast::TypeId, u64>,
+        field_class_names: &BTreeMap<crate::tast::SymbolId, String>,
     ) -> BladeCachedMaps {
         let mut functions = Vec::new();
         let mut fields = Vec::new();
@@ -681,7 +687,14 @@ impl CompilationUnit {
                     .get(sym.name)
                     .unwrap_or("<unknown>")
                     .to_string();
-                let class_name = self.find_class_name_for_scope(sym.scope_id);
+
+                // Use field_class_names from MIR context (populated during register_class_metadata)
+                // Fall back to accumulated import names for fields inherited from dependencies
+                let class_name = field_class_names
+                    .get(symbol_id)
+                    .cloned()
+                    .or_else(|| self.import_field_class_names.get(symbol_id).cloned())
+                    .or_else(|| self.find_class_name_for_scope(sym.scope_id));
 
                 fields.push(BladeFieldEntry {
                     class_name: class_name.unwrap_or_default(),
@@ -1064,10 +1077,10 @@ impl CompilationUnit {
             }
         }
 
-        // Add to scope
-        let _ = self
-            .scope_tree
-            .add_symbol_to_scope(class_scope, field_symbol);
+        // Add to scope (using add_symbol to update both symbols list and lookup cache)
+        if let Some(scope) = self.scope_tree.get_scope_mut(class_scope) {
+            scope.add_symbol(field_symbol, field_name);
+        }
 
         field_symbol
     }
@@ -2123,6 +2136,7 @@ impl CompilationUnit {
                     false
                 };
 
+                debug!("[IMPORT_LOAD] Processing '{}' (cache_hit={})", name, cache_hit);
                 if !cache_hit {
                     // Cache miss or caching disabled - compile normally
                     // Use is_stdlib_file=true so import files:
@@ -2203,10 +2217,14 @@ impl CompilationUnit {
         self.restore_cached_maps(&cached_maps, &registered);
 
         // Step 3: Build name-based function map from MIR
+        // Use qualified names to avoid collisions (e.g., "current" matching
+        // both ArrayIterator.current field and Thread.current method)
         for (func_id, func) in &mir.functions {
             if !func.cfg.blocks.is_empty() {
+                // Prefer qualified_name (e.g., "ArrayIterator.hasNext") over bare name ("hasNext")
+                let map_name = func.qualified_name.as_deref().unwrap_or(&func.name);
                 self.stdlib_function_name_map
-                    .insert(func.name.clone(), *func_id);
+                    .insert(map_name.to_string(), *func_id);
             }
         }
 
@@ -2272,6 +2290,11 @@ impl CompilationUnit {
             if let Some(sym) = self.symbol_table.get_symbol(symbol_id) {
                 let type_id = sym.type_id;
                 let scope_id = sym.scope_id;
+                // Insert both qualified name (haxe.Exception) and simple name (Exception)
+                // so BLADE field entries using either convention can be restored
+                if !class_info.package.is_empty() {
+                    class_map.insert(class_info.name.clone(), (symbol_id, type_id, scope_id));
+                }
                 class_map.insert(qualified_name, (symbol_id, type_id, scope_id));
             }
         }
@@ -2327,10 +2350,24 @@ impl CompilationUnit {
                 let field_name_interned = self.string_interner.intern(&entry.field_name);
                 if let Some(scope) = self.scope_tree.get_scope(*class_scope) {
                     if let Some(field_sym) = scope.get_symbol(field_name_interned) {
+                        debug!(
+                            "[BLADE_FIELD] Restored {}.{} {:?} -> (TypeId({:?}), index={})",
+                            entry.class_name, entry.field_name, field_sym, class_type, entry.field_index
+                        );
                         self.import_field_index_map
                             .insert(field_sym, (*class_type, entry.field_index));
+                    } else {
+                        debug!(
+                            "[BLADE_FIELD] MISS: {}.{} not found in scope {:?}",
+                            entry.class_name, entry.field_name, class_scope
+                        );
                     }
                 }
+            } else {
+                debug!(
+                    "[BLADE_FIELD] MISS: class '{}' not in registered map",
+                    entry.class_name
+                );
             }
         }
 
@@ -3233,6 +3270,7 @@ impl CompilationUnit {
                 && typed_file.functions.is_empty()
                 && typed_file.enums.is_empty();
             if is_extern_only {
+                debug!("[EXTERN_ONLY] Skipping MIR for extern-only file: {}", filename);
                 self.compiled_files
                     .insert(filename.to_string(), typed_file.clone());
                 return Ok(typed_file);
@@ -3271,6 +3309,17 @@ impl CompilationUnit {
 
         let stdlib_mapping = self.compiler_plugin_registry.build_combined_mapping();
 
+        // Build constructor param counts from import MIR modules for fill_default_args fallback
+        let mut constructor_param_counts: BTreeMap<crate::ir::IrFunctionId, usize> = BTreeMap::new();
+        for (_, func_id) in &self.import_constructor_name_map {
+            for import_mir in &self.import_mir_modules {
+                if let Some(func) = import_mir.functions.get(func_id) {
+                    constructor_param_counts.insert(*func_id, func.signature.parameters.len());
+                    break;
+                }
+            }
+        }
+
         let mir_result = lower_hir_to_mir_with_function_map(
             &hir_module,
             &self.string_interner,
@@ -3285,6 +3334,7 @@ impl CompilationUnit {
             self.import_class_alloc_sizes.clone(),
             self.import_class_method_symbols.clone(),
             self.import_class_type_to_symbol.clone(),
+            constructor_param_counts,
         )
         .map_err(|errors| {
             errors
@@ -3308,6 +3358,7 @@ impl CompilationUnit {
                 &mir_result.field_index_map,
                 &mir_result.constructor_name_map,
                 &mir_result.class_alloc_sizes,
+                &mir_result.field_class_names,
             );
             self.last_compiled_cached_maps = Some(cached_maps);
         }
@@ -3341,36 +3392,31 @@ impl CompilationUnit {
         }
 
         // For stdlib files, also collect name-based mappings for cross-file lookups
-        // (Only stdlib has unique function names like "StringTools.startsWith";
-        //  import class methods have bare names like "add" which would conflict)
+        // Use qualified names to avoid collisions (e.g., "current" matching
+        // both ArrayIterator.current field and Thread.current method)
         if is_stdlib_file {
-            let mut added_count = 0;
-            let mut skipped_count = 0;
             for (func_id, func) in &mir_module.functions {
                 // Only add non-empty CFG functions (skip forward refs/stubs)
                 if !func.cfg.blocks.is_empty() {
+                    // Prefer qualified_name (e.g., "ArrayIterator.hasNext") over bare name
+                    let map_name = func.qualified_name.as_deref().unwrap_or(&func.name);
                     self.stdlib_function_name_map
-                        .insert(func.name.clone(), *func_id);
-                    debug!("DEBUG: [NAME MAP] Added '{}' -> {:?}", func.name, func_id);
-                    added_count += 1;
-                } else {
-                    debug!(
-                        "DEBUG: [NAME MAP SKIP] '{}' has empty CFG (forward ref/stub)",
-                        func.name
-                    );
-                    skipped_count += 1;
+                        .insert(map_name.to_string(), *func_id);
                 }
             }
-            debug!(
-                "DEBUG: [NAME MAP] {} added, {} skipped for {}",
-                added_count, skipped_count, filename
-            );
         }
 
         // Accumulate field index and property access maps from all compiled files
         // (both stdlib and imports) so user files can resolve field access on imported classes
+        debug!(
+            "[FIELD_ACCUM] file='{}', mir_result.field_index_map has {} entries, import_field_index_map has {} entries before merge",
+            filename, mir_result.field_index_map.len(), self.import_field_index_map.len()
+        );
         for (sym, val) in mir_result.field_index_map {
             self.import_field_index_map.insert(sym, val);
+        }
+        for (sym, name) in mir_result.field_class_names {
+            self.import_field_class_names.insert(sym, name);
         }
         for (sym, val) in mir_result.property_access_map {
             self.import_property_access_map.insert(sym, val);
@@ -3516,6 +3562,7 @@ impl CompilationUnit {
             // inference issues. The stdlib version is the source of truth, so we REPLACE
             // the user's version with the stdlib's version.
 
+
             // Build map of function names to ALL IDs in the user module (before merging)
             // Multiple import modules can have duplicate extern declarations of the same function.
             // We need to track ALL of them to replace every copy.
@@ -3534,6 +3581,7 @@ impl CompilationUnit {
             for (func_id, func) in &renumbered_functions {
                 if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
                     for &existing_id in existing_ids {
+                        debug!("[STDLIB_REPLACE] '{}' replacing {:?} -> {:?}", func.name, existing_id, func_id);
                         id_replacements.insert(existing_id, *func_id);
                     }
                 }

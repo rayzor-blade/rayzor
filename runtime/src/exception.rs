@@ -75,9 +75,12 @@ pub extern "C" fn rayzor_throw_typed(exception_value: i64, type_id: u32) {
         let mut state = state.borrow_mut();
         state.current_exception = exception_value;
         state.current_exception_type_id = type_id;
-        // Capture backtrace at throw time
-        let bt = backtrace::Backtrace::new();
-        state.current_stack_trace = format!("{:?}", bt);
+        // Capture shadow call stack at throw time (debug mode only)
+        if crate::native_stack_trace::is_enabled() {
+            state.current_stack_trace = crate::native_stack_trace::capture_shadow_stack();
+        } else {
+            state.current_stack_trace = String::new();
+        }
 
         if let Some(handler) = state.handlers.last_mut() {
             let buf_ptr = handler.jmp_buf.as_mut_ptr();
@@ -88,6 +91,9 @@ pub extern "C" fn rayzor_throw_typed(exception_value: i64, type_id: u32) {
             }
         } else {
             eprintln!("Uncaught exception: {}", exception_value);
+            if !state.current_stack_trace.is_empty() {
+                eprintln!("{}", state.current_stack_trace);
+            }
             std::process::abort();
         }
     });
@@ -109,6 +115,15 @@ pub extern "C" fn rayzor_get_exception_type_id() -> u32 {
 /// Get the stored exception stack trace (for NativeStackTrace module).
 pub fn get_exception_stack_trace() -> String {
     STATE.with(|state| state.borrow().current_stack_trace.clone())
+}
+
+/// Throw an exception with a string message (used by panic guard).
+/// Creates a HaxeString, boxes it as DynamicValue, and throws as TYPE_STRING.
+pub fn throw_with_message(msg: String) -> ! {
+    let haxe_str = crate::native_stack_trace::make_haxe_string(msg);
+    let boxed = crate::type_system::haxe_box_reference_ptr(haxe_str as *mut u8, 5); // TYPE_STRING = TypeId(5)
+    rayzor_throw_typed(boxed as i64, 5); // TYPE_STRING = 5
+    unreachable!()
 }
 
 /// Polymorphic type matching for catch dispatch.

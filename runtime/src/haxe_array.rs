@@ -426,7 +426,7 @@ pub extern "C" fn haxe_array_push(arr: *mut HaxeArray, data: *const u8) {
         return;
     }
 
-    unsafe {
+    crate::panic_guard::guarded_call(|| unsafe {
         let arr_ref = &mut *arr;
         debug!(
             "[haxe_array_push] Before push: len={}, cap={}, elem_size={}",
@@ -470,7 +470,7 @@ pub extern "C" fn haxe_array_push(arr: *mut HaxeArray, data: *const u8) {
             "[haxe_array_push] After push: len={}, element added successfully",
             arr_ref.len
         );
-    }
+    });
 }
 
 /// Pop element from array (original version with out param)
@@ -570,7 +570,7 @@ pub extern "C" fn haxe_array_insert(arr: *mut HaxeArray, index: i32, data: *cons
         return;
     }
 
-    unsafe {
+    crate::panic_guard::guarded_call(|| unsafe {
         let arr_ref = &mut *arr;
         let insert_pos = (index.max(0) as usize).min(arr_ref.len);
 
@@ -603,7 +603,7 @@ pub extern "C" fn haxe_array_insert(arr: *mut HaxeArray, index: i32, data: *cons
         let elem_ptr = arr_ref.ptr.add(insert_pos * arr_ref.elem_size);
         ptr::copy_nonoverlapping(data, elem_ptr, arr_ref.elem_size);
         arr_ref.len += 1;
-    }
+    });
 }
 
 /// Remove element at index

@@ -556,6 +556,7 @@ impl TierPreset {
                 start_interpreted: true,
                 bailout_strategy: BailoutStrategy::Quick,
                 max_tier_promotions: 4,
+                enable_stack_traces: true,
             },
 
             TierPreset::Application => TieredConfig {
@@ -573,6 +574,7 @@ impl TierPreset {
                 start_interpreted: true,
                 bailout_strategy: BailoutStrategy::Quick,
                 max_tier_promotions: 10,
+                enable_stack_traces: true,
             },
 
             TierPreset::Server => TieredConfig {
@@ -590,6 +592,7 @@ impl TierPreset {
                 start_interpreted: true,
                 bailout_strategy: BailoutStrategy::Immediate,
                 max_tier_promotions: 15,
+                enable_stack_traces: true,
             },
 
             TierPreset::Benchmark => TieredConfig {
@@ -607,6 +610,7 @@ impl TierPreset {
                 start_interpreted: true, // Start with interpreter for instant startup
                 bailout_strategy: BailoutStrategy::Immediate,
                 max_tier_promotions: 8,
+                enable_stack_traces: true,
             },
 
             TierPreset::Development => TieredConfig {
@@ -618,6 +622,7 @@ impl TierPreset {
                 start_interpreted: true,
                 bailout_strategy: BailoutStrategy::Immediate,
                 max_tier_promotions: 6,
+                enable_stack_traces: true,
             },
 
             TierPreset::Embedded => TieredConfig {
@@ -635,6 +640,7 @@ impl TierPreset {
                 start_interpreted: true,
                 bailout_strategy: BailoutStrategy::Slow, // High threshold before bailout
                 max_tier_promotions: 0,                  // Interpreter only
+                enable_stack_traces: false,              // No stack traces for embedded
             },
         }
     }
@@ -725,6 +731,12 @@ pub struct TieredConfig {
     /// LLVM promotion is not counted since it has its own singleton guard.
     /// Set to 0 to disable tier promotion entirely.
     pub max_tier_promotions: u64,
+
+    /// Enable source-mapped stack traces for exceptions.
+    /// When true, registers JIT function addresses with source metadata after compilation
+    /// and captures Haxe-level stack traces on throw. Disabled in --release mode for
+    /// zero overhead in production.
+    pub enable_stack_traces: bool,
 }
 
 impl Default for TieredConfig {
@@ -738,6 +750,7 @@ impl Default for TieredConfig {
             start_interpreted: true, // Enable interpreter by default for instant startup
             bailout_strategy: BailoutStrategy::Quick, // Good balance for most apps
             max_tier_promotions: 10,
+            enable_stack_traces: true, // Debug by default
         }
     }
 }
@@ -770,6 +783,7 @@ impl TieredConfig {
             start_interpreted: true, // Instant startup for quick iteration
             bailout_strategy: BailoutStrategy::Immediate, // Quick bailout for testing
             max_tier_promotions: 6,
+            enable_stack_traces: true,
         }
     }
 
@@ -784,6 +798,7 @@ impl TieredConfig {
             start_interpreted: true, // Instant startup, then promote hot functions
             bailout_strategy: BailoutStrategy::Quick, // Quick bailout
             max_tier_promotions: 10,
+            enable_stack_traces: false, // Production: no trace overhead
         }
     }
 
@@ -799,6 +814,7 @@ impl TieredConfig {
             start_interpreted: false, // Skip interpreter, start at Phase 1
             bailout_strategy: BailoutStrategy::Quick, // Not used when start_interpreted=false
             max_tier_promotions: 10,
+            enable_stack_traces: true,
         }
     }
 }
@@ -1204,6 +1220,9 @@ impl TieredBackend {
 
         match self.compile_all_with_llvm() {
             Ok(all_pointers) => {
+                // Re-register source info at new LLVM addresses
+                self.register_source_info_for_pointers(&all_pointers);
+
                 let mut fp_lock = self.function_pointers.write().unwrap();
                 let mut ft_lock = self.function_tiers.write().unwrap();
 
@@ -1447,6 +1466,12 @@ impl TieredBackend {
             debug!("[TieredBackend] JIT mode: compiling all modules to Cranelift");
         }
 
+        // Instrument MIR functions with shadow call stack push/pop (debug mode only)
+        // TODO: temporarily disabled for debugging
+        // if self.config.enable_stack_traces {
+        //     Self::instrument_modules_for_stack_traces(&mut self.modules.write().unwrap());
+        // }
+
         // Convert runtime symbols to the format Cranelift expects
         let symbols: Vec<(&str, *const u8)> = self
             .runtime_symbols
@@ -1473,8 +1498,32 @@ impl TieredBackend {
         // Finalize all modules at once (must be done before getting function pointers)
         backend.finalize()?;
 
+        // Enable stack traces in the runtime if configured
+        if self.config.enable_stack_traces {
+            if let Some((_, ptr)) = self
+                .runtime_symbols
+                .iter()
+                .find(|(name, _)| name == "rayzor_set_stack_traces_enabled")
+            {
+                let enable_fn: extern "C" fn(i32) =
+                    unsafe { std::mem::transmute(*ptr) };
+                enable_fn(1);
+            }
+        }
+
         // Store function pointers for functions with bodies (non-extern)
         // Extern functions have empty CFGs and are imported, not compiled
+        // Also register source info for debug-mode stack traces
+        let register_fn: Option<extern "C" fn(u32, usize, *const u8, usize, *const u8, usize, u32, u32)> =
+            if self.config.enable_stack_traces {
+                self.runtime_symbols
+                    .iter()
+                    .find(|(name, _)| name == "rayzor_register_function_source")
+                    .map(|(_, ptr)| unsafe { std::mem::transmute(*ptr) })
+            } else {
+                None
+            };
+
         for module in modules.iter() {
             for (func_id, function) in &module.functions {
                 // Skip extern functions (no body to compile)
@@ -1486,6 +1535,25 @@ impl TieredBackend {
                         .write()
                         .unwrap()
                         .insert(*func_id, ptr as usize);
+
+                    // Register source info for stack traces (debug mode only)
+                    if let Some(register) = register_fn {
+                        let name = function
+                            .qualified_name
+                            .as_deref()
+                            .unwrap_or(&function.name);
+                        let source_file = &module.source_file;
+                        register(
+                            func_id.0,
+                            ptr as usize,
+                            name.as_ptr(),
+                            name.len(),
+                            source_file.as_ptr(),
+                            source_file.len(),
+                            function.source_location.line,
+                            function.source_location.column,
+                        );
+                    }
                 }
             }
         }
@@ -1504,6 +1572,219 @@ impl TieredBackend {
         }
 
         Ok(())
+    }
+
+    /// Instrument all MIR functions with shadow call stack push/pop instructions.
+    /// In debug mode, this adds `rayzor_push_call_frame(func_id)` at each function's
+    /// entry block and `rayzor_pop_call_frame()` before every return terminator.
+    /// This enables source-mapped stack traces by maintaining a thread-local shadow stack.
+    fn instrument_modules_for_stack_traces(modules: &mut Vec<IrModule>) {
+        use crate::ir::blocks::{IrBasicBlock, IrBlockId, IrTerminator};
+        use crate::ir::functions::{IrFunctionSignature, IrParameter};
+        use crate::ir::modules::IrExternFunction;
+        use crate::ir::types::{IrType, IrValue};
+        use crate::ir::{CallingConvention, IrId, OwnershipMode};
+        use crate::tast::id_types::SymbolId;
+
+        for module in modules.iter_mut() {
+            // Allocate function IDs for the two extern functions in this module
+            let push_fn_id = module.alloc_function_id();
+            let pop_fn_id = module.alloc_function_id();
+
+            // Register rayzor_push_call_frame(func_id: u32) -> void
+            module.add_extern_function(IrExternFunction {
+                id: push_fn_id,
+                name: "rayzor_push_call_frame".to_string(),
+                symbol_id: SymbolId::from_raw(u32::MAX - 10),
+                signature: IrFunctionSignature {
+                    parameters: vec![IrParameter {
+                        name: "func_id".to_string(),
+                        ty: IrType::U32,
+                        reg: IrId::new(0),
+                        by_ref: false,
+                    }],
+                    return_type: IrType::Void,
+                    calling_convention: CallingConvention::C,
+                    can_throw: false,
+                    type_params: vec![],
+                    uses_sret: false,
+                },
+                source: "runtime".to_string(),
+            });
+
+            // Register rayzor_pop_call_frame() -> void
+            module.add_extern_function(IrExternFunction {
+                id: pop_fn_id,
+                name: "rayzor_pop_call_frame".to_string(),
+                symbol_id: SymbolId::from_raw(u32::MAX - 11),
+                signature: IrFunctionSignature {
+                    parameters: vec![],
+                    return_type: IrType::Void,
+                    calling_convention: CallingConvention::C,
+                    can_throw: false,
+                    type_params: vec![],
+                    uses_sret: false,
+                },
+                source: "runtime".to_string(),
+            });
+
+            // Collect function IDs that need instrumentation (non-extern functions with bodies)
+            let func_ids: Vec<(crate::ir::IrFunctionId, u32)> = module
+                .functions
+                .iter()
+                .filter(|(_, f)| !f.cfg.blocks.is_empty())
+                .map(|(id, _)| (*id, id.0))
+                .collect();
+
+            for (func_id, raw_id) in func_ids {
+                let function = match module.functions.get_mut(&func_id) {
+                    Some(f) => f,
+                    None => continue,
+                };
+
+                // Allocate registers for the push call
+                let const_reg = IrId::new(function.next_reg_id);
+                function.next_reg_id += 1;
+
+                // Prepend to entry block: Const(reg, U32(func_id)) + CallDirect(push, [reg])
+                let entry_block_id = function.cfg.entry_block;
+                if let Some(entry_block) = function.cfg.get_block_mut(entry_block_id) {
+                    let push_instructions = vec![
+                        IrInstruction::Const {
+                            dest: const_reg,
+                            value: IrValue::U32(raw_id),
+                        },
+                        IrInstruction::CallDirect {
+                            dest: None,
+                            func_id: push_fn_id,
+                            args: vec![const_reg],
+                            arg_ownership: vec![OwnershipMode::Copy],
+                            type_args: vec![],
+                            is_tail_call: false,
+                        },
+                    ];
+
+                    // Insert at the beginning of the entry block
+                    let mut new_instructions = push_instructions;
+                    new_instructions.append(&mut entry_block.instructions);
+                    entry_block.instructions = new_instructions;
+                }
+
+                // For every block with a Return terminator, insert pop before it
+                let return_block_ids: Vec<IrBlockId> = function
+                    .cfg
+                    .blocks
+                    .iter()
+                    .filter(|(_, block)| matches!(block.terminator, IrTerminator::Return { .. }))
+                    .map(|(id, _)| *id)
+                    .collect();
+
+                for block_id in return_block_ids {
+                    if let Some(block) = function.cfg.get_block_mut(block_id) {
+                        block.instructions.push(IrInstruction::CallDirect {
+                            dest: None,
+                            func_id: pop_fn_id,
+                            args: vec![],
+                            arg_ownership: vec![],
+                            type_args: vec![],
+                            is_tail_call: false,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    /// Static version of source info registration for background worker thread.
+    fn register_source_info_static(
+        modules: &Arc<RwLock<Vec<IrModule>>>,
+        pointers: &HashMap<IrFunctionId, usize>,
+        runtime_symbols: &Arc<Vec<(String, usize)>>,
+    ) {
+        let register_fn: Option<
+            extern "C" fn(u32, usize, *const u8, usize, *const u8, usize, u32, u32),
+        > = runtime_symbols
+            .iter()
+            .find(|(name, _)| name == "rayzor_register_function_source")
+            .map(|(_, ptr)| unsafe { std::mem::transmute(*ptr) });
+
+        let register = match register_fn {
+            Some(f) => f,
+            None => return,
+        };
+
+        let modules_lock = modules.read().unwrap();
+        for module in modules_lock.iter() {
+            for (func_id, function) in &module.functions {
+                if function.cfg.blocks.is_empty() {
+                    continue;
+                }
+                if let Some(&ptr) = pointers.get(func_id) {
+                    let name = function
+                        .qualified_name
+                        .as_deref()
+                        .unwrap_or(&function.name);
+                    let source_file = &module.source_file;
+                    register(
+                        func_id.0,
+                        ptr,
+                        name.as_ptr(),
+                        name.len(),
+                        source_file.as_ptr(),
+                        source_file.len(),
+                        function.source_location.line,
+                        function.source_location.column,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Register source info for a set of function pointers (used by LLVM/AOT paths).
+    /// Iterates all modules, matching func_id → pointer in the given map.
+    fn register_source_info_for_pointers(&self, pointers: &HashMap<IrFunctionId, usize>) {
+        if !self.config.enable_stack_traces {
+            return;
+        }
+
+        let register_fn: Option<
+            extern "C" fn(u32, usize, *const u8, usize, *const u8, usize, u32, u32),
+        > = self
+            .runtime_symbols
+            .iter()
+            .find(|(name, _)| name == "rayzor_register_function_source")
+            .map(|(_, ptr)| unsafe { std::mem::transmute(*ptr) });
+
+        let register = match register_fn {
+            Some(f) => f,
+            None => return,
+        };
+
+        let modules = self.modules.read().unwrap();
+        for module in modules.iter() {
+            for (func_id, function) in &module.functions {
+                if function.cfg.blocks.is_empty() {
+                    continue;
+                }
+                if let Some(&ptr) = pointers.get(func_id) {
+                    let name = function
+                        .qualified_name
+                        .as_deref()
+                        .unwrap_or(&function.name);
+                    let source_file = &module.source_file;
+                    register(
+                        func_id.0,
+                        ptr,
+                        name.as_ptr(),
+                        name.len(),
+                        source_file.as_ptr(),
+                        source_file.len(),
+                        function.source_location.line,
+                        function.source_location.column,
+                    );
+                }
+            }
+        }
     }
 
     /// Register enum RTTI from a single MIR module's type definitions.
@@ -1611,6 +1892,17 @@ impl TieredBackend {
         backend.finalize()?;
 
         // Collect function pointers for all functions with bodies
+        // Also re-register source info for stack traces (debug mode only)
+        let register_fn: Option<extern "C" fn(u32, usize, *const u8, usize, *const u8, usize, u32, u32)> =
+            if self.config.enable_stack_traces {
+                self.runtime_symbols
+                    .iter()
+                    .find(|(name, _)| name == "rayzor_register_function_source")
+                    .map(|(_, ptr)| unsafe { std::mem::transmute(*ptr) })
+            } else {
+                None
+            };
+
         let mut pointers = HashMap::new();
         for module in modules_to_compile {
             for (func_id, function) in &module.functions {
@@ -1620,6 +1912,25 @@ impl TieredBackend {
                 }
                 if let Ok(ptr) = backend.get_function_ptr(*func_id) {
                     pointers.insert(*func_id, ptr as usize);
+
+                    // Re-register source info at new address (tier promotion)
+                    if let Some(register) = register_fn {
+                        let name = function
+                            .qualified_name
+                            .as_deref()
+                            .unwrap_or(&function.name);
+                        let source_file = &module.source_file;
+                        register(
+                            func_id.0,
+                            ptr as usize,
+                            name.as_ptr(),
+                            name.len(),
+                            source_file.as_ptr(),
+                            source_file.len(),
+                            function.source_location.line,
+                            function.source_location.column,
+                        );
+                    }
                 }
             }
         }
@@ -1680,6 +1991,9 @@ impl TieredBackend {
         {
             match self.compile_all_with_llvm() {
                 Ok(all_pointers) => {
+                    // Re-register source info at new LLVM addresses
+                    self.register_source_info_for_pointers(&all_pointers);
+
                     // Install ALL compiled function pointers (not just pending ones)
                     let mut fp_lock = self.function_pointers.write().unwrap();
                     let mut ft_lock = self.function_tiers.write().unwrap();
@@ -2525,6 +2839,15 @@ impl TieredBackend {
                             optimizing_lock.remove(func_id);
                         }
                         return;
+                    }
+
+                    // Re-register source info at new addresses (tier promotion)
+                    if config.enable_stack_traces {
+                        Self::register_source_info_static(
+                            &modules,
+                            &all_pointers,
+                            runtime_symbols,
+                        );
                     }
 
                     // Step 3: All executions drained - safe to install pointers atomically
