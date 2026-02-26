@@ -2153,7 +2153,7 @@ impl CompilationUnit {
     fn try_compile_import(
         &mut self,
         name: &str,
-        file_path: &PathBuf,
+        file_path: &Path,
         source: &str,
         deps: Vec<String>,
     ) -> bool {
@@ -2165,7 +2165,7 @@ impl CompilationUnit {
         }
 
         // Mark as loaded
-        self.namespace_resolver.mark_file_loaded(file_path.clone());
+        self.namespace_resolver.mark_file_loaded(file_path.to_path_buf());
 
         // Try BLADE cache first
         let cache_hit = if self.config.enable_cache {
