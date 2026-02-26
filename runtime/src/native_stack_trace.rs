@@ -233,10 +233,10 @@ pub fn resolve_backtrace_to_source(bt: &backtrace::Backtrace) -> String {
                     .next()
                     .unwrap_or(&source_file);
                 result.push_str(filename);
-                result.push_str(" line ");
+                result.push(':');
                 result.push_str(&line.to_string());
                 if column > 0 {
-                    result.push_str(" column ");
+                    result.push(':');
                     result.push_str(&column.to_string());
                 }
                 result.push(')');
@@ -324,12 +324,13 @@ pub fn capture_shadow_stack() -> String {
                         .rsplit('/')
                         .next()
                         .unwrap_or(&info.source_file);
+                    // Use file:line:col format so editors can create clickable links
                     result.push_str(" (");
                     result.push_str(filename);
-                    result.push_str(" line ");
+                    result.push(':');
                     result.push_str(&info.line.to_string());
                     if info.column > 0 {
-                        result.push_str(" column ");
+                        result.push(':');
                         result.push_str(&info.column.to_string());
                     }
                     result.push(')');
