@@ -12,7 +12,7 @@ use crate::ir::blade::{
     BladeEnumVariantInfo, BladeFieldInfo, BladeMethodInfo, BladeModuleSymbols, BladeParamInfo,
     BladeTypeAliasInfo, BladeTypeInfo, RayzorBundle,
 };
-use crate::ir::optimization::{OptimizationLevel, PassManager};
+use crate::ir::optimization::{strip_stack_trace_updates, OptimizationLevel, PassManager};
 use crate::ir::tree_shake;
 
 /// Configuration for bundle creation.
@@ -158,6 +158,14 @@ pub fn create_bundle(config: &BundleConfig) -> Result<usize, String> {
             for module in &mut modules {
                 let _ = pass_manager.run(module);
             }
+        }
+    }
+
+    // Strip call-frame location update hooks in stripped bundles.
+    // This keeps precompiled execution parity with source-JIT benchmark paths.
+    if config.strip {
+        for module in &mut modules {
+            let _ = strip_stack_trace_updates(module);
         }
     }
 
