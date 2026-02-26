@@ -85,12 +85,21 @@ pub struct PassManager {
 /// This is useful in non-stack-trace builds (benchmarks/release) where
 /// `hir_to_mir`-emitted call-site updates are pure overhead.
 pub fn strip_stack_trace_updates(module: &mut IrModule) -> OptimizationResult {
-    let update_fn_ids: HashSet<IrFunctionId> = module
+    const UPDATE_FN: &str = "rayzor_update_call_frame_location";
+
+    let mut update_fn_ids: HashSet<IrFunctionId> = module
         .extern_functions
         .values()
-        .filter(|ef| ef.name == "rayzor_update_call_frame_location")
+        .filter(|ef| ef.name == UPDATE_FN)
         .map(|ef| ef.id)
         .collect();
+    update_fn_ids.extend(
+        module
+            .functions
+            .values()
+            .filter(|f| f.name == UPDATE_FN)
+            .map(|f| f.id),
+    );
 
     if update_fn_ids.is_empty() {
         return OptimizationResult::unchanged();
@@ -111,12 +120,14 @@ pub fn strip_stack_trace_updates(module: &mut IrModule) -> OptimizationResult {
     }
 
     let extern_before = module.extern_functions.len();
-    module
-        .extern_functions
-        .retain(|_, ef| ef.name != "rayzor_update_call_frame_location");
+    module.extern_functions.retain(|_, ef| ef.name != UPDATE_FN);
     let removed_externs = extern_before - module.extern_functions.len();
 
-    if stripped_calls == 0 && removed_externs == 0 {
+    let functions_before = module.functions.len();
+    module.functions.retain(|_, f| f.name != UPDATE_FN);
+    let removed_functions = functions_before - module.functions.len();
+
+    if stripped_calls == 0 && removed_externs == 0 && removed_functions == 0 {
         return OptimizationResult::unchanged();
     }
 
@@ -129,6 +140,10 @@ pub fn strip_stack_trace_updates(module: &mut IrModule) -> OptimizationResult {
     result.stats.insert(
         "stack_trace_update_externs_removed".to_string(),
         removed_externs,
+    );
+    result.stats.insert(
+        "stack_trace_update_functions_removed".to_string(),
+        removed_functions,
     );
     result
 }
@@ -1888,5 +1903,139 @@ mod tests {
 
         assert!(opt_result.modified);
         assert!(opt_result.instructions_eliminated > 0);
+    }
+
+    #[test]
+    fn test_strip_stack_trace_updates_only_removes_update_calls() {
+        let mut builder = IrBuilder::new("test".to_string(), "test.hx".to_string());
+
+        let update_sig = FunctionSignatureBuilder::new()
+            .param("line".to_string(), IrType::I32)
+            .param("col".to_string(), IrType::I32)
+            .returns(IrType::Void)
+            .build();
+        let keep_sig = FunctionSignatureBuilder::new()
+            .returns(IrType::Void)
+            .build();
+
+        let update_id = builder.module.alloc_function_id();
+        let keep_id = builder.module.alloc_function_id();
+        builder
+            .module
+            .add_extern_function(crate::ir::modules::IrExternFunction {
+                id: update_id,
+                name: "rayzor_update_call_frame_location".to_string(),
+                symbol_id: SymbolId::from_raw(9001),
+                signature: update_sig,
+                source: "runtime".to_string(),
+            });
+        builder
+            .module
+            .add_extern_function(crate::ir::modules::IrExternFunction {
+                id: keep_id,
+                name: "rayzor_runtime_keep_me".to_string(),
+                symbol_id: SymbolId::from_raw(9002),
+                signature: keep_sig,
+                source: "runtime".to_string(),
+            });
+
+        let sig = FunctionSignatureBuilder::new()
+            .returns(IrType::Void)
+            .build();
+        builder.start_function(SymbolId::from_raw(1), "main".to_string(), sig);
+        let line = builder.build_const(IrValue::I32(7)).unwrap();
+        let col = builder.build_const(IrValue::I32(13)).unwrap();
+        builder.build_call_direct(update_id, vec![line, col], IrType::Void);
+        builder.build_call_direct(keep_id, vec![], IrType::Void);
+        builder.build_return(None);
+        builder.finish_function();
+
+        let result = strip_stack_trace_updates(&mut builder.module);
+        assert!(result.modified);
+        assert_eq!(result.instructions_eliminated, 1);
+
+        let func = builder.module.functions.values().next().unwrap();
+        let instructions: Vec<&IrInstruction> = func
+            .cfg
+            .blocks
+            .values()
+            .flat_map(|b| b.instructions.iter())
+            .collect();
+
+        assert!(!instructions.iter().any(|instr| {
+            matches!(instr, IrInstruction::CallDirect { func_id, .. } if *func_id == update_id)
+        }));
+        assert!(instructions.iter().any(|instr| {
+            matches!(instr, IrInstruction::CallDirect { func_id, .. } if *func_id == keep_id)
+        }));
+        assert!(!builder.module.extern_functions.contains_key(&update_id));
+        assert!(builder.module.extern_functions.contains_key(&keep_id));
+    }
+
+    #[test]
+    fn test_strip_stack_trace_updates_removes_internal_update_function_calls() {
+        let mut builder = IrBuilder::new("test".to_string(), "test.hx".to_string());
+
+        let update_sig = FunctionSignatureBuilder::new()
+            .param("line".to_string(), IrType::I32)
+            .param("col".to_string(), IrType::I32)
+            .returns(IrType::Void)
+            .build();
+        let keep_sig = FunctionSignatureBuilder::new()
+            .returns(IrType::Void)
+            .build();
+
+        let update_id = builder.start_function(
+            SymbolId::from_raw(9100),
+            "rayzor_update_call_frame_location".to_string(),
+            update_sig,
+        );
+        builder.build_return(None);
+        builder.finish_function();
+
+        let keep_id = builder.start_function(
+            SymbolId::from_raw(9101),
+            "keep_me".to_string(),
+            keep_sig.clone(),
+        );
+        builder.build_return(None);
+        builder.finish_function();
+
+        builder.start_function(SymbolId::from_raw(9102), "main".to_string(), keep_sig);
+        let line = builder.build_const(IrValue::I32(10)).unwrap();
+        let col = builder.build_const(IrValue::I32(20)).unwrap();
+        builder.build_call_direct(update_id, vec![line, col], IrType::Void);
+        builder.build_call_direct(keep_id, vec![], IrType::Void);
+        builder.build_return(None);
+        builder.finish_function();
+
+        let result = strip_stack_trace_updates(&mut builder.module);
+        assert!(result.modified);
+        assert_eq!(result.instructions_eliminated, 1);
+
+        let main_func = builder
+            .module
+            .functions
+            .values()
+            .find(|f| f.name == "main")
+            .unwrap();
+        let instructions: Vec<&IrInstruction> = main_func
+            .cfg
+            .blocks
+            .values()
+            .flat_map(|b| b.instructions.iter())
+            .collect();
+
+        assert!(!instructions.iter().any(|instr| {
+            matches!(instr, IrInstruction::CallDirect { func_id, .. } if *func_id == update_id)
+        }));
+        assert!(instructions.iter().any(|instr| {
+            matches!(instr, IrInstruction::CallDirect { func_id, .. } if *func_id == keep_id)
+        }));
+        assert!(!builder
+            .module
+            .functions
+            .values()
+            .any(|f| f.name == "rayzor_update_call_frame_location"));
     }
 }
