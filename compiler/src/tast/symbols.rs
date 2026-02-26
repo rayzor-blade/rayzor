@@ -321,6 +321,8 @@ impl SymbolFlags {
     pub const NO_MANGLE: Self = Self(1 << 15);
     /// @:gpuStruct - GPU-compatible flat struct layout (4-byte floats, no object header)
     pub const GPU_STRUCT: Self = Self(1 << 16);
+    /// @:keep - preserve symbol even if seemingly unreachable (skip DCE)
+    pub const KEEP: Self = Self(1 << 17);
 
     pub const fn empty() -> Self {
         Self::NONE
@@ -378,6 +380,11 @@ impl SymbolFlags {
     /// Check if this symbol has @:gpuStruct metadata
     pub const fn is_gpu_struct(self) -> bool {
         self.contains(Self::GPU_STRUCT)
+    }
+
+    /// Check if this symbol has @:keep metadata
+    pub const fn is_keep(self) -> bool {
+        self.contains(Self::KEEP)
     }
 }
 
@@ -492,6 +499,11 @@ impl Symbol {
     /// Check if this symbol is final
     pub fn is_final(&self) -> bool {
         self.flags.contains(SymbolFlags::FINAL)
+    }
+
+    /// Check if this symbol has @:keep metadata
+    pub fn is_keep(&self) -> bool {
+        self.flags.contains(SymbolFlags::KEEP)
     }
 
     /// Get a human-readable description of this symbol

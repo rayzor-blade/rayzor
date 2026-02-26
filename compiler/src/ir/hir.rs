@@ -151,6 +151,8 @@ pub struct HirFunction {
     pub calling_convention: HirCallingConvention,
     /// Flag to indicate if this is the main entry point
     pub is_main: bool,
+    /// Preserve function regardless of reachability (from @:keep metadata)
+    pub is_keep: bool,
     /// Source location of the function definition (for stack traces)
     pub source_location: crate::tast::symbols::SourceLocation,
 }

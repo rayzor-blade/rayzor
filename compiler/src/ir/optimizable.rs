@@ -209,6 +209,11 @@ impl<'a> HirOptimizationPass for HirDeadCodeElimination<'a> {
 
         // Collect all reachable functions
         let mut reachable_functions = std::collections::HashSet::new();
+        for func in module.functions.values() {
+            if func.is_keep {
+                reachable_functions.insert(func.symbol_id);
+            }
+        }
 
         // If we have a call graph, use it for precise analysis
         if let Some(call_graph) = self.call_graph {
@@ -498,5 +503,85 @@ fn validate_hir(module: &super::hir::HirModule) -> Result<(), Vec<ValidationErro
         Ok(())
     } else {
         Err(errors)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HirDeadCodeElimination, HirOptimizationPass};
+    use crate::ir::hir::{HirBlock, HirCallingConvention, HirFunction, HirMetadata, HirModule};
+    use crate::tast::{ScopeId, SourceLocation, StringInterner, SymbolId, TypeId};
+    use std::collections::HashMap;
+
+    fn test_function(
+        symbol_id: SymbolId,
+        name: crate::tast::InternedString,
+        is_main: bool,
+        is_keep: bool,
+    ) -> HirFunction {
+        HirFunction {
+            symbol_id,
+            name,
+            qualified_name: None,
+            type_params: Vec::new(),
+            params: Vec::new(),
+            return_type: TypeId::from_raw(1),
+            body: Some(HirBlock::new(Vec::new(), ScopeId::from_raw(0))),
+            metadata: Vec::new(),
+            is_inline: false,
+            is_macro: false,
+            is_extern: false,
+            calling_convention: HirCallingConvention::Haxe,
+            is_main,
+            is_keep,
+            source_location: SourceLocation::unknown(),
+        }
+    }
+
+    fn empty_module(name: &str) -> HirModule {
+        HirModule {
+            name: name.to_string(),
+            imports: Vec::new(),
+            types: indexmap::IndexMap::new(),
+            functions: indexmap::IndexMap::new(),
+            globals: HashMap::new(),
+            metadata: HirMetadata {
+                source_file: String::new(),
+                language_version: "1.0".to_string(),
+                target_platforms: vec!["js".to_string()],
+                optimization_hints: Vec::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn hir_dce_keeps_keep_annotated_unreachable_functions() {
+        let mut interner = StringInterner::new();
+        let main_name = interner.intern("main");
+        let kept_name = interner.intern("kept");
+        let dead_name = interner.intern("dead");
+
+        let main_sym = SymbolId::from_raw(1);
+        let kept_sym = SymbolId::from_raw(2);
+        let dead_sym = SymbolId::from_raw(3);
+
+        let mut module = empty_module("keep_test");
+        module
+            .functions
+            .insert(main_sym, test_function(main_sym, main_name, true, false));
+        module
+            .functions
+            .insert(kept_sym, test_function(kept_sym, kept_name, false, true));
+        module
+            .functions
+            .insert(dead_sym, test_function(dead_sym, dead_name, false, false));
+
+        let mut dce = HirDeadCodeElimination::new();
+        let result = HirOptimizationPass::optimize_hir(&mut dce, &mut module);
+
+        assert!(result.modified);
+        assert!(module.functions.contains_key(&main_sym));
+        assert!(module.functions.contains_key(&kept_sym));
+        assert!(!module.functions.contains_key(&dead_sym));
     }
 }

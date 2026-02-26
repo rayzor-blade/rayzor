@@ -867,9 +867,12 @@ map.set(new Key(1, "foo"), "value");
 - [x] EnumValueMap<K,V> - Enum value key map (pure Haxe, set/get/exists work with enum keys via BalancedTree + virtual dispatch)
 - [x] List<T> - Linked list (pure Haxe, add/push/pop/first/last/isEmpty/length/remove/clear all working via auto-import) (2026-02-21)
 
-**Exception/Stack Trace** 🟡
-- [ ] Exception class with stack trace
-- [ ] NativeStackTrace for capture
+**Exception/Stack Trace** 🟢 (Parity fixes complete, 2026-02-26)
+- [x] Polymorphic typed exceptions and typed catch dispatch (`rayzor_throw_typed`, `rayzor_get_exception_type_id`)
+- [x] `haxe.NativeStackTrace.exceptionStack()` / `callStack()` runtime capture available
+- [x] Shadow call-stack call-site tracking via `rayzor_update_call_frame_location`
+- [x] MIR method-resolution parity for `Exception.message` / `toString()` / `details()` before backend lowering
+- [x] Uncaught exception message parity (`Uncaught exception: Exception: "<message>"` + stack trace)
 
 ### 6.6 Not Implemented - LOW PRIORITY 🔴
 
@@ -983,6 +986,7 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 - [x] Unreachable Block Elimination — removes dead code blocks
 - [x] Control Flow Simplification — constant-folds conditional branches
 - [x] InsertFree — correctness pass with escape analysis for non-escaping allocations (all levels)
+- [x] Stack trace update stripping (`strip_stack_trace_updates`) — removes `rayzor_update_call_frame_location` calls in non-stack-trace MIR flows (bench/release/AOT)
 - [x] Loop Vectorization framework — SIMD types and vector instruction infrastructure (O3 only, limited transformation)
 
 ### Pass Pipeline (per optimization level)
@@ -1818,10 +1822,15 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 - [x] Exception propagation through uncaught functions (cross-function unwinding) — setjmp/longjmp inherently handles this (2026-02-20)
 
+**Implemented (2026-02-26):**
+
+- [x] Stack-trace update stripping moved to MIR-level pass (`strip_stack_trace_updates`) for non-instrumented benchmark/release paths (Cranelift + LLVM consumers), preserving exception/stack features in debug paths
+- [x] MIR call lowering now resolves class methods deterministically for `haxe.Exception` instance calls (`message`, `toString`, `details`) before backend lowering
+- [x] Runtime uncaught throw formatting now prints exception message text (not raw pointer value) while preserving stack output order
+
 **Not Yet Implemented:**
 
-- [ ] `haxe.Exception` base class
-- [ ] Stack trace capture on throw
+- [ ] Additional formatting polish for `Exception.details()` source snippets in edge cases
 
 ### 16.4 Closures as First-Class Values 🟢
 

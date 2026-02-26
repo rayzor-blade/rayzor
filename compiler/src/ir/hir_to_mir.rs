@@ -871,6 +871,335 @@ impl<'a> HirToMirContext<'a> {
         result
     }
 
+    /// Resolve a class symbol from a receiver type, handling aliases/generic instances.
+    /// Falls back to the persisted class_type_to_symbol map when TypeIds drift.
+    fn resolve_receiver_class_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
+        let mut current = type_id;
+        {
+            let type_table = self.type_table.borrow();
+            for _ in 0..16 {
+                match type_table.get(current).map(|ti| &ti.kind) {
+                    Some(TypeKind::Class { symbol_id, .. }) => return Some(*symbol_id),
+                    Some(TypeKind::TypeAlias { target_type, .. }) => {
+                        if *target_type == current {
+                            break;
+                        }
+                        current = *target_type;
+                    }
+                    Some(TypeKind::GenericInstance { base_type, .. }) => {
+                        if *base_type == current {
+                            break;
+                        }
+                        current = *base_type;
+                    }
+                    _ => break,
+                }
+            }
+        }
+
+        self.class_type_to_symbol
+            .get(&current)
+            .copied()
+            .or_else(|| self.class_type_to_symbol.get(&type_id).copied())
+    }
+
+    /// Resolve the canonical runtime class TypeId used by MIR type metadata.
+    /// TAST class TypeIds can differ from HIR/MIR TypeIds; runtime RTTI registration
+    /// is keyed by MIR TypeId, so we map through class_symbol when needed.
+    fn resolve_runtime_class_type_id(
+        &self,
+        tast_type_id: TypeId,
+        class_symbol: SymbolId,
+    ) -> TypeId {
+        let has_mir_type = |tid: TypeId| {
+            self.builder
+                .module
+                .types
+                .values()
+                .any(|typedef| typedef.type_id == tid)
+        };
+
+        if self.class_type_to_symbol.get(&tast_type_id) == Some(&class_symbol)
+            && has_mir_type(tast_type_id)
+        {
+            return tast_type_id;
+        }
+
+        let symbol_type_id = TypeId::from_raw(class_symbol.as_raw());
+        let mut best: Option<(u8, TypeId)> = None;
+        for (candidate_type_id, sym) in &self.class_type_to_symbol {
+            if *sym != class_symbol {
+                continue;
+            }
+
+            // Prefer TypeIds that are known canonical class IDs:
+            // 1) Present as a typedef in the current MIR module
+            // 2) Present in class_alloc_sizes (seeded from imported class metadata)
+            // 3) Not just the SymbolId-derived synthetic fallback.
+            let score = if has_mir_type(*candidate_type_id) {
+                3
+            } else if self.class_alloc_sizes.contains_key(candidate_type_id) {
+                2
+            } else if *candidate_type_id != symbol_type_id {
+                1
+            } else {
+                0
+            };
+
+            match best {
+                Some((best_score, best_tid)) => {
+                    if score > best_score
+                        || (score == best_score && candidate_type_id.as_raw() < best_tid.as_raw())
+                    {
+                        best = Some((score, *candidate_type_id));
+                    }
+                }
+                None => best = Some((score, *candidate_type_id)),
+            }
+        }
+
+        if let Some((_, tid)) = best {
+            return tid;
+        }
+
+        // Last-resort fallback: match class short name to MIR typedef name.
+        // This handles symbol-id drift between TAST/HIR when class_type_to_symbol
+        // has not been populated for the current symbol-id variant.
+        if let Some(class_name) = self
+            .symbol_table
+            .get_symbol(class_symbol)
+            .and_then(|s| self.string_interner.get(s.name))
+        {
+            let mut by_name: Option<TypeId> = None;
+            for typedef in self.builder.module.types.values() {
+                if typedef.name == class_name {
+                    by_name = Some(typedef.type_id);
+                    break;
+                }
+            }
+            if let Some(tid) = by_name {
+                return tid;
+            }
+        }
+
+        tast_type_id
+    }
+
+    /// Resolve a method symbol by (class, method_name), walking parent classes.
+    fn resolve_class_method_symbol(
+        &self,
+        class_symbol: SymbolId,
+        method_name: InternedString,
+    ) -> Option<SymbolId> {
+        let mut current = Some(class_symbol);
+        for _ in 0..32 {
+            let cls = current?;
+            if let Some(method_symbol) = self
+                .class_method_symbols
+                .get(&(cls, method_name))
+                .copied()
+                .or_else(|| self.class_method_by_name.get(&(cls, method_name)).copied())
+            {
+                return Some(method_symbol);
+            }
+            current = self.class_parent_map.get(&cls).copied();
+        }
+        None
+    }
+
+    /// Check whether a method symbol is declared on the class or one of its parents.
+    /// This avoids ambiguous bare-name fallback when multiple classes share names
+    /// like `toString`, especially across lazy-loaded import modules.
+    fn symbol_belongs_to_class_hierarchy(
+        &self,
+        method_symbol: SymbolId,
+        class_symbol: SymbolId,
+    ) -> bool {
+        let method_scope = match self.symbol_table.get_symbol(method_symbol) {
+            Some(sym) => sym.scope_id,
+            None => return false,
+        };
+
+        let mut current = Some(class_symbol);
+        for _ in 0..32 {
+            let cls = match current {
+                Some(s) => s,
+                None => break,
+            };
+            let cls_scope = self.symbol_table.get_symbol(cls).map(|s| s.scope_id);
+            if cls_scope == Some(method_scope) {
+                return true;
+            }
+            current = self.class_parent_map.get(&cls).copied();
+        }
+
+        false
+    }
+
+    /// Resolve a function ID by symbol with a qualified-name fallback across local/external maps.
+    fn resolve_function_id_with_qualified_fallback(
+        &self,
+        symbol: SymbolId,
+    ) -> Option<IrFunctionId> {
+        if let Some(func_id) = self.get_function_id(&symbol) {
+            return Some(func_id);
+        }
+
+        let qual_name = self
+            .symbol_table
+            .get_symbol(symbol)
+            .and_then(|s| s.qualified_name)
+            .and_then(|qn| self.string_interner.get(qn))?;
+
+        for (local_sym, &local_func_id) in &self.function_map {
+            let local_qual = self
+                .symbol_table
+                .get_symbol(*local_sym)
+                .and_then(|s| s.qualified_name)
+                .and_then(|qn| self.string_interner.get(qn));
+            if local_qual == Some(qual_name) {
+                return Some(local_func_id);
+            }
+        }
+
+        for (ext_sym, &ext_func_id) in &self.external_function_map {
+            let ext_qual = self
+                .symbol_table
+                .get_symbol(*ext_sym)
+                .and_then(|s| s.qualified_name)
+                .and_then(|qn| self.string_interner.get(qn));
+            if ext_qual == Some(qual_name) {
+                return Some(ext_func_id);
+            }
+        }
+
+        self.external_function_name_map.get(qual_name).copied()
+    }
+
+    /// Resolve an instance method function ID from receiver type + method name.
+    fn resolve_method_function_id(
+        &self,
+        receiver_type: TypeId,
+        method_name: InternedString,
+    ) -> Option<IrFunctionId> {
+        let class_symbol = self.resolve_receiver_class_symbol(receiver_type)?;
+        let method_symbol_opt = self.resolve_class_method_symbol(class_symbol, method_name);
+        if let Some(method_symbol) = method_symbol_opt {
+            if let Some(func_id) = self.resolve_function_id_with_qualified_fallback(method_symbol) {
+                return Some(func_id);
+            }
+        }
+
+        let class_name_hint = self
+            .symbol_table
+            .get_symbol(class_symbol)
+            .and_then(|s| s.qualified_name.or(Some(s.name)))
+            .and_then(|n| self.string_interner.get(n));
+        let method_decl_loc = method_symbol_opt
+            .and_then(|method_symbol| self.symbol_table.get_symbol(method_symbol))
+            .map(|s| s.definition_location)
+            .unwrap_or(SourceLocation::unknown());
+
+        let mut name_matches = BTreeSet::new();
+
+        for (candidate_sym, &func_id) in &self.function_map {
+            if let Some(sym_info) = self.symbol_table.get_symbol(*candidate_sym) {
+                if sym_info.name != method_name {
+                    continue;
+                }
+                name_matches.insert(func_id);
+                if self.symbol_belongs_to_class_hierarchy(*candidate_sym, class_symbol) {
+                    return Some(func_id);
+                }
+                if method_decl_loc.is_valid() && sym_info.definition_location == method_decl_loc {
+                    return Some(func_id);
+                }
+                if let Some(class_hint) = class_name_hint {
+                    let qual_match = sym_info
+                        .qualified_name
+                        .and_then(|qn| self.string_interner.get(qn))
+                        .map(|qn| qn.contains(class_hint))
+                        .unwrap_or(false);
+                    if qual_match {
+                        return Some(func_id);
+                    }
+                }
+            }
+        }
+
+        for (candidate_sym, &func_id) in &self.external_function_map {
+            if let Some(sym_info) = self.symbol_table.get_symbol(*candidate_sym) {
+                if sym_info.name != method_name {
+                    continue;
+                }
+                name_matches.insert(func_id);
+                if self.symbol_belongs_to_class_hierarchy(*candidate_sym, class_symbol) {
+                    return Some(func_id);
+                }
+                if method_decl_loc.is_valid() && sym_info.definition_location == method_decl_loc {
+                    return Some(func_id);
+                }
+                if let Some(class_hint) = class_name_hint {
+                    let qual_match = sym_info
+                        .qualified_name
+                        .and_then(|qn| self.string_interner.get(qn))
+                        .map(|qn| qn.contains(class_hint))
+                        .unwrap_or(false);
+                    if qual_match {
+                        return Some(func_id);
+                    }
+                }
+            }
+        }
+
+        let method_name_str = self.string_interner.get(method_name)?;
+        let class_short_hint = class_name_hint
+            .and_then(|n| n.rsplit('.').next())
+            .filter(|s| !s.is_empty());
+        let mut module_name_matches = BTreeSet::new();
+        for (func_id, func) in &self.builder.module.functions {
+            if func.name != method_name_str {
+                continue;
+            }
+            module_name_matches.insert(*func_id);
+            if let Some(class_hint) = class_name_hint {
+                let qual_match = func
+                    .qualified_name
+                    .as_deref()
+                    .map(|qn| {
+                        qn.contains(class_hint)
+                            || class_short_hint
+                                .map(|short| qn.contains(short))
+                                .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+                if qual_match {
+                    return Some(*func_id);
+                }
+            }
+        }
+        if module_name_matches.len() == 1 {
+            return module_name_matches.iter().next().copied();
+        }
+
+        let mut extern_name_matches = BTreeSet::new();
+        for (func_id, func) in &self.builder.module.extern_functions {
+            if func.name != method_name_str {
+                continue;
+            }
+            extern_name_matches.insert(*func_id);
+        }
+        if extern_name_matches.len() == 1 {
+            return extern_name_matches.iter().next().copied();
+        }
+
+        if name_matches.len() == 1 {
+            return name_matches.iter().next().copied();
+        }
+
+        None
+    }
+
     /// Find a MIR function by its bare name in function_map
     fn find_function_by_name(&self, name: &str) -> Option<IrFunctionId> {
         let module = &self.builder.module;
@@ -1966,6 +2295,14 @@ impl<'a> HirToMirContext<'a> {
         let func_id = self.builder.start_function(symbol_id, func_name, signature);
         self.function_map.insert(symbol_id, func_id);
 
+        if hir_func.is_keep {
+            if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
+                func.attributes
+                    .custom
+                    .insert("keep".to_string(), "true".to_string());
+            }
+        }
+
         // Store default parameter expressions for call-site filling
         let defaults: Vec<Option<HirExpr>> =
             hir_func.params.iter().map(|p| p.default.clone()).collect();
@@ -2043,6 +2380,14 @@ impl<'a> HirToMirContext<'a> {
 
         let func_id = self.builder.start_function(symbol_id, func_name, signature);
         self.function_map.insert(symbol_id, func_id);
+
+        if hir_func.is_keep {
+            if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
+                func.attributes
+                    .custom
+                    .insert("keep".to_string(), "true".to_string());
+            }
+        }
 
         // Store default parameter expressions for call-site filling
         let defaults: Vec<Option<HirExpr>> =
@@ -2565,6 +2910,14 @@ impl<'a> HirToMirContext<'a> {
 
         // Store function mapping for call resolution
         self.function_map.insert(symbol_id, func_id);
+
+        if hir_func.is_keep {
+            if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
+                func.attributes
+                    .custom
+                    .insert("keep".to_string(), "true".to_string());
+            }
+        }
 
         // Record constrained type parameter info for call-site fat pointer wrapping
         self.record_constrained_params(func_id, hir_func, false);
@@ -3648,7 +4001,6 @@ impl<'a> HirToMirContext<'a> {
             }
 
             HirStatement::Throw(expr) => {
-                let thrown_type_id = self.runtime_type_id(expr.ty);
                 let thrown_type = expr.ty;
                 let throw_loc = expr.source_location;
                 if let Some(exception_reg) = self.lower_expression(expr) {
@@ -3688,11 +4040,44 @@ impl<'a> HirToMirContext<'a> {
                         exception_reg
                     };
 
-                    // Call rayzor_throw_typed(exception_value, type_id)
-                    let type_id_const = self
-                        .builder
-                        .build_const(IrValue::I32(thrown_type_id as i32))
-                        .expect("failed to create type_id const");
+                    // Call rayzor_throw_typed(exception_value, type_id).
+                    // For class throws, derive the raw type id from the object header at runtime,
+                    // then add +1000 to match typed-catch encoding.
+                    let thrown_type_reg = if self.get_class_symbol(thrown_type).is_some() {
+                        let obj_ptr_ty = IrType::Ptr(Box::new(IrType::U8));
+                        let obj_ptr = self
+                            .builder
+                            .build_cast(exc_as_i64, IrType::I64, obj_ptr_ty.clone())
+                            .unwrap_or(exception_reg);
+                        let idx0 = self
+                            .builder
+                            .build_const(IrValue::I32(0))
+                            .expect("failed to create throw header index const");
+                        let header_ptr = self
+                            .builder
+                            .build_gep(obj_ptr, vec![idx0], IrType::I64)
+                            .expect("failed to build throw header gep");
+                        let header_raw = self
+                            .builder
+                            .build_load(header_ptr, IrType::I64)
+                            .expect("failed to load throw header type id");
+                        let class_offset = self
+                            .builder
+                            .build_const(IrValue::I64(1000))
+                            .expect("failed to create throw class offset const");
+                        let encoded = self
+                            .builder
+                            .build_binop(BinaryOp::Add, header_raw, class_offset)
+                            .expect("failed to encode throw class type id");
+                        self.builder
+                            .build_cast(encoded, IrType::I64, IrType::I32)
+                            .expect("failed to cast throw class type id")
+                    } else {
+                        let thrown_type_id = self.runtime_type_id(expr.ty);
+                        self.builder
+                            .build_const(IrValue::I32(thrown_type_id as i32))
+                            .expect("failed to create throw type_id const")
+                    };
                     let throw_fn = self.get_or_register_extern_function(
                         "rayzor_throw_typed",
                         vec![IrType::I64, IrType::I32],
@@ -3700,7 +4085,7 @@ impl<'a> HirToMirContext<'a> {
                     );
                     self.builder.build_call_direct(
                         throw_fn,
-                        vec![exc_as_i64, type_id_const],
+                        vec![exc_as_i64, thrown_type_reg],
                         IrType::Void,
                     );
                     self.builder.build_unreachable();
@@ -4786,14 +5171,14 @@ impl<'a> HirToMirContext<'a> {
 
     /// Record an enum for RTTI registration
     /// This collects enum metadata during lowering so it can be registered at module init
-    fn record_enum_for_registration(&mut self, enum_symbol_id: SymbolId, _type_id: TypeId) {
+    fn record_enum_for_registration(&mut self, enum_symbol_id: SymbolId, type_id: TypeId) {
         // Skip if already recorded
         if self.enums_for_registration.contains_key(&enum_symbol_id) {
             return;
         }
 
-        // Calculate runtime type ID (symbol_id + 1000 offset)
-        let runtime_type_id = enum_symbol_id.as_raw() + 1000;
+        // Calculate runtime type ID (TypeId + 1000 offset)
+        let runtime_type_id = type_id.as_raw() + 1000;
 
         // Get enum name from symbol table
         let enum_name = self
@@ -5955,10 +6340,9 @@ impl<'a> HirToMirContext<'a> {
                 if let HirExprKind::Field { object, field } = &callee.kind {
                     // This is a method call: object.method(args)
                     // The method symbol should be in our function_map (local or external)
-                    let method_name = self
-                        .symbol_table
-                        .get_symbol(*field)
-                        .and_then(|s| self.string_interner.get(s.name));
+                    let method_name_interned = self.symbol_table.get_symbol(*field).map(|s| s.name);
+                    let method_name =
+                        method_name_interned.and_then(|name| self.string_interner.get(name));
                     let in_local = self.function_map.contains_key(field);
                     let in_external = self.external_function_map.contains_key(field);
                     debug!(
@@ -6165,7 +6549,12 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    let maybe_func_id = self.get_function_id(field);
+                    let maybe_func_id = self
+                        .resolve_function_id_with_qualified_fallback(*field)
+                        .or_else(|| {
+                            method_name_interned
+                                .and_then(|name| self.resolve_method_function_id(object.ty, name))
+                        });
                     let field_name = self
                         .symbol_table
                         .get_symbol(*field)
@@ -7237,8 +7626,6 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
                         drop(type_table);
-
-                        // eprintln!("WARNING: Method {:?} not found in function_map", field);
                     }
                 }
 
@@ -10845,7 +11232,16 @@ impl<'a> HirToMirContext<'a> {
 
                     // Check if this symbol is a function (local or external)
                     // First try direct symbol ID lookup
+                    let method_name_interned =
+                        self.symbol_table.get_symbol(*symbol).map(|s| s.name);
                     let mut func_id_opt = self.get_function_id(symbol);
+
+                    if func_id_opt.is_none() && *is_method && !args.is_empty() {
+                        if let Some(method_name) = method_name_interned {
+                            func_id_opt = self.resolve_method_function_id(args[0].ty, method_name);
+                        }
+                    }
+
                     // If not found by symbol ID, try lookup by qualified name
                     // This handles cross-module calls where symbol IDs differ between modules,
                     // and also intra-module static method calls where the call site symbol
@@ -12440,18 +12836,14 @@ impl<'a> HirToMirContext<'a> {
                 let obj_ptr = self.build_heap_alloc(obj_size);
                 let obj_ptr = obj_ptr?;
 
-                // Store object header: runtime type_id at GEP index 0
-                // This enables runtime type identification for downcasting, Dynamic field access, etc.
-                // IMPORTANT: Use the SymbolId-based TypeId (matches TYPE_REGISTRY key).
-                // tast_to_hir creates TypeId::from_raw(symbol_id.as_raw()) for the registry,
-                // so we must extract the symbol_id from the TAST type and use that.
+                // Store object header: runtime type_id at GEP index 0.
+                // Use the same class-id resolver as typed throw/catch (without +1000).
                 {
-                    let runtime_type_id = {
-                        let type_table = self.type_table.borrow();
-                        match type_table.get(*class_type).map(|t| &t.kind) {
-                            Some(TypeKind::Class { symbol_id, .. }) => symbol_id.as_raw() as i64,
-                            _ => class_type.as_raw() as i64, // fallback
-                        }
+                    let encoded_type_id = self.runtime_type_id(*class_type);
+                    let runtime_type_id = if encoded_type_id >= 1000 {
+                        (encoded_type_id - 1000) as i64
+                    } else {
+                        encoded_type_id as i64
                     };
                     if let Some(type_id_const) =
                         self.builder.build_const(IrValue::I64(runtime_type_id))
@@ -13239,10 +13631,9 @@ impl<'a> HirToMirContext<'a> {
                             self.builder.build_cast(value_reg, from_type, to_type)
                         } else {
                             // Downcast or unrelated: runtime check via object header.
-                            // haxe_safe_downcast_class reads type_id from offset 0,
-                            // walks the hierarchy, returns obj_ptr or null.
-                            // Use SymbolId-based TypeId to match TYPE_REGISTRY and object header.
-                            let target_type_id = tgt_sym.as_raw() as i64;
+                            // haxe_safe_downcast_class reads raw TypeId from offset 0,
+                            // walks hierarchy, and returns obj_ptr or null.
+                            let target_type_id = target.as_raw() as i64;
                             let type_id_const =
                                 self.builder.build_const(IrValue::I64(target_type_id))?;
                             let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
@@ -22741,13 +23132,7 @@ impl<'a> HirToMirContext<'a> {
 
     /// Check if a type is a class type and return its SymbolId
     fn get_class_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
-        let type_table = self.type_table.borrow();
-        let type_ref = type_table.get(type_id)?;
-        if let TypeKind::Class { symbol_id, .. } = &type_ref.kind {
-            Some(*symbol_id)
-        } else {
-            None
-        }
+        self.resolve_receiver_class_symbol(type_id)
     }
 
     /// If value_type is a class and target_type is an interface the class implements,
@@ -23210,8 +23595,14 @@ impl<'a> HirToMirContext<'a> {
             Some(TypeKind::Float) => 4,
             Some(TypeKind::String) => 5,
             Some(TypeKind::Dynamic) => 5, // Dynamic matches anything
-            Some(TypeKind::Class { symbol_id, .. }) => symbol_id.as_raw() as u32 + 1000,
-            Some(TypeKind::Enum { symbol_id, .. }) => symbol_id.as_raw() as u32 + 1000,
+            Some(TypeKind::Class { symbol_id, .. }) => {
+                // Class runtime IDs must align with MIR typedef type_id used for RTTI
+                // registration and object headers.
+                self.resolve_runtime_class_type_id(type_id, *symbol_id)
+                    .as_raw()
+                    + 1000
+            }
+            Some(TypeKind::Enum { .. }) => type_id.as_raw() + 1000,
             Some(TypeKind::TypeAlias { target_type, .. }) => {
                 let target = *target_type;
                 drop(type_table);

@@ -1824,7 +1824,13 @@ impl TieredBackend {
                 // Separate instance and static fields
                 // In MIR, all fields are in the struct — we treat them all as instance fields
                 // Static fields would need separate tracking (future work)
-                let instance_fields: Vec<String> = fields.iter().map(|f| f.name.clone()).collect();
+                // Skip synthetic object header field from user-visible RTTI field list.
+                // Object slot 0 is always reserved for __type_id at runtime.
+                let instance_fields: Vec<String> = fields
+                    .iter()
+                    .filter(|f| f.name != "__type_id")
+                    .map(|f| f.name.clone())
+                    .collect();
                 let static_fields: Vec<String> = Vec::new();
 
                 let super_type_id = typedef.super_type_id.map(|t| t.0);
