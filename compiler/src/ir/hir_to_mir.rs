@@ -3700,40 +3700,6 @@ impl<'a> HirToMirContext<'a> {
                         );
                     }
 
-                    // Before throwing, capture the shadow call stack and store it
-                    // on the exception object's stackTrace field (if it has one).
-                    // This uses rayzor_native_stack_trace_call_stack() which reads
-                    // the shadow stack maintained by push/pop_call_frame instrumentation.
-                    // Store stack trace on Exception.stackTrace field before throwing.
-                    // Captures the shadow call stack via rayzor_native_stack_trace_call_stack().
-                    let stack_trace_field_name = self.string_interner.intern("stackTrace");
-                    if let Some((_, field_idx)) =
-                        self.resolve_field_index_by_name(stack_trace_field_name, thrown_type)
-                    {
-                        let call_stack_fn = self.get_or_register_extern_function(
-                            "rayzor_native_stack_trace_call_stack",
-                            vec![],
-                            IrType::Ptr(Box::new(IrType::U8)),
-                        );
-                        if let Some(trace_str) = self.builder.build_call_direct(
-                            call_stack_fn,
-                            vec![],
-                            IrType::Ptr(Box::new(IrType::U8)),
-                        ) {
-                            let idx_const = self
-                                .builder
-                                .build_const(IrValue::I64(field_idx as i64))
-                                .expect("failed to create field index const");
-                            // Use I64 as GEP element type so elem_size=8 (struct field slot)
-                            if let Some(field_ptr) =
-                                self.builder
-                                    .build_gep(exception_reg, vec![idx_const], IrType::I64)
-                            {
-                                self.builder.build_store(field_ptr, trace_str);
-                            }
-                        }
-                    }
-
                     // Cast exception to i64 for uniform storage
                     let reg_type = self
                         .builder
@@ -12424,8 +12390,42 @@ impl<'a> HirToMirContext<'a> {
                 let registry_type_id = actual_symbol_id.map(|sid| TypeId::from_raw(sid.as_raw()));
                 let obj_size: u64 = registry_type_id
                     .and_then(|tid| self.class_alloc_sizes.get(&tid).copied())
+                    // Also try the TAST class_type directly — the hir_module.types key may differ
+                    // from TypeId::from_raw(symbol_id) for stdlib classes (e.g., Exception).
+                    .or_else(|| self.class_alloc_sizes.get(class_type).copied())
+                    // Fallback: derive from field_index_map, since class_alloc_sizes TypeIds
+                    // differ across compilation contexts but field_index_map uses SymbolIds.
+                    // alloc_size = (max_slot + 1) * 8 (header at slot 0, user fields at 1+).
+                    .or_else(|| {
+                        let target_sym = actual_symbol_id?;
+                        let mut max_idx = 0u32;
+                        let mut found = false;
+                        for &(class_ty, idx) in self.field_index_map.values() {
+                            let owner =
+                                self.class_type_to_symbol
+                                    .get(&class_ty)
+                                    .copied()
+                                    .or_else(|| {
+                                        if class_ty == *class_type {
+                                            actual_symbol_id
+                                        } else {
+                                            None
+                                        }
+                                    });
+                            if owner == Some(target_sym) {
+                                if idx > max_idx {
+                                    max_idx = idx;
+                                }
+                                found = true;
+                            }
+                        }
+                        if found {
+                            Some((max_idx as u64 + 1) * 8)
+                        } else {
+                            None
+                        }
+                    })
                     .unwrap_or_else(|| ((args.len() as u64 + 1) * 8).max(16));
-
                 // Use heap allocation (malloc) for class instances
                 let obj_ptr = self.build_heap_alloc(obj_size);
                 let obj_ptr = obj_ptr?;
