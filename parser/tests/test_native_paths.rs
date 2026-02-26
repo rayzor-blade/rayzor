@@ -177,8 +177,8 @@ extern class PhpClass {
                 .find(|m| m.name == "native")
                 .expect("Expected @:native");
             if let ExprKind::String(s) = &native_meta.params[0].kind {
-                // Parser preserves raw escape sequences from Haxe string literals
-                assert_eq!(s, "\\\\Vendor\\\\Package\\\\ClassName");
+                // Haxe `"\\"` is a single backslash — parser unescapes the string literal
+                assert_eq!(s, "\\Vendor\\Package\\ClassName");
             } else {
                 panic!("Expected string parameter");
             }
