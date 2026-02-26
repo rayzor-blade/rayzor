@@ -42,19 +42,19 @@
 //!   cargo run --release --package compiler --example benchmark_runner -- mandelbrot
 //!   cargo run --release --package compiler --example benchmark_runner -- --json
 
+use compiler::codegen::tiered_backend::{TierPreset, TieredBackend, TieredConfig};
 use compiler::codegen::CraneliftBackend;
 use compiler::codegen::InterpValue;
-use compiler::codegen::tiered_backend::{TierPreset, TieredBackend, TieredConfig};
 use compiler::compilation::{CompilationConfig, CompilationUnit};
-use compiler::ir::optimization::{OptimizationLevel, PassManager, strip_stack_trace_updates};
-use compiler::ir::{IrFunctionId, IrModule, RayzorBundle, load_bundle};
+use compiler::ir::optimization::{strip_stack_trace_updates, OptimizationLevel, PassManager};
+use compiler::ir::{load_bundle, IrFunctionId, IrModule, RayzorBundle};
 
-#[cfg(feature = "llvm-backend")]
-use compiler::codegen::LLVMJitBackend;
 #[cfg(feature = "llvm-backend")]
 use compiler::codegen::init_llvm_once;
 #[cfg(feature = "llvm-backend")]
 use compiler::codegen::reset_llvm_global_state;
+#[cfg(feature = "llvm-backend")]
+use compiler::codegen::LLVMJitBackend;
 #[cfg(feature = "llvm-backend")]
 use inkwell::context::Context;
 use serde::{Deserialize, Serialize};
