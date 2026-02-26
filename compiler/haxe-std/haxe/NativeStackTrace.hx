@@ -9,7 +9,7 @@ import haxe.CallStack.StackItem;
 @:noCompletion
 extern class NativeStackTrace {
 	static public function saveStack(exception:Any):Void;
-	static public function callStack():Any;
+	static public function callStack():String;
 	static public function exceptionStack():String;
 	static public function toHaxe(nativeStackTrace:Any, skip:Int = 0):Array<StackItem>;
 }

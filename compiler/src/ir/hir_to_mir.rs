@@ -11042,6 +11042,42 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
+                    // Fallback for extern class static methods (e.g. NativeStackTrace.exceptionStack()).
+                    // StaticFieldAccess becomes Variable in HIR, bypassing the Field-callee stdlib
+                    // dispatch. Check the stdlib mapping by bare method name as a last resort.
+                    if func_id_opt.is_none() {
+                        if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
+                            if let Some(method_name) = self.string_interner.get(sym_info.name) {
+                                if let Some((_sig, mapping)) =
+                                    self.stdlib_mapping.find_static_method_by_name(method_name)
+                                {
+                                    let runtime_func_name = mapping.runtime_name.to_string();
+                                    let mut arg_regs: Vec<IrId> = Vec::new();
+                                    let mut arg_types: Vec<IrType> = Vec::new();
+                                    for arg in args.iter() {
+                                        if let Some(reg) = self.lower_expression(arg) {
+                                            arg_regs.push(reg);
+                                            arg_types.push(self.convert_type(arg.ty));
+                                        }
+                                    }
+                                    let (expected_param_types, expected_return_type) = self
+                                        .get_extern_function_signature(&runtime_func_name)
+                                        .unwrap_or_else(|| (arg_types, result_type.clone()));
+                                    let runtime_func_id = self.get_or_register_extern_function(
+                                        &runtime_func_name,
+                                        expected_param_types,
+                                        expected_return_type.clone(),
+                                    );
+                                    return self.builder.build_call_direct(
+                                        runtime_func_id,
+                                        arg_regs,
+                                        expected_return_type,
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     if let Some(func_id) = func_id_opt {
                         let sym_name = self
                             .symbol_table
