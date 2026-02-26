@@ -75,7 +75,8 @@ pub extern "C" fn rayzor_throw_typed(exception_value: i64, type_id: u32) {
         let mut state = state.borrow_mut();
         state.current_exception = exception_value;
         state.current_exception_type_id = type_id;
-        // Capture shadow call stack at throw time (debug mode only)
+        // Capture shadow call stack at throw time (debug mode only).
+        // Uses the shadow stack maintained by push/pop_call_frame instrumentation.
         if crate::native_stack_trace::is_enabled() {
             state.current_stack_trace = crate::native_stack_trace::capture_shadow_stack();
         } else {

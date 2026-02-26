@@ -334,8 +334,7 @@ pub fn make_haxe_string(s: String) -> *mut HaxeString {
 #[no_mangle]
 pub extern "C" fn rayzor_native_stack_trace_call_stack() -> *mut u8 {
     if is_enabled() {
-        let bt = backtrace::Backtrace::new();
-        let trace_str = resolve_backtrace_to_source(&bt);
+        let trace_str = capture_shadow_stack();
         make_haxe_string(trace_str) as *mut u8
     } else {
         make_haxe_string(String::new()) as *mut u8

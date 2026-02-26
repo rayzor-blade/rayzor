@@ -3241,6 +3241,10 @@ impl CompilationUnit {
                 .collect::<Vec<_>>()
         })?;
 
+        // Set source file path on HIR module for stack trace source info
+        let mut hir_module = hir_module;
+        hir_module.metadata.source_file = filename.to_string();
+
         // Check if this file contains ONLY extern class declarations BEFORE MIR lowering.
         // Extern class files only need TAST+HIR for type system registration (symbol scopes,
         // method signatures). Their runtime code is provided by build_stdlib() from Rust

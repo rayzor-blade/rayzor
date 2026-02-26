@@ -1467,10 +1467,9 @@ impl TieredBackend {
         }
 
         // Instrument MIR functions with shadow call stack push/pop (debug mode only)
-        // TODO: temporarily disabled for debugging
-        // if self.config.enable_stack_traces {
-        //     Self::instrument_modules_for_stack_traces(&mut self.modules.write().unwrap());
-        // }
+        if self.config.enable_stack_traces {
+            Self::instrument_modules_for_stack_traces(&mut self.modules.write().unwrap());
+        }
 
         // Convert runtime symbols to the format Cranelift expects
         let symbols: Vec<(&str, *const u8)> = self

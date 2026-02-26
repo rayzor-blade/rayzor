@@ -678,10 +678,46 @@ fn simple_string<'a>(full: &'a str, input: &'a str, quote: char) -> PResult<'a, 
     Ok((
         input,
         Expr {
-            kind: ExprKind::String(content.to_string()),
+            kind: ExprKind::String(unescape_string(content)),
             span: Span::new(start, end),
         },
     ))
+}
+
+/// Convert escape sequences in a parsed string literal to their actual characters.
+fn unescape_string(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => result.push('\n'),
+                Some('t') => result.push('\t'),
+                Some('r') => result.push('\r'),
+                Some('\\') => result.push('\\'),
+                Some('"') => result.push('"'),
+                Some('\'') => result.push('\''),
+                Some('b') => result.push('\x08'), // backspace
+                Some('f') => result.push('\x0C'), // form feed
+                Some('v') => result.push('\x0B'), // vertical tab
+                Some('0') => result.push('\0'),   // null
+                Some('u') => {
+                    // Unicode escape: \uXXXX
+                    let hex: String = chars.by_ref().take(4).collect();
+                    if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                        if let Some(ch) = char::from_u32(code) {
+                            result.push(ch);
+                        }
+                    }
+                }
+                Some(c) => { result.push('\\'); result.push(c); }
+                None => result.push('\\'),
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 fn interpolated_string<'a>(full: &'a str, input: &'a str, quote: char) -> PResult<'a, Expr> {
@@ -723,20 +759,28 @@ fn interpolated_string<'a>(full: &'a str, input: &'a str, quote: char) -> PResul
             }));
             remaining = rest;
         } else if remaining.starts_with('\\') && remaining.len() > 1 {
-            // Escape sequence - handle \' , \n, etc.
-            current.push('\\');
+            // Escape sequence - convert to actual character
             if let Some(ch) = remaining.chars().nth(1) {
-                current.push(ch);
-                // Skip 2 characters: the backslash and the escaped char
-                // For ASCII escapes, this is 2 bytes. For unicode, we use char_indices.
+                let actual = match ch {
+                    'n' => '\n',
+                    't' => '\t',
+                    'r' => '\r',
+                    '\\' => '\\',
+                    '\'' => '\'',
+                    '"' => '"',
+                    'b' => '\x08',
+                    'f' => '\x0C',
+                    'v' => '\x0B',
+                    '0' => '\0',
+                    other => other, // Unknown escape: keep the char after backslash
+                };
+                current.push(actual);
                 let mut char_indices = remaining.char_indices();
                 char_indices.next(); // Position 0: backslash
                 char_indices.next(); // Position 1: escaped char
-                                     // Now get position after the escaped char
                 if let Some((next_idx, _)) = char_indices.next() {
                     remaining = &remaining[next_idx..];
                 } else {
-                    // No more chars after the escape sequence
                     remaining = "";
                 }
             } else {

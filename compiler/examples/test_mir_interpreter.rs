@@ -138,6 +138,7 @@ fn test_tiered_with_interpreter() {
         start_interpreted: true, // Start in interpreter mode
         bailout_strategy: compiler::codegen::BailoutStrategy::Quick,
         max_tier_promotions: 0,
+        enable_stack_traces: false,
     };
 
     // Create tiered backend
