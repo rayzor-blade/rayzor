@@ -643,6 +643,7 @@ impl<'a> AstLowering<'a> {
                 "final" => flags = flags.union(SymbolFlags::FINAL),
                 "forward" => flags = flags.union(SymbolFlags::FORWARD),
                 "extern" => flags = flags.union(SymbolFlags::EXTERN),
+                "keep" => flags = flags.union(SymbolFlags::KEEP),
                 "native" => {
                     flags = flags.union(SymbolFlags::NATIVE);
                     if let Some(first_param) = meta.params.first() {
@@ -2548,6 +2549,24 @@ impl<'a> AstLowering<'a> {
 
         let interned_name = self.context.intern_string(&field_name);
         let field_symbol = self.context.symbol_table.create_variable(interned_name);
+        let mut field_flags = self.extract_metadata_flags(&module_field.meta, field_symbol);
+        for modifier in &module_field.modifiers {
+            use crate::tast::symbols::SymbolFlags;
+            field_flags = field_flags.union(match modifier {
+                parser::haxe_ast::Modifier::Static => SymbolFlags::STATIC,
+                parser::haxe_ast::Modifier::Inline => SymbolFlags::INLINE,
+                parser::haxe_ast::Modifier::Macro => SymbolFlags::MACRO,
+                parser::haxe_ast::Modifier::Dynamic => SymbolFlags::DYNAMIC,
+                parser::haxe_ast::Modifier::Override => SymbolFlags::OVERRIDE,
+                parser::haxe_ast::Modifier::Final => SymbolFlags::FINAL,
+                parser::haxe_ast::Modifier::Extern => SymbolFlags::EXTERN,
+            });
+        }
+        if !field_flags.is_empty() {
+            self.context
+                .symbol_table
+                .add_symbol_flags(field_symbol, field_flags);
+        }
 
         let kind = match &module_field.kind {
             parser::ModuleFieldKind::Var {
@@ -2595,9 +2614,9 @@ impl<'a> AstLowering<'a> {
                     initializer,
                 }
             }
-            parser::ModuleFieldKind::Function(func) => {
-                TypedModuleFieldKind::Function(self.lower_function_object(func)?)
-            }
+            parser::ModuleFieldKind::Function(func) => TypedModuleFieldKind::Function(
+                self.lower_function_object(func, &module_field.meta, &module_field.modifiers)?,
+            ),
         };
 
         Ok(TypedModuleField {
@@ -3968,6 +3987,25 @@ impl<'a> AstLowering<'a> {
             .symbol_table
             .update_symbol_type(field_symbol, field_type);
 
+        let mut field_flags = self.extract_metadata_flags(&field.meta, field_symbol);
+        for modifier in &field.modifiers {
+            use crate::tast::symbols::SymbolFlags;
+            field_flags = field_flags.union(match modifier {
+                parser::haxe_ast::Modifier::Static => SymbolFlags::STATIC,
+                parser::haxe_ast::Modifier::Inline => SymbolFlags::INLINE,
+                parser::haxe_ast::Modifier::Macro => SymbolFlags::MACRO,
+                parser::haxe_ast::Modifier::Dynamic => SymbolFlags::DYNAMIC,
+                parser::haxe_ast::Modifier::Override => SymbolFlags::OVERRIDE,
+                parser::haxe_ast::Modifier::Final => SymbolFlags::FINAL,
+                parser::haxe_ast::Modifier::Extern => SymbolFlags::EXTERN,
+            });
+        }
+        if !field_flags.is_empty() {
+            self.context
+                .symbol_table
+                .add_symbol_flags(field_symbol, field_flags);
+        }
+
         // Add field symbol to current class scope for resolution
         if let Some(scope) = self
             .context
@@ -4060,9 +4098,38 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Lower a function object
-    fn lower_function_object(&mut self, func: &Function) -> LoweringResult<TypedFunction> {
+    fn lower_function_object(
+        &mut self,
+        func: &Function,
+        meta: &[parser::Metadata],
+        modifiers: &[parser::Modifier],
+    ) -> LoweringResult<TypedFunction> {
         let function_name = self.context.intern_string(&func.name);
         let function_symbol = self.context.symbol_table.create_function(function_name);
+        let mut symbol_flags = self.extract_metadata_flags(meta, function_symbol);
+        for modifier in modifiers {
+            use crate::tast::symbols::SymbolFlags;
+            symbol_flags = symbol_flags.union(match modifier {
+                parser::haxe_ast::Modifier::Static => SymbolFlags::STATIC,
+                parser::haxe_ast::Modifier::Inline => SymbolFlags::INLINE,
+                parser::haxe_ast::Modifier::Macro => SymbolFlags::MACRO,
+                parser::haxe_ast::Modifier::Dynamic => SymbolFlags::DYNAMIC,
+                parser::haxe_ast::Modifier::Override => SymbolFlags::OVERRIDE,
+                parser::haxe_ast::Modifier::Final => SymbolFlags::FINAL,
+                parser::haxe_ast::Modifier::Extern => SymbolFlags::EXTERN,
+            });
+        }
+        if !symbol_flags.is_empty() {
+            self.context
+                .symbol_table
+                .add_symbol_flags(function_symbol, symbol_flags);
+        }
+        let is_static = modifiers
+            .iter()
+            .any(|m| matches!(m, parser::haxe_ast::Modifier::Static));
+        let is_inline = modifiers
+            .iter()
+            .any(|m| matches!(m, parser::haxe_ast::Modifier::Inline));
 
         // Enter function scope
         let function_scope = self.context.enter_scope(ScopeKind::Function);
@@ -4105,9 +4172,12 @@ impl<'a> AstLowering<'a> {
             return_type,
             body,
             visibility: Visibility::Public,
-            effects: crate::tast::node::FunctionEffects::default(),
+            effects: crate::tast::node::FunctionEffects {
+                is_inline,
+                ..crate::tast::node::FunctionEffects::default()
+            },
             type_parameters: Vec::new(), // TODO: Convert type parameters
-            is_static: false,            // Constructors are not static
+            is_static,
             source_location: self.context.create_location(),
             metadata: FunctionMetadata::default(),
         })
@@ -4227,6 +4297,25 @@ impl<'a> AstLowering<'a> {
                 .create_function_in_scope(function_name, class_scope)
         };
 
+        let mut function_flags = self.extract_metadata_flags(&field.meta, function_symbol);
+        for modifier in &field.modifiers {
+            use crate::tast::symbols::SymbolFlags;
+            function_flags = function_flags.union(match modifier {
+                parser::haxe_ast::Modifier::Static => SymbolFlags::STATIC,
+                parser::haxe_ast::Modifier::Inline => SymbolFlags::INLINE,
+                parser::haxe_ast::Modifier::Macro => SymbolFlags::MACRO,
+                parser::haxe_ast::Modifier::Dynamic => SymbolFlags::DYNAMIC,
+                parser::haxe_ast::Modifier::Override => SymbolFlags::OVERRIDE,
+                parser::haxe_ast::Modifier::Final => SymbolFlags::FINAL,
+                parser::haxe_ast::Modifier::Extern => SymbolFlags::EXTERN,
+            });
+        }
+        if !function_flags.is_empty() {
+            self.context
+                .symbol_table
+                .add_symbol_flags(function_symbol, function_flags);
+        }
+
         // Update qualified name (full path including class hierarchy)
         self.context.update_symbol_qualified_name(function_symbol);
 
@@ -4247,46 +4336,6 @@ impl<'a> AstLowering<'a> {
                     .iter()
                     .any(|m| matches!(m, Modifier::Static));
                 fields_list.push((function_name, function_symbol, is_static));
-            }
-        }
-
-        // Process @:native metadata on method fields (sets native_name on the method symbol)
-        for meta in &field.meta {
-            let name = meta.name.strip_prefix(':').unwrap_or(&meta.name);
-            if name == "native" {
-                if let Some(first_param) = meta.params.first() {
-                    if let parser::haxe_ast::ExprKind::String(native_str) = &first_param.kind {
-                        let native_interned = self.context.string_interner.intern(native_str);
-                        if let Some(sym) = self.context.symbol_table.get_symbol_mut(function_symbol)
-                        {
-                            sym.native_name = Some(native_interned);
-                        }
-                    }
-                }
-            } else if matches!(name, "frameworks" | "cInclude" | "cSource" | "clib") {
-                if let Some(first_param) = meta.params.first() {
-                    if let parser::haxe_ast::ExprKind::Array(elements) = &first_param.kind {
-                        let mut names = Vec::new();
-                        for elem in elements {
-                            if let parser::haxe_ast::ExprKind::String(s) = &elem.kind {
-                                names.push(self.context.string_interner.intern(s));
-                            }
-                        }
-                        if !names.is_empty() {
-                            if let Some(sym) =
-                                self.context.symbol_table.get_symbol_mut(function_symbol)
-                            {
-                                match name {
-                                    "frameworks" => sym.frameworks = Some(names),
-                                    "cInclude" => sym.c_includes = Some(names),
-                                    "cSource" => sym.c_sources = Some(names),
-                                    "clib" => sym.c_libs = Some(names),
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
             }
         }
 

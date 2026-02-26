@@ -1,5 +1,7 @@
 package haxe;
 
+import haxe.NativeStackTrace;
+
 class Exception {
     public var message:String;
     public var previous:Exception;
@@ -9,11 +11,12 @@ class Exception {
         this.previous = previous;
     }
 
-    public function toString():String {
+    @:keep
+    public inline function toString():String {
         return message;
     }
 
-    public function details():String {
+    public inline function details():String {
         var stack = NativeStackTrace.exceptionStack();
         if (stack != null && stack != "")
             return "Exception: \"" + message + "\"\n" + stack;

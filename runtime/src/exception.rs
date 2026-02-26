@@ -91,7 +91,9 @@ pub extern "C" fn rayzor_throw_typed(exception_value: i64, type_id: u32) {
                 _longjmp(buf_ptr, 1);
             }
         } else {
-            eprintln!("Uncaught exception: {}", exception_value);
+            let formatted =
+                format_uncaught_exception(exception_value, state.current_exception_type_id);
+            eprintln!("Uncaught exception: {}", formatted);
             if !state.current_stack_trace.is_empty() {
                 eprintln!("{}", state.current_stack_trace);
             }
@@ -125,6 +127,150 @@ pub fn throw_with_message(msg: String) -> ! {
     let boxed = crate::type_system::haxe_box_reference_ptr(haxe_str as *mut u8, 5); // TYPE_STRING = TypeId(5)
     rayzor_throw_typed(boxed as i64, 5); // TYPE_STRING = 5
     unreachable!()
+}
+
+fn normalize_thrown_type_id(type_id: u32) -> u32 {
+    if type_id >= crate::type_system::TYPE_USER_START {
+        type_id - crate::type_system::TYPE_USER_START
+    } else {
+        type_id
+    }
+}
+
+fn read_haxe_string(hs_ptr: *const crate::haxe_string::HaxeString) -> Option<String> {
+    if hs_ptr.is_null() {
+        return None;
+    }
+
+    unsafe {
+        let hs = &*hs_ptr;
+        if hs.ptr.is_null() {
+            return Some(String::new());
+        }
+        let bytes = std::slice::from_raw_parts(hs.ptr, hs.len);
+        Some(String::from_utf8_lossy(bytes).to_string())
+    }
+}
+
+fn try_format_class_exception_message(exception_value: i64, raw_type_id: u32) -> Option<String> {
+    if exception_value == 0 {
+        return None;
+    }
+
+    let type_info = crate::type_system::get_type_info(crate::type_system::TypeId(raw_type_id))?;
+    let class_info = type_info.class_info?;
+    let message_index = class_info
+        .instance_fields
+        .iter()
+        .position(|field| *field == "message")?;
+
+    // Runtime RTTI may include "__type_id" in instance_fields (older registration path)
+    // or omit it (newer path). Compute the correct object slot for both layouts.
+    let has_header_field = class_info
+        .instance_fields
+        .first()
+        .map(|name| *name == "__type_id")
+        .unwrap_or(false);
+    let message_slot = if has_header_field {
+        message_index
+    } else {
+        message_index + 1
+    };
+    let message_ptr = unsafe {
+        let obj_ptr = exception_value as *const i64;
+        if obj_ptr.is_null() {
+            return None;
+        }
+        *obj_ptr.add(message_slot) as *const crate::haxe_string::HaxeString
+    };
+
+    read_haxe_string(message_ptr).map(|msg| format!("Exception: \"{}\"", msg))
+}
+
+fn try_format_exception_like_message_slot(
+    exception_value: i64,
+    raw_type_id: u32,
+) -> Option<String> {
+    if exception_value == 0 {
+        return None;
+    }
+
+    unsafe {
+        let obj_ptr = exception_value as *const i64;
+        if obj_ptr.is_null() {
+            return None;
+        }
+
+        // Ensure this really looks like the thrown class object layout:
+        // slot 0 is runtime class type_id.
+        let header_tid = *obj_ptr as u32;
+        if header_tid != raw_type_id {
+            return None;
+        }
+
+        // haxe.Exception layout puts message in slot 1.
+        let message_ptr = *obj_ptr.add(1) as *const crate::haxe_string::HaxeString;
+        if message_ptr.is_null() || (message_ptr as usize) < 0x10000 {
+            return None;
+        }
+
+        read_haxe_string(message_ptr).map(|msg| format!("Exception: \"{}\"", msg))
+    }
+}
+
+fn try_format_boxed_string(exception_value: i64) -> Option<String> {
+    if exception_value == 0 {
+        return None;
+    }
+
+    unsafe {
+        let dynamic = *(exception_value as *const crate::type_system::DynamicValue);
+        if dynamic.type_id == crate::type_system::TYPE_STRING && !dynamic.value_ptr.is_null() {
+            return read_haxe_string(dynamic.value_ptr as *const crate::haxe_string::HaxeString);
+        }
+    }
+
+    None
+}
+
+fn format_uncaught_exception(exception_value: i64, thrown_type_id: u32) -> String {
+    let raw_type_id = normalize_thrown_type_id(thrown_type_id);
+
+    // Class throws use +1000 encoded IDs; decode and extract the `message` field if present.
+    if thrown_type_id >= crate::type_system::TYPE_USER_START {
+        if let Some(msg) = try_format_class_exception_message(exception_value, raw_type_id) {
+            return msg;
+        }
+        if let Some(msg) = try_format_exception_like_message_slot(exception_value, raw_type_id) {
+            return msg;
+        }
+    }
+
+    if raw_type_id == crate::type_system::TYPE_STRING.0 {
+        if let Some(msg) = try_format_boxed_string(exception_value) {
+            return msg;
+        }
+        if let Some(msg) =
+            read_haxe_string(exception_value as *const crate::haxe_string::HaxeString)
+        {
+            return msg;
+        }
+    }
+    if raw_type_id == crate::type_system::TYPE_INT.0 {
+        return exception_value.to_string();
+    }
+    if raw_type_id == crate::type_system::TYPE_BOOL.0 {
+        return if exception_value != 0 {
+            "true".to_string()
+        } else {
+            "false".to_string()
+        };
+    }
+    if raw_type_id == crate::type_system::TYPE_FLOAT.0 {
+        return (exception_value as f64).to_string();
+    }
+
+    exception_value.to_string()
 }
 
 /// Polymorphic type matching for catch dispatch.

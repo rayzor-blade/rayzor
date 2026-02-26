@@ -707,10 +707,11 @@ impl<'a> TastToHirContext<'a> {
         }
 
         // Get qualified name from symbol table
-        let qualified_name = self
+        let symbol_info = self
             .symbol_table
             .get_symbol(function.symbol_id)
-            .and_then(|sym| sym.qualified_name);
+            .map(|sym| (sym.qualified_name, sym.flags.is_keep()));
+        let (qualified_name, is_keep) = symbol_info.unwrap_or((None, false));
 
         HirFunction {
             symbol_id: function.symbol_id,
@@ -730,6 +731,7 @@ impl<'a> TastToHirContext<'a> {
             is_extern: false, // TODO: Extract from function metadata
             calling_convention: HirCallingConvention::Haxe,
             is_main,
+            is_keep,
             source_location: function.source_location,
         }
     }
