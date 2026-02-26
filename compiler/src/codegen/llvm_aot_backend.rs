@@ -151,7 +151,7 @@ pub fn compile_ir_with_system_tools(
     // changes floating-point results in iteration-heavy loops.
     let opt_out = Command::new(&opt_bin)
         .arg(opt_flag)
-        .arg("--fp-contract=off")
+        .arg("--fp-contract=on")
         .arg("-o")
         .arg(&bc_path)
         .arg(&ir_path)
