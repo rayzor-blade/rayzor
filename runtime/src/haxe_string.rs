@@ -308,7 +308,7 @@ pub extern "C" fn haxe_string_index_of(
         return -1;
     }
 
-    crate::panic_guard::guarded_call(|| unsafe {
+    unsafe {
         let s_ref = &*s;
         let needle_ref = &*needle;
 
@@ -327,7 +327,7 @@ pub extern "C" fn haxe_string_index_of(
         }
 
         -1
-    })
+    }
 }
 
 /// Split string by delimiter
@@ -347,7 +347,7 @@ pub extern "C" fn haxe_string_split(
         return;
     }
 
-    crate::panic_guard::guarded_call(|| unsafe {
+    unsafe {
         let s_ref = &*s;
         let delim_ref = &*delimiter;
 
@@ -390,7 +390,7 @@ pub extern "C" fn haxe_string_split(
 
         *out = array_ptr;
         *out_len = count;
-    });
+    }
 }
 
 /// Split string into an array of strings (returns proper HaxeArray)
@@ -418,7 +418,7 @@ pub extern "C" fn haxe_string_split_array(
         return Box::into_raw(arr);
     }
 
-    crate::panic_guard::guarded_call(|| unsafe {
+    unsafe {
         let s_ref = &*s;
         let delim_ref = &*delimiter;
 
@@ -498,7 +498,7 @@ pub extern "C" fn haxe_string_split_array(
             arr_ptr, count
         );
         arr_ptr
-    })
+    }
 }
 
 // ============================================================================

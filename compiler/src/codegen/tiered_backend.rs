@@ -610,7 +610,7 @@ impl TierPreset {
                 start_interpreted: true, // Start with interpreter for instant startup
                 bailout_strategy: BailoutStrategy::Immediate,
                 max_tier_promotions: 8,
-                enable_stack_traces: true,
+                enable_stack_traces: false, // No instrumentation overhead in benchmarks
             },
 
             TierPreset::Development => TieredConfig {
@@ -1469,6 +1469,9 @@ impl TieredBackend {
         // Instrument MIR functions with shadow call stack push/pop (debug mode only)
         if self.config.enable_stack_traces {
             Self::instrument_modules_for_stack_traces(&mut self.modules.write().unwrap());
+        } else {
+            // Strip update_call_frame_location calls that hir_to_mir emits unconditionally
+            Self::strip_stack_trace_updates(&mut self.modules.write().unwrap());
         }
 
         // Convert runtime symbols to the format Cranelift expects
@@ -1688,6 +1691,65 @@ impl TieredBackend {
                     }
                 }
             }
+        }
+    }
+
+    /// Strip `rayzor_update_call_frame_location` calls from MIR when stack traces are disabled.
+    ///
+    /// hir_to_mir.rs emits these calls unconditionally (it has no access to TieredConfig).
+    /// When `enable_stack_traces` is false, these calls are dead weight and can cause issues
+    /// with LLVM AOT compilation (unnecessary extern function references). This pass removes
+    /// them and their associated Const instructions.
+    fn strip_stack_trace_updates(modules: &mut [IrModule]) {
+        use crate::ir::instructions::IrInstruction;
+
+        for module in modules.iter_mut() {
+            // Find the extern function ID for rayzor_update_call_frame_location
+            let update_fn_id = module
+                .extern_functions
+                .values()
+                .find(|ef| ef.name == "rayzor_update_call_frame_location")
+                .map(|ef| ef.id);
+
+            let Some(update_fn_id) = update_fn_id else {
+                continue; // No update_call_frame_location in this module
+            };
+
+            // Strip calls from all functions
+            for function in module.functions.values_mut() {
+                for block in function.cfg.blocks.values_mut() {
+                    // Collect registers used as args to update_call_frame_location calls
+                    // so we can remove the Const instructions that produce them
+                    let mut dead_regs = std::collections::HashSet::new();
+                    for instr in block.instructions.iter() {
+                        if let IrInstruction::CallDirect { func_id, args, .. } = instr {
+                            if *func_id == update_fn_id {
+                                for arg in args {
+                                    dead_regs.insert(*arg);
+                                }
+                            }
+                        }
+                    }
+
+                    // Remove the CallDirect and their Const operands
+                    block.instructions.retain(|instr| {
+                        match instr {
+                            IrInstruction::CallDirect { func_id, .. }
+                                if *func_id == update_fn_id =>
+                            {
+                                false
+                            }
+                            IrInstruction::Const { dest, .. } if dead_regs.contains(dest) => false,
+                            _ => true,
+                        }
+                    });
+                }
+            }
+
+            // Remove the extern function declaration
+            module
+                .extern_functions
+                .retain(|_, ef| ef.name != "rayzor_update_call_frame_location");
         }
     }
 
