@@ -394,6 +394,7 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
 
                 for field in &class.fields {
                     let is_static = field.modifiers.contains(&parser::Modifier::Static);
+                    let is_inline = field.modifiers.contains(&parser::Modifier::Inline);
                     let is_public = matches!(field.access, Some(parser::Access::Public));
 
                     match &field.kind {
@@ -462,7 +463,8 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                             }
                         }
                         parser::ClassFieldKind::Function(func) => {
-                            let method_info = extract_method_from_ast(func, is_public, is_static);
+                            let method_info =
+                                extract_method_from_ast(func, is_public, is_static, is_inline);
                             if func.name == "new" {
                                 constructor = Some(method_info);
                             } else if is_static {
@@ -575,8 +577,10 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                 for field in &abstract_decl.fields {
                     if let parser::ClassFieldKind::Function(func) = &field.kind {
                         let is_static = field.modifiers.contains(&parser::Modifier::Static);
+                        let is_inline = field.modifiers.contains(&parser::Modifier::Inline);
                         let is_public = matches!(field.access, Some(parser::Access::Public));
-                        let method_info = extract_method_from_ast(func, is_public, is_static);
+                        let method_info =
+                            extract_method_from_ast(func, is_public, is_static, is_inline);
                         if is_static {
                             static_methods.push(method_info);
                         } else {
@@ -614,7 +618,9 @@ pub fn extract_type_info_from_ast(haxe_file: &parser::HaxeFile) -> BladeTypeInfo
                     if let parser::ClassFieldKind::Function(func) = &field.kind {
                         let is_public = true;
                         let is_static = field.modifiers.contains(&parser::Modifier::Static);
-                        let method_info = extract_method_from_ast(func, is_public, is_static);
+                        let is_inline = field.modifiers.contains(&parser::Modifier::Inline);
+                        let method_info =
+                            extract_method_from_ast(func, is_public, is_static, is_inline);
                         methods.push(method_info);
                     }
                 }
@@ -661,6 +667,7 @@ fn extract_method_from_ast(
     func: &parser::Function,
     is_public: bool,
     is_static: bool,
+    is_inline: bool,
 ) -> BladeMethodInfo {
     let params: Vec<BladeParamInfo> = func
         .params
@@ -689,7 +696,7 @@ fn extract_method_from_ast(
             .unwrap_or_else(|| "Void".to_string()),
         is_public,
         is_static,
-        is_inline: false,
+        is_inline,
         type_params,
     }
 }

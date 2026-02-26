@@ -651,6 +651,13 @@ impl CompilationUnit {
         // Convert function_map: SymbolId → IrFunctionId to (class_name, method_name, func_id)
         for (symbol_id, func_id) in function_map {
             if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
+                // Constructors are stored separately in constructor_name_map.
+                // Skip non-function symbols here (e.g. class symbols used as ctor keys),
+                // otherwise cache restore will try to resolve bogus method names like `Exception`.
+                if !matches!(sym.kind, crate::tast::SymbolKind::Function) {
+                    continue;
+                }
+
                 let method_name = self
                     .string_interner
                     .get(sym.name)
@@ -999,11 +1006,17 @@ impl CompilationUnit {
     fn register_method_from_blade(
         &mut self,
         method: &BladeMethodInfo,
-        _class_symbol: SymbolId,
+        class_symbol: SymbolId,
         class_scope: ScopeId,
         is_static: bool,
     ) -> SymbolId {
         let method_name = self.string_interner.intern(&method.name);
+        let class_qualified_name = self.symbol_table.get_symbol(class_symbol).and_then(|sym| {
+            sym.qualified_name
+                .and_then(|n| self.string_interner.get(n))
+                .or_else(|| self.string_interner.get(sym.name))
+                .map(|s| s.to_string())
+        });
 
         // Create the function symbol
         let method_symbol = self
@@ -1034,15 +1047,24 @@ impl CompilationUnit {
             if is_static {
                 sym.flags = sym.flags.union(SymbolFlags::STATIC);
             }
+            if method.is_inline {
+                sym.flags = sym.flags.union(SymbolFlags::INLINE);
+            }
             if !method.is_public {
                 sym.visibility = crate::tast::symbols::Visibility::Private;
             }
+            if let Some(class_name) = &class_qualified_name {
+                let method_qualified_name = self
+                    .string_interner
+                    .intern(&format!("{}.{}", class_name, method.name));
+                sym.qualified_name = Some(method_qualified_name);
+            }
         }
 
-        // Add to scope
-        let _ = self
-            .scope_tree
-            .add_symbol_to_scope(class_scope, method_symbol);
+        // Add to scope, updating both symbol list and name lookup cache.
+        if let Some(scope) = self.scope_tree.get_scope_mut(class_scope) {
+            scope.add_symbol(method_symbol, method_name);
+        }
 
         method_symbol
     }
@@ -3485,6 +3507,15 @@ impl CompilationUnit {
             // load_imports_efficiently, so they won't collide with either user or stdlib IDs.
             // The user module already references these high IDs via external_function_map.
             for import_module in self.import_mir_modules.drain(..) {
+                // Merge import type definitions so runtime RTTI registration includes
+                // imported classes/enums (needed for uncaught exception formatting and
+                // hierarchy-aware typed catches). TypeDef IDs are module-local map keys,
+                // so re-key them on insert to avoid collisions.
+                for (_old_type_def_id, mut typedef) in import_module.types {
+                    let new_type_def_id = mir_module.alloc_typedef_id();
+                    typedef.id = new_type_def_id;
+                    mir_module.types.insert(new_type_def_id, typedef);
+                }
                 for (func_id, func) in import_module.functions {
                     mir_module.functions.insert(func_id, func);
                 }
