@@ -42,19 +42,19 @@
 //!   cargo run --release --package compiler --example benchmark_runner -- mandelbrot
 //!   cargo run --release --package compiler --example benchmark_runner -- --json
 
-use compiler::codegen::tiered_backend::{TierPreset, TieredBackend, TieredConfig};
 use compiler::codegen::CraneliftBackend;
 use compiler::codegen::InterpValue;
+use compiler::codegen::tiered_backend::{TierPreset, TieredBackend, TieredConfig};
 use compiler::compilation::{CompilationConfig, CompilationUnit};
-use compiler::ir::optimization::{OptimizationLevel, PassManager};
-use compiler::ir::{load_bundle, IrFunctionId, IrModule, RayzorBundle};
+use compiler::ir::optimization::{OptimizationLevel, PassManager, strip_stack_trace_updates};
+use compiler::ir::{IrFunctionId, IrModule, RayzorBundle, load_bundle};
 
+#[cfg(feature = "llvm-backend")]
+use compiler::codegen::LLVMJitBackend;
 #[cfg(feature = "llvm-backend")]
 use compiler::codegen::init_llvm_once;
 #[cfg(feature = "llvm-backend")]
 use compiler::codegen::reset_llvm_global_state;
-#[cfg(feature = "llvm-backend")]
-use compiler::codegen::LLVMJitBackend;
 #[cfg(feature = "llvm-backend")]
 use inkwell::context::Context;
 use serde::{Deserialize, Serialize};
@@ -358,6 +358,7 @@ fn run_benchmark_cranelift(
         // Get mutable access to the module through Arc::make_mut
         let module_mut = std::sync::Arc::make_mut(module);
         let _ = pass_manager.run(module_mut);
+        let _ = strip_stack_trace_updates(module_mut);
     }
 
     let mut backend =
@@ -474,6 +475,7 @@ fn setup_tiered_benchmark(
     for module in &mut mir_modules {
         let module_mut = std::sync::Arc::make_mut(module);
         let _ = pass_manager.run(module_mut);
+        let _ = strip_stack_trace_updates(module_mut);
     }
 
     // Use Benchmark preset - optimized for performance testing
@@ -613,6 +615,7 @@ fn setup_llvm_benchmark<'ctx>(
     for module in &mut mir_modules {
         let module_mut = std::sync::Arc::make_mut(module);
         let _ = pass_manager.run(module_mut);
+        let _ = strip_stack_trace_updates(module_mut);
     }
 
     // Acquire LLVM lock for thread safety during compilation

@@ -80,6 +80,78 @@ pub struct PassManager {
     passes: Vec<Box<dyn OptimizationPass>>,
 }
 
+/// Strip `rayzor_update_call_frame_location` calls from MIR.
+///
+/// This is useful in non-stack-trace builds (benchmarks/release) where
+/// `hir_to_mir`-emitted call-site updates are pure overhead.
+pub fn strip_stack_trace_updates(module: &mut IrModule) -> OptimizationResult {
+    let update_fn_ids: HashSet<IrFunctionId> = module
+        .extern_functions
+        .values()
+        .filter(|ef| ef.name == "rayzor_update_call_frame_location")
+        .map(|ef| ef.id)
+        .collect();
+
+    if update_fn_ids.is_empty() {
+        return OptimizationResult::unchanged();
+    }
+
+    let mut stripped_calls = 0usize;
+    for function in module.functions.values_mut() {
+        for block in function.cfg.blocks.values_mut() {
+            let before = block.instructions.len();
+            block.instructions.retain(|instr| {
+                !matches!(
+                    instr,
+                    IrInstruction::CallDirect { func_id, .. } if update_fn_ids.contains(func_id)
+                )
+            });
+            stripped_calls += before - block.instructions.len();
+        }
+    }
+
+    let extern_before = module.extern_functions.len();
+    module
+        .extern_functions
+        .retain(|_, ef| ef.name != "rayzor_update_call_frame_location");
+    let removed_externs = extern_before - module.extern_functions.len();
+
+    if stripped_calls == 0 && removed_externs == 0 {
+        return OptimizationResult::unchanged();
+    }
+
+    let mut result = OptimizationResult::changed();
+    result.instructions_eliminated = stripped_calls;
+    result.stats.insert(
+        "stack_trace_update_calls_stripped".to_string(),
+        stripped_calls,
+    );
+    result.stats.insert(
+        "stack_trace_update_externs_removed".to_string(),
+        removed_externs,
+    );
+    result
+}
+
+/// MIR pass wrapper for stripping `rayzor_update_call_frame_location`.
+pub struct StripStackTraceUpdatesPass;
+
+impl StripStackTraceUpdatesPass {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl OptimizationPass for StripStackTraceUpdatesPass {
+    fn name(&self) -> &'static str {
+        "strip-stack-trace-updates"
+    }
+
+    fn run_on_module(&mut self, module: &mut IrModule) -> OptimizationResult {
+        strip_stack_trace_updates(module)
+    }
+}
+
 impl PassManager {
     /// Create a new pass manager
     pub fn new() -> Self {

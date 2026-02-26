@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -1696,60 +1696,10 @@ impl TieredBackend {
 
     /// Strip `rayzor_update_call_frame_location` calls from MIR when stack traces are disabled.
     ///
-    /// hir_to_mir.rs emits these calls unconditionally (it has no access to TieredConfig).
-    /// When `enable_stack_traces` is false, these calls are dead weight and can cause issues
-    /// with LLVM AOT compilation (unnecessary extern function references). This pass removes
-    /// them and their associated Const instructions.
+    /// Uses the shared MIR-level utility so behavior is consistent across backends.
     fn strip_stack_trace_updates(modules: &mut [IrModule]) {
-        use crate::ir::instructions::IrInstruction;
-
         for module in modules.iter_mut() {
-            // Find the extern function ID for rayzor_update_call_frame_location
-            let update_fn_id = module
-                .extern_functions
-                .values()
-                .find(|ef| ef.name == "rayzor_update_call_frame_location")
-                .map(|ef| ef.id);
-
-            let Some(update_fn_id) = update_fn_id else {
-                continue; // No update_call_frame_location in this module
-            };
-
-            // Strip calls from all functions
-            for function in module.functions.values_mut() {
-                for block in function.cfg.blocks.values_mut() {
-                    // Collect registers used as args to update_call_frame_location calls
-                    // so we can remove the Const instructions that produce them
-                    let mut dead_regs = std::collections::HashSet::new();
-                    for instr in block.instructions.iter() {
-                        if let IrInstruction::CallDirect { func_id, args, .. } = instr {
-                            if *func_id == update_fn_id {
-                                for arg in args {
-                                    dead_regs.insert(*arg);
-                                }
-                            }
-                        }
-                    }
-
-                    // Remove the CallDirect and their Const operands
-                    block.instructions.retain(|instr| {
-                        match instr {
-                            IrInstruction::CallDirect { func_id, .. }
-                                if *func_id == update_fn_id =>
-                            {
-                                false
-                            }
-                            IrInstruction::Const { dest, .. } if dead_regs.contains(dest) => false,
-                            _ => true,
-                        }
-                    });
-                }
-            }
-
-            // Remove the extern function declaration
-            module
-                .extern_functions
-                .retain(|_, ef| ef.name != "rayzor_update_call_frame_location");
+            let _ = crate::ir::optimization::strip_stack_trace_updates(module);
         }
     }
 
@@ -1843,7 +1793,7 @@ impl TieredBackend {
     /// This ensures getName()/getParameters()/trace work correctly at runtime.
     fn register_enum_rtti_from_module(module: &IrModule) {
         use crate::ir::modules::IrTypeDefinition;
-        use rayzor_runtime::type_system::{register_enum_from_mir, ParamType};
+        use rayzor_runtime::type_system::{ParamType, register_enum_from_mir};
 
         for (_id, typedef) in &module.types {
             if let IrTypeDefinition::Enum { variants, .. } = &typedef.definition {
@@ -2869,7 +2819,9 @@ impl TieredBackend {
                     promotion_barrier.request_promotion();
 
                     if config.verbosity >= 2 {
-                        debug!("[TieredBackend] Promotion requested, waiting for in-flight executions to drain");
+                        debug!(
+                            "[TieredBackend] Promotion requested, waiting for in-flight executions to drain"
+                        );
                     }
 
                     // Step 2: Wait for all in-flight executions to complete (with timeout)
