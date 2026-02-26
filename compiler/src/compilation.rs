@@ -2049,7 +2049,6 @@ impl CompilationUnit {
                 Ok(ast) => Self::extract_all_dependencies(&ast),
                 Err(_) => Vec::new(),
             };
-
             // Queue dependencies for processing
             for dep in &deps {
                 if !visited.contains(dep) {
@@ -2130,74 +2129,92 @@ impl CompilationUnit {
             }
         }
 
-        // Step 3: Compile in topological order (no retries needed!)
+        // Step 3: Compile in topological order with retry for files that fail
+        // due to unresolved symbols (dependency ordering issues from cycles).
+        let mut retry_queue: Vec<(String, PathBuf, String, Vec<String>)> = Vec::new();
         for name in compile_order {
             if let Some((file_path, source, deps)) = all_files.remove(&name) {
-                // Skip if already compiled
-                let filename = file_path.to_string_lossy().to_string();
-                if self.compiled_files.contains_key(&filename) {
-                    continue;
-                }
-
-                // Mark as loaded
-                self.namespace_resolver.mark_file_loaded(file_path.clone());
-
-                // Try BLADE cache first: if we have type info + cached maps, we can
-                // skip the full Parse → TAST → HIR → MIR pipeline entirely.
-                let cache_hit = if self.config.enable_cache {
-                    self.try_load_import_from_cache(&filename, &source)
-                } else {
-                    false
-                };
-
-                debug!(
-                    "[IMPORT_LOAD] Processing '{}' (cache_hit={})",
-                    name, cache_hit
-                );
-                if !cache_hit {
-                    // Cache miss or caching disabled - compile normally
-                    // Use is_stdlib_file=true so import files:
-                    //   1. Skip the stdlib MIR merge (only user file should merge stdlib)
-                    //   2. Collect function mappings for cross-file resolution
-                    match self.compile_file_with_shared_state_ex(&filename, &source, true) {
-                        Ok(typed_file) => {
-                            self.loaded_stdlib_typed_files.push(typed_file);
-
-                            // Move the MIR from mir_modules to import_mir_modules.
-                            if let Some(mir_arc) = self.mir_modules.pop() {
-                                // Save to BLADE cache before renumbering (with type info + maps)
-                                if self.config.enable_cache {
-                                    let type_info = self.last_compiled_type_info.take();
-                                    let cached_maps = self.last_compiled_cached_maps.take();
-                                    self.save_blade_cached(
-                                        &filename,
-                                        &source,
-                                        &mir_arc,
-                                        deps,
-                                        type_info,
-                                        cached_maps,
-                                    );
-                                }
-
-                                self.renumber_and_push_import_mir((*mir_arc).clone());
-                            }
-                        }
-                        Err(_e) => {
-                            debug!(
-                                "[IMPORT_LOAD] Failed to compile {}: {} error(s)",
-                                filename,
-                                _e.len()
-                            );
-                            for e in &_e {
-                                debug!("  - {}", e.message);
-                            }
-                        }
-                    }
+                if !self.try_compile_import(&name, &file_path, &source, deps.clone()) {
+                    retry_queue.push((name, file_path, source, deps));
                 }
             }
         }
 
+        // Retry failed files — their dependencies should now be registered
+        // from successful compilations in the first pass.
+        for (name, file_path, source, deps) in retry_queue {
+            self.try_compile_import(&name, &file_path, &source, deps);
+        }
+
         Ok(())
+    }
+
+    /// Try to compile a single import file. Returns true on success, false on failure.
+    fn try_compile_import(
+        &mut self,
+        name: &str,
+        file_path: &PathBuf,
+        source: &str,
+        deps: Vec<String>,
+    ) -> bool {
+        let filename = file_path.to_string_lossy().to_string();
+
+        // Skip if already compiled
+        if self.compiled_files.contains_key(&filename) {
+            return true;
+        }
+
+        // Mark as loaded
+        self.namespace_resolver.mark_file_loaded(file_path.clone());
+
+        // Try BLADE cache first
+        let cache_hit = if self.config.enable_cache {
+            self.try_load_import_from_cache(&filename, source)
+        } else {
+            false
+        };
+
+        if cache_hit {
+            return true;
+        }
+
+        // Cache miss or caching disabled - compile normally
+        match self.compile_file_with_shared_state_ex(&filename, source, true) {
+            Ok(typed_file) => {
+                self.loaded_stdlib_typed_files.push(typed_file);
+
+                // Move the MIR from mir_modules to import_mir_modules.
+                if let Some(mir_arc) = self.mir_modules.pop() {
+                    // Save to BLADE cache before renumbering
+                    if self.config.enable_cache {
+                        let type_info = self.last_compiled_type_info.take();
+                        let cached_maps = self.last_compiled_cached_maps.take();
+                        self.save_blade_cached(
+                            &filename,
+                            source,
+                            &mir_arc,
+                            deps,
+                            type_info,
+                            cached_maps,
+                        );
+                    }
+
+                    self.renumber_and_push_import_mir((*mir_arc).clone());
+                }
+                true
+            }
+            Err(_e) => {
+                debug!(
+                    "[IMPORT_LOAD] Failed to compile {}: {} error(s)",
+                    name,
+                    _e.len()
+                );
+                for e in &_e {
+                    debug!("  - {}", e.message);
+                }
+                false
+            }
+        }
     }
 
     /// Try to load an import file from BLADE cache.
@@ -3437,10 +3454,6 @@ impl CompilationUnit {
 
         // Accumulate field index and property access maps from all compiled files
         // (both stdlib and imports) so user files can resolve field access on imported classes
-        debug!(
-            "[FIELD_ACCUM] file='{}', mir_result.field_index_map has {} entries, import_field_index_map has {} entries before merge",
-            filename, mir_result.field_index_map.len(), self.import_field_index_map.len()
-        );
         for (sym, val) in mir_result.field_index_map {
             self.import_field_index_map.insert(sym, val);
         }
