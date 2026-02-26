@@ -24,6 +24,9 @@ use crate::haxe_parser_types::type_expr;
 // Simple expressions
 
 pub fn identifier_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
+    // Skip leading whitespace before recording start so the identifier span
+    // begins at the actual identifier character, not at a preceding newline.
+    let (input, _) = ws(input)?;
     let start = position(full, input);
     let (input, id) = identifier(input)?;
     let end = position(full, input);

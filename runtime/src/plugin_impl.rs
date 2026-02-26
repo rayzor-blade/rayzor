@@ -1621,8 +1621,18 @@ register_symbol!(
     "rayzor_set_stack_traces_enabled",
     crate::native_stack_trace::rayzor_set_stack_traces_enabled
 );
-register_symbol!("rayzor_push_call_frame", crate::native_stack_trace::rayzor_push_call_frame);
-register_symbol!("rayzor_pop_call_frame", crate::native_stack_trace::rayzor_pop_call_frame);
+register_symbol!(
+    "rayzor_push_call_frame",
+    crate::native_stack_trace::rayzor_push_call_frame
+);
+register_symbol!(
+    "rayzor_pop_call_frame",
+    crate::native_stack_trace::rayzor_pop_call_frame
+);
+register_symbol!(
+    "rayzor_update_call_frame_location",
+    crate::native_stack_trace::rayzor_update_call_frame_location
+);
 
 // ============================================================================
 // EReg Functions (Regular Expressions)

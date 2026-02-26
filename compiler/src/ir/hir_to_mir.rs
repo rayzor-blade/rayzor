@@ -2243,14 +2243,21 @@ impl<'a> HirToMirContext<'a> {
         } else if let Some(func_mut) = self.builder.module.functions.get_mut(&func_id) {
             // Fallback: build Class.method from this_type or current_module
             if let Some(class_type) = this_type {
-                if let Some(class_name) = self.class_type_to_symbol.get(&class_type)
+                if let Some(class_name) = self
+                    .class_type_to_symbol
+                    .get(&class_type)
                     .and_then(|&sym| self.symbol_table.get_symbol(sym))
-                    .and_then(|s| s.qualified_name.and_then(|n| self.string_interner.get(n))
-                        .or_else(|| self.string_interner.get(s.name)))
+                    .and_then(|s| {
+                        s.qualified_name
+                            .and_then(|n| self.string_interner.get(n))
+                            .or_else(|| self.string_interner.get(s.name))
+                    })
                 {
                     func_mut.qualified_name = Some(format!("{}.{}", class_name, func_mut.name));
                 }
-            } else if let Some(module_name) = self.current_module.as_deref().filter(|m| !m.is_empty()) {
+            } else if let Some(module_name) =
+                self.current_module.as_deref().filter(|m| !m.is_empty())
+            {
                 let bare = func_mut.name.clone();
                 func_mut.qualified_name = Some(format!("{}.{}", module_name, bare));
             }
@@ -2707,10 +2714,15 @@ impl<'a> HirToMirContext<'a> {
             }
         } else if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
             // Build qualified name from class type
-            let class_name = self.class_type_to_symbol.get(&class_type_id)
+            let class_name = self
+                .class_type_to_symbol
+                .get(&class_type_id)
                 .and_then(|&sym| self.symbol_table.get_symbol(sym))
-                .and_then(|s| s.qualified_name.and_then(|n| self.string_interner.get(n))
-                    .or_else(|| self.string_interner.get(s.name)));
+                .and_then(|s| {
+                    s.qualified_name
+                        .and_then(|n| self.string_interner.get(n))
+                        .or_else(|| self.string_interner.get(s.name))
+                });
             if let Some(cn) = class_name {
                 func.qualified_name = Some(format!("{}.{}", cn, func.name));
             }
@@ -3288,6 +3300,35 @@ impl<'a> HirToMirContext<'a> {
                 // Clear temps before expression
                 self.temp_heap_values.clear();
 
+                // Update the shadow-stack frame to the current statement's source line so the
+                // stack trace shows WHERE in the function execution was (call site), not
+                // the function definition line.
+                // Skip container expressions (Block, TryCatch) — they don't represent call sites;
+                // their inner statements will each emit their own update.
+                let is_container = matches!(
+                    expr.kind,
+                    HirExprKind::Block(_) | HirExprKind::TryCatch { .. }
+                );
+                let stmt_loc = expr.source_location;
+                if !is_container && stmt_loc.line > 0 {
+                    let update_fn = self.get_or_register_extern_function(
+                        "rayzor_update_call_frame_location",
+                        vec![IrType::I32, IrType::I32],
+                        IrType::Void,
+                    );
+                    if let (Some(line_c), Some(col_c)) = (
+                        self.builder.build_const(IrValue::I32(stmt_loc.line as i32)),
+                        self.builder
+                            .build_const(IrValue::I32(stmt_loc.column as i32)),
+                    ) {
+                        self.builder.build_call_direct(
+                            update_fn,
+                            vec![line_c, col_c],
+                            IrType::Void,
+                        );
+                    }
+                }
+
                 let result = self.lower_expression(expr);
 
                 // Free any temporaries created during expression evaluation
@@ -3634,7 +3675,31 @@ impl<'a> HirToMirContext<'a> {
             HirStatement::Throw(expr) => {
                 let thrown_type_id = self.runtime_type_id(expr.ty);
                 let thrown_type = expr.ty;
+                let throw_loc = expr.source_location;
                 if let Some(exception_reg) = self.lower_expression(expr) {
+                    // Update the top shadow-stack frame to the exact throw line/col so
+                    // the trace snippet points at the throw statement, not the function def.
+                    if throw_loc.is_valid() && throw_loc.line > 0 {
+                        let update_loc_fn = self.get_or_register_extern_function(
+                            "rayzor_update_call_frame_location",
+                            vec![IrType::I32, IrType::I32],
+                            IrType::Void,
+                        );
+                        let line_const = self
+                            .builder
+                            .build_const(IrValue::I32(throw_loc.line as i32))
+                            .expect("failed to create throw line const");
+                        let col_const = self
+                            .builder
+                            .build_const(IrValue::I32(throw_loc.column as i32))
+                            .expect("failed to create throw col const");
+                        self.builder.build_call_direct(
+                            update_loc_fn,
+                            vec![line_const, col_const],
+                            IrType::Void,
+                        );
+                    }
+
                     // Before throwing, capture the shadow call stack and store it
                     // on the exception object's stackTrace field (if it has one).
                     // This uses rayzor_native_stack_trace_call_stack() which reads
@@ -3655,14 +3720,15 @@ impl<'a> HirToMirContext<'a> {
                             vec![],
                             IrType::Ptr(Box::new(IrType::U8)),
                         ) {
-                            let idx_const = self.builder.build_const(IrValue::I64(field_idx as i64))
+                            let idx_const = self
+                                .builder
+                                .build_const(IrValue::I64(field_idx as i64))
                                 .expect("failed to create field index const");
                             // Use I64 as GEP element type so elem_size=8 (struct field slot)
-                            if let Some(field_ptr) = self.builder.build_gep(
-                                exception_reg,
-                                vec![idx_const],
-                                IrType::I64,
-                            ) {
+                            if let Some(field_ptr) =
+                                self.builder
+                                    .build_gep(exception_reg, vec![idx_const], IrType::I64)
+                            {
                                 self.builder.build_store(field_ptr, trace_str);
                             }
                         }
@@ -4575,7 +4641,6 @@ impl<'a> HirToMirContext<'a> {
         mut param_types: Vec<IrType>,
         mut return_type: IrType,
     ) -> IrFunctionId {
-
         // Override with correct signature if this is a known extern function
         // This is critical for Math functions to get f64 types instead of inferred i64
         if let Some((correct_params, correct_return)) = self.get_extern_function_signature(name) {
@@ -5529,8 +5594,7 @@ impl<'a> HirToMirContext<'a> {
                             None
                         }
                     });
-                    if let Some((field_class_type, _field_idx)) = field_entry
-                    {
+                    if let Some((field_class_type, _field_idx)) = field_entry {
                         // Get 'this' pointer (SymbolId(0) is the special 'this' mapping)
                         if let Some(&this_reg) = self.symbol_map.get(&SymbolId::from_raw(0)) {
                             // Use current_this_type if available, otherwise use field_class_type
@@ -5610,9 +5674,14 @@ impl<'a> HirToMirContext<'a> {
                     }
 
                     // If we get here, we couldn't resolve the variable
-                    let sym_name = self.symbol_table.get_symbol(*symbol)
+                    let sym_name = self
+                        .symbol_table
+                        .get_symbol(*symbol)
                         .and_then(|s| self.string_interner.get(s.name));
-                    debug!("[UNRESOLVED_VAR] Could not resolve variable {:?} (name={:?})", symbol, sym_name);
+                    debug!(
+                        "[UNRESOLVED_VAR] Could not resolve variable {:?} (name={:?})",
+                        symbol, sym_name
+                    );
                     None
                 }
             }
@@ -5763,6 +5832,29 @@ impl<'a> HirToMirContext<'a> {
                 // Reset call_label for tracing which path generates the call
                 self.builder.call_label = Some("CALL_START".to_string());
                 let result_type = self.convert_type(expr.ty);
+
+                // Update the caller's shadow-stack frame to this call-site line/col so
+                // the trace shows WHERE the call was made, not the function definition line.
+                // (Also emitted at the HirStatement::Expr level, but kept here for nested calls.)
+                let call_loc = expr.source_location;
+                if call_loc.is_valid() && call_loc.line > 0 {
+                    let update_loc_fn = self.get_or_register_extern_function(
+                        "rayzor_update_call_frame_location",
+                        vec![IrType::I32, IrType::I32],
+                        IrType::Void,
+                    );
+                    if let (Some(line_c), Some(col_c)) = (
+                        self.builder.build_const(IrValue::I32(call_loc.line as i32)),
+                        self.builder
+                            .build_const(IrValue::I32(call_loc.column as i32)),
+                    ) {
+                        self.builder.build_call_direct(
+                            update_loc_fn,
+                            vec![line_c, col_c],
+                            IrType::Void,
+                        );
+                    }
+                }
 
                 // Convert HIR type_args to IrType for use in CallDirect
                 let converted_hir_type_args: Vec<IrType> = hir_type_args
@@ -12383,8 +12475,13 @@ impl<'a> HirToMirContext<'a> {
                     // Fill in default values for any missing optional parameters
                     self.fill_default_args(constructor_func_id, &mut arg_regs, true);
                     let post_fill = arg_regs.len();
-                    let sig_params = self.builder.module.functions.get(&constructor_func_id)
-                        .map(|f| f.signature.parameters.len()).unwrap_or(0);
+                    let sig_params = self
+                        .builder
+                        .module
+                        .functions
+                        .get(&constructor_func_id)
+                        .map(|f| f.signature.parameters.len())
+                        .unwrap_or(0);
 
                     // Constructor returns void, so we ignore the result
                     self.builder
@@ -14753,7 +14850,11 @@ impl<'a> HirToMirContext<'a> {
             .functions
             .get(&func_id)
             .map(|f| f.signature.parameters.len())
-            .or_else(|| self.external_constructor_param_counts.get(&func_id).copied())
+            .or_else(|| {
+                self.external_constructor_param_counts
+                    .get(&func_id)
+                    .copied()
+            })
             .unwrap_or(0);
 
         let total_provided = arg_regs.len();
@@ -17856,10 +17957,15 @@ impl<'a> HirToMirContext<'a> {
         // user fields to unrelated stdlib methods with the same bare name (e.g.,
         // ArrayIterator.current matched to Thread.current → sys_thread_current).
         let is_known_user_field = self.field_index_map.contains_key(&field)
-            || self.resolve_field_index_by_name(
-                self.symbol_table.get_symbol(field).map(|s| s.name).unwrap_or_default(),
-                receiver_ty,
-            ).is_some();
+            || self
+                .resolve_field_index_by_name(
+                    self.symbol_table
+                        .get_symbol(field)
+                        .map(|s| s.name)
+                        .unwrap_or_default(),
+                    receiver_ty,
+                )
+                .is_some();
 
         let field_name_debug = self
             .symbol_table
@@ -17868,80 +17974,80 @@ impl<'a> HirToMirContext<'a> {
             .unwrap_or("<unknown>");
 
         if !is_known_user_field {
-        if let Some((_class_match, _method, runtime_call)) =
-            self.get_stdlib_runtime_info(field, receiver_ty, None, None)
-        {
-            let runtime_func = runtime_call.runtime_name;
-            debug!(
-                "[lower_field_access] Found stdlib property! runtime_func={}",
-                runtime_func
-            );
+            if let Some((_class_match, _method, runtime_call)) =
+                self.get_stdlib_runtime_info(field, receiver_ty, None, None)
+            {
+                let runtime_func = runtime_call.runtime_name;
+                debug!(
+                    "[lower_field_access] Found stdlib property! runtime_func={}",
+                    runtime_func
+                );
 
-            // Determine result type based on whether it returns a primitive or complex type
-            // If needs_out_param is false and has_return is true, it returns a primitive (i32/i64/f64)
-            // Otherwise it returns a complex type (Ptr) or void
-            let result_type = if !runtime_call.needs_out_param && runtime_call.has_return {
-                // Returns a primitive - get the actual primitive type from field_ty
-                let field_kind = {
-                    let type_table = self.type_table.borrow();
-                    type_table.get(field_ty).map(|t| t.kind.clone())
+                // Determine result type based on whether it returns a primitive or complex type
+                // If needs_out_param is false and has_return is true, it returns a primitive (i32/i64/f64)
+                // Otherwise it returns a complex type (Ptr) or void
+                let result_type = if !runtime_call.needs_out_param && runtime_call.has_return {
+                    // Returns a primitive - get the actual primitive type from field_ty
+                    let field_kind = {
+                        let type_table = self.type_table.borrow();
+                        type_table.get(field_ty).map(|t| t.kind.clone())
+                    };
+
+                    // Map TAST primitive types to IR types correctly
+                    match field_kind {
+                        Some(crate::tast::TypeKind::Int) => IrType::I64,
+                        Some(crate::tast::TypeKind::Float) => IrType::F64,
+                        Some(crate::tast::TypeKind::Bool) => IrType::Bool,
+                        _ => {
+                            warn!(
+                                "Unexpected field kind {:?} for primitive-returning function {}",
+                                field_kind, runtime_func
+                            );
+                            self.convert_type(field_ty)
+                        }
+                    }
+                } else {
+                    // Returns a complex type or void
+                    self.convert_type(field_ty)
                 };
 
-                // Map TAST primitive types to IR types correctly
-                match field_kind {
-                    Some(crate::tast::TypeKind::Int) => IrType::I64,
-                    Some(crate::tast::TypeKind::Float) => IrType::F64,
-                    Some(crate::tast::TypeKind::Bool) => IrType::Bool,
-                    _ => {
-                        warn!(
-                            "Unexpected field kind {:?} for primitive-returning function {}",
-                            field_kind, runtime_func
-                        );
-                        self.convert_type(field_ty)
-                    }
-                }
-            } else {
-                // Returns a complex type or void
-                self.convert_type(field_ty)
-            };
-
-            debug!("[lower_field_access] result_type for {} = {:?} (needs_out_param={}, has_return={})",
+                debug!("[lower_field_access] result_type for {} = {:?} (needs_out_param={}, has_return={})",
                 runtime_func, result_type, runtime_call.needs_out_param, runtime_call.has_return);
 
-            // Generate a call to the runtime property getter
-            // Property getters take the object as the only parameter
-            // Use explicit Ptr(Void) type for opaque stdlib objects (Array, String, etc.)
-            let param_types = vec![IrType::Ptr(Box::new(IrType::Void))];
-            let runtime_func_id = self.get_or_register_extern_function(
-                &runtime_func,
-                param_types,
-                result_type.clone(),
-            );
+                // Generate a call to the runtime property getter
+                // Property getters take the object as the only parameter
+                // Use explicit Ptr(Void) type for opaque stdlib objects (Array, String, etc.)
+                let param_types = vec![IrType::Ptr(Box::new(IrType::Void))];
+                let runtime_func_id = self.get_or_register_extern_function(
+                    &runtime_func,
+                    param_types,
+                    result_type.clone(),
+                );
 
-            // Call the property getter with just the object
-            let result_reg =
-                self.builder
-                    .build_call_direct(runtime_func_id, vec![obj], result_type.clone());
+                // Call the property getter with just the object
+                let result_reg =
+                    self.builder
+                        .build_call_direct(runtime_func_id, vec![obj], result_type.clone());
 
-            // DEBUG: Check actual type of result register
-            if let Some(reg) = result_reg {
-                if let Some(reg_type) = self.builder.get_register_type(reg) {
-                    debug!(
-                        "[lower_field_access] result_reg={}, register_type={:?}",
-                        reg, reg_type
-                    );
-                } else {
-                    debug!(
-                        "[lower_field_access] result_reg={} has no type in builder",
-                        reg
-                    );
+                // DEBUG: Check actual type of result register
+                if let Some(reg) = result_reg {
+                    if let Some(reg_type) = self.builder.get_register_type(reg) {
+                        debug!(
+                            "[lower_field_access] result_reg={}, register_type={:?}",
+                            reg, reg_type
+                        );
+                    } else {
+                        debug!(
+                            "[lower_field_access] result_reg={} has no type in builder",
+                            reg
+                        );
+                    }
                 }
-            }
 
-            return result_reg;
-        } else {
-            debug!("[lower_field_access] get_stdlib_runtime_info returned None for field='{}' ({:?}), receiver_ty={:?}", field_name_debug, field, receiver_ty);
-        }
+                return result_reg;
+            } else {
+                debug!("[lower_field_access] get_stdlib_runtime_info returned None for field='{}' ({:?}), receiver_ty={:?}", field_name_debug, field, receiver_ty);
+            }
         } // end if !is_known_user_field
 
         // Check if this is a property with a custom getter
@@ -18401,7 +18507,8 @@ impl<'a> HirToMirContext<'a> {
         if all_matches.is_empty() {
             debug!(
                 "[RESOLVE_FIELD] No matches found for '{}' in {} field_index_map entries",
-                target_name_str, self.field_index_map.len()
+                target_name_str,
+                self.field_index_map.len()
             );
             return None;
         }
@@ -24045,7 +24152,9 @@ impl<'a> HirToMirContext<'a> {
         self.collect_inherited_fields(parent_class.extends, child_type, fields, field_index);
 
         // Then add parent's own fields
-        let parent_class_name = self.symbol_table.get_symbol(parent_class.symbol_id)
+        let parent_class_name = self
+            .symbol_table
+            .get_symbol(parent_class.symbol_id)
             .and_then(|sym| sym.qualified_name.and_then(|n| self.string_interner.get(n)))
             .or_else(|| self.string_interner.get(parent_class.name))
             .unwrap_or("<unknown>")
@@ -24135,7 +24244,9 @@ impl<'a> HirToMirContext<'a> {
                 .insert(field.symbol_id, (type_id, field_index));
 
             // Store qualified class name for BLADE cache serialization
-            let class_name_str = self.symbol_table.get_symbol(class.symbol_id)
+            let class_name_str = self
+                .symbol_table
+                .get_symbol(class.symbol_id)
                 .and_then(|sym| sym.qualified_name.and_then(|n| self.string_interner.get(n)))
                 .or_else(|| self.string_interner.get(class.name))
                 .unwrap_or("<unknown>");

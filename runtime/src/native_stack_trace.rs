@@ -117,8 +117,11 @@ pub extern "C" fn rayzor_register_function_source(
         String::from("<unknown>")
     } else {
         unsafe {
-            String::from_utf8_lossy(std::slice::from_raw_parts(qualified_name_ptr, qualified_name_len))
-                .into_owned()
+            String::from_utf8_lossy(std::slice::from_raw_parts(
+                qualified_name_ptr,
+                qualified_name_len,
+            ))
+            .into_owned()
         }
     };
 
@@ -162,9 +165,9 @@ fn lookup_function(ip: usize) -> Option<(String, String, u32, u32)> {
 
     // Binary search for the largest code_start <= ip
     let idx = match registry.binary_search_by_key(&ip, |entry| entry.code_start) {
-        Ok(idx) => idx,       // Exact match
+        Ok(idx) => idx,        // Exact match
         Err(0) => return None, // ip is before all functions
-        Err(idx) => idx - 1,  // Largest code_start that is < ip
+        Err(idx) => idx - 1,   // Largest code_start that is < ip
     };
 
     let info = &registry[idx];
@@ -228,10 +231,7 @@ pub fn resolve_backtrace_to_source(bt: &backtrace::Backtrace) -> String {
             if line > 0 {
                 result.push_str(" (");
                 // Extract just the filename from the path
-                let filename = source_file
-                    .rsplit('/')
-                    .next()
-                    .unwrap_or(&source_file);
+                let filename = source_file.rsplit('/').next().unwrap_or(&source_file);
                 result.push_str(filename);
                 result.push(':');
                 result.push_str(&line.to_string());
@@ -252,22 +252,36 @@ pub fn resolve_backtrace_to_source(bt: &backtrace::Backtrace) -> String {
 // ============================================================================
 
 /// A frame on the shadow call stack — stores an index into the FUNCTION_REGISTRY.
+/// A single frame on the shadow call stack.
+struct ShadowFrame {
+    /// Index into FUNCTION_REGISTRY (u32::MAX = unknown)
+    registry_index: u32,
+    /// Runtime-updated line override (0 = use registry default)
+    line: u32,
+    /// Runtime-updated column override (0 = use registry default)
+    column: u32,
+}
+
 thread_local! {
-    static SHADOW_STACK: std::cell::RefCell<Vec<u32>> = const { std::cell::RefCell::new(Vec::new()) };
+    static SHADOW_STACK: std::cell::RefCell<Vec<ShadowFrame>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// Push a call frame onto the shadow stack (called at function entry in debug mode).
 /// The `func_id` is the compiler-assigned IrFunctionId.
 #[no_mangle]
 pub extern "C" fn rayzor_push_call_frame(func_id: u32) {
-    // Translate func_id → registry index
     let index = if let Ok(map) = FUNC_ID_MAP.read() {
         map.get(&func_id).copied().unwrap_or(u32::MAX)
     } else {
         u32::MAX
     };
     SHADOW_STACK.with(|stack| {
-        stack.borrow_mut().push(index);
+        stack.borrow_mut().push(ShadowFrame {
+            registry_index: index,
+            line: 0,
+            column: 0,
+        });
     });
 }
 
@@ -276,6 +290,19 @@ pub extern "C" fn rayzor_push_call_frame(func_id: u32) {
 pub extern "C" fn rayzor_pop_call_frame() {
     SHADOW_STACK.with(|stack| {
         stack.borrow_mut().pop();
+    });
+}
+
+/// Update the top frame's source location to reflect the current statement.
+/// Emitted by the compiler before throw statements and call expressions so the
+/// snapshot captures the exact line rather than the function definition line.
+#[no_mangle]
+pub extern "C" fn rayzor_update_call_frame_location(line: u32, column: u32) {
+    SHADOW_STACK.with(|stack| {
+        if let Some(frame) = stack.borrow_mut().last_mut() {
+            frame.line = line;
+            frame.column = column;
+        }
     });
 }
 
@@ -298,15 +325,28 @@ pub fn capture_shadow_stack() -> String {
         let mut seen = std::collections::HashSet::new();
 
         // Iterate in reverse (most recent call first)
-        for &func_index in stack.iter().rev() {
+        for frame in stack.iter().rev() {
+            let func_index = frame.registry_index;
             if let Some(info) = registry.get(func_index as usize) {
                 // Skip internal/generated functions
                 if info.qualified_name.starts_with("__") {
                     continue;
                 }
 
-                // Deduplicate
-                let key = (func_index, info.line);
+                // Prefer runtime-updated line/col over the registration-time defaults
+                let line = if frame.line > 0 {
+                    frame.line
+                } else {
+                    info.line
+                };
+                let column = if frame.line > 0 {
+                    frame.column
+                } else {
+                    info.column
+                };
+
+                // Deduplicate by (function, line) so the same statement isn't shown twice
+                let key = (func_index, line);
                 if seen.contains(&key) {
                     continue;
                 }
@@ -319,48 +359,49 @@ pub fn capture_shadow_stack() -> String {
                 result.push_str("Called from ");
                 result.push_str(&info.qualified_name);
 
-                if info.line > 0 {
-                    let filename = info.source_file
+                if line > 0 {
+                    let filename = info
+                        .source_file
                         .rsplit('/')
                         .next()
                         .unwrap_or(&info.source_file);
-                    // Use file:line:col format so editors can create clickable links
+                    // file:line:col — recognized as a clickable link by editors
                     result.push_str(" (");
                     result.push_str(filename);
                     result.push(':');
-                    result.push_str(&info.line.to_string());
-                    if info.column > 0 {
+                    result.push_str(&line.to_string());
+                    if column > 0 {
                         result.push(':');
-                        result.push_str(&info.column.to_string());
+                        result.push_str(&column.to_string());
                     }
                     result.push(')');
 
-                    // Emit source snippet if available
-                    if !info.source_snippet.is_empty() {
-                        let line_str = info.line.to_string();
+                    // Fetch the source line (may differ from the pre-cached snippet if the
+                    // runtime override points to a different line)
+                    let snippet = if frame.line > 0 && frame.line != info.line {
+                        fetch_source_line(&info.source_file, line)
+                    } else {
+                        info.source_snippet.clone()
+                    };
+
+                    if !snippet.is_empty() {
+                        let line_str = line.to_string();
                         result.push('\n');
-                        // Right-align line number in a 4-char field, then " | " separator
                         let pad = 4usize.saturating_sub(line_str.len());
-                        for _ in 0..pad { result.push(' '); }
+                        for _ in 0..pad {
+                            result.push(' ');
+                        }
                         result.push_str(&line_str);
                         result.push_str(" | ");
-                        result.push_str(info.source_snippet.trim_end());
+                        result.push_str(snippet.trim_end());
 
-                        // Emit column indicator if column is known
-                        if info.column > 0 {
-                            let col = info.column as usize;
-                            // Count leading whitespace in the raw snippet to align the caret
-                            let leading = info.source_snippet
-                                .chars()
-                                .take_while(|c| c.is_whitespace())
-                                .count();
+                        if column > 0 {
                             result.push('\n');
-                            // Pad to match " NNN | " prefix (4 + 3 = 7 chars)
                             result.push_str("     | ");
-                            // Fill up to the column position (1-based), accounting for leading ws
-                            // The displayed column is relative to the trimmed line start
-                            let display_col = col.saturating_sub(1);
-                            for _ in 0..display_col { result.push(' '); }
+                            let display_col = (column as usize).saturating_sub(1);
+                            for _ in 0..display_col {
+                                result.push(' ');
+                            }
                             result.push('^');
                         }
                     }
@@ -426,10 +467,7 @@ pub extern "C" fn rayzor_native_stack_trace_exception_stack() -> *mut u8 {
 /// Convert a native stack trace to a Haxe Array<StackItem>.
 /// V1: returns an empty HaxeArray (full StackItem conversion deferred).
 #[no_mangle]
-pub extern "C" fn rayzor_native_stack_trace_to_haxe(
-    _native_trace: *mut u8,
-    _skip: i32,
-) -> *mut u8 {
+pub extern "C" fn rayzor_native_stack_trace_to_haxe(_native_trace: *mut u8, _skip: i32) -> *mut u8 {
     // Return empty array — allocate on heap
     unsafe {
         let arr = Box::into_raw(Box::new(std::mem::zeroed::<HaxeArray>()));
