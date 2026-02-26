@@ -189,7 +189,7 @@ fn lookup_function(ip: usize) -> Option<(String, String, u32, u32)> {
 /// Non-JIT frames (runtime, system) are skipped.
 pub fn resolve_backtrace_to_source(bt: &backtrace::Backtrace) -> String {
     let registry = FUNCTION_REGISTRY.read().ok();
-    let has_registry = registry.as_ref().map_or(false, |r| !r.is_empty());
+    let has_registry = registry.as_ref().is_some_and(|r| !r.is_empty());
     drop(registry); // Release lock before iterating
 
     if !has_registry {

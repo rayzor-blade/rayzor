@@ -1574,7 +1574,7 @@ impl TieredBackend {
     /// In debug mode, this adds `rayzor_push_call_frame(func_id)` at each function's
     /// entry block and `rayzor_pop_call_frame()` before every return terminator.
     /// This enables source-mapped stack traces by maintaining a thread-local shadow stack.
-    fn instrument_modules_for_stack_traces(modules: &mut Vec<IrModule>) {
+    fn instrument_modules_for_stack_traces(modules: &mut [IrModule]) {
         use crate::ir::blocks::{IrBasicBlock, IrBlockId, IrTerminator};
         use crate::ir::functions::{IrFunctionSignature, IrParameter};
         use crate::ir::modules::IrExternFunction;
