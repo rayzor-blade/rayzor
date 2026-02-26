@@ -49,6 +49,47 @@ struct FunctionSourceInfo {
     line: u32,
     /// Column number in source (1-based)
     column: u32,
+    /// The trimmed source line at `line`, pre-fetched at registration time.
+    /// Empty string if the file could not be read or line is out of range.
+    source_snippet: String,
+}
+
+/// Cache of already-read source files: path → lines.
+/// Populated lazily at function registration time so throw-time formatting is free.
+static SOURCE_FILE_CACHE: LazyLock<RwLock<std::collections::HashMap<String, Vec<String>>>> =
+    LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
+
+/// Look up a source line from the cache, reading the file if necessary.
+/// Returns the raw (un-trimmed) line content, or empty string on failure.
+fn fetch_source_line(path: &str, line: u32) -> String {
+    if path == "<unknown>" || line == 0 {
+        return String::new();
+    }
+
+    // Fast path: file already cached
+    if let Ok(cache) = SOURCE_FILE_CACHE.read() {
+        if let Some(lines) = cache.get(path) {
+            return lines
+                .get((line as usize).saturating_sub(1))
+                .cloned()
+                .unwrap_or_default();
+        }
+    }
+
+    // Slow path: read and cache the file
+    if let Ok(content) = std::fs::read_to_string(path) {
+        let lines: Vec<String> = content.lines().map(|l| l.to_string()).collect();
+        let result = lines
+            .get((line as usize).saturating_sub(1))
+            .cloned()
+            .unwrap_or_default();
+        if let Ok(mut cache) = SOURCE_FILE_CACHE.write() {
+            cache.insert(path.to_string(), lines);
+        }
+        result
+    } else {
+        String::new()
+    }
 }
 
 /// Global registry of JIT function source info, keyed by compiler-assigned function ID.
@@ -90,12 +131,15 @@ pub extern "C" fn rayzor_register_function_source(
         }
     };
 
+    let source_snippet = fetch_source_line(&source_file, line);
+
     let info = FunctionSourceInfo {
         code_start,
         qualified_name,
         source_file,
         line,
         column,
+        source_snippet,
     };
 
     if let Ok(mut registry) = FUNCTION_REGISTRY.write() {
@@ -289,6 +333,36 @@ pub fn capture_shadow_stack() -> String {
                         result.push_str(&info.column.to_string());
                     }
                     result.push(')');
+
+                    // Emit source snippet if available
+                    if !info.source_snippet.is_empty() {
+                        let line_str = info.line.to_string();
+                        result.push('\n');
+                        // Right-align line number in a 4-char field, then " | " separator
+                        let pad = 4usize.saturating_sub(line_str.len());
+                        for _ in 0..pad { result.push(' '); }
+                        result.push_str(&line_str);
+                        result.push_str(" | ");
+                        result.push_str(info.source_snippet.trim_end());
+
+                        // Emit column indicator if column is known
+                        if info.column > 0 {
+                            let col = info.column as usize;
+                            // Count leading whitespace in the raw snippet to align the caret
+                            let leading = info.source_snippet
+                                .chars()
+                                .take_while(|c| c.is_whitespace())
+                                .count();
+                            result.push('\n');
+                            // Pad to match " NNN | " prefix (4 + 3 = 7 chars)
+                            result.push_str("     | ");
+                            // Fill up to the column position (1-based), accounting for leading ws
+                            // The displayed column is relative to the trimmed line start
+                            let display_col = col.saturating_sub(1);
+                            for _ in 0..display_col { result.push(' '); }
+                            result.push('^');
+                        }
+                    }
                 }
             }
         }

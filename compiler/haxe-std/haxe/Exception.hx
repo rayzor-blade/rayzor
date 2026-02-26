@@ -16,7 +16,7 @@ class Exception {
 
     public function details():String {
         if (stackTrace != null)
-            return message + "\n" + stackTrace;
+            return "Exception: \"" + message + "\"\n" + stackTrace;
         return message;
     }
 }
