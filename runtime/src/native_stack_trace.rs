@@ -427,10 +427,11 @@ pub fn capture_shadow_stack() -> String {
 // ============================================================================
 
 /// Save the current stack trace for the given exception.
-/// Called automatically at throw time. The exception parameter is unused
-/// in our implementation — we store the trace in thread-local ExceptionState.
+/// Called automatically at throw time. The exception parameter is a DynamicValue*
+/// (Any = type-safe Dynamic = boxed value with type tag). Unused in our implementation
+/// — we store the trace in thread-local ExceptionState.
 #[no_mangle]
-pub extern "C" fn rayzor_native_stack_trace_save_stack(_exception: i64) {
+pub extern "C" fn rayzor_native_stack_trace_save_stack(_exception: *mut u8) {
     // Stack is already captured in rayzor_throw_typed, nothing extra needed
 }
 
