@@ -3300,34 +3300,9 @@ impl<'a> HirToMirContext<'a> {
                 // Clear temps before expression
                 self.temp_heap_values.clear();
 
-                // Update the shadow-stack frame to the current statement's source line so the
-                // stack trace shows WHERE in the function execution was (call site), not
-                // the function definition line.
-                // Skip container expressions (Block, TryCatch) — they don't represent call sites;
-                // their inner statements will each emit their own update.
-                let is_container = matches!(
-                    expr.kind,
-                    HirExprKind::Block(_) | HirExprKind::TryCatch { .. }
-                );
-                let stmt_loc = expr.source_location;
-                if !is_container && stmt_loc.line > 0 {
-                    let update_fn = self.get_or_register_extern_function(
-                        "rayzor_update_call_frame_location",
-                        vec![IrType::I32, IrType::I32],
-                        IrType::Void,
-                    );
-                    if let (Some(line_c), Some(col_c)) = (
-                        self.builder.build_const(IrValue::I32(stmt_loc.line as i32)),
-                        self.builder
-                            .build_const(IrValue::I32(stmt_loc.column as i32)),
-                    ) {
-                        self.builder.build_call_direct(
-                            update_fn,
-                            vec![line_c, col_c],
-                            IrType::Void,
-                        );
-                    }
-                }
+                // Shadow-stack location updates are emitted only at call expressions
+                // (in the Call handler) and throw statements — not at every statement.
+                // This avoids the overhead of N extra extern calls per function.
 
                 let result = self.lower_expression(expr);
 
@@ -5801,7 +5776,6 @@ impl<'a> HirToMirContext<'a> {
 
                 // Update the caller's shadow-stack frame to this call-site line/col so
                 // the trace shows WHERE the call was made, not the function definition line.
-                // (Also emitted at the HirStatement::Expr level, but kept here for nested calls.)
                 let call_loc = expr.source_location;
                 if call_loc.is_valid() && call_loc.line > 0 {
                     let update_loc_fn = self.get_or_register_extern_function(
