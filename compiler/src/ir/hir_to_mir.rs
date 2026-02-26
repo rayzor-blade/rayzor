@@ -2230,6 +2230,46 @@ impl<'a> HirToMirContext<'a> {
         self.builder.current_block = Some(func.entry_block());
         self.current_function_symbol = Some(symbol_id);
 
+        // Set qualified name for stack traces.
+        // hir_func.qualified_name is built by build_qualified_name() during TAST lowering
+        // and includes the class prefix, e.g. "Main.thrower".
+        if let Some(qname_id) = hir_func.qualified_name {
+            if let Some(qname_str) = self.string_interner.get(qname_id) {
+                let qname = qname_str.to_string();
+                if let Some(func_mut) = self.builder.module.functions.get_mut(&func_id) {
+                    func_mut.qualified_name = Some(qname);
+                }
+            }
+        } else if let Some(func_mut) = self.builder.module.functions.get_mut(&func_id) {
+            // Fallback: build Class.method from this_type or current_module
+            if let Some(class_type) = this_type {
+                if let Some(class_name) = self.class_type_to_symbol.get(&class_type)
+                    .and_then(|&sym| self.symbol_table.get_symbol(sym))
+                    .and_then(|s| s.qualified_name.and_then(|n| self.string_interner.get(n))
+                        .or_else(|| self.string_interner.get(s.name)))
+                {
+                    func_mut.qualified_name = Some(format!("{}.{}", class_name, func_mut.name));
+                }
+            } else if let Some(module_name) = self.current_module.as_deref().filter(|m| !m.is_empty()) {
+                let bare = func_mut.name.clone();
+                func_mut.qualified_name = Some(format!("{}.{}", module_name, bare));
+            }
+        }
+
+        // Set source location from HIR function (propagated from TAST TypedFunction.source_location).
+        {
+            let loc = hir_func.source_location;
+            if loc.is_valid() && loc.line > 0 {
+                if let Some(func_mut) = self.builder.module.functions.get_mut(&func_id) {
+                    func_mut.source_location = IrSourceLocation {
+                        file_id: loc.file_id,
+                        line: loc.line,
+                        column: loc.column,
+                    };
+                }
+            }
+        }
+
         // Clear per-function drop tracking state
         // Note: We track owned heap values to free them on reassignment (Rust-style drop)
         // This handles the main memory leak case: loop iterations creating new objects
@@ -2561,15 +2601,8 @@ impl<'a> HirToMirContext<'a> {
         // Note: CSE opportunities don't have a direct attribute mapping yet
         // They will be used by the optimization pass manager
 
-        // Set qualified name for debugging and profiling
-        if let Some(qualified_name) = hir_func.qualified_name {
-            if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
-                func.qualified_name = self
-                    .string_interner
-                    .get(qualified_name)
-                    .map(|s| s.to_string());
-            }
-        }
+        // Note: qualified_name and source_location are set in lower_function_body (Pass 2).
+        // This dead-code path (lower_function is never called) is left for reference.
 
         // Map parameters to MIR registers
         // Parameters now have symbol IDs (preserved from TAST)!
@@ -2664,13 +2697,36 @@ impl<'a> HirToMirContext<'a> {
         // Store function mapping for call resolution
         self.function_map.insert(symbol_id, func_id);
 
-        // Set qualified name for debugging and profiling
+        // Set qualified name for debugging, profiling, and stack traces
         if let Some(qualified_name) = hir_func.qualified_name {
             if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
                 func.qualified_name = self
                     .string_interner
                     .get(qualified_name)
                     .map(|s| s.to_string());
+            }
+        } else if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
+            // Build qualified name from class type
+            let class_name = self.class_type_to_symbol.get(&class_type_id)
+                .and_then(|&sym| self.symbol_table.get_symbol(sym))
+                .and_then(|s| s.qualified_name.and_then(|n| self.string_interner.get(n))
+                    .or_else(|| self.string_interner.get(s.name)));
+            if let Some(cn) = class_name {
+                func.qualified_name = Some(format!("{}.{}", cn, func.name));
+            }
+        }
+
+        // Set source location from symbol table for stack traces
+        if let Some(sym) = self.symbol_table.get_symbol(hir_func.symbol_id) {
+            let loc = sym.definition_location;
+            if loc.line > 0 {
+                if let Some(func) = self.builder.module.functions.get_mut(&func_id) {
+                    func.source_location = IrSourceLocation {
+                        file_id: loc.file_id,
+                        line: loc.line,
+                        column: loc.column,
+                    };
+                }
             }
         }
 
@@ -3577,11 +3633,40 @@ impl<'a> HirToMirContext<'a> {
 
             HirStatement::Throw(expr) => {
                 let thrown_type_id = self.runtime_type_id(expr.ty);
+                let thrown_type = expr.ty;
                 if let Some(exception_reg) = self.lower_expression(expr) {
-                    // Stack trace is captured at runtime in rayzor_throw_typed()
-                    // and stored on thread-local state. Accessible via:
-                    // - NativeStackTrace.exceptionStack() for caught exceptions
-                    // - Exception.stackTrace field (populated by runtime for class exceptions)
+                    // Before throwing, capture the shadow call stack and store it
+                    // on the exception object's stackTrace field (if it has one).
+                    // This uses rayzor_native_stack_trace_call_stack() which reads
+                    // the shadow stack maintained by push/pop_call_frame instrumentation.
+                    // Store stack trace on Exception.stackTrace field before throwing.
+                    // Captures the shadow call stack via rayzor_native_stack_trace_call_stack().
+                    let stack_trace_field_name = self.string_interner.intern("stackTrace");
+                    if let Some((_, field_idx)) =
+                        self.resolve_field_index_by_name(stack_trace_field_name, thrown_type)
+                    {
+                        let call_stack_fn = self.get_or_register_extern_function(
+                            "rayzor_native_stack_trace_call_stack",
+                            vec![],
+                            IrType::Ptr(Box::new(IrType::U8)),
+                        );
+                        if let Some(trace_str) = self.builder.build_call_direct(
+                            call_stack_fn,
+                            vec![],
+                            IrType::Ptr(Box::new(IrType::U8)),
+                        ) {
+                            let idx_const = self.builder.build_const(IrValue::I64(field_idx as i64))
+                                .expect("failed to create field index const");
+                            // Use I64 as GEP element type so elem_size=8 (struct field slot)
+                            if let Some(field_ptr) = self.builder.build_gep(
+                                exception_reg,
+                                vec![idx_const],
+                                IrType::I64,
+                            ) {
+                                self.builder.build_store(field_ptr, trace_str);
+                            }
+                        }
+                    }
 
                     // Cast exception to i64 for uniform storage
                     let reg_type = self

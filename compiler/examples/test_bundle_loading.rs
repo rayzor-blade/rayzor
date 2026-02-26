@@ -147,6 +147,7 @@ fn execute_bundle_interpreted(bundle: &RayzorBundle) -> Result<std::time::Durati
         start_interpreted: true,
         bailout_strategy: compiler::codegen::BailoutStrategy::Quick,
         max_tier_promotions: 0,
+        enable_stack_traces: false,
     };
 
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)
@@ -216,6 +217,7 @@ fn compile_and_run(source: &str) -> Result<(), String> {
         start_interpreted: true,
         bailout_strategy: compiler::codegen::BailoutStrategy::Quick,
         max_tier_promotions: 0,
+        enable_stack_traces: false,
     };
 
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)

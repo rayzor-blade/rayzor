@@ -730,6 +730,7 @@ impl<'a> TastToHirContext<'a> {
             is_extern: false, // TODO: Extract from function metadata
             calling_convention: HirCallingConvention::Haxe,
             is_main,
+            source_location: function.source_location,
         }
     }
 
