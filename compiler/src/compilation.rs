@@ -2165,7 +2165,8 @@ impl CompilationUnit {
         }
 
         // Mark as loaded
-        self.namespace_resolver.mark_file_loaded(file_path.to_path_buf());
+        self.namespace_resolver
+            .mark_file_loaded(file_path.to_path_buf());
 
         // Try BLADE cache first
         let cache_hit = if self.config.enable_cache {
