@@ -3,7 +3,6 @@ package haxe;
 class Exception {
     public var message:String;
     public var previous:Exception;
-    public var stackTrace:String;
 
     public function new(message:String, ?previous:Exception, ?native:Any):Void {
         this.message = message;
@@ -15,8 +14,9 @@ class Exception {
     }
 
     public function details():String {
-        if (stackTrace != null)
-            return "Exception: \"" + message + "\"\n" + stackTrace;
+        var stack = NativeStackTrace.exceptionStack();
+        if (stack != null && stack != "")
+            return "Exception: \"" + message + "\"\n" + stack;
         return message;
     }
 }

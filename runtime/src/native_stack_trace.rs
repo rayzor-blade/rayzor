@@ -251,11 +251,14 @@ pub fn resolve_backtrace_to_source(bt: &backtrace::Backtrace) -> String {
 // Shadow Call Stack (debug mode instrumentation)
 // ============================================================================
 
-/// A frame on the shadow call stack — stores an index into the FUNCTION_REGISTRY.
 /// A single frame on the shadow call stack.
+/// Stores the compiler-assigned func_id rather than the registry index so that
+/// `rayzor_push_call_frame` is a cheap lock-free thread-local push.
+/// The func_id → registry_index resolution happens only in `capture_shadow_stack`,
+/// which is called exclusively at exception throw time.
 struct ShadowFrame {
-    /// Index into FUNCTION_REGISTRY (u32::MAX = unknown)
-    registry_index: u32,
+    /// Compiler-assigned IrFunctionId (resolved to FUNCTION_REGISTRY at capture time)
+    func_id: u32,
     /// Runtime-updated line override (0 = use registry default)
     line: u32,
     /// Runtime-updated column override (0 = use registry default)
@@ -269,16 +272,16 @@ thread_local! {
 
 /// Push a call frame onto the shadow stack (called at function entry in debug mode).
 /// The `func_id` is the compiler-assigned IrFunctionId.
+///
+/// **Hot path**: this is called on every function entry in debug mode and must be as
+/// cheap as possible.  We store `func_id` directly and defer the FUNC_ID_MAP lookup
+/// (which requires a global RwLock) to `capture_shadow_stack`, which only runs when
+/// an exception is thrown.
 #[no_mangle]
 pub extern "C" fn rayzor_push_call_frame(func_id: u32) {
-    let index = if let Ok(map) = FUNC_ID_MAP.read() {
-        map.get(&func_id).copied().unwrap_or(u32::MAX)
-    } else {
-        u32::MAX
-    };
     SHADOW_STACK.with(|stack| {
         stack.borrow_mut().push(ShadowFrame {
-            registry_index: index,
+            func_id,
             line: 0,
             column: 0,
         });
@@ -324,9 +327,15 @@ pub fn capture_shadow_stack() -> String {
         let mut result = String::new();
         let mut seen = std::collections::HashSet::new();
 
+        // Resolve func_id → registry_index once, here at capture time (not at push time).
+        let func_id_map = FUNC_ID_MAP.read().ok();
+
         // Iterate in reverse (most recent call first)
         for frame in stack.iter().rev() {
-            let func_index = frame.registry_index;
+            let func_index = func_id_map
+                .as_ref()
+                .and_then(|m| m.get(&frame.func_id).copied())
+                .unwrap_or(u32::MAX);
             if let Some(info) = registry.get(func_index as usize) {
                 // Skip internal/generated functions
                 if info.qualified_name.starts_with("__") {

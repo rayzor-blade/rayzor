@@ -1564,6 +1564,20 @@ impl CompilationUnit {
                     }
                 }
                 ExprKind::Field { expr, .. } => {
+                    // If the object is a capitalized identifier, it may be a class/module
+                    // reference (e.g. NativeStackTrace.exceptionStack()). Add it as a
+                    // potential unqualified dep so load_imports_efficiently can resolve it
+                    // via package-prefix fallback (tries haxe.X, haxe.ds.X, etc.).
+                    if let ExprKind::Ident(name) = &expr.kind {
+                        if name
+                            .chars()
+                            .next()
+                            .map(|c| c.is_uppercase())
+                            .unwrap_or(false)
+                        {
+                            deps.insert(name.clone());
+                        }
+                    }
                     extract_expr_deps(expr, deps);
                 }
                 ExprKind::Index { expr, index } => {
