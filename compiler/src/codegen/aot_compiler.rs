@@ -9,7 +9,7 @@ use inkwell::context::Context;
 use inkwell::targets::RelocMode;
 
 use crate::compilation::{CompilationConfig, CompilationUnit};
-use crate::ir::optimization::{OptimizationLevel, PassManager};
+use crate::ir::optimization::{OptimizationLevel, PassManager, strip_stack_trace_updates};
 use crate::ir::tree_shake;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -136,6 +136,7 @@ impl AotCompiler {
             let mut pass_manager = PassManager::for_level(mir_opt);
             for module in &mut modules {
                 let _ = pass_manager.run(module);
+                let _ = strip_stack_trace_updates(module);
             }
         }
 
