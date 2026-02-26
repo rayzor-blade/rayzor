@@ -384,6 +384,9 @@ fn prefix_unary_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
 
 /// Parse postfix expression
 pub fn postfix_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
+    // Skip leading whitespace before recording start so expression spans begin at the
+    // actual first character of the expression, not at a preceding newline or indent.
+    let (input, _) = ws(input)?;
     let start = position(full, input);
     let (input, mut expr) = primary_expr(full, input)?;
 
@@ -710,7 +713,10 @@ fn unescape_string(s: &str) -> String {
                         }
                     }
                 }
-                Some(c) => { result.push('\\'); result.push(c); }
+                Some(c) => {
+                    result.push('\\');
+                    result.push(c);
+                }
                 None => result.push('\\'),
             }
         } else {

@@ -2136,7 +2136,10 @@ impl CompilationUnit {
                     false
                 };
 
-                debug!("[IMPORT_LOAD] Processing '{}' (cache_hit={})", name, cache_hit);
+                debug!(
+                    "[IMPORT_LOAD] Processing '{}' (cache_hit={})",
+                    name, cache_hit
+                );
                 if !cache_hit {
                     // Cache miss or caching disabled - compile normally
                     // Use is_stdlib_file=true so import files:
@@ -2352,7 +2355,11 @@ impl CompilationUnit {
                     if let Some(field_sym) = scope.get_symbol(field_name_interned) {
                         debug!(
                             "[BLADE_FIELD] Restored {}.{} {:?} -> (TypeId({:?}), index={})",
-                            entry.class_name, entry.field_name, field_sym, class_type, entry.field_index
+                            entry.class_name,
+                            entry.field_name,
+                            field_sym,
+                            class_type,
+                            entry.field_index
                         );
                         self.import_field_index_map
                             .insert(field_sym, (*class_type, entry.field_index));
@@ -3274,7 +3281,10 @@ impl CompilationUnit {
                 && typed_file.functions.is_empty()
                 && typed_file.enums.is_empty();
             if is_extern_only {
-                debug!("[EXTERN_ONLY] Skipping MIR for extern-only file: {}", filename);
+                debug!(
+                    "[EXTERN_ONLY] Skipping MIR for extern-only file: {}",
+                    filename
+                );
                 self.compiled_files
                     .insert(filename.to_string(), typed_file.clone());
                 return Ok(typed_file);
@@ -3314,7 +3324,8 @@ impl CompilationUnit {
         let stdlib_mapping = self.compiler_plugin_registry.build_combined_mapping();
 
         // Build constructor param counts from import MIR modules for fill_default_args fallback
-        let mut constructor_param_counts: BTreeMap<crate::ir::IrFunctionId, usize> = BTreeMap::new();
+        let mut constructor_param_counts: BTreeMap<crate::ir::IrFunctionId, usize> =
+            BTreeMap::new();
         for (_, func_id) in &self.import_constructor_name_map {
             for import_mir in &self.import_mir_modules {
                 if let Some(func) = import_mir.functions.get(func_id) {
@@ -3566,7 +3577,6 @@ impl CompilationUnit {
             // inference issues. The stdlib version is the source of truth, so we REPLACE
             // the user's version with the stdlib's version.
 
-
             // Build map of function names to ALL IDs in the user module (before merging)
             // Multiple import modules can have duplicate extern declarations of the same function.
             // We need to track ALL of them to replace every copy.
@@ -3585,7 +3595,10 @@ impl CompilationUnit {
             for (func_id, func) in &renumbered_functions {
                 if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
                     for &existing_id in existing_ids {
-                        debug!("[STDLIB_REPLACE] '{}' replacing {:?} -> {:?}", func.name, existing_id, func_id);
+                        debug!(
+                            "[STDLIB_REPLACE] '{}' replacing {:?} -> {:?}",
+                            func.name, existing_id, func_id
+                        );
                         id_replacements.insert(existing_id, *func_id);
                     }
                 }

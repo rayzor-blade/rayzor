@@ -901,8 +901,21 @@ impl<'a> TastToHirContext<'a> {
                     is_mutable,
                 }
             }
-            TypedStatement::Expression { expression, .. } => {
-                HirStatement::Expr(self.lower_expression(expression))
+            TypedStatement::Expression {
+                expression,
+                source_location,
+                ..
+            } => {
+                let mut hir_expr = self.lower_expression(expression);
+                // Propagate statement source_location to the HIR expression when the
+                // expression itself has no valid location (e.g., calls inside try blocks).
+                if (!hir_expr.source_location.is_valid() || hir_expr.source_location.line == 0)
+                    && source_location.is_valid()
+                    && source_location.line > 0
+                {
+                    hir_expr.source_location = *source_location;
+                }
+                HirStatement::Expr(hir_expr)
             }
             TypedStatement::Return { value, .. } => {
                 HirStatement::Return(value.as_ref().map(|e| self.lower_expression(e)))

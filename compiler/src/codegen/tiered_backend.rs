@@ -1504,8 +1504,7 @@ impl TieredBackend {
                 .iter()
                 .find(|(name, _)| name == "rayzor_set_stack_traces_enabled")
             {
-                let enable_fn: extern "C" fn(i32) =
-                    unsafe { std::mem::transmute(*ptr) };
+                let enable_fn: extern "C" fn(i32) = unsafe { std::mem::transmute(*ptr) };
                 enable_fn(1);
             }
         }
@@ -1513,15 +1512,16 @@ impl TieredBackend {
         // Store function pointers for functions with bodies (non-extern)
         // Extern functions have empty CFGs and are imported, not compiled
         // Also register source info for debug-mode stack traces
-        let register_fn: Option<extern "C" fn(u32, usize, *const u8, usize, *const u8, usize, u32, u32)> =
-            if self.config.enable_stack_traces {
-                self.runtime_symbols
-                    .iter()
-                    .find(|(name, _)| name == "rayzor_register_function_source")
-                    .map(|(_, ptr)| unsafe { std::mem::transmute(*ptr) })
-            } else {
-                None
-            };
+        let register_fn: Option<
+            extern "C" fn(u32, usize, *const u8, usize, *const u8, usize, u32, u32),
+        > = if self.config.enable_stack_traces {
+            self.runtime_symbols
+                .iter()
+                .find(|(name, _)| name == "rayzor_register_function_source")
+                .map(|(_, ptr)| unsafe { std::mem::transmute(*ptr) })
+        } else {
+            None
+        };
 
         for module in modules.iter() {
             for (func_id, function) in &module.functions {
@@ -1537,10 +1537,7 @@ impl TieredBackend {
 
                     // Register source info for stack traces (debug mode only)
                     if let Some(register) = register_fn {
-                        let name = function
-                            .qualified_name
-                            .as_deref()
-                            .unwrap_or(&function.name);
+                        let name = function.qualified_name.as_deref().unwrap_or(&function.name);
                         let source_file = &module.source_file;
                         register(
                             func_id.0,
@@ -1719,10 +1716,7 @@ impl TieredBackend {
                     continue;
                 }
                 if let Some(&ptr) = pointers.get(func_id) {
-                    let name = function
-                        .qualified_name
-                        .as_deref()
-                        .unwrap_or(&function.name);
+                    let name = function.qualified_name.as_deref().unwrap_or(&function.name);
                     let source_file = &module.source_file;
                     register(
                         func_id.0,
@@ -1766,10 +1760,7 @@ impl TieredBackend {
                     continue;
                 }
                 if let Some(&ptr) = pointers.get(func_id) {
-                    let name = function
-                        .qualified_name
-                        .as_deref()
-                        .unwrap_or(&function.name);
+                    let name = function.qualified_name.as_deref().unwrap_or(&function.name);
                     let source_file = &module.source_file;
                     register(
                         func_id.0,
@@ -1892,15 +1883,16 @@ impl TieredBackend {
 
         // Collect function pointers for all functions with bodies
         // Also re-register source info for stack traces (debug mode only)
-        let register_fn: Option<extern "C" fn(u32, usize, *const u8, usize, *const u8, usize, u32, u32)> =
-            if self.config.enable_stack_traces {
-                self.runtime_symbols
-                    .iter()
-                    .find(|(name, _)| name == "rayzor_register_function_source")
-                    .map(|(_, ptr)| unsafe { std::mem::transmute(*ptr) })
-            } else {
-                None
-            };
+        let register_fn: Option<
+            extern "C" fn(u32, usize, *const u8, usize, *const u8, usize, u32, u32),
+        > = if self.config.enable_stack_traces {
+            self.runtime_symbols
+                .iter()
+                .find(|(name, _)| name == "rayzor_register_function_source")
+                .map(|(_, ptr)| unsafe { std::mem::transmute(*ptr) })
+        } else {
+            None
+        };
 
         let mut pointers = HashMap::new();
         for module in modules_to_compile {
@@ -1914,10 +1906,7 @@ impl TieredBackend {
 
                     // Re-register source info at new address (tier promotion)
                     if let Some(register) = register_fn {
-                        let name = function
-                            .qualified_name
-                            .as_deref()
-                            .unwrap_or(&function.name);
+                        let name = function.qualified_name.as_deref().unwrap_or(&function.name);
                         let source_file = &module.source_file;
                         register(
                             func_id.0,
@@ -2842,11 +2831,7 @@ impl TieredBackend {
 
                     // Re-register source info at new addresses (tier promotion)
                     if config.enable_stack_traces {
-                        Self::register_source_info_static(
-                            &modules,
-                            &all_pointers,
-                            runtime_symbols,
-                        );
+                        Self::register_source_info_static(&modules, &all_pointers, runtime_symbols);
                     }
 
                     // Step 3: All executions drained - safe to install pointers atomically
