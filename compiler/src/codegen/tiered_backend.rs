@@ -23,7 +23,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 use std::time::Duration;
@@ -1793,7 +1793,7 @@ impl TieredBackend {
     /// This ensures getName()/getParameters()/trace work correctly at runtime.
     fn register_enum_rtti_from_module(module: &IrModule) {
         use crate::ir::modules::IrTypeDefinition;
-        use rayzor_runtime::type_system::{ParamType, register_enum_from_mir};
+        use rayzor_runtime::type_system::{register_enum_from_mir, ParamType};
 
         for (_id, typedef) in &module.types {
             if let IrTypeDefinition::Enum { variants, .. } = &typedef.definition {
