@@ -3258,9 +3258,9 @@ impl StdlibMapping {
         let mappings = vec![
             // saveStack(exception:Any):Void
             map_method!(static "NativeStackTrace", "saveStack" => "rayzor_native_stack_trace_save_stack", params: 1, returns: void, types: &[PtrVoid]),
-            // callStack():Any
+            // callStack():String
             map_method!(static "NativeStackTrace", "callStack" => "rayzor_native_stack_trace_call_stack", params: 0, returns: primitive, types: &[] => PtrVoid),
-            // exceptionStack():Any
+            // exceptionStack():String
             map_method!(static "NativeStackTrace", "exceptionStack" => "rayzor_native_stack_trace_exception_stack", params: 0, returns: primitive, types: &[] => PtrVoid),
             // toHaxe(nativeStackTrace:Any, skip:Int = 0):Array<StackItem>
             map_method!(static "NativeStackTrace", "toHaxe" => "rayzor_native_stack_trace_to_haxe", params: 2, returns: primitive, types: &[PtrVoid, I32] => PtrVoid),
