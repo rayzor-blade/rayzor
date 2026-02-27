@@ -938,19 +938,17 @@ impl<'a> HirToMirContext<'a> {
         let mut current = type_id;
         {
             let type_table = self.type_table.borrow();
-            for _ in 0..16 {
+            let mut visited = HashSet::new();
+            loop {
+                if !visited.insert(current) {
+                    break;
+                }
                 match type_table.get(current).map(|ti| &ti.kind) {
                     Some(TypeKind::Class { symbol_id, .. }) => return Some(*symbol_id),
                     Some(TypeKind::TypeAlias { target_type, .. }) => {
-                        if *target_type == current {
-                            break;
-                        }
                         current = *target_type;
                     }
                     Some(TypeKind::GenericInstance { base_type, .. }) => {
-                        if *base_type == current {
-                            break;
-                        }
                         current = *base_type;
                     }
                     _ => break,
@@ -1053,8 +1051,11 @@ impl<'a> HirToMirContext<'a> {
         method_name: InternedString,
     ) -> Option<SymbolId> {
         let mut current = Some(class_symbol);
-        for _ in 0..32 {
-            let cls = current?;
+        let mut visited = HashSet::new();
+        while let Some(cls) = current {
+            if !visited.insert(cls) {
+                break;
+            }
             if let Some(method_symbol) = self
                 .class_method_symbols
                 .get(&(cls, method_name))
@@ -1082,11 +1083,11 @@ impl<'a> HirToMirContext<'a> {
         };
 
         let mut current = Some(class_symbol);
-        for _ in 0..32 {
-            let cls = match current {
-                Some(s) => s,
-                None => break,
-            };
+        let mut visited = HashSet::new();
+        while let Some(cls) = current {
+            if !visited.insert(cls) {
+                break;
+            }
             let cls_scope = self.symbol_table.get_symbol(cls).map(|s| s.scope_id);
             if cls_scope == Some(method_scope) {
                 return true;
@@ -14254,6 +14255,29 @@ impl<'a> HirToMirContext<'a> {
                             self.builder.build_const(IrValue::Bool(false))
                         }
                     }
+                    // Class -> Interface: runtime check against registered interface impl map.
+                    (
+                        Some(TypeKind::Class { .. }),
+                        Some(TypeKind::Interface { .. }),
+                    ) => {
+                        let value_reg = self.lower_expression(expr)?;
+                        let target_type_id = self.runtime_type_id(*expected) as i64;
+                        let type_id_const =
+                            self.builder.build_const(IrValue::I64(target_type_id))?;
+                        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                        let is_func = self.get_or_register_extern_function(
+                            "haxe_object_is_instance",
+                            vec![ptr_void, IrType::I64],
+                            IrType::I64,
+                        );
+                        let result_i64 = self.builder.build_call_direct(
+                            is_func,
+                            vec![value_reg, type_id_const],
+                            IrType::I64,
+                        )?;
+                        let zero = self.builder.build_const(IrValue::I64(0))?;
+                        self.builder.build_cmp(CompareOp::Ne, result_i64, zero)
+                    }
                     // Class vs primitive or other unrelated → false
                     (Some(TypeKind::Class { .. }), Some(TypeKind::Int))
                     | (Some(TypeKind::Class { .. }), Some(TypeKind::Float))
@@ -19417,8 +19441,11 @@ impl<'a> HirToMirContext<'a> {
             // Resolve receiver_ty through TypeAlias/GenericInstance chains to find
             // the underlying Class type and its symbol_id
             let mut resolved = receiver_ty;
-            for _ in 0..10 {
-                // max depth
+            let mut visited = HashSet::new();
+            loop {
+                if !visited.insert(resolved) {
+                    break;
+                }
                 if let Some(ti) = type_table.get(resolved) {
                     match &ti.kind {
                         TypeKind::TypeAlias { target_type, .. } => resolved = *target_type,
@@ -21137,7 +21164,11 @@ impl<'a> HirToMirContext<'a> {
             let type_table = self.type_table.borrow();
             let mut tid = iter_expr.ty;
             let mut result: Option<SymbolId> = None;
-            for _ in 0..10 {
+            let mut visited = HashSet::new();
+            loop {
+                if !visited.insert(tid) {
+                    break;
+                }
                 if let Some(ty) = type_table.get(tid) {
                     match &ty.kind {
                         crate::tast::TypeKind::Class { symbol_id, .. } => {
@@ -21151,6 +21182,9 @@ impl<'a> HirToMirContext<'a> {
                         } => {
                             result = Some(*symbol_id);
                             tid = *target_type;
+                        }
+                        crate::tast::TypeKind::GenericInstance { base_type, .. } => {
+                            tid = *base_type;
                         }
                         crate::tast::TypeKind::Placeholder { .. } => break,
                         _ => break,
@@ -24127,6 +24161,7 @@ impl<'a> HirToMirContext<'a> {
                     .as_raw()
                     + 1000
             }
+            Some(TypeKind::Interface { .. }) => type_id.as_raw(),
             Some(TypeKind::Enum { .. }) => type_id.as_raw() + 1000,
             Some(TypeKind::TypeAlias { target_type, .. }) => {
                 let target = *target_type;
@@ -24142,7 +24177,11 @@ impl<'a> HirToMirContext<'a> {
     fn resolve_through_aliases(&self, type_id: TypeId) -> TypeId {
         let type_table = self.type_table.borrow();
         let mut current = type_id;
-        for _ in 0..10 {
+        let mut visited = HashSet::new();
+        loop {
+            if !visited.insert(current) {
+                break;
+            }
             match type_table.get(current).map(|t| &t.kind) {
                 Some(TypeKind::TypeAlias { target_type, .. }) => current = *target_type,
                 _ => break,
@@ -24173,7 +24212,8 @@ impl<'a> HirToMirContext<'a> {
         };
 
         let mut current_sym = source_sym;
-        for _ in 0..20 {
+        let mut visited = HashSet::new();
+        while visited.insert(current_sym) {
             // Find the class with this SymbolId in current_hir_types
             let parent_type = self.current_hir_types.values().find_map(|decl| {
                 if let super::hir::HirTypeDecl::Class(class) = decl {
@@ -25750,6 +25790,11 @@ impl<'a> HirToMirContext<'a> {
             vec![IrType::I64, IrType::I64],
             IrType::Void,
         );
+        let register_iface_impl_fn = self.get_or_register_extern_function(
+            "haxe_register_interface_impl",
+            vec![IrType::I64, IrType::I64],
+            IrType::Void,
+        );
 
         let class_vtables = self.class_vtables.clone();
         for (class_sym, vtable) in &class_vtables {
@@ -25775,6 +25820,42 @@ impl<'a> HirToMirContext<'a> {
                         self.builder.build_call_direct(
                             vtable_set_fn,
                             vec![tid2, sr, cp],
+                            IrType::Void,
+                        );
+                    }
+                }
+            }
+        }
+
+        // Register class -> interface implementation pairs for Std.is(..., Interface) runtime checks.
+        let mut registered_iface_pairs: BTreeSet<(i64, i64)> = BTreeSet::new();
+        let interface_vtables = self.interface_vtables.clone();
+        for ((class_sym, iface_sym), _methods) in interface_vtables {
+            let mut class_ids: BTreeSet<i64> = BTreeSet::new();
+            class_ids.insert(class_sym.as_raw() as i64);
+            class_ids.insert(class_sym.as_raw() as i64 + 1000);
+            if let Some(sym) = self.symbol_table.get_symbol(class_sym) {
+                class_ids.insert(sym.type_id.as_raw() as i64);
+            }
+
+            let mut iface_ids: BTreeSet<i64> = BTreeSet::new();
+            iface_ids.insert(iface_sym.as_raw() as i64);
+            iface_ids.insert(iface_sym.as_raw() as i64 + 1000);
+            if let Some(sym) = self.symbol_table.get_symbol(iface_sym) {
+                iface_ids.insert(sym.type_id.as_raw() as i64);
+            }
+
+            for class_type_id in &class_ids {
+                for iface_type_id in &iface_ids {
+                    if !registered_iface_pairs.insert((*class_type_id, *iface_type_id)) {
+                        continue;
+                    }
+                    let class_tid = self.builder.build_const(IrValue::I64(*class_type_id));
+                    let iface_tid = self.builder.build_const(IrValue::I64(*iface_type_id));
+                    if let (Some(cid), Some(iid)) = (class_tid, iface_tid) {
+                        self.builder.build_call_direct(
+                            register_iface_impl_fn,
+                            vec![cid, iid],
                             IrType::Void,
                         );
                     }
