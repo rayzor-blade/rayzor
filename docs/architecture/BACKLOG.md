@@ -787,8 +787,8 @@ map.set(new Key(1, "foo"), "value");
 - [x] Reflect.getProperty(o, name) - get via property accessor, falls back to field (2026-02-21)
 - [x] Reflect.setProperty(o, name, value) - set via property accessor, falls back to setField (2026-02-21)
 - [x] Reflect.isFunction(f) - function/closure detection via `haxe_box_function_ptr` + `TYPE_FUNCTION` tagging (2026-02-27)
-- [ ] Reflect.callMethod(o, func, args) - reflective method call
-- [ ] Reflect.makeVarArgs(f) - wrap function as varargs
+- [x] Reflect.callMethod(o, func, args) - reflective method call (2026-02-27)
+- [x] Reflect.makeVarArgs(f) - wrap function as varargs (2026-02-27)
 
 **Priority 2: File System I/O - VERIFIED ✅ (2025-11-27)**
 
@@ -1755,8 +1755,8 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
    - [x] Implement `Type.createInstance` with constructor + argument semantics (2026-02-27).
    - [x] Implement `Type.createEmptyInstance` allocation path (2026-02-27).
 2. **Interface runtime parity**
-   - [ ] `Std.is(obj, IMyInterface)` runtime check.
-   - [ ] Fat pointer lifecycle management (free/drop parity).
+   - [x] `Std.is(obj, IMyInterface)` runtime check (runtime registry + MIR registration, 2026-02-27).
+   - [ ] Fat pointer lifecycle management (free/drop parity; variable assignment/reassignment tracking improved, 2026-02-27).
 3. **Correctness regressions still open**
    - [ ] Array comprehension temp scoping bug (multiple comprehensions in one function).
    - [ ] `Type.typeof()` returns real `ValueType` enum value (not i32 ordinal).
@@ -1809,7 +1809,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 - [x] Multiple interface implementation (`class Foo implements Bar implements Baz`) — parser accepts repeated `implements` keyword (2026-02-20)
 - [x] Interface inheritance (`interface A extends B`) — inherited methods in vtable, transitive parent vtables for implementing classes (2026-02-18)
-- [ ] `Std.is(obj, IMyInterface)` runtime check
+- [x] `Std.is(obj, IMyInterface)` runtime check (2026-02-27)
 - [ ] Fat pointer lifecycle management (free on scope exit)
 
 ### 16.3 Try/Catch Exception Handling 🟢
