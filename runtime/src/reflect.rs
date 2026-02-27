@@ -10,7 +10,9 @@
 
 use crate::anon_object;
 use crate::haxe_string::HaxeString;
-use crate::type_system::{DynamicValue, TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_NULL, TYPE_STRING};
+use crate::type_system::{
+    DynamicValue, TYPE_BOOL, TYPE_FLOAT, TYPE_FUNCTION, TYPE_INT, TYPE_NULL, TYPE_STRING,
+};
 
 /// Haxe ValueType enum ordinals (matches Type.hx ValueType)
 pub const TVALUETYPE_TNULL: i32 = 0;
@@ -142,6 +144,9 @@ pub extern "C" fn haxe_reflect_is_object(v: *mut u8) -> bool {
     }
     unsafe {
         let dv = *(v as *const DynamicValue);
+        if dv.type_id == TYPE_FUNCTION {
+            return false;
+        }
         // Anonymous objects and user-defined types (classes) are "objects"
         dv.type_id == anon_object::TYPE_ANON_OBJECT || dv.type_id.0 >= 1000
     }
@@ -156,8 +161,10 @@ pub extern "C" fn haxe_reflect_is_function(v: *mut u8) -> bool {
     if v.is_null() {
         return false;
     }
-    // For now, we don't have function type IDs. Will be extended later.
-    false
+    unsafe {
+        let dv = *(v as *const DynamicValue);
+        dv.type_id == TYPE_FUNCTION
+    }
 }
 
 /// Reflect.copy(obj) -> Dynamic
@@ -370,6 +377,7 @@ pub extern "C" fn haxe_type_typeof(v: *mut u8) -> i32 {
             t if t == TYPE_INT => TVALUETYPE_TINT,
             t if t == TYPE_FLOAT => TVALUETYPE_TFLOAT,
             t if t == TYPE_BOOL => TVALUETYPE_TBOOL,
+            t if t == TYPE_FUNCTION => TVALUETYPE_TFUNCTION,
             t if t == TYPE_STRING => TVALUETYPE_TCLASS, // String is a class in Haxe
             t if t == anon_object::TYPE_ANON_OBJECT => TVALUETYPE_TOBJECT,
             t if t.0 >= 1000 => TVALUETYPE_TCLASS, // User-defined types are classes
@@ -385,7 +393,7 @@ pub extern "C" fn haxe_type_typeof(v: *mut u8) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::type_system::{haxe_box_float_ptr, haxe_box_int_ptr};
+    use crate::type_system::{haxe_box_float_ptr, haxe_box_function_ptr, haxe_box_int_ptr};
 
     #[test]
     fn test_typeof_int() {
@@ -403,5 +411,13 @@ mod tests {
     #[test]
     fn test_typeof_null() {
         assert_eq!(haxe_type_typeof(std::ptr::null_mut()), TVALUETYPE_TNULL);
+    }
+
+    #[test]
+    fn test_reflect_is_function_true_for_boxed_function() {
+        let closure_ptr = Box::into_raw(Box::new([0u8; 16])) as *mut u8;
+        let boxed_fn = haxe_box_function_ptr(closure_ptr);
+        assert!(haxe_reflect_is_function(boxed_fn));
+        assert_eq!(haxe_type_typeof(boxed_fn), TVALUETYPE_TFUNCTION);
     }
 }

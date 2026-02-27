@@ -48,6 +48,7 @@ pub const TYPE_BOOL: TypeId = TypeId(2);
 pub const TYPE_INT: TypeId = TypeId(3);
 pub const TYPE_FLOAT: TypeId = TypeId(4);
 pub const TYPE_STRING: TypeId = TypeId(5);
+pub const TYPE_FUNCTION: TypeId = TypeId(u32::MAX - 1);
 
 // Starting ID for user-defined types (classes, enums, etc.)
 pub const TYPE_USER_START: u32 = 1000;
@@ -237,6 +238,18 @@ pub fn init_type_system() {
         },
     );
 
+    registry.insert(
+        TYPE_FUNCTION,
+        TypeInfo {
+            name: "Function",
+            size: std::mem::size_of::<usize>(),
+            align: std::mem::align_of::<usize>(),
+            to_string: function_to_string,
+            enum_info: None,
+            class_info: None,
+        },
+    );
+
     *TYPE_REGISTRY.write().unwrap() = Some(registry);
 }
 
@@ -406,6 +419,8 @@ pub fn register_class_from_mir(
             .into_boxed_slice(),
     );
 
+    let class_size = ((instance_fields.len() + 1) * 8).max(16);
+
     let class_info = Box::leak(Box::new(ClassInfo {
         name: class_name_static,
         super_type_id,
@@ -415,7 +430,9 @@ pub fn register_class_from_mir(
 
     let type_info = TypeInfo {
         name: class_name_static,
-        size: 0, // Struct size is not tracked here (computed by backend)
+        // Class instance layout in Rayzor is 8-byte slots with header at slot 0.
+        // Keep a runtime fallback size for reflective empty construction.
+        size: class_size,
         align: 8,
         to_string: void_to_string,
         enum_info: None,
@@ -547,6 +564,53 @@ pub extern "C" fn haxe_type_resolve_class(name_ptr: *mut u8) -> i64 {
         }
     }
     -1
+}
+
+/// Type.createEmptyInstance(c) -> T
+/// Allocates a zero-initialized class instance without invoking the constructor.
+#[no_mangle]
+pub extern "C" fn haxe_type_create_empty_instance(type_id: i64) -> *mut u8 {
+    if type_id <= 0 {
+        return std::ptr::null_mut();
+    }
+
+    let alloc_size = {
+        let guard = TYPE_REGISTRY.read().unwrap();
+        let registry = match guard.as_ref() {
+            Some(registry) => registry,
+            None => return std::ptr::null_mut(),
+        };
+        let info = match registry.get(&TypeId(type_id as u32)) {
+            Some(info) => info,
+            None => return std::ptr::null_mut(),
+        };
+        let class_info = match info.class_info.as_ref() {
+            Some(class_info) => class_info,
+            None => return std::ptr::null_mut(),
+        };
+
+        let has_header_field = class_info
+            .instance_fields
+            .first()
+            .is_some_and(|name| *name == "__type_id");
+        let slot_count = if has_header_field {
+            class_info.instance_fields.len()
+        } else {
+            class_info.instance_fields.len().saturating_add(1)
+        };
+        let fallback_size = (slot_count * 8).max(16);
+        info.size.max(fallback_size).max(16)
+    };
+
+    unsafe {
+        let obj_ptr = libc::calloc(1, alloc_size) as *mut u8;
+        if obj_ptr.is_null() {
+            return std::ptr::null_mut();
+        }
+        // Object header slot 0 always stores the runtime class type_id.
+        *(obj_ptr as *mut i64) = type_id;
+        obj_ptr
+    }
 }
 
 /// Type.getEnumConstructs(e) -> Array<String>
@@ -1307,6 +1371,14 @@ unsafe extern "C" fn string_to_string(value_ptr: *const u8) -> StringPtr {
     *(value_ptr as *const StringPtr)
 }
 
+unsafe extern "C" fn function_to_string(_value_ptr: *const u8) -> StringPtr {
+    let s = "<function>";
+    StringPtr {
+        ptr: s.as_ptr(),
+        len: s.len(),
+    }
+}
+
 // ============================================================================
 // Boxing functions: Convert concrete values to Dynamic
 // ============================================================================
@@ -1782,6 +1854,24 @@ pub extern "C" fn haxe_box_haxestring_ptr(hs_ptr: *mut u8) -> *mut u8 {
     let dynamic = DynamicValue {
         type_id: TYPE_STRING,
         value_ptr: hs_ptr,
+    };
+    let boxed = Box::new(dynamic);
+    Box::into_raw(boxed) as *mut u8
+}
+
+/// Box a function/closure pointer as Dynamic.
+/// The value pointer is expected to be a closure object pointer
+/// (`{fn_ptr, env_ptr}`) or another callable runtime representation.
+#[no_mangle]
+pub extern "C" fn haxe_box_function_ptr(fn_ptr: *mut u8) -> *mut u8 {
+    if fn_ptr.is_null() {
+        let dynamic = haxe_box_null();
+        let boxed = Box::new(dynamic);
+        return Box::into_raw(boxed) as *mut u8;
+    }
+    let dynamic = DynamicValue {
+        type_id: TYPE_FUNCTION,
+        value_ptr: fn_ptr,
     };
     let boxed = Box::new(dynamic);
     Box::into_raw(boxed) as *mut u8

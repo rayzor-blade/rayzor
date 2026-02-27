@@ -758,7 +758,7 @@ map.set(new Key(1, "foo"), "value");
 - [x] Std.is(v, t) - type check via `haxe_std_is` with class hierarchy walking (2026-02-21)
 - [x] Std.downcast<T>(v, c) - safe downcast via `haxe_std_downcast` with hierarchy walking (2026-02-21)
 
-**Type Class - 🟡 Mostly Complete (2026-02-21):**
+**Type Class - 🟡 Mostly Complete (2026-02-27):**
 - [x] Type.getClass(o) - get class type_id from object header (2026-02-17)
 - [x] Type.getClassName(c) - class name via TYPE_REGISTRY (2026-02-17)
 - [x] Type.getSuperClass(c) - parent type_id via TYPE_REGISTRY (2026-02-17)
@@ -769,13 +769,13 @@ map.set(new Key(1, "foo"), "value");
 - [x] Type.enumConstructor(e) - get enum variant name via `haxe_type_enum_constructor` MIR wrapper (2026-02-21)
 - [x] Type.enumParameters(e) - get enum variant params via `haxe_type_enum_parameters` MIR wrapper (2026-02-21)
 - [ ] Type.createInstance(c, args) - reflective construction
-- [ ] Type.createEmptyInstance(c) - reflective empty construction
+- [x] Type.createEmptyInstance(c) - reflective empty construction via `haxe_type_create_empty_instance` (2026-02-27)
 - [ ] Type.enumEq(a, b) - deep enum equality
 - [ ] Type.getEnum(e) - get enum type from value
 - [ ] Type.resolveEnum(name) - lookup enum by name
 - [ ] Type.allEnums(e) - list all zero-param enum constructors
 
-**Reflect Class - 🟡 Mostly Complete (2026-02-21):**
+**Reflect Class - 🟡 Mostly Complete (2026-02-27):**
 - [x] Reflect.field(o, name) - get field by name (2026-02-07)
 - [x] Reflect.setField(o, name, value) - set field by name (2026-02-07)
 - [x] Reflect.hasField(o, name) - check field exists (2026-02-07)
@@ -786,7 +786,7 @@ map.set(new Key(1, "foo"), "value");
 - [x] Reflect.isEnumValue(v) - check if enum value (2026-02-19)
 - [x] Reflect.getProperty(o, name) - get via property accessor, falls back to field (2026-02-21)
 - [x] Reflect.setProperty(o, name, value) - set via property accessor, falls back to setField (2026-02-21)
-- [x] Reflect.isFunction(f) - check if function value (runtime + stdlib mapped)
+- [x] Reflect.isFunction(f) - function/closure detection via `haxe_box_function_ptr` + `TYPE_FUNCTION` tagging (2026-02-27)
 - [ ] Reflect.callMethod(o, func, args) - reflective method call
 - [ ] Reflect.makeVarArgs(f) - wrap function as varargs
 
@@ -926,7 +926,7 @@ map.set(new Key(1, "foo"), "value");
 **Phase 6: Advanced Features (Future)**
 1. Networking (requires async infrastructure)
 2. SSL/TLS support
-3. Type.createInstance / Type.createEmptyInstance (reflective construction)
+3. Type.createInstance (reflective construction; `createEmptyInstance` completed 2026-02-27)
 4. Reflect.callMethod / Reflect.makeVarArgs (reflective invocation)
 
 ### 6.8 Runtime Implementation Strategy
@@ -1707,11 +1707,11 @@ Two optimizations applied to the shared LLVM codegen (benefits both JIT and AOT)
 
 ---
 
-## 16. Haxe Language Feature Gap Analysis 🟢
+## 16. Haxe Language Feature Gap Analysis 🟡
 
 **Priority:** Critical — these gaps block real-world Haxe code from compiling
 **Last Audit:** 2026-02-23 (cross-referenced against https://haxe.org/manual/introduction.html)
-**Status:** 25/25 features complete. All core Haxe language features implemented.
+**Status:** Core language features are in place, but runtime parity gaps remain for Type/Reflect and a few correctness edge cases.
 
 ### Gap Priority Matrix
 
@@ -1746,6 +1746,24 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 25 | `Reflect.compare` / `Reflect.isEnumValue` | P2 | Low | 🟢 Complete | EnumValueMap, generic comparison |
 
 ---
+
+### 16.0 Next Execution Queue (2026-02-27)
+
+1. **Type/Reflect parity (highest impact)**
+   - [x] Implement `Reflect.isFunction` real function/closure detection (2026-02-27).
+   - [ ] Implement `Reflect.callMethod` and `Reflect.makeVarArgs` parity path.
+   - [ ] Implement `Type.createInstance` with constructor + argument semantics.
+   - [x] Implement `Type.createEmptyInstance` allocation path (2026-02-27).
+2. **Interface runtime parity**
+   - [ ] `Std.is(obj, IMyInterface)` runtime check.
+   - [ ] Fat pointer lifecycle management (free/drop parity).
+3. **Correctness regressions still open**
+   - [ ] Array comprehension temp scoping bug (multiple comprehensions in one function).
+   - [ ] `Type.typeof()` returns real `ValueType` enum value (not i32 ordinal).
+4. **Verification gates for each parity slice**
+   - [ ] Add/extend Haxe fixtures with explicit output checks.
+   - [ ] Validate MIR dumps at `-O0` and `-O2` before backend lowering.
+   - [ ] Run both Cranelift and LLVM backends where available.
 
 ### 16.1 Enum Variants + Pattern Matching (ADTs) 🟢
 
@@ -1858,7 +1876,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 **Not Yet Implemented:**
 
 - [ ] Partial application / bind
-- [ ] `Reflect.isFunction()` support
+- [x] `Reflect.isFunction()` support (2026-02-27)
 
 ### 16.5 Array Methods 🟢
 
@@ -2110,7 +2128,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 **Not Yet Implemented:**
 
-- [ ] `for (key => value in map)` key-value iteration (key-only works)
+- [x] `for (key => value in map)` key-value iteration (implemented 2026-02-18 for IntMap/StringMap via `map.get(key)` per loop)
 
 ### 16.17 Array Comprehension 🟢
 
