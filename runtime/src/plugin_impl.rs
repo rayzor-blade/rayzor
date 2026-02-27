@@ -1494,6 +1494,10 @@ register_symbol!(
     "haxe_trace_value_type",
     crate::reflect::haxe_trace_value_type
 );
+register_symbol!(
+    "haxe_string_from_value_type",
+    crate::reflect::haxe_string_from_value_type
+);
 
 // ============================================================================
 // Class Virtual Method Dispatch (Vtable)

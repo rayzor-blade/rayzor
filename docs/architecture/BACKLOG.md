@@ -764,7 +764,7 @@ map.set(new Key(1, "foo"), "value");
 - [x] Type.getSuperClass(c) - parent type_id via TYPE_REGISTRY (2026-02-17)
 - [x] Type.getInstanceFields(c) - field name array via TYPE_REGISTRY (2026-02-17)
 - [x] Type.resolveClass(name) - lookup TypeId by qualified name (2026-02-17)
-- [x] Type.typeof(v) - returns ValueType ordinal (2026-02-20)
+- [x] Type.typeof(v) - language-level `ValueType` parity via MIR lowering to `haxe_type_typeof_value` (runtime ordinal helper retained internally) (2026-02-27)
 - [x] Type.enumIndex(e) - get enum variant index via `haxe_type_enum_index` MIR wrapper (2026-02-21)
 - [x] Type.enumConstructor(e) - get enum variant name via `haxe_type_enum_constructor` MIR wrapper (2026-02-21)
 - [x] Type.enumParameters(e) - get enum variant params via `haxe_type_enum_parameters` MIR wrapper (2026-02-21)
@@ -1711,7 +1711,7 @@ Two optimizations applied to the shared LLVM codegen (benefits both JIT and AOT)
 
 **Priority:** Critical — these gaps block real-world Haxe code from compiling
 **Last Audit:** 2026-02-23 (cross-referenced against https://haxe.org/manual/introduction.html)
-**Status:** Core language features are in place, but runtime parity gaps remain for Type/Reflect and a few correctness edge cases.
+**Status:** Core language features are in place; remaining parity/correctness gaps are mainly lifecycle and edge cases.
 
 ### Gap Priority Matrix
 
@@ -1759,7 +1759,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
    - [ ] Fat pointer lifecycle management (free/drop parity; variable assignment/reassignment tracking improved, 2026-02-27).
 3. **Correctness regressions still open**
    - [ ] Array comprehension temp scoping bug (multiple comprehensions in one function).
-   - [ ] `Type.typeof()` returns real `ValueType` enum value (not i32 ordinal).
+   - [x] `Type.typeof()` returns real `ValueType` enum value at language level (via `haxe_type_typeof_value` + trace parity path, 2026-02-27).
 4. **Verification gates for each parity slice**
    - [ ] Add/extend Haxe fixtures with explicit output checks.
    - [ ] Validate MIR dumps at `-O0` and `-O2` before backend lowering.
@@ -2176,7 +2176,12 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 **Implemented (2026-02-20):**
 
-- [x] `Type.typeof(value)` — returns ValueType ordinal (TNull=0, TInt=1, TFloat=2, TBool=3, TObject=4, TFunction=5, TClass=6, TEnum=7, TUnknown=8) via `haxe_type_typeof` runtime function
+- [x] `Type.typeof(value)` low-level runtime helper returns ValueType ordinal (TNull=0, TInt=1, TFloat=2, TBool=3, TObject=4, TFunction=5, TClass=6, TEnum=7, TUnknown=8) via `haxe_type_typeof`
+
+**Implemented (2026-02-27 — parity):**
+
+- [x] `Type.typeof(value)` language-level parity returns boxed `ValueType` when required via compiler special-lowering to `haxe_type_typeof_value`
+- [x] `trace(Type.typeof(x))` parity output fixed (e.g. `TFunction` instead of raw pointer/int)
 
 **Implemented (2026-02-21 — Tier-A):**
 
@@ -2189,7 +2194,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 **Deferred:**
 
-- [ ] `Type.typeof()` returns actual `ValueType` enum instead of i32 ordinal (needs enum boxing for TClass(c)/TEnum(e) params)
+- [x] Full `ValueType` pretty-print parity for parameterized cases across trace/Std.string/interpolation output paths (2026-02-27)
 
 ### 16.19 Class Virtual Dispatch (`override`) 🟢
 
