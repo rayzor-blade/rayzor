@@ -1523,6 +1523,7 @@ impl<'a> AstLowering<'a> {
             "Array.hx".to_string(),
             "Iterator.hx".to_string(),
             "Std.hx".to_string(),
+            "Type.hx".to_string(),
         ];
 
         let mut loader = StdLibLoader::new(config);
@@ -5531,6 +5532,76 @@ impl<'a> AstLowering<'a> {
         }
     }
 
+    /// Fill in known stdlib static method types when only placeholder symbols are available.
+    ///
+    /// This keeps return types stable even when stdlib class bodies are not fully lowered.
+    fn ensure_known_static_method_type(
+        &mut self,
+        class_symbol: SymbolId,
+        method_name: InternedString,
+        method_symbol: SymbolId,
+    ) {
+        let class_name = self
+            .context
+            .symbol_table
+            .get_symbol(class_symbol)
+            .and_then(|s| self.context.string_interner.get(s.name));
+        let method_name_str = self.context.string_interner.get(method_name);
+
+        // Keep Type.typeof statically typed as Dynamic -> ValueType.
+        // Runtime mapping may provide an ordinal-based placeholder signature, but
+        // language-level typing must remain ValueType for parity (trace/switch).
+        if class_name == Some("Type") && method_name_str == Some("typeof") {
+            let dynamic_type = self.context.type_table.borrow().dynamic_type();
+            let value_type = self
+                .resolve_type_by_name("ValueType")
+                .unwrap_or(dynamic_type);
+            let should_update = self
+                .context
+                .symbol_table
+                .get_symbol(method_symbol)
+                .map(|s| {
+                    let current_type = s.type_id;
+                    let type_table = self.context.type_table.borrow();
+                    match type_table.get(current_type).map(|t| &t.kind) {
+                        Some(crate::tast::core::TypeKind::Function {
+                            params,
+                            return_type,
+                            ..
+                        }) => {
+                            params.len() != 1
+                                || params[0] != dynamic_type
+                                || *return_type != value_type
+                        }
+                        _ => true,
+                    }
+                })
+                .unwrap_or(true);
+
+            if should_update {
+                let fn_type = self
+                    .context
+                    .type_table
+                    .borrow_mut()
+                    .create_function_type(vec![dynamic_type], value_type);
+                self.context
+                    .symbol_table
+                    .update_symbol_type(method_symbol, fn_type);
+            }
+            return;
+        }
+
+        let has_type = self
+            .context
+            .symbol_table
+            .get_symbol(method_symbol)
+            .map(|s| s.type_id.is_valid())
+            .unwrap_or(false);
+        if has_type {
+            return;
+        }
+    }
+
     /// Resolve a method symbol for a given receiver and method name
     fn resolve_method_symbol(
         &mut self,
@@ -7139,6 +7210,12 @@ impl<'a> AstLowering<'a> {
                                     }
                                 };
 
+                                self.ensure_known_static_method_type(
+                                    class_symbol,
+                                    method_name,
+                                    method_symbol,
+                                );
+
                                 // Get method return type by extracting it from the Function type
                                 // (must be done before arg_exprs is moved into StaticMethodCall)
                                 let expr_type = if let Some(symbol) =
@@ -7589,6 +7666,12 @@ impl<'a> AstLowering<'a> {
                                             }
                                         }
                                     };
+
+                                    self.ensure_known_static_method_type(
+                                        class_symbol,
+                                        method_name,
+                                        method_symbol,
+                                    );
 
                                     let expr_type = if let Some(symbol) =
                                         self.context.symbol_table.get_symbol(method_symbol)

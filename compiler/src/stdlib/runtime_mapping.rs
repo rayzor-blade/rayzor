@@ -3183,7 +3183,8 @@ impl StdlibMapping {
         use IrTypeDescriptor::*;
 
         let mappings = vec![
-            // Type.typeof(v:Dynamic):ValueType (returns ordinal as i32)
+            // Type.typeof(v:Dynamic):ValueType (returns ordinal as i32;
+            // lowered to enum value by compiler special handling)
             map_method!(static "Type", "typeof" => "haxe_type_typeof", params: 1, returns: primitive,
                 types: &[PtrU8] => I32),
             // Type.getClass(o:T):Class<T> — reads object header type_id

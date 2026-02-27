@@ -1486,6 +1486,14 @@ register_symbol!(
     crate::reflect::haxe_reflect_is_enum_value
 );
 register_symbol!("haxe_type_typeof", crate::reflect::haxe_type_typeof);
+register_symbol!(
+    "haxe_type_typeof_value",
+    crate::reflect::haxe_type_typeof_value
+);
+register_symbol!(
+    "haxe_trace_value_type",
+    crate::reflect::haxe_trace_value_type
+);
 
 // ============================================================================
 // Class Virtual Method Dispatch (Vtable)

@@ -6211,6 +6211,103 @@ impl<'a> HirToMirContext<'a> {
         Some(call_result)
     }
 
+    /// Lower `Type.typeof(v)` with ValueType parity.
+    ///
+    /// Runtime `haxe_type_typeof` returns an ordinal (`i32`). When the call
+    /// result is used as `ValueType`, we build the actual enum value through
+    /// `haxe_type_typeof_value`.
+    fn lower_type_typeof_call(&mut self, args: &[HirExpr], result_type: IrType) -> Option<IrId> {
+        if args.len() != 1 {
+            return None;
+        }
+
+        let value_reg = self.lower_expression(&args[0])?;
+        let actual_ty = self
+            .builder
+            .get_register_type(value_reg)
+            .unwrap_or_else(|| self.convert_type(args[0].ty));
+        let dynamic_ptr_ty = IrType::Ptr(Box::new(IrType::U8));
+        let value_dyn = if actual_ty == dynamic_ptr_ty {
+            value_reg
+        } else {
+            self.box_value_for_dynamic(value_reg, args[0].ty)?
+        };
+
+        if result_type == IrType::I32 {
+            let ordinal_fn = self.get_or_register_extern_function(
+                "haxe_type_typeof",
+                vec![dynamic_ptr_ty],
+                IrType::I32,
+            );
+            return self
+                .builder
+                .build_call_direct(ordinal_fn, vec![value_dyn], IrType::I32);
+        }
+
+        let value_fn = self.get_or_register_extern_function(
+            "haxe_type_typeof_value",
+            vec![dynamic_ptr_ty],
+            IrType::I64,
+        );
+        self.builder
+            .build_call_direct(value_fn, vec![value_dyn], IrType::I64)
+    }
+
+    fn is_type_typeof_symbol(&self, symbol_id: SymbolId) -> bool {
+        let Some(sym) = self.symbol_table.get_symbol(symbol_id) else {
+            return false;
+        };
+
+        let name = self.string_interner.get(sym.name);
+        if name == Some("haxe_type_typeof") {
+            return true;
+        }
+
+        if let Some(native) = sym.native_name.and_then(|n| self.string_interner.get(n)) {
+            if native == "haxe_type_typeof" {
+                return true;
+            }
+        }
+
+        if name != Some("typeof") {
+            return false;
+        }
+
+        if let Some(qn) = sym
+            .qualified_name
+            .and_then(|qn| self.string_interner.get(qn))
+        {
+            if qn == "Type.typeof" || qn.ends_with(".Type.typeof") {
+                return true;
+            }
+        }
+
+        // Some lowering paths keep only the bare method name.
+        true
+    }
+
+    fn is_type_typeof_callee_expr(&self, expr: &HirExpr) -> bool {
+        match &expr.kind {
+            HirExprKind::Variable { symbol, .. } => self.is_type_typeof_symbol(*symbol),
+            HirExprKind::Field { field, .. } => self.is_type_typeof_symbol(*field),
+            HirExprKind::Cast { expr, .. } => self.is_type_typeof_callee_expr(expr),
+            _ => false,
+        }
+    }
+
+    fn trace_typeof_inner_arg<'b>(&self, expr: &'b HirExpr) -> Option<&'b HirExpr> {
+        match &expr.kind {
+            HirExprKind::Cast { expr: inner, .. } => self.trace_typeof_inner_arg(inner),
+            HirExprKind::Call { callee, args, .. } => {
+                if args.len() == 1 && self.is_type_typeof_callee_expr(callee) {
+                    return args.first();
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
     fn try_lower_special_runtime_call(
         &mut self,
         runtime_func: &str,
@@ -6224,6 +6321,9 @@ impl<'a> HirToMirContext<'a> {
             }
             "haxe_reflect_make_var_args" | "Reflect.makeVarArgs" => {
                 Some(self.lower_reflect_make_var_args(args, result_type, location))
+            }
+            "haxe_type_typeof" | "Type.typeof" => {
+                Some(self.lower_type_typeof_call(args, result_type))
             }
             _ => None,
         }
@@ -8716,6 +8816,25 @@ impl<'a> HirToMirContext<'a> {
                     // Route to type-specific trace functions based on argument type
                     if symbol_name == "trace" && args.len() == 1 {
                         let arg = &args[0];
+
+                        // Route trace(Type.typeof(x)) to enum tracing directly.
+                        // This preserves parity even when the call-site type was widened.
+                        if let Some(typeof_arg) = self.trace_typeof_inner_arg(arg) {
+                            let value_reg = self.lower_type_typeof_call(
+                                std::slice::from_ref(typeof_arg),
+                                IrType::I64,
+                            )?;
+                            let trace_typeof_id = self.get_or_register_extern_function(
+                                "haxe_trace_value_type",
+                                vec![IrType::I64],
+                                IrType::Void,
+                            );
+                            return self.builder.build_call_direct(
+                                trace_typeof_id,
+                                vec![value_reg],
+                                IrType::Void,
+                            );
+                        }
 
                         // Check if arg is a class or enum type
                         // For classes: try to call toString() method
