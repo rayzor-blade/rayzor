@@ -486,19 +486,9 @@ pub extern "C" fn haxe_type_typeof_value(v: *mut u8) -> i64 {
     }
 }
 
-/// Trace a boxed ValueType enum returned by `haxe_type_typeof_value`.
-///
-/// This avoids relying on enum RTTI registration for `ValueType` and provides
-/// stable output for `trace(Type.typeof(x))`.
-#[no_mangle]
-pub extern "C" fn haxe_trace_value_type(value: i64) {
-    fn trace_text(s: &str) {
-        crate::haxe_sys::haxe_trace_string(s.as_ptr(), s.len());
-    }
-
+fn format_value_type(value: i64) -> String {
     if value == 0 {
-        trace_text("TNull");
-        return;
+        return "TNull".to_string();
     }
 
     let is_ptr_like = value > 0x1000;
@@ -511,51 +501,58 @@ pub extern "C" fn haxe_trace_value_type(value: i64) {
     let payload = if is_ptr_like {
         unsafe { *((value as *const u8).add(8) as *const i64) }
     } else {
-        0
+        -1
     };
 
     match tag {
-        TVALUETYPE_TNULL => trace_text("TNull"),
-        TVALUETYPE_TINT => trace_text("TInt"),
-        TVALUETYPE_TFLOAT => trace_text("TFloat"),
-        TVALUETYPE_TBOOL => trace_text("TBool"),
-        TVALUETYPE_TOBJECT => trace_text("TObject"),
-        TVALUETYPE_TFUNCTION => trace_text("TFunction"),
+        TVALUETYPE_TNULL => "TNull".to_string(),
+        TVALUETYPE_TINT => "TInt".to_string(),
+        TVALUETYPE_TFLOAT => "TFloat".to_string(),
+        TVALUETYPE_TBOOL => "TBool".to_string(),
+        TVALUETYPE_TOBJECT => "TObject".to_string(),
+        TVALUETYPE_TFUNCTION => "TFunction".to_string(),
         TVALUETYPE_TCLASS => {
             if payload >= 0 {
                 if let Some(type_info) = get_type_info(crate::type_system::TypeId(payload as u32)) {
-                    let s = format!("TClass({})", type_info.name);
-                    trace_text(&s);
+                    format!("TClass({})", type_info.name)
                 } else {
-                    let s = format!("TClass({})", payload);
-                    trace_text(&s);
+                    format!("TClass({})", payload)
                 }
             } else {
-                trace_text("TClass");
+                "TClass".to_string()
             }
         }
         TVALUETYPE_TENUM => {
             if payload >= 0 {
                 if let Some(type_info) = get_type_info(crate::type_system::TypeId(payload as u32)) {
-                    let s = format!("TEnum({})", type_info.name);
-                    trace_text(&s);
+                    format!("TEnum({})", type_info.name)
                 } else {
-                    let s = format!("TEnum({})", payload);
-                    trace_text(&s);
+                    format!("TEnum({})", payload)
                 }
             } else {
-                trace_text("TEnum");
+                "TEnum".to_string()
             }
         }
-        TVALUETYPE_TUNKNOWN => {
-            let s = format!("TUnknown({})", payload);
-            trace_text(&s);
-        }
-        _ => {
-            let s = format!("<ValueType:{}>", tag);
-            trace_text(&s);
-        }
+        TVALUETYPE_TUNKNOWN => "TUnknown".to_string(),
+        _ => format!("<ValueType:{}>", tag),
     }
+}
+
+/// Trace a boxed ValueType enum returned by `haxe_type_typeof_value`.
+///
+/// This avoids relying on enum RTTI registration for `ValueType` and provides
+/// stable output for `trace(Type.typeof(x))`.
+#[no_mangle]
+pub extern "C" fn haxe_trace_value_type(value: i64) {
+    let text = format_value_type(value);
+    crate::haxe_sys::haxe_trace_string(text.as_ptr(), text.len());
+}
+
+/// Convert a boxed ValueType payload to a HaxeString.
+#[no_mangle]
+pub extern "C" fn haxe_string_from_value_type(value: i64) -> *mut crate::haxe_string::HaxeString {
+    let text = format_value_type(value);
+    crate::haxe_sys::haxe_string_from_string(text.as_ptr(), text.len())
 }
 
 // ============================================================================

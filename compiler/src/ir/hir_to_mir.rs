@@ -287,6 +287,11 @@ pub struct HirToMirContext<'a> {
     /// raw i64 values that happen to have Dynamic type (e.g., untyped lambda params).
     boxed_dynamic_symbols: BTreeSet<SymbolId>,
 
+    /// Symbols known to carry `Type.typeof(...)` boxed ValueType payloads.
+    /// These values are runtime enum payload pointers encoded as i64 and need
+    /// dedicated formatting paths for trace/Std.string/interpolation parity.
+    value_type_symbols: BTreeSet<SymbolId>,
+
     /// Allocation sizes for class instances (in bytes).
     /// Maps class TypeId → allocation size. Populated during register_class_metadata.
     /// Used by the New handler to allocate the correct size for objects.
@@ -445,6 +450,7 @@ struct SavedLoweringState {
     current_drop_points: Option<DropPoints>,
     current_stmt_index: usize,
     boxed_dynamic_symbols: BTreeSet<SymbolId>,
+    value_type_symbols: BTreeSet<SymbolId>,
     anon_views: BTreeMap<SymbolId, AnonBacking>,
 }
 
@@ -515,6 +521,7 @@ impl<'a> HirToMirContext<'a> {
             abstract_to_rules: BTreeMap::new(),
             abstract_forward_rules: BTreeMap::new(),
             boxed_dynamic_symbols: BTreeSet::new(),
+            value_type_symbols: BTreeSet::new(),
             class_alloc_sizes: BTreeMap::new(),
             class_type_to_symbol: BTreeMap::new(),
             field_class_names: BTreeMap::new(),
@@ -3444,6 +3451,7 @@ impl<'a> HirToMirContext<'a> {
                         "[LOWER STMT] init_expr.kind = {:?}",
                         std::mem::discriminant(&init_expr.kind)
                     );
+                    let init_is_value_type = self.expr_is_value_type_expr(init_expr);
 
                     // Check for stdlib class method calls like Arc.init() or arc.clone()
                     // These methods return the same stdlib class type (e.g., Arc.init() -> Arc, Arc.clone() -> Arc)
@@ -3630,6 +3638,11 @@ impl<'a> HirToMirContext<'a> {
                         // Only register AutoDrop types (user-defined classes), not RuntimeManaged
                         // extern types (Thread, Channel, Arc, Mutex) or NoDrop types
                         if let HirPattern::Variable { symbol, .. } = pattern {
+                            if init_is_value_type {
+                                self.value_type_symbols.insert(*symbol);
+                            } else {
+                                self.value_type_symbols.remove(symbol);
+                            }
                             if wrapped_for_interface {
                                 // Interface assignments allocate a fat pointer wrapper that
                                 // must be freed on reassignment/scope-exit.
@@ -3737,6 +3750,7 @@ impl<'a> HirToMirContext<'a> {
 
                 // Clear temps before RHS evaluation
                 self.temp_heap_values.clear();
+                let rhs_is_value_type = self.expr_is_value_type_expr(rhs) && op.is_none();
 
                 let rhs_value = self.lower_expression(rhs);
 
@@ -3916,6 +3930,14 @@ impl<'a> HirToMirContext<'a> {
 
                         // Remove the assigned value from temps (it's now owned by the variable)
                         self.temp_heap_values.retain(|&id| id != value);
+                    }
+
+                    if let Some(symbol) = lhs_symbol {
+                        if rhs_is_value_type {
+                            self.value_type_symbols.insert(symbol);
+                        } else {
+                            self.value_type_symbols.remove(&symbol);
+                        }
                     }
 
                     // Free any intermediate temporaries created during RHS evaluation
@@ -6295,6 +6317,33 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    fn is_value_type_type_id(&self, type_id: TypeId) -> bool {
+        let resolved = self.resolve_through_aliases(type_id);
+        let type_table = self.type_table.borrow();
+        let Some(type_info) = type_table.get(resolved) else {
+            return false;
+        };
+        let TypeKind::Enum { symbol_id, .. } = type_info.kind else {
+            return false;
+        };
+        drop(type_table);
+
+        let Some(sym) = self.symbol_table.get_symbol(symbol_id) else {
+            return false;
+        };
+        let name = self.string_interner.get(sym.name);
+        if name == Some("ValueType") {
+            return true;
+        }
+        if let Some(qn) = sym
+            .qualified_name
+            .and_then(|qn| self.string_interner.get(qn))
+        {
+            return qn == "ValueType" || qn.ends_with(".ValueType");
+        }
+        false
+    }
+
     fn trace_typeof_inner_arg<'b>(&self, expr: &'b HirExpr) -> Option<&'b HirExpr> {
         match &expr.kind {
             HirExprKind::Cast { expr: inner, .. } => self.trace_typeof_inner_arg(inner),
@@ -6306,6 +6355,31 @@ impl<'a> HirToMirContext<'a> {
             }
             _ => None,
         }
+    }
+
+    fn expr_is_value_type_expr(&self, expr: &HirExpr) -> bool {
+        if self.trace_typeof_inner_arg(expr).is_some() {
+            return true;
+        }
+
+        match &expr.kind {
+            HirExprKind::Cast { expr: inner, .. } => self.expr_is_value_type_expr(inner),
+            HirExprKind::Variable { symbol, .. } => {
+                self.value_type_symbols.contains(symbol) || self.is_value_type_type_id(expr.ty)
+            }
+            _ => self.is_value_type_type_id(expr.ty),
+        }
+    }
+
+    fn convert_value_type_to_string(&mut self, value: IrId) -> Option<IrId> {
+        let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
+        let conv_fn = self.get_or_register_extern_function(
+            "haxe_string_from_value_type",
+            vec![IrType::I64],
+            string_ptr_ty.clone(),
+        );
+        self.builder
+            .build_call_direct(conv_fn, vec![value], string_ptr_ty)
     }
 
     fn try_lower_special_runtime_call(
@@ -8836,6 +8910,21 @@ impl<'a> HirToMirContext<'a> {
                             );
                         }
 
+                        // Handle ValueType values that were previously produced/stored.
+                        if self.expr_is_value_type_expr(arg) {
+                            let arg_reg = self.lower_expression(arg)?;
+                            let trace_typeof_id = self.get_or_register_extern_function(
+                                "haxe_trace_value_type",
+                                vec![IrType::I64],
+                                IrType::Void,
+                            );
+                            return self.builder.build_call_direct(
+                                trace_typeof_id,
+                                vec![arg_reg],
+                                IrType::Void,
+                            );
+                        }
+
                         // Check if arg is a class or enum type
                         // For classes: try to call toString() method
                         // For enums: for now, fall through to traceAny (enum toString not yet implemented)
@@ -9366,6 +9455,14 @@ impl<'a> HirToMirContext<'a> {
                         } else {
                             &args[0]
                         };
+                        let arg_is_value_type = self.expr_is_value_type_expr(arg);
+
+                        // ValueType pretty-print parity path
+                        if arg_is_value_type {
+                            let arg_reg = self.lower_expression(arg)?;
+                            return self.convert_value_type_to_string(arg_reg);
+                        }
+
                         let arg_type = self.convert_type(arg.ty);
 
                         // Determine which MIR wrapper function to call based on type
@@ -13763,7 +13860,9 @@ impl<'a> HirToMirContext<'a> {
                         // Convert non-string operand to string if needed
                         // For class instances with toString(), call it directly at compile time
                         let lhs_str_val = if !lhs_is_string_mir {
-                            if let Some(reg) =
+                            if self.expr_is_value_type_expr(lhs) {
+                                self.convert_value_type_to_string(lhs_reg)?
+                            } else if let Some(reg) =
                                 self.try_call_tostring(lhs_reg, self.resolve_expr_type_id(lhs))?
                             {
                                 reg
@@ -13775,7 +13874,9 @@ impl<'a> HirToMirContext<'a> {
                         };
 
                         let rhs_str_val = if !rhs_is_string_mir {
-                            if let Some(reg) =
+                            if self.expr_is_value_type_expr(rhs) {
+                                self.convert_value_type_to_string(rhs_reg)?
+                            } else if let Some(reg) =
                                 self.try_call_tostring(rhs_reg, self.resolve_expr_type_id(rhs))?
                             {
                                 reg
@@ -22961,6 +23062,7 @@ impl<'a> HirToMirContext<'a> {
             current_drop_points: self.current_drop_points.clone(),
             current_stmt_index: self.current_stmt_index,
             boxed_dynamic_symbols: self.boxed_dynamic_symbols.clone(),
+            value_type_symbols: self.value_type_symbols.clone(),
             anon_views: self.anon_views.clone(),
         }
     }
@@ -22978,6 +23080,7 @@ impl<'a> HirToMirContext<'a> {
         self.current_drop_points = state.current_drop_points;
         self.current_stmt_index = state.current_stmt_index;
         self.boxed_dynamic_symbols = state.boxed_dynamic_symbols;
+        self.value_type_symbols = state.value_type_symbols;
         self.anon_views = state.anon_views;
     }
 
@@ -24451,62 +24554,66 @@ impl<'a> HirToMirContext<'a> {
                 HirStringPart::Interpolation(expr) => {
                     let expr_val = self.lower_expression(expr)?;
 
-                    // Convert to string based on expression type
-                    let expr_type_kind = {
-                        let type_table = self.type_table.borrow();
-                        type_table.get(expr.ty).map(|ti| ti.kind.clone())
-                    };
+                    if self.expr_is_value_type_expr(expr) {
+                        self.convert_value_type_to_string(expr_val)?
+                    } else {
+                        // Convert to string based on expression type
+                        let expr_type_kind = {
+                            let type_table = self.type_table.borrow();
+                            type_table.get(expr.ty).map(|ti| ti.kind.clone())
+                        };
 
-                    match expr_type_kind.as_ref() {
-                        Some(TypeKind::String) => expr_val, // already a string
-                        Some(TypeKind::Int) => {
-                            let conv_fn = self.get_or_register_extern_function(
-                                "haxe_string_from_int",
-                                vec![IrType::I64],
-                                string_ptr_ty.clone(),
-                            );
-                            self.builder.build_call_direct(
-                                conv_fn,
-                                vec![expr_val],
-                                string_ptr_ty.clone(),
-                            )?
-                        }
-                        Some(TypeKind::Float) => {
-                            let conv_fn = self.get_or_register_extern_function(
-                                "haxe_string_from_float",
-                                vec![IrType::F64],
-                                string_ptr_ty.clone(),
-                            );
-                            self.builder.build_call_direct(
-                                conv_fn,
-                                vec![expr_val],
-                                string_ptr_ty.clone(),
-                            )?
-                        }
-                        Some(TypeKind::Bool) => {
-                            let conv_fn = self.get_or_register_extern_function(
-                                "haxe_string_from_bool",
-                                vec![IrType::I32],
-                                string_ptr_ty.clone(),
-                            );
-                            self.builder.build_call_direct(
-                                conv_fn,
-                                vec![expr_val],
-                                string_ptr_ty.clone(),
-                            )?
-                        }
-                        _ => {
-                            // Fallback: treat as int (prints raw i64 value)
-                            let conv_fn = self.get_or_register_extern_function(
-                                "haxe_string_from_int",
-                                vec![IrType::I64],
-                                string_ptr_ty.clone(),
-                            );
-                            self.builder.build_call_direct(
-                                conv_fn,
-                                vec![expr_val],
-                                string_ptr_ty.clone(),
-                            )?
+                        match expr_type_kind.as_ref() {
+                            Some(TypeKind::String) => expr_val, // already a string
+                            Some(TypeKind::Int) => {
+                                let conv_fn = self.get_or_register_extern_function(
+                                    "haxe_string_from_int",
+                                    vec![IrType::I64],
+                                    string_ptr_ty.clone(),
+                                );
+                                self.builder.build_call_direct(
+                                    conv_fn,
+                                    vec![expr_val],
+                                    string_ptr_ty.clone(),
+                                )?
+                            }
+                            Some(TypeKind::Float) => {
+                                let conv_fn = self.get_or_register_extern_function(
+                                    "haxe_string_from_float",
+                                    vec![IrType::F64],
+                                    string_ptr_ty.clone(),
+                                );
+                                self.builder.build_call_direct(
+                                    conv_fn,
+                                    vec![expr_val],
+                                    string_ptr_ty.clone(),
+                                )?
+                            }
+                            Some(TypeKind::Bool) => {
+                                let conv_fn = self.get_or_register_extern_function(
+                                    "haxe_string_from_bool",
+                                    vec![IrType::I32],
+                                    string_ptr_ty.clone(),
+                                );
+                                self.builder.build_call_direct(
+                                    conv_fn,
+                                    vec![expr_val],
+                                    string_ptr_ty.clone(),
+                                )?
+                            }
+                            _ => {
+                                // Fallback: treat as int (prints raw i64 value)
+                                let conv_fn = self.get_or_register_extern_function(
+                                    "haxe_string_from_int",
+                                    vec![IrType::I64],
+                                    string_ptr_ty.clone(),
+                                );
+                                self.builder.build_call_direct(
+                                    conv_fn,
+                                    vec![expr_val],
+                                    string_ptr_ty.clone(),
+                                )?
+                            }
                         }
                     }
                 }
