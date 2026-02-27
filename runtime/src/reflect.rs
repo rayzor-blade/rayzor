@@ -11,10 +11,11 @@
 use crate::anon_object;
 use crate::haxe_string::HaxeString;
 use crate::type_system::{
-    DynamicValue, TYPE_BOOL, TYPE_FLOAT, TYPE_FUNCTION, TYPE_INT, TYPE_NULL, TYPE_STRING,
+    get_type_info, DynamicValue, TYPE_BOOL, TYPE_FLOAT, TYPE_FUNCTION, TYPE_INT, TYPE_NULL,
+    TYPE_STRING,
 };
 
-/// Haxe ValueType enum ordinals (matches Type.hx ValueType)
+/// Haxe ValueType constructor ordinals (matches Type.hx ValueType order)
 pub const TVALUETYPE_TNULL: i32 = 0;
 pub const TVALUETYPE_TINT: i32 = 1;
 pub const TVALUETYPE_TFLOAT: i32 = 2;
@@ -359,9 +360,46 @@ pub extern "C" fn haxe_reflect_is_enum_value(v: *mut u8) -> bool {
 // Type API
 // ============================================================================
 
+/// Allocate a boxed enum payload with no constructor parameters.
+/// Layout: [tag:i32][pad:i32] => returned as i64 pointer.
+unsafe fn alloc_boxed_enum_tag_only(tag: i32) -> i64 {
+    let ptr = libc::malloc(8) as *mut u8;
+    if ptr.is_null() {
+        return 0;
+    }
+    *(ptr as *mut i32) = tag;
+    *((ptr as *mut i32).add(1)) = 0;
+    ptr as i64
+}
+
+/// Allocate a boxed enum payload with one i64 constructor parameter.
+/// Layout: [tag:i32][pad:i32][field0:i64] => returned as i64 pointer.
+unsafe fn alloc_boxed_enum_with_i64(tag: i32, field0: i64) -> i64 {
+    let ptr = libc::malloc(16) as *mut u8;
+    if ptr.is_null() {
+        return 0;
+    }
+    std::ptr::write_bytes(ptr, 0, 16);
+    *(ptr as *mut i32) = tag;
+    *(ptr.add(8) as *mut i64) = field0;
+    ptr as i64
+}
+
+fn valuetype_tag_only(tag: i32) -> i64 {
+    unsafe { alloc_boxed_enum_tag_only(tag) }
+}
+
+fn valuetype_tclass(type_id: i64) -> i64 {
+    unsafe { alloc_boxed_enum_with_i64(TVALUETYPE_TCLASS, type_id) }
+}
+
+fn valuetype_tenum(type_id: i64) -> i64 {
+    unsafe { alloc_boxed_enum_with_i64(TVALUETYPE_TENUM, type_id) }
+}
+
 /// Type.typeof(v) -> ValueType
 ///
-/// Returns the ValueType enum ordinal for a value.
+/// Returns the ValueType ordinal for a value.
 /// v: DynamicValue pointer
 /// Returns: i32 ordinal (TNull=0, TInt=1, TFloat=2, TBool=3, TObject=4,
 ///          TFunction=5, TClass=6, TEnum=7, TUnknown=8)
@@ -372,16 +410,150 @@ pub extern "C" fn haxe_type_typeof(v: *mut u8) -> i32 {
     }
     unsafe {
         let dv = *(v as *const DynamicValue);
-        match dv.type_id {
-            t if t == TYPE_NULL => TVALUETYPE_TNULL,
-            t if t == TYPE_INT => TVALUETYPE_TINT,
-            t if t == TYPE_FLOAT => TVALUETYPE_TFLOAT,
-            t if t == TYPE_BOOL => TVALUETYPE_TBOOL,
-            t if t == TYPE_FUNCTION => TVALUETYPE_TFUNCTION,
-            t if t == TYPE_STRING => TVALUETYPE_TCLASS, // String is a class in Haxe
-            t if t == anon_object::TYPE_ANON_OBJECT => TVALUETYPE_TOBJECT,
-            t if t.0 >= 1000 => TVALUETYPE_TCLASS, // User-defined types are classes
-            _ => TVALUETYPE_TUNKNOWN,
+        if dv.type_id == TYPE_NULL {
+            return TVALUETYPE_TNULL;
+        }
+        if dv.type_id == TYPE_INT {
+            return TVALUETYPE_TINT;
+        }
+        if dv.type_id == TYPE_FLOAT {
+            return TVALUETYPE_TFLOAT;
+        }
+        if dv.type_id == TYPE_BOOL {
+            return TVALUETYPE_TBOOL;
+        }
+        if dv.type_id == TYPE_FUNCTION {
+            return TVALUETYPE_TFUNCTION;
+        }
+        if dv.type_id == anon_object::TYPE_ANON_OBJECT {
+            return TVALUETYPE_TOBJECT;
+        }
+        if dv.type_id == TYPE_STRING {
+            // Haxe treats String as a class
+            return TVALUETYPE_TCLASS;
+        }
+
+        if let Some(type_info) = get_type_info(dv.type_id) {
+            if type_info.enum_info.is_some() {
+                return TVALUETYPE_TENUM;
+            }
+            if type_info.class_info.is_some() {
+                return TVALUETYPE_TCLASS;
+            }
+        }
+
+        if dv.type_id.0 >= 1000 {
+            // Unregistered user-defined runtime type: treat as class by convention.
+            return TVALUETYPE_TCLASS;
+        }
+
+        TVALUETYPE_TUNKNOWN
+    }
+}
+
+/// Build a boxed `ValueType` runtime enum value from the ordinal returned by
+/// `haxe_type_typeof`.
+///
+/// This keeps the low-level typeof contract simple (`i32`) while allowing
+/// compiler lowering to request a real enum value when needed.
+#[no_mangle]
+pub extern "C" fn haxe_type_typeof_value(v: *mut u8) -> i64 {
+    let tag = haxe_type_typeof(v);
+    match tag {
+        TVALUETYPE_TCLASS => {
+            let type_id = unsafe {
+                if v.is_null() {
+                    -1
+                } else {
+                    let dv = *(v as *const DynamicValue);
+                    dv.type_id.0 as i64
+                }
+            };
+            valuetype_tclass(type_id)
+        }
+        TVALUETYPE_TENUM => {
+            let type_id = unsafe {
+                if v.is_null() {
+                    -1
+                } else {
+                    let dv = *(v as *const DynamicValue);
+                    dv.type_id.0 as i64
+                }
+            };
+            valuetype_tenum(type_id)
+        }
+        _ => valuetype_tag_only(tag),
+    }
+}
+
+/// Trace a boxed ValueType enum returned by `haxe_type_typeof_value`.
+///
+/// This avoids relying on enum RTTI registration for `ValueType` and provides
+/// stable output for `trace(Type.typeof(x))`.
+#[no_mangle]
+pub extern "C" fn haxe_trace_value_type(value: i64) {
+    fn trace_text(s: &str) {
+        crate::haxe_sys::haxe_trace_string(s.as_ptr(), s.len());
+    }
+
+    if value == 0 {
+        trace_text("TNull");
+        return;
+    }
+
+    let is_ptr_like = value > 0x1000;
+    let tag = if is_ptr_like {
+        unsafe { *(value as *const i32) }
+    } else {
+        value as i32
+    };
+
+    let payload = if is_ptr_like {
+        unsafe { *((value as *const u8).add(8) as *const i64) }
+    } else {
+        0
+    };
+
+    match tag {
+        TVALUETYPE_TNULL => trace_text("TNull"),
+        TVALUETYPE_TINT => trace_text("TInt"),
+        TVALUETYPE_TFLOAT => trace_text("TFloat"),
+        TVALUETYPE_TBOOL => trace_text("TBool"),
+        TVALUETYPE_TOBJECT => trace_text("TObject"),
+        TVALUETYPE_TFUNCTION => trace_text("TFunction"),
+        TVALUETYPE_TCLASS => {
+            if payload >= 0 {
+                if let Some(type_info) = get_type_info(crate::type_system::TypeId(payload as u32)) {
+                    let s = format!("TClass({})", type_info.name);
+                    trace_text(&s);
+                } else {
+                    let s = format!("TClass({})", payload);
+                    trace_text(&s);
+                }
+            } else {
+                trace_text("TClass");
+            }
+        }
+        TVALUETYPE_TENUM => {
+            if payload >= 0 {
+                if let Some(type_info) = get_type_info(crate::type_system::TypeId(payload as u32)) {
+                    let s = format!("TEnum({})", type_info.name);
+                    trace_text(&s);
+                } else {
+                    let s = format!("TEnum({})", payload);
+                    trace_text(&s);
+                }
+            } else {
+                trace_text("TEnum");
+            }
+        }
+        TVALUETYPE_TUNKNOWN => {
+            let s = format!("TUnknown({})", payload);
+            trace_text(&s);
+        }
+        _ => {
+            let s = format!("<ValueType:{}>", tag);
+            trace_text(&s);
         }
     }
 }
@@ -394,6 +566,23 @@ pub extern "C" fn haxe_type_typeof(v: *mut u8) -> i32 {
 mod tests {
     use super::*;
     use crate::type_system::{haxe_box_float_ptr, haxe_box_function_ptr, haxe_box_int_ptr};
+
+    unsafe extern "C" fn dummy_to_string(_ptr: *const u8) -> crate::type_system::StringPtr {
+        crate::type_system::StringPtr {
+            ptr: std::ptr::null(),
+            len: 0,
+        }
+    }
+
+    fn decode_valuetype_tag(v: i64) -> i32 {
+        assert_ne!(v, 0, "ValueType should be boxed (non-null pointer)");
+        unsafe { *(v as *const i32) }
+    }
+
+    fn decode_valuetype_payload(v: i64) -> i64 {
+        assert_ne!(v, 0, "ValueType should be boxed (non-null pointer)");
+        unsafe { *((v as *const u8).add(8) as *const i64) }
+    }
 
     #[test]
     fn test_typeof_int() {
@@ -418,6 +607,70 @@ mod tests {
         let closure_ptr = Box::into_raw(Box::new([0u8; 16])) as *mut u8;
         let boxed_fn = haxe_box_function_ptr(closure_ptr);
         assert!(haxe_reflect_is_function(boxed_fn));
-        assert_eq!(haxe_type_typeof(boxed_fn), TVALUETYPE_TFUNCTION);
+        let vt = haxe_type_typeof_value(boxed_fn);
+        assert_eq!(decode_valuetype_tag(vt), TVALUETYPE_TFUNCTION);
+    }
+
+    #[test]
+    fn test_typeof_string_is_tclass_with_payload() {
+        let mut hs = Box::new(crate::haxe_string::HaxeString {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        });
+        crate::haxe_string::haxe_string_from_bytes(hs.as_mut(), b"x".as_ptr(), 1);
+        let s = Box::into_raw(hs) as *mut u8;
+        let dv = Box::into_raw(Box::new(DynamicValue {
+            type_id: TYPE_STRING,
+            value_ptr: s,
+        })) as *mut u8;
+        let vt = haxe_type_typeof_value(dv);
+        assert_eq!(decode_valuetype_tag(vt), TVALUETYPE_TCLASS);
+        assert_eq!(decode_valuetype_payload(vt), TYPE_STRING.0 as i64);
+    }
+
+    #[test]
+    fn test_typeof_unknown_is_tunknown() {
+        let fake = Box::into_raw(Box::new(DynamicValue {
+            type_id: crate::type_system::TypeId(999),
+            value_ptr: std::ptr::null_mut(),
+        })) as *mut u8;
+        let vt = haxe_type_typeof_value(fake);
+        assert_eq!(decode_valuetype_tag(vt), TVALUETYPE_TUNKNOWN);
+    }
+
+    #[test]
+    fn test_typeof_registered_user_type_is_tclass() {
+        crate::type_system::register_type(
+            crate::type_system::TypeId(4242),
+            crate::type_system::TypeInfo {
+                name: "UserClass",
+                size: 8,
+                align: 8,
+                to_string: dummy_to_string,
+                enum_info: None,
+                class_info: Some(Box::leak(Box::new(crate::type_system::ClassInfo {
+                    name: "UserClass",
+                    super_type_id: None,
+                    instance_fields: Box::leak(vec!["__type_id"].into_boxed_slice()),
+                    static_fields: Box::leak(Vec::<&'static str>::new().into_boxed_slice()),
+                }))),
+            },
+        );
+
+        let dv = Box::into_raw(Box::new(DynamicValue {
+            type_id: crate::type_system::TypeId(4242),
+            value_ptr: std::ptr::null_mut(),
+        })) as *mut u8;
+        let vt = haxe_type_typeof_value(dv);
+        assert_eq!(decode_valuetype_tag(vt), TVALUETYPE_TCLASS);
+        assert_eq!(decode_valuetype_payload(vt), 4242);
+    }
+
+    #[test]
+    fn test_typeof_value_primitive_int_not_tclass() {
+        let boxed = haxe_box_int_ptr(7);
+        let vt = haxe_type_typeof_value(boxed);
+        assert_eq!(decode_valuetype_tag(vt), TVALUETYPE_TINT);
     }
 }

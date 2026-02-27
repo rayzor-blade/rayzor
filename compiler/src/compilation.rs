@@ -184,6 +184,7 @@ impl Default for CompilationConfig {
                 "Array.hx".to_string(),
                 "Math.hx".to_string(), // Top-level Math functions (sqrt, sin, cos, etc.)
                 "Std.hx".to_string(),  // Top-level conversion utilities
+                "Type.hx".to_string(), // ValueType enum + Type reflection APIs
                 // Concurrent types
                 "rayzor/concurrent/Thread.hx".to_string(),
                 "rayzor/concurrent/Channel.hx".to_string(),
@@ -492,6 +493,10 @@ impl CompilationUnit {
         let default_files = loader.load_default_imports();
         for file in default_files {
             debug!("Loading default import: {}", file.filename);
+            if let Some(source) = file.input.as_deref() {
+                self.pre_register_file_types(&file.filename, source)?;
+                self.register_enums_from_source(&file.filename, source);
+            }
             // Add the file to the stdlib files for processing during lowering
             self.stdlib_files.push(file);
         }
