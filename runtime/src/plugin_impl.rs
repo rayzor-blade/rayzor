@@ -352,6 +352,10 @@ register_symbol!(
     crate::type_system::haxe_type_resolve_class
 );
 register_symbol!(
+    "haxe_type_create_empty_instance",
+    crate::type_system::haxe_type_create_empty_instance
+);
+register_symbol!(
     "haxe_type_get_enum_constructs",
     crate::type_system::haxe_type_get_enum_constructs
 );
@@ -874,6 +878,10 @@ register_symbol!(
 register_symbol!(
     "haxe_box_haxestring_ptr",
     crate::type_system::haxe_box_haxestring_ptr
+);
+register_symbol!(
+    "haxe_box_function_ptr",
+    crate::type_system::haxe_box_function_ptr
 );
 register_symbol!("haxe_unbox_int_ptr", crate::type_system::haxe_unbox_int_ptr);
 register_symbol!(

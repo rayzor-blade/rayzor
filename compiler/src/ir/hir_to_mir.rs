@@ -23433,13 +23433,15 @@ impl<'a> HirToMirContext<'a> {
         };
 
         let ir_type = self.convert_type(concrete_type_id);
-        let (is_string, is_enum) = {
+        let (is_string, is_enum, is_function) = {
             let type_table = self.type_table.borrow();
             let ti = type_table.get(concrete_type_id);
             (
                 ti.map(|t| matches!(t.kind, crate::tast::TypeKind::String))
                     .unwrap_or(false),
                 ti.map(|t| matches!(t.kind, crate::tast::TypeKind::Enum { .. }))
+                    .unwrap_or(false),
+                ti.map(|t| matches!(t.kind, crate::tast::TypeKind::Function { .. }))
                     .unwrap_or(false),
             )
         };
@@ -23469,6 +23471,38 @@ impl<'a> HirToMirContext<'a> {
             return self
                 .builder
                 .build_call_direct(box_func, vec![as_ptr, type_id_const], ptr_u8);
+        }
+
+        if is_function {
+            // Function values are represented as closure pointers at runtime.
+            // Normalize to *u8 and tag with TYPE_FUNCTION for Reflect/Type parity.
+            let actual_reg_type = self
+                .builder
+                .get_register_type(value)
+                .unwrap_or(ir_type.clone());
+            let as_ptr = if matches!(&actual_reg_type, IrType::Ptr(_)) {
+                value
+            } else if matches!(&actual_reg_type, IrType::Function { .. }) {
+                let as_i64 = self
+                    .builder
+                    .build_bitcast(value, IrType::I64)
+                    .unwrap_or(value);
+                self.builder
+                    .build_cast(as_i64, IrType::I64, ptr_u8.clone())
+                    .unwrap_or(as_i64)
+            } else {
+                self.builder
+                    .build_cast(value, actual_reg_type, ptr_u8.clone())
+                    .unwrap_or(value)
+            };
+            let box_func = self.get_or_register_extern_function(
+                "haxe_box_function_ptr",
+                vec![ptr_u8.clone()],
+                ptr_u8.clone(),
+            );
+            return self
+                .builder
+                .build_call_direct(box_func, vec![as_ptr], ptr_u8);
         }
 
         if is_string || matches!(&ir_type, IrType::Ptr(_)) {
