@@ -768,12 +768,12 @@ map.set(new Key(1, "foo"), "value");
 - [x] Type.enumIndex(e) - get enum variant index via `haxe_type_enum_index` MIR wrapper (2026-02-21)
 - [x] Type.enumConstructor(e) - get enum variant name via `haxe_type_enum_constructor` MIR wrapper (2026-02-21)
 - [x] Type.enumParameters(e) - get enum variant params via `haxe_type_enum_parameters` MIR wrapper (2026-02-21)
-- [ ] Type.createInstance(c, args) - reflective construction
+- [x] Type.createInstance(c, args) - reflective construction via constructor wrapper registry (2026-02-27)
 - [x] Type.createEmptyInstance(c) - reflective empty construction via `haxe_type_create_empty_instance` (2026-02-27)
-- [ ] Type.enumEq(a, b) - deep enum equality
-- [ ] Type.getEnum(e) - get enum type from value
-- [ ] Type.resolveEnum(name) - lookup enum by name
-- [ ] Type.allEnums(e) - list all zero-param enum constructors
+- [x] Type.enumEq(a, b) - deep enum equality for unboxed + boxed enum values via `haxe_type_enum_eq` (2026-02-27)
+- [x] Type.getEnum(e) - get enum type from value (compiler-injected enum type_id) (2026-02-27)
+- [x] Type.resolveEnum(name) - lookup enum by qualified name via enum registry (2026-02-27)
+- [x] Type.allEnums(e) - list all zero-param enum constructors via `haxe_type_all_enums` (2026-02-27)
 
 **Reflect Class - 🟡 Mostly Complete (2026-02-27):**
 - [x] Reflect.field(o, name) - get field by name (2026-02-07)

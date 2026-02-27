@@ -161,6 +161,11 @@ pub(crate) static TYPE_REGISTRY: RwLock<Option<HashMap<TypeId, TypeInfo>>> = RwL
 /// Maps qualified class name -> TypeId
 static CLASS_NAME_REGISTRY: RwLock<Option<HashMap<String, u32>>> = RwLock::new(None);
 
+/// Global enum name registry for Type.resolveEnum
+///
+/// Maps qualified enum name -> TypeId
+static ENUM_NAME_REGISTRY: RwLock<Option<HashMap<String, u32>>> = RwLock::new(None);
+
 /// Initialize the type registry with primitive types
 pub fn init_type_system() {
     let mut registry = HashMap::new();
@@ -264,6 +269,12 @@ pub fn register_type(type_id: TypeId, info: TypeInfo) {
     }
 }
 
+fn register_enum_name(name: &str, type_id: u32) {
+    let mut guard = ENUM_NAME_REGISTRY.write().unwrap();
+    let registry = guard.get_or_insert_with(HashMap::new);
+    registry.insert(name.to_string(), type_id);
+}
+
 /// Get type info for a TypeId
 ///
 /// Primitive types (Void, Null, Bool, Int, Float, String) are lazily initialized
@@ -343,6 +354,7 @@ pub extern "C" fn haxe_register_enum(
         };
 
         register_type(TypeId(type_id), type_info);
+        register_enum_name(name, type_id);
     }
 }
 
@@ -385,6 +397,7 @@ pub fn register_enum_from_mir(
     };
 
     register_type(TypeId(type_id), type_info);
+    register_enum_name(name, type_id);
 }
 
 // ============================================================================
@@ -486,6 +499,19 @@ unsafe fn build_string_array(names: &[&str]) -> *mut u8 {
     arr_ptr as *mut u8
 }
 
+unsafe fn build_i64_array(values: &[i64]) -> *mut u8 {
+    let arr_layout = std::alloc::Layout::new::<crate::haxe_array::HaxeArray>();
+    let arr_ptr = std::alloc::alloc(arr_layout) as *mut crate::haxe_array::HaxeArray;
+    if arr_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    crate::haxe_array::haxe_array_new(arr_ptr, 8);
+    for &value in values {
+        crate::haxe_array::haxe_array_push_i64(arr_ptr, value);
+    }
+    arr_ptr as *mut u8
+}
+
 /// Type.getClassName(c) -> String
 /// Takes a type_id (i64), returns the class name as a HaxeString pointer.
 #[no_mangle]
@@ -565,6 +591,49 @@ pub extern "C" fn haxe_type_resolve_class(name_ptr: *mut u8) -> i64 {
     if let Some(registry) = guard.as_ref() {
         if let Some(&type_id) = registry.get(&name) {
             return type_id as i64;
+        }
+    }
+    -1
+}
+
+/// Type.resolveEnum(name) -> Enum<Dynamic> (returns type_id, or -1 if not found)
+#[no_mangle]
+pub extern "C" fn haxe_type_resolve_enum(name_ptr: *mut u8) -> i64 {
+    if name_ptr.is_null() {
+        return -1;
+    }
+    let name = unsafe {
+        let hs = &*(name_ptr as *const crate::haxe_string::HaxeString);
+        if hs.ptr.is_null() || hs.len == 0 {
+            return -1;
+        }
+        let bytes = std::slice::from_raw_parts(hs.ptr, hs.len);
+        String::from_utf8_lossy(bytes).to_string()
+    };
+    let guard = ENUM_NAME_REGISTRY.read().unwrap();
+    if let Some(registry) = guard.as_ref() {
+        if let Some(&type_id) = registry.get(&name) {
+            return type_id as i64;
+        }
+    }
+    -1
+}
+
+/// Type.getEnum(e:EnumValue):Enum<Dynamic> — get enum type id from enum value.
+///
+/// The compiler injects `type_id` as a hidden argument because enum values can be
+/// unboxed discriminants and don't carry runtime type metadata by themselves.
+#[no_mangle]
+pub extern "C" fn haxe_type_get_enum(_value: i64, type_id: i32) -> i64 {
+    if type_id <= 0 {
+        return -1;
+    }
+    let guard = TYPE_REGISTRY.read().unwrap();
+    if let Some(registry) = guard.as_ref() {
+        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
+            if type_info.enum_info.is_some() {
+                return type_id as i64;
+            }
         }
     }
     -1
@@ -702,6 +771,137 @@ pub extern "C" fn haxe_type_get_enum_name(type_id: i64) -> *mut u8 {
         }
     }
     std::ptr::null_mut()
+}
+
+fn enum_variant_from_value(
+    type_id: u32,
+    value: i64,
+) -> Option<(i64, bool, &'static EnumVariantInfo)> {
+    let guard = TYPE_REGISTRY.read().unwrap();
+    let registry = guard.as_ref()?;
+    let type_info = registry.get(&TypeId(type_id))?;
+    let enum_info = type_info.enum_info?;
+
+    // Unboxed enum case: value is discriminant, only valid for zero-param variants.
+    if value >= 0 {
+        let idx = value as usize;
+        if let Some(variant) = enum_info.variants.get(idx) {
+            if variant.param_count == 0 {
+                return Some((value, false, variant));
+            }
+        }
+    }
+
+    // Boxed enum case: value is pointer with tag at offset 0.
+    let ptr = value as *const u8;
+    if ptr.is_null() {
+        return None;
+    }
+    let tag = unsafe { *(ptr as *const i32) as i64 };
+    let idx = usize::try_from(tag).ok()?;
+    let variant = enum_info.variants.get(idx)?;
+    Some((tag, true, variant))
+}
+
+unsafe fn haxe_string_ptr_eq(a: i64, b: i64) -> bool {
+    if a == b {
+        return true;
+    }
+    if a == 0 || b == 0 {
+        return false;
+    }
+    let sa = &*(a as *const crate::haxe_string::HaxeString);
+    let sb = &*(b as *const crate::haxe_string::HaxeString);
+    if sa.len != sb.len {
+        return false;
+    }
+    if sa.ptr.is_null() || sb.ptr.is_null() {
+        return false;
+    }
+    let a_bytes = std::slice::from_raw_parts(sa.ptr, sa.len);
+    let b_bytes = std::slice::from_raw_parts(sb.ptr, sb.len);
+    a_bytes == b_bytes
+}
+
+/// Type.allEnums(e) -> Array<T>
+/// Returns all parameterless constructors for an enum type.
+#[no_mangle]
+pub extern "C" fn haxe_type_all_enums(type_id: i64) -> *mut u8 {
+    let guard = TYPE_REGISTRY.read().unwrap();
+    if let Some(registry) = guard.as_ref() {
+        if let Some(type_info) = registry.get(&TypeId(type_id as u32)) {
+            if let Some(enum_info) = &type_info.enum_info {
+                let mut values = Vec::new();
+                for (idx, variant) in enum_info.variants.iter().enumerate() {
+                    if variant.param_count == 0 {
+                        values.push(idx as i64);
+                    }
+                }
+                return unsafe { build_i64_array(&values) };
+            }
+        }
+    }
+    unsafe { build_i64_array(&[]) }
+}
+
+/// Type.enumEq(a, b) -> Bool
+/// Deep equality for enum values (constructor + parameters).
+///
+/// Compiler injects `type_id` as hidden argument because enum values can be unboxed.
+#[no_mangle]
+pub extern "C" fn haxe_type_enum_eq(a: i64, b: i64, type_id: i32) -> bool {
+    if type_id <= 0 {
+        return false;
+    }
+    let enum_type = type_id as u32;
+    let Some((tag_a, boxed_a, variant_a)) = enum_variant_from_value(enum_type, a) else {
+        return false;
+    };
+    let Some((tag_b, boxed_b, variant_b)) = enum_variant_from_value(enum_type, b) else {
+        return false;
+    };
+
+    if tag_a != tag_b {
+        return false;
+    }
+    if variant_a.param_count == 0 {
+        return true;
+    }
+    if variant_a.param_count != variant_b.param_count {
+        return false;
+    }
+    if !boxed_a || !boxed_b {
+        return false;
+    }
+
+    let ptr_a = a as *const u8;
+    let ptr_b = b as *const u8;
+    if ptr_a.is_null() || ptr_b.is_null() {
+        return false;
+    }
+
+    unsafe {
+        for i in 0..variant_a.param_count {
+            let va = *(ptr_a.add(8 + i * 8) as *const i64);
+            let vb = *(ptr_b.add(8 + i * 8) as *const i64);
+            let param_type = variant_a
+                .param_types
+                .get(i)
+                .copied()
+                .unwrap_or(ParamType::Dynamic);
+            let equal = match param_type {
+                ParamType::Int | ParamType::Bool | ParamType::Object | ParamType::Dynamic => {
+                    va == vb
+                }
+                ParamType::Float => f64::from_bits(va as u64) == f64::from_bits(vb as u64),
+                ParamType::String => haxe_string_ptr_eq(va, vb),
+            };
+            if !equal {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 /// Type.createEnum(e, constr, ?params) -> T
@@ -926,6 +1126,7 @@ pub extern "C" fn haxe_register_enum_finish(type_id: u32) {
             };
 
             register_type(TypeId(type_id), type_info);
+            register_enum_name(enum_name_static, type_id);
 
             debug!(
                 "Registered enum '{}' with {} variants at type_id {}",
