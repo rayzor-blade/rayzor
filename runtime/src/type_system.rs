@@ -1398,7 +1398,7 @@ pub extern "C" fn haxe_register_interface_impl(class_type_id: i64, interface_typ
     let iface_id = interface_type_id as u32;
     let mut guard = INTERFACE_IMPL_REGISTRY.write().unwrap();
     let registry = guard.get_or_insert_with(HashMap::new);
-    let set = registry.entry(class_id).or_insert_with(HashSet::new);
+    let set = registry.entry(class_id).or_default();
     set.insert(iface_id);
 }
 
