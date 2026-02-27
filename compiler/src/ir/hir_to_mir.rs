@@ -3616,10 +3616,11 @@ impl<'a> HirToMirContext<'a> {
                         };
 
                         // Wrap class instance in interface fat pointer if needed
-                        let final_value = if let Some(target_ty) = var_type {
+                        let (final_value, wrapped_for_interface) = if let Some(target_ty) = var_type
+                        {
                             self.maybe_wrap_for_interface(final_value, init_expr.ty, target_ty)
                         } else {
-                            final_value
+                            (final_value, false)
                         };
 
                         // Structural subtyping: register anon view for class→anon or wider-anon→narrower
@@ -3679,10 +3680,14 @@ impl<'a> HirToMirContext<'a> {
                         // Register heap-allocated value for drop tracking
                         // Only register AutoDrop types (user-defined classes), not RuntimeManaged
                         // extern types (Thread, Channel, Arc, Mutex) or NoDrop types
-                        if is_heap_alloc {
-                            let needs_drop = self.type_needs_drop(init_expr.ty);
-                            if needs_drop {
-                                if let HirPattern::Variable { symbol, .. } = pattern {
+                        if let HirPattern::Variable { symbol, .. } = pattern {
+                            if wrapped_for_interface {
+                                // Interface assignments allocate a fat pointer wrapper that
+                                // must be freed on reassignment/scope-exit.
+                                self.register_owned_value(*symbol, final_value);
+                            } else if is_heap_alloc {
+                                let needs_drop = self.type_needs_drop(init_expr.ty);
+                                if needs_drop {
                                     self.register_owned_value(*symbol, final_value);
                                 }
                             }
@@ -3855,18 +3860,18 @@ impl<'a> HirToMirContext<'a> {
                         };
 
                         // Wrap class instance in interface fat pointer if assigning to interface var
-                        let value = if let HirLValue::Variable(sym) = lhs {
+                        let (value, wrapped_for_interface) = if let HirLValue::Variable(sym) = lhs {
                             if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
                                 if sym_info.type_id != TypeId::invalid() {
                                     self.maybe_wrap_for_interface(value, rhs.ty, sym_info.type_id)
                                 } else {
-                                    value
+                                    (value, false)
                                 }
                             } else {
-                                value
+                                (value, false)
                             }
                         } else {
-                            value
+                            (value, false)
                         };
 
                         // Clone anonymous object handles for COW semantics on reassignment.
@@ -3909,10 +3914,12 @@ impl<'a> HirToMirContext<'a> {
 
                         let lhs_was_tracked =
                             lhs_symbol.map_or(false, |s| self.owned_heap_values.contains_key(&s));
+                        let rhs_needs_tracking = (rhs_is_owned_allocation && rhs_type_needs_drop)
+                            || wrapped_for_interface;
 
                         if lhs_was_tracked {
                             if let Some(symbol) = lhs_symbol {
-                                if rhs_is_owned_allocation {
+                                if rhs_needs_tracking {
                                     // RHS creates a new allocation → free old, track new
                                     self.register_owned_value(symbol, value);
                                 } else {
@@ -3927,7 +3934,7 @@ impl<'a> HirToMirContext<'a> {
                                     self.reassigned_in_scope.insert(symbol);
                                 }
                             }
-                        } else if rhs_is_owned_allocation && rhs_type_needs_drop {
+                        } else if rhs_needs_tracking {
                             // New allocation assigned to previously-untracked variable
                             if let Some(symbol) = lhs_symbol {
                                 self.register_owned_value(symbol, value);
@@ -14256,10 +14263,7 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
                     // Class -> Interface: runtime check against registered interface impl map.
-                    (
-                        Some(TypeKind::Class { .. }),
-                        Some(TypeKind::Interface { .. }),
-                    ) => {
+                    (Some(TypeKind::Class { .. }), Some(TypeKind::Interface { .. })) => {
                         let value_reg = self.lower_expression(expr)?;
                         let target_type_id = self.runtime_type_id(*expected) as i64;
                         let type_id_const =
@@ -23667,23 +23671,25 @@ impl<'a> HirToMirContext<'a> {
         value_reg: IrId,
         value_type: TypeId,
         target_type: TypeId,
-    ) -> IrId {
+    ) -> (IrId, bool) {
         let iface_sym = match self.get_interface_symbol(target_type) {
             Some(s) => s,
-            None => return value_reg,
+            None => return (value_reg, false),
         };
         let class_sym = match self.get_class_symbol(value_type) {
             Some(s) => s,
-            None => return value_reg,
+            None => return (value_reg, false),
         };
 
         // Check if we have a vtable for this (class, interface) pair
         if !self.interface_vtables.contains_key(&(class_sym, iface_sym)) {
-            return value_reg;
+            return (value_reg, false);
         }
 
-        self.wrap_in_interface_fat_ptr(value_reg, class_sym, iface_sym)
-            .unwrap_or(value_reg)
+        match self.wrap_in_interface_fat_ptr(value_reg, class_sym, iface_sym) {
+            Some(wrapped) => (wrapped, true),
+            None => (value_reg, false),
+        }
     }
 
     fn lower_object_literal(
