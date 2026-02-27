@@ -3634,6 +3634,17 @@ impl<'a> HirToMirContext<'a> {
                                 // Interface assignments allocate a fat pointer wrapper that
                                 // must be freed on reassignment/scope-exit.
                                 self.register_owned_value(*symbol, final_value);
+                                if let HirExprKind::Variable {
+                                    symbol: src_symbol, ..
+                                } = &init_expr.kind
+                                {
+                                    // The class object is now also referenced through an interface
+                                    // wrapper. Conservatively stop tracking the source symbol as a
+                                    // sole owner to avoid premature free on source reassignment.
+                                    if self.owned_heap_values.remove(src_symbol).is_some() {
+                                        self.reassigned_in_scope.insert(*src_symbol);
+                                    }
+                                }
                             } else if is_heap_alloc {
                                 let needs_drop = self.type_needs_drop(init_expr.ty);
                                 if needs_drop {
@@ -3865,6 +3876,19 @@ impl<'a> HirToMirContext<'a> {
                             lhs_symbol.map_or(false, |s| self.owned_heap_values.contains_key(&s));
                         let rhs_needs_tracking = (rhs_is_owned_allocation && rhs_type_needs_drop)
                             || wrapped_for_interface;
+
+                        if wrapped_for_interface {
+                            if let HirExprKind::Variable {
+                                symbol: src_symbol, ..
+                            } = &rhs.kind
+                            {
+                                // See let-path note above: interface wrappers can outlive or alias
+                                // the source class symbol, so don't keep source as sole owner.
+                                if self.owned_heap_values.remove(src_symbol).is_some() {
+                                    self.reassigned_in_scope.insert(*src_symbol);
+                                }
+                            }
+                        }
 
                         if lhs_was_tracked {
                             if let Some(symbol) = lhs_symbol {
