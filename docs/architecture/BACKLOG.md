@@ -1751,8 +1751,8 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 1. **Type/Reflect parity (highest impact)**
    - [x] Implement `Reflect.isFunction` real function/closure detection (2026-02-27).
-   - [ ] Implement `Reflect.callMethod` and `Reflect.makeVarArgs` parity path.
-   - [ ] Implement `Type.createInstance` with constructor + argument semantics.
+   - [x] Implement `Reflect.callMethod` and `Reflect.makeVarArgs` parity path (typed indirect lowering + var-args bridge, 2026-02-27).
+   - [x] Implement `Type.createInstance` with constructor + argument semantics (2026-02-27).
    - [x] Implement `Type.createEmptyInstance` allocation path (2026-02-27).
 2. **Interface runtime parity**
    - [ ] `Std.is(obj, IMyInterface)` runtime check.
