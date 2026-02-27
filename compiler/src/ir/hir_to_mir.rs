@@ -159,6 +159,11 @@ pub struct HirToMirContext<'a> {
     /// This allows new expressions to find the constructor by class type
     constructor_map: BTreeMap<TypeId, IrFunctionId>,
 
+    /// Reflective constructor wrappers keyed by class TypeId.
+    /// Each wrapper has a uniform ABI `(obj_ptr, args_array)` and invokes the
+    /// real constructor after unboxing dynamic arguments.
+    constructor_reflect_wrappers: BTreeMap<TypeId, IrFunctionId>,
+
     /// Mapping from qualified class name to constructor IrFunctionId
     /// This is a fallback when TypeIds don't match (e.g., across separately compiled files)
     constructor_name_map: BTreeMap<String, IrFunctionId>,
@@ -476,6 +481,7 @@ impl<'a> HirToMirContext<'a> {
             typedef_field_map: BTreeMap::new(),
             property_access_map: BTreeMap::new(),
             constructor_map: BTreeMap::new(),
+            constructor_reflect_wrappers: BTreeMap::new(),
             constructor_name_map: BTreeMap::new(),
             current_hir_types: hir_types,
             stdlib_mapping,
@@ -821,6 +827,61 @@ impl<'a> HirToMirContext<'a> {
     /// Check if a type needs drop (convenience wrapper for get_drop_behavior)
     fn type_needs_drop(&self, type_id: TypeId) -> bool {
         self.get_drop_behavior(type_id) == DropBehavior::AutoDrop
+    }
+
+    /// Detect reflective Type allocation calls that return fresh class instances.
+    fn is_reflective_type_alloc_call(&self, callee: &HirExpr, arg_count: usize) -> bool {
+        let is_alloc_method = |name: &str| matches!(name, "createInstance" | "createEmptyInstance");
+
+        match &callee.kind {
+            HirExprKind::Variable { symbol, .. } => {
+                if let Some((class_name, method_name, _)) =
+                    self.get_stdlib_runtime_info(*symbol, TypeId::invalid(), Some(arg_count), None)
+                {
+                    if class_name == "Type" && is_alloc_method(method_name) {
+                        return true;
+                    }
+                }
+
+                let Some(sym) = self.symbol_table.get_symbol(*symbol) else {
+                    return false;
+                };
+                let method_name = self.string_interner.get(sym.name).unwrap_or("");
+                if !is_alloc_method(method_name) {
+                    return false;
+                }
+
+                if let Some(qn) = sym.qualified_name.and_then(|q| self.string_interner.get(q)) {
+                    return qn == "Type.createInstance"
+                        || qn == "Type.createEmptyInstance"
+                        || qn.ends_with(".Type.createInstance")
+                        || qn.ends_with(".Type.createEmptyInstance");
+                }
+                false
+            }
+            HirExprKind::Field { object, field } => {
+                let owner_is_type = if let HirExprKind::Variable { symbol, .. } = &object.kind {
+                    self.symbol_table.get_symbol(*symbol).is_some_and(|sym| {
+                        self.string_interner.get(sym.name) == Some("Type")
+                            || sym
+                                .qualified_name
+                                .and_then(|q| self.string_interner.get(q))
+                                .is_some_and(|qn| qn == "Type" || qn.ends_with(".Type"))
+                    })
+                } else {
+                    false
+                };
+                if !owner_is_type {
+                    return false;
+                }
+
+                self.symbol_table
+                    .get_symbol(*field)
+                    .and_then(|sym| self.string_interner.get(sym.name))
+                    .is_some_and(is_alloc_method)
+            }
+            _ => false,
+        }
     }
 
     /// Check drop points and emit Free for variables at their last use
@@ -2230,8 +2291,11 @@ impl<'a> HirToMirContext<'a> {
             self.lower_global(*symbol_id, global);
         }
 
+        // Generate reflective constructor wrappers for Type.createInstance().
+        self.generate_constructor_reflect_wrappers();
+
         // Generate __vtable_init__ function for class virtual dispatch tables
-        if !self.class_vtables.is_empty() {
+        if !self.class_vtables.is_empty() || !self.constructor_reflect_wrappers.is_empty() {
             self.generate_vtable_init_function();
         }
 
@@ -3465,20 +3529,25 @@ impl<'a> HirToMirContext<'a> {
                         None
                     };
 
-                    // Check if this is a heap allocation (from `new` expression)
-                    // Arrays are stack-allocated (the struct), with internal buffer managed by runtime,
-                    // so they should NOT be tracked for Free
-                    let is_heap_alloc = if matches!(&init_expr.kind, HirExprKind::New { .. }) {
-                        let type_table = self.type_table.borrow();
-                        let is_array = if let Some(type_ref) = type_table.get(init_expr.ty) {
-                            matches!(type_ref.kind, crate::tast::TypeKind::Array { .. })
-                        } else {
-                            false
-                        };
-                        drop(type_table);
-                        !is_array // is_heap_alloc = true only if NOT an array
-                    } else {
-                        false
+                    // Track ownership for explicit allocations:
+                    // - `new` class expressions (except array literals)
+                    // - reflective Type.createInstance/createEmptyInstance calls
+                    let is_heap_alloc = match &init_expr.kind {
+                        HirExprKind::New { .. } => {
+                            let type_table = self.type_table.borrow();
+                            let is_array = if let Some(type_ref) = type_table.get(init_expr.ty) {
+                                matches!(type_ref.kind, crate::tast::TypeKind::Array { .. })
+                            } else {
+                                false
+                            };
+                            drop(type_table);
+                            !is_array
+                        }
+                        HirExprKind::Call { callee, args, .. } => {
+                            self.type_needs_drop(init_expr.ty)
+                                && self.is_reflective_type_alloc_call(callee, args.len())
+                        }
+                        _ => false,
                     };
 
                     let value = self.lower_expression(init_expr);
@@ -25061,6 +25130,171 @@ impl<'a> HirToMirContext<'a> {
         self.builder.module.add_type(typedef);
     }
 
+    /// Generate uniform constructor wrappers used by `Type.createInstance`.
+    ///
+    /// Wrapper ABI: `fn(obj_ptr: *u8, args: *void) -> void`
+    /// Runtime passes raw 64-bit array slots via `args`; wrappers reinterpret/cast
+    /// each slot to match the concrete constructor signature.
+    fn generate_constructor_reflect_wrappers(&mut self) {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+
+        // Runtime helper used by generated wrappers.
+        let array_get_i64_fn = self.get_or_register_extern_function(
+            "haxe_array_get_i64",
+            vec![ptr_void.clone(), IrType::I64],
+            IrType::I64,
+        );
+
+        let ctor_entries: Vec<(TypeId, IrFunctionId)> = self
+            .constructor_map
+            .iter()
+            .map(|(class_type_id, ctor_func_id)| (*class_type_id, *ctor_func_id))
+            .collect();
+
+        let saved_symbol_map = self.symbol_map.clone();
+        self.symbol_map.clear();
+
+        for (class_type_id, ctor_func_id) in ctor_entries {
+            if self
+                .constructor_reflect_wrappers
+                .contains_key(&class_type_id)
+            {
+                continue;
+            }
+
+            // Only emit wrappers for classes known to this module's type metadata.
+            let has_typedef = self
+                .builder
+                .module
+                .types
+                .values()
+                .any(|typedef| typedef.type_id == class_type_id);
+            if !has_typedef {
+                continue;
+            }
+
+            let ctor_sig = match self.builder.module.functions.get(&ctor_func_id) {
+                Some(func) => func.signature.clone(),
+                None => continue, // Imported constructor body not available in this module.
+            };
+            if ctor_sig.parameters.is_empty() {
+                continue;
+            }
+
+            let wrapper_symbol = SymbolId::from_raw(u32::MAX - 1000 - self.next_wrapper_id);
+            self.next_wrapper_id += 1;
+            let wrapper_name = format!("__reflect_ctor_wrap_{}", class_type_id.as_raw());
+
+            let wrapper_sig = FunctionSignatureBuilder::new()
+                .param("obj".to_string(), ptr_u8.clone())
+                .param("args".to_string(), ptr_void.clone())
+                .returns(IrType::Void)
+                .calling_convention(CallingConvention::Haxe)
+                .build();
+
+            let wrapper_func_id =
+                self.builder
+                    .start_function(wrapper_symbol, wrapper_name, wrapper_sig);
+
+            let (obj_reg, args_reg) = {
+                let Some(func) = self.builder.current_function() else {
+                    self.builder.finish_function();
+                    continue;
+                };
+                let Some(obj) = func.get_param_reg(0) else {
+                    self.builder.finish_function();
+                    continue;
+                };
+                let Some(args) = func.get_param_reg(1) else {
+                    self.builder.finish_function();
+                    continue;
+                };
+                (obj, args)
+            };
+
+            let mut ctor_args: Vec<IrId> = Vec::new();
+            let this_ty = ctor_sig.parameters[0].ty.clone();
+            let this_arg = if this_ty == ptr_u8 {
+                obj_reg
+            } else {
+                self.builder
+                    .build_cast(obj_reg, ptr_u8.clone(), this_ty)
+                    .unwrap_or(obj_reg)
+            };
+            ctor_args.push(this_arg);
+
+            for (param_idx, param) in ctor_sig.parameters.iter().enumerate().skip(1) {
+                let Some(index_reg) = self
+                    .builder
+                    .build_const(IrValue::I64((param_idx.saturating_sub(1)) as i64))
+                else {
+                    continue;
+                };
+
+                let raw_i64 = self
+                    .builder
+                    .build_call_direct(array_get_i64_fn, vec![args_reg, index_reg], IrType::I64)
+                    .or_else(|| self.builder.build_const(IrValue::I64(0)));
+                let Some(raw_i64) = raw_i64 else {
+                    continue;
+                };
+
+                let arg_reg_opt = match &param.ty {
+                    IrType::Bool => self.builder.build_cast(raw_i64, IrType::I64, IrType::Bool),
+                    IrType::F64 => self.builder.build_bitcast(raw_i64, IrType::F64),
+                    IrType::F32 => {
+                        let as_i32 = self.builder.build_cast(raw_i64, IrType::I64, IrType::I32);
+                        as_i32.and_then(|v| self.builder.build_bitcast(v, IrType::F32))
+                    }
+                    IrType::I8
+                    | IrType::I16
+                    | IrType::I32
+                    | IrType::I64
+                    | IrType::U8
+                    | IrType::U16
+                    | IrType::U32
+                    | IrType::U64 => {
+                        if param.ty == IrType::I64 {
+                            Some(raw_i64)
+                        } else {
+                            self.builder
+                                .build_cast(raw_i64, IrType::I64, param.ty.clone())
+                        }
+                    }
+                    _ => {
+                        let ref_ptr = self
+                            .builder
+                            .build_cast(raw_i64, IrType::I64, ptr_u8.clone());
+                        match &param.ty {
+                            IrType::Ptr(_) | IrType::Ref(_) | IrType::Any => {
+                                ref_ptr.and_then(|r| {
+                                    self.builder.build_cast(r, ptr_u8.clone(), param.ty.clone())
+                                })
+                            }
+                            IrType::String | IrType::Function { .. } => ref_ptr,
+                            _ => ref_ptr,
+                        }
+                    }
+                };
+
+                if let Some(arg_reg) = arg_reg_opt {
+                    ctor_args.push(arg_reg);
+                }
+            }
+
+            self.builder
+                .build_call_direct(ctor_func_id, ctor_args, IrType::Void);
+            self.builder.build_return(None);
+            self.builder.finish_function();
+
+            self.constructor_reflect_wrappers
+                .insert(class_type_id, wrapper_func_id);
+        }
+
+        self.symbol_map = saved_symbol_map;
+    }
+
     fn generate_vtable_init_function(&mut self) {
         // Generate __vtable_init__ function that registers class vtables at startup.
         // Called before main() by the backend (same pattern as __init__).
@@ -25087,6 +25321,11 @@ impl<'a> HirToMirContext<'a> {
         let vtable_set_fn = self.get_or_register_extern_function(
             "haxe_vtable_set_slot",
             vec![IrType::I32, IrType::I32, IrType::I64],
+            IrType::Void,
+        );
+        let register_ctor_fn = self.get_or_register_extern_function(
+            "haxe_type_register_constructor",
+            vec![IrType::I64, IrType::I64],
             IrType::Void,
         );
 
@@ -25118,6 +25357,19 @@ impl<'a> HirToMirContext<'a> {
                         );
                     }
                 }
+            }
+        }
+
+        // Register constructor closure pointers for Type.createInstance.
+        let ctor_wrappers = self.constructor_reflect_wrappers.clone();
+        for (class_type_id, wrapper_func_id) in ctor_wrappers {
+            let type_id_reg = self
+                .builder
+                .build_const(IrValue::I64(class_type_id.as_raw() as i64));
+            let closure_ptr = self.builder.build_function_ref(wrapper_func_id);
+            if let (Some(tid), Some(cptr)) = (type_id_reg, closure_ptr) {
+                self.builder
+                    .build_call_direct(register_ctor_fn, vec![tid, cptr], IrType::Void);
             }
         }
 
