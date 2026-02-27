@@ -3151,6 +3151,10 @@ impl StdlibMapping {
             // Reflect.isFunction(f:Dynamic):Bool
             map_method!(static "Reflect", "isFunction" => "haxe_reflect_is_function", params: 1, returns: primitive,
                 types: &[PtrU8] => Bool),
+            // Reflect.callMethod(o, func, args):Dynamic
+            // Lowered directly in HIR->MIR (no runtime trampoline).
+            map_method!(static "Reflect", "callMethod" => "haxe_reflect_call_method", params: 3, returns: primitive,
+                types: &[PtrU8, PtrVoid, PtrVoid] => PtrVoid),
             // Reflect.copy(o:Dynamic):Dynamic
             map_method!(static "Reflect", "copy" => "haxe_reflect_copy", params: 1, returns: primitive,
                 types: &[PtrU8] => PtrU8),
@@ -3160,6 +3164,10 @@ impl StdlibMapping {
             // Reflect.isEnumValue(v:Dynamic):Bool
             map_method!(static "Reflect", "isEnumValue" => "haxe_reflect_is_enum_value", params: 1, returns: primitive,
                 types: &[PtrU8] => Bool),
+            // Reflect.makeVarArgs(f:Array<Dynamic>->Dynamic):Dynamic
+            // Lowered directly in HIR->MIR as a bridge for callMethod(args-array) dispatch.
+            map_method!(static "Reflect", "makeVarArgs" => "haxe_reflect_make_var_args", params: 1, returns: primitive,
+                types: &[PtrVoid] => PtrVoid),
             // Reflect.getProperty(o:Dynamic, field:String):Dynamic — maps to field access
             map_method!(static "Reflect", "getProperty" => "haxe_reflect_field", params: 2, returns: primitive,
                 types: &[PtrU8, PtrU8] => PtrU8),
