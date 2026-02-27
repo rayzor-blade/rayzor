@@ -3647,15 +3647,17 @@ impl<'a> HirToMirContext<'a> {
                                 // Interface assignments allocate a fat pointer wrapper that
                                 // must be freed on reassignment/scope-exit.
                                 self.register_owned_value(*symbol, final_value);
-                                if let HirExprKind::Variable {
-                                    symbol: src_symbol, ..
-                                } = &init_expr.kind
-                                {
-                                    // The class object is now also referenced through an interface
-                                    // wrapper. Conservatively stop tracking the source symbol as a
-                                    // sole owner to avoid premature free on source reassignment.
-                                    if self.owned_heap_values.remove(src_symbol).is_some() {
-                                        self.reassigned_in_scope.insert(*src_symbol);
+                                if self.get_class_symbol(init_expr.ty).is_some() {
+                                    if let HirExprKind::Variable {
+                                        symbol: src_symbol, ..
+                                    } = &init_expr.kind
+                                    {
+                                        // Class -> interface wrapping aliases the class object.
+                                        // Stop tracking source as sole owner to avoid premature
+                                        // class frees while interface wrappers still reference it.
+                                        if self.owned_heap_values.remove(src_symbol).is_some() {
+                                            self.reassigned_in_scope.insert(*src_symbol);
+                                        }
                                     }
                                 }
                             } else if is_heap_alloc {
@@ -3891,13 +3893,13 @@ impl<'a> HirToMirContext<'a> {
                         let rhs_needs_tracking = (rhs_is_owned_allocation && rhs_type_needs_drop)
                             || wrapped_for_interface;
 
-                        if wrapped_for_interface {
+                        if wrapped_for_interface && self.get_class_symbol(rhs.ty).is_some() {
                             if let HirExprKind::Variable {
                                 symbol: src_symbol, ..
                             } = &rhs.kind
                             {
-                                // See let-path note above: interface wrappers can outlive or alias
-                                // the source class symbol, so don't keep source as sole owner.
+                                // Class -> interface wrapping aliases the class object.
+                                // Don't keep source as sole owner.
                                 if self.owned_heap_values.remove(src_symbol).is_some() {
                                     self.reassigned_in_scope.insert(*src_symbol);
                                 }
@@ -15472,8 +15474,17 @@ impl<'a> HirToMirContext<'a> {
                 self.collect_referenced_variables_in_expr(expr, vars);
             }
             HirStatement::Assign { lhs, rhs, .. } => {
-                if let HirLValue::Variable(sym) = lhs {
-                    vars.insert(*sym);
+                match lhs {
+                    HirLValue::Variable(sym) => {
+                        vars.insert(*sym);
+                    }
+                    HirLValue::Field { object, .. } => {
+                        self.collect_referenced_variables_in_expr(object, vars);
+                    }
+                    HirLValue::Index { object, index } => {
+                        self.collect_referenced_variables_in_expr(object, vars);
+                        self.collect_referenced_variables_in_expr(index, vars);
+                    }
                 }
                 self.collect_referenced_variables_in_expr(rhs, vars);
             }
@@ -18954,6 +18965,30 @@ impl<'a> HirToMirContext<'a> {
                 // would corrupt array storage (DynamicValue.type_id stored instead of value)
                 if let Some(obj_reg) = self.lower_expression(object) {
                     if let Some(idx_reg) = self.lower_expression(index) {
+                        let idx_i64 = {
+                            let idx_ty = self.builder.get_register_type(idx_reg);
+                            match idx_ty {
+                                Some(IrType::I64) => idx_reg,
+                                Some(IrType::I32) => self
+                                    .builder
+                                    .build_cast(idx_reg, IrType::I32, IrType::I64)
+                                    .unwrap_or(idx_reg),
+                                Some(IrType::Bool) => self
+                                    .builder
+                                    .build_cast(idx_reg, IrType::Bool, IrType::I64)
+                                    .unwrap_or(idx_reg),
+                                Some(IrType::Ptr(_)) => self
+                                    .builder
+                                    .build_bitcast(idx_reg, IrType::I64)
+                                    .unwrap_or(idx_reg),
+                                Some(other) => self
+                                    .builder
+                                    .build_cast(idx_reg, other, IrType::I64)
+                                    .unwrap_or(idx_reg),
+                                None => idx_reg,
+                            }
+                        };
+
                         let value_ir_type = self.builder.get_register_type(value);
                         match &value_ir_type {
                             Some(IrType::F32) | Some(IrType::F64) => {
@@ -18967,9 +19002,21 @@ impl<'a> HirToMirContext<'a> {
                                     ],
                                     IrType::Bool,
                                 );
+                                let value_f64 = match value_ir_type.clone() {
+                                    Some(IrType::F64) => value,
+                                    Some(IrType::F32) => self
+                                        .builder
+                                        .build_cast(value, IrType::F32, IrType::F64)
+                                        .unwrap_or(value),
+                                    Some(other) => self
+                                        .builder
+                                        .build_cast(value, other, IrType::F64)
+                                        .unwrap_or(value),
+                                    None => value,
+                                };
                                 self.builder.build_call_direct(
                                     func_id,
-                                    vec![obj_reg, idx_reg, value],
+                                    vec![obj_reg, idx_i64, value_f64],
                                     IrType::Bool,
                                 );
                             }
@@ -18985,9 +19032,42 @@ impl<'a> HirToMirContext<'a> {
                                     ],
                                     IrType::Bool,
                                 );
+                                let value_i64 = match value_ir_type.clone() {
+                                    Some(IrType::I64) => value,
+                                    Some(IrType::I32) => self
+                                        .builder
+                                        .build_cast(value, IrType::I32, IrType::I64)
+                                        .unwrap_or(value),
+                                    Some(IrType::Bool) => self
+                                        .builder
+                                        .build_cast(value, IrType::Bool, IrType::I64)
+                                        .unwrap_or(value),
+                                    Some(IrType::Ptr(_)) => self
+                                        .builder
+                                        .build_bitcast(value, IrType::I64)
+                                        .unwrap_or(value),
+                                    Some(IrType::F64) => self
+                                        .builder
+                                        .build_bitcast(value, IrType::I64)
+                                        .unwrap_or(value),
+                                    Some(IrType::F32) => {
+                                        let as_i32 = self
+                                            .builder
+                                            .build_bitcast(value, IrType::I32)
+                                            .unwrap_or(value);
+                                        self.builder
+                                            .build_cast(as_i32, IrType::I32, IrType::I64)
+                                            .unwrap_or(as_i32)
+                                    }
+                                    Some(other) => self
+                                        .builder
+                                        .build_cast(value, other, IrType::I64)
+                                        .unwrap_or(value),
+                                    None => value,
+                                };
                                 self.builder.build_call_direct(
                                     func_id,
-                                    vec![obj_reg, idx_reg, value],
+                                    vec![obj_reg, idx_i64, value_i64],
                                     IrType::Bool,
                                 );
                             }
@@ -21175,140 +21255,7 @@ impl<'a> HirToMirContext<'a> {
             iter_expr.ty, elem_type_id
         );
 
-        // Step 2: Get array length by directly reading the 'len' field from HaxeArray struct
-        // HaxeArray layout: { ptr: *u8 (8 bytes), len: usize (8 bytes), cap: usize, elem_size: usize }
-        // The 'len' field is at offset 8 bytes from the start of the struct
-        //
-        // We use pointer arithmetic: len_ptr = collection + 8
-        let Some(offset_8) = self.builder.build_const(IrValue::I64(8)) else {
-            return;
-        };
-        let Some(len_ptr) =
-            self.builder
-                .build_binop(crate::ir::instructions::BinaryOp::Add, collection, offset_8)
-        else {
-            return;
-        };
-        let Some(array_len) = self.builder.build_load(len_ptr, IrType::I64) else {
-            debug!("[for-in]: FAILED to load array length!");
-            return;
-        };
-        debug!(
-            "[for-in]: array_len reg={:?} (loaded from offset 8)",
-            array_len
-        );
-
-        // Step 3: Initialize index to 0
-        let Some(zero) = self.builder.build_const(IrValue::I64(0)) else {
-            return;
-        };
-        let Some(index_ptr) = self.builder.build_alloc(IrType::I64, None) else {
-            return;
-        };
-        self.builder.build_store(index_ptr, zero);
-
-        // Step 4: Create loop blocks
-        let Some(loop_cond_block) = self.builder.create_block() else {
-            return;
-        };
-        let Some(loop_body_block) = self.builder.create_block() else {
-            return;
-        };
-        let Some(loop_exit_block) = self.builder.create_block() else {
-            return;
-        };
-
-        // Jump to condition check
-        self.builder.build_branch(loop_cond_block);
-
-        // Push loop context for break/continue
-        self.loop_stack.push(LoopContext {
-            continue_block: loop_cond_block,
-            break_block: loop_exit_block,
-            label: label.cloned(),
-            exit_phi_nodes: BTreeMap::new(),
-            continue_phi_nodes: BTreeMap::new(),
-        });
-
-        // Step 5: Build condition block - check if index < length
-        self.builder.switch_to_block(loop_cond_block);
-        let Some(current_index) = self.builder.build_load(index_ptr, IrType::I64) else {
-            self.loop_stack.pop();
-            return;
-        };
-        let Some(cmp_result) = self.builder.build_cmp(
-            crate::ir::instructions::CompareOp::Lt,
-            current_index,
-            array_len,
-        ) else {
-            self.loop_stack.pop();
-            return;
-        };
-
-        // Conditional branch based on comparison
-        self.builder
-            .build_cond_branch(cmp_result, loop_body_block, loop_exit_block);
-
-        // Step 6: Build body block
-        self.builder.switch_to_block(loop_body_block);
-
-        // Reload current index for element access
-        let Some(idx_for_access) = self.builder.build_load(index_ptr, IrType::I64) else {
-            self.loop_stack.pop();
-            return;
-        };
-
-        // Get element at current index using lower_index_access (same as arr[i])
-        let Some(element_value) = self.lower_index_access(collection, idx_for_access, elem_type_id)
-        else {
-            self.loop_stack.pop();
-            return;
-        };
-
-        // Bind the pattern to the element value
-        match pattern {
-            HirPattern::Variable { symbol, .. } => {
-                self.symbol_map.insert(*symbol, element_value);
-            }
-            _ => {
-                // Complex patterns need full pattern matching
-                // For now, just use the element value
-            }
-        }
-
-        // Lower the loop body
-        self.enter_drop_scope(); // Enter scope for loop body allocations
-        self.lower_block(body);
-
-        // Increment index: _i++
-        if !self.is_terminated() {
-            self.exit_drop_scope(); // Free loop body allocations before next iteration
-            let Some(idx_to_inc) = self.builder.build_load(index_ptr, IrType::I64) else {
-                self.loop_stack.pop();
-                return;
-            };
-            let Some(one) = self.builder.build_const(IrValue::I64(1)) else {
-                self.loop_stack.pop();
-                return;
-            };
-            let Some(next_index) =
-                self.builder
-                    .build_binop(crate::ir::instructions::BinaryOp::Add, idx_to_inc, one)
-            else {
-                self.loop_stack.pop();
-                return;
-            };
-            self.builder.build_store(index_ptr, next_index);
-
-            // Jump back to condition check
-            self.builder.build_branch(loop_cond_block);
-        }
-
-        // Pop loop context
-        self.loop_stack.pop();
-
-        // Step 7: Continue at exit block
-        self.builder.switch_to_block(loop_exit_block);
+        self.lower_for_in_over_array(pattern, collection, elem_type_id, body, label);
     }
 
     /// Lower a range-based for-in loop: `for (i in start...end) { body }`
@@ -21330,12 +21277,90 @@ impl<'a> HirToMirContext<'a> {
         let Some(end_val) = self.lower_expression(end_expr) else {
             return;
         };
+        let start_i64 = {
+            let start_ty = self.builder.get_register_type(start_val);
+            match start_ty {
+                Some(IrType::I64) => start_val,
+                Some(IrType::I32) => self
+                    .builder
+                    .build_cast(start_val, IrType::I32, IrType::I64)
+                    .unwrap_or(start_val),
+                Some(IrType::Bool) => self
+                    .builder
+                    .build_cast(start_val, IrType::Bool, IrType::I64)
+                    .unwrap_or(start_val),
+                Some(other) => self
+                    .builder
+                    .build_cast(start_val, other, IrType::I64)
+                    .unwrap_or(start_val),
+                None => start_val,
+            }
+        };
+        let end_i64 = {
+            let end_ty = self.builder.get_register_type(end_val);
+            match end_ty {
+                Some(IrType::I64) => end_val,
+                Some(IrType::I32) => self
+                    .builder
+                    .build_cast(end_val, IrType::I32, IrType::I64)
+                    .unwrap_or(end_val),
+                Some(IrType::Bool) => self
+                    .builder
+                    .build_cast(end_val, IrType::Bool, IrType::I64)
+                    .unwrap_or(end_val),
+                Some(other) => self
+                    .builder
+                    .build_cast(end_val, other, IrType::I64)
+                    .unwrap_or(end_val),
+                None => end_val,
+            }
+        };
+
+        // Save the entry block for loop-carried phi incoming edges.
+        let entry_block = if let Some(block_id) = self.builder.current_block() {
+            block_id
+        } else {
+            return;
+        };
+
+        // Collect variables referenced in the body that need loop-carried SSA values.
+        let mut referenced_vars = std::collections::HashSet::new();
+        self.collect_referenced_variables_in_block(body, &mut referenced_vars);
+
+        let modified_vars: std::collections::HashSet<SymbolId> = referenced_vars
+            .into_iter()
+            .filter(|sym| {
+                let in_map = self.symbol_map.contains_key(sym);
+                let is_param = if let Some(func) = self.builder.current_function() {
+                    func.signature
+                        .parameters
+                        .iter()
+                        .any(|p| self.symbol_map.get(sym) == Some(&p.reg))
+                } else {
+                    false
+                };
+                in_map && !is_param
+            })
+            .collect();
+
+        let mut loop_var_initial_values: BTreeMap<SymbolId, (IrId, IrType)> = BTreeMap::new();
+        for symbol_id in &modified_vars {
+            if let Some(&reg) = self.symbol_map.get(symbol_id) {
+                let reg_ty = self
+                    .builder
+                    .current_function()
+                    .and_then(|func| func.locals.get(&reg).map(|l| l.ty.clone()))
+                    .or_else(|| self.builder.get_register_type(reg))
+                    .unwrap_or(IrType::I64);
+                loop_var_initial_values.insert(*symbol_id, (reg, reg_ty));
+            }
+        }
 
         // Allocate counter on stack, initialize to start
         let Some(counter_ptr) = self.builder.build_alloc(IrType::I64, None) else {
             return;
         };
-        self.builder.build_store(counter_ptr, start_val);
+        self.builder.build_store(counter_ptr, start_i64);
 
         // Create loop blocks
         let Some(loop_cond_block) = self.builder.create_block() else {
@@ -21351,24 +21376,87 @@ impl<'a> HirToMirContext<'a> {
         // Jump to condition check
         self.builder.build_branch(loop_cond_block);
 
+        // Condition block: create loop-carried phis first.
+        self.builder.switch_to_block(loop_cond_block);
+        let mut phi_nodes: BTreeMap<SymbolId, IrId> = BTreeMap::new();
+        for (symbol_id, (initial_reg, var_type)) in &loop_var_initial_values {
+            if let Some(phi_reg) = self.builder.build_phi(loop_cond_block, var_type.clone()) {
+                self.builder
+                    .add_phi_incoming(loop_cond_block, phi_reg, entry_block, *initial_reg);
+
+                if let Some(func) = self.builder.current_function_mut() {
+                    if let Some(local) = func.locals.get(initial_reg).cloned() {
+                        func.locals.insert(
+                            phi_reg,
+                            super::IrLocal {
+                                name: format!("{}_phi", local.name),
+                                ty: var_type.clone(),
+                                mutable: true,
+                                source_location: local.source_location,
+                                allocation: super::AllocationHint::Register,
+                            },
+                        );
+                    }
+                }
+
+                phi_nodes.insert(*symbol_id, phi_reg);
+                self.symbol_map.insert(*symbol_id, phi_reg);
+
+                if self.owned_heap_values.contains_key(symbol_id) {
+                    self.owned_heap_values.insert(*symbol_id, phi_reg);
+                }
+            }
+        }
+
+        // Build exit phi nodes up-front so break statements can target them.
+        let mut exit_phi_nodes: BTreeMap<SymbolId, IrId> = BTreeMap::new();
+        for (symbol_id, loop_phi_reg) in &phi_nodes {
+            if let Some((_, var_type)) = loop_var_initial_values.get(symbol_id) {
+                let exit_param_reg = self.builder.alloc_reg().unwrap();
+
+                if let Some(func) = self.builder.current_function_mut() {
+                    if let Some(exit_block_data) = func.cfg.get_block_mut(loop_exit_block) {
+                        let exit_phi = super::IrPhiNode {
+                            dest: exit_param_reg,
+                            incoming: vec![(loop_cond_block, *loop_phi_reg)],
+                            ty: var_type.clone(),
+                        };
+                        exit_block_data.add_phi(exit_phi);
+
+                        func.locals.insert(
+                            exit_param_reg,
+                            super::IrLocal {
+                                name: format!("loop_exit_{}", symbol_id.as_raw()),
+                                ty: var_type.clone(),
+                                mutable: false,
+                                source_location: super::IrSourceLocation::unknown(),
+                                allocation: super::AllocationHint::Register,
+                            },
+                        );
+                    }
+                }
+
+                exit_phi_nodes.insert(*symbol_id, exit_param_reg);
+            }
+        }
+
         // Push loop context for break/continue
         self.loop_stack.push(LoopContext {
             continue_block: loop_cond_block,
             break_block: loop_exit_block,
             label: label.cloned(),
-            exit_phi_nodes: BTreeMap::new(),
+            exit_phi_nodes: exit_phi_nodes.clone(),
             continue_phi_nodes: BTreeMap::new(),
         });
 
         // Condition block: counter < end
-        self.builder.switch_to_block(loop_cond_block);
         let Some(current_val) = self.builder.build_load(counter_ptr, IrType::I64) else {
             self.loop_stack.pop();
             return;
         };
         let Some(cmp_result) =
             self.builder
-                .build_cmp(crate::ir::instructions::CompareOp::Lt, current_val, end_val)
+                .build_cmp(crate::ir::instructions::CompareOp::Lt, current_val, end_i64)
         else {
             self.loop_stack.pop();
             return;
@@ -21394,6 +21482,24 @@ impl<'a> HirToMirContext<'a> {
         // Lower loop body
         self.enter_drop_scope();
         self.lower_block(body);
+
+        // Capture the block we ended up in after lowering the body.
+        let body_end_block = self.builder.current_block().unwrap_or(loop_body_block);
+
+        // Add loop back-edge values for loop-carried variables.
+        for (symbol_id, phi_reg) in &phi_nodes {
+            let back_edge_value = if let Some(&updated_reg) = self.symbol_map.get(symbol_id) {
+                updated_reg
+            } else {
+                *phi_reg
+            };
+            self.builder.add_phi_incoming(
+                loop_cond_block,
+                *phi_reg,
+                body_end_block,
+                back_edge_value,
+            );
+        }
 
         // Increment counter
         if !self.is_terminated() {
@@ -21422,6 +21528,14 @@ impl<'a> HirToMirContext<'a> {
 
         // Continue at exit block
         self.builder.switch_to_block(loop_exit_block);
+
+        // Update symbols to exit phi values after the loop.
+        for (symbol_id, exit_reg) in &exit_phi_nodes {
+            self.symbol_map.insert(*symbol_id, *exit_reg);
+            if self.owned_heap_values.contains_key(symbol_id) {
+                self.owned_heap_values.insert(*symbol_id, *exit_reg);
+            }
+        }
     }
 
     /// Lower for-in iteration using the hasNext()/next() iterator protocol.
@@ -21786,11 +21900,13 @@ impl<'a> HirToMirContext<'a> {
         let mut loop_var_initial_values: BTreeMap<SymbolId, (IrId, IrType)> = BTreeMap::new();
         for symbol_id in &modified_vars {
             if let Some(&reg) = self.symbol_map.get(symbol_id) {
-                if let Some(func) = self.builder.current_function() {
-                    if let Some(local) = func.locals.get(&reg) {
-                        loop_var_initial_values.insert(*symbol_id, (reg, local.ty.clone()));
-                    }
-                }
+                let reg_ty = self
+                    .builder
+                    .current_function()
+                    .and_then(|func| func.locals.get(&reg).map(|l| l.ty.clone()))
+                    .or_else(|| self.builder.get_register_type(reg))
+                    .unwrap_or(IrType::I64);
+                loop_var_initial_values.insert(*symbol_id, (reg, reg_ty));
             }
         }
 
@@ -22056,6 +22172,46 @@ impl<'a> HirToMirContext<'a> {
         };
         self.builder.build_store(index_ptr, zero);
 
+        // Save entry block for loop-carried phi incoming edges.
+        let entry_block = if let Some(block_id) = self.builder.current_block() {
+            block_id
+        } else {
+            return;
+        };
+
+        // Collect referenced variables in loop body for loop-carried SSA updates.
+        let mut referenced_vars = std::collections::HashSet::new();
+        self.collect_referenced_variables_in_block(body, &mut referenced_vars);
+
+        let modified_vars: std::collections::HashSet<SymbolId> = referenced_vars
+            .into_iter()
+            .filter(|sym| {
+                let in_map = self.symbol_map.contains_key(sym);
+                let is_param = if let Some(func) = self.builder.current_function() {
+                    func.signature
+                        .parameters
+                        .iter()
+                        .any(|p| self.symbol_map.get(sym) == Some(&p.reg))
+                } else {
+                    false
+                };
+                in_map && !is_param
+            })
+            .collect();
+
+        let mut loop_var_initial_values: BTreeMap<SymbolId, (IrId, IrType)> = BTreeMap::new();
+        for symbol_id in &modified_vars {
+            if let Some(&reg) = self.symbol_map.get(symbol_id) {
+                let reg_ty = self
+                    .builder
+                    .current_function()
+                    .and_then(|func| func.locals.get(&reg).map(|l| l.ty.clone()))
+                    .or_else(|| self.builder.get_register_type(reg))
+                    .unwrap_or(IrType::I64);
+                loop_var_initial_values.insert(*symbol_id, (reg, reg_ty));
+            }
+        }
+
         // Create loop blocks
         let Some(loop_cond_block) = self.builder.create_block() else {
             return;
@@ -22069,17 +22225,76 @@ impl<'a> HirToMirContext<'a> {
 
         self.builder.build_branch(loop_cond_block);
 
+        // Condition block: create loop-carried phis first.
+        self.builder.switch_to_block(loop_cond_block);
+        let mut phi_nodes: BTreeMap<SymbolId, IrId> = BTreeMap::new();
+        for (symbol_id, (initial_reg, var_type)) in &loop_var_initial_values {
+            if let Some(phi_reg) = self.builder.build_phi(loop_cond_block, var_type.clone()) {
+                self.builder
+                    .add_phi_incoming(loop_cond_block, phi_reg, entry_block, *initial_reg);
+                if let Some(func) = self.builder.current_function_mut() {
+                    if let Some(local) = func.locals.get(initial_reg).cloned() {
+                        func.locals.insert(
+                            phi_reg,
+                            super::IrLocal {
+                                name: format!("{}_phi", local.name),
+                                ty: var_type.clone(),
+                                mutable: true,
+                                source_location: local.source_location,
+                                allocation: super::AllocationHint::Register,
+                            },
+                        );
+                    }
+                }
+                phi_nodes.insert(*symbol_id, phi_reg);
+                self.symbol_map.insert(*symbol_id, phi_reg);
+                if self.owned_heap_values.contains_key(symbol_id) {
+                    self.owned_heap_values.insert(*symbol_id, phi_reg);
+                }
+            }
+        }
+
+        // Build exit phis now so break statements can target the correct values.
+        let mut exit_phi_nodes: BTreeMap<SymbolId, IrId> = BTreeMap::new();
+        for (symbol_id, loop_phi_reg) in &phi_nodes {
+            if let Some((_, var_type)) = loop_var_initial_values.get(symbol_id) {
+                let Some(exit_param_reg) = self.builder.alloc_reg() else {
+                    continue;
+                };
+                if let Some(func) = self.builder.current_function_mut() {
+                    if let Some(exit_block_data) = func.cfg.get_block_mut(loop_exit_block) {
+                        let exit_phi = super::IrPhiNode {
+                            dest: exit_param_reg,
+                            incoming: vec![(loop_cond_block, *loop_phi_reg)],
+                            ty: var_type.clone(),
+                        };
+                        exit_block_data.add_phi(exit_phi);
+                        func.locals.insert(
+                            exit_param_reg,
+                            super::IrLocal {
+                                name: format!("loop_exit_{}", symbol_id.as_raw()),
+                                ty: var_type.clone(),
+                                mutable: false,
+                                source_location: super::IrSourceLocation::unknown(),
+                                allocation: super::AllocationHint::Register,
+                            },
+                        );
+                    }
+                }
+                exit_phi_nodes.insert(*symbol_id, exit_param_reg);
+            }
+        }
+
         // Push loop context for break/continue
         self.loop_stack.push(LoopContext {
             continue_block: loop_cond_block,
             break_block: loop_exit_block,
             label: label.cloned(),
-            exit_phi_nodes: BTreeMap::new(),
+            exit_phi_nodes: exit_phi_nodes.clone(),
             continue_phi_nodes: BTreeMap::new(),
         });
 
         // Condition block: index < length
-        self.builder.switch_to_block(loop_cond_block);
         let Some(current_index) = self.builder.build_load(index_ptr, IrType::I64) else {
             self.loop_stack.pop();
             return;
@@ -22119,6 +22334,22 @@ impl<'a> HirToMirContext<'a> {
         self.enter_drop_scope();
         self.lower_block(body);
 
+        // Add loop-carried phi incoming values from the body-end block.
+        let body_end_block = self.builder.current_block().unwrap_or(loop_body_block);
+        for (symbol_id, phi_reg) in &phi_nodes {
+            let back_edge_value = if let Some(&updated_reg) = self.symbol_map.get(symbol_id) {
+                updated_reg
+            } else {
+                *phi_reg
+            };
+            self.builder.add_phi_incoming(
+                loop_cond_block,
+                *phi_reg,
+                body_end_block,
+                back_edge_value,
+            );
+        }
+
         // Increment index
         if !self.is_terminated() {
             self.exit_drop_scope();
@@ -22143,6 +22374,14 @@ impl<'a> HirToMirContext<'a> {
 
         self.loop_stack.pop();
         self.builder.switch_to_block(loop_exit_block);
+
+        // Update symbol map and owned heap tracking to loop-exit values.
+        for (symbol_id, exit_param_reg) in &exit_phi_nodes {
+            self.symbol_map.insert(*symbol_id, *exit_param_reg);
+            if self.owned_heap_values.contains_key(symbol_id) {
+                self.owned_heap_values.insert(*symbol_id, *exit_param_reg);
+            }
+        }
     }
 
     fn lower_switch_statement(&mut self, scrutinee: &HirExpr, cases: &[HirMatchCase]) {
@@ -23821,16 +24060,15 @@ impl<'a> HirToMirContext<'a> {
             .get(&(class_symbol, interface_symbol))
             .cloned()?;
         let method_count = vtable.len();
-        let fat_ptr_size = (1 + method_count) * 8; // object_ptr + N function pointers
-                                                   // Allocate fat pointer using tracked_alloc for proper lifecycle
+        let fat_ptr_size = ((1 + method_count) * 8) as u64; // object_ptr + N function pointers
+                                                            // Allocate fat pointer with malloc so IrInstruction::Free
+                                                            // (lowered to libc free) uses matching allocator semantics.
         let malloc_fn = self.get_or_register_extern_function(
-            "rayzor_tracked_alloc",
-            vec![IrType::I64],
+            "malloc",
+            vec![IrType::U64],
             IrType::Ptr(Box::new(IrType::U8)),
         );
-        let size_reg = self
-            .builder
-            .build_const(IrValue::I64(fat_ptr_size as i64))?;
+        let size_reg = self.builder.build_const(IrValue::U64(fat_ptr_size))?;
         let fat_ptr = self.builder.build_call_direct(
             malloc_fn,
             vec![size_reg],
@@ -23870,6 +24108,74 @@ impl<'a> HirToMirContext<'a> {
         }
 
         Some(fat_ptr)
+    }
+
+    /// Clone an interface fat pointer when assigning interface -> interface.
+    /// This prevents multiple variables from aliasing the same wrapper allocation,
+    /// so source reassignment can free only the source wrapper without invalidating
+    /// other interface variables.
+    fn clone_interface_fat_ptr(
+        &mut self,
+        fat_ptr_reg: IrId,
+        source_interface: SymbolId,
+        target_interface: SymbolId,
+    ) -> Option<IrId> {
+        let source_method_count = self.interface_method_names.get(&source_interface)?.len();
+        let target_method_count = self.interface_method_names.get(&target_interface)?.len();
+
+        // Reject downcast-like layout growth to avoid reading past source wrapper.
+        if source_method_count < target_method_count {
+            return None;
+        }
+
+        let slot_count = 1 + target_method_count; // object ptr + method slots
+        let fat_ptr_size = (slot_count * 8) as u64;
+        let malloc_fn = self.get_or_register_extern_function(
+            "malloc",
+            vec![IrType::U64],
+            IrType::Ptr(Box::new(IrType::U8)),
+        );
+        let size_reg = self.builder.build_const(IrValue::U64(fat_ptr_size))?;
+        let cloned_ptr = self.builder.build_call_direct(
+            malloc_fn,
+            vec![size_reg],
+            IrType::Ptr(Box::new(IrType::U8)),
+        )?;
+
+        let src_ptr = {
+            let src_ty = self
+                .builder
+                .get_register_type(fat_ptr_reg)
+                .unwrap_or(IrType::I64);
+            if matches!(src_ty, IrType::Ptr(_)) {
+                fat_ptr_reg
+            } else {
+                self.builder
+                    .build_bitcast(fat_ptr_reg, IrType::Ptr(Box::new(IrType::U8)))?
+            }
+        };
+
+        // Copy object slot + required method slots.
+        let obj_ptr = self.builder.build_load(src_ptr, IrType::I64)?;
+        self.builder.build_store(cloned_ptr, obj_ptr);
+        for i in 1..slot_count {
+            let offset_reg = self.builder.build_const(IrValue::I64((i * 8) as i64))?;
+            let src_slot_ptr = self.builder.build_ptr_add(
+                src_ptr,
+                offset_reg,
+                IrType::Ptr(Box::new(IrType::U8)),
+            )?;
+            let slot_val = self.builder.build_load(src_slot_ptr, IrType::I64)?;
+
+            let dst_slot_ptr = self.builder.build_ptr_add(
+                cloned_ptr,
+                offset_reg,
+                IrType::Ptr(Box::new(IrType::U8)),
+            )?;
+            self.builder.build_store(dst_slot_ptr, slot_val);
+        }
+
+        Some(cloned_ptr)
     }
 
     /// Check if a type is an interface type and return its SymbolId.
@@ -23954,20 +24260,30 @@ impl<'a> HirToMirContext<'a> {
             Some(s) => s,
             None => return (value_reg, false),
         };
-        let class_sym = match self.get_class_symbol(value_type) {
-            Some(s) => s,
-            None => return (value_reg, false),
-        };
 
-        // Check if we have a vtable for this (class, interface) pair
-        if !self.interface_vtables.contains_key(&(class_sym, iface_sym)) {
-            return (value_reg, false);
+        // Class -> interface: build a fresh fat pointer wrapper from class vtable entries.
+        if let Some(class_sym) = self.get_class_symbol(value_type) {
+            // Check if we have a vtable for this (class, interface) pair
+            if !self.interface_vtables.contains_key(&(class_sym, iface_sym)) {
+                return (value_reg, false);
+            }
+
+            return match self.wrap_in_interface_fat_ptr(value_reg, class_sym, iface_sym) {
+                Some(wrapped) => (wrapped, true),
+                None => (value_reg, false),
+            };
         }
 
-        match self.wrap_in_interface_fat_ptr(value_reg, class_sym, iface_sym) {
-            Some(wrapped) => (wrapped, true),
-            None => (value_reg, false),
+        // Interface -> interface: clone wrapper so destination does not alias source wrapper
+        // ownership. This keeps reassignment semantics stable for both variables.
+        if let Some(src_iface_sym) = self.get_interface_symbol(value_type) {
+            return match self.clone_interface_fat_ptr(value_reg, src_iface_sym, iface_sym) {
+                Some(cloned) => (cloned, true),
+                None => (value_reg, false),
+            };
         }
+
+        (value_reg, false)
     }
 
     fn lower_object_literal(
