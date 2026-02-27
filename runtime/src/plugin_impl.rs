@@ -330,6 +330,8 @@ register_symbol!(
     "haxe_type_enum_parameters",
     crate::type_system::haxe_type_enum_parameters
 );
+register_symbol!("haxe_type_get_enum", crate::type_system::haxe_type_get_enum);
+register_symbol!("haxe_type_enum_eq", crate::type_system::haxe_type_enum_eq);
 // Type RTTI query functions
 register_symbol!(
     "haxe_type_get_class_name",
@@ -352,6 +354,10 @@ register_symbol!(
     crate::type_system::haxe_type_resolve_class
 );
 register_symbol!(
+    "haxe_type_resolve_enum",
+    crate::type_system::haxe_type_resolve_enum
+);
+register_symbol!(
     "haxe_type_create_empty_instance",
     crate::type_system::haxe_type_create_empty_instance
 );
@@ -370,6 +376,10 @@ register_symbol!(
 register_symbol!(
     "haxe_type_get_enum_name",
     crate::type_system::haxe_type_get_enum_name
+);
+register_symbol!(
+    "haxe_type_all_enums",
+    crate::type_system::haxe_type_all_enums
 );
 register_symbol!(
     "haxe_type_create_enum",

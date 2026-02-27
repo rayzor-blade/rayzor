@@ -5756,6 +5756,76 @@ impl<'a> HirToMirContext<'a> {
         None
     }
 
+    /// Return true for runtime functions that expect a hidden enum `type_id: i32`.
+    fn runtime_func_needs_enum_type_id(runtime_func: &str) -> bool {
+        matches!(
+            runtime_func,
+            "haxe_type_enum_constructor"
+                | "haxe_type_enum_parameters"
+                | "haxe_type_get_enum"
+                | "haxe_type_enum_eq"
+        )
+    }
+
+    /// Try to resolve enum type id from call arguments for runtime enum helpers.
+    /// For `enumEq(a, b)`, prefer the first arg then second arg.
+    fn extract_enum_type_id_from_args(&self, runtime_func: &str, args: &[HirExpr]) -> Option<u32> {
+        if args.is_empty() {
+            return None;
+        }
+
+        let preferred_indices: &[usize] = if runtime_func == "haxe_type_enum_eq" {
+            &[0, 1]
+        } else {
+            &[0]
+        };
+
+        for &idx in preferred_indices {
+            if let Some(arg) = args.get(idx) {
+                if let Some(type_id) = self.extract_enum_type_id_from_expr(arg) {
+                    return Some(type_id);
+                }
+            }
+        }
+
+        for arg in args {
+            if let Some(type_id) = self.extract_enum_type_id_from_expr(arg) {
+                return Some(type_id);
+            }
+        }
+
+        None
+    }
+
+    /// Append hidden enum type id to runtime enum helper calls.
+    /// Falls back to `0` when type inference fails to preserve ABI parity (no arg-count mismatch).
+    fn inject_hidden_enum_type_id_arg(
+        &mut self,
+        runtime_func: &str,
+        args: &[HirExpr],
+        arg_regs: &mut Vec<IrId>,
+    ) {
+        if !Self::runtime_func_needs_enum_type_id(runtime_func) {
+            return;
+        }
+
+        let type_id = self.extract_enum_type_id_from_args(runtime_func, args);
+        let tid_reg = match type_id {
+            Some(type_id) => self.builder.build_const(IrValue::I32(type_id as i32)),
+            None => {
+                debug!(
+                    "[ENUM TYPE_ID] Could not resolve hidden enum type_id for {}, using 0 fallback",
+                    runtime_func
+                );
+                self.builder.build_const(IrValue::I32(0))
+            }
+        };
+
+        if let Some(tid_reg) = tid_reg {
+            arg_regs.push(tid_reg);
+        }
+    }
+
     /// Try to dispatch an enum built-in method (getIndex, getName, getParameters).
     /// Uses runtime mapping registered in runtime_mapping.rs.
     /// Injects compile-time constants (type_id, is_boxed) as extra params.
@@ -11088,23 +11158,13 @@ impl<'a> HirToMirContext<'a> {
                                                 })
                                                 .collect();
 
-                                            // Inject type_id for enum methods that need it
+                                            // Inject hidden enum type_id for enum helper runtime calls.
                                             let mut final_arg_regs = final_arg_regs;
-                                            if (runtime_func == "haxe_type_enum_constructor"
-                                                || runtime_func == "haxe_type_enum_parameters")
-                                                && !args.is_empty()
-                                            {
-                                                if let Some(type_id) =
-                                                    self.extract_enum_type_id_from_expr(&args[0])
-                                                {
-                                                    if let Some(tid_reg) = self
-                                                        .builder
-                                                        .build_const(IrValue::I32(type_id as i32))
-                                                    {
-                                                        final_arg_regs.push(tid_reg);
-                                                    }
-                                                }
-                                            }
+                                            self.inject_hidden_enum_type_id_arg(
+                                                &runtime_func,
+                                                args,
+                                                &mut final_arg_regs,
+                                            );
 
                                             let runtime_func_id = self
                                                 .get_or_register_extern_function(
@@ -11265,23 +11325,13 @@ impl<'a> HirToMirContext<'a> {
                                         })
                                         .collect();
 
-                                    // Inject type_id for enum methods that need it
+                                    // Inject hidden enum type_id for enum helper runtime calls.
                                     let mut final_arg_regs = final_arg_regs;
-                                    if (runtime_func_name == "haxe_type_enum_constructor"
-                                        || runtime_func_name == "haxe_type_enum_parameters")
-                                        && !args.is_empty()
-                                    {
-                                        if let Some(type_id) =
-                                            self.extract_enum_type_id_from_expr(&args[0])
-                                        {
-                                            if let Some(tid_reg) = self
-                                                .builder
-                                                .build_const(IrValue::I32(type_id as i32))
-                                            {
-                                                final_arg_regs.push(tid_reg);
-                                            }
-                                        }
-                                    }
+                                    self.inject_hidden_enum_type_id_arg(
+                                        &runtime_func_name,
+                                        args,
+                                        &mut final_arg_regs,
+                                    );
 
                                     let runtime_func_id = self.get_or_register_extern_function(
                                         &runtime_func_name,
@@ -11854,7 +11904,7 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
 
-                            // Inject type_id for enum methods that need it
+                            // Inject hidden enum type_id for enum helper runtime calls.
                             {
                                 let func_name = self
                                     .builder
@@ -11863,20 +11913,11 @@ impl<'a> HirToMirContext<'a> {
                                     .get(&func_id)
                                     .map(|f| f.name.clone())
                                     .unwrap_or_default();
-                                if (func_name == "haxe_type_enum_constructor"
-                                    || func_name == "haxe_type_enum_parameters")
-                                    && !args.is_empty()
-                                {
-                                    if let Some(type_id) =
-                                        self.extract_enum_type_id_from_expr(&args[0])
-                                    {
-                                        if let Some(tid_reg) =
-                                            self.builder.build_const(IrValue::I32(type_id as i32))
-                                        {
-                                            arg_regs.push(tid_reg);
-                                        }
-                                    }
-                                }
+                                self.inject_hidden_enum_type_id_arg(
+                                    &func_name,
+                                    args,
+                                    &mut arg_regs,
+                                );
                             }
 
                             // Infer type_args for static generic calls if not already provided
