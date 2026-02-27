@@ -1756,14 +1756,14 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
    - [x] Implement `Type.createEmptyInstance` allocation path (2026-02-27).
 2. **Interface runtime parity**
    - [x] `Std.is(obj, IMyInterface)` runtime check (runtime registry + MIR registration, 2026-02-27).
-   - [ ] Fat pointer lifecycle management (free/drop parity; variable assignment/reassignment tracking improved, 2026-02-27).
+   - [x] Fat pointer lifecycle management (wrapper allocation/free parity + interface-wrapper cloning on interface->interface assignment/reassignment, 2026-02-27).
 3. **Correctness regressions still open**
-   - [ ] Array comprehension temp scoping bug (multiple comprehensions in one function).
+   - [x] Array comprehension temp scoping bug (loop-carried temp/index SSA fixed for range and array for-in lowering, 2026-02-27).
    - [x] `Type.typeof()` returns real `ValueType` enum value at language level (via `haxe_type_typeof_value` + trace parity path, 2026-02-27).
 4. **Verification gates for each parity slice**
-   - [ ] Add/extend Haxe fixtures with explicit output checks.
-   - [ ] Validate MIR dumps at `-O0` and `-O2` before backend lowering.
-   - [ ] Run both Cranelift and LLVM backends where available.
+   - [x] Add/extend Haxe fixtures with explicit output checks (interface wrapper copy + multi-comprehension scope fixture, 2026-02-27).
+   - [x] Validate MIR dumps at `-O0` and `-O2` before backend lowering (2026-02-27).
+   - [x] Run both Cranelift and LLVM backends where available (2026-02-27; verified `--llvm` on exception/catch/trace/interface/typeof/reflect parity fixtures).
 
 ### 16.1 Enum Variants + Pattern Matching (ADTs) 🟢
 
@@ -1810,7 +1810,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [x] Multiple interface implementation (`class Foo implements Bar implements Baz`) — parser accepts repeated `implements` keyword (2026-02-20)
 - [x] Interface inheritance (`interface A extends B`) — inherited methods in vtable, transitive parent vtables for implementing classes (2026-02-18)
 - [x] `Std.is(obj, IMyInterface)` runtime check (2026-02-27)
-- [ ] Fat pointer lifecycle management (free on scope exit)
+- [x] Fat pointer lifecycle management (wrapper allocation/free parity + interface-wrapper cloning, 2026-02-27)
 
 ### 16.3 Try/Catch Exception Handling 🟢
 
@@ -2148,7 +2148,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 **Known Issue:**
 
-- [ ] Multiple comprehensions in same function produce incorrect results (temp variable scoping bug, pre-existing)
+- [x] Multiple comprehensions in same function produce incorrect results (fixed via loop-carried SSA in range/array for-in lowering, 2026-02-27)
 
 ### 16.18 RTTI (Runtime Type Information) 🟢
 
