@@ -1647,6 +1647,100 @@ impl CraneliftBackend {
         Ok(())
     }
 
+    /// Lower selected hot runtime calls as inline Cranelift instructions.
+    ///
+    /// This keeps parity for both true extern-table calls and tree-shaken
+    /// empty-CFG runtime declarations that no longer appear in `extern_functions`.
+    fn try_lower_runtime_intrinsic(
+        builder: &mut FunctionBuilder,
+        callee_name: &str,
+        arg_values: &[Value],
+    ) -> Option<Value> {
+        match callee_name {
+            // Math intrinsics.
+            "haxe_math_sqrt" | "haxe_math_abs" | "haxe_math_floor" | "haxe_math_ceil"
+            | "haxe_math_round"
+                if arg_values.len() == 1 =>
+            {
+                let arg = arg_values[0];
+                let arg_type = builder.func.dfg.value_type(arg);
+
+                // Convert ints to f64 where needed; otherwise skip unsupported input types.
+                if arg_type.is_float() || arg_type == types::I32 || arg_type == types::I64 {
+                    let float_arg = if arg_type.is_float() {
+                        arg
+                    } else {
+                        builder.ins().fcvt_from_sint(types::F64, arg)
+                    };
+
+                    let result = match callee_name {
+                        "haxe_math_sqrt" => builder.ins().sqrt(float_arg),
+                        "haxe_math_abs" => builder.ins().fabs(float_arg),
+                        "haxe_math_floor" => builder.ins().floor(float_arg),
+                        "haxe_math_ceil" => builder.ins().ceil(float_arg),
+                        "haxe_math_round" => builder.ins().nearest(float_arg),
+                        _ => unreachable!(),
+                    };
+                    debug!(
+                        "Math intrinsic: {} -> native Cranelift instruction",
+                        callee_name
+                    );
+                    Some(result)
+                } else {
+                    debug!(
+                        "Math intrinsic: {} skipped, unsupported arg type {:?}",
+                        callee_name, arg_type
+                    );
+                    None
+                }
+            }
+
+            // Std.int(): float/int to i32.
+            "haxe_std_int" if arg_values.len() == 1 => {
+                let arg = arg_values[0];
+                let arg_type = builder.func.dfg.value_type(arg);
+                let result = if arg_type.is_float() {
+                    builder.ins().fcvt_to_sint_sat(types::I32, arg)
+                } else if arg_type == types::I64 {
+                    builder.ins().ireduce(types::I32, arg)
+                } else {
+                    arg
+                };
+                debug!("Std intrinsic: haxe_std_int -> {:?} to i32", arg_type);
+                Some(result)
+            }
+
+            // HaxeArray.length inline load.
+            // Layout: { ptr (0), len (8), cap (16), elem_size (24) }.
+            "haxe_array_length" if arg_values.len() == 1 => {
+                let arr_ptr = arg_values[0];
+                let len = builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), arr_ptr, 8i32);
+                debug!("Array intrinsic: haxe_array_length -> inline load");
+                Some(len)
+            }
+
+            // HaxeArray.get_ptr inline pointer arithmetic.
+            "haxe_array_get_ptr" if arg_values.len() == 2 => {
+                let arr_ptr = arg_values[0];
+                let index = arg_values[1];
+                let data_ptr = builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), arr_ptr, 0i32);
+                let elem_size = builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), arr_ptr, 24i32);
+                let byte_offset = builder.ins().imul(index, elem_size);
+                let elem_ptr = builder.ins().iadd(data_ptr, byte_offset);
+                debug!("Array intrinsic: haxe_array_get_ptr -> inline pointer arithmetic");
+                Some(elem_ptr)
+            }
+
+            _ => None,
+        }
+    }
+
     /// Translate a single MIR instruction to Cranelift IR (static method)
     fn translate_instruction(
         value_map: &mut HashMap<IrId, Value>,
@@ -2087,105 +2181,11 @@ impl CraneliftBackend {
                         arg_values.push(cl_value);
                     }
 
-                    // Check if this is a function we can replace with inline instructions
-                    let intrinsic_result = match extern_func.name.as_str() {
-                        // Math intrinsics: replace with native Cranelift instructions
-                        "haxe_math_sqrt" | "haxe_math_abs" | "haxe_math_floor"
-                        | "haxe_math_ceil" | "haxe_math_round"
-                            if arg_values.len() == 1 =>
-                        {
-                            let arg = arg_values[0];
-                            let arg_type = builder.func.dfg.value_type(arg);
-
-                            // Convert int to float if necessary, or skip if unsupported type
-                            if arg_type.is_float()
-                                || arg_type == types::I32
-                                || arg_type == types::I64
-                            {
-                                let float_arg = if arg_type.is_float() {
-                                    arg
-                                } else {
-                                    builder.ins().fcvt_from_sint(types::F64, arg)
-                                };
-
-                                let result = match extern_func.name.as_str() {
-                                    "haxe_math_sqrt" => builder.ins().sqrt(float_arg),
-                                    "haxe_math_abs" => builder.ins().fabs(float_arg),
-                                    "haxe_math_floor" => builder.ins().floor(float_arg),
-                                    "haxe_math_ceil" => builder.ins().ceil(float_arg),
-                                    "haxe_math_round" => builder.ins().nearest(float_arg),
-                                    _ => unreachable!(),
-                                };
-                                debug!(
-                                    "Math intrinsic: {} → native Cranelift instruction",
-                                    extern_func.name
-                                );
-                                Some(result)
-                            } else {
-                                // Unknown type, skip intrinsic and fall through to function call
-                                debug!(
-                                    "Math intrinsic: {} skipped, unsupported arg type {:?}",
-                                    extern_func.name, arg_type
-                                );
-                                None
-                            }
-                        }
-                        // Std.int(): float to int truncation
-                        "haxe_std_int" if arg_values.len() == 1 => {
-                            let arg = arg_values[0];
-                            let arg_type = builder.func.dfg.value_type(arg);
-                            let result = if arg_type.is_float() {
-                                // fcvt_to_sint_sat: saturating conversion (avoids UB on overflow)
-                                builder.ins().fcvt_to_sint_sat(types::I32, arg)
-                            } else if arg_type == types::I64 {
-                                // Already an int, just narrow to i32
-                                builder.ins().ireduce(types::I32, arg)
-                            } else {
-                                // Already i32, return as-is
-                                arg
-                            };
-                            debug!("Std intrinsic: haxe_std_int → {:?} to i32", arg_type);
-                            Some(result)
-                        }
-                        // Array intrinsics
-                        // HaxeArray layout: { ptr: *mut u8 (0), len: usize (8), cap: usize (16), elem_size: usize (24) }
-                        "haxe_array_length" if arg_values.len() == 1 => {
-                            let arr_ptr = arg_values[0];
-                            let len = builder.ins().load(
-                                types::I64,
-                                MemFlags::trusted(),
-                                arr_ptr,
-                                8i32, // offset of len field
-                            );
-                            debug!("Array intrinsic: haxe_array_length → inline load");
-                            Some(len)
-                        }
-                        // Array get_ptr: compute ptr + index * elem_size
-                        // Returns pointer to element at given index
-                        "haxe_array_get_ptr" if arg_values.len() == 2 => {
-                            let arr_ptr = arg_values[0];
-                            let index = arg_values[1];
-                            // Load base data pointer (offset 0)
-                            let data_ptr =
-                                builder
-                                    .ins()
-                                    .load(types::I64, MemFlags::trusted(), arr_ptr, 0i32);
-                            // Load elem_size (offset 24)
-                            let elem_size =
-                                builder
-                                    .ins()
-                                    .load(types::I64, MemFlags::trusted(), arr_ptr, 24i32);
-                            // Compute offset = index * elem_size
-                            let byte_offset = builder.ins().imul(index, elem_size);
-                            // Compute element pointer = data_ptr + offset
-                            let elem_ptr = builder.ins().iadd(data_ptr, byte_offset);
-                            debug!(
-                                "Array intrinsic: haxe_array_get_ptr → inline pointer arithmetic"
-                            );
-                            Some(elem_ptr)
-                        }
-                        _ => None,
-                    };
+                    let intrinsic_result = Self::try_lower_runtime_intrinsic(
+                        builder,
+                        extern_func.name.as_str(),
+                        &arg_values,
+                    );
 
                     if let Some(result) = intrinsic_result {
                         if let Some(dest_reg) = dest {
@@ -2386,6 +2386,19 @@ impl CraneliftBackend {
                             }
                         }
                         call_args.push(arg_val);
+                    }
+
+                    if is_extern_func {
+                        if let Some(intrinsic) = Self::try_lower_runtime_intrinsic(
+                            builder,
+                            called_func.name.as_str(),
+                            &call_args,
+                        ) {
+                            if let Some(dest_reg) = dest {
+                                value_map.insert(*dest_reg, intrinsic);
+                            }
+                            return Ok(());
+                        }
                     }
 
                     // Emit the call instruction
