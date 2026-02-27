@@ -412,6 +412,10 @@ register_symbol!(
     "haxe_safe_downcast_class",
     crate::type_system::haxe_safe_downcast_class
 );
+register_symbol!(
+    "haxe_register_interface_impl",
+    crate::type_system::haxe_register_interface_impl
+);
 
 // Std.string() - Type-specific conversions
 register_symbol!(

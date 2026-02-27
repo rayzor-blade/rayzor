@@ -27,7 +27,7 @@
 //!    ```
 
 use log::debug;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Once, RwLock};
 
 /// Ensures primitive types are registered exactly once
@@ -165,6 +165,10 @@ static CLASS_NAME_REGISTRY: RwLock<Option<HashMap<String, u32>>> = RwLock::new(N
 ///
 /// Maps qualified enum name -> TypeId
 static ENUM_NAME_REGISTRY: RwLock<Option<HashMap<String, u32>>> = RwLock::new(None);
+
+/// Runtime registry of interface implementations:
+/// class type_id -> set of interface type_ids implemented by that class.
+static INTERFACE_IMPL_REGISTRY: RwLock<Option<HashMap<u32, HashSet<u32>>>> = RwLock::new(None);
 
 /// Initialize the type registry with primitive types
 pub fn init_type_system() {
@@ -1321,6 +1325,83 @@ pub(crate) fn type_id_matches_with_hierarchy(actual_type_id: i64, expected_type_
     false
 }
 
+fn class_implements_interface(class_type_id: u32, interface_type_id: u32) -> bool {
+    let impl_guard = INTERFACE_IMPL_REGISTRY.read().unwrap();
+    let Some(impl_registry) = impl_guard.as_ref() else {
+        return false;
+    };
+
+    let type_guard = TYPE_REGISTRY.read().unwrap();
+    let type_registry = type_guard.as_ref();
+
+    let mut current = Some(class_type_id);
+    while let Some(cid) = current {
+        if impl_registry
+            .get(&cid)
+            .map(|set| set.contains(&interface_type_id))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+
+        current = type_registry
+            .and_then(|r| r.get(&TypeId(cid)))
+            .and_then(|info| info.class_info)
+            .and_then(|class_info| class_info.super_type_id);
+    }
+
+    false
+}
+
+fn class_implements_interface_with_normalization(
+    class_type_id: i64,
+    interface_type_id: i64,
+) -> bool {
+    if class_type_id <= 0 || interface_type_id <= 0 {
+        return false;
+    }
+
+    let class_raw = class_type_id as u32;
+    let iface_raw = interface_type_id as u32;
+
+    let mut class_candidates = vec![class_raw];
+    if class_raw >= 1000 {
+        class_candidates.push(class_raw - 1000);
+    } else {
+        class_candidates.push(class_raw + 1000);
+    }
+
+    let mut iface_candidates = vec![iface_raw];
+    if iface_raw >= 1000 {
+        iface_candidates.push(iface_raw - 1000);
+    } else {
+        iface_candidates.push(iface_raw + 1000);
+    }
+
+    for cid in class_candidates {
+        for iid in &iface_candidates {
+            if class_implements_interface(cid, *iid) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Register that a class implements an interface.
+#[no_mangle]
+pub extern "C" fn haxe_register_interface_impl(class_type_id: i64, interface_type_id: i64) {
+    if class_type_id <= 0 || interface_type_id <= 0 {
+        return;
+    }
+    let class_id = class_type_id as u32;
+    let iface_id = interface_type_id as u32;
+    let mut guard = INTERFACE_IMPL_REGISTRY.write().unwrap();
+    let registry = guard.get_or_insert_with(HashMap::new);
+    let set = registry.entry(class_id).or_insert_with(HashSet::new);
+    set.insert(iface_id);
+}
+
 /// Runtime type check for Dynamic/boxed values.
 /// Checks if a boxed DynamicValue has the given type_id, walking the class hierarchy.
 /// Used by `Std.is()` and `(expr is Type)` for Dynamic-typed values.
@@ -1333,7 +1414,13 @@ pub extern "C" fn haxe_std_is(value_ptr: *mut u8, expected_type_id: i64) -> bool
         let dynamic = *(value_ptr as *const DynamicValue);
         dynamic.type_id.0 as i64
     };
-    type_id_matches_with_hierarchy(actual_type_id, expected_type_id)
+    if type_id_matches_with_hierarchy(actual_type_id, expected_type_id) {
+        return true;
+    }
+    if class_implements_interface_with_normalization(actual_type_id, expected_type_id) {
+        return true;
+    }
+    false
 }
 
 /// Runtime downcast for Dynamic/boxed values.
@@ -2323,6 +2410,10 @@ pub extern "C" fn haxe_object_is_instance(obj_ptr: *const u8, target_type_id: i6
             }
         }
     }
+    if class_implements_interface_with_normalization(actual_type_id, target_type_id) {
+        return 1;
+    }
+
     0
 }
 
