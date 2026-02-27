@@ -4432,16 +4432,46 @@ impl<'a> HirToMirContext<'a> {
     )> {
         // Get the method name and optional qualified name from the symbol table
         // Prefer @:native name over Haxe name for runtime mapping lookup
-        let (method_name, qualified_name) =
+        let (method_name, qualified_name, method_is_extern) =
             if let Some(symbol) = self.symbol_table.get_symbol(method_symbol) {
                 let name = self.string_interner.get(symbol.name)?;
                 let qname = symbol
                     .qualified_name
                     .and_then(|qn| self.string_interner.get(qn));
-                (name, qname)
+                (name, qname, symbol.flags.contains(SymbolFlags::EXTERN))
             } else {
                 return None;
             };
+
+        let allow_generic_monomorphization = self
+            .resolve_receiver_class_symbol(receiver_type)
+            .and_then(|symbol_id| self.symbol_table.get_symbol(symbol_id))
+            .map_or(false, |symbol| {
+                if !symbol.flags.contains(SymbolFlags::EXTERN) {
+                    return false;
+                }
+                let class_name = match self.string_interner.get(symbol.name) {
+                    Some(name) => name,
+                    None => return false,
+                };
+                let has_monomorphized_variants = !self
+                    .stdlib_mapping
+                    .get_monomorphized_variants(class_name)
+                    .is_empty();
+                if !has_monomorphized_variants {
+                    return false;
+                }
+
+                let in_stdlib_namespace = symbol
+                    .qualified_name
+                    .and_then(|qn| self.string_interner.get(qn))
+                    .map_or(false, |qn| {
+                        qn.starts_with("rayzor.")
+                            || qn.starts_with("sys.")
+                            || qn.starts_with("haxe.")
+                    });
+                in_stdlib_namespace || self.is_stdlib_class_by_symbol(symbol)
+            });
 
         // Get the class name and type args from the receiver type
         let type_table = self.type_table.borrow();
@@ -4458,30 +4488,65 @@ impl<'a> HirToMirContext<'a> {
                 // Pattern: "rayzor.Vec.get" or "rayzor.concurrent.MutexGuard.get"
                 let parts: Vec<&str> = qname.split('.').collect();
                 if parts.len() >= 2 {
-                    // Check if second-to-last part is a stdlib class (dynamically from mapping)
-                    if let Some(&class_name) = parts.iter().rev().nth(1) {
-                        // First try direct class lookup
+                    let class_parts = &parts[..parts.len() - 1];
+                    let class_name = class_parts[class_parts.len() - 1];
+                    let qualified_class_name = class_parts.join("_");
+
+                    if let Some(count) = param_count {
+                        if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(
+                            &qualified_class_name,
+                            method_name,
+                            count,
+                        ) {
+                            return Some((sig.class, sig.method, mapping));
+                        }
+                    }
+                    if let Some((sig, mapping)) = self
+                        .stdlib_mapping
+                        .find_by_name(&qualified_class_name, method_name)
+                    {
+                        return Some((sig.class, sig.method, mapping));
+                    }
+
+                    // For unresolved extern classes in stdlib namespaces, allow a
+                    // simple-class fallback as a compatibility path.
+                    // Keep this disabled for non-stdlib namespaces to avoid user
+                    // class collisions (e.g., test.Vec, test.Thread, ...).
+                    let allow_simple_fallback = class_parts.len() == 1
+                        || qualified_class_name.starts_with("rayzor_")
+                        || qualified_class_name.starts_with("sys_")
+                        || qualified_class_name.starts_with("haxe_");
+                    if method_is_extern && allow_simple_fallback {
+                        if let Some(count) = param_count {
+                            if let Some((sig, mapping)) = self
+                                .stdlib_mapping
+                                .find_by_name_and_params(class_name, method_name, count)
+                            {
+                                return Some((sig.class, sig.method, mapping));
+                            }
+                        }
                         if let Some((sig, mapping)) =
                             self.stdlib_mapping.find_by_name(class_name, method_name)
                         {
-                            debug!(
-                                "[FALLBACK] Found {}.{} method via qualified name fallback",
-                                class_name, method_name
-                            );
                             return Some((sig.class, sig.method, mapping));
                         }
 
-                        // If not found, try monomorphized variants (e.g., Vec -> VecI32, VecI64, etc.)
                         let variants = self.stdlib_mapping.get_monomorphized_variants(class_name);
-                        for variant in variants {
-                            if let Some((sig, mapping)) =
-                                self.stdlib_mapping.find_by_name(variant, method_name)
-                            {
-                                debug!(
-                                    "[FALLBACK] Found {}.{} method in {} variant",
-                                    class_name, method_name, variant
-                                );
-                                return Some((sig.class, sig.method, mapping));
+                        if !variants.is_empty() {
+                            for variant in variants {
+                                if let Some(count) = param_count {
+                                    if let Some((sig, mapping)) = self
+                                        .stdlib_mapping
+                                        .find_by_name_and_params(variant, method_name, count)
+                                    {
+                                        return Some((sig.class, sig.method, mapping));
+                                    }
+                                }
+                                if let Some((sig, mapping)) =
+                                    self.stdlib_mapping.find_by_name(variant, method_name)
+                                {
+                                    return Some((sig.class, sig.method, mapping));
+                                }
                             }
                         }
                     }
@@ -4755,7 +4820,7 @@ impl<'a> HirToMirContext<'a> {
         // MONOMORPHIZATION: For generic extern classes like Vec<T>, monomorphize the class name
         // based on type arguments. Vec<Int> -> VecI32, Vec<Float> -> VecF64, etc.
         let monomorphized_class_name: Option<String> =
-            if base_class_name == "Vec" && !type_args.is_empty() {
+            if allow_generic_monomorphization && !type_args.is_empty() {
                 let first_arg = type_args[0];
                 let suffix = if let Some(arg_type) = type_table.get(first_arg) {
                     match &arg_type.kind {
@@ -4784,7 +4849,17 @@ impl<'a> HirToMirContext<'a> {
                 } else {
                     Some("Ptr") // Unknown type, use pointer
                 };
-                suffix.map(|s| format!("Vec{}", s))
+                suffix.and_then(|s| {
+                    let candidate = format!("{}{}", base_class_name, s);
+                    let variants = self
+                        .stdlib_mapping
+                        .get_monomorphized_variants(base_class_name);
+                    if variants.iter().any(|v| *v == candidate) {
+                        Some(candidate)
+                    } else {
+                        None
+                    }
+                })
             } else {
                 None
             };

@@ -163,6 +163,10 @@ impl<'a> TastToHirContext<'a> {
         self.type_table.borrow().bool_type()
     }
 
+    fn get_int_type(&self) -> TypeId {
+        self.type_table.borrow().int_type()
+    }
+
     fn get_string_type(&self) -> TypeId {
         self.type_table.borrow().string_type()
     }
@@ -2821,9 +2825,11 @@ impl<'a> TastToHirContext<'a> {
     /// [for (x in xs) if (condition) expression] becomes:
     /// {
     ///     let result = [];
+    ///     let idx = 0;
     ///     for (x in xs) {
     ///         if (condition) {
-    ///             result.push(expression);
+    ///             result[idx] = expression;
+    ///             idx += 1;
     ///         }
     ///     }
     ///     result
@@ -2837,9 +2843,11 @@ impl<'a> TastToHirContext<'a> {
         // Full desugaring: [for (x in xs) if (cond) expr] becomes:
         // {
         //     let _tmp = [];
+        //     let _idx = 0;
         //     for (x in xs) {
         //         if (cond) {
-        //             _tmp.push(expr);
+        //             _tmp[_idx] = expr;
+        //             _idx += 1;
         //         }
         //     }
         //     _tmp
@@ -2872,12 +2880,32 @@ impl<'a> TastToHirContext<'a> {
             is_mutable: true,
         });
 
+        // 1b. Create temporary array write index
+        let (index_name, index_symbol) = self.gen_temp_var();
+        let int_type = self.get_int_type();
+        let zero = HirExpr::new(
+            HirExprKind::Literal(HirLiteral::Int(0)),
+            int_type,
+            self.current_lifetime,
+            SourceLocation::unknown(),
+        );
+        statements.push(HirStatement::Let {
+            pattern: HirPattern::Variable {
+                name: index_name,
+                symbol: index_symbol,
+            },
+            type_hint: Some(int_type),
+            init: Some(zero),
+            is_mutable: true,
+        });
+
         // 2. Build nested for loops
         let mut current_body = match self.build_comprehension_body(
             expression,
             temp_symbol,
-            temp_name.clone(),
+            index_symbol,
             array_type,
+            int_type,
         ) {
             Ok(body) => body,
             Err(err) => {
@@ -2951,8 +2979,9 @@ impl<'a> TastToHirContext<'a> {
         &mut self,
         expression: &TypedExpression,
         array_symbol: SymbolId,
-        _array_name: InternedString,
+        index_symbol: SymbolId,
         array_type: TypeId,
+        int_type: TypeId,
     ) -> Result<HirBlock, String> {
         // Check if expression is a filter: Conditional { condition, then_expr, else_expr: None }
         // If so, wrap the push in an if-statement so filtered-out elements are skipped entirely.
@@ -2962,7 +2991,13 @@ impl<'a> TastToHirContext<'a> {
             else_expr: None,
         } = &expression.kind
         {
-            let push_block = self.build_comprehension_push(then_expr, array_symbol, array_type)?;
+            let push_block = self.build_comprehension_push(
+                then_expr,
+                array_symbol,
+                index_symbol,
+                array_type,
+                int_type,
+            )?;
             let if_stmt = HirStatement::If {
                 condition: self.lower_expression(condition),
                 then_branch: push_block,
@@ -2971,15 +3006,17 @@ impl<'a> TastToHirContext<'a> {
             return Ok(HirBlock::new(vec![if_stmt], self.current_scope));
         }
 
-        self.build_comprehension_push(expression, array_symbol, array_type)
+        self.build_comprehension_push(expression, array_symbol, index_symbol, array_type, int_type)
     }
 
-    /// Emit `_tmp.push(expression)` as an HIR block.
+    /// Emit `_tmp[_idx] = expression; _idx += 1` as an HIR block.
     fn build_comprehension_push(
         &mut self,
         expression: &TypedExpression,
         array_symbol: SymbolId,
+        index_symbol: SymbolId,
         array_type: TypeId,
+        int_type: TypeId,
     ) -> Result<HirBlock, String> {
         let array_ref = HirExpr::new(
             HirExprKind::Variable {
@@ -2991,32 +3028,39 @@ impl<'a> TastToHirContext<'a> {
             SourceLocation::unknown(),
         );
 
-        let push_symbol = self.lookup_array_push_method(array_type).ok_or_else(|| {
-            "Cannot resolve Array.push method for comprehension desugaring".to_string()
-        })?;
-
-        let push_call = HirExpr::new(
-            HirExprKind::Call {
-                callee: Box::new(HirExpr::new(
-                    HirExprKind::Variable {
-                        symbol: push_symbol,
-                        capture_mode: None,
-                    },
-                    self.get_dynamic_type(),
-                    self.current_lifetime,
-                    SourceLocation::unknown(),
-                )),
-                type_args: Vec::new(),
-                args: vec![array_ref, self.lower_expression(expression)],
-                is_method: true,
+        let index_ref = HirExpr::new(
+            HirExprKind::Variable {
+                symbol: index_symbol,
+                capture_mode: None,
             },
-            self.get_void_type(),
+            int_type,
             self.current_lifetime,
             SourceLocation::unknown(),
         );
 
+        let assign_into_array = HirStatement::Assign {
+            lhs: HirLValue::Index {
+                object: Box::new(array_ref),
+                index: Box::new(index_ref),
+            },
+            rhs: self.lower_expression(expression),
+            op: None,
+        };
+
+        let one = HirExpr::new(
+            HirExprKind::Literal(HirLiteral::Int(1)),
+            int_type,
+            self.current_lifetime,
+            SourceLocation::unknown(),
+        );
+        let increment_index = HirStatement::Assign {
+            lhs: HirLValue::Variable(index_symbol),
+            rhs: one,
+            op: Some(HirBinaryOp::Add),
+        };
+
         Ok(HirBlock::new(
-            vec![HirStatement::Expr(push_call)],
+            vec![assign_into_array, increment_index],
             self.current_scope,
         ))
     }
@@ -3134,66 +3178,6 @@ impl<'a> TastToHirContext<'a> {
         // Create a synthetic symbol ID for the temporary
         let symbol_id = SymbolId::from_raw(u32::MAX - self.temp_var_counter);
         (interned, symbol_id)
-    }
-
-    /// Look up the push method for Array type
-    fn lookup_array_push_method(&self, array_type: TypeId) -> Option<SymbolId> {
-        // Array is loaded from haxe-std/Array.hx as an extern class
-        // The push method should be registered in the symbol table
-        //
-        // NOTE: This is a temporary workaround. In the future, we need to:
-        // 1. Add package declarations to haxe-std files
-        // 2. Properly resolve methods through type information
-        // 3. Support global root-level Haxe standard modules
-
-        // Strategy 1: Look for "Array.push" qualified name
-        let array_push_qualified = self.string_interner.intern("Array.push");
-        if let Some(symbol_id) = self
-            .symbol_table
-            .resolve_qualified_name(array_push_qualified)
-        {
-            return Some(symbol_id);
-        }
-
-        // Strategy 2: Try "haxe.Array.push" (if from std package)
-        let haxe_array_push = self.string_interner.intern("haxe.Array.push");
-        if let Some(symbol_id) = self.symbol_table.resolve_qualified_name(haxe_array_push) {
-            return Some(symbol_id);
-        }
-
-        // Strategy 3: Search for ANY symbol with qualified_name ending in "Array.push"
-        // This handles cases where Array is in different packages (stdlib, test, etc.)
-        for symbol in self.symbol_table.all_symbols() {
-            if let Some(qualified) = symbol.qualified_name {
-                if let Some(qual_str) = self.string_interner.get(qualified) {
-                    // Match any qualified name ending with ".Array.push"
-                    // This will match "test.comprehensive.Array.push", "haxe.Array.push", etc.
-                    if qual_str.ends_with(".Array.push") {
-                        return Some(symbol.id);
-                    }
-                }
-            }
-            // Also check the name field directly
-            if let Some(name_str) = self.string_interner.get(symbol.name) {
-                if name_str == "Array.push" || name_str == "haxe.Array.push" {
-                    return Some(symbol.id);
-                }
-            }
-        }
-
-        // Strategy 4: Find any symbol simply named "push" that belongs to an Array class
-        let push_name = self.string_interner.intern("push");
-        for symbol in self.symbol_table.all_symbols() {
-            if symbol.name == push_name {
-                // Check if this push belongs to Array by examining the parent class
-                if symbol.kind == crate::tast::symbols::SymbolKind::Function {
-                    return Some(symbol.id);
-                }
-            }
-        }
-
-        // If we still can't find it, the standard library wasn't properly loaded
-        None
     }
 
     /// Desugar pattern matching statement to if-else chain
