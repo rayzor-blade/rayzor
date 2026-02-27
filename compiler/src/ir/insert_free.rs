@@ -8,7 +8,8 @@
 //! ## Algorithm
 //!
 //! For each function:
-//! 1. Find all allocation sources (`Alloc` + `CallDirect` to malloc/rayzor_anon_new)
+//! 1. Find all allocation sources (`Alloc` + `CallDirect` to
+//!    malloc/haxe_type_create_{empty_,}instance/rayzor_anon_new)
 //! 2. Track derived pointers (GEP, Cast, Copy of alloc result)
 //! 3. Check escape conditions:
 //!    - Pointer returned from function → escapes
@@ -127,7 +128,7 @@ impl OptimizationPass for InsertFreePass {
 /// Classify a function by name into the appropriate ID sets.
 fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
     match name {
-        "malloc" => {
+        "malloc" | "haxe_type_create_empty_instance" | "haxe_type_create_instance" => {
             ids.malloc_ids.insert(fid);
         }
         "free" => {
@@ -155,7 +156,9 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
         return 0;
     }
 
-    // Step 1: Find all allocation sources (malloc + rayzor_anon_new calls)
+    // Step 1: Find all allocation sources:
+    // - malloc + reflective class allocators (`haxe_type_create_*`)
+    // - rayzor_anon_new (Arc-backed anonymous objects)
     // NOTE: IrInstruction::Alloc is NOT included here because Alloc creates
     // stack slots (via Cranelift's create_sized_stack_slot), not heap memory.
     // Stack slots are automatically freed when the function returns.

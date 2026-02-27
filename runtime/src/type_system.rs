@@ -447,6 +447,10 @@ pub fn register_class_from_mir(
     registry.insert(name.to_string(), type_id);
 }
 
+/// Reflective constructor registry.
+/// Maps class type_id -> closure pointer (`{fn_ptr, env_ptr}`) created by FunctionRef.
+static CONSTRUCTOR_REGISTRY: RwLock<Option<HashMap<u32, i64>>> = RwLock::new(None);
+
 // ============================================================================
 // Class RTTI query functions (called from JIT'd code)
 // ============================================================================
@@ -603,14 +607,71 @@ pub extern "C" fn haxe_type_create_empty_instance(type_id: i64) -> *mut u8 {
     };
 
     unsafe {
-        let obj_ptr = libc::calloc(1, alloc_size) as *mut u8;
+        // Keep allocator semantics aligned with compiler-emitted `free` calls.
+        let obj_ptr = libc::malloc(alloc_size.max(1)) as *mut u8;
         if obj_ptr.is_null() {
             return std::ptr::null_mut();
         }
+        std::ptr::write_bytes(obj_ptr, 0, alloc_size);
         // Object header slot 0 always stores the runtime class type_id.
         *(obj_ptr as *mut i64) = type_id;
         obj_ptr
     }
+}
+
+/// Register a constructor closure for reflective Type.createInstance calls.
+///
+/// `ctor_closure_ptr` is a pointer to closure layout `{fn_ptr: i64, env_ptr: i64}`.
+#[no_mangle]
+pub extern "C" fn haxe_type_register_constructor(type_id: i64, ctor_closure_ptr: i64) {
+    if type_id <= 0 || ctor_closure_ptr == 0 {
+        return;
+    }
+    let mut registry = CONSTRUCTOR_REGISTRY.write().unwrap();
+    let map = registry.get_or_insert_with(HashMap::new);
+    map.insert(type_id as u32, ctor_closure_ptr);
+}
+
+/// Type.createInstance(c, args) -> T
+/// Allocates an object, then invokes its registered constructor wrapper.
+#[no_mangle]
+pub extern "C" fn haxe_type_create_instance(type_id: i64, args_ptr: *mut u8) -> *mut u8 {
+    let obj = haxe_type_create_empty_instance(type_id);
+    if obj.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let ctor_closure = {
+        let registry = CONSTRUCTOR_REGISTRY.read().unwrap();
+        registry
+            .as_ref()
+            .and_then(|map| map.get(&(type_id as u32)).copied())
+    };
+
+    if let Some(closure_ptr_i64) = ctor_closure {
+        unsafe {
+            let closure_addr = closure_ptr_i64 as usize;
+            // Tier-0 interpreter may register non-pointer function tokens.
+            // Ignore those here (constructor invocation requires native closure layout).
+            if closure_addr < 0x1000 || (closure_addr & 0x7) != 0 {
+                return obj;
+            }
+            let closure_ptr = closure_ptr_i64 as *const i64;
+            if !closure_ptr.is_null() {
+                // Closure layout: [fn_ptr:i64, env_ptr:i64]
+                let fn_ptr = *closure_ptr;
+                let env_ptr = *closure_ptr.add(1);
+                if fn_ptr != 0 {
+                    type CtorThunk =
+                        unsafe extern "C" fn(i64, *mut u8, *mut crate::haxe_array::HaxeArray);
+                    let ctor: CtorThunk = std::mem::transmute(fn_ptr as usize);
+                    ctor(env_ptr, obj, args_ptr as *mut crate::haxe_array::HaxeArray);
+                }
+            }
+        }
+    }
+
+    obj
 }
 
 /// Type.getEnumConstructs(e) -> Array<String>

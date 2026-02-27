@@ -3196,6 +3196,9 @@ impl StdlibMapping {
             // Type.resolveClass(name:String):Class<Dynamic>
             map_method!(static "Type", "resolveClass" => "haxe_type_resolve_class", params: 1, returns: primitive,
                 types: &[PtrVoid] => I64),
+            // Type.createInstance(c:Class<T>, args:Array<Dynamic>):T
+            map_method!(static "Type", "createInstance" => "haxe_type_create_instance", params: 2, returns: primitive,
+                types: &[I64, PtrVoid] => PtrVoid),
             // Type.createEmptyInstance(c:Class<T>):T
             map_method!(static "Type", "createEmptyInstance" => "haxe_type_create_empty_instance", params: 1, returns: primitive,
                 types: &[I64] => PtrVoid),

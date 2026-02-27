@@ -356,6 +356,14 @@ register_symbol!(
     crate::type_system::haxe_type_create_empty_instance
 );
 register_symbol!(
+    "haxe_type_create_instance",
+    crate::type_system::haxe_type_create_instance
+);
+register_symbol!(
+    "haxe_type_register_constructor",
+    crate::type_system::haxe_type_register_constructor
+);
+register_symbol!(
     "haxe_type_get_enum_constructs",
     crate::type_system::haxe_type_get_enum_constructs
 );
