@@ -20,6 +20,7 @@ use crate::ir::{
     IrTypeDefId, IrTypeDefinition, IrValue, Linkage, UnaryOp,
 };
 use crate::stdlib::{MethodSignature, StdlibMapping};
+use crate::tast::symbols::SymbolFlags;
 use crate::tast::{
     InternedString, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeKind,
     TypeTable,
@@ -744,8 +745,6 @@ impl<'a> HirToMirContext<'a> {
     /// - User-defined classes → AutoDrop
     /// - Primitives, arrays, Dynamic → NoDrop
     fn get_drop_behavior(&self, type_id: TypeId) -> DropBehavior {
-        use crate::tast::symbols::SymbolFlags;
-
         let type_table = self.type_table.borrow();
         if let Some(type_info) = type_table.get(type_id) {
             match &type_info.kind {
@@ -3446,59 +3445,9 @@ impl<'a> HirToMirContext<'a> {
                         std::mem::discriminant(&init_expr.kind)
                     );
 
-                    // Check if this is a New expression for a generic stdlib class (Vec<T>)
-                    // We need to track the monomorphized class name for later method calls
-                    let monomorphized_class = if let HirExprKind::New {
-                        class_name,
-                        type_args,
-                        ..
-                    } = &init_expr.kind
-                    {
-                        let class_name_str =
-                            class_name.and_then(|interned| self.string_interner.get(interned));
-                        if class_name_str == Some("Vec") && !type_args.is_empty() {
-                            // Determine the monomorphized Vec variant from type args
-                            let first_arg = type_args[0];
-                            let type_table = self.type_table.borrow();
-                            let suffix = if let Some(arg_type) = type_table.get(first_arg) {
-                                match &arg_type.kind {
-                                    TypeKind::Int => Some("I32"),
-                                    TypeKind::Float => Some("F64"),
-                                    TypeKind::Bool => Some("Bool"),
-                                    TypeKind::String => Some("Ptr"),
-                                    TypeKind::Class { symbol_id, .. } => {
-                                        if let Some(class_info) =
-                                            self.symbol_table.get_symbol(*symbol_id)
-                                        {
-                                            if let Some(name) =
-                                                self.string_interner.get(class_info.name)
-                                            {
-                                                if name == "Int64" {
-                                                    Some("I64")
-                                                } else {
-                                                    Some("Ptr")
-                                                }
-                                            } else {
-                                                Some("Ptr")
-                                            }
-                                        } else {
-                                            Some("Ptr")
-                                        }
-                                    }
-                                    _ => Some("Ptr"),
-                                }
-                            } else {
-                                Some("Ptr")
-                            };
-                            drop(type_table);
-                            suffix.map(|s| format!("Vec{}", s))
-                        } else {
-                            None
-                        }
-                    }
-                    // Also check for stdlib class method calls like Arc.init() or arc.clone()
+                    // Check for stdlib class method calls like Arc.init() or arc.clone()
                     // These methods return the same stdlib class type (e.g., Arc.init() -> Arc, Arc.clone() -> Arc)
-                    else if let HirExprKind::Call {
+                    let monomorphized_class = if let HirExprKind::Call {
                         callee,
                         args: call_args,
                         is_method,
@@ -13053,6 +13002,10 @@ impl<'a> HirToMirContext<'a> {
                         let result =
                             self.builder
                                 .build_call_direct(wrapper_func_id, arg_regs, result_type);
+                        if let Some(reg) = result {
+                            self.register_class_hints
+                                .insert(reg, class_name.to_string());
+                        }
                         return result;
                     }
                 }
@@ -13397,6 +13350,10 @@ impl<'a> HirToMirContext<'a> {
                     // eprintln!("WARNING: Constructor not found for TypeId {:?}", class_type);
                 }
 
+                if let Some(class_name) = final_class_name {
+                    self.register_class_hints
+                        .insert(obj_ptr, class_name.to_string());
+                }
                 Some(obj_ptr)
             }
 
