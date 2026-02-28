@@ -5768,6 +5768,105 @@ impl<'a> AstLowering<'a> {
         new_symbol
     }
 
+    /// Resolve a method symbol within a specific class context, preferring
+    /// qualified-name matching to avoid cross-class collisions on short names.
+    fn resolve_class_method_symbol(
+        &self,
+        class_symbol: SymbolId,
+        method_name: InternedString,
+    ) -> Option<SymbolId> {
+        // Strategy 1: local class_methods table (same lowering instance)
+        if let Some(methods) = self.class_methods.get(&class_symbol) {
+            if let Some((_, symbol, _)) = methods.iter().find(|(name, _, _)| *name == method_name) {
+                return Some(*symbol);
+            }
+        }
+
+        let class_sym = self.context.symbol_table.get_symbol(class_symbol)?;
+
+        // Strategy 2: exact qualified-name match Class.method
+        if let (Some(class_qname), Some(method_name_str)) = (
+            class_sym
+                .qualified_name
+                .and_then(|qn| self.context.string_interner.get(qn)),
+            self.context.string_interner.get(method_name),
+        ) {
+            let expected_qname = format!("{}.{}", class_qname, method_name_str);
+            if let Some(sym) = self
+                .context
+                .symbol_table
+                .find_symbols(|sym| {
+                    sym.kind == crate::tast::symbols::SymbolKind::Function
+                        && sym.name == method_name
+                        && sym
+                            .qualified_name
+                            .and_then(|qn| self.context.string_interner.get(qn))
+                            .map(|qn| qn == expected_qname)
+                            .unwrap_or(false)
+                })
+                .into_iter()
+                .next()
+            {
+                return Some(sym.id);
+            }
+        }
+
+        // Strategy 3: class scope fallback
+        self.context
+            .symbol_table
+            .lookup_symbol(class_sym.scope_id, method_name)
+            .map(|sym| sym.id)
+    }
+
+    /// Resolve a class-like symbol by simple name.
+    ///
+    /// First tries lexical scope resolution, then falls back to a global symbol
+    /// table scan for Class/Abstract/TypeAlias symbols with that name.
+    fn resolve_class_like_symbol_by_name(&self, name: InternedString) -> Option<SymbolId> {
+        if let Some(symbol_id) = self.resolve_symbol_in_scope_hierarchy(name) {
+            if let Some(sym) = self.context.symbol_table.get_symbol(symbol_id) {
+                if matches!(
+                    sym.kind,
+                    crate::tast::symbols::SymbolKind::Class
+                        | crate::tast::symbols::SymbolKind::Abstract
+                        | crate::tast::symbols::SymbolKind::TypeAlias
+                ) {
+                    return Some(symbol_id);
+                }
+            }
+        }
+
+        let mut matches = self.context.symbol_table.find_symbols(|sym| {
+            sym.name == name
+                && matches!(
+                    sym.kind,
+                    crate::tast::symbols::SymbolKind::Class
+                        | crate::tast::symbols::SymbolKind::Abstract
+                        | crate::tast::symbols::SymbolKind::TypeAlias
+                )
+        });
+
+        if matches.is_empty() {
+            return None;
+        }
+        if matches.len() == 1 {
+            return Some(matches[0].id);
+        }
+
+        if let Some(name_str) = self.context.string_interner.get(name) {
+            if let Some(sym) = matches.iter().find(|sym| {
+                sym.qualified_name
+                    .and_then(|qn| self.context.string_interner.get(qn))
+                    .map(|qn| qn == name_str)
+                    .unwrap_or(false)
+            }) {
+                return Some(sym.id);
+            }
+        }
+
+        Some(matches.remove(0).id)
+    }
+
     /// Try to find a static extension method in using modules
     /// Returns (class_symbol, method_symbol) if found
     fn find_static_extension_method(
@@ -7100,7 +7199,7 @@ impl<'a> AstLowering<'a> {
 
                     // Try to resolve as a class symbol
                     if let Some(symbol_id) =
-                        self.resolve_symbol_in_scope_hierarchy(class_name_interned)
+                        self.resolve_class_like_symbol_by_name(class_name_interned)
                     {
                         if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
                             // Check if this symbol represents a class declaration (not just a variable of class type)
@@ -7139,74 +7238,48 @@ impl<'a> AstLowering<'a> {
                                 // This is a static method call
                                 let method_name = self.context.intern_string(field);
 
-                                // Look for the method in this class
-                                // 1. Check local class_methods (for classes lowered in this compilation unit)
-                                // 2. Check shared symbol table's class scope (for extern classes from other units)
-                                // 3. Create placeholder as last resort
+                                // Look for the method in this class:
+                                // 1. local class_methods
+                                // 2. exact qualified-name match
+                                // 3. class scope fallback
+                                // 4. create placeholder as last resort
                                 let method_symbol = {
-                                    // Strategy 1: local class_methods
-                                    let from_local =
-                                        self.class_methods.get(&class_symbol).and_then(|methods| {
-                                            methods
-                                                .iter()
-                                                .find(|(name, _, _)| *name == method_name)
-                                                .map(|(_, symbol, _)| *symbol)
-                                        });
-
-                                    if let Some(sym) = from_local {
+                                    if let Some(sym) =
+                                        self.resolve_class_method_symbol(class_symbol, method_name)
+                                    {
                                         sym
                                     } else {
-                                        // Strategy 2: shared symbol table scope lookup
-                                        let from_scope = self
-                                            .context
-                                            .symbol_table
-                                            .get_symbol(class_symbol)
-                                            .map(|s| s.scope_id)
-                                            .and_then(|scope_id| {
-                                                self.context
-                                                    .symbol_table
-                                                    .lookup_symbol(scope_id, method_name)
-                                                    .map(|sym| sym.id)
-                                            });
-
-                                        if let Some(sym) = from_scope {
-                                            sym
-                                        } else {
-                                            // Strategy 3: create placeholder with qualified name
-                                            let new_symbol = self
-                                                .context
-                                                .symbol_table
-                                                .create_function(method_name);
-                                            if let Some(class_sym) =
-                                                self.context.symbol_table.get_symbol(class_symbol)
+                                        // Strategy 4: create placeholder with qualified name
+                                        let new_symbol =
+                                            self.context.symbol_table.create_function(method_name);
+                                        if let Some(class_sym) =
+                                            self.context.symbol_table.get_symbol(class_symbol)
+                                        {
+                                            if let Some(class_qname) = class_sym
+                                                .qualified_name
+                                                .and_then(|qn| self.context.string_interner.get(qn))
                                             {
-                                                if let Some(class_qname) =
-                                                    class_sym.qualified_name.and_then(|qn| {
-                                                        self.context.string_interner.get(qn)
-                                                    })
+                                                let method_qname = format!(
+                                                    "{}.{}",
+                                                    class_qname,
+                                                    self.context
+                                                        .string_interner
+                                                        .get(method_name)
+                                                        .unwrap_or("")
+                                                );
+                                                let method_qname_interned =
+                                                    self.context.intern_string(&method_qname);
+                                                if let Some(sym_mut) = self
+                                                    .context
+                                                    .symbol_table
+                                                    .get_symbol_mut(new_symbol)
                                                 {
-                                                    let method_qname = format!(
-                                                        "{}.{}",
-                                                        class_qname,
-                                                        self.context
-                                                            .string_interner
-                                                            .get(method_name)
-                                                            .unwrap_or("")
-                                                    );
-                                                    let method_qname_interned =
-                                                        self.context.intern_string(&method_qname);
-                                                    if let Some(sym_mut) = self
-                                                        .context
-                                                        .symbol_table
-                                                        .get_symbol_mut(new_symbol)
-                                                    {
-                                                        sym_mut.qualified_name =
-                                                            Some(method_qname_interned);
-                                                    }
+                                                    sym_mut.qualified_name =
+                                                        Some(method_qname_interned);
                                                 }
                                             }
-                                            new_symbol
                                         }
+                                        new_symbol
                                     }
                                 };
 
@@ -7468,7 +7541,7 @@ impl<'a> AstLowering<'a> {
                                 self.resolve_symbol_in_scope_hierarchy(qualified_class_interned)
                             })
                             .or_else(|| {
-                                self.resolve_symbol_in_scope_hierarchy(class_name_interned)
+                                self.resolve_class_like_symbol_by_name(class_name_interned)
                             });
 
                         if let Some(symbol_id) = symbol_id_opt {
@@ -7599,71 +7672,44 @@ impl<'a> AstLowering<'a> {
                                     let method_name = self.context.intern_string(field);
 
                                     let method_symbol = {
-                                        let from_local = self
-                                            .class_methods
-                                            .get(&class_symbol)
-                                            .and_then(|methods| {
-                                                methods
-                                                    .iter()
-                                                    .find(|(name, _, _)| *name == method_name)
-                                                    .map(|(_, symbol, _)| *symbol)
-                                            });
-
-                                        if let Some(sym) = from_local {
+                                        if let Some(sym) = self
+                                            .resolve_class_method_symbol(class_symbol, method_name)
+                                        {
                                             sym
                                         } else {
-                                            let from_scope = self
+                                            let new_symbol = self
                                                 .context
                                                 .symbol_table
-                                                .get_symbol(class_symbol)
-                                                .map(|s| s.scope_id)
-                                                .and_then(|scope_id| {
-                                                    self.context
-                                                        .symbol_table
-                                                        .lookup_symbol(scope_id, method_name)
-                                                        .map(|sym| sym.id)
-                                                });
-
-                                            if let Some(sym) = from_scope {
-                                                sym
-                                            } else {
-                                                let new_symbol = self
-                                                    .context
-                                                    .symbol_table
-                                                    .create_function(method_name);
-                                                if let Some(class_sym) = self
-                                                    .context
-                                                    .symbol_table
-                                                    .get_symbol(class_symbol)
+                                                .create_function(method_name);
+                                            if let Some(class_sym) =
+                                                self.context.symbol_table.get_symbol(class_symbol)
+                                            {
+                                                if let Some(class_qname) =
+                                                    class_sym.qualified_name.and_then(|qn| {
+                                                        self.context.string_interner.get(qn)
+                                                    })
                                                 {
-                                                    if let Some(class_qname) =
-                                                        class_sym.qualified_name.and_then(|qn| {
-                                                            self.context.string_interner.get(qn)
-                                                        })
+                                                    let method_qname = format!(
+                                                        "{}.{}",
+                                                        class_qname,
+                                                        self.context
+                                                            .string_interner
+                                                            .get(method_name)
+                                                            .unwrap_or("")
+                                                    );
+                                                    let method_qname_interned =
+                                                        self.context.intern_string(&method_qname);
+                                                    if let Some(sym_mut) = self
+                                                        .context
+                                                        .symbol_table
+                                                        .get_symbol_mut(new_symbol)
                                                     {
-                                                        let method_qname = format!(
-                                                            "{}.{}",
-                                                            class_qname,
-                                                            self.context
-                                                                .string_interner
-                                                                .get(method_name)
-                                                                .unwrap_or("")
-                                                        );
-                                                        let method_qname_interned = self
-                                                            .context
-                                                            .intern_string(&method_qname);
-                                                        if let Some(sym_mut) = self
-                                                            .context
-                                                            .symbol_table
-                                                            .get_symbol_mut(new_symbol)
-                                                        {
-                                                            sym_mut.qualified_name =
-                                                                Some(method_qname_interned);
-                                                        }
+                                                        sym_mut.qualified_name =
+                                                            Some(method_qname_interned);
                                                     }
                                                 }
-                                                new_symbol
                                             }
+                                            new_symbol
                                         }
                                     };
 
@@ -8094,7 +8140,7 @@ impl<'a> AstLowering<'a> {
                         .or_else(|| {
                             self.resolve_symbol_in_scope_hierarchy(qualified_class_interned)
                         })
-                        .or_else(|| self.resolve_symbol_in_scope_hierarchy(class_name_interned));
+                        .or_else(|| self.resolve_class_like_symbol_by_name(class_name_interned));
 
                     if let Some(symbol_id) = symbol_id_opt {
                         if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
@@ -8188,7 +8234,7 @@ impl<'a> AstLowering<'a> {
                         .or_else(|| {
                             self.resolve_symbol_in_scope_hierarchy(qualified_class_interned)
                         })
-                        .or_else(|| self.resolve_symbol_in_scope_hierarchy(class_name_interned));
+                        .or_else(|| self.resolve_class_like_symbol_by_name(class_name_interned));
 
                     if let Some(symbol_id) = symbol_id_opt {
                         if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
@@ -8305,7 +8351,7 @@ impl<'a> AstLowering<'a> {
             let class_name_interned = self.context.intern_string(class_name);
 
             // Try to resolve as a class or enum symbol
-            if let Some(symbol_id) = self.resolve_symbol_in_scope_hierarchy(class_name_interned) {
+            if let Some(symbol_id) = self.resolve_class_like_symbol_by_name(class_name_interned) {
                 // Extract symbol kind to release the borrow before calling intern_string
                 let symbol_kind = self
                     .context

@@ -317,6 +317,20 @@ impl StdlibMapping {
             .find(|(sig, _)| sig.is_static && sig.method == method)
     }
 
+    /// Find a static stdlib method mapping by method name and argument count.
+    ///
+    /// This is safer than name-only matching for ambiguous static methods
+    /// (e.g. `Std.random(x)` vs `Math.random()`).
+    pub fn find_static_method_by_name_and_params(
+        &self,
+        method: &str,
+        param_count: usize,
+    ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
+        self.mappings.iter().find(|(sig, call)| {
+            sig.is_static && sig.method == method && call.param_count == param_count
+        })
+    }
+
     /// Check if a lookup class name matches a registered class name.
     /// Supports exact match and suffix match (e.g., "Arc" matches "rayzor_concurrent_Arc").
     fn class_matches(&self, lookup: &str, registered: &str) -> bool {
