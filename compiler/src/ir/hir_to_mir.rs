@@ -4996,22 +4996,32 @@ impl<'a> HirToMirContext<'a> {
         self.get_static_stdlib_runtime_func_with_params_internal(qualified_name, method_name, None)
     }
 
+    fn is_class_symbol_expr(&self, expr: &HirExpr) -> bool {
+        match &expr.kind {
+            HirExprKind::Variable { symbol, .. } => self
+                .symbol_table
+                .get_symbol(*symbol)
+                .map(|sym| {
+                    matches!(
+                        sym.kind,
+                        crate::tast::symbols::SymbolKind::Class
+                            | crate::tast::symbols::SymbolKind::Abstract
+                            | crate::tast::symbols::SymbolKind::TypeAlias
+                    )
+                })
+                .unwrap_or(false),
+            HirExprKind::Cast { expr: inner, .. } => self.is_class_symbol_expr(inner),
+            _ => false,
+        }
+    }
+
     /// Strip a synthetic class "receiver" from static-call args when present.
     fn effective_static_call_args<'b>(&self, args: &'b [HirExpr]) -> &'b [HirExpr] {
         if args.is_empty() {
             return args;
         }
-        if let HirExprKind::Variable { symbol, .. } = &args[0].kind {
-            if let Some(sym) = self.symbol_table.get_symbol(*symbol) {
-                if matches!(
-                    sym.kind,
-                    crate::tast::symbols::SymbolKind::Class
-                        | crate::tast::symbols::SymbolKind::Abstract
-                        | crate::tast::symbols::SymbolKind::TypeAlias
-                ) {
-                    return &args[1..];
-                }
-            }
+        if self.is_class_symbol_expr(&args[0]) {
+            return &args[1..];
         }
         args
     }
@@ -7969,7 +7979,7 @@ impl<'a> HirToMirContext<'a> {
 
                             if let Some(sym_id) = class_symbol_id {
                                 // Get the class name from qualified_name
-                                let class_name_opt =
+                                let class_name_from_obj =
                                     self.symbol_table.get_symbol(sym_id).and_then(|s| {
                                         s.qualified_name
                                             .and_then(|qn| self.string_interner.get(qn))
@@ -7980,6 +7990,26 @@ impl<'a> HirToMirContext<'a> {
                                     .symbol_table
                                     .get_symbol(*field)
                                     .and_then(|s| self.string_interner.get(s.name));
+
+                                // PRIORITY: Use the field's qualified name to derive the class,
+                                // since the field symbol knows which package it belongs to.
+                                // This prevents sys.thread.Thread.sleep from being resolved
+                                // via rayzor.concurrent.Thread when the class symbol is shared.
+                                let class_name_from_field = self
+                                    .symbol_table
+                                    .get_symbol(*field)
+                                    .and_then(|s| s.qualified_name)
+                                    .and_then(|qn| self.string_interner.get(qn))
+                                    .and_then(|qn_str| {
+                                        let parts: Vec<&str> = qn_str.split('.').collect();
+                                        if parts.len() >= 2 {
+                                            Some(parts[..parts.len() - 1].join("_"))
+                                        } else {
+                                            None
+                                        }
+                                    });
+
+                                let class_name_opt = class_name_from_field.or(class_name_from_obj);
 
                                 if let (Some(class_name), Some(method_name)) =
                                     (class_name_opt, method_name_opt)
@@ -8015,27 +8045,37 @@ impl<'a> HirToMirContext<'a> {
                                                 .map(|(sig, m)| (sig.clone(), m.clone()))
                                         });
 
-                                    if let Some((_sig, mapping)) = stdlib_result {
+                                    if let Some((sig, mapping)) = stdlib_result {
                                         // Extract data before dropping borrows
                                         let is_mir_wrapper = mapping.is_mir_wrapper;
                                         let runtime_name = mapping.runtime_name.to_string();
                                         let has_return = mapping.has_return;
+                                        let mapping_is_static = sig.is_static;
                                         drop(type_table);
 
-                                        // Lower object (receiver) + args, auto-boxing primitives
-                                        // when the MIR wrapper expects Ptr(U8) (e.g., Channel<Int>.send(42))
+                                        // Lower args, auto-boxing primitives when the MIR wrapper
+                                        // expects Ptr(U8) (e.g., Channel<Int>.send(42)).
+                                        // For instance methods, prepend object as receiver (param 0).
+                                        // For static methods, skip the object — it's just a class ref.
                                         let mir_wrapper_sig =
                                             self.get_stdlib_mir_wrapper_signature(&runtime_name);
-                                        let obj_reg = self.lower_expression(object)?;
-                                        let mut arg_regs = vec![obj_reg];
+                                        let is_static_call = mapping_is_static || !*is_method;
+                                        let mut arg_regs = Vec::new();
+                                        if !is_static_call {
+                                            let obj_reg = self.lower_expression(object)?;
+                                            arg_regs.push(obj_reg);
+                                        }
                                         for (i, arg) in args.iter().enumerate() {
                                             if let Some(reg) = self.lower_expression(arg) {
                                                 let actual_ty = self.convert_type(arg.ty);
-                                                // param index i+1 because param 0 is the receiver
+                                                // For instance methods, param 0 = receiver, user args start at i+1
+                                                // For static methods, no receiver, user args start at i
+                                                let param_idx =
+                                                    if is_static_call { i } else { i + 1 };
                                                 let expected_ty = mir_wrapper_sig
                                                     .as_ref()
                                                     .and_then(|(params, _)| {
-                                                        params.get(i + 1).cloned()
+                                                        params.get(param_idx).cloned()
                                                     })
                                                     .unwrap_or_else(|| actual_ty.clone());
                                                 let final_reg = self.maybe_box_for_extern_call(
@@ -8395,6 +8435,20 @@ impl<'a> HirToMirContext<'a> {
 
                                     if let Some(method_name) = method_name {
                                         let static_args = self.effective_static_call_args(args);
+                                        let object_qualified_name_opt =
+                                            if let HirExprKind::Variable {
+                                                symbol: object_symbol,
+                                                ..
+                                            } = &object.kind
+                                            {
+                                                self.symbol_table
+                                                    .get_symbol(*object_symbol)
+                                                    .and_then(|s| s.qualified_name)
+                                                    .and_then(|qn| self.string_interner.get(qn))
+                                                    .map(|s| s.to_string())
+                                            } else {
+                                                None
+                                            };
 
                                         // Prefer class-qualified lookup when a qualified class name
                                         // exists, but always keep a global static fallback.
@@ -8402,9 +8456,35 @@ impl<'a> HirToMirContext<'a> {
                                         // qualified/native names on the symbol.
                                         let runtime_func_opt = qualified_name_opt
                                             .as_deref()
-                                            .and_then(|qualified_name| {
+                                            .and_then(|class_qualified_name| {
+                                                let lookup =
+                                                    format!("{}.{}", class_qualified_name, method_name);
                                                 self.get_static_stdlib_runtime_func_with_params(
-                                                    qualified_name,
+                                                    &lookup,
+                                                    method_name,
+                                                    static_args.len(),
+                                                )
+                                            })
+                                            .or_else(|| {
+                                                object_qualified_name_opt
+                                                    .as_deref()
+                                                    .and_then(|class_qualified_name| {
+                                                        let lookup = format!(
+                                                            "{}.{}",
+                                                            class_qualified_name, method_name
+                                                        );
+                                                        self.get_static_stdlib_runtime_func_with_params(
+                                                            &lookup,
+                                                            method_name,
+                                                            static_args.len(),
+                                                        )
+                                                    })
+                                            })
+                                            .or_else(|| {
+                                                let lookup =
+                                                    format!("{}.{}", class_name, method_name);
+                                                self.get_static_stdlib_runtime_func_with_params(
+                                                    &lookup,
                                                     method_name,
                                                     static_args.len(),
                                                 )
@@ -11740,109 +11820,132 @@ impl<'a> HirToMirContext<'a> {
                             // receiver_is_class_type == true
                             // This is an instance method call on a MIR wrapper class (Thread, Channel, etc.)
                             // Route to the MIR wrapper function (Thread_join, Channel_send, etc.)
-                            if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
-                                if let Some(method_name) = self.string_interner.get(sym_info.name) {
-                                    // Get the class name from the receiver type
-                                    let class_name = {
-                                        let type_table = self.type_table.borrow();
-                                        type_table.get(receiver_type).and_then(|ti| {
-                                            if let crate::tast::core::TypeKind::Class {
-                                                symbol_id,
-                                                ..
-                                            } = &ti.kind
-                                            {
-                                                self.symbol_table
-                                                    .get_symbol(*symbol_id)
-                                                    .and_then(|s| self.string_interner.get(s.name))
-                                                    .map(|s| s.to_string())
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                    };
-
-                                    if let Some(class_name) = class_name {
-                                        // Build MIR wrapper function name: Thread_join, Channel_send, etc.
-                                        let mir_func_name =
-                                            format!("{}_{}", class_name, method_name);
-                                        debug!(
-                                            "[MIR WRAPPER INSTANCE] Routing {}.{} to {}",
-                                            class_name, method_name, mir_func_name
-                                        );
-
-                                        // Get the registered signature for this MIR wrapper
-                                        if let Some((mir_param_types, mir_return_type)) =
-                                            self.get_stdlib_mir_wrapper_signature(&mir_func_name)
-                                        {
-                                            // Lower all arguments (first arg is receiver/self)
-                                            // Auto-box primitive args when MIR wrapper expects Ptr(U8)
-                                            // (e.g., Channel<Int>.send(42) needs to box the Int)
-                                            let mut arg_regs = Vec::new();
-                                            for (i, arg) in args.iter().enumerate() {
-                                                if let Some(reg) = self.lower_expression(arg) {
-                                                    let actual_ty = self.convert_type(arg.ty);
-                                                    let expected_ty = mir_param_types
-                                                        .get(i)
-                                                        .cloned()
-                                                        .unwrap_or_else(|| actual_ty.clone());
-
-                                                    // Auto-box if MIR wrapper expects Ptr(U8) but arg is primitive
-                                                    let final_reg = self
-                                                        .maybe_box_for_extern_call(
-                                                            reg,
-                                                            &actual_ty,
-                                                            &expected_ty,
-                                                        )?;
-                                                    arg_regs.push(final_reg);
+                            let receiver_is_synthetic_class = args
+                                .first()
+                                .map(|arg| self.is_class_symbol_expr(arg))
+                                .unwrap_or(false);
+                            if !receiver_is_synthetic_class {
+                                if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
+                                    if let Some(method_name) =
+                                        self.string_interner.get(sym_info.name)
+                                    {
+                                        // Get the class name from the receiver type
+                                        let class_name = {
+                                            let type_table = self.type_table.borrow();
+                                            type_table.get(receiver_type).and_then(|ti| {
+                                                if let crate::tast::core::TypeKind::Class {
+                                                    symbol_id,
+                                                    ..
+                                                } = &ti.kind
+                                                {
+                                                    self.symbol_table
+                                                        .get_symbol(*symbol_id)
+                                                        .and_then(|s| {
+                                                            self.string_interner.get(s.name)
+                                                        })
+                                                        .map(|s| s.to_string())
+                                                } else {
+                                                    None
                                                 }
-                                            }
+                                            })
+                                        };
 
-                                            // Register forward reference to MIR wrapper
-                                            let mir_func_id = self.register_stdlib_mir_forward_ref(
-                                                &mir_func_name,
-                                                mir_param_types,
-                                                mir_return_type.clone(),
+                                        if let Some(class_name) = class_name {
+                                            // Build MIR wrapper function name: Thread_join, Channel_send, etc.
+                                            let mir_func_name =
+                                                format!("{}_{}", class_name, method_name);
+                                            debug!(
+                                                "[MIR WRAPPER INSTANCE] Routing {}.{} to {}",
+                                                class_name, method_name, mir_func_name
                                             );
 
-                                            debug!(
+                                            // Get the registered signature for this MIR wrapper
+                                            if let Some((mir_param_types, mir_return_type)) = self
+                                                .get_stdlib_mir_wrapper_signature(&mir_func_name)
+                                            {
+                                                let call_args = if args.len()
+                                                    == mir_param_types.len() + 1
+                                                    && !args.is_empty()
+                                                {
+                                                    &args[1..]
+                                                } else {
+                                                    &args[..]
+                                                };
+                                                // Lower all arguments (first arg is receiver/self)
+                                                // Auto-box primitive args when MIR wrapper expects Ptr(U8)
+                                                // (e.g., Channel<Int>.send(42) needs to box the Int)
+                                                let mut arg_regs = Vec::new();
+                                                for (i, arg) in call_args.iter().enumerate() {
+                                                    if let Some(reg) = self.lower_expression(arg) {
+                                                        let actual_ty = self.convert_type(arg.ty);
+                                                        let expected_ty = mir_param_types
+                                                            .get(i)
+                                                            .cloned()
+                                                            .unwrap_or_else(|| actual_ty.clone());
+
+                                                        // Auto-box if MIR wrapper expects Ptr(U8) but arg is primitive
+                                                        let final_reg = self
+                                                            .maybe_box_for_extern_call(
+                                                                reg,
+                                                                &actual_ty,
+                                                                &expected_ty,
+                                                            )?;
+                                                        arg_regs.push(final_reg);
+                                                    }
+                                                }
+
+                                                // Register forward reference to MIR wrapper
+                                                let mir_func_id = self
+                                                    .register_stdlib_mir_forward_ref(
+                                                        &mir_func_name,
+                                                        mir_param_types,
+                                                        mir_return_type.clone(),
+                                                    );
+
+                                                debug!(
                                                 "[MIR WRAPPER INSTANCE] Registered forward ref to {} with ID {:?}",
                                                 mir_func_name, mir_func_id
                                             );
 
-                                            // Generate the call with the MIR wrapper's return type
-                                            let call_result = self.builder.build_call_direct(
-                                                mir_func_id,
-                                                arg_regs,
-                                                mir_return_type.clone(),
-                                            )?;
+                                                // Generate the call with the MIR wrapper's return type
+                                                let call_result = self.builder.build_call_direct(
+                                                    mir_func_id,
+                                                    arg_regs,
+                                                    mir_return_type.clone(),
+                                                )?;
 
-                                            // Auto-unbox if MIR wrapper returns Ptr(U8) but HIR expects primitive
-                                            // (e.g., Channel<Int>.tryReceive() returns boxed int)
-                                            debug!(
+                                                // Auto-unbox if MIR wrapper returns Ptr(U8) but HIR expects primitive
+                                                // (e.g., Channel<Int>.tryReceive() returns boxed int)
+                                                debug!(
                                                 "[MIR WRAPPER INSTANCE] call_result={:?}, mir_return_type={:?}, result_type={:?}",
                                                 call_result, mir_return_type, result_type
                                             );
-                                            return self.maybe_unbox_for_extern_return(
-                                                call_result,
-                                                &mir_return_type,
-                                                &result_type,
-                                            );
-                                        } else {
-                                            debug!(
+                                                return self.maybe_unbox_for_extern_return(
+                                                    call_result,
+                                                    &mir_return_type,
+                                                    &result_type,
+                                                );
+                                            } else {
+                                                debug!(
                                                 "[MIR WRAPPER INSTANCE] No signature found for {}, falling through",
                                                 mir_func_name
                                             );
+                                            }
                                         }
                                     }
                                 }
+                            } else {
+                                debug!(
+                                    "[MIR WRAPPER INSTANCE] Skipping instance-wrapper dispatch for synthetic class receiver"
+                                );
                             }
                         } // end if receiver_is_class_type else block
                     }
                     // For static methods, check if it's a stdlib static method
-                    if !*is_method {
-                        // debug!("Static method path (is_method=false)");
+                    if !*is_method || self.effective_static_call_args(args).len() != args.len() {
                         if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
                             if let Some(method_name) = self.string_interner.get(sym_info.name) {
+                                let static_args = self.effective_static_call_args(args);
                                 debug!(
                                     "[STATIC-PATH] method_name='{}', symbol={:?}, has_qualified_name={}",
                                     method_name,
@@ -11880,9 +11983,9 @@ impl<'a> HirToMirContext<'a> {
                                                 debug!(
                                                     "[STDLIB MIR] Detected stdlib MIR function: {}, args.len()={}",
                                                     mir_func_name,
-                                                    args.len()
+                                                    static_args.len()
                                                 );
-                                                for (idx, arg) in args.iter().enumerate() {
+                                                for (idx, arg) in static_args.iter().enumerate() {
                                                     debug!(
                                                         "[STDLIB MIR PRE] arg[{}] kind={:?}, ty={:?}",
                                                         idx,
@@ -11891,39 +11994,29 @@ impl<'a> HirToMirContext<'a> {
                                                     );
                                                 }
 
-                                                // WORKAROUND: During dependency loading retries, static method calls like
-                                                // Thread.spawn(closure) can be incorrectly treated as instance method calls
-                                                // with args = [Thread_class, closure] instead of just [closure].
-                                                // Detect and fix this by checking if first arg is the class itself.
-                                                let actual_args = if args.len() >= 2 {
-                                                    // Check if first arg might be the class type
-                                                    let type_table = self.type_table.borrow();
-                                                    let first_arg_is_class = type_table.get(args[0].ty)
-                                                        .map(|ti| {
-                                                            // Check if this type is a Class type matching our static method class
-                                                            if let crate::tast::core::TypeKind::Class { symbol_id, .. } = &ti.kind {
-                                                                self.symbol_table.get_symbol(*symbol_id)
-                                                                    .and_then(|s| self.string_interner.get(s.name))
-                                                                    .map(|name| name == class_name)
-                                                                    .unwrap_or(false)
-                                                            } else {
-                                                                false
-                                                            }
-                                                        })
-                                                        .unwrap_or(false);
-                                                    drop(type_table);
-
-                                                    if first_arg_is_class {
+                                                // WORKAROUND: static calls may carry a synthetic
+                                                // class receiver argument. Prefer the mapping
+                                                // signature arity to trim that argument.
+                                                let mut actual_args = static_args;
+                                                if let Some((expected_params, _)) = self
+                                                    .get_stdlib_mir_wrapper_signature(
+                                                        &mir_func_name,
+                                                    )
+                                                {
+                                                    if actual_args.len() != expected_params.len()
+                                                        && static_args.len()
+                                                            == expected_params.len() + 1
+                                                        && !static_args.is_empty()
+                                                    {
                                                         debug!(
-                                                            "[STDLIB MIR FIX] Detected spurious class argument, skipping first arg"
+                                                            "[STDLIB MIR FIX] Arity-based static receiver trim for {}: {} -> {} args",
+                                                            mir_func_name,
+                                                            static_args.len(),
+                                                            expected_params.len()
                                                         );
-                                                        &args[1..] // Skip the class "receiver" argument
-                                                    } else {
-                                                        &args[..]
+                                                        actual_args = &static_args[1..];
                                                     }
-                                                } else {
-                                                    &args[..]
-                                                };
+                                                }
 
                                                 // Lower all arguments and collect their types
                                                 let mut arg_regs = Vec::new();
@@ -11937,6 +12030,14 @@ impl<'a> HirToMirContext<'a> {
                                                         arg_regs.push(reg);
                                                         param_types.push(self.convert_type(arg.ty));
                                                     }
+                                                }
+                                                if mir_func_name == "Thread_sleep" {
+                                                    eprintln!(
+                                                        "[DBG STATIC MIR Thread_sleep] args_len={} static_args_len={} actual_args_len={}",
+                                                        args.len(),
+                                                        static_args.len(),
+                                                        actual_args.len()
+                                                    );
                                                 }
 
                                                 // Register forward reference - will be provided by merged stdlib module
@@ -11973,7 +12074,7 @@ impl<'a> HirToMirContext<'a> {
                                             .get_static_stdlib_runtime_func_with_params(
                                                 qual_name_str,
                                                 method_name,
-                                                args.len(),
+                                                static_args.len(),
                                             );
                                         debug!(
                                             "[PRE-CHECK] get_static_stdlib_runtime_func returned: {:?}",
@@ -11986,13 +12087,13 @@ impl<'a> HirToMirContext<'a> {
                                                 qual_name_str,
                                                 method_name,
                                                 runtime_func,
-                                                args.len()
+                                                static_args.len()
                                             );
 
                                             if let Some(result) = self
                                                 .try_lower_special_runtime_call(
                                                     &runtime_func,
-                                                    args,
+                                                    static_args,
                                                     result_type.clone(),
                                                     expr.source_location.clone(),
                                                 )
@@ -12008,7 +12109,7 @@ impl<'a> HirToMirContext<'a> {
                                                     // Fall back to inferred types from TAST
                                                     let string_ptr_ty =
                                                         IrType::Ptr(Box::new(IrType::String));
-                                                    let param_types: Vec<IrType> = args
+                                                    let param_types: Vec<IrType> = static_args
                                                         .iter()
                                                         .map(|a| {
                                                             let arg_ty = self.convert_type(a.ty);
@@ -12022,8 +12123,17 @@ impl<'a> HirToMirContext<'a> {
                                                     (param_types, result_type.clone())
                                                 });
 
+                                            let runtime_call_args = if static_args.len()
+                                                == expected_param_types.len() + 1
+                                                && !static_args.is_empty()
+                                            {
+                                                &static_args[1..]
+                                            } else {
+                                                static_args
+                                            };
+
                                             // Lower all arguments
-                                            let arg_regs: Vec<_> = args
+                                            let arg_regs: Vec<_> = runtime_call_args
                                                 .iter()
                                                 .filter_map(|a| self.lower_expression(a))
                                                 .collect();
@@ -12045,10 +12155,10 @@ impl<'a> HirToMirContext<'a> {
                                                         if *expected_ty != actual_ty {
                                                             // When expected is Ptr(U8) (Dynamic/boxed), auto-box the value
                                                             let is_ptr_u8 = matches!(expected_ty, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::U8));
-                                                            if is_ptr_u8 && i < args.len() {
-                                                                debug!("[STATIC METHOD BOX] Attempting auto-box for arg {} with type {:?}", i, args[i].ty);
+                                                            if is_ptr_u8 && i < runtime_call_args.len() {
+                                                                debug!("[STATIC METHOD BOX] Attempting auto-box for arg {} with type {:?}", i, runtime_call_args[i].ty);
                                                                 // Use box_value_for_dynamic to properly box based on HIR type
-                                                                if let Some(boxed) = self.box_value_for_dynamic(reg, args[i].ty) {
+                                                                if let Some(boxed) = self.box_value_for_dynamic(reg, runtime_call_args[i].ty) {
                                                                     debug!("[STATIC METHOD BOX] Auto-boxed arg {} for Dynamic param", i);
                                                                     return boxed;
                                                                 }
@@ -12068,7 +12178,7 @@ impl<'a> HirToMirContext<'a> {
                                             let mut final_arg_regs = final_arg_regs;
                                             self.inject_hidden_enum_type_id_arg(
                                                 &runtime_func,
-                                                args,
+                                                runtime_call_args,
                                                 &mut final_arg_regs,
                                             );
 
@@ -12090,6 +12200,14 @@ impl<'a> HirToMirContext<'a> {
                                                 final_arg_regs,
                                                 expected_return_type,
                                             );
+                                            if runtime_func == "Thread_sleep" {
+                                                eprintln!(
+                                                    "[DBG STATIC RUNTIME Thread_sleep] args_len={} static_args_len={} final_args={}",
+                                                    args.len(),
+                                                    static_args.len(),
+                                                    result.as_ref().map(|_| 0).unwrap_or(0)
+                                                );
+                                            }
                                             debug!(
                                                 "[STATIC METHOD] Generated call, result: {:?}",
                                                 result
@@ -12123,7 +12241,7 @@ impl<'a> HirToMirContext<'a> {
                                                 self.stdlib_mapping.find_by_name_and_params(
                                                     &class_name,
                                                     method_name,
-                                                    args.len(),
+                                                    static_args.len(),
                                                 )
                                             {
                                                 static_fallback = Some(found);
@@ -12137,12 +12255,12 @@ impl<'a> HirToMirContext<'a> {
                                     debug!(
                                         "[STATIC-FALLBACK] Trying global find_static_method_by_name_and_params('{}', {})...",
                                         method_name,
-                                        args.len()
+                                        static_args.len()
                                     );
                                     static_fallback =
                                         self.stdlib_mapping.find_static_method_by_name_and_params(
                                             method_name,
-                                            args.len(),
+                                            static_args.len(),
                                         );
                                 }
 
@@ -12155,7 +12273,7 @@ impl<'a> HirToMirContext<'a> {
 
                                     if let Some(result) = self.try_lower_special_runtime_call(
                                         &runtime_func_name,
-                                        args,
+                                        static_args,
                                         result_type.clone(),
                                         expr.source_location.clone(),
                                     ) {
@@ -12165,7 +12283,7 @@ impl<'a> HirToMirContext<'a> {
                                     // Lower all arguments first
                                     let mut arg_regs: Vec<IrId> = Vec::new();
                                     let mut arg_types: Vec<IrType> = Vec::new();
-                                    for arg in args.iter() {
+                                    for arg in static_args.iter() {
                                         if let Some(reg) = self.lower_expression(arg) {
                                             arg_regs.push(reg);
                                             arg_types.push(self.convert_type(arg.ty));
@@ -12180,7 +12298,7 @@ impl<'a> HirToMirContext<'a> {
                                         let mut type_param_name: Option<String> = None;
                                         let mut use_typed = false;
 
-                                        if let Some(first_arg) = args.first() {
+                                        if let Some(first_arg) = static_args.first() {
                                             let type_table = self.type_table.borrow();
                                             if let Some(ti) = type_table.get(first_arg.ty) {
                                                 use crate::tast::core::TypeKind;
@@ -12309,8 +12427,14 @@ impl<'a> HirToMirContext<'a> {
                     let method_name_interned =
                         self.symbol_table.get_symbol(*symbol).map(|s| s.name);
                     let mut func_id_opt = self.get_function_id(symbol);
+                    let has_synthetic_static_receiver =
+                        *is_method && self.effective_static_call_args(args).len() != args.len();
 
-                    if func_id_opt.is_none() && *is_method && !args.is_empty() {
+                    if func_id_opt.is_none()
+                        && *is_method
+                        && !has_synthetic_static_receiver
+                        && !args.is_empty()
+                    {
                         if let Some(method_name) = method_name_interned {
                             func_id_opt = self.resolve_method_function_id(args[0].ty, method_name);
                         }
@@ -12414,7 +12538,7 @@ impl<'a> HirToMirContext<'a> {
                     // IMPORTANT: When matching by bare name, also verify the function belongs to
                     // the receiver's class (via qualified name). Without this, common names like
                     // "get", "set", "toString" could match wrong stdlib functions.
-                    if func_id_opt.is_none() && *is_method {
+                    if func_id_opt.is_none() && *is_method && !has_synthetic_static_receiver {
                         if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
                             if let Some(method_name) = self.string_interner.get(sym_info.name) {
                                 debug!(
@@ -12497,7 +12621,7 @@ impl<'a> HirToMirContext<'a> {
                     // Guard against short-name symbol collisions for static calls:
                     // if the resolved function signature arity does not match this call site,
                     // drop it so static runtime fallback can re-resolve by (name, arity).
-                    if func_id_opt.is_some() && !*is_method {
+                    if func_id_opt.is_some() && (!*is_method || has_synthetic_static_receiver) {
                         let static_arg_count = self.effective_static_call_args(args).len();
                         if let Some(func_id) = func_id_opt {
                             let expected_params_opt = self
@@ -12647,9 +12771,55 @@ impl<'a> HirToMirContext<'a> {
                                 result_type.clone()
                             }
                         };
+                        let function_param_count = self
+                            .builder
+                            .module
+                            .functions
+                            .get(&func_id)
+                            .map(|f| f.signature.parameters.len())
+                            .or_else(|| {
+                                self.builder
+                                    .module
+                                    .extern_functions
+                                    .get(&func_id)
+                                    .map(|f| f.signature.parameters.len())
+                            });
+                        let has_arity_static_receiver = *is_method
+                            && function_param_count
+                                .map(|param_count| args.len() == param_count + 1)
+                                .unwrap_or(false);
+                        let treat_as_static_call =
+                            has_synthetic_static_receiver || has_arity_static_receiver;
+                        if self
+                            .builder
+                            .module
+                            .functions
+                            .get(&func_id)
+                            .map(|f| f.name == "Thread_sleep")
+                            .unwrap_or(false)
+                        {
+                            eprintln!(
+                                "[DBG Thread_sleep] is_method={} has_synth={} has_arity={} treat_static={} args_len={} param_count={:?}",
+                                is_method,
+                                has_synthetic_static_receiver,
+                                has_arity_static_receiver,
+                                treat_as_static_call,
+                                args.len(),
+                                function_param_count
+                            );
+                        }
+                        if has_arity_static_receiver {
+                            debug!(
+                                "[STATIC-RECEIVER ARITY] Treating method call as static: symbol={:?}, func_id={:?}, args={}, params={:?}",
+                                symbol,
+                                func_id,
+                                args.len(),
+                                function_param_count
+                            );
+                        }
 
                         // Handle method calls where the object is passed as first argument
-                        if *is_method {
+                        if *is_method && !treat_as_static_call {
                             // For method calls, args already includes the object as first arg.
                             // Track non-receiver args as temps ONLY if the callee is user-defined.
                             // Stdlib/runtime methods (e.g., Array.push) may store arguments.
@@ -12879,8 +13049,31 @@ impl<'a> HirToMirContext<'a> {
                                 .map(|f| f.kind == crate::ir::functions::FunctionKind::UserDefined)
                                 .unwrap_or(false);
 
+                            let mut call_args = self.effective_static_call_args(args);
+                            if call_args.len() == args.len() {
+                                if let Some(param_count) = function_param_count {
+                                    if args.len() == param_count + 1 && !args.is_empty() {
+                                        call_args = &args[1..];
+                                    }
+                                }
+                            }
+                            if self
+                                .builder
+                                .module
+                                .functions
+                                .get(&func_id)
+                                .map(|f| f.name == "Thread_sleep")
+                                .unwrap_or(false)
+                            {
+                                eprintln!(
+                                    "[DBG Thread_sleep direct] args_len={} call_args_len={} param_count={:?}",
+                                    args.len(),
+                                    call_args.len(),
+                                    function_param_count
+                                );
+                            }
                             let mut arg_regs = Vec::new();
-                            for (param_idx, arg) in args.iter().enumerate() {
+                            for (param_idx, arg) in call_args.iter().enumerate() {
                                 if let Some(reg) = self.lower_expression(arg) {
                                     // Materialize anon-backed variables at call boundary
                                     let reg = self.maybe_materialize_for_call(
@@ -12922,12 +13115,11 @@ impl<'a> HirToMirContext<'a> {
                                         if let Some(method_name) =
                                             self.string_interner.get(sym_info.name)
                                         {
-                                            let static_args = self.effective_static_call_args(args);
                                             if let Some((_sig, mapping)) = self
                                                 .stdlib_mapping
                                                 .find_static_method_by_name_and_params(
                                                     method_name,
-                                                    static_args.len(),
+                                                    call_args.len(),
                                                 )
                                             {
                                                 let runtime_func_name =
@@ -12935,7 +13127,7 @@ impl<'a> HirToMirContext<'a> {
                                                 let mut fallback_arg_regs: Vec<IrId> = Vec::new();
                                                 let mut fallback_arg_types: Vec<IrType> =
                                                     Vec::new();
-                                                for arg in static_args.iter() {
+                                                for arg in call_args.iter() {
                                                     if let Some(reg) = self.lower_expression(arg) {
                                                         fallback_arg_regs.push(reg);
                                                         fallback_arg_types
@@ -12987,11 +13179,11 @@ impl<'a> HirToMirContext<'a> {
                                                 self.builder.get_register_type(arg_regs[i])
                                             {
                                                 if !matches!(actual_ty, IrType::Ptr(_))
-                                                    && i < args.len()
+                                                    && i < call_args.len()
                                                 {
                                                     if let Some(boxed) = self.box_value_for_dynamic(
                                                         arg_regs[i],
-                                                        args[i].ty,
+                                                        call_args[i].ty,
                                                     ) {
                                                         arg_regs[i] = boxed;
                                                     }
@@ -13013,7 +13205,7 @@ impl<'a> HirToMirContext<'a> {
                                     .unwrap_or_default();
                                 if let Some(result) = self.try_lower_special_runtime_call(
                                     &func_name,
-                                    args,
+                                    call_args,
                                     result_type.clone(),
                                     expr.source_location.clone(),
                                 ) {
@@ -13021,7 +13213,7 @@ impl<'a> HirToMirContext<'a> {
                                 }
                                 self.inject_hidden_enum_type_id_arg(
                                     &func_name,
-                                    args,
+                                    call_args,
                                     &mut arg_regs,
                                 );
                             }
@@ -13030,7 +13222,9 @@ impl<'a> HirToMirContext<'a> {
                             let final_type_args = if converted_hir_type_args.is_empty() {
                                 // Check if the function has type parameters
                                 if let Some(func) = self.builder.module.functions.get(&func_id) {
-                                    if !func.signature.type_params.is_empty() && !args.is_empty() {
+                                    if !func.signature.type_params.is_empty()
+                                        && !call_args.is_empty()
+                                    {
                                         // Try to infer type_args from argument types
                                         debug!(
                                             "[TYPE INFERENCE] Function {} has type_params: {:?}",
@@ -13059,10 +13253,12 @@ impl<'a> HirToMirContext<'a> {
                                                     sig_param.name, sig_param.ty, type_param.name
                                                 );
                                                 if let IrType::TypeVar(ref name) = sig_param.ty {
-                                                    if name == &type_param.name && i < args.len() {
+                                                    if name == &type_param.name
+                                                        && i < call_args.len()
+                                                    {
                                                         // Use the concrete type of the corresponding argument
                                                         let arg_type =
-                                                            self.convert_type(args[i].ty);
+                                                            self.convert_type(call_args[i].ty);
                                                         debug!(
                                                             "[TYPE INFERENCE] Inferred {}={:?} from arg {}",
                                                             type_param.name, arg_type, i
@@ -13077,9 +13273,10 @@ impl<'a> HirToMirContext<'a> {
                                                 // Couldn't infer this type param from signature params
                                                 // Try using the first argument's type as a fallback for single type param
                                                 if func.signature.type_params.len() == 1
-                                                    && !args.is_empty()
+                                                    && !call_args.is_empty()
                                                 {
-                                                    let arg_type = self.convert_type(args[0].ty);
+                                                    let arg_type =
+                                                        self.convert_type(call_args[0].ty);
                                                     debug!(
                                                         "[TYPE INFERENCE] Fallback: Inferred {}={:?} from first arg",
                                                         type_param.name, arg_type
@@ -13112,8 +13309,8 @@ impl<'a> HirToMirContext<'a> {
                                 self.constrained_param_interfaces.get(&func_id).cloned()
                             {
                                 for (param_idx, iface_sym) in &constrained {
-                                    if *param_idx < arg_regs.len() && *param_idx < args.len() {
-                                        let arg_type = args[*param_idx].ty;
+                                    if *param_idx < arg_regs.len() && *param_idx < call_args.len() {
+                                        let arg_type = call_args[*param_idx].ty;
                                         if let Some(class_sym) = self.get_class_symbol(arg_type) {
                                             if self
                                                 .interface_vtables
@@ -13163,6 +13360,7 @@ impl<'a> HirToMirContext<'a> {
                         // Check if it's a stdlib static method (like Math.sin, Sys.println)
                         if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
                             if let Some(method_name) = self.string_interner.get(sym_info.name) {
+                                let static_args = self.effective_static_call_args(args);
                                 // Check if method name matches known Math/Sys methods
                                 // Try to find this method in ANY stdlib class with static methods
                                 // This replaces the hardcoded is_math_method and is_sys_method checks
@@ -13178,7 +13376,7 @@ impl<'a> HirToMirContext<'a> {
                                             method: method_static,
                                             is_static: true,
                                             is_constructor: false, // Normal static method, not constructor
-                                            param_count: args.len(),
+                                            param_count: static_args.len(),
                                         };
                                         if let Some(mapping) = self.stdlib_mapping.get(&sig) {
                                             found_mapping = Some((class_name, mapping));
@@ -13199,7 +13397,7 @@ impl<'a> HirToMirContext<'a> {
                                     // Lower arguments and get their types
                                     let mut arg_regs = Vec::new();
                                     let mut arg_types = Vec::new();
-                                    for arg in args {
+                                    for arg in static_args {
                                         if let Some(reg) = self.lower_expression(arg) {
                                             arg_regs.push(reg);
                                             arg_types.push(self.convert_type(arg.ty));
@@ -13215,7 +13413,7 @@ impl<'a> HirToMirContext<'a> {
                                         let mut known_type_tag: Option<i32> = None;
                                         let mut use_typed_compare = false;
 
-                                        if let Some(first_arg) = args.first() {
+                                        if let Some(first_arg) = static_args.first() {
                                             let type_table = self.type_table.borrow();
                                             if let Some(ti) = type_table.get(first_arg.ty) {
                                                 match &ti.kind {
@@ -13292,7 +13490,7 @@ impl<'a> HirToMirContext<'a> {
                                         } else {
                                             // Dynamic case: box arguments for haxe_reflect_compare
                                             let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                                            for (i, arg) in args.iter().enumerate() {
+                                            for (i, arg) in static_args.iter().enumerate() {
                                                 if i >= arg_regs.len() {
                                                     break;
                                                 }
@@ -13328,6 +13526,11 @@ impl<'a> HirToMirContext<'a> {
                 // Before falling through to indirect call, try to look up by name or register a forward reference
                 // for unresolved static method calls (cross-module dependencies during stdlib compilation)
                 if let HirExprKind::Variable { symbol, .. } = &callee.kind {
+                    let unresolved_call_args = if !*is_method {
+                        self.effective_static_call_args(args)
+                    } else {
+                        args
+                    };
                     if let Some(sym_info) = self.symbol_table.get_symbol(*symbol) {
                         if let Some(qual_name) = sym_info.qualified_name {
                             if let Some(qual_name_str) = self.string_interner.get(qual_name) {
@@ -13349,7 +13552,7 @@ impl<'a> HirToMirContext<'a> {
                                     );
 
                                     // Lower arguments
-                                    let arg_regs: Vec<_> = args
+                                    let arg_regs: Vec<_> = unresolved_call_args
                                         .iter()
                                         .filter_map(|a| self.lower_expression(a))
                                         .collect();
@@ -13372,7 +13575,7 @@ impl<'a> HirToMirContext<'a> {
                                 // Lower arguments and collect their types
                                 let mut arg_regs = Vec::new();
                                 let mut param_types = Vec::new();
-                                for arg in args {
+                                for arg in unresolved_call_args {
                                     if let Some(reg) = self.lower_expression(arg) {
                                         arg_regs.push(reg);
                                         param_types.push(self.convert_type(arg.ty));
