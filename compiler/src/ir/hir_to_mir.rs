@@ -4107,6 +4107,43 @@ impl<'a> HirToMirContext<'a> {
                         );
                     }
 
+                    // Populate the exception's `stack` field with the current call stack trace.
+                    // This must happen AFTER rayzor_update_call_frame_location (so the
+                    // throw location is in the trace) but BEFORE rayzor_throw_typed.
+                    {
+                        let stack_name = self.string_interner.intern("stack");
+                        let stack_field = self.resolve_field_index_by_name(stack_name, thrown_type);
+                        if let Some((_class_ty, field_idx)) = stack_field {
+                            let call_stack_fn = self.get_or_register_extern_function(
+                                "rayzor_native_stack_trace_call_stack",
+                                vec![],
+                                IrType::Ptr(Box::new(IrType::U8)),
+                            );
+                            let stack_str = self
+                                .builder
+                                .build_call_direct(
+                                    call_stack_fn,
+                                    vec![],
+                                    IrType::Ptr(Box::new(IrType::U8)),
+                                )
+                                .expect("failed to call rayzor_native_stack_trace_call_stack");
+
+                            let idx_const = self
+                                .builder
+                                .build_const(IrValue::I32(field_idx as i32))
+                                .expect("failed to create stack field index const");
+                            let field_ptr = self
+                                .builder
+                                .build_gep(
+                                    exception_reg,
+                                    vec![idx_const],
+                                    IrType::Ptr(Box::new(IrType::Void)),
+                                )
+                                .expect("failed to build stack field GEP");
+                            self.builder.build_store(field_ptr, stack_str);
+                        }
+                    }
+
                     // Cast exception to i64 for uniform storage
                     let reg_type = self
                         .builder
@@ -7803,6 +7840,73 @@ impl<'a> HirToMirContext<'a> {
                         }
 
                         // Regular method call (not extern or no runtime mapping)
+                        // Detect static calls: if the object is a class/abstract symbol
+                        // reference (not an instance), this is a static method call and
+                        // the object should NOT be passed as 'this'.
+                        let is_static_class_call = if let HirExprKind::Variable {
+                            symbol: obj_sym,
+                            ..
+                        } = &object.kind
+                        {
+                            self.symbol_table
+                                .get_symbol(*obj_sym)
+                                .map(|s| {
+                                    matches!(
+                                        s.kind,
+                                        crate::tast::symbols::SymbolKind::Class
+                                            | crate::tast::symbols::SymbolKind::Abstract
+                                            | crate::tast::symbols::SymbolKind::TypeAlias
+                                    )
+                                })
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+
+                        if is_static_class_call {
+                            // Static call: do NOT include the class reference as 'this'
+                            let callee_is_user_defined = self
+                                .builder
+                                .module
+                                .functions
+                                .get(&func_id)
+                                .map(|f| f.kind == crate::ir::functions::FunctionKind::UserDefined)
+                                .unwrap_or(false);
+
+                            let mut arg_regs = Vec::new();
+                            for arg in args.iter() {
+                                if let Some(reg) = self.lower_expression(arg) {
+                                    if callee_is_user_defined {
+                                        let is_heap_intermediate = matches!(
+                                            &arg.kind,
+                                            HirExprKind::New { .. } | HirExprKind::Call { .. }
+                                        ) && self
+                                            .get_drop_behavior(arg.ty)
+                                            == DropBehavior::AutoDrop;
+                                        if is_heap_intermediate {
+                                            self.temp_heap_values.push(reg);
+                                        }
+                                    }
+                                    arg_regs.push(reg);
+                                }
+                            }
+
+                            self.fill_default_args(func_id, &mut arg_regs, false);
+
+                            let actual_return_type =
+                                if let Some(func) = self.builder.module.functions.get(&func_id) {
+                                    func.signature.return_type.clone()
+                                } else {
+                                    result_type.clone()
+                                };
+
+                            return self.builder.build_call_direct(
+                                func_id,
+                                arg_regs,
+                                actual_return_type,
+                            );
+                        }
+
                         // Lower the object (this will be the first parameter)
                         let obj_reg = self.lower_expression(object)?;
 
