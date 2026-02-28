@@ -2371,7 +2371,6 @@ impl<'a> TastToHirContext<'a> {
                     .get_symbol(*method_symbol)
                     .and_then(|s| self.string_interner.get(s.name))
                     .map(|s| s.to_string());
-
                 if matches!(class_name.as_deref(), Some("Std"))
                     && matches!(method_name.as_deref(), Some("is") | Some("isOfType"))
                     && arguments.len() == 2
@@ -2385,15 +2384,34 @@ impl<'a> TastToHirContext<'a> {
                         expected: type_arg.expr_type,
                     }
                 } else {
-                    // Lower static method call to a regular function call
-                    // Static methods are just functions in the class namespace
+                    // Preserve class context in the callee to avoid collisions on
+                    // short method names (e.g., Std.random vs Math.random).
+                    let class_type = self
+                        .symbol_table
+                        .get_symbol(*class_symbol)
+                        .map(|s| s.type_id)
+                        .unwrap_or_else(|| self.get_dynamic_type());
+                    let method_type = self
+                        .symbol_table
+                        .get_symbol(*method_symbol)
+                        .map(|s| s.type_id)
+                        .unwrap_or(expr.expr_type);
+
                     HirExprKind::Call {
                         callee: Box::new(HirExpr::new(
-                            HirExprKind::Variable {
-                                symbol: *method_symbol,
-                                capture_mode: None,
+                            HirExprKind::Field {
+                                object: Box::new(HirExpr::new(
+                                    HirExprKind::Variable {
+                                        symbol: *class_symbol,
+                                        capture_mode: None,
+                                    },
+                                    class_type,
+                                    expr.lifetime_id,
+                                    expr.source_location,
+                                )),
+                                field: *method_symbol,
                             },
-                            expr.expr_type,
+                            method_type,
                             expr.lifetime_id,
                             expr.source_location,
                         )),
