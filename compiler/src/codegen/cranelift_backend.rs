@@ -362,7 +362,10 @@ impl CraneliftBackend {
                                         func_id,
                                         ..
                                     } if closure_dest == ptr => {
-                                        debug!("Traced func_ptr through Load from MakeClosure to lambda {:?}", func_id);
+                                        debug!(
+                                            "Traced func_ptr through Load from MakeClosure to lambda {:?}",
+                                            func_id
+                                        );
                                         return Some(*func_id);
                                     }
                                     // Also check PtrAdd (for field access at offset)
@@ -381,7 +384,10 @@ impl CraneliftBackend {
                                                 } = deepest_inst
                                                 {
                                                     if closure_dest == base_ptr {
-                                                        debug!("Traced func_ptr through Load->PtrAdd->MakeClosure to lambda {:?}", func_id);
+                                                        debug!(
+                                                            "Traced func_ptr through Load->PtrAdd->MakeClosure to lambda {:?}",
+                                                            func_id
+                                                        );
                                                         return Some(*func_id);
                                                     }
                                                 }
@@ -798,7 +804,7 @@ impl CraneliftBackend {
                 // This allows the real implementation to use the forward ref's func_id
                 if !is_extern {
                     debug!(
-            ": Linking function '{}' to forward reference '{}' - MIR {:?} -> Cranelift {:?}",
+                        ": Linking function '{}' to forward reference '{}' - MIR {:?} -> Cranelift {:?}",
                         function.name, qualified_name, mir_func_id, forward_ref_func_id
                     );
                     self.function_map.insert(mir_func_id, forward_ref_func_id);
@@ -860,8 +866,14 @@ impl CraneliftBackend {
                 );
 
             if will_extend {
-                debug!("!!! EXTENDING {} param '{}' from {:?} to i64 (is_extern={}, calling_conv={:?})",
-                         function.name, param.name, param.ty, is_extern, function.signature.calling_convention);
+                debug!(
+                    "!!! EXTENDING {} param '{}' from {:?} to i64 (is_extern={}, calling_conv={:?})",
+                    function.name,
+                    param.name,
+                    param.ty,
+                    is_extern,
+                    function.signature.calling_convention
+                );
             }
 
             let cranelift_type = if will_extend {
@@ -1433,6 +1445,19 @@ impl CraneliftBackend {
 
             // Translate instructions
             for instruction in &mir_block.instructions {
+                // Some MIR producers can leave unreachable instructions after a terminator.
+                // Cranelift forbids appending instructions once a block is filled.
+                if let Some(current_block) = builder.current_block() {
+                    if let Some(last_inst) = builder.func.layout.last_inst(current_block) {
+                        if builder.func.dfg.insts[last_inst].opcode().is_terminator() {
+                            warn!(
+                                "Skipping instruction after terminator in function '{}' block {:?}: {:?}",
+                                function.name, mir_block_id, instruction
+                            );
+                            break;
+                        }
+                    }
+                }
                 Self::translate_instruction(
                     &mut self.value_map,
                     &mut builder,
@@ -1451,22 +1476,34 @@ impl CraneliftBackend {
 
             // Translate terminator
             // debug!("Cranelift: MIR terminator for block {:?}: {:?}", mir_block_id, mir_block.terminator);
-            if let Err(e) = Self::translate_terminator_static(
-                &mut self.value_map,
-                &mut builder,
-                &mir_block.terminator,
-                &block_map,
-                function,
-                sret_ptr,
-            ) {
+            let block_already_terminated = builder
+                .current_block()
+                .and_then(|block| builder.func.layout.last_inst(block))
+                .map(|inst| builder.func.dfg.insts[inst].opcode().is_terminator())
+                .unwrap_or(false);
+            if !block_already_terminated {
+                if let Err(e) = Self::translate_terminator_static(
+                    &mut self.value_map,
+                    &mut builder,
+                    &mir_block.terminator,
+                    &block_map,
+                    function,
+                    sret_ptr,
+                ) {
+                    debug!(
+                        "\n!!! Error translating terminator in function '{}' block {:?}: {}",
+                        function.name, mir_block_id, e
+                    );
+                    trace!("=== Cranelift IR so far ===");
+                    debug!("{}", self.ctx.func.display());
+                    trace!("=== End IR ===\n");
+                    return Err(e);
+                }
+            } else {
                 debug!(
-                    "\n!!! Error translating terminator in function '{}' block {:?}: {}",
-                    function.name, mir_block_id, e
+                    "Skipping duplicate terminator translation in function '{}' block {:?}",
+                    function.name, mir_block_id
                 );
-                trace!("=== Cranelift IR so far ===");
-                debug!("{}", self.ctx.func.display());
-                trace!("=== End IR ===\n");
-                return Err(e);
             }
 
             translated_blocks.insert(mir_block_id);
@@ -2015,12 +2052,16 @@ impl CraneliftBackend {
                                     {
                                         Some(imm.bits() as u32)
                                     } else {
-                                        warn!("Alloc count instruction is not UnaryImm, defaulting to 1");
+                                        warn!(
+                                            "Alloc count instruction is not UnaryImm, defaulting to 1"
+                                        );
                                         Some(1)
                                     }
                                 }
                                 _ => {
-                                    warn!("Alloc count value not from instruction result, defaulting to 1");
+                                    warn!(
+                                        "Alloc count value not from instruction result, defaulting to 1"
+                                    );
                                     Some(1)
                                 }
                             }
@@ -2080,7 +2121,10 @@ impl CraneliftBackend {
                             {
                                 match param.ty {
                                     crate::ir::IrType::I32 | crate::ir::IrType::U32 => {
-                                        debug!("!!! [DYNAMIC DECL] Extending {} param '{}' from {:?} to i64", extern_func.name, param.name, param.ty);
+                                        debug!(
+                                            "!!! [DYNAMIC DECL] Extending {} param '{}' from {:?} to i64",
+                                            extern_func.name, param.name, param.ty
+                                        );
                                         cranelift_type = types::I64;
                                     }
                                     _ => {}
@@ -2151,8 +2195,10 @@ impl CraneliftBackend {
 
                             // Extend i32 to i64 if the Cranelift signature expects i64
                             if cl_value_type == types::I32 && expected_cl_type == Some(types::I64) {
-                                debug!("!!! [EXTERN BRANCH] Extending arg {} for {} from i32 to i64 (based on Cranelift signature)",
-                                    i, extern_func.name);
+                                debug!(
+                                    "!!! [EXTERN BRANCH] Extending arg {} for {} from i32 to i64 (based on Cranelift signature)",
+                                    i, extern_func.name
+                                );
                                 cl_value = builder.ins().sextend(types::I64, cl_value);
                             } else if cl_value_type == types::I8
                                 && expected_cl_type == Some(types::I64)
@@ -2406,9 +2452,18 @@ impl CraneliftBackend {
                         let decl = module.declarations().get_function_decl(cl_func_id);
                         let expected_params = decl.signature.params.len();
                         if expected_params != call_args.len() {
-                            warn!("CALL MISMATCH in '{}': calling '{}' (MIR {:?}, CL {:?}): expected {} params, providing {} args, is_extern={}, env_added={}, sret={}",
-                                function.name, called_func.name, func_id, cl_func_id,
-                                expected_params, call_args.len(), is_extern_func, should_add_env, uses_sret);
+                            warn!(
+                                "CALL MISMATCH in '{}': calling '{}' (MIR {:?}, CL {:?}): expected {} params, providing {} args, is_extern={}, env_added={}, sret={}",
+                                function.name,
+                                called_func.name,
+                                func_id,
+                                cl_func_id,
+                                expected_params,
+                                call_args.len(),
+                                is_extern_func,
+                                should_add_env,
+                                uses_sret
+                            );
                             for (pi, p) in called_func.signature.parameters.iter().enumerate() {
                                 debug!("  MIR param[{}] '{}': {:?}", pi, p.name, p.ty);
                             }
@@ -2513,8 +2568,10 @@ impl CraneliftBackend {
                                         && actual_ret_ty.is_int()
                                         && mir_expected_ty.is_int()
                                     {
-                                        debug!("Call return type coercion: actual={:?}, mir_expected={:?}, func={}",
-                                    actual_ret_ty, mir_expected_ty, called_func.name);
+                                        debug!(
+                                            "Call return type coercion: actual={:?}, mir_expected={:?}, func={}",
+                                            actual_ret_ty, mir_expected_ty, called_func.name
+                                        );
                                         if actual_ret_ty.bits() > mir_expected_ty.bits() {
                                             // Truncate i64 -> i32
                                             builder.ins().ireduce(mir_expected_ty, result_val)
@@ -2528,7 +2585,10 @@ impl CraneliftBackend {
 
                                     value_map.insert(*dest_reg, final_val);
                                 } else {
-                                    return Err(format!("Function call expected to return value but got none (func_id={:?}, dest={:?})", func_id, dest_reg));
+                                    return Err(format!(
+                                        "Function call expected to return value but got none (func_id={:?}, dest={:?})",
+                                        func_id, dest_reg
+                                    ));
                                 }
                             }
                         }
@@ -2624,7 +2684,7 @@ impl CraneliftBackend {
                         return Err(format!(
                             "Invalid signature type for CallIndirect: {:?}",
                             signature
-                        ))
+                        ));
                     }
                 }
 
@@ -2836,7 +2896,7 @@ impl CraneliftBackend {
                         return Err(format!(
                             "Unsupported cast from {:?} ({:?}) to {:?}",
                             actual_src_ty, from_ty, to_ty
-                        ))
+                        ));
                     }
                 };
 
@@ -2881,7 +2941,7 @@ impl CraneliftBackend {
                         return Err(format!(
                             "Unsupported bitcast from {:?} to {:?}",
                             src_ty, dest_ty
-                        ))
+                        ));
                     }
                 };
 
