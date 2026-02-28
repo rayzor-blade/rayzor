@@ -27,7 +27,7 @@ const INITIAL_CAPACITY: usize = 32;
 /// Create a new empty string
 #[no_mangle]
 pub extern "C" fn haxe_string_new(out: *mut HaxeString) {
-    unsafe {
+    crate::panic_guard::guarded_call(|| unsafe {
         let layout = Layout::from_size_align_unchecked(INITIAL_CAPACITY, 1);
         let ptr = alloc(layout);
         if ptr.is_null() {
@@ -39,7 +39,7 @@ pub extern "C" fn haxe_string_new(out: *mut HaxeString) {
         (*out).ptr = ptr;
         (*out).len = 0;
         (*out).cap = INITIAL_CAPACITY;
-    }
+    })
 }
 
 /// Create a string from a C string (null-terminated)
@@ -152,7 +152,7 @@ pub extern "C" fn haxe_string_concat_sret(
         return;
     }
 
-    unsafe {
+    crate::panic_guard::guarded_call(|| unsafe {
         let a_len = if a.is_null() { 0 } else { (*a).len };
         let b_len = if b.is_null() { 0 } else { (*b).len };
         let total_len = a_len + b_len;
@@ -180,7 +180,7 @@ pub extern "C" fn haxe_string_concat_sret(
         (*out).ptr = ptr;
         (*out).len = total_len;
         (*out).cap = cap;
-    }
+    })
 }
 
 /// Get substring

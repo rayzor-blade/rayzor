@@ -27,7 +27,7 @@ const INITIAL_CAPACITY: usize = 8;
 /// Create a new empty array
 #[no_mangle]
 pub extern "C" fn haxe_array_new(out: *mut HaxeArray, elem_size: usize) {
-    unsafe {
+    crate::panic_guard::guarded_call(|| unsafe {
         let total_size = INITIAL_CAPACITY * elem_size;
         let layout = Layout::from_size_align_unchecked(total_size, 8);
         let ptr = alloc(layout);
@@ -40,7 +40,7 @@ pub extern "C" fn haxe_array_new(out: *mut HaxeArray, elem_size: usize) {
         (*out).len = 0;
         (*out).cap = INITIAL_CAPACITY;
         (*out).elem_size = elem_size;
-    }
+    })
 }
 
 /// Create array from existing elements
@@ -426,7 +426,7 @@ pub extern "C" fn haxe_array_push(arr: *mut HaxeArray, data: *const u8) {
         return;
     }
 
-    unsafe {
+    crate::panic_guard::guarded_call(|| unsafe {
         let arr_ref = &mut *arr;
         debug!(
             "[haxe_array_push] Before push: len={}, cap={}, elem_size={}",
@@ -470,7 +470,7 @@ pub extern "C" fn haxe_array_push(arr: *mut HaxeArray, data: *const u8) {
             "[haxe_array_push] After push: len={}, element added successfully",
             arr_ref.len
         );
-    }
+    })
 }
 
 /// Pop element from array (original version with out param)
