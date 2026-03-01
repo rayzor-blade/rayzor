@@ -5830,6 +5830,7 @@ impl<'a> AstLowering<'a> {
                     crate::tast::symbols::SymbolKind::Class
                         | crate::tast::symbols::SymbolKind::Abstract
                         | crate::tast::symbols::SymbolKind::TypeAlias
+                        | crate::tast::symbols::SymbolKind::Enum
                 ) {
                     return Some(symbol_id);
                 }
@@ -5843,6 +5844,7 @@ impl<'a> AstLowering<'a> {
                     crate::tast::symbols::SymbolKind::Class
                         | crate::tast::symbols::SymbolKind::Abstract
                         | crate::tast::symbols::SymbolKind::TypeAlias
+                        | crate::tast::symbols::SymbolKind::Enum
                 )
         });
 
@@ -9884,7 +9886,20 @@ impl<'a> AstLowering<'a> {
                         let ereg_name = self.context.string_interner.intern("EReg");
                         if let Some(symbol_id) = self.resolve_symbol_in_scope_hierarchy(ereg_name) {
                             if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
-                                return Ok(symbol.type_id);
+                                let tid = symbol.type_id;
+                                if tid != TypeId::invalid() {
+                                    return Ok(tid);
+                                }
+                                // EReg placeholder exists but has no TypeId yet —
+                                // create a proper Class type and link it to the symbol.
+                                let ereg_type = self.context.type_table.borrow_mut().create_type(
+                                    crate::tast::core::TypeKind::Class {
+                                        symbol_id,
+                                        type_args: Vec::new(),
+                                    },
+                                );
+                                self.context.symbol_table.update_symbol_type(symbol_id, ereg_type);
+                                return Ok(ereg_type);
                             }
                         }
                         // Fallback to structural type
