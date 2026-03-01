@@ -1537,7 +1537,7 @@ impl CraneliftBackend {
         // Define the function in the module
         self.module
             .define_function(func_id, &mut self.ctx)
-            .map_err(|e| format!("Failed to define function: {}", e))?;
+            .map_err(|e| format!("Failed to define function '{}': {}", function.name, e))?;
 
         // Track that this function has been defined to prevent duplicate definitions
         self.defined_functions.insert(func_id);
