@@ -3425,12 +3425,7 @@ impl CompilationUnit {
 
         let mut mir_module = mir_result.module;
 
-        // Dump MIR if requested
-        if std::env::var("RAYZOR_DUMP_MIR").is_ok() {
-            eprintln!("=== MIR DUMP for {} ===", filename);
-            eprintln!("{}", crate::ir::dump::dump_module(&mir_module));
-            eprintln!("=== END MIR DUMP ===");
-        }
+        // (MIR dump moved to after stdlib merge)
 
         // Build BladeCachedMaps for BLADE cache (name-keyed, before ID-keyed accumulation consumes the data)
         if self.config.enable_cache {
@@ -3757,16 +3752,21 @@ impl CompilationUnit {
             // A MirWrapper function with an empty CFG means the stdlib merge failed
             // to find the implementation — this would cause wrong values at runtime.
             for (func_id, func) in &mir_module.functions {
-                if matches!(func.kind, crate::ir::FunctionKind::MirWrapper)
-                    && func.cfg.blocks.is_empty()
-                {
-                    debug!(
-                        "Unreplaced MIR forward ref after stdlib merge: '{}' (ID {})",
-                        func.name, func_id.0
+                if func.cfg.blocks.is_empty() && !matches!(func.kind, crate::ir::FunctionKind::ExternC) {
+                    eprintln!(
+                        "warning: empty function body after stdlib merge: '{}' (ID {}) kind={:?}",
+                        func.name, func_id.0, func.kind
                     );
                 }
             }
         } // end if !is_stdlib_file (stdlib merge + renumbering)
+
+        // Dump MIR after stdlib merge so wrapper bodies are visible
+        if std::env::var("RAYZOR_DUMP_MIR").is_ok() {
+            eprintln!("=== MIR DUMP (post-merge) for {} ===", filename);
+            eprintln!("{}", crate::ir::dump::dump_module(&mir_module));
+            eprintln!("=== END MIR DUMP ===");
+        }
 
         // Run monomorphization pass to specialize generic functions
         let mut monomorphizer = Monomorphizer::new();

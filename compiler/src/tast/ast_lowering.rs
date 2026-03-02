@@ -613,6 +613,7 @@ pub struct AstLowering<'a> {
 }
 
 /// Result of type parameter substitution for generic method return types
+#[derive(Debug)]
 enum TypeSubstitutionResult {
     /// No substitution needed, return this type as-is
     NoChange(TypeId),
@@ -6734,11 +6735,11 @@ impl<'a> AstLowering<'a> {
                     Vec::new()
                 };
 
-                // Determine return type
+                // Determine return type: explicit annotation > infer from body > void
                 let return_type = if let Some(ret_type) = &func.return_type {
                     self.lower_type(ret_type)?
                 } else {
-                    self.context.type_table.borrow().dynamic_type()
+                    self.infer_return_type_from_body(&body)
                 };
 
                 // Exit the function scope
@@ -6784,12 +6785,24 @@ impl<'a> AstLowering<'a> {
                     });
                 }
 
-                // Lower arrow body (single expression) in the new scope
-                let body_expr = self.lower_expression(expr)?;
-                let body = vec![TypedStatement::Expression {
-                    expression: body_expr.clone(),
-                    source_location: body_expr.source_location,
-                }];
+                // Lower arrow body in the new scope
+                // For block bodies like () -> { ...; return x; }, use lower_function_body
+                // to get flat statements so return type inference works correctly.
+                // For simple expressions like () -> x * 2, lower as expression directly.
+                let (body, return_type) = if matches!(&expr.kind, ExprKind::Block(_)) {
+                    let body = self.lower_function_body(expr)?;
+                    let return_type = self.infer_return_type_from_body(&body);
+                    eprintln!("DBG-ARROW-BLOCK: inferred return_type={:?}, kind={:?}", return_type, self.context.type_table.borrow().get(return_type).map(|i| i.kind.clone()));
+                    (body, return_type)
+                } else {
+                    let body_expr = self.lower_expression(expr)?;
+                    let return_type = body_expr.expr_type;
+                    let body = vec![TypedStatement::Expression {
+                        expression: body_expr.clone(),
+                        source_location: body_expr.source_location,
+                    }];
+                    (body, return_type)
+                };
 
                 // Exit the function scope
                 self.context.exit_scope();
@@ -6797,7 +6810,7 @@ impl<'a> AstLowering<'a> {
                 TypedExpressionKind::FunctionLiteral {
                     parameters: typed_params,
                     body,
-                    return_type: body_expr.expr_type,
+                    return_type,
                 }
             }
             ExprKind::Var {
@@ -7319,14 +7332,33 @@ impl<'a> AstLowering<'a> {
                                                     }
                                                     inferred
                                                 } else if let Some(ret_info) = type_table.get(ret) {
-                                                    // Check if return type is a GenericInstance with TypeParameter args
-                                                    // e.g., Thread<T> from spawn<T>(fn: Void -> T): Thread<T>
-                                                    if let crate::tast::core::TypeKind::GenericInstance {
-                                                        base_type,
-                                                        type_args: ret_type_args,
-                                                        ..
-                                                    } = &ret_info.kind
-                                                    {
+                                                    // Check if return type has TypeParameter args that need substitution.
+                                                    // This handles both GenericInstance (e.g., Array<T>) and Class/Interface
+                                                    // types whose definition carries type_args (e.g., Thread<T> stored as
+                                                    // Class { type_args: [T] } rather than GenericInstance).
+                                                    let (base_type_opt, ret_type_args_opt) = match &ret_info.kind {
+                                                        crate::tast::core::TypeKind::GenericInstance {
+                                                            base_type,
+                                                            type_args: ret_type_args,
+                                                            ..
+                                                        } => (Some(*base_type), Some(ret_type_args.clone())),
+                                                        crate::tast::core::TypeKind::Class {
+                                                            type_args: ret_type_args,
+                                                            ..
+                                                        } | crate::tast::core::TypeKind::Interface {
+                                                            type_args: ret_type_args,
+                                                            ..
+                                                        } if !ret_type_args.is_empty() && ret_type_args.iter().any(|ta| {
+                                                            type_table.get(*ta).map_or(false, |info| {
+                                                                matches!(info.kind, crate::tast::core::TypeKind::TypeParameter { .. })
+                                                            })
+                                                        }) => {
+                                                            // Class/Interface with unresolved TypeParameter args — treat ret itself as base
+                                                            (Some(ret), Some(ret_type_args.clone()))
+                                                        }
+                                                        _ => (None, None),
+                                                    };
+                                                    if let (Some(base_type), Some(ret_type_args)) = (base_type_opt, ret_type_args_opt) {
                                                         let mut subs: Vec<(TypeId, TypeId)> = Vec::new();
                                                         for ret_ta in ret_type_args.iter() {
                                                             if let Some(ta_info) = type_table.get(*ret_ta) {
@@ -7339,14 +7371,17 @@ impl<'a> AstLowering<'a> {
                                                                         if pi >= arg_exprs.len() {
                                                                             continue;
                                                                         }
+                                                                        let arg_ty = arg_exprs[pi].expr_type;
+                                                                        eprintln!("DBG-GENERIC-SUB: matching T_sym={:?} param_ty={:?} arg_ty={:?} arg_kind={:?}", tp_sym, param_ty, arg_ty, type_table.get(arg_ty).map(|i| i.kind.clone()));
                                                                         if let Some(concrete) =
                                                                             Self::match_type_param_in_types(
                                                                                 *tp_sym,
                                                                                 *param_ty,
-                                                                                arg_exprs[pi].expr_type,
+                                                                                arg_ty,
                                                                                 &type_table,
                                                                             )
                                                                         {
+                                                                            eprintln!("DBG-GENERIC-SUB: resolved concrete={:?} kind={:?}", concrete, type_table.get(concrete).map(|i| i.kind.clone()));
                                                                             subs.push((*ret_ta, concrete));
                                                                             break;
                                                                         }
@@ -7356,7 +7391,7 @@ impl<'a> AstLowering<'a> {
                                                         }
 
                                                         if !subs.is_empty() {
-                                                            let base_type_val = *base_type;
+                                                            let base_type_val = base_type;
                                                             let new_args: Vec<TypeId> = ret_type_args
                                                                 .iter()
                                                                 .map(|ta| {
@@ -8008,6 +8043,11 @@ impl<'a> AstLowering<'a> {
 
         // Build the TypedExpression for the non-early-return paths
         let expr_type = self.infer_expression_type(&kind)?;
+        if let TypedExpressionKind::MethodCall { method_symbol, .. } = &kind {
+            let name = self.context.symbol_table.get_symbol(*method_symbol)
+                .and_then(|s| self.context.string_interner.get(s.name));
+            eprintln!("DBG-TAST-MC: method={:?} expr_type={:?}", name, expr_type);
+        }
         let usage = self.determine_variable_usage(&kind);
         let lifetime_id = self.assign_lifetime(&kind, &expr_type);
         let metadata = self.analyze_expression_metadata(&kind);
@@ -10376,7 +10416,11 @@ impl<'a> AstLowering<'a> {
 
             // Get the method symbol
             let method_type_id = match self.context.symbol_table.get_symbol(method_symbol) {
-                Some(symbol) if symbol.type_id.is_valid() => symbol.type_id,
+                Some(symbol) if symbol.type_id.is_valid() => {
+                    eprintln!("DBG-METHOD-RET: method_symbol={:?} type_id={:?} valid, receiver_type={:?} kind={:?}",
+                        method_symbol, symbol.type_id, receiver_type, type_table.get(receiver_type).map(|i| i.kind.clone()));
+                    symbol.type_id
+                }
                 _ => {
                     // Method symbol has no type info (placeholder for built-in methods).
                     // Use infer_builtin_method_type to get the method's function type,
@@ -10407,10 +10451,28 @@ impl<'a> AstLowering<'a> {
             };
 
             // Compute the substitution
-            self.compute_type_substitution(return_type, receiver_type, &type_table)
+            let sub_result = self.compute_type_substitution(return_type, receiver_type, &type_table);
+            if matches!(sub_result, TypeSubstitutionResult::NoChange(_)) {
+                if let Some(rt_info) = type_table.get(return_type) {
+                    if let crate::tast::core::TypeKind::TypeParameter { symbol_id: ret_sym, .. } = &rt_info.kind {
+                        if let Some(recv_info) = type_table.get(receiver_type) {
+                            if let crate::tast::core::TypeKind::GenericInstance { base_type, type_args: recv_type_args, .. } = &recv_info.kind {
+                                if let Some(base_info) = type_table.get(*base_type) {
+                                    if let crate::tast::core::TypeKind::Class { type_args: base_params, .. } = &base_info.kind {
+                                        eprintln!("DBG-SUB-MISMATCH: ret_sym={:?}, base_params={:?}, recv_type_args={:?}",
+                                            ret_sym, base_params.iter().map(|p| (p, type_table.get(*p).map(|i| &i.kind).cloned())).collect::<Vec<_>>(), recv_type_args);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            sub_result
         };
 
         // Phase 2: Create new type if needed (with mutable borrow)
+        eprintln!("DBG-METHOD-RESULT: sub_result={:?}", substitution_result);
         match substitution_result {
             TypeSubstitutionResult::NoChange(type_id) => Ok(type_id),
             TypeSubstitutionResult::DirectSubstitution(type_id) => Ok(type_id),
@@ -10472,6 +10534,7 @@ impl<'a> AstLowering<'a> {
         match &return_type_info.kind {
             crate::tast::core::TypeKind::TypeParameter { symbol_id, .. } => {
                 // Direct type parameter - find and substitute
+                // First try exact SymbolId match
                 for (i, param_type_id) in base_type_params.iter().enumerate() {
                     if let Some(param_info) = type_table.get(*param_type_id) {
                         if let crate::tast::core::TypeKind::TypeParameter {
@@ -10481,6 +10544,29 @@ impl<'a> AstLowering<'a> {
                         {
                             if param_sym == symbol_id {
                                 if i < type_args.len() {
+                                    return TypeSubstitutionResult::DirectSubstitution(
+                                        type_args[i],
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                // Fallback: name-based matching for extern class methods where the method's
+                // type parameter T has a different SymbolId than the class definition's T
+                let ret_param_name = self.context.symbol_table.get_symbol(*symbol_id)
+                    .map(|s| s.name);
+                if let Some(ret_name) = ret_param_name {
+                    for (i, param_type_id) in base_type_params.iter().enumerate() {
+                        if let Some(param_info) = type_table.get(*param_type_id) {
+                            if let crate::tast::core::TypeKind::TypeParameter {
+                                symbol_id: param_sym,
+                                ..
+                            } = &param_info.kind
+                            {
+                                let param_name = self.context.symbol_table.get_symbol(*param_sym)
+                                    .map(|s| s.name);
+                                if param_name == Some(ret_name) && i < type_args.len() {
                                     return TypeSubstitutionResult::DirectSubstitution(
                                         type_args[i],
                                     );
@@ -12389,6 +12475,34 @@ impl<'a> AstLowering<'a> {
                                         }
                                         Err(e) => {
                                             // Collect error and continue processing other statements
+                                            self.collected_errors.push(e);
+                                        }
+                                    }
+                                }
+                                parser::ExprKind::Return(_) => {
+                                    // Return expression - convert to TypedStatement::Return
+                                    // so infer_return_type_from_body can extract the return type
+                                    match self.lower_expression(expr) {
+                                        Ok(typed_expr) => {
+                                            if let TypedExpressionKind::Return { value } =
+                                                typed_expr.kind
+                                            {
+                                                statements.push(TypedStatement::Return {
+                                                    value: value.map(|v| *v),
+                                                    source_location: self
+                                                        .context
+                                                        .span_to_location(&expr.span),
+                                                });
+                                            } else {
+                                                statements.push(TypedStatement::Expression {
+                                                    expression: typed_expr,
+                                                    source_location: self
+                                                        .context
+                                                        .span_to_location(&expr.span),
+                                                });
+                                            }
+                                        }
+                                        Err(e) => {
                                             self.collected_errors.push(e);
                                         }
                                     }

@@ -2239,6 +2239,56 @@ pub extern "C" fn haxe_unbox_int_ptr(ptr: *mut u8) -> i64 {
     }
 }
 
+/// Safely coerce a Dynamic-typed value to an integer.
+/// If the pointer is a genuinely boxed DynamicValue* (properly aligned, valid type_id),
+/// unbox it. Otherwise, treat the pointer value itself as a raw integer.
+/// This handles the ambiguity between boxed DynamicValue* and type-erased raw integers.
+#[no_mangle]
+pub extern "C" fn haxe_coerce_dynamic_to_int(ptr: *mut u8) -> i64 {
+    if ptr.is_null() {
+        return 0;
+    }
+    let addr = ptr as usize;
+    // DynamicValue is 16 bytes, heap-allocated, so must be aligned to 8.
+    // Raw integer values (0..small_number) are typically NOT aligned to 8 AND
+    // are small values. Heap pointers are large (> 0x1000 on all platforms).
+    if addr >= 0x1000 && (addr & 7) == 0 {
+        // Looks like a valid heap pointer — try reading as DynamicValue
+        unsafe {
+            let dynamic_ptr = ptr as *const DynamicValue;
+            let dynamic = *dynamic_ptr;
+            // Validate type_id: known primitive types or reasonable class type_id
+            let tid = dynamic.type_id.0;
+            if tid <= 5 || (tid > 100 && tid < u32::MAX - 10) {
+                return haxe_unbox_int(dynamic);
+            }
+        }
+    }
+    // Not a valid DynamicValue* — treat pointer value as raw integer
+    addr as i64
+}
+
+/// Safely coerce a Dynamic-typed value to a float.
+/// Same heuristic as haxe_coerce_dynamic_to_int.
+#[no_mangle]
+pub extern "C" fn haxe_coerce_dynamic_to_float(ptr: *mut u8) -> f64 {
+    if ptr.is_null() {
+        return 0.0;
+    }
+    let addr = ptr as usize;
+    if addr >= 0x1000 && (addr & 7) == 0 {
+        unsafe {
+            let dynamic_ptr = ptr as *const DynamicValue;
+            let dynamic = *dynamic_ptr;
+            let tid = dynamic.type_id.0;
+            if tid <= 5 || (tid > 100 && tid < u32::MAX - 10) {
+                return haxe_unbox_float(dynamic);
+            }
+        }
+    }
+    addr as i64 as f64
+}
+
 /// Unbox a Float from Dynamic (takes opaque pointer to DynamicValue)
 #[no_mangle]
 pub extern "C" fn haxe_unbox_float_ptr(ptr: *mut u8) -> f64 {
