@@ -2153,6 +2153,7 @@ impl StdlibMapping {
     // Values are type-erased at runtime (stored as pointers).
 
     fn register_stringmap_methods(&mut self) {
+        use IrTypeDescriptor::*;
         let mappings = vec![
             // Constructor: new StringMap<T>() -> StringMap<T>
             // Returns pointer directly (primitive return style)
@@ -2166,9 +2167,11 @@ impl StdlibMapping {
             // Returns raw u64 bits, compiler casts back to resolved type parameter T
             map_method!(instance "StringMap", "get" => "haxe_stringmap_get", params: 1, returns: raw_value),
             // StringMap<T>::exists(key: String) -> Bool
-            map_method!(instance "StringMap", "exists" => "haxe_stringmap_exists", params: 1, returns: primitive),
+            map_method!(instance "StringMap", "exists" => "haxe_stringmap_exists", params: 1, returns: primitive,
+                types: &[PtrU8, PtrString] => Bool),
             // StringMap<T>::remove(key: String) -> Bool
-            map_method!(instance "StringMap", "remove" => "haxe_stringmap_remove", params: 1, returns: primitive),
+            map_method!(instance "StringMap", "remove" => "haxe_stringmap_remove", params: 1, returns: primitive,
+                types: &[PtrU8, PtrString] => Bool),
             // StringMap<T>::clear() -> Void
             map_method!(instance "StringMap", "clear" => "haxe_stringmap_clear", params: 0, returns: void),
             // StringMap<T>::toString() -> String
@@ -2187,6 +2190,7 @@ impl StdlibMapping {
     // Values are type-erased at runtime (stored as pointers).
 
     fn register_intmap_methods(&mut self) {
+        use IrTypeDescriptor::*;
         // Parameter indices (0-indexed, including self):
         // - 0: self (map_ptr)
         // - 1: key (Int, needs i32->i64 extension)
@@ -2204,10 +2208,12 @@ impl StdlibMapping {
             map_method!(instance "IntMap", "get" => "haxe_intmap_get", params: 1, returns: raw_value, extend_i64: 0b010),
             // IntMap<T>::exists(key: Int) -> Bool
             // Key is extended from i32 to i64
-            map_method!(instance "IntMap", "exists" => "haxe_intmap_exists", params: 1, returns: primitive, extend_i64: 0b010),
+            map_method!(instance "IntMap", "exists" => "haxe_intmap_exists", params: 1, returns: primitive,
+                types: &[PtrU8, I64] => Bool),
             // IntMap<T>::remove(key: Int) -> Bool
             // Key is extended from i32 to i64
-            map_method!(instance "IntMap", "remove" => "haxe_intmap_remove", params: 1, returns: primitive, extend_i64: 0b010),
+            map_method!(instance "IntMap", "remove" => "haxe_intmap_remove", params: 1, returns: primitive,
+                types: &[PtrU8, I64] => Bool),
             // IntMap<T>::clear() -> Void
             map_method!(instance "IntMap", "clear" => "haxe_intmap_clear", params: 0, returns: void),
             // IntMap<T>::toString() -> String
@@ -2219,6 +2225,7 @@ impl StdlibMapping {
     }
 
     fn register_objectmap_methods(&mut self) {
+        use IrTypeDescriptor::*;
         // Parameter indices (0-indexed after self):
         // - 1: key (object pointer — already 64-bit, no conversion needed)
         // - 2: value (T, needs raw u64 conversion for set)
@@ -2231,9 +2238,11 @@ impl StdlibMapping {
             // ObjectMap<K,V>::get(key: K) -> V (as u64)
             map_method!(instance "ObjectMap", "get" => "haxe_objectmap_get", params: 1, returns: raw_value),
             // ObjectMap<K,V>::exists(key: K) -> Bool
-            map_method!(instance "ObjectMap", "exists" => "haxe_objectmap_exists", params: 1, returns: primitive),
+            map_method!(instance "ObjectMap", "exists" => "haxe_objectmap_exists", params: 1, returns: primitive,
+                types: &[PtrU8, I64] => Bool),
             // ObjectMap<K,V>::remove(key: K) -> Bool
-            map_method!(instance "ObjectMap", "remove" => "haxe_objectmap_remove", params: 1, returns: primitive),
+            map_method!(instance "ObjectMap", "remove" => "haxe_objectmap_remove", params: 1, returns: primitive,
+                types: &[PtrU8, I64] => Bool),
             // ObjectMap<K,V>::clear() -> Void
             map_method!(instance "ObjectMap", "clear" => "haxe_objectmap_clear", params: 0, returns: void),
             // ObjectMap<K,V>::toString() -> String

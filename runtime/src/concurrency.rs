@@ -265,7 +265,7 @@ pub unsafe extern "C" fn rayzor_thread_spawn(
 /// # Safety
 /// - handle must be a valid pointer from rayzor_thread_spawn
 /// - handle is consumed and should not be used after this call
-/// - returns the i32 result cast to *mut u8
+/// - returns the result as a boxed DynamicValue* (via haxe_box_int_ptr)
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_thread_join(handle: *mut u8) -> *mut u8 {
     if handle.is_null() {
@@ -276,7 +276,9 @@ pub unsafe extern "C" fn rayzor_thread_join(handle: *mut u8) -> *mut u8 {
     let boxed_handle: Box<JoinHandle<i32>> = Box::from_raw(handle as *mut JoinHandle<i32>);
     let result = boxed_handle.join().unwrap_or(-1);
     ACTIVE_THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
-    result as usize as *mut u8
+    // Box the result as a DynamicValue* so the compiler can properly unbox it
+    // (matching the convention used by Channel and other generic containers)
+    crate::type_system::haxe_box_int_ptr(result as i64)
 }
 
 /// Check if a thread has finished executing

@@ -907,6 +907,14 @@ register_symbol!(
 );
 register_symbol!("haxe_unbox_int_ptr", crate::type_system::haxe_unbox_int_ptr);
 register_symbol!(
+    "haxe_coerce_dynamic_to_int",
+    crate::type_system::haxe_coerce_dynamic_to_int
+);
+register_symbol!(
+    "haxe_coerce_dynamic_to_float",
+    crate::type_system::haxe_coerce_dynamic_to_float
+);
+register_symbol!(
     "haxe_unbox_float_ptr",
     crate::type_system::haxe_unbox_float_ptr
 );
