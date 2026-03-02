@@ -4134,7 +4134,8 @@ impl<'a> HirToMirContext<'a> {
                     // Populate the exception's `stack` field with the current call stack trace.
                     // This must happen AFTER rayzor_update_call_frame_location (so the
                     // throw location is in the trace) but BEFORE rayzor_throw_typed.
-                    {
+                    // Only for class types (Exception subclasses), not primitive throws.
+                    if self.get_class_symbol(thrown_type).is_some() {
                         let stack_name = self.string_interner.intern("stack");
                         let stack_field = self.resolve_field_index_by_name(stack_name, thrown_type);
                         if let Some((_class_ty, field_idx)) = stack_field {
@@ -4877,7 +4878,7 @@ impl<'a> HirToMirContext<'a> {
             // Return None to let the caller's fallback chain handle resolution.
             // The caller has context-specific handlers (Dynamic method handler, function_map, etc.)
             // that work better than brute-force stdlib search for these cases.
-            TypeKind::TypeParameter { .. } | TypeKind::Dynamic | TypeKind::Placeholder { .. } => {
+            TypeKind::TypeParameter { .. } | TypeKind::Dynamic | TypeKind::Placeholder { .. } | TypeKind::Unknown => {
                 drop(type_table);
                 // Try qualified_name if available (e.g., for user-class methods like "test.Counter.increment")
                 if let Some(qname) = qualified_name {
@@ -6629,8 +6630,6 @@ impl<'a> HirToMirContext<'a> {
 
     /// Lower a HIR expression to MIR value
     fn lower_expression(&mut self, expr: &HirExpr) -> Option<IrId> {
-        // debug!("lower_expression - {:?}", std::mem::discriminant(&expr.kind));
-
         // DEBUG: Check if this is Field expression being lowered
         if matches!(&expr.kind, HirExprKind::Field { .. }) {
             debug!("[lower_expression] START - Field expression");
@@ -8266,6 +8265,19 @@ impl<'a> HirToMirContext<'a> {
                                     match &type_info.kind {
                                         TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
                                         TypeKind::Abstract { symbol_id, .. } => Some(*symbol_id),
+                                        TypeKind::GenericInstance { base_type, .. } => {
+                                            // For GenericInstance like ObjectMap<Point, Int>,
+                                            // resolve the base class/abstract symbol
+                                            if let Some(base_info) = type_table.get(*base_type) {
+                                                match &base_info.kind {
+                                                    TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                                                    TypeKind::Abstract { symbol_id, .. } => Some(*symbol_id),
+                                                    _ => None,
+                                                }
+                                            } else {
+                                                None
+                                            }
+                                        }
                                         _ => None,
                                     }
                                 } else {
@@ -9165,7 +9177,20 @@ impl<'a> HirToMirContext<'a> {
                             };
                         // Fallback: use find_receiver_class_name if monomorphized_var_types didn't have it
                         let receiver_class_hint_owned = receiver_class_hint_owned
-                            .or_else(|| self.find_receiver_class_name(receiver));
+                            .or_else(|| self.find_receiver_class_name(receiver))
+                            .or_else(|| {
+                                // Fallback: check register_class_hints for the receiver's MIR register.
+                                // This resolves class names for variables assigned from extern class
+                                // constructors (e.g., `var map = new ObjectMap<K,V>()`), where the
+                                // New handler stored a class hint on the result register.
+                                if let HirExprKind::Variable { symbol: recv_sym, .. } = &receiver.kind {
+                                    self.symbol_map.get(recv_sym).and_then(|reg| {
+                                        self.register_class_hints.get(reg).cloned()
+                                    })
+                                } else {
+                                    None
+                                }
+                            });
 
                         // SIMD4f detection: If the receiver type converts to VecF32x4, force
                         // the class hint to "rayzor_SIMD4f". This prevents the FALLBACK2 brute-force
@@ -10131,6 +10156,7 @@ impl<'a> HirToMirContext<'a> {
                                     TypeKind::Dynamic
                                         | TypeKind::TypeParameter { .. }
                                         | TypeKind::Placeholder { .. }
+                                        | TypeKind::Unknown
                                 ) {
                                     drop(type_table);
 

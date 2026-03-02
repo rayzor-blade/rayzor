@@ -78,6 +78,15 @@ fn declare_ereg_externs(builder: &mut MirBuilder) {
         .build();
     builder.mark_as_extern(func_id);
 
+    // haxe_ereg_matched_pos_anon(ereg: *mut u8) -> *mut u8 (anon handle {len, pos})
+    let func_id = builder
+        .begin_function("haxe_ereg_matched_pos_anon")
+        .param("ereg", ptr_u8.clone())
+        .returns(ptr_u8.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
     // haxe_ereg_match_sub(ereg: *mut u8, s: *const HaxeString, pos: i32, len: i32) -> i32
     let func_id = builder
         .begin_function("haxe_ereg_match_sub")

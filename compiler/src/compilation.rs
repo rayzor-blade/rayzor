@@ -3425,6 +3425,13 @@ impl CompilationUnit {
 
         let mut mir_module = mir_result.module;
 
+        // Dump MIR if requested
+        if std::env::var("RAYZOR_DUMP_MIR").is_ok() {
+            eprintln!("=== MIR DUMP for {} ===", filename);
+            eprintln!("{}", crate::ir::dump::dump_module(&mir_module));
+            eprintln!("=== END MIR DUMP ===");
+        }
+
         // Build BladeCachedMaps for BLADE cache (name-keyed, before ID-keyed accumulation consumes the data)
         if self.config.enable_cache {
             let cached_maps = self.build_cached_maps_from_mir_result(
