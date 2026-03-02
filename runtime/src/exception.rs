@@ -97,7 +97,7 @@ pub extern "C" fn rayzor_throw_typed(exception_value: i64, type_id: u32) {
             if !state.current_stack_trace.is_empty() {
                 eprintln!("{}", state.current_stack_trace);
             }
-            std::process::abort();
+            std::process::exit(1);
         }
     });
 }

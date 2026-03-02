@@ -199,6 +199,46 @@ pub extern "C" fn haxe_ereg_matched_pos(ereg: *mut u8, out_pos: *mut i32, out_le
     }
 }
 
+/// Return matchedPos() as an anonymous object `{len:Int, pos:Int}`.
+/// Fields are alphabetically sorted: len (index 0), pos (index 1).
+/// Uses a fixed shape_id (1000) for the {len, pos} shape.
+#[no_mangle]
+pub extern "C" fn haxe_ereg_matched_pos_anon(ereg: *mut u8) -> *mut u8 {
+    use crate::anon_object::{rayzor_anon_new, rayzor_anon_set_field_by_index, rayzor_ensure_shape};
+    use std::sync::Once;
+
+    // Register shape once: fields sorted alphabetically, type 3 = Int
+    static INIT: Once = Once::new();
+    const SHAPE_ID: u32 = 1000;
+    INIT.call_once(|| {
+        let descriptor = rust_str_to_hs("len:3,pos:3");
+        rayzor_ensure_shape(SHAPE_ID, descriptor);
+    });
+
+    let (pos, len) = if ereg.is_null() {
+        (-1i64, 0i64)
+    } else {
+        unsafe {
+            let ereg_ref = &*(ereg as *mut HaxeEReg);
+            if let Some(captures) = &ereg_ref.last_captures {
+                if let Some(Some((start, end))) = captures.first() {
+                    (*start as i64, (*end - *start) as i64)
+                } else {
+                    (-1, 0)
+                }
+            } else {
+                (-1, 0)
+            }
+        }
+    };
+
+    // Create anon object {len: Int, pos: Int}
+    let handle = rayzor_anon_new(SHAPE_ID, 2);
+    rayzor_anon_set_field_by_index(handle, 0, len as u64);  // len at index 0
+    rayzor_anon_set_field_by_index(handle, 1, pos as u64);  // pos at index 1
+    handle
+}
+
 /// Match a substring of s starting at pos with optional length.
 /// len = -1 means match to end of string.
 /// Returns 1 if match found, 0 otherwise.

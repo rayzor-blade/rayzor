@@ -3268,26 +3268,38 @@ impl StdlibMapping {
 
         let mappings = vec![
             // Constructor: new EReg(pattern:String, opts:String) -> EReg (opaque pointer)
-            map_method!(constructor "EReg", "new" => "haxe_ereg_new", params: 2, returns: primitive),
+            map_method!(constructor "EReg", "new" => "haxe_ereg_new", params: 2, returns: primitive,
+                types: &[PtrString, PtrString] => PtrU8),
             // match(s:String):Bool — test match, update state
-            map_method!(instance "EReg", "match" => "haxe_ereg_match", params: 1, returns: primitive),
+            map_method!(instance "EReg", "match" => "haxe_ereg_match", params: 1, returns: primitive,
+                types: &[PtrU8, PtrString] => I32),
             // matched(n:Int):String — get nth capture group
-            map_method!(instance "EReg", "matched" => "haxe_ereg_matched", params: 1, returns: primitive),
+            map_method!(instance "EReg", "matched" => "haxe_ereg_matched", params: 1, returns: primitive,
+                types: &[PtrU8, I32] => String),
             // matchedLeft():String — substring before match
-            map_method!(instance "EReg", "matchedLeft" => "haxe_ereg_matched_left", params: 0, returns: primitive),
+            map_method!(instance "EReg", "matchedLeft" => "haxe_ereg_matched_left", params: 0, returns: primitive,
+                types: &[PtrU8] => String),
             // matchedRight():String — substring after match
-            map_method!(instance "EReg", "matchedRight" => "haxe_ereg_matched_right", params: 0, returns: primitive),
+            map_method!(instance "EReg", "matchedRight" => "haxe_ereg_matched_right", params: 0, returns: primitive,
+                types: &[PtrU8] => String),
+            // matchedPos():{pos:Int, len:Int} — returns anon object with match position/length
+            map_method!(instance "EReg", "matchedPos" => "haxe_ereg_matched_pos_anon", params: 0, returns: primitive,
+                types: &[PtrU8] => PtrU8),
             // matchSub(s:String, pos:Int):Bool — 2-param version, len defaults to -1
             map_method!(instance "EReg", "matchSub" => "EReg_matchSub_2", params: 2, mir_wrapper,
                 types: &[PtrU8, PtrString, I32] => I32),
             // matchSub(s:String, pos:Int, len:Int):Bool — 3-param version
-            map_method!(instance "EReg", "matchSub" => "haxe_ereg_match_sub", params: 3, returns: primitive),
+            map_method!(instance "EReg", "matchSub" => "haxe_ereg_match_sub", params: 3, returns: primitive,
+                types: &[PtrU8, PtrString, I32, I32] => I32),
             // split(s:String):Array<String>
-            map_method!(instance "EReg", "split" => "haxe_ereg_split", params: 1, returns: primitive),
+            map_method!(instance "EReg", "split" => "haxe_ereg_split", params: 1, returns: primitive,
+                types: &[PtrU8, PtrString] => PtrU8),
             // replace(s:String, by:String):String
-            map_method!(instance "EReg", "replace" => "haxe_ereg_replace", params: 2, returns: primitive),
+            map_method!(instance "EReg", "replace" => "haxe_ereg_replace", params: 2, returns: primitive,
+                types: &[PtrU8, PtrString, PtrString] => String),
             // static escape(s:String):String
-            map_method!(static "EReg", "escape" => "haxe_ereg_escape", params: 1, returns: primitive),
+            map_method!(static "EReg", "escape" => "haxe_ereg_escape", params: 1, returns: primitive,
+                types: &[PtrString] => String),
         ];
 
         self.register_from_tuples(mappings);

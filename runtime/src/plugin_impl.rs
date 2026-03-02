@@ -1691,6 +1691,10 @@ register_symbol!(
     crate::ereg::haxe_ereg_matched_right
 );
 register_symbol!("haxe_ereg_matched_pos", crate::ereg::haxe_ereg_matched_pos);
+register_symbol!(
+    "haxe_ereg_matched_pos_anon",
+    crate::ereg::haxe_ereg_matched_pos_anon
+);
 register_symbol!("haxe_ereg_match_sub", crate::ereg::haxe_ereg_match_sub);
 register_symbol!("haxe_ereg_split", crate::ereg::haxe_ereg_split);
 register_symbol!("haxe_ereg_replace", crate::ereg::haxe_ereg_replace);

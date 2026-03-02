@@ -44,7 +44,7 @@ WORKDIR /rayzor
 COPY . .
 
 # Build the benchmark runner in release mode with all backends
-RUN cargo build --release --package compiler --features all-backends,tcc-linker \
+RUN cargo build --release --package compiler --features all-backends \
     --example benchmark_runner
 
 # Build the SIGSEGV handler shared library for crash diagnosis
