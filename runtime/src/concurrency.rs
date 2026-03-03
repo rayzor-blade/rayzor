@@ -1265,7 +1265,9 @@ mod tests {
             assert!(!handle.is_null());
 
             let result = rayzor_thread_join(handle);
-            assert_eq!(result as *const () as usize, 42);
+            // rayzor_thread_join returns a boxed DynamicValue* — unbox to get the raw i64
+            let value = crate::type_system::haxe_unbox_int_ptr(result);
+            assert_eq!(value, 42);
         }
     }
 
