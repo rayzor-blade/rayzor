@@ -604,7 +604,10 @@ impl Monomorphizer {
                     for (block_id, inst_idx, new_callee_id) in &rewrites {
                         if let Some(block) = func.cfg.blocks.get_mut(block_id) {
                             if let Some(inst) = block.instructions.get_mut(*inst_idx) {
-                                if let IrInstruction::CallDirect { func_id, type_args, .. } = inst {
+                                if let IrInstruction::CallDirect {
+                                    func_id, type_args, ..
+                                } = inst
+                                {
                                     *func_id = *new_callee_id;
                                     type_args.clear(); // Clear stale erased type_args
                                     self.stats.call_sites_rewritten += 1;

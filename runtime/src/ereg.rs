@@ -204,7 +204,9 @@ pub extern "C" fn haxe_ereg_matched_pos(ereg: *mut u8, out_pos: *mut i32, out_le
 /// Uses a fixed shape_id (1000) for the {len, pos} shape.
 #[no_mangle]
 pub extern "C" fn haxe_ereg_matched_pos_anon(ereg: *mut u8) -> *mut u8 {
-    use crate::anon_object::{rayzor_anon_new, rayzor_anon_set_field_by_index, rayzor_ensure_shape};
+    use crate::anon_object::{
+        rayzor_anon_new, rayzor_anon_set_field_by_index, rayzor_ensure_shape,
+    };
     use std::sync::Once;
 
     // Register shape once: fields sorted alphabetically, type 3 = Int
@@ -234,8 +236,8 @@ pub extern "C" fn haxe_ereg_matched_pos_anon(ereg: *mut u8) -> *mut u8 {
 
     // Create anon object {len: Int, pos: Int}
     let handle = rayzor_anon_new(SHAPE_ID, 2);
-    rayzor_anon_set_field_by_index(handle, 0, len as u64);  // len at index 0
-    rayzor_anon_set_field_by_index(handle, 1, pos as u64);  // pos at index 1
+    rayzor_anon_set_field_by_index(handle, 0, len as u64); // len at index 0
+    rayzor_anon_set_field_by_index(handle, 1, pos as u64); // pos at index 1
     handle
 }
 

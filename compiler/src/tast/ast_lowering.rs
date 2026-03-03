@@ -4943,12 +4943,17 @@ impl<'a> AstLowering<'a> {
     /// This handles extern classes that were pre-registered as placeholders.
     fn ensure_symbol_has_class_type(&mut self, sym_id: SymbolId, type_id: TypeId) -> TypeId {
         if type_id == TypeId::invalid() || self.context.type_table.borrow().get(type_id).is_none() {
-            let class_type = self.context.type_table.borrow_mut().create_class_type(
-                sym_id,
-                Vec::new(),
-            );
-            self.context.symbol_table.update_symbol_type(sym_id, class_type);
-            self.context.symbol_table.register_type_symbol_mapping(class_type, sym_id);
+            let class_type = self
+                .context
+                .type_table
+                .borrow_mut()
+                .create_class_type(sym_id, Vec::new());
+            self.context
+                .symbol_table
+                .update_symbol_type(sym_id, class_type);
+            self.context
+                .symbol_table
+                .register_type_symbol_mapping(class_type, sym_id);
             class_type
         } else {
             type_id
@@ -5055,10 +5060,11 @@ impl<'a> AstLowering<'a> {
         // in root scope. Extern classes loaded via load_imports_efficiently may be
         // registered under their simple name, not the fully qualified path.
         if !type_path.package.is_empty() {
-            if let Some(symbol) = self.context.symbol_table.lookup_symbol(
-                ScopeId::first(),
-                name_interned,
-            ) {
+            if let Some(symbol) = self
+                .context
+                .symbol_table
+                .lookup_symbol(ScopeId::first(), name_interned)
+            {
                 let sym_id = symbol.id;
                 let type_id = symbol.type_id;
                 return Ok(self.ensure_symbol_has_class_type(sym_id, type_id));
@@ -7395,10 +7401,15 @@ impl<'a> AstLowering<'a> {
                                                         }
                                                         _ => (None, None),
                                                     };
-                                                    if let (Some(base_type), Some(ret_type_args)) = (base_type_opt, ret_type_args_opt) {
-                                                        let mut subs: Vec<(TypeId, TypeId)> = Vec::new();
+                                                    if let (Some(base_type), Some(ret_type_args)) =
+                                                        (base_type_opt, ret_type_args_opt)
+                                                    {
+                                                        let mut subs: Vec<(TypeId, TypeId)> =
+                                                            Vec::new();
                                                         for ret_ta in ret_type_args.iter() {
-                                                            if let Some(ta_info) = type_table.get(*ret_ta) {
+                                                            if let Some(ta_info) =
+                                                                type_table.get(*ret_ta)
+                                                            {
                                                                 if let crate::tast::core::TypeKind::TypeParameter {
                                                                     symbol_id: tp_sym,
                                                                     ..
@@ -7427,15 +7438,18 @@ impl<'a> AstLowering<'a> {
 
                                                         if !subs.is_empty() {
                                                             let base_type_val = base_type;
-                                                            let new_args: Vec<TypeId> = ret_type_args
-                                                                .iter()
-                                                                .map(|ta| {
-                                                                    subs.iter()
-                                                                        .find(|(old, _)| old == ta)
-                                                                        .map(|(_, new)| *new)
-                                                                        .unwrap_or(*ta)
-                                                                })
-                                                                .collect();
+                                                            let new_args: Vec<TypeId> =
+                                                                ret_type_args
+                                                                    .iter()
+                                                                    .map(|ta| {
+                                                                        subs.iter()
+                                                                            .find(|(old, _)| {
+                                                                                old == ta
+                                                                            })
+                                                                            .map(|(_, new)| *new)
+                                                                            .unwrap_or(*ta)
+                                                                    })
+                                                                    .collect();
                                                             drop(type_table);
                                                             self.context
                                                                 .type_table
@@ -9968,7 +9982,9 @@ impl<'a> AstLowering<'a> {
                                         type_args: Vec::new(),
                                     },
                                 );
-                                self.context.symbol_table.update_symbol_type(symbol_id, ereg_type);
+                                self.context
+                                    .symbol_table
+                                    .update_symbol_type(symbol_id, ereg_type);
                                 return Ok(ereg_type);
                             }
                         }
@@ -10446,9 +10462,7 @@ impl<'a> AstLowering<'a> {
 
             // Get the method symbol
             let method_type_id = match self.context.symbol_table.get_symbol(method_symbol) {
-                Some(symbol) if symbol.type_id.is_valid() => {
-                    symbol.type_id
-                }
+                Some(symbol) if symbol.type_id.is_valid() => symbol.type_id,
                 _ => {
                     // Method symbol has no type info (placeholder for built-in methods).
                     // Use infer_builtin_method_type to get the method's function type,
@@ -10479,15 +10493,27 @@ impl<'a> AstLowering<'a> {
             };
 
             // Compute the substitution
-            let sub_result = self.compute_type_substitution(return_type, receiver_type, &type_table);
+            let sub_result =
+                self.compute_type_substitution(return_type, receiver_type, &type_table);
             if matches!(sub_result, TypeSubstitutionResult::NoChange(_)) {
                 if let Some(rt_info) = type_table.get(return_type) {
-                    if let crate::tast::core::TypeKind::TypeParameter { symbol_id: ret_sym, .. } = &rt_info.kind {
+                    if let crate::tast::core::TypeKind::TypeParameter {
+                        symbol_id: ret_sym, ..
+                    } = &rt_info.kind
+                    {
                         if let Some(recv_info) = type_table.get(receiver_type) {
-                            if let crate::tast::core::TypeKind::GenericInstance { base_type, type_args: recv_type_args, .. } = &recv_info.kind {
+                            if let crate::tast::core::TypeKind::GenericInstance {
+                                base_type,
+                                type_args: recv_type_args,
+                                ..
+                            } = &recv_info.kind
+                            {
                                 if let Some(base_info) = type_table.get(*base_type) {
-                                    if let crate::tast::core::TypeKind::Class { type_args: base_params, .. } = &base_info.kind {
-                                    }
+                                    if let crate::tast::core::TypeKind::Class {
+                                        type_args: base_params,
+                                        ..
+                                    } = &base_info.kind
+                                    {}
                                 }
                             }
                         }
@@ -10579,7 +10605,10 @@ impl<'a> AstLowering<'a> {
                 }
                 // Fallback: name-based matching for extern class methods where the method's
                 // type parameter T has a different SymbolId than the class definition's T
-                let ret_param_name = self.context.symbol_table.get_symbol(*symbol_id)
+                let ret_param_name = self
+                    .context
+                    .symbol_table
+                    .get_symbol(*symbol_id)
                     .map(|s| s.name);
                 if let Some(ret_name) = ret_param_name {
                     for (i, param_type_id) in base_type_params.iter().enumerate() {
@@ -10589,7 +10618,10 @@ impl<'a> AstLowering<'a> {
                                 ..
                             } = &param_info.kind
                             {
-                                let param_name = self.context.symbol_table.get_symbol(*param_sym)
+                                let param_name = self
+                                    .context
+                                    .symbol_table
+                                    .get_symbol(*param_sym)
                                     .map(|s| s.name);
                                 if param_name == Some(ret_name) && i < type_args.len() {
                                     return TypeSubstitutionResult::DirectSubstitution(
@@ -12442,22 +12474,29 @@ impl<'a> AstLowering<'a> {
                 }
                 crate::tast::core::TypeKind::Class { symbol_id, .. } => {
                     // For extern classes with known methods, provide proper return types
-                    let class_name = self.context.symbol_table.get_symbol(*symbol_id)
+                    let class_name = self
+                        .context
+                        .symbol_table
+                        .get_symbol(*symbol_id)
                         .and_then(|s| self.context.string_interner.get(s.name))
                         .unwrap_or("");
                     match (class_name, field_name.as_str()) {
-                        ("EReg", "match" | "matchSub") => {
-                            Ok(type_table.bool_type())
-                        }
+                        ("EReg", "match" | "matchSub") => Ok(type_table.bool_type()),
                         ("EReg", "matched" | "matchedLeft" | "matchedRight" | "replace") => {
                             Ok(type_table.string_type())
                         }
                         ("EReg", "split") => {
                             let string_type = type_table.string_type();
                             drop(type_table);
-                            let array_of_strings = self.context.type_table.borrow_mut()
+                            let array_of_strings = self
+                                .context
+                                .type_table
+                                .borrow_mut()
                                 .create_array_type(string_type);
-                            Ok(self.context.type_table.borrow_mut()
+                            Ok(self
+                                .context
+                                .type_table
+                                .borrow_mut()
                                 .create_function_type(vec![string_type], array_of_strings))
                         }
                         _ => Ok(type_table.dynamic_type()),
