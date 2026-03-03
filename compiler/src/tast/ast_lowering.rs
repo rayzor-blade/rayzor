@@ -12440,6 +12440,29 @@ impl<'a> AstLowering<'a> {
                     drop(type_table);
                     self.infer_builtin_method_type(base, field_symbol)
                 }
+                crate::tast::core::TypeKind::Class { symbol_id, .. } => {
+                    // For extern classes with known methods, provide proper return types
+                    let class_name = self.context.symbol_table.get_symbol(*symbol_id)
+                        .and_then(|s| self.context.string_interner.get(s.name))
+                        .unwrap_or("");
+                    match (class_name, field_name.as_str()) {
+                        ("EReg", "match" | "matchSub") => {
+                            Ok(type_table.bool_type())
+                        }
+                        ("EReg", "matched" | "matchedLeft" | "matchedRight" | "replace") => {
+                            Ok(type_table.string_type())
+                        }
+                        ("EReg", "split") => {
+                            let string_type = type_table.string_type();
+                            drop(type_table);
+                            let array_of_strings = self.context.type_table.borrow_mut()
+                                .create_array_type(string_type);
+                            Ok(self.context.type_table.borrow_mut()
+                                .create_function_type(vec![string_type], array_of_strings))
+                        }
+                        _ => Ok(type_table.dynamic_type()),
+                    }
+                }
                 _ => Ok(type_table.dynamic_type()),
             }
         } else {
