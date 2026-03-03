@@ -572,9 +572,11 @@ impl Monomorphizer {
                         ..
                     } = inst
                     {
-                        // Only handle calls without type_args (already-monomorphized calls
-                        // with type_args are handled by the standard flow)
-                        if type_args.is_empty() && funcs_with_fixups.contains(callee_id) {
+                        // Handle calls to functions with fixups. Monomorphized clones
+                        // (created in Phase 3) may still carry stale erased type_args
+                        // (e.g., [I64, I64]) from before Phase 5 cleared them. We must
+                        // propagate regardless so transitive fixups get correct types.
+                        if funcs_with_fixups.contains(callee_id) {
                             // Specialize this callee with our substitution map
                             if let Some(callee) = module.functions.get(callee_id).cloned() {
                                 let (new_id, is_new) =
@@ -602,8 +604,9 @@ impl Monomorphizer {
                     for (block_id, inst_idx, new_callee_id) in &rewrites {
                         if let Some(block) = func.cfg.blocks.get_mut(block_id) {
                             if let Some(inst) = block.instructions.get_mut(*inst_idx) {
-                                if let IrInstruction::CallDirect { func_id, .. } = inst {
+                                if let IrInstruction::CallDirect { func_id, type_args, .. } = inst {
                                     *func_id = *new_callee_id;
+                                    type_args.clear(); // Clear stale erased type_args
                                     self.stats.call_sites_rewritten += 1;
                                 }
                             }
