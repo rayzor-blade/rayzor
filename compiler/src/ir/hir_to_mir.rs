@@ -7919,7 +7919,7 @@ impl<'a> HirToMirContext<'a> {
                                     .or_else(|| self.stdlib_mapping.find_by_name(cls, mn))
                                     .map(|(sig, mapping)| (sig.class, sig.method, mapping));
 
-                                if let Some((_class_name, _method_name, runtime_call)) =
+                                if let Some((sc_class_name, sc_method_name, runtime_call)) =
                                     static_stdlib_info
                                 {
                                     let runtime_func = runtime_call.runtime_name;
@@ -7928,6 +7928,7 @@ impl<'a> HirToMirContext<'a> {
                                     let has_return = runtime_call.has_return;
                                     let raw_value_params = runtime_call.raw_value_params;
                                     let extend_to_i64_params = runtime_call.extend_to_i64_params;
+                                    let explicit_return_type = runtime_call.return_type.map(|rt| rt.to_ir_type());
 
                                     // First, try special runtime calls that need custom MIR lowering
                                     // (e.g., Reflect.callMethod, Reflect.makeVarArgs, Type.typeof)
@@ -7958,7 +7959,9 @@ impl<'a> HirToMirContext<'a> {
                                                     params.push(self.convert_type(arg.ty));
                                                 }
                                             }
-                                            let ret_type = if returns_raw_value {
+                                            let ret_type = if let Some(ref ert) = explicit_return_type {
+                                                ert.clone()
+                                            } else if returns_raw_value {
                                                 IrType::U64
                                             } else if has_return {
                                                 result_type.clone()
@@ -8388,6 +8391,10 @@ impl<'a> HirToMirContext<'a> {
                                         let is_mir_wrapper = mapping.is_mir_wrapper;
                                         let runtime_name = mapping.runtime_name.to_string();
                                         let has_return = mapping.has_return;
+                                        let returns_raw_value = mapping.returns_raw_value;
+                                        let raw_value_params = mapping.raw_value_params;
+                                        let extend_to_i64_params = mapping.extend_to_i64_params;
+                                        let explicit_return_type = mapping.return_type.map(|rt| rt.to_ir_type());
                                         let mapping_is_static = sig.is_static;
                                         drop(type_table);
 
@@ -8514,13 +8521,38 @@ impl<'a> HirToMirContext<'a> {
                                                 args,
                                                 &mut arg_regs,
                                             );
-                                            let param_types: Vec<_> =
-                                                arg_regs.iter().map(|_| IrType::I64).collect();
-                                            let return_type = if has_return {
-                                                IrType::I64
-                                            } else {
-                                                IrType::Void
-                                            };
+
+                                            // Use explicit types from the types: descriptor when available
+                                            let (param_types, return_type) = self
+                                                .get_stdlib_mir_wrapper_signature(&runtime_name)
+                                                .unwrap_or_else(|| {
+                                                    let params: Vec<_> = arg_regs
+                                                        .iter()
+                                                        .enumerate()
+                                                        .map(|(i, r)| {
+                                                            let param_bit = 1u32 << i;
+                                                            if raw_value_params & param_bit != 0 {
+                                                                IrType::U64
+                                                            } else if extend_to_i64_params & param_bit != 0 {
+                                                                IrType::I64
+                                                            } else {
+                                                                self.builder
+                                                                    .get_register_type(*r)
+                                                                    .unwrap_or(IrType::I64)
+                                                            }
+                                                        })
+                                                        .collect();
+                                                    let ret = if let Some(ref ert) = explicit_return_type {
+                                                        ert.clone()
+                                                    } else if returns_raw_value {
+                                                        IrType::U64
+                                                    } else if has_return {
+                                                        result_type.clone()
+                                                    } else {
+                                                        IrType::Void
+                                                    };
+                                                    (params, ret)
+                                                });
 
                                             let extern_func_id = self
                                                 .get_or_register_extern_function(
@@ -8529,11 +8561,21 @@ impl<'a> HirToMirContext<'a> {
                                                     return_type.clone(),
                                                 );
 
-                                            return self.builder.build_call_direct(
+                                            let call_result = self.builder.build_call_direct(
                                                 extern_func_id,
                                                 arg_regs,
-                                                return_type,
+                                                return_type.clone(),
                                             );
+
+                                            // Auto-unbox if runtime returns Ptr(U8) but HIR expects primitive
+                                            if let Some(call_reg) = call_result {
+                                                return self.maybe_unbox_for_extern_return(
+                                                    call_reg,
+                                                    &return_type,
+                                                    &result_type,
+                                                );
+                                            }
+                                            return call_result;
                                         }
                                     }
                                 }
@@ -9938,7 +9980,6 @@ impl<'a> HirToMirContext<'a> {
                             .unwrap_or_else(|| self.convert_type(arg.ty));
 
                         let mut arg_type = actual_reg_type.clone();
-
                         // If the MIR type is Ptr(Void) but we have better type info from the symbol,
                         // use the symbol's type instead. This handles cases like trace(t) where t is
                         // a float from Sys.time() but the trace() signature says Dynamic.
