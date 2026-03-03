@@ -3568,7 +3568,9 @@ impl<'a> HirToMirContext<'a> {
                                 // field access skips haxe_unbox_reference_ptr.
                                 let is_dynamic_init = {
                                     let tt = self.type_table.borrow();
-                                    tt.get(init_expr.ty).map(|t| matches!(t.kind, TypeKind::Dynamic)).unwrap_or(false)
+                                    tt.get(init_expr.ty)
+                                        .map(|t| matches!(t.kind, TypeKind::Dynamic))
+                                        .unwrap_or(false)
                                 };
                                 let is_ptr_u8 = matches!(
                                     self.builder.get_register_type(value_reg),
@@ -4878,7 +4880,10 @@ impl<'a> HirToMirContext<'a> {
             // Return None to let the caller's fallback chain handle resolution.
             // The caller has context-specific handlers (Dynamic method handler, function_map, etc.)
             // that work better than brute-force stdlib search for these cases.
-            TypeKind::TypeParameter { .. } | TypeKind::Dynamic | TypeKind::Placeholder { .. } | TypeKind::Unknown => {
+            TypeKind::TypeParameter { .. }
+            | TypeKind::Dynamic
+            | TypeKind::Placeholder { .. }
+            | TypeKind::Unknown => {
                 drop(type_table);
                 // Try qualified_name if available (e.g., for user-class methods like "test.Counter.increment")
                 if let Some(qname) = qualified_name {
@@ -6553,7 +6558,8 @@ impl<'a> HirToMirContext<'a> {
                 }
                 TypeKind::Dynamic => {
                     // Params are Dynamic — infer from expression kind
-                    if let HirExprKind::Literal(crate::ir::hir::HirLiteral::String(_)) = &first.kind {
+                    if let HirExprKind::Literal(crate::ir::hir::HirLiteral::String(_)) = &first.kind
+                    {
                         return Some(Ok(5));
                     }
                     // Check if the expression is a variable with a known concrete type
@@ -6628,7 +6634,10 @@ impl<'a> HirToMirContext<'a> {
                     vec![ptr_u8.clone()],
                     IrType::Bool,
                 );
-                Some(self.builder.build_call_direct(func_id, vec![value_dyn], IrType::Bool))
+                Some(
+                    self.builder
+                        .build_call_direct(func_id, vec![value_dyn], IrType::Bool),
+                )
             }
             _ => None,
         }
@@ -7089,7 +7098,10 @@ impl<'a> HirToMirContext<'a> {
 
                 // Raw anonymous object handle: use haxe_reflect_field directly
                 // without haxe_unbox_reference_ptr (the handle is NOT a boxed DynamicValue*)
-                if let HirExprKind::Variable { symbol: obj_sym, .. } = &object.kind {
+                if let HirExprKind::Variable {
+                    symbol: obj_sym, ..
+                } = &object.kind
+                {
                     if self.raw_anon_symbols.contains(obj_sym) {
                         return self.raw_anon_reflect_field_read(obj_reg, *field, expr.ty);
                     }
@@ -7151,7 +7163,6 @@ impl<'a> HirToMirContext<'a> {
                     "[CALL] expr.ty={:?}, result_type={:?}, is_method={}",
                     expr.ty, result_type, is_method
                 );
-
 
                 // Static synthetic calls resolved as Variable — find parent class
                 if let HirExprKind::Variable { symbol, .. } = &callee.kind {
@@ -7795,13 +7806,14 @@ impl<'a> HirToMirContext<'a> {
                                                     params.push(self.convert_type(arg.ty));
                                                 }
                                                 // Use explicit return type from types: descriptor when available
-                                                let ret_type = if let Some(ref rt) = mapping.return_type {
-                                                    rt.to_ir_type()
-                                                } else if mapping.has_return {
-                                                    result_type.clone()
-                                                } else {
-                                                    IrType::Void
-                                                };
+                                                let ret_type =
+                                                    if let Some(ref rt) = mapping.return_type {
+                                                        rt.to_ir_type()
+                                                    } else if mapping.has_return {
+                                                        result_type.clone()
+                                                    } else {
+                                                        IrType::Void
+                                                    };
                                                 (params, ret_type)
                                             });
 
@@ -7974,7 +7986,10 @@ impl<'a> HirToMirContext<'a> {
 
                             // Also try to get class name from the object symbol directly
                             let static_class_name = static_class_name.or_else(|| {
-                                if let HirExprKind::Variable { symbol: obj_sym, .. } = &object.kind {
+                                if let HirExprKind::Variable {
+                                    symbol: obj_sym, ..
+                                } = &object.kind
+                                {
                                     self.symbol_table
                                         .get_symbol(*obj_sym)
                                         .and_then(|s| self.string_interner.get(s.name))
@@ -8002,16 +8017,19 @@ impl<'a> HirToMirContext<'a> {
                                     let has_return = runtime_call.has_return;
                                     let raw_value_params = runtime_call.raw_value_params;
                                     let extend_to_i64_params = runtime_call.extend_to_i64_params;
-                                    let explicit_return_type = runtime_call.return_type.map(|rt| rt.to_ir_type());
+                                    let explicit_return_type =
+                                        runtime_call.return_type.map(|rt| rt.to_ir_type());
 
                                     // First, try special runtime calls that need custom MIR lowering
                                     // (e.g., Reflect.callMethod, Reflect.makeVarArgs, Type.typeof)
-                                    if let Some(special_result) = self.try_lower_special_runtime_call(
-                                        runtime_func,
-                                        args,
-                                        result_type.clone(),
-                                        expr.source_location,
-                                    ) {
+                                    if let Some(special_result) = self
+                                        .try_lower_special_runtime_call(
+                                            runtime_func,
+                                            args,
+                                            result_type.clone(),
+                                            expr.source_location,
+                                        )
+                                    {
                                         return special_result;
                                     }
 
@@ -8024,24 +8042,22 @@ impl<'a> HirToMirContext<'a> {
                                                 let param_bit = 1u32 << i;
                                                 if raw_value_params & param_bit != 0 {
                                                     params.push(IrType::U64);
-                                                } else if extend_to_i64_params
-                                                    & param_bit
-                                                    != 0
-                                                {
+                                                } else if extend_to_i64_params & param_bit != 0 {
                                                     params.push(IrType::I64);
                                                 } else {
                                                     params.push(self.convert_type(arg.ty));
                                                 }
                                             }
-                                            let ret_type = if let Some(ref ert) = explicit_return_type {
-                                                ert.clone()
-                                            } else if returns_raw_value {
-                                                IrType::U64
-                                            } else if has_return {
-                                                result_type.clone()
-                                            } else {
-                                                IrType::Void
-                                            };
+                                            let ret_type =
+                                                if let Some(ref ert) = explicit_return_type {
+                                                    ert.clone()
+                                                } else if returns_raw_value {
+                                                    IrType::U64
+                                                } else if has_return {
+                                                    result_type.clone()
+                                                } else {
+                                                    IrType::Void
+                                                };
                                             (params, ret_type)
                                         });
 
@@ -8347,8 +8363,12 @@ impl<'a> HirToMirContext<'a> {
                                             // resolve the base class/abstract symbol
                                             if let Some(base_info) = type_table.get(*base_type) {
                                                 match &base_info.kind {
-                                                    TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
-                                                    TypeKind::Abstract { symbol_id, .. } => Some(*symbol_id),
+                                                    TypeKind::Class { symbol_id, .. } => {
+                                                        Some(*symbol_id)
+                                                    }
+                                                    TypeKind::Abstract { symbol_id, .. } => {
+                                                        Some(*symbol_id)
+                                                    }
                                                     _ => None,
                                                 }
                                             } else {
@@ -8374,11 +8394,17 @@ impl<'a> HirToMirContext<'a> {
                             // For static class calls where object.ty is invalid (TypeId::MAX),
                             // extract the class symbol directly from the object Variable expression
                             let class_symbol_id = class_symbol_id.or_else(|| {
-                                if let HirExprKind::Variable { symbol: obj_sym, .. } = &object.kind {
+                                if let HirExprKind::Variable {
+                                    symbol: obj_sym, ..
+                                } = &object.kind
+                                {
                                     let sym = self.symbol_table.get_symbol(*obj_sym)?;
-                                    if matches!(sym.kind, crate::tast::SymbolKind::Class
-                                        | crate::tast::SymbolKind::Abstract
-                                        | crate::tast::SymbolKind::TypeAlias) {
+                                    if matches!(
+                                        sym.kind,
+                                        crate::tast::SymbolKind::Class
+                                            | crate::tast::SymbolKind::Abstract
+                                            | crate::tast::SymbolKind::TypeAlias
+                                    ) {
                                         return Some(*obj_sym);
                                     }
                                 }
@@ -8421,7 +8447,8 @@ impl<'a> HirToMirContext<'a> {
 
                                 // Also try bare class name as final fallback
                                 let class_name_opt = class_name_opt.or_else(|| {
-                                    self.symbol_table.get_symbol(sym_id)
+                                    self.symbol_table
+                                        .get_symbol(sym_id)
                                         .and_then(|s| self.string_interner.get(s.name))
                                         .map(|s| s.to_string())
                                 });
@@ -8468,24 +8495,28 @@ impl<'a> HirToMirContext<'a> {
                                         let returns_raw_value = mapping.returns_raw_value;
                                         let raw_value_params = mapping.raw_value_params;
                                         let extend_to_i64_params = mapping.extend_to_i64_params;
-                                        let explicit_return_type = mapping.return_type.map(|rt| rt.to_ir_type());
+                                        let explicit_return_type =
+                                            mapping.return_type.map(|rt| rt.to_ir_type());
                                         let mapping_is_static = sig.is_static;
                                         drop(type_table);
 
                                         // First, try special runtime calls that need custom MIR lowering
                                         // (e.g., Reflect.callMethod, Reflect.makeVarArgs, Type.typeof)
-                                        if let Some(special_result) = self.try_lower_special_runtime_call(
-                                            &runtime_name,
-                                            args,
-                                            result_type.clone(),
-                                            expr.source_location,
-                                        ) {
+                                        if let Some(special_result) = self
+                                            .try_lower_special_runtime_call(
+                                                &runtime_name,
+                                                args,
+                                                result_type.clone(),
+                                                expr.source_location,
+                                            )
+                                        {
                                             return special_result;
                                         }
 
                                         // Std.string on ValueType enum values needs special routing
                                         // (same check that trace/interpolation paths do)
-                                        if runtime_name == "haxe_std_string_ptr" && args.len() == 1 {
+                                        if runtime_name == "haxe_std_string_ptr" && args.len() == 1
+                                        {
                                             if self.expr_is_value_type_expr(&args[0]) {
                                                 let arg_reg = self.lower_expression(&args[0])?;
                                                 return self.convert_value_type_to_string(arg_reg);
@@ -8496,45 +8527,68 @@ impl<'a> HirToMirContext<'a> {
                                         // route to haxe_reflect_compare_typed. This avoids boxing
                                         // and ensures string comparison works correctly.
                                         // Must be done before the arg boxing loop below.
-                                        if runtime_name == "haxe_reflect_compare" && args.len() >= 2 {
-                                            let type_info = self.infer_reflect_compare_type_info(args);
+                                        if runtime_name == "haxe_reflect_compare" && args.len() >= 2
+                                        {
+                                            let type_info =
+                                                self.infer_reflect_compare_type_info(args);
                                             if let Some(info) = type_info {
                                                 let mut arg_regs = Vec::new();
                                                 for arg in args.iter() {
                                                     if let Some(reg) = self.lower_expression(arg) {
-                                                        let reg_ty = self.builder.get_register_type(reg).unwrap_or(IrType::I64);
+                                                        let reg_ty = self
+                                                            .builder
+                                                            .get_register_type(reg)
+                                                            .unwrap_or(IrType::I64);
                                                         let final_reg = if reg_ty != IrType::I64 {
-                                                            self.builder.build_cast(reg, reg_ty, IrType::I64).unwrap_or(reg)
-                                                        } else { reg };
+                                                            self.builder
+                                                                .build_cast(
+                                                                    reg,
+                                                                    reg_ty,
+                                                                    IrType::I64,
+                                                                )
+                                                                .unwrap_or(reg)
+                                                        } else {
+                                                            reg
+                                                        };
                                                         arg_regs.push(final_reg);
                                                     }
                                                 }
                                                 let tag_reg = match info {
-                                                    Ok(tag_value) => {
-                                                        self.builder.build_const(IrValue::I32(tag_value))?
-                                                    }
+                                                    Ok(tag_value) => self
+                                                        .builder
+                                                        .build_const(IrValue::I32(tag_value))?,
                                                     Err(type_param_name) => {
                                                         // Generic: placeholder tag with fixup
-                                                        let tag = self.builder.build_const(IrValue::I32(0))?;
-                                                        if let Some(func) = self.builder.current_function_mut() {
-                                                            func.type_param_tag_fixups.push((tag, type_param_name));
+                                                        let tag = self
+                                                            .builder
+                                                            .build_const(IrValue::I32(0))?;
+                                                        if let Some(func) =
+                                                            self.builder.current_function_mut()
+                                                        {
+                                                            func.type_param_tag_fixups
+                                                                .push((tag, type_param_name));
                                                         }
                                                         tag
                                                     }
                                                 };
                                                 arg_regs.push(tag_reg);
-                                                let extern_func_id = self.get_or_register_extern_function(
-                                                    "haxe_reflect_compare_typed",
-                                                    vec![IrType::I64, IrType::I64, IrType::I32],
-                                                    IrType::I64,
-                                                );
+                                                let extern_func_id = self
+                                                    .get_or_register_extern_function(
+                                                        "haxe_reflect_compare_typed",
+                                                        vec![IrType::I64, IrType::I64, IrType::I32],
+                                                        IrType::I64,
+                                                    );
                                                 let call_result = self.builder.build_call_direct(
                                                     extern_func_id,
                                                     arg_regs,
                                                     IrType::I64,
                                                 )?;
                                                 if result_type == IrType::I32 {
-                                                    return self.builder.build_cast(call_result, IrType::I64, IrType::I32);
+                                                    return self.builder.build_cast(
+                                                        call_result,
+                                                        IrType::I64,
+                                                        IrType::I32,
+                                                    );
                                                 }
                                                 return Some(call_result);
                                             }
@@ -8664,7 +8718,10 @@ impl<'a> HirToMirContext<'a> {
                                                             let param_bit = 1u32 << i;
                                                             if raw_value_params & param_bit != 0 {
                                                                 IrType::U64
-                                                            } else if extend_to_i64_params & param_bit != 0 {
+                                                            } else if extend_to_i64_params
+                                                                & param_bit
+                                                                != 0
+                                                            {
                                                                 IrType::I64
                                                             } else {
                                                                 self.builder
@@ -8673,7 +8730,9 @@ impl<'a> HirToMirContext<'a> {
                                                             }
                                                         })
                                                         .collect();
-                                                    let ret = if let Some(ref ert) = explicit_return_type {
+                                                    let ret = if let Some(ref ert) =
+                                                        explicit_return_type
+                                                    {
                                                         ert.clone()
                                                     } else if returns_raw_value {
                                                         IrType::U64
@@ -9113,7 +9172,11 @@ impl<'a> HirToMirContext<'a> {
                         use crate::tast::SymbolKind;
                         if sym.kind == SymbolKind::EnumVariant
                             || (sym.kind == SymbolKind::Function
-                                && self.symbol_table.find_parent_enum_for_constructor(*symbol).is_some()) {
+                                && self
+                                    .symbol_table
+                                    .find_parent_enum_for_constructor(*symbol)
+                                    .is_some())
+                        {
                             // Find the parent enum and variant index
                             if let Some(parent_enum_id) =
                                 self.symbol_table.find_parent_enum_for_constructor(*symbol)
@@ -9181,7 +9244,11 @@ impl<'a> HirToMirContext<'a> {
                                             // When is_method=true, args[0] is the enum class reference
                                             // (receiver), not a constructor field. Skip it.
                                             let constructor_args: &[HirExpr] = if *is_method {
-                                                if args.len() > 1 { &args[1..] } else { &[] }
+                                                if args.len() > 1 {
+                                                    &args[1..]
+                                                } else {
+                                                    &[]
+                                                }
                                             } else {
                                                 args
                                             };
@@ -9356,10 +9423,13 @@ impl<'a> HirToMirContext<'a> {
                                 // This resolves class names for variables assigned from extern class
                                 // constructors (e.g., `var map = new ObjectMap<K,V>()`), where the
                                 // New handler stored a class hint on the result register.
-                                if let HirExprKind::Variable { symbol: recv_sym, .. } = &receiver.kind {
-                                    self.symbol_map.get(recv_sym).and_then(|reg| {
-                                        self.register_class_hints.get(reg).cloned()
-                                    })
+                                if let HirExprKind::Variable {
+                                    symbol: recv_sym, ..
+                                } = &receiver.kind
+                                {
+                                    self.symbol_map
+                                        .get(recv_sym)
+                                        .and_then(|reg| self.register_class_hints.get(reg).cloned())
                                 } else {
                                     None
                                 }
@@ -9446,7 +9516,8 @@ impl<'a> HirToMirContext<'a> {
                                 let raw_value_params = runtime_call.raw_value_params;
                                 let extend_to_i64_params = runtime_call.extend_to_i64_params;
                                 let has_return = runtime_call.has_return;
-                                let explicit_return_type = runtime_call.return_type.map(|t| t.to_ir_type());
+                                let explicit_return_type =
+                                    runtime_call.return_type.map(|t| t.to_ir_type());
                                 debug!(
                                     "[EXTERN METHOD VAR] Redirecting {}.{} -> {} (instance={}, mir_wrapper={})",
                                     class_name,
@@ -9465,8 +9536,8 @@ impl<'a> HirToMirContext<'a> {
                                         Some(format!("MIR_WRAPPER:{}", runtime_func));
 
                                     // Get the MIR wrapper's expected signature for auto-boxing/unboxing
-                                    let mir_wrapper_sig = self
-                                        .get_stdlib_mir_wrapper_signature(runtime_func);
+                                    let mir_wrapper_sig =
+                                        self.get_stdlib_mir_wrapper_signature(runtime_func);
 
                                     // Lower receiver + args with auto-boxing
                                     // When MIR wrapper expects Ptr(U8) but arg is a concrete primitive
@@ -9479,22 +9550,30 @@ impl<'a> HirToMirContext<'a> {
                                             continue; // Skip class receiver for static methods
                                         }
                                         if let Some(reg) = self.lower_expression(arg) {
-                                            let actual_ty = self.builder
+                                            let actual_ty = self
+                                                .builder
                                                 .get_register_type(reg)
                                                 .unwrap_or(IrType::I64);
-                                            let param_idx = if is_instance_method { i } else { i - 1 };
+                                            let param_idx =
+                                                if is_instance_method { i } else { i - 1 };
                                             let expected_ty = mir_wrapper_sig
                                                 .as_ref()
-                                                .and_then(|(params, _)| params.get(param_idx).cloned())
+                                                .and_then(|(params, _)| {
+                                                    params.get(param_idx).cloned()
+                                                })
                                                 .unwrap_or_else(|| actual_ty.clone());
 
                                             // Check if this arg is a type-erased pointer (I64 from
                                             // TypeParameter/class/GenericInstance) vs a concrete
                                             // primitive (I32/F64/Bool). Type-erased pointers should
                                             // be CAST to Ptr(U8), not BOXED as integers.
-                                            let is_type_erased_ptr = matches!(actual_ty, IrType::I64) && {
-                                                let type_table = self.type_table.borrow();
-                                                type_table.get(arg.ty).map(|ti| matches!(
+                                            let is_type_erased_ptr =
+                                                matches!(actual_ty, IrType::I64) && {
+                                                    let type_table = self.type_table.borrow();
+                                                    type_table
+                                                        .get(arg.ty)
+                                                        .map(|ti| {
+                                                            matches!(
                                                     ti.kind,
                                                     crate::tast::TypeKind::TypeParameter { .. }
                                                     | crate::tast::TypeKind::Class { .. }
@@ -9502,18 +9581,22 @@ impl<'a> HirToMirContext<'a> {
                                                     | crate::tast::TypeKind::Interface { .. }
                                                     | crate::tast::TypeKind::Dynamic
                                                     | crate::tast::TypeKind::Placeholder { .. }
-                                                )).unwrap_or(false)
-                                            };
+                                                )
+                                                        })
+                                                        .unwrap_or(false)
+                                                };
 
                                             let final_reg = if is_type_erased_ptr
                                                 && matches!(&expected_ty, IrType::Ptr(_))
                                             {
                                                 // Cast I64 → Ptr(U8) for type-erased pointers
-                                                self.builder.build_cast(
-                                                    reg,
-                                                    IrType::I64,
-                                                    expected_ty.clone(),
-                                                ).unwrap_or(reg)
+                                                self.builder
+                                                    .build_cast(
+                                                        reg,
+                                                        IrType::I64,
+                                                        expected_ty.clone(),
+                                                    )
+                                                    .unwrap_or(reg)
                                             } else {
                                                 self.maybe_box_for_extern_call(
                                                     reg,
@@ -9568,7 +9651,10 @@ impl<'a> HirToMirContext<'a> {
                                             type_table
                                                 .get(receiver_type)
                                                 .and_then(|ti| match &ti.kind {
-                                                    crate::tast::TypeKind::Class { type_args, .. }
+                                                    crate::tast::TypeKind::Class {
+                                                        type_args,
+                                                        ..
+                                                    }
                                                     | crate::tast::TypeKind::GenericInstance {
                                                         type_args,
                                                         ..
@@ -11080,7 +11166,6 @@ impl<'a> HirToMirContext<'a> {
                             // Calculate param_count for overload disambiguation: args[0] is receiver, rest are params
                             let method_param_count =
                                 if args.len() > 1 { args.len() - 1 } else { 0 };
-
 
                             if let Some((class_name, method_name, runtime_call)) = self
                                 .get_stdlib_runtime_info(
@@ -12970,9 +13055,16 @@ impl<'a> HirToMirContext<'a> {
                                             // Cast value args to I64 — haxe_reflect_compare_typed
                                             // takes type-erased i64 values, not typed structs
                                             for i in 0..arg_regs.len().min(2) {
-                                                let reg_ty = self.builder.get_register_type(arg_regs[i]).unwrap_or(IrType::I64);
+                                                let reg_ty = self
+                                                    .builder
+                                                    .get_register_type(arg_regs[i])
+                                                    .unwrap_or(IrType::I64);
                                                 if reg_ty != IrType::I64 {
-                                                    if let Some(cast) = self.builder.build_cast(arg_regs[i], reg_ty, IrType::I64) {
+                                                    if let Some(cast) = self.builder.build_cast(
+                                                        arg_regs[i],
+                                                        reg_ty,
+                                                        IrType::I64,
+                                                    ) {
                                                         arg_regs[i] = cast;
                                                     }
                                                 }
@@ -14097,9 +14189,16 @@ impl<'a> HirToMirContext<'a> {
                                             // Cast value args to I64 — haxe_reflect_compare_typed
                                             // takes type-erased i64 values, not typed structs
                                             for i in 0..arg_regs.len().min(2) {
-                                                let reg_ty = self.builder.get_register_type(arg_regs[i]).unwrap_or(IrType::I64);
+                                                let reg_ty = self
+                                                    .builder
+                                                    .get_register_type(arg_regs[i])
+                                                    .unwrap_or(IrType::I64);
                                                 if reg_ty != IrType::I64 {
-                                                    if let Some(cast) = self.builder.build_cast(arg_regs[i], reg_ty, IrType::I64) {
+                                                    if let Some(cast) = self.builder.build_cast(
+                                                        arg_regs[i],
+                                                        reg_ty,
+                                                        IrType::I64,
+                                                    ) {
                                                         arg_regs[i] = cast;
                                                     }
                                                 }
@@ -15565,9 +15664,13 @@ impl<'a> HirToMirContext<'a> {
 
                             // Determine concrete type from the non-Dynamic side
                             let concrete_ty = if lhs_is_dyn {
-                                self.builder.get_register_type(rhs_reg).unwrap_or(IrType::I32)
+                                self.builder
+                                    .get_register_type(rhs_reg)
+                                    .unwrap_or(IrType::I32)
                             } else {
-                                self.builder.get_register_type(lhs_reg).unwrap_or(IrType::I32)
+                                self.builder
+                                    .get_register_type(lhs_reg)
+                                    .unwrap_or(IrType::I32)
                             };
 
                             let is_float = matches!(concrete_ty, IrType::F32 | IrType::F64);
@@ -15578,21 +15681,43 @@ impl<'a> HirToMirContext<'a> {
                             let coerce_dyn = |s: &mut Self, reg: IrId| -> Option<IrId> {
                                 let reg_ty = s.builder.get_register_type(reg);
                                 // Already concrete? No coercion needed.
-                                if reg_ty.as_ref().map(|t| matches!(t,
-                                    IrType::I32 | IrType::I64 | IrType::F32 | IrType::F64 | IrType::Bool
-                                )).unwrap_or(false) {
+                                if reg_ty
+                                    .as_ref()
+                                    .map(|t| {
+                                        matches!(
+                                            t,
+                                            IrType::I32
+                                                | IrType::I64
+                                                | IrType::F32
+                                                | IrType::F64
+                                                | IrType::Bool
+                                        )
+                                    })
+                                    .unwrap_or(false)
+                                {
                                     return Some(reg);
                                 }
                                 let ptr_void = IrType::Ptr(Box::new(IrType::Void));
                                 if is_float {
                                     let f = s.get_or_register_extern_function(
-                                        "haxe_coerce_dynamic_to_float", vec![ptr_void], IrType::F64);
+                                        "haxe_coerce_dynamic_to_float",
+                                        vec![ptr_void],
+                                        IrType::F64,
+                                    );
                                     s.builder.build_call_direct(f, vec![reg], IrType::F64)
                                 } else {
                                     let f = s.get_or_register_extern_function(
-                                        "haxe_coerce_dynamic_to_int", vec![ptr_void], IrType::I64);
-                                    let v = s.builder.build_call_direct(f, vec![reg], IrType::I64)?;
-                                    Some(s.builder.build_cast(v, IrType::I64, concrete_ty.clone()).unwrap_or(v))
+                                        "haxe_coerce_dynamic_to_int",
+                                        vec![ptr_void],
+                                        IrType::I64,
+                                    );
+                                    let v =
+                                        s.builder.build_call_direct(f, vec![reg], IrType::I64)?;
+                                    Some(
+                                        s.builder
+                                            .build_cast(v, IrType::I64, concrete_ty.clone())
+                                            .unwrap_or(v),
+                                    )
                                 }
                             };
 
@@ -15604,11 +15729,9 @@ impl<'a> HirToMirContext<'a> {
 
                             let mir_op = self.convert_binary_op_to_mir(*op);
                             let result_reg = match mir_op {
-                                MirBinaryOp::Binary(arith_op) => self.builder.build_binop(
-                                    arith_op,
-                                    lhs_reg,
-                                    rhs_reg,
-                                )?,
+                                MirBinaryOp::Binary(arith_op) => {
+                                    self.builder.build_binop(arith_op, lhs_reg, rhs_reg)?
+                                }
                                 MirBinaryOp::Compare(cmp_op) => {
                                     self.builder.build_cmp(cmp_op, lhs_reg, rhs_reg)?
                                 }
@@ -19468,9 +19591,7 @@ impl<'a> HirToMirContext<'a> {
             // Function types also pass through: most callees (Thread.spawn, array.map)
             // expect raw closure pointers, not boxed DynamicValue. Reflection APIs that
             // need boxed functions (Reflect.isFunction) handle boxing at their call sites.
-            IrType::Function { .. } | IrType::Ptr(_) | IrType::String | IrType::Any => {
-                Some(value)
-            }
+            IrType::Function { .. } | IrType::Ptr(_) | IrType::String | IrType::Any => Some(value),
             // Other types - pass through without boxing (may cause issues, but let's see)
             _ => {
                 debug!("[EXTERN BOXING] Skipping boxing for type {:?}", actual_ty);
@@ -19706,7 +19827,8 @@ impl<'a> HirToMirContext<'a> {
 
                 // Resolve whether this enum is boxed
                 // Try effective_type first, fall back to pattern's enum_type if unresolvable
-                let enum_symbol = self.resolve_enum_symbol(effective_type)
+                let enum_symbol = self
+                    .resolve_enum_symbol(effective_type)
                     .or_else(|| self.resolve_enum_symbol(*enum_type));
                 let is_boxed = enum_symbol.map_or(false, |s| self.enum_is_boxed(s));
                 if !is_boxed || fields.is_empty() {
@@ -25163,7 +25285,10 @@ impl<'a> HirToMirContext<'a> {
                             IrInstruction::BinOp { dest, left, .. } if *dest == *ret_reg => {
                                 // Infer from left operand type (BinOp preserves operand type)
                                 if let Some(local) = function.locals.get(left) {
-                                    debug!("Inferred type from BinOp left operand local: {:?}", local.ty);
+                                    debug!(
+                                        "Inferred type from BinOp left operand local: {:?}",
+                                        local.ty
+                                    );
                                     return local.ty.clone();
                                 }
                                 if let Some(ty) = function.register_types.get(left) {
@@ -25180,7 +25305,10 @@ impl<'a> HirToMirContext<'a> {
                                     return local.ty.clone();
                                 }
                                 if let Some(ty) = function.register_types.get(operand) {
-                                    debug!("Inferred type from UnOp operand register_types: {:?}", ty);
+                                    debug!(
+                                        "Inferred type from UnOp operand register_types: {:?}",
+                                        ty
+                                    );
                                     return ty.clone();
                                 }
                                 return IrType::I64;
@@ -25192,7 +25320,10 @@ impl<'a> HirToMirContext<'a> {
 
                 // Instruction scan didn't match — try register_types for the return register
                 if let Some(ty) = function.register_types.get(ret_reg) {
-                    debug!("Inferred return type from register_types for ret_reg: {:?}", ty);
+                    debug!(
+                        "Inferred return type from register_types for ret_reg: {:?}",
+                        ty
+                    );
                     return ty.clone();
                 }
             }

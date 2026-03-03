@@ -3752,7 +3752,9 @@ impl CompilationUnit {
             // A MirWrapper function with an empty CFG means the stdlib merge failed
             // to find the implementation — this would cause wrong values at runtime.
             for (func_id, func) in &mir_module.functions {
-                if func.cfg.blocks.is_empty() && !matches!(func.kind, crate::ir::FunctionKind::ExternC) {
+                if func.cfg.blocks.is_empty()
+                    && !matches!(func.kind, crate::ir::FunctionKind::ExternC)
+                {
                     eprintln!(
                         "warning: empty function body after stdlib merge: '{}' (ID {}) kind={:?}",
                         func.name, func_id.0, func.kind
