@@ -4938,6 +4938,23 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Resolve a TypePath to a TypeId for constructor calls
+    /// Ensure a symbol has a valid class type. If its type_id is invalid or has
+    /// no entry in the type_table, create a Class type and link it to the symbol.
+    /// This handles extern classes that were pre-registered as placeholders.
+    fn ensure_symbol_has_class_type(&mut self, sym_id: SymbolId, type_id: TypeId) -> TypeId {
+        if type_id == TypeId::invalid() || self.context.type_table.borrow().get(type_id).is_none() {
+            let class_type = self.context.type_table.borrow_mut().create_class_type(
+                sym_id,
+                Vec::new(),
+            );
+            self.context.symbol_table.update_symbol_type(sym_id, class_type);
+            self.context.symbol_table.register_type_symbol_mapping(class_type, sym_id);
+            class_type
+        } else {
+            type_id
+        }
+    }
+
     fn resolve_type_path(&mut self, type_path: &parser::TypePath) -> LoweringResult<TypeId> {
         // Try to resolve using the import resolver first — user imports take priority
         // over top-level stdlib builtins (Array, Map, etc.)
@@ -4957,7 +4974,9 @@ impl<'a> AstLowering<'a> {
                 .lookup_symbol(qualified_path)
             {
                 if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
-                    return Ok(symbol.type_id);
+                    let sym_id = symbol.id;
+                    let type_id = symbol.type_id;
+                    return Ok(self.ensure_symbol_has_class_type(sym_id, type_id));
                 }
             }
         }
@@ -4981,7 +5000,9 @@ impl<'a> AstLowering<'a> {
                     .find_symbols_by_name(name_interned, current_package);
                 if let Some((_, symbol_id)) = package_segments.first() {
                     if let Some(symbol) = self.context.symbol_table.get_symbol(*symbol_id) {
-                        return Ok(symbol.type_id);
+                        let sym_id = symbol.id;
+                        let type_id = symbol.type_id;
+                        return Ok(self.ensure_symbol_has_class_type(sym_id, type_id));
                     }
                 }
             }
@@ -5005,7 +5026,9 @@ impl<'a> AstLowering<'a> {
             .lookup_symbol(&qualified_path)
         {
             if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
-                return Ok(symbol.type_id);
+                let sym_id = symbol.id;
+                let type_id = symbol.type_id;
+                return Ok(self.ensure_symbol_has_class_type(sym_id, type_id));
             }
         }
 
@@ -5023,28 +5046,43 @@ impl<'a> AstLowering<'a> {
             ScopeId::first(), // Look in root scope for type definitions
             interned_name,
         ) {
-            // Return the type associated with this symbol
-            Ok(symbol.type_id)
-        } else {
-            // Type not found - create a placeholder and defer resolution
-            let placeholder_type = self
-                .context
-                .type_table
-                .borrow_mut()
-                .create_type(crate::tast::core::TypeKind::Unknown);
-
-            // Add to deferred resolutions for later processing
-            self.resolution_state
-                .deferred_resolutions
-                .push(DeferredTypeResolution {
-                    type_name: full_path.clone(),
-                    target_type_id: placeholder_type,
-                    location: self.context.create_location(),
-                    type_params: Vec::new(), // For constructor calls, we don't need type params here
-                });
-
-            Ok(placeholder_type)
+            let sym_id = symbol.id;
+            let type_id = symbol.type_id;
+            return Ok(self.ensure_symbol_has_class_type(sym_id, type_id));
         }
+
+        // For qualified names (e.g., "haxe.ds.IntMap"), also try the simple name
+        // in root scope. Extern classes loaded via load_imports_efficiently may be
+        // registered under their simple name, not the fully qualified path.
+        if !type_path.package.is_empty() {
+            if let Some(symbol) = self.context.symbol_table.lookup_symbol(
+                ScopeId::first(),
+                name_interned,
+            ) {
+                let sym_id = symbol.id;
+                let type_id = symbol.type_id;
+                return Ok(self.ensure_symbol_has_class_type(sym_id, type_id));
+            }
+        }
+
+        // Type not found - create a placeholder and defer resolution
+        let placeholder_type = self
+            .context
+            .type_table
+            .borrow_mut()
+            .create_type(crate::tast::core::TypeKind::Unknown);
+
+        // Add to deferred resolutions for later processing
+        self.resolution_state
+            .deferred_resolutions
+            .push(DeferredTypeResolution {
+                type_name: full_path.clone(),
+                target_type_id: placeholder_type,
+                location: self.context.create_location(),
+                type_params: Vec::new(), // For constructor calls, we don't need type params here
+            });
+
+        Ok(placeholder_type)
     }
 
     /// Resolve built-in types
@@ -6792,7 +6830,6 @@ impl<'a> AstLowering<'a> {
                 let (body, return_type) = if matches!(&expr.kind, ExprKind::Block(_)) {
                     let body = self.lower_function_body(expr)?;
                     let return_type = self.infer_return_type_from_body(&body);
-                    eprintln!("DBG-ARROW-BLOCK: inferred return_type={:?}, kind={:?}", return_type, self.context.type_table.borrow().get(return_type).map(|i| i.kind.clone()));
                     (body, return_type)
                 } else {
                     let body_expr = self.lower_expression(expr)?;
@@ -7372,7 +7409,6 @@ impl<'a> AstLowering<'a> {
                                                                             continue;
                                                                         }
                                                                         let arg_ty = arg_exprs[pi].expr_type;
-                                                                        eprintln!("DBG-GENERIC-SUB: matching T_sym={:?} param_ty={:?} arg_ty={:?} arg_kind={:?}", tp_sym, param_ty, arg_ty, type_table.get(arg_ty).map(|i| i.kind.clone()));
                                                                         if let Some(concrete) =
                                                                             Self::match_type_param_in_types(
                                                                                 *tp_sym,
@@ -7381,7 +7417,6 @@ impl<'a> AstLowering<'a> {
                                                                                 &type_table,
                                                                             )
                                                                         {
-                                                                            eprintln!("DBG-GENERIC-SUB: resolved concrete={:?} kind={:?}", concrete, type_table.get(concrete).map(|i| i.kind.clone()));
                                                                             subs.push((*ret_ta, concrete));
                                                                             break;
                                                                         }
@@ -8043,11 +8078,6 @@ impl<'a> AstLowering<'a> {
 
         // Build the TypedExpression for the non-early-return paths
         let expr_type = self.infer_expression_type(&kind)?;
-        if let TypedExpressionKind::MethodCall { method_symbol, .. } = &kind {
-            let name = self.context.symbol_table.get_symbol(*method_symbol)
-                .and_then(|s| self.context.string_interner.get(s.name));
-            eprintln!("DBG-TAST-MC: method={:?} expr_type={:?}", name, expr_type);
-        }
         let usage = self.determine_variable_usage(&kind);
         let lifetime_id = self.assign_lifetime(&kind, &expr_type);
         let metadata = self.analyze_expression_metadata(&kind);
@@ -10417,8 +10447,6 @@ impl<'a> AstLowering<'a> {
             // Get the method symbol
             let method_type_id = match self.context.symbol_table.get_symbol(method_symbol) {
                 Some(symbol) if symbol.type_id.is_valid() => {
-                    eprintln!("DBG-METHOD-RET: method_symbol={:?} type_id={:?} valid, receiver_type={:?} kind={:?}",
-                        method_symbol, symbol.type_id, receiver_type, type_table.get(receiver_type).map(|i| i.kind.clone()));
                     symbol.type_id
                 }
                 _ => {
@@ -10459,8 +10487,6 @@ impl<'a> AstLowering<'a> {
                             if let crate::tast::core::TypeKind::GenericInstance { base_type, type_args: recv_type_args, .. } = &recv_info.kind {
                                 if let Some(base_info) = type_table.get(*base_type) {
                                     if let crate::tast::core::TypeKind::Class { type_args: base_params, .. } = &base_info.kind {
-                                        eprintln!("DBG-SUB-MISMATCH: ret_sym={:?}, base_params={:?}, recv_type_args={:?}",
-                                            ret_sym, base_params.iter().map(|p| (p, type_table.get(*p).map(|i| &i.kind).cloned())).collect::<Vec<_>>(), recv_type_args);
                                     }
                                 }
                             }
@@ -10472,7 +10498,6 @@ impl<'a> AstLowering<'a> {
         };
 
         // Phase 2: Create new type if needed (with mutable borrow)
-        eprintln!("DBG-METHOD-RESULT: sub_result={:?}", substitution_result);
         match substitution_result {
             TypeSubstitutionResult::NoChange(type_id) => Ok(type_id),
             TypeSubstitutionResult::DirectSubstitution(type_id) => Ok(type_id),

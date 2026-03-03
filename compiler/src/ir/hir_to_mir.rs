@@ -7073,22 +7073,6 @@ impl<'a> HirToMirContext<'a> {
                     .map(|&ty_id| self.convert_type(ty_id))
                     .collect();
 
-                // Temporary diagnostic for generic type propagation debugging
-                {
-                    let callee_name = match &callee.kind {
-                        HirExprKind::Variable { symbol, .. } => self.symbol_table.get_symbol(*symbol)
-                            .and_then(|s| self.string_interner.get(s.name)).unwrap_or("?"),
-                        HirExprKind::Field { field, .. } => self.symbol_table.get_symbol(*field)
-                            .and_then(|s| self.string_interner.get(s.name)).unwrap_or("?field"),
-                        _ => "?other",
-                    };
-                    eprintln!("DBG-MIR-CALL: callee={}, expr.ty={:?}, result_type={:?}, is_method={}, callee_kind={}", callee_name, expr.ty, result_type, is_method,
-                        match &callee.kind {
-                            HirExprKind::Variable { .. } => "Variable",
-                            HirExprKind::Field { .. } => "Field",
-                            _ => "Other",
-                        });
-                }
                 debug!(
                     "[CALL] expr.ty={:?}, result_type={:?}, is_method={}",
                     expr.ty, result_type, is_method
@@ -7457,9 +7441,6 @@ impl<'a> HirToMirContext<'a> {
                             method_name_interned
                                 .and_then(|name| self.resolve_method_function_id(object.ty, name))
                         });
-                    if matches!(method_name, Some("join") | Some("tryReceive") | Some("get") | Some("send") | Some("clone")) {
-                        eprintln!("DBG-FIELD-FUNCID: method={:?}, maybe_func_id={:?}, object.ty={:?}", method_name, maybe_func_id, object.ty);
-                    }
                     if let Some(func_id) = maybe_func_id {
                         // FIRST: Try to route through runtime mapping for extern class methods
                         // Check if there's a runtime mapping using the standard approach
@@ -7556,10 +7537,6 @@ impl<'a> HirToMirContext<'a> {
                         if let Some((class_name, method_name, runtime_call)) = stdlib_info {
                             let runtime_func = runtime_call.runtime_name;
                             let is_mir_wrapper = runtime_call.is_mir_wrapper;
-                            if matches!(method_name, "join" | "tryReceive" | "get" | "send") {
-                                eprintln!("DBG-FIELD-DISPATCH: class={}, method={}, runtime={}, is_mir_wrapper={}, object.ty={:?}, result_type={:?}",
-                                    class_name, method_name, runtime_func, is_mir_wrapper, object.ty, result_type);
-                            }
                             // Method redirected via runtime mapping
 
                             // Get expected parameter types from the extern function signature
@@ -7584,8 +7561,11 @@ impl<'a> HirToMirContext<'a> {
                                             params.push(self.convert_type(arg.ty));
                                         }
                                     }
-                                    // Use U64 return for returns_raw_value, Void for no return
-                                    let ret_type = if runtime_call.returns_raw_value {
+                                    // Use explicit return type from types: descriptor when available,
+                                    // otherwise fall back to legacy inference
+                                    let ret_type = if let Some(ref rt) = runtime_call.return_type {
+                                        rt.to_ir_type()
+                                    } else if runtime_call.returns_raw_value {
                                         IrType::U64
                                     } else if runtime_call.has_return {
                                         result_type.clone()
@@ -7691,16 +7671,6 @@ impl<'a> HirToMirContext<'a> {
                                     result_type.clone()
                                 }
                             };
-                            if matches!(method_name, "join" | "tryReceive" | "get" | "send") {
-                                eprintln!("DBG-FIELD-UNBOX: runtime={}, actual_return={:?}, result_type={:?}, resolved_expected={:?}, needs_resolve={}, object.ty={:?}",
-                                    runtime_func, actual_return_type, result_type, resolved_expected,
-                                    result_type == IrType::Any || matches!(&result_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void)) || result_type == IrType::I64,
-                                    object.ty);
-                                let tt = self.type_table.borrow();
-                                if let Some(ti) = tt.get(object.ty) {
-                                    eprintln!("DBG-FIELD-UNBOX: object type kind={:?}", ti.kind);
-                                }
-                            }
                             return self.maybe_unbox_for_extern_return(
                                 call_result,
                                 &actual_return_type,
@@ -7750,8 +7720,10 @@ impl<'a> HirToMirContext<'a> {
                                                 for arg in args {
                                                     params.push(self.convert_type(arg.ty));
                                                 }
-                                                // Use Void if function doesn't return a value
-                                                let ret_type = if mapping.has_return {
+                                                // Use explicit return type from types: descriptor when available
+                                                let ret_type = if let Some(ref rt) = mapping.return_type {
+                                                    rt.to_ir_type()
+                                                } else if mapping.has_return {
                                                     result_type.clone()
                                                 } else {
                                                     IrType::Void
@@ -10937,23 +10909,6 @@ impl<'a> HirToMirContext<'a> {
                             let method_param_count =
                                 if args.len() > 1 { args.len() - 1 } else { 0 };
 
-                            // DBG: trace stdlib dispatch for join/tryReceive
-                            {
-                                let dbg_method = self.symbol_table.get_symbol(*symbol)
-                                    .and_then(|s| self.string_interner.get(s.name));
-                                let dbg_kind = {
-                                    let tt = self.type_table.borrow();
-                                    tt.get(receiver_type).map(|ti| format!("{:?}", std::mem::discriminant(&ti.kind)))
-                                };
-                                if matches!(dbg_method, Some("join") | Some("tryReceive") | Some("get") | Some("send")) {
-                                    eprintln!("DBG-DISPATCH: method={:?}, receiver_type={:?}, kind={:?}, param_count={}", dbg_method, receiver_type, dbg_kind, method_param_count);
-                                    let info = self.get_stdlib_runtime_info(*symbol, receiver_type, Some(method_param_count), None);
-                                    eprintln!("DBG-DISPATCH: get_stdlib_runtime_info returned is_some={}", info.is_some());
-                                    if let Some((cn, mn, rc)) = info {
-                                        eprintln!("DBG-DISPATCH: class={}, method={}, runtime={}, is_mir_wrapper={}", cn, mn, rc.runtime_name, rc.is_mir_wrapper);
-                                    }
-                                }
-                            }
 
                             if let Some((class_name, method_name, runtime_call)) = self
                                 .get_stdlib_runtime_info(
@@ -11161,10 +11116,6 @@ impl<'a> HirToMirContext<'a> {
                                         arg_regs,
                                         mir_actual_return.clone(),
                                     )?;
-                                    eprintln!(
-                                        "DBG-MIR-WRAPPER: func={}, call_result={:?}, mir_actual_return={:?}, resolved_result_type={:?}",
-                                        mir_func_name, call_result, mir_actual_return, resolved_result_type
-                                    );
                                     // Auto-unbox if MIR wrapper returns Ptr(U8) but caller expects primitive
                                     // (e.g., Channel<Int>.tryReceive() returns boxed int that needs unboxing)
                                     return self.maybe_unbox_for_extern_return(
