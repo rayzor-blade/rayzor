@@ -6528,6 +6528,55 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// Infer type info for Reflect.compare args.
+    /// Returns:
+    /// - `Some(Ok(tag))` for concrete types (Int=1, Bool=2, Float=4, String=5)
+    /// - `Some(Err(type_param_name))` for generic type parameters (needs fixup)
+    /// - `None` for Dynamic/unknown (fall through to boxing path)
+    fn infer_reflect_compare_type_info(&self, args: &[HirExpr]) -> Option<Result<i32, String>> {
+        use crate::tast::core::TypeKind;
+        let first = &args[0];
+        let type_table = self.type_table.borrow();
+        if let Some(ti) = type_table.get(first.ty) {
+            match &ti.kind {
+                TypeKind::Int => return Some(Ok(1)),
+                TypeKind::Float => return Some(Ok(4)),
+                TypeKind::Bool => return Some(Ok(2)),
+                TypeKind::String => return Some(Ok(5)),
+                TypeKind::TypeParameter { symbol_id, .. } => {
+                    if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
+                        if let Some(name_str) = self.string_interner.get(sym.name) {
+                            return Some(Err(name_str.to_string()));
+                        }
+                    }
+                    return Some(Err("T".to_string()));
+                }
+                TypeKind::Dynamic => {
+                    // Params are Dynamic — infer from expression kind
+                    if let HirExprKind::Literal(crate::ir::hir::HirLiteral::String(_)) = &first.kind {
+                        return Some(Ok(5));
+                    }
+                    // Check if the expression is a variable with a known concrete type
+                    if let HirExprKind::Variable { symbol, .. } = &first.kind {
+                        if let Some(sym) = self.symbol_table.get_symbol(*symbol) {
+                            if let Some(sym_ti) = type_table.get(sym.type_id) {
+                                match &sym_ti.kind {
+                                    TypeKind::Int => return Some(Ok(1)),
+                                    TypeKind::Float => return Some(Ok(4)),
+                                    TypeKind::Bool => return Some(Ok(2)),
+                                    TypeKind::String => return Some(Ok(5)),
+                                    _ => {}
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     fn convert_value_type_to_string(&mut self, value: IrId) -> Option<IrId> {
         let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
         let conv_fn = self.get_or_register_extern_function(
@@ -8407,6 +8456,63 @@ impl<'a> HirToMirContext<'a> {
                                             expr.source_location,
                                         ) {
                                             return special_result;
+                                        }
+
+                                        // Std.string on ValueType enum values needs special routing
+                                        // (same check that trace/interpolation paths do)
+                                        if runtime_name == "haxe_std_string_ptr" && args.len() == 1 {
+                                            if self.expr_is_value_type_expr(&args[0]) {
+                                                let arg_reg = self.lower_expression(&args[0])?;
+                                                return self.convert_value_type_to_string(arg_reg);
+                                            }
+                                        }
+
+                                        // Reflect.compare: detect arg types from expressions and
+                                        // route to haxe_reflect_compare_typed. This avoids boxing
+                                        // and ensures string comparison works correctly.
+                                        // Must be done before the arg boxing loop below.
+                                        if runtime_name == "haxe_reflect_compare" && args.len() >= 2 {
+                                            let type_info = self.infer_reflect_compare_type_info(args);
+                                            if let Some(info) = type_info {
+                                                let mut arg_regs = Vec::new();
+                                                for arg in args.iter() {
+                                                    if let Some(reg) = self.lower_expression(arg) {
+                                                        let reg_ty = self.builder.get_register_type(reg).unwrap_or(IrType::I64);
+                                                        let final_reg = if reg_ty != IrType::I64 {
+                                                            self.builder.build_cast(reg, reg_ty, IrType::I64).unwrap_or(reg)
+                                                        } else { reg };
+                                                        arg_regs.push(final_reg);
+                                                    }
+                                                }
+                                                let tag_reg = match info {
+                                                    Ok(tag_value) => {
+                                                        self.builder.build_const(IrValue::I32(tag_value))?
+                                                    }
+                                                    Err(type_param_name) => {
+                                                        // Generic: placeholder tag with fixup
+                                                        let tag = self.builder.build_const(IrValue::I32(0))?;
+                                                        if let Some(func) = self.builder.current_function_mut() {
+                                                            func.type_param_tag_fixups.push((tag, type_param_name));
+                                                        }
+                                                        tag
+                                                    }
+                                                };
+                                                arg_regs.push(tag_reg);
+                                                let extern_func_id = self.get_or_register_extern_function(
+                                                    "haxe_reflect_compare_typed",
+                                                    vec![IrType::I64, IrType::I64, IrType::I32],
+                                                    IrType::I64,
+                                                );
+                                                let call_result = self.builder.build_call_direct(
+                                                    extern_func_id,
+                                                    arg_regs,
+                                                    IrType::I64,
+                                                )?;
+                                                if result_type == IrType::I32 {
+                                                    return self.builder.build_cast(call_result, IrType::I64, IrType::I32);
+                                                }
+                                                return Some(call_result);
+                                            }
                                         }
 
                                         // Lower args, auto-boxing primitives when the MIR wrapper
@@ -12836,6 +12942,18 @@ impl<'a> HirToMirContext<'a> {
                                         }
 
                                         if use_typed {
+                                            // Cast value args to I64 — haxe_reflect_compare_typed
+                                            // takes type-erased i64 values, not typed structs
+                                            for i in 0..arg_regs.len().min(2) {
+                                                let reg_ty = self.builder.get_register_type(arg_regs[i]).unwrap_or(IrType::I64);
+                                                if reg_ty != IrType::I64 {
+                                                    if let Some(cast) = self.builder.build_cast(arg_regs[i], reg_ty, IrType::I64) {
+                                                        arg_regs[i] = cast;
+                                                    }
+                                                }
+                                                arg_types[i] = IrType::I64;
+                                            }
+
                                             let tag_reg = if let Some(tp_name) = type_param_name {
                                                 let tag =
                                                     self.builder.build_const(IrValue::I32(0))?;
@@ -13951,6 +14069,18 @@ impl<'a> HirToMirContext<'a> {
                                         }
 
                                         if use_typed_compare {
+                                            // Cast value args to I64 — haxe_reflect_compare_typed
+                                            // takes type-erased i64 values, not typed structs
+                                            for i in 0..arg_regs.len().min(2) {
+                                                let reg_ty = self.builder.get_register_type(arg_regs[i]).unwrap_or(IrType::I64);
+                                                if reg_ty != IrType::I64 {
+                                                    if let Some(cast) = self.builder.build_cast(arg_regs[i], reg_ty, IrType::I64) {
+                                                        arg_regs[i] = cast;
+                                                    }
+                                                }
+                                                arg_types[i] = IrType::I64;
+                                            }
+
                                             // Emit type tag constant (placeholder 0 for generics, real value for concrete)
                                             let tag_reg = if let Some(tp_name) = type_param_name {
                                                 let tag =
@@ -15625,6 +15755,8 @@ impl<'a> HirToMirContext<'a> {
                         if !matches!(&target_kind, Some(TypeKind::Dynamic)) =>
                     {
                         let value_reg = self.lower_expression(expr)?;
+                        // DynamicValue boxing uses TAST TypeId (value_ty.as_raw()),
+                        // so downcast comparison must also use TAST TypeId for consistency.
                         let type_id_const = self
                             .builder
                             .build_const(IrValue::I64(target.as_raw() as i64))?;
@@ -15668,7 +15800,11 @@ impl<'a> HirToMirContext<'a> {
                             // Downcast or unrelated: runtime check via object header.
                             // haxe_safe_downcast_class reads raw TypeId from offset 0,
                             // walks hierarchy, and returns obj_ptr or null.
-                            let target_type_id = target.as_raw() as i64;
+                            // Must resolve MIR runtime type_id to match object headers.
+                            // Object headers store resolve_runtime_class_type_id().as_raw()
+                            // (the New handler subtracts 1000 from runtime_type_id()).
+                            let resolved = self.resolve_runtime_class_type_id(*target, tgt_sym);
+                            let target_type_id = resolved.as_raw() as i64;
                             let type_id_const =
                                 self.builder.build_const(IrValue::I64(target_type_id))?;
                             let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
@@ -21017,10 +21153,13 @@ impl<'a> HirToMirContext<'a> {
         let field_value = self.builder.build_load(field_ptr, gep_element_ty.clone())?;
 
         // Type erasure coercion: if field was loaded as I64 (erased type param),
-        // coerce to the concrete type expected by the caller
-        if field_is_type_param && field_ir_ty != IrType::I64 {
+        // coerce to the concrete type expected by the caller.
+        // Note: field_ir_ty is always I64 for type params (from convert_type(TypeParameter)),
+        // so we must check the RESOLVED type (field_ty) to detect when coercion is needed.
+        let expected_ir_ty = self.convert_type(field_ty);
+        if field_is_type_param && expected_ir_ty != IrType::I64 {
             let coerced = self.coerce_from_i64(field_value, field_ty)?;
-            self.builder.set_register_type(coerced, field_ir_ty);
+            self.builder.set_register_type(coerced, expected_ir_ty);
             return Some(coerced);
         }
 
@@ -22139,8 +22278,16 @@ impl<'a> HirToMirContext<'a> {
         // Only create result phi if BOTH branches return values (for expression-style ifs)
         // If only one returns a value, that's a type error - skip result phi
         if then_val.is_some() && else_val.is_some() {
-            // Determine result type from then expression's HIR type
-            let result_type = self.convert_type(then_expr.ty);
+            // Determine result type from the ACTUAL register types after harmonization,
+            // not the original HIR type (which may be pre-boxing, e.g. I32 before the
+            // type harmonization boxed it to Ptr(U8) to match a null branch).
+            let result_type = if let Some(tv) = then_val {
+                self.builder
+                    .get_register_type(tv)
+                    .unwrap_or_else(|| self.convert_type(then_expr.ty))
+            } else {
+                self.convert_type(then_expr.ty)
+            };
             let result = match self.builder.build_phi(merge_block, result_type.clone()) {
                 Some(r) => {
                     // debug!("Created result phi {:?}", r);
@@ -27101,13 +27248,49 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
                         }
+
+                        // Cross-module parent class fallback:
+                        // Collect parent fields from field_index_map (seeded from external modules).
+                        // These already include inherited fields from grandparent classes.
+                        let parent_sym = *parent_symbol;
+                        let mut parent_fields: Vec<(SymbolId, u32)> = Vec::new();
+                        for (field_sym, (class_ty, idx)) in &self.field_index_map {
+                            if *class_ty == parent_type_id
+                                || self.class_type_to_symbol.get(class_ty) == Some(&parent_sym)
+                            {
+                                parent_fields.push((*field_sym, *idx));
+                            }
+                        }
+                        parent_fields.sort_by_key(|(_, idx)| *idx);
+
+                        for (field_sym, _orig_idx) in &parent_fields {
+                            let field_name = self
+                                .symbol_table
+                                .get_symbol(*field_sym)
+                                .and_then(|s| self.string_interner.get(s.name))
+                                .unwrap_or("<unknown>")
+                                .to_string();
+                            let field_ir_type = self
+                                .symbol_table
+                                .get_symbol(*field_sym)
+                                .map(|s| self.convert_type(s.type_id))
+                                .unwrap_or(IrType::I64);
+
+                            // Re-map this field to the child class with correct index
+                            self.field_index_map
+                                .insert(*field_sym, (child_type, *field_index));
+
+                            fields.push(IrField {
+                                name: field_name,
+                                ty: field_ir_type,
+                                offset: None,
+                            });
+
+                            *field_index += 1;
+                        }
+                        return;
                     }
                 }
-
-                // eprintln!(
-                //     "WARNING: Could not find parent class for TypeId={:?}",
-                //     parent_type_id
-                // );
             }
         }
     }

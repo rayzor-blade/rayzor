@@ -266,6 +266,9 @@ impl DropPointAnalyzer {
                 let was_in_loop = self.in_loop;
                 self.in_loop = true;
 
+                // Mark iterator as escaping — it lives across all loop iterations
+                // and must not be freed by last-use analysis inside the loop body.
+                self.mark_escaping(iterator);
                 self.analyze_expr(iterator);
                 self.analyze_block(body);
 
