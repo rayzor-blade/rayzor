@@ -4700,6 +4700,24 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
+            // FALLBACK: Use receiver_class_hint if available.
+            // This handles monomorphized extern classes like Vec<Int> -> VecI32 where
+            // the receiver TypeId is not in type_table but the New handler stored a
+            // class hint on the receiver register.
+            if let Some(hint) = receiver_class_hint {
+                if let Some(count) = param_count {
+                    if let Some((sig, mapping)) =
+                        self.stdlib_mapping
+                            .find_by_name_and_params(hint, method_name, count)
+                    {
+                        return Some((sig.class, sig.method, mapping));
+                    }
+                }
+                if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(hint, method_name) {
+                    return Some((sig.class, sig.method, mapping));
+                }
+            }
+
             // No qualified name and no valid receiver type — cannot resolve stdlib method.
             // Do NOT brute-force search all stdlib classes by bare method name, as this
             // causes false positives (e.g., user field "current" matching Thread.current).
@@ -4971,9 +4989,13 @@ impl<'a> HirToMirContext<'a> {
 
         drop(type_table);
 
-        // Use monomorphized name if available, otherwise use base name
+        // Use monomorphized name if available, then receiver_class_hint, then base name.
+        // receiver_class_hint comes from the New handler (e.g., Vec<Int> -> "VecI32") and is
+        // needed when allow_generic_monomorphization is false (e.g., qualified_name is "Vec"
+        // not "rayzor.Vec" so the stdlib namespace check fails).
         let class_name = monomorphized_class_name
             .as_deref()
+            .or(receiver_class_hint)
             .unwrap_or(base_class_name);
 
         // Try to find this method in the stdlib mapping
@@ -6835,11 +6857,18 @@ impl<'a> HirToMirContext<'a> {
                                 matches!(&actual_type, IrType::String | IrType::F64 | IrType::F32)
                                     && expected_type == IrType::I64;
 
+                            // I64→I32 narrowing would truncate high bits (e.g., function pointers
+                            // from CC.getSymbol on 64-bit platforms). Extern functions return I64
+                            // but Haxe `Int` maps to I32; preserve the full I64 value.
+                            let actual_i64_expected_i32 =
+                                actual_type == IrType::I64 && expected_type == IrType::I32;
+
                             let should_skip_cast = (actual_is_ptr && !expected_is_ptr)  // pointer to scalar
                                 || (actual_is_specific && expected_is_void_ptr)          // specific type to void pointer
                                 || (actual_is_string_ptr && expected_is_void_ptr)        // Ptr(String) to Ptr(Void)
                                 || actual_is_vector // vector types (SIMD) should never be cast
-                                || actual_loses_info_to_i64; // TypeParameter erasure would lose concrete type
+                                || actual_loses_info_to_i64 // TypeParameter erasure would lose concrete type
+                                || actual_i64_expected_i32; // I64→I32 truncation would lose high bits
 
                             if should_skip_cast {
                                 debug!(
@@ -9564,7 +9593,7 @@ impl<'a> HirToMirContext<'a> {
                                                 .unwrap_or_else(|| actual_ty.clone());
 
                                             // Check if this arg is a type-erased pointer (I64 from
-                                            // TypeParameter/class/GenericInstance) vs a concrete
+                                            // TypeParameter/class/GenericInstance/Array) vs a concrete
                                             // primitive (I32/F64/Bool). Type-erased pointers should
                                             // be CAST to Ptr(U8), not BOXED as integers.
                                             let is_type_erased_ptr =
@@ -9581,6 +9610,7 @@ impl<'a> HirToMirContext<'a> {
                                                     | crate::tast::TypeKind::Interface { .. }
                                                     | crate::tast::TypeKind::Dynamic
                                                     | crate::tast::TypeKind::Placeholder { .. }
+                                                    | crate::tast::TypeKind::Array { .. }
                                                 )
                                                         })
                                                         .unwrap_or(false)
