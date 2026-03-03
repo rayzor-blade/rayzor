@@ -6605,6 +6605,31 @@ impl<'a> HirToMirContext<'a> {
             "haxe_type_typeof" | "Type.typeof" => {
                 Some(self.lower_type_typeof_call(args, result_type))
             }
+            // Reflect.isFunction / Reflect.isObject need boxed DynamicValue* args
+            // to inspect the type_id tag. Raw function/class pointers lack this tag,
+            // so we must box via box_value_for_dynamic (same as Type.typeof).
+            "haxe_reflect_is_function" | "haxe_reflect_is_object" => {
+                if args.len() != 1 {
+                    return None;
+                }
+                let value_reg = self.lower_expression(&args[0])?;
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let value_dyn = if matches!(
+                    self.builder.get_register_type(value_reg),
+                    Some(IrType::Ptr(ref inner)) if matches!(**inner, IrType::U8)
+                ) {
+                    // Already a PtrU8 (likely already boxed Dynamic) — pass through
+                    value_reg
+                } else {
+                    self.box_value_for_dynamic(value_reg, args[0].ty)?
+                };
+                let func_id = self.get_or_register_extern_function(
+                    runtime_func,
+                    vec![ptr_u8.clone()],
+                    IrType::Bool,
+                );
+                Some(self.builder.build_call_direct(func_id, vec![value_dyn], IrType::Bool))
+            }
             _ => None,
         }
     }
@@ -19439,8 +19464,13 @@ impl<'a> HirToMirContext<'a> {
                 self.builder
                     .build_call_direct(box_func_id, vec![value], ptr_u8)
             }
-            // Already a pointer type - no boxing needed
-            IrType::Ptr(_) | IrType::String | IrType::Any => Some(value),
+            // Already a pointer type (including function pointers) - no boxing needed.
+            // Function types also pass through: most callees (Thread.spawn, array.map)
+            // expect raw closure pointers, not boxed DynamicValue. Reflection APIs that
+            // need boxed functions (Reflect.isFunction) handle boxing at their call sites.
+            IrType::Function { .. } | IrType::Ptr(_) | IrType::String | IrType::Any => {
+                Some(value)
+            }
             // Other types - pass through without boxing (may cause issues, but let's see)
             _ => {
                 debug!("[EXTERN BOXING] Skipping boxing for type {:?}", actual_ty);
