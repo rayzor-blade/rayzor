@@ -6,6 +6,13 @@ class Main {
     }
 
     static function main() {
-        thrower();
+        try {
+            thrower();
+            trace("should not reach here");
+        } catch (e:Exception) {
+            trace(e.message);
+            trace("caught");
+        }
+        trace("done");
     }
 }
