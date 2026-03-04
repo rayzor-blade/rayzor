@@ -7693,18 +7693,28 @@ impl<'a> HirToMirContext<'a> {
                                 expected_param_types, actual_return_type
                             );
 
-                            // Lower the object (this will be the first parameter)
-                            let obj_reg = self.lower_expression(object)?;
+                            // For static stdlib methods (e.g., StringTools.startsWith via `using`),
+                            // the object is a class reference, NOT an instance receiver.
+                            // The args already include the real receiver (first arg from `using` desugaring).
+                            // Don't prepend the class reference as 'this'.
+                            let is_static_stdlib = !runtime_call.has_self_param;
 
-                            // Lower the arguments and auto-box if needed for generic extern classes
-                            let mut arg_regs = vec![obj_reg]; // 'this' as first arg
+                            let mut arg_regs = if is_static_stdlib {
+                                Vec::new()
+                            } else {
+                                // Lower the object (this will be the first parameter)
+                                let obj_reg = self.lower_expression(object)?;
+                                vec![obj_reg] // 'this' as first arg
+                            };
                             for (i, arg) in args.iter().enumerate() {
                                 let arg_reg = self.lower_expression(arg)?;
                                 let actual_ty = self.convert_type(arg.ty);
 
-                                // Get expected type for this argument (offset by 1 for 'this')
+                                // Get expected type for this argument
+                                // For instance methods, offset by 1 for 'this'
+                                let param_idx = if is_static_stdlib { i } else { i + 1 };
                                 let expected_ty = expected_param_types
-                                    .get(i + 1)
+                                    .get(param_idx)
                                     .cloned()
                                     .unwrap_or_else(|| actual_ty.clone());
 
@@ -7723,7 +7733,11 @@ impl<'a> HirToMirContext<'a> {
                                 expected_param_types.clone()
                             } else {
                                 // Fallback if lengths don't match
-                                let mut params = vec![IrType::Ptr(Box::new(IrType::U8))];
+                                let mut params = if is_static_stdlib {
+                                    Vec::new()
+                                } else {
+                                    vec![IrType::Ptr(Box::new(IrType::U8))]
+                                };
                                 for arg in args {
                                     params.push(self.convert_type(arg.ty));
                                 }
