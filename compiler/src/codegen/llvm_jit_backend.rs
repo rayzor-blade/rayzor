@@ -5316,6 +5316,17 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             return Ok(result.into());
         }
 
+        // Bool to integer cast (Bool is i8 but not in is_integer())
+        if *from_ty == IrType::Bool && to_ty.is_integer() {
+            let src_int = src.into_int_value();
+            let target_int_ty = target_llvm_ty.into_int_type();
+            let result = self
+                .builder
+                .build_int_z_extend(src_int, target_int_ty, &name)
+                .map_err(|e| format!("Failed to build bool-to-int cast: {}", e))?;
+            return Ok(result.into());
+        }
+
         // Integer to integer casts (normal path)
         if from_ty.is_integer() && to_ty.is_integer() {
             let src_int = src.into_int_value();
