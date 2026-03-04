@@ -23406,7 +23406,12 @@ impl<'a> HirToMirContext<'a> {
                     };
 
                     self.emit_iterator_while_loop(
-                        pattern, obj_reg, has_next_fn, next_fn, body, label,
+                        pattern,
+                        obj_reg,
+                        has_next_fn,
+                        next_fn,
+                        body,
+                        label,
                     );
                     return;
                 }
@@ -23432,281 +23437,267 @@ impl<'a> HirToMirContext<'a> {
         // 1. Check stdlib runtime mappings (for runtime-backed iterators like ArrayIterator)
         // 2. Check for iterator() method on the class (Haxe iterator protocol)
         // 3. Check for keyValueIterator() method on the class
-        let (obj_reg, has_next_fn, next_fn) =
-            if let (Some(hn_sym), Some(n_sym)) = (has_next_sym, next_sym) {
-                match (self.get_function_id(&hn_sym), self.get_function_id(&n_sym)) {
-                    (Some(hn), Some(n)) => (obj_reg, hn, n),
-                    _ => return,
-                }
-            } else {
-                // Fallback 1: Check stdlib runtime mappings by class name
-                // This handles runtime-backed iterator classes (ArrayIterator, ArrayKeyValueIterator)
-                // that don't have compiled hasNext/next in class_method_symbols.
-                let class_name_str = self
-                    .symbol_table
-                    .get_symbol(class_sym)
-                    .and_then(|sym| self.string_interner.get(sym.name))
-                    .map(|s| s.to_string());
+        let (obj_reg, has_next_fn, next_fn) = if let (Some(hn_sym), Some(n_sym)) =
+            (has_next_sym, next_sym)
+        {
+            match (self.get_function_id(&hn_sym), self.get_function_id(&n_sym)) {
+                (Some(hn), Some(n)) => (obj_reg, hn, n),
+                _ => return,
+            }
+        } else {
+            // Fallback 1: Check stdlib runtime mappings by class name
+            // This handles runtime-backed iterator classes (ArrayIterator, ArrayKeyValueIterator)
+            // that don't have compiled hasNext/next in class_method_symbols.
+            let class_name_str = self
+                .symbol_table
+                .get_symbol(class_sym)
+                .and_then(|sym| self.string_interner.get(sym.name))
+                .map(|s| s.to_string());
 
-                // Extract runtime names first to avoid borrow conflict with get_or_register_extern_function
-                let stdlib_names = class_name_str.as_ref().and_then(|class_name| {
-                    let hn_mapping = self.stdlib_mapping.find_by_name(class_name, "hasNext");
-                    let n_mapping = self.stdlib_mapping.find_by_name(class_name, "next");
-                    if let (Some((_hn_sig, hn_rt)), Some((_n_sig, n_rt))) =
-                        (hn_mapping, n_mapping)
-                    {
-                        Some((
-                            hn_rt.runtime_name.to_string(),
-                            n_rt.runtime_name.to_string(),
-                        ))
-                    } else {
-                        None
-                    }
-                });
-                let stdlib_result = stdlib_names.map(|(hn_name, n_name)| {
-                    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
-                    let hn_fn = self.get_or_register_extern_function(
-                        &hn_name,
-                        vec![ptr_void.clone()],
-                        IrType::I32,
-                    );
-                    let n_fn = self.get_or_register_extern_function(
-                        &n_name,
-                        vec![ptr_void.clone()],
-                        IrType::I64,
-                    );
-                    (obj_reg, hn_fn, n_fn)
-                });
-
-                if let Some(result) = stdlib_result {
-                    result
+            // Extract runtime names first to avoid borrow conflict with get_or_register_extern_function
+            let stdlib_names = class_name_str.as_ref().and_then(|class_name| {
+                let hn_mapping = self.stdlib_mapping.find_by_name(class_name, "hasNext");
+                let n_mapping = self.stdlib_mapping.find_by_name(class_name, "next");
+                if let (Some((_hn_sig, hn_rt)), Some((_n_sig, n_rt))) = (hn_mapping, n_mapping) {
+                    Some((
+                        hn_rt.runtime_name.to_string(),
+                        n_rt.runtime_name.to_string(),
+                    ))
                 } else {
-                    // Fallback 2: Look for iterator() method on the class via class_method_symbols
-                    let iterator_name = self.string_interner.intern("iterator");
-                    let kv_iterator_name = self.string_interner.intern("keyValueIterator");
-                    let iterator_sym = self
-                        .class_method_symbols
-                        .get(&(class_sym, iterator_name))
-                        .copied();
+                    None
+                }
+            });
+            let stdlib_result = stdlib_names.map(|(hn_name, n_name)| {
+                let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                let hn_fn = self.get_or_register_extern_function(
+                    &hn_name,
+                    vec![ptr_void.clone()],
+                    IrType::I32,
+                );
+                let n_fn = self.get_or_register_extern_function(
+                    &n_name,
+                    vec![ptr_void.clone()],
+                    IrType::I64,
+                );
+                (obj_reg, hn_fn, n_fn)
+            });
 
-                    // Also check for iterator/keyValueIterator via stdlib mapping (e.g., Array.iterator)
-                    // Extract names first to avoid borrow conflicts
-                    let stdlib_iter_names = if iterator_sym.is_none() {
-                        class_name_str.as_ref().and_then(|class_name| {
-                            let iter_mapping = self
-                                .stdlib_mapping
-                                .find_by_name(class_name, "iterator")
-                                .or_else(|| {
-                                    self.stdlib_mapping
-                                        .find_by_name(class_name, "keyValueIterator")
-                                });
-                            if let Some((_sig, rt)) = iter_mapping {
-                                let iter_rt_name = rt.runtime_name.to_string();
-                                let is_kv = iter_rt_name.contains("kv_iterator");
-                                let iter_class_name = if is_kv {
-                                    "ArrayKeyValueIterator"
-                                } else {
-                                    "ArrayIterator"
-                                };
-                                let hn_mapping =
-                                    self.stdlib_mapping.find_by_name(iter_class_name, "hasNext");
-                                let n_mapping =
-                                    self.stdlib_mapping.find_by_name(iter_class_name, "next");
-                                if let (Some((_hn_sig, hn_rt)), Some((_n_sig, n_rt))) =
-                                    (hn_mapping, n_mapping)
-                                {
-                                    Some((
-                                        iter_rt_name,
-                                        hn_rt.runtime_name.to_string(),
-                                        n_rt.runtime_name.to_string(),
-                                    ))
-                                } else {
-                                    None
-                                }
+            if let Some(result) = stdlib_result {
+                result
+            } else {
+                // Fallback 2: Look for iterator() method on the class via class_method_symbols
+                let iterator_name = self.string_interner.intern("iterator");
+                let kv_iterator_name = self.string_interner.intern("keyValueIterator");
+                let iterator_sym = self
+                    .class_method_symbols
+                    .get(&(class_sym, iterator_name))
+                    .copied();
+
+                // Also check for iterator/keyValueIterator via stdlib mapping (e.g., Array.iterator)
+                // Extract names first to avoid borrow conflicts
+                let stdlib_iter_names = if iterator_sym.is_none() {
+                    class_name_str.as_ref().and_then(|class_name| {
+                        let iter_mapping = self
+                            .stdlib_mapping
+                            .find_by_name(class_name, "iterator")
+                            .or_else(|| {
+                                self.stdlib_mapping
+                                    .find_by_name(class_name, "keyValueIterator")
+                            });
+                        if let Some((_sig, rt)) = iter_mapping {
+                            let iter_rt_name = rt.runtime_name.to_string();
+                            let is_kv = iter_rt_name.contains("kv_iterator");
+                            let iter_class_name = if is_kv {
+                                "ArrayKeyValueIterator"
+                            } else {
+                                "ArrayIterator"
+                            };
+                            let hn_mapping =
+                                self.stdlib_mapping.find_by_name(iter_class_name, "hasNext");
+                            let n_mapping =
+                                self.stdlib_mapping.find_by_name(iter_class_name, "next");
+                            if let (Some((_hn_sig, hn_rt)), Some((_n_sig, n_rt))) =
+                                (hn_mapping, n_mapping)
+                            {
+                                Some((
+                                    iter_rt_name,
+                                    hn_rt.runtime_name.to_string(),
+                                    n_rt.runtime_name.to_string(),
+                                ))
                             } else {
                                 None
                             }
-                        })
-                    } else {
-                        None
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
+                let stdlib_iter_result =
+                    stdlib_iter_names.and_then(|(iter_name, hn_name, n_name)| {
+                        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                        let iter_fn = self.get_or_register_extern_function(
+                            &iter_name,
+                            vec![ptr_void.clone()],
+                            ptr_void.clone(),
+                        );
+                        let iter_obj = self.builder.build_call_direct(
+                            iter_fn,
+                            vec![obj_reg],
+                            ptr_void.clone(),
+                        )?;
+                        let hn_fn = self.get_or_register_extern_function(
+                            &hn_name,
+                            vec![ptr_void.clone()],
+                            IrType::I32,
+                        );
+                        let n_fn = self.get_or_register_extern_function(
+                            &n_name,
+                            vec![ptr_void],
+                            IrType::I64,
+                        );
+                        Some((iter_obj, hn_fn, n_fn))
+                    });
+
+                if let Some(result) = stdlib_iter_result {
+                    result
+                } else if let Some(iter_sym) = iterator_sym {
+                    // Compiled iterator() method path (existing logic)
+                    let Some(iter_fn) = self.get_function_id(&iter_sym) else {
+                        return;
                     };
-                    let stdlib_iter_result =
-                        stdlib_iter_names.and_then(|(iter_name, hn_name, n_name)| {
-                            let ptr_void = IrType::Ptr(Box::new(IrType::Void));
-                            let iter_fn = self.get_or_register_extern_function(
-                                &iter_name,
-                                vec![ptr_void.clone()],
-                                ptr_void.clone(),
-                            );
-                            let iter_obj = self.builder.build_call_direct(
-                                iter_fn,
-                                vec![obj_reg],
-                                ptr_void.clone(),
-                            )?;
-                            let hn_fn = self.get_or_register_extern_function(
-                                &hn_name,
-                                vec![ptr_void.clone()],
-                                IrType::I32,
-                            );
-                            let n_fn = self.get_or_register_extern_function(
-                                &n_name,
-                                vec![ptr_void],
-                                IrType::I64,
-                            );
-                            Some((iter_obj, hn_fn, n_fn))
-                        });
 
-                    if let Some(result) = stdlib_iter_result {
-                        result
-                    } else if let Some(iter_sym) = iterator_sym {
-                        // Compiled iterator() method path (existing logic)
-                        let Some(iter_fn) = self.get_function_id(&iter_sym) else {
-                            return;
-                        };
+                    // Call iterator() to get the iterator object
+                    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                    let Some(iter_obj) =
+                        self.builder
+                            .build_call_direct(iter_fn, vec![obj_reg], ptr_void)
+                    else {
+                        return;
+                    };
 
-                        // Call iterator() to get the iterator object
-                        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
-                        let Some(iter_obj) =
-                            self.builder
-                                .build_call_direct(iter_fn, vec![obj_reg], ptr_void)
-                        else {
-                            return;
-                        };
-
-                        // Find the iterator class from the return type
-                        let iter_class_sym = {
-                            let sym = self.symbol_table.get_symbol(iter_sym);
-                            sym.and_then(|s| {
-                                let tt = self.type_table.borrow();
-                                let ret_ty = tt.get(s.type_id)?;
-                                if let crate::tast::TypeKind::Function { return_type, .. } =
-                                    &ret_ty.kind
-                                {
-                                    let ret = tt.get(*return_type)?;
-                                    if let crate::tast::TypeKind::Class { symbol_id, .. } =
-                                        &ret.kind
-                                    {
-                                        return Some(*symbol_id);
-                                    }
-                                }
-                                None
-                            })
-                        };
-
-                        // Fallback: search class_method_symbols for any class with hasNext+next
-                        let iter_class_sym = iter_class_sym.or_else(|| {
-                            for ((cls, method_name), _) in self.class_method_symbols.iter() {
-                                if *method_name == has_next_name && *cls != class_sym {
-                                    if self
-                                        .class_method_symbols
-                                        .contains_key(&(*cls, next_name))
-                                    {
-                                        return Some(*cls);
-                                    }
+                    // Find the iterator class from the return type
+                    let iter_class_sym = {
+                        let sym = self.symbol_table.get_symbol(iter_sym);
+                        sym.and_then(|s| {
+                            let tt = self.type_table.borrow();
+                            let ret_ty = tt.get(s.type_id)?;
+                            if let crate::tast::TypeKind::Function { return_type, .. } =
+                                &ret_ty.kind
+                            {
+                                let ret = tt.get(*return_type)?;
+                                if let crate::tast::TypeKind::Class { symbol_id, .. } = &ret.kind {
+                                    return Some(*symbol_id);
                                 }
                             }
                             None
-                        });
+                        })
+                    };
 
-                        let Some(iter_cls) = iter_class_sym else {
-                            return;
-                        };
-                        let hn_sym = self
-                            .class_method_symbols
-                            .get(&(iter_cls, has_next_name))
-                            .copied();
-                        let n_sym = self
-                            .class_method_symbols
-                            .get(&(iter_cls, next_name))
-                            .copied();
-                        match (hn_sym, n_sym) {
-                            (Some(hn), Some(n)) => {
-                                match (self.get_function_id(&hn), self.get_function_id(&n)) {
-                                    (Some(hn_fn), Some(n_fn)) => (iter_obj, hn_fn, n_fn),
-                                    _ => return,
+                    // Fallback: search class_method_symbols for any class with hasNext+next
+                    let iter_class_sym = iter_class_sym.or_else(|| {
+                        for ((cls, method_name), _) in self.class_method_symbols.iter() {
+                            if *method_name == has_next_name && *cls != class_sym {
+                                if self.class_method_symbols.contains_key(&(*cls, next_name)) {
+                                    return Some(*cls);
                                 }
                             }
-                            _ => return,
                         }
-                    } else {
-                        // Fallback 3: Check for keyValueIterator() method (compiled user class)
-                        let kv_iter_sym = self
-                            .class_method_symbols
-                            .get(&(class_sym, kv_iterator_name))
-                            .copied();
-                        let Some(kv_sym) = kv_iter_sym else {
-                            return;
-                        };
-                        let Some(kv_fn) = self.get_function_id(&kv_sym) else {
-                            return;
-                        };
+                        None
+                    });
 
-                        // Call keyValueIterator() to get the KV iterator object
-                        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
-                        let Some(kv_obj) =
-                            self.builder
-                                .build_call_direct(kv_fn, vec![obj_reg], ptr_void)
-                        else {
-                            return;
-                        };
+                    let Some(iter_cls) = iter_class_sym else {
+                        return;
+                    };
+                    let hn_sym = self
+                        .class_method_symbols
+                        .get(&(iter_cls, has_next_name))
+                        .copied();
+                    let n_sym = self
+                        .class_method_symbols
+                        .get(&(iter_cls, next_name))
+                        .copied();
+                    match (hn_sym, n_sym) {
+                        (Some(hn), Some(n)) => {
+                            match (self.get_function_id(&hn), self.get_function_id(&n)) {
+                                (Some(hn_fn), Some(n_fn)) => (iter_obj, hn_fn, n_fn),
+                                _ => return,
+                            }
+                        }
+                        _ => return,
+                    }
+                } else {
+                    // Fallback 3: Check for keyValueIterator() method (compiled user class)
+                    let kv_iter_sym = self
+                        .class_method_symbols
+                        .get(&(class_sym, kv_iterator_name))
+                        .copied();
+                    let Some(kv_sym) = kv_iter_sym else {
+                        return;
+                    };
+                    let Some(kv_fn) = self.get_function_id(&kv_sym) else {
+                        return;
+                    };
 
-                        // Find hasNext/next on the returned KV iterator class
-                        let kv_class_sym = {
-                            let sym = self.symbol_table.get_symbol(kv_sym);
-                            sym.and_then(|s| {
-                                let tt = self.type_table.borrow();
-                                let ret_ty = tt.get(s.type_id)?;
-                                if let crate::tast::TypeKind::Function { return_type, .. } =
-                                    &ret_ty.kind
-                                {
-                                    let ret = tt.get(*return_type)?;
-                                    if let crate::tast::TypeKind::Class { symbol_id, .. } =
-                                        &ret.kind
-                                    {
-                                        return Some(*symbol_id);
-                                    }
-                                }
-                                None
-                            })
-                        };
+                    // Call keyValueIterator() to get the KV iterator object
+                    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                    let Some(kv_obj) =
+                        self.builder
+                            .build_call_direct(kv_fn, vec![obj_reg], ptr_void)
+                    else {
+                        return;
+                    };
 
-                        let kv_class_sym = kv_class_sym.or_else(|| {
-                            for ((cls, method_name), _) in self.class_method_symbols.iter() {
-                                if *method_name == has_next_name && *cls != class_sym {
-                                    if self
-                                        .class_method_symbols
-                                        .contains_key(&(*cls, next_name))
-                                    {
-                                        return Some(*cls);
-                                    }
+                    // Find hasNext/next on the returned KV iterator class
+                    let kv_class_sym = {
+                        let sym = self.symbol_table.get_symbol(kv_sym);
+                        sym.and_then(|s| {
+                            let tt = self.type_table.borrow();
+                            let ret_ty = tt.get(s.type_id)?;
+                            if let crate::tast::TypeKind::Function { return_type, .. } =
+                                &ret_ty.kind
+                            {
+                                let ret = tt.get(*return_type)?;
+                                if let crate::tast::TypeKind::Class { symbol_id, .. } = &ret.kind {
+                                    return Some(*symbol_id);
                                 }
                             }
                             None
-                        });
+                        })
+                    };
 
-                        let Some(kv_cls) = kv_class_sym else {
-                            return;
-                        };
-                        let hn_sym = self
-                            .class_method_symbols
-                            .get(&(kv_cls, has_next_name))
-                            .copied();
-                        let n_sym = self
-                            .class_method_symbols
-                            .get(&(kv_cls, next_name))
-                            .copied();
-                        match (hn_sym, n_sym) {
-                            (Some(hn), Some(n)) => {
-                                match (self.get_function_id(&hn), self.get_function_id(&n)) {
-                                    (Some(hn_fn), Some(n_fn)) => (kv_obj, hn_fn, n_fn),
-                                    _ => return,
+                    let kv_class_sym = kv_class_sym.or_else(|| {
+                        for ((cls, method_name), _) in self.class_method_symbols.iter() {
+                            if *method_name == has_next_name && *cls != class_sym {
+                                if self.class_method_symbols.contains_key(&(*cls, next_name)) {
+                                    return Some(*cls);
                                 }
                             }
-                            _ => return,
                         }
+                        None
+                    });
+
+                    let Some(kv_cls) = kv_class_sym else {
+                        return;
+                    };
+                    let hn_sym = self
+                        .class_method_symbols
+                        .get(&(kv_cls, has_next_name))
+                        .copied();
+                    let n_sym = self.class_method_symbols.get(&(kv_cls, next_name)).copied();
+                    match (hn_sym, n_sym) {
+                        (Some(hn), Some(n)) => {
+                            match (self.get_function_id(&hn), self.get_function_id(&n)) {
+                                (Some(hn_fn), Some(n_fn)) => (kv_obj, hn_fn, n_fn),
+                                _ => return,
+                            }
+                        }
+                        _ => return,
                     }
                 }
-            };
+            }
+        };
 
         self.emit_iterator_while_loop(pattern, obj_reg, has_next_fn, next_fn, body, label);
     }
