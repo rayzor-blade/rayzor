@@ -214,6 +214,8 @@ impl StdlibMapping {
         mapping.register_string_methods();
         mapping.register_stringtools_methods();
         mapping.register_array_methods();
+        // Note: ArrayIterator and ArrayKeyValueIterator are compiled as regular
+        // Haxe classes (not runtime-backed). No stdlib mappings needed.
         mapping.register_math_methods();
         mapping.register_sys_methods();
         mapping.register_std_methods();
@@ -1478,10 +1480,27 @@ impl StdlibMapping {
             map_method!(instance "Array", "map" => "array_map", params: 1, returns: primitive),
             map_method!(instance "Array", "filter" => "array_filter", params: 1, returns: primitive),
             map_method!(instance "Array", "sort" => "array_sort", params: 1, returns: void),
+            // Iterator creation — MIR wrappers that allocate and initialize iterator objects
+            // with correct compiled class layout (matching ArrayIterator.hx / ArrayKeyValueIterator.hx)
+            map_method!(instance "Array", "iterator" => "array_iterator", params: 0, mir_wrapper,
+                types: &[PtrVoid] => PtrVoid),
+            map_method!(instance "Array", "keyValueIterator" => "array_kv_iterator", params: 0, mir_wrapper,
+                types: &[PtrVoid] => PtrVoid),
+            // ArrayIterator methods — MIR wrappers implementing hasNext/next on the iterator object
+            map_method!(instance "ArrayIterator", "hasNext" => "ArrayIterator_hasNext", params: 0, mir_wrapper,
+                types: &[PtrVoid] => I32),
+            map_method!(instance "ArrayIterator", "next" => "ArrayIterator_next", params: 0, mir_wrapper,
+                types: &[PtrVoid] => I64),
+            // ArrayKeyValueIterator methods
+            map_method!(instance "ArrayKeyValueIterator", "hasNext" => "ArrayKeyValueIterator_hasNext", params: 0, mir_wrapper,
+                types: &[PtrVoid] => I32),
+            map_method!(instance "ArrayKeyValueIterator", "next" => "ArrayKeyValueIterator_next", params: 0, mir_wrapper,
+                types: &[PtrVoid] => PtrVoid),
         ];
 
         self.register_from_tuples(mappings);
     }
+
 
     // ============================================================================
     // Math Methods

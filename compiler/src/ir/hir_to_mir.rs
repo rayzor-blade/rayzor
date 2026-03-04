@@ -4447,6 +4447,10 @@ impl<'a> HirToMirContext<'a> {
             (c, "lock" | "tryLock") if c.contains("Mutex") && !c.contains("MutexGuard") => {
                 "rayzor_concurrent_MutexGuard"
             }
+            // Array.iterator() returns ArrayIterator
+            ("Array", "iterator") => "ArrayIterator",
+            // Array.keyValueIterator() returns ArrayKeyValueIterator
+            ("Array", "keyValueIterator") => "ArrayKeyValueIterator",
             // Default: return value is associated with the same class
             _ => dispatching_class,
         }
@@ -4481,6 +4485,15 @@ impl<'a> HirToMirContext<'a> {
                     if let Some(native_str) = self.string_interner.get(native) {
                         return Some(native_str.replace("::", "_"));
                     }
+                }
+            }
+
+            // Strategy 3: Check register_class_hints via symbol_map.
+            // This handles runtime-backed types whose stdlib class isn't loaded as HIR
+            // (e.g., ArrayIterator from arr.iterator(), ArrayKeyValueIterator).
+            if let Some(reg) = self.symbol_map.get(symbol) {
+                if let Some(hint) = self.register_class_hints.get(reg) {
+                    return Some(hint.clone());
                 }
             }
         }
@@ -7799,11 +7812,21 @@ impl<'a> HirToMirContext<'a> {
                                     result_type.clone()
                                 }
                             };
-                            return self.maybe_unbox_for_extern_return(
+                            // Store class hint on result register for subsequent method dispatch.
+                            // E.g., Array.iterator() returns ArrayIterator — tag the result so
+                            // it.hasNext()/it.next() can find the correct stdlib mapping.
+                            let final_result = self.maybe_unbox_for_extern_return(
                                 call_result,
                                 &actual_return_type,
                                 &resolved_expected,
                             );
+                            if let Some(result_reg) = final_result {
+                                let return_class =
+                                    Self::get_return_class_hint(class_name, method_name);
+                                self.register_class_hints
+                                    .insert(result_reg, return_class.to_string());
+                            }
+                            return final_result;
                         }
 
                         // FALLBACK: For extern classes not in type_table (like rayzor.Bytes),
@@ -11210,7 +11233,6 @@ impl<'a> HirToMirContext<'a> {
                             // Calculate param_count for overload disambiguation: args[0] is receiver, rest are params
                             let method_param_count =
                                 if args.len() > 1 { args.len() - 1 } else { 0 };
-
                             if let Some((class_name, method_name, runtime_call)) = self
                                 .get_stdlib_runtime_info(
                                     *symbol,
@@ -11417,13 +11439,27 @@ impl<'a> HirToMirContext<'a> {
                                         arg_regs,
                                         mir_actual_return.clone(),
                                     )?;
+
                                     // Auto-unbox if MIR wrapper returns Ptr(U8) but caller expects primitive
                                     // (e.g., Channel<Int>.tryReceive() returns boxed int that needs unboxing)
-                                    return self.maybe_unbox_for_extern_return(
+                                    let final_result = self.maybe_unbox_for_extern_return(
                                         call_result,
                                         &mir_actual_return,
                                         &resolved_result_type,
                                     );
+
+                                    // Set class hint on the FINAL result register (after potential unboxing)
+                                    // to enable disambiguation of subsequent method calls.
+                                    // E.g., Array.iterator() returns ArrayIterator, so subsequent
+                                    // .hasNext()/.next() calls dispatch to ArrayIterator methods.
+                                    if let Some(result_reg) = final_result {
+                                        let return_class =
+                                            Self::get_return_class_hint(class_name, method_name);
+                                        self.register_class_hints
+                                            .insert(result_reg, return_class.to_string());
+                                    }
+
+                                    return final_result;
                                 }
 
                                 // println!(
@@ -13515,12 +13551,21 @@ impl<'a> HirToMirContext<'a> {
                         );
 
                         // IMPORTANT: Use the function's actual return type, not expr.ty
+                        // Check both functions (local) and extern_functions (forward refs to stdlib)
                         let actual_return_type = if let Some(func) =
                             self.builder.module.functions.get(&func_id)
                         {
                             debug!(
                                 "[FUNCTION_MAP] Using actual return type {:?} for function {:?}",
                                 func.signature.return_type, func.name
+                            );
+                            func.signature.return_type.clone()
+                        } else if let Some(func) =
+                            self.builder.module.extern_functions.get(&func_id)
+                        {
+                            debug!(
+                                "[FUNCTION_MAP] Using extern_functions return type {:?} for {:?}",
+                                func.signature.return_type, func_id
                             );
                             func.signature.return_type.clone()
                         } else {
@@ -20726,8 +20771,9 @@ impl<'a> HirToMirContext<'a> {
                                     field_ty,
                                 );
                             }
-                            // No class has this field — use Reflect API (anonymous object)
-                            return self.dynamic_reflect_field_read(unboxed_obj, field, field_ty);
+                            // No class has this field — use Reflect API (anonymous object).
+                            // Already unboxed above, so use raw_anon path (no double-unbox).
+                            return self.raw_anon_reflect_field_read(unboxed_obj, field, field_ty);
                         }
                     }
                     // Also check for I64 - this is a raw pointer from Array element access
@@ -21951,18 +21997,33 @@ impl<'a> HirToMirContext<'a> {
         )?;
 
         // Determine the correct load type based on the element type.
-        // This preserves type information so trace and other consumers
-        // can dispatch correctly (e.g., String elements print as strings).
-        let load_type = {
+        // Array slots are always 8 bytes, so we load as the storage type first.
+        // For types smaller than 8 bytes (Int→I32, Bool), we need to cast after loading.
+        let (load_type, target_type) = {
             let type_table = self.type_table.borrow();
             match type_table.get(ty).map(|ti| &ti.kind) {
-                Some(crate::tast::TypeKind::String) => IrType::Ptr(Box::new(IrType::String)),
-                Some(crate::tast::TypeKind::Float) => IrType::F64,
-                _ => IrType::I64, // Int, Bool, class pointers, Dynamic, etc.
+                Some(crate::tast::TypeKind::String) => {
+                    let t = IrType::Ptr(Box::new(IrType::String));
+                    (t.clone(), t)
+                }
+                Some(crate::tast::TypeKind::Float) => (IrType::F64, IrType::F64),
+                Some(crate::tast::TypeKind::Int) => (IrType::I64, IrType::I32),
+                Some(crate::tast::TypeKind::Bool) => (IrType::I64, IrType::Bool),
+                _ => {
+                    let t = IrType::I64;
+                    (t.clone(), t)
+                }
             }
         };
 
-        self.builder.build_load(elem_ptr, load_type)
+        let loaded = self.builder.build_load(elem_ptr, load_type.clone())?;
+
+        // Cast to target type if different from load type (e.g., I64 → I32 for Int elements)
+        if load_type != target_type {
+            self.builder.build_cast(loaded, load_type, target_type)
+        } else {
+            Some(loaded)
+        }
     }
 
     fn lower_logical_and(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Option<IrId> {
@@ -22914,6 +22975,8 @@ impl<'a> HirToMirContext<'a> {
 
         // For class/interface types with hasNext()/next() iterator protocol,
         // desugar to a while loop calling those methods directly.
+        // Dynamic is included because arr.iterator() returns Dynamic-typed iterators
+        // that have hasNext/next via stdlib mappings.
         if let Some(ref kind) = iter_type_kind {
             let is_iterator_class = matches!(
                 kind,
@@ -22921,6 +22984,7 @@ impl<'a> HirToMirContext<'a> {
                     | crate::tast::TypeKind::Interface { .. }
                     | crate::tast::TypeKind::TypeAlias { .. }
                     | crate::tast::TypeKind::Placeholder { .. }
+                    | crate::tast::TypeKind::Dynamic
             );
             if is_iterator_class {
                 self.lower_for_in_iterator_protocol(pattern, iter_expr, body, label);
@@ -23301,10 +23365,55 @@ impl<'a> HirToMirContext<'a> {
             result
         };
 
-        let class_sym = match class_sym {
-            Some(s) => s,
-            None => return,
-        };
+        // For Dynamic-typed iterators (e.g., from arr.iterator()), class_sym is None.
+        // Use register class hints to find the iterator class and resolve via stdlib mappings.
+        if class_sym.is_none() {
+            if let Some(class_hint) = self.register_class_hints.get(&obj_reg).cloned() {
+                let hn_mapping = self.stdlib_mapping.find_by_name(&class_hint, "hasNext");
+                let n_mapping = self.stdlib_mapping.find_by_name(&class_hint, "next");
+                if let (Some((_hn_sig, hn_rt)), Some((_n_sig, n_rt))) = (hn_mapping, n_mapping) {
+                    let hn_name = hn_rt.runtime_name.to_string();
+                    let n_name = n_rt.runtime_name.to_string();
+                    let hn_is_mir = hn_rt.is_mir_wrapper;
+                    let n_is_mir = n_rt.is_mir_wrapper;
+                    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+
+                    let has_next_fn = if hn_is_mir {
+                        self.register_stdlib_mir_forward_ref(
+                            &hn_name,
+                            vec![ptr_void.clone()],
+                            IrType::I32,
+                        )
+                    } else {
+                        self.get_or_register_extern_function(
+                            &hn_name,
+                            vec![ptr_void.clone()],
+                            IrType::I32,
+                        )
+                    };
+                    let next_fn = if n_is_mir {
+                        self.register_stdlib_mir_forward_ref(
+                            &n_name,
+                            vec![ptr_void.clone()],
+                            IrType::I64,
+                        )
+                    } else {
+                        self.get_or_register_extern_function(
+                            &n_name,
+                            vec![ptr_void.clone()],
+                            IrType::I64,
+                        )
+                    };
+
+                    self.emit_iterator_while_loop(
+                        pattern, obj_reg, has_next_fn, next_fn, body, label,
+                    );
+                    return;
+                }
+            }
+            return;
+        }
+        let class_sym = class_sym.unwrap();
 
         // Look up hasNext and next methods on the class
         let has_next_name = self.string_interner.intern("hasNext");
@@ -23319,9 +23428,10 @@ impl<'a> HirToMirContext<'a> {
             .get(&(class_sym, next_name))
             .copied();
 
-        // If the class doesn't have hasNext/next directly, check for iterator() method.
-        // This handles the Haxe iterator protocol: class.iterator() returns an iterator
-        // with hasNext()/next() (e.g., List.iterator() -> ListIterator).
+        // If the class doesn't have hasNext/next directly, try several fallback paths:
+        // 1. Check stdlib runtime mappings (for runtime-backed iterators like ArrayIterator)
+        // 2. Check for iterator() method on the class (Haxe iterator protocol)
+        // 3. Check for keyValueIterator() method on the class
         let (obj_reg, has_next_fn, next_fn) =
             if let (Some(hn_sym), Some(n_sym)) = (has_next_sym, next_sym) {
                 match (self.get_function_id(&hn_sym), self.get_function_id(&n_sym)) {
@@ -23329,78 +23439,289 @@ impl<'a> HirToMirContext<'a> {
                     _ => return,
                 }
             } else {
-                // Look for iterator() method on the class via class_method_symbols
-                let iterator_name = self.string_interner.intern("iterator");
-                let iterator_sym = self
-                    .class_method_symbols
-                    .get(&(class_sym, iterator_name))
-                    .copied();
-                let Some(iter_sym) = iterator_sym else {
-                    return;
-                };
-                let Some(iter_fn) = self.get_function_id(&iter_sym) else {
-                    return;
-                };
+                // Fallback 1: Check stdlib runtime mappings by class name
+                // This handles runtime-backed iterator classes (ArrayIterator, ArrayKeyValueIterator)
+                // that don't have compiled hasNext/next in class_method_symbols.
+                let class_name_str = self
+                    .symbol_table
+                    .get_symbol(class_sym)
+                    .and_then(|sym| self.string_interner.get(sym.name))
+                    .map(|s| s.to_string());
 
-                // Call iterator() to get the iterator object
-                let ptr_void = IrType::Ptr(Box::new(IrType::Void));
-                let Some(iter_obj) =
-                    self.builder
-                        .build_call_direct(iter_fn, vec![obj_reg], ptr_void)
-                else {
-                    return;
-                };
-
-                // Find the iterator class from the return type or by searching class_method_symbols
-                let iter_class_sym = {
-                    let sym = self.symbol_table.get_symbol(iter_sym);
-                    sym.and_then(|s| {
-                        let tt = self.type_table.borrow();
-                        let ret_ty = tt.get(s.type_id)?;
-                        if let crate::tast::TypeKind::Function { return_type, .. } = &ret_ty.kind {
-                            let ret = tt.get(*return_type)?;
-                            if let crate::tast::TypeKind::Class { symbol_id, .. } = &ret.kind {
-                                return Some(*symbol_id);
-                            }
-                        }
+                // Extract runtime names first to avoid borrow conflict with get_or_register_extern_function
+                let stdlib_names = class_name_str.as_ref().and_then(|class_name| {
+                    let hn_mapping = self.stdlib_mapping.find_by_name(class_name, "hasNext");
+                    let n_mapping = self.stdlib_mapping.find_by_name(class_name, "next");
+                    if let (Some((_hn_sig, hn_rt)), Some((_n_sig, n_rt))) =
+                        (hn_mapping, n_mapping)
+                    {
+                        Some((
+                            hn_rt.runtime_name.to_string(),
+                            n_rt.runtime_name.to_string(),
+                        ))
+                    } else {
                         None
-                    })
-                };
-
-                // Fallback: search class_method_symbols for any class with hasNext+next
-                let iter_class_sym = iter_class_sym.or_else(|| {
-                    for ((cls, method_name), _) in self.class_method_symbols.iter() {
-                        if *method_name == has_next_name && *cls != class_sym {
-                            if self.class_method_symbols.contains_key(&(*cls, next_name)) {
-                                return Some(*cls);
-                            }
-                        }
                     }
-                    None
+                });
+                let stdlib_result = stdlib_names.map(|(hn_name, n_name)| {
+                    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                    let hn_fn = self.get_or_register_extern_function(
+                        &hn_name,
+                        vec![ptr_void.clone()],
+                        IrType::I32,
+                    );
+                    let n_fn = self.get_or_register_extern_function(
+                        &n_name,
+                        vec![ptr_void.clone()],
+                        IrType::I64,
+                    );
+                    (obj_reg, hn_fn, n_fn)
                 });
 
-                let Some(iter_cls) = iter_class_sym else {
-                    return;
-                };
-                let hn_sym = self
-                    .class_method_symbols
-                    .get(&(iter_cls, has_next_name))
-                    .copied();
-                let n_sym = self
-                    .class_method_symbols
-                    .get(&(iter_cls, next_name))
-                    .copied();
-                match (hn_sym, n_sym) {
-                    (Some(hn), Some(n)) => {
-                        match (self.get_function_id(&hn), self.get_function_id(&n)) {
-                            (Some(hn_fn), Some(n_fn)) => (iter_obj, hn_fn, n_fn),
+                if let Some(result) = stdlib_result {
+                    result
+                } else {
+                    // Fallback 2: Look for iterator() method on the class via class_method_symbols
+                    let iterator_name = self.string_interner.intern("iterator");
+                    let kv_iterator_name = self.string_interner.intern("keyValueIterator");
+                    let iterator_sym = self
+                        .class_method_symbols
+                        .get(&(class_sym, iterator_name))
+                        .copied();
+
+                    // Also check for iterator/keyValueIterator via stdlib mapping (e.g., Array.iterator)
+                    // Extract names first to avoid borrow conflicts
+                    let stdlib_iter_names = if iterator_sym.is_none() {
+                        class_name_str.as_ref().and_then(|class_name| {
+                            let iter_mapping = self
+                                .stdlib_mapping
+                                .find_by_name(class_name, "iterator")
+                                .or_else(|| {
+                                    self.stdlib_mapping
+                                        .find_by_name(class_name, "keyValueIterator")
+                                });
+                            if let Some((_sig, rt)) = iter_mapping {
+                                let iter_rt_name = rt.runtime_name.to_string();
+                                let is_kv = iter_rt_name.contains("kv_iterator");
+                                let iter_class_name = if is_kv {
+                                    "ArrayKeyValueIterator"
+                                } else {
+                                    "ArrayIterator"
+                                };
+                                let hn_mapping =
+                                    self.stdlib_mapping.find_by_name(iter_class_name, "hasNext");
+                                let n_mapping =
+                                    self.stdlib_mapping.find_by_name(iter_class_name, "next");
+                                if let (Some((_hn_sig, hn_rt)), Some((_n_sig, n_rt))) =
+                                    (hn_mapping, n_mapping)
+                                {
+                                    Some((
+                                        iter_rt_name,
+                                        hn_rt.runtime_name.to_string(),
+                                        n_rt.runtime_name.to_string(),
+                                    ))
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                    } else {
+                        None
+                    };
+                    let stdlib_iter_result =
+                        stdlib_iter_names.and_then(|(iter_name, hn_name, n_name)| {
+                            let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                            let iter_fn = self.get_or_register_extern_function(
+                                &iter_name,
+                                vec![ptr_void.clone()],
+                                ptr_void.clone(),
+                            );
+                            let iter_obj = self.builder.build_call_direct(
+                                iter_fn,
+                                vec![obj_reg],
+                                ptr_void.clone(),
+                            )?;
+                            let hn_fn = self.get_or_register_extern_function(
+                                &hn_name,
+                                vec![ptr_void.clone()],
+                                IrType::I32,
+                            );
+                            let n_fn = self.get_or_register_extern_function(
+                                &n_name,
+                                vec![ptr_void],
+                                IrType::I64,
+                            );
+                            Some((iter_obj, hn_fn, n_fn))
+                        });
+
+                    if let Some(result) = stdlib_iter_result {
+                        result
+                    } else if let Some(iter_sym) = iterator_sym {
+                        // Compiled iterator() method path (existing logic)
+                        let Some(iter_fn) = self.get_function_id(&iter_sym) else {
+                            return;
+                        };
+
+                        // Call iterator() to get the iterator object
+                        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                        let Some(iter_obj) =
+                            self.builder
+                                .build_call_direct(iter_fn, vec![obj_reg], ptr_void)
+                        else {
+                            return;
+                        };
+
+                        // Find the iterator class from the return type
+                        let iter_class_sym = {
+                            let sym = self.symbol_table.get_symbol(iter_sym);
+                            sym.and_then(|s| {
+                                let tt = self.type_table.borrow();
+                                let ret_ty = tt.get(s.type_id)?;
+                                if let crate::tast::TypeKind::Function { return_type, .. } =
+                                    &ret_ty.kind
+                                {
+                                    let ret = tt.get(*return_type)?;
+                                    if let crate::tast::TypeKind::Class { symbol_id, .. } =
+                                        &ret.kind
+                                    {
+                                        return Some(*symbol_id);
+                                    }
+                                }
+                                None
+                            })
+                        };
+
+                        // Fallback: search class_method_symbols for any class with hasNext+next
+                        let iter_class_sym = iter_class_sym.or_else(|| {
+                            for ((cls, method_name), _) in self.class_method_symbols.iter() {
+                                if *method_name == has_next_name && *cls != class_sym {
+                                    if self
+                                        .class_method_symbols
+                                        .contains_key(&(*cls, next_name))
+                                    {
+                                        return Some(*cls);
+                                    }
+                                }
+                            }
+                            None
+                        });
+
+                        let Some(iter_cls) = iter_class_sym else {
+                            return;
+                        };
+                        let hn_sym = self
+                            .class_method_symbols
+                            .get(&(iter_cls, has_next_name))
+                            .copied();
+                        let n_sym = self
+                            .class_method_symbols
+                            .get(&(iter_cls, next_name))
+                            .copied();
+                        match (hn_sym, n_sym) {
+                            (Some(hn), Some(n)) => {
+                                match (self.get_function_id(&hn), self.get_function_id(&n)) {
+                                    (Some(hn_fn), Some(n_fn)) => (iter_obj, hn_fn, n_fn),
+                                    _ => return,
+                                }
+                            }
+                            _ => return,
+                        }
+                    } else {
+                        // Fallback 3: Check for keyValueIterator() method (compiled user class)
+                        let kv_iter_sym = self
+                            .class_method_symbols
+                            .get(&(class_sym, kv_iterator_name))
+                            .copied();
+                        let Some(kv_sym) = kv_iter_sym else {
+                            return;
+                        };
+                        let Some(kv_fn) = self.get_function_id(&kv_sym) else {
+                            return;
+                        };
+
+                        // Call keyValueIterator() to get the KV iterator object
+                        let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                        let Some(kv_obj) =
+                            self.builder
+                                .build_call_direct(kv_fn, vec![obj_reg], ptr_void)
+                        else {
+                            return;
+                        };
+
+                        // Find hasNext/next on the returned KV iterator class
+                        let kv_class_sym = {
+                            let sym = self.symbol_table.get_symbol(kv_sym);
+                            sym.and_then(|s| {
+                                let tt = self.type_table.borrow();
+                                let ret_ty = tt.get(s.type_id)?;
+                                if let crate::tast::TypeKind::Function { return_type, .. } =
+                                    &ret_ty.kind
+                                {
+                                    let ret = tt.get(*return_type)?;
+                                    if let crate::tast::TypeKind::Class { symbol_id, .. } =
+                                        &ret.kind
+                                    {
+                                        return Some(*symbol_id);
+                                    }
+                                }
+                                None
+                            })
+                        };
+
+                        let kv_class_sym = kv_class_sym.or_else(|| {
+                            for ((cls, method_name), _) in self.class_method_symbols.iter() {
+                                if *method_name == has_next_name && *cls != class_sym {
+                                    if self
+                                        .class_method_symbols
+                                        .contains_key(&(*cls, next_name))
+                                    {
+                                        return Some(*cls);
+                                    }
+                                }
+                            }
+                            None
+                        });
+
+                        let Some(kv_cls) = kv_class_sym else {
+                            return;
+                        };
+                        let hn_sym = self
+                            .class_method_symbols
+                            .get(&(kv_cls, has_next_name))
+                            .copied();
+                        let n_sym = self
+                            .class_method_symbols
+                            .get(&(kv_cls, next_name))
+                            .copied();
+                        match (hn_sym, n_sym) {
+                            (Some(hn), Some(n)) => {
+                                match (self.get_function_id(&hn), self.get_function_id(&n)) {
+                                    (Some(hn_fn), Some(n_fn)) => (kv_obj, hn_fn, n_fn),
+                                    _ => return,
+                                }
+                            }
                             _ => return,
                         }
                     }
-                    _ => return,
                 }
             };
 
+        self.emit_iterator_while_loop(pattern, obj_reg, has_next_fn, next_fn, body, label);
+    }
+
+    /// Emit a while loop that calls hasNext/next on an iterator object.
+    /// Used by lower_for_in_iterator_protocol for both typed and Dynamic iterators.
+    fn emit_iterator_while_loop(
+        &mut self,
+        pattern: &HirPattern,
+        obj_reg: IrId,
+        has_next_fn: IrFunctionId,
+        next_fn: IrFunctionId,
+        body: &HirBlock,
+        label: Option<&SymbolId>,
+    ) {
         // Store obj pointer to a stack slot so it survives across blocks
         let obj_ty = self
             .builder
@@ -23435,13 +23756,6 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
         }
-
-        // Update symbol_map to use stack loads for modified variables
-        // This ensures assignments in the loop body use stores to slots
-        // (The assignment handler stores to symbol_map; we need loads before use)
-        // Actually, we need to handle this differently: before each loop iteration,
-        // load from slots; after each assignment, store to slots.
-        // The simplest approach: load all modified vars at the start of each block iteration.
 
         // Create loop blocks
         let Some(loop_cond_block) = self.builder.create_block() else {
@@ -23507,6 +23821,40 @@ impl<'a> HirToMirContext<'a> {
         match pattern {
             HirPattern::Variable { symbol, .. } => {
                 self.symbol_map.insert(*symbol, next_value);
+            }
+            HirPattern::Tuple(sub_patterns) if sub_patterns.len() == 2 => {
+                // Destructure {key, value} from next() return (anon object handle)
+                // Fields are alphabetically sorted: key at index 0, value at index 1
+                let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+                let get_field_fn = self.get_or_register_extern_function(
+                    "rayzor_anon_get_field_by_index",
+                    vec![ptr_void.clone(), IrType::I32],
+                    IrType::I64,
+                );
+                // key = rayzor_anon_get_field_by_index(next_value, 0)
+                if let Some(idx_0) = self.builder.build_const(crate::ir::IrValue::I32(0)) {
+                    if let Some(key_val) = self.builder.build_call_direct(
+                        get_field_fn,
+                        vec![next_value, idx_0],
+                        IrType::I64,
+                    ) {
+                        if let HirPattern::Variable { symbol, .. } = &sub_patterns[0] {
+                            self.symbol_map.insert(*symbol, key_val);
+                        }
+                    }
+                }
+                // value = rayzor_anon_get_field_by_index(next_value, 1)
+                if let Some(idx_1) = self.builder.build_const(crate::ir::IrValue::I32(1)) {
+                    if let Some(value_val) = self.builder.build_call_direct(
+                        get_field_fn,
+                        vec![next_value, idx_1],
+                        IrType::I64,
+                    ) {
+                        if let HirPattern::Variable { symbol, .. } = &sub_patterns[1] {
+                            self.symbol_map.insert(*symbol, value_val);
+                        }
+                    }
+                }
             }
             _ => {}
         }

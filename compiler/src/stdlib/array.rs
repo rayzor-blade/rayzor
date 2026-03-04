@@ -5,6 +5,7 @@
 /// Array operations that return Array instances (slice, copy) use out-param
 /// convention where the runtime function writes to a provided HaxeArray struct.
 /// The MIR wrappers handle allocation and forwarding.
+use crate::ir::instructions::CompareOp;
 use crate::ir::mir_builder::MirBuilder;
 use crate::ir::{CallingConvention, IrType};
 
@@ -12,6 +13,9 @@ use crate::ir::{CallingConvention, IrType};
 /// struct HaxeArray { ptr: *mut u8, len: usize, cap: usize, elem_size: usize }
 /// On 64-bit: 8 + 8 + 8 + 8 = 32 bytes
 const HAXE_ARRAY_STRUCT_SIZE: usize = 32;
+
+/// Iterator object size: __type_id (8) + field1 (8) + field2 (8) = 24 bytes
+const ITERATOR_STRUCT_SIZE: usize = 24;
 
 /// Build all array type functions
 pub fn build_array_type(builder: &mut MirBuilder) {
@@ -35,6 +39,12 @@ pub fn build_array_type(builder: &mut MirBuilder) {
     build_array_map(builder);
     build_array_filter(builder);
     build_array_sort(builder);
+    build_array_iterator(builder);
+    build_array_kv_iterator(builder);
+    build_array_iterator_has_next(builder);
+    build_array_iterator_next(builder);
+    build_array_kv_iterator_has_next(builder);
+    build_array_kv_iterator_next(builder);
 }
 
 /// Declare Array extern runtime functions
@@ -282,6 +292,57 @@ fn declare_array_externs(builder: &mut MirBuilder) {
         .calling_convention(CallingConvention::C)
         .build();
     builder.mark_as_extern(func_id);
+
+    // haxe_array_get_i64(arr: *const HaxeArray, index: usize) -> i64
+    let func_id = builder
+        .begin_function("haxe_array_get_i64")
+        .param("arr", ptr_void.clone())
+        .param("index", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // rayzor_anon_new(shape_id: u32, field_count: u32) -> *mut u8
+    let func_id = builder
+        .begin_function("rayzor_anon_new")
+        .param("shape_id", i64_ty.clone())
+        .param("field_count", i64_ty.clone())
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // rayzor_ensure_shape(shape_id: u32, descriptor: *mut u8)
+    let func_id = builder
+        .begin_function("rayzor_ensure_shape")
+        .param("shape_id", i64_ty.clone())
+        .param("descriptor", ptr_void.clone())
+        .returns(void_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // rayzor_anon_set_field_by_index(handle: *mut u8, index: u32, value: u64)
+    let func_id = builder
+        .begin_function("rayzor_anon_set_field_by_index")
+        .param("handle", ptr_void.clone())
+        .param("index", i64_ty.clone())
+        .param("value", i64_ty.clone())
+        .returns(void_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // haxe_box_reference_ptr: box a raw pointer as DynamicValue
+    let func_id = builder
+        .begin_function("haxe_box_reference_ptr")
+        .param("ptr", ptr_void.clone())
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
 }
 
 /// Build: fn array_push(arr: Any, value: Any) -> void
@@ -847,6 +908,341 @@ fn build_array_filter(builder: &mut MirBuilder) {
     builder.call(filter_func, vec![out_ptr, arr_ptr, fn_ptr, env_ptr_cast]);
 
     builder.ret(Some(out_ptr));
+}
+
+/// Build: fn array_iterator(arr: Ptr(Void)) -> Ptr(Void)
+/// Creates an ArrayIterator object with correct compiled class layout:
+///   offset 0:  __type_id (i64) = 0 (placeholder)
+///   offset 8:  array (Ptr) = arr parameter
+///   offset 16: current (i64) = 0
+/// The returned object is compatible with compiled ArrayIterator.hx methods (hasNext, next).
+fn build_array_iterator(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+
+    let func_id = builder
+        .begin_function("array_iterator")
+        .param("arr", ptr_void.clone())
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+
+    // Allocate iterator struct (24 bytes: type_id + array + current)
+    let malloc_func = builder
+        .get_function_by_name("malloc")
+        .expect("malloc extern not found");
+    let size = builder.const_i64(ITERATOR_STRUCT_SIZE as i64);
+    let ptr = builder
+        .call(malloc_func, vec![size])
+        .expect("malloc should return a pointer");
+
+    // offset 0: type_id = 0 (placeholder)
+    let zero = builder.const_i64(0);
+    builder.store(ptr, zero);
+
+    // offset 8: array pointer
+    let off8 = builder.const_i64(8);
+    let slot1 = builder.ptr_add(ptr, off8, ptr_u8.clone());
+    builder.store(slot1, arr);
+
+    // offset 16: current = 0
+    let zero2 = builder.const_i64(0);
+    let off16 = builder.const_i64(16);
+    let slot2 = builder.ptr_add(ptr, off16, ptr_u8.clone());
+    builder.store(slot2, zero2);
+
+    // Return the iterator pointer
+    let result = builder.cast(ptr, ptr_u8, ptr_void);
+    builder.ret(Some(result));
+}
+
+/// Build: fn array_kv_iterator(arr: Ptr(Void)) -> Ptr(Void)
+/// Creates an ArrayKeyValueIterator object with correct compiled class layout:
+///   offset 0:  __type_id (i64) = 0 (placeholder)
+///   offset 8:  current (i64) = 0   (declared first in ArrayKeyValueIterator.hx)
+///   offset 16: array (Ptr) = arr   (declared second)
+/// The returned object is compatible with compiled ArrayKeyValueIterator.hx methods.
+fn build_array_kv_iterator(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+
+    let func_id = builder
+        .begin_function("array_kv_iterator")
+        .param("arr", ptr_void.clone())
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+
+    // Allocate iterator struct (24 bytes: type_id + current + array)
+    let malloc_func = builder
+        .get_function_by_name("malloc")
+        .expect("malloc extern not found");
+    let size = builder.const_i64(ITERATOR_STRUCT_SIZE as i64);
+    let ptr = builder
+        .call(malloc_func, vec![size])
+        .expect("malloc should return a pointer");
+
+    // offset 0: type_id = 0 (placeholder)
+    let zero = builder.const_i64(0);
+    builder.store(ptr, zero);
+
+    // offset 8: current = 0 (declared first in ArrayKeyValueIterator.hx)
+    let zero2 = builder.const_i64(0);
+    let off8 = builder.const_i64(8);
+    let slot1 = builder.ptr_add(ptr, off8, ptr_u8.clone());
+    builder.store(slot1, zero2);
+
+    // offset 16: array pointer (declared second in ArrayKeyValueIterator.hx)
+    let off16 = builder.const_i64(16);
+    let slot2 = builder.ptr_add(ptr, off16, ptr_u8.clone());
+    builder.store(slot2, arr);
+
+    // Return the iterator pointer
+    let result = builder.cast(ptr, ptr_u8, ptr_void);
+    builder.ret(Some(result));
+}
+
+/// Build: fn ArrayIterator_hasNext(iter: Ptr(Void)) -> I32
+/// Checks if the ArrayIterator has more elements.
+/// Layout: [type_id(0), array(8), current(16)]
+fn build_array_iterator_has_next(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+
+    let func_id = builder
+        .begin_function("ArrayIterator_hasNext")
+        .param("iter", ptr_void.clone())
+        .returns(IrType::I32)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let iter = builder.get_param(0);
+
+    // Load array pointer from offset 8
+    let off8 = builder.const_i64(8);
+    let array_slot = builder.ptr_add(iter, off8, ptr_u8.clone());
+    let array_ptr = builder.load(array_slot, ptr_void.clone());
+
+    // Load current from offset 16
+    let off16 = builder.const_i64(16);
+    let current_slot = builder.ptr_add(iter, off16, ptr_u8.clone());
+    let current = builder.load(current_slot, IrType::I64);
+
+    // Call haxe_array_length(array) -> I64
+    let length_func = builder
+        .get_function_by_name("haxe_array_length")
+        .expect("haxe_array_length extern not found");
+    let length = builder
+        .call(length_func, vec![array_ptr])
+        .expect("haxe_array_length should return");
+
+    // Compare current < length
+    let is_less = builder.cmp(CompareOp::Lt, current, length);
+
+    // Cast Bool to I32
+    let result = builder.cast(is_less, IrType::Bool, IrType::I32);
+    builder.ret(Some(result));
+}
+
+/// Build: fn ArrayIterator_next(iter: Ptr(Void)) -> I64
+/// Returns the next element and advances the iterator.
+/// Layout: [type_id(0), array(8), current(16)]
+fn build_array_iterator_next(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+
+    let func_id = builder
+        .begin_function("ArrayIterator_next")
+        .param("iter", ptr_void.clone())
+        .returns(IrType::I64)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let iter = builder.get_param(0);
+
+    // Load array pointer from offset 8
+    let off8 = builder.const_i64(8);
+    let array_slot = builder.ptr_add(iter, off8, ptr_u8.clone());
+    let array_ptr = builder.load(array_slot, ptr_void.clone());
+
+    // Load current from offset 16
+    let off16 = builder.const_i64(16);
+    let current_slot = builder.ptr_add(iter, off16, ptr_u8.clone());
+    let current = builder.load(current_slot, IrType::I64);
+
+    // Call haxe_array_get_i64(array, current) -> I64
+    let get_func = builder
+        .get_function_by_name("haxe_array_get_i64")
+        .expect("haxe_array_get_i64 extern not found");
+    let value = builder
+        .call(get_func, vec![array_ptr, current])
+        .expect("haxe_array_get_i64 should return");
+
+    // Increment current: current + 1
+    let one = builder.const_i64(1);
+    let new_current = builder.add(current, one, IrType::I64);
+
+    // Store new_current back at offset 16
+    let current_slot2 = builder.ptr_add(iter, off16, ptr_u8.clone());
+    builder.store(current_slot2, new_current);
+
+    // Return the value
+    builder.ret(Some(value));
+}
+
+/// Build: fn ArrayKeyValueIterator_hasNext(iter: Ptr(Void)) -> I32
+/// Checks if the ArrayKeyValueIterator has more elements.
+/// Layout: [type_id(0), current(8), array(16)]
+fn build_array_kv_iterator_has_next(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+
+    let func_id = builder
+        .begin_function("ArrayKeyValueIterator_hasNext")
+        .param("iter", ptr_void.clone())
+        .returns(IrType::I32)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let iter = builder.get_param(0);
+
+    // Load current from offset 8
+    let off8 = builder.const_i64(8);
+    let current_slot = builder.ptr_add(iter, off8, ptr_u8.clone());
+    let current = builder.load(current_slot, IrType::I64);
+
+    // Load array pointer from offset 16
+    let off16 = builder.const_i64(16);
+    let array_slot = builder.ptr_add(iter, off16, ptr_u8.clone());
+    let array_ptr = builder.load(array_slot, ptr_void.clone());
+
+    // Call haxe_array_length(array) -> I64
+    let length_func = builder
+        .get_function_by_name("haxe_array_length")
+        .expect("haxe_array_length extern not found");
+    let length = builder
+        .call(length_func, vec![array_ptr])
+        .expect("haxe_array_length should return");
+
+    // Compare current < length
+    let is_less = builder.cmp(CompareOp::Lt, current, length);
+
+    // Cast Bool to I32
+    let result = builder.cast(is_less, IrType::Bool, IrType::I32);
+    builder.ret(Some(result));
+}
+
+/// Build: fn ArrayKeyValueIterator_next(iter: Ptr(Void)) -> Ptr(Void)
+/// Returns the next {key: Int, value: Dynamic} anon object and advances the iterator.
+/// Layout: [type_id(0), current(8), array(16)]
+fn build_array_kv_iterator_next(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+
+    let func_id = builder
+        .begin_function("ArrayKeyValueIterator_next")
+        .param("iter", ptr_void.clone())
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let iter = builder.get_param(0);
+
+    // Load current from offset 8
+    let off8 = builder.const_i64(8);
+    let current_slot = builder.ptr_add(iter, off8, ptr_u8.clone());
+    let current = builder.load(current_slot, IrType::I64);
+
+    // Load array pointer from offset 16
+    let off16 = builder.const_i64(16);
+    let array_slot = builder.ptr_add(iter, off16, ptr_u8.clone());
+    let array_ptr = builder.load(array_slot, ptr_void.clone());
+
+    // Call haxe_array_get_i64(array, current) -> I64
+    let get_func = builder
+        .get_function_by_name("haxe_array_get_i64")
+        .expect("haxe_array_get_i64 extern not found");
+    let value = builder
+        .call(get_func, vec![array_ptr, current])
+        .expect("haxe_array_get_i64 should return");
+
+    // Create anon object {key: current, value: element}
+    // KV_SHAPE_ID = 1001, fields sorted: key(idx 0), value(idx 1)
+    let anon_new_func = builder
+        .get_function_by_name("rayzor_anon_new")
+        .expect("rayzor_anon_new extern not found");
+    let ensure_shape_func = builder
+        .get_function_by_name("rayzor_ensure_shape")
+        .expect("rayzor_ensure_shape extern not found");
+    let set_field_func = builder
+        .get_function_by_name("rayzor_anon_set_field_by_index")
+        .expect("rayzor_anon_set_field_by_index extern not found");
+
+    // Ensure shape {key:3,value:7} is registered
+    let shape_id = builder.const_i64(1001); // KV_SHAPE_ID from runtime
+    // We skip ensure_shape here — the runtime ArrayKeyValueIterator already registers it,
+    // and the shape is lazily created by rayzor_anon_new if needed.
+
+    let field_count = builder.const_i64(2);
+    let handle = builder
+        .call(anon_new_func, vec![shape_id, field_count])
+        .expect("rayzor_anon_new should return");
+
+    // Set key field (index 0)
+    let idx0 = builder.const_i64(0);
+    let key_as_u64 = builder.cast(current, IrType::I64, IrType::I64); // current is already I64
+    builder.call(set_field_func, vec![handle, idx0, key_as_u64]);
+
+    // Set value field (index 1)
+    let idx1 = builder.const_i64(1);
+    let val_as_u64 = builder.cast(value, IrType::I64, IrType::I64);
+    builder.call(set_field_func, vec![handle, idx1, val_as_u64]);
+
+    // Increment current: current + 1
+    let one = builder.const_i64(1);
+    let new_current = builder.add(current, one, IrType::I64);
+
+    // Store new_current back at offset 8
+    let current_slot2 = builder.ptr_add(iter, off8, ptr_u8.clone());
+    builder.store(current_slot2, new_current);
+
+    // Box the anon handle as DynamicValue so Dynamic field access can unbox it correctly
+    let box_func = builder
+        .get_function_by_name("haxe_box_reference_ptr")
+        .expect("haxe_box_reference_ptr extern not found");
+    let boxed = builder
+        .call(box_func, vec![handle])
+        .expect("haxe_box_reference_ptr should return");
+
+    builder.ret(Some(boxed));
 }
 
 /// Build: fn array_sort(arr: Any, closure: Any) -> Void

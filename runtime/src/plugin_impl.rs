@@ -1728,6 +1728,8 @@ impl Default for RayzorRuntimePlugin {
 
 /// Get the runtime plugin instance
 pub fn get_plugin() -> Box<dyn rayzor_plugin::RuntimePlugin> {
+    // Register builtin shapes used by compiler-generated MIR wrappers
+    crate::anon_object::register_builtin_shapes();
     Box::new(RayzorRuntimePlugin)
 }
 
