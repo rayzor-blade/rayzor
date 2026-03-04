@@ -190,6 +190,9 @@ impl Default for CompilationConfig {
                 "rayzor/concurrent/Channel.hx".to_string(),
                 "rayzor/concurrent/Mutex.hx".to_string(),
                 "rayzor/concurrent/Arc.hx".to_string(),
+                // Array iterator classes (compiled as regular Haxe, not runtime-backed)
+                "haxe/iterators/ArrayIterator.hx".to_string(),
+                "haxe/iterators/ArrayKeyValueIterator.hx".to_string(),
             ],
             load_stdlib: true,
             stdlib_root_package: Some("haxe".to_string()), // Prefix stdlib with "haxe.*" namespace

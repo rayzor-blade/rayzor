@@ -57,6 +57,28 @@ fn ensure_shape_table() {
     }
 }
 
+/// Register builtin shapes used by compiler-generated code.
+/// Called during runtime initialization.
+pub fn register_builtin_shapes() {
+    ensure_shape_table();
+    let mut table = SHAPE_TABLE.write().unwrap();
+    let shapes = table.as_mut().unwrap();
+
+    // Shape 1001: {key: Int, value: Int} for ArrayKeyValueIterator.next()
+    // Fields sorted alphabetically: key(idx 0, type 3=Int), value(idx 1, type 3=Int)
+    // Note: value is stored as raw i64 from haxe_array_get_i64, so type 3 (Int) is correct.
+    while shapes.len() <= 1001 {
+        shapes.push(ShapeDescriptor {
+            field_names: Vec::new(),
+            field_types: Vec::new(),
+        });
+    }
+    shapes[1001] = ShapeDescriptor {
+        field_names: vec!["key".to_string(), "value".to_string()],
+        field_types: vec![3, 3], // 3 = Int, 3 = Int
+    };
+}
+
 /// Register a new shape, returns shape_id
 #[no_mangle]
 pub extern "C" fn rayzor_register_shape(
