@@ -334,10 +334,13 @@ fn declare_array_externs(builder: &mut MirBuilder) {
         .build();
     builder.mark_as_extern(func_id);
 
-    // haxe_box_reference_ptr: box a raw pointer as DynamicValue
+    // haxe_box_reference_ptr(ptr: *mut u8, type_id: u32) -> *mut u8
+    // NOTE: Must match runtime signature (2 params). A 1-param declaration here
+    // would replace the correct user forward-ref during stdlib merge, causing SIGILL.
     let func_id = builder
         .begin_function("haxe_box_reference_ptr")
         .param("ptr", ptr_void.clone())
+        .param("type_id", IrType::U32)
         .returns(ptr_void.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -1237,8 +1240,11 @@ fn build_array_kv_iterator_next(builder: &mut MirBuilder) {
     let box_func = builder
         .get_function_by_name("haxe_box_reference_ptr")
         .expect("haxe_box_reference_ptr extern not found");
+    // type_id=0 for anonymous objects (no specific class type)
+    let type_id = builder.const_i64(0);
+    let type_id_u32 = builder.cast(type_id, IrType::I64, IrType::U32);
     let boxed = builder
-        .call(box_func, vec![handle])
+        .call(box_func, vec![handle, type_id_u32])
         .expect("haxe_box_reference_ptr should return");
 
     builder.ret(Some(boxed));
