@@ -70,7 +70,11 @@ class Main {
 
     // Dump all function names across all modules
     for (i, module) in mir_modules.iter().enumerate() {
-        println!("=== Module {} ({} functions) ===", i, module.functions.len());
+        println!(
+            "=== Module {} ({} functions) ===",
+            i,
+            module.functions.len()
+        );
         for (fid, func) in &module.functions {
             println!("  {:?}: {}", fid, func.name);
         }
@@ -78,7 +82,7 @@ class Main {
 
     // Dump MIR of the last module (user code) to check for hasNext/next calls
     if let Some(last_module) = mir_modules.last() {
-        for (_fid, func) in &last_module.functions {
+        for func in last_module.functions.values() {
             if func.name.contains("main") || func.name.contains("Main") {
                 println!("\n=== MIR of {} ===", func.name);
                 for (bid, block) in &func.cfg.blocks {
@@ -94,7 +98,11 @@ class Main {
 
     println!("Compiling {} modules...", mir_modules.len());
     for (i, module) in mir_modules.iter().enumerate() {
-        println!("  Compiling module {} ({} functions)...", i, module.functions.len());
+        println!(
+            "  Compiling module {} ({} functions)...",
+            i,
+            module.functions.len()
+        );
         if let Err(e) = backend.compile_module(module) {
             println!("  FAIL: Compile module {}: {}", i, e);
             return;
