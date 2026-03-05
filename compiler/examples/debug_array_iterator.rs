@@ -70,7 +70,11 @@ class Main {
 
     // Dump all function names across all modules
     for (i, module) in mir_modules.iter().enumerate() {
-        println!("=== Module {} ({} functions) ===", i, module.functions.len());
+        println!(
+            "=== Module {} ({} functions) ===",
+            i,
+            module.functions.len()
+        );
         for (fid, func) in &module.functions {
             println!("  {:?}: {}", fid, func.name);
         }
@@ -94,7 +98,11 @@ class Main {
 
     println!("Compiling {} modules...", mir_modules.len());
     for (i, module) in mir_modules.iter().enumerate() {
-        println!("  Compiling module {} ({} functions)...", i, module.functions.len());
+        println!(
+            "  Compiling module {} ({} functions)...",
+            i,
+            module.functions.len()
+        );
         if let Err(e) = backend.compile_module(module) {
             println!("  FAIL: Compile module {}: {}", i, e);
             return;
