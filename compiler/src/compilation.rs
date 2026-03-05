@@ -3426,6 +3426,11 @@ impl CompilationUnit {
                 .collect::<Vec<_>>()
         })?;
 
+        // Print any diagnostics from MIR lowering (e.g., exhaustiveness warnings)
+        if !mir_result.diagnostics.is_empty() {
+            self.print_mir_diagnostics(&mir_result.diagnostics);
+        }
+
         let mut mir_module = mir_result.module;
 
         // (MIR dump moved to after stdlib merge)
@@ -4247,6 +4252,28 @@ impl CompilationUnit {
         for error in errors {
             let diagnostic = error.to_diagnostic(&source_map);
             let formatted = formatter.format_diagnostic(&diagnostic, &source_map);
+            eprint!("{}", formatted);
+        }
+    }
+
+    /// Print diagnostics from MIR lowering using the diagnostics formatter.
+    /// The source map is built with the user file at FileId 0 to match the
+    /// compiler's SourceLocation.file_id convention (user file = 0).
+    fn print_mir_diagnostics(&self, mir_diagnostics: &[diagnostics::Diagnostic]) {
+        use diagnostics::{ErrorFormatter, SourceMap};
+
+        let mut source_map = SourceMap::new();
+
+        // User file must be FileId 0 (matching compiler's SourceLocation convention)
+        for user_file in &self.user_files {
+            if let Some(ref source) = user_file.input {
+                source_map.add_file(user_file.filename.clone(), source.clone());
+            }
+        }
+
+        let formatter = ErrorFormatter::with_colors();
+        for diagnostic in mir_diagnostics {
+            let formatted = formatter.format_diagnostic(diagnostic, &source_map);
             eprint!("{}", formatted);
         }
     }

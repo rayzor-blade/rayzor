@@ -1785,7 +1785,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 **Not Yet Implemented:**
 
 - [x] Guard expressions in match arms (`case v if v > 0:`) — guards propagated from AST through TAST/HIR to MIR (2026-02-18)
-- [ ] Exhaustiveness checking (warn on missing cases)
+- [x] Exhaustiveness checking (warn on missing cases) — W0002 diagnostic via `check_switch_exhaustiveness` in hir_to_mir.rs, covers enum and bool types (2026-03-05)
 - [x] Nested pattern matching (`case Pair(Some(x), _):`) — short-circuit field extraction behind tag check to prevent OOB reads; type-based parent enum resolution fixes cross-enum variant name collisions (2026-02-20)
 
 **Completed separately (see 16.13):**
@@ -1904,10 +1904,10 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [x] `arr.resize(len)` — set array length (2026-02-10)
 - [x] `arr.toString()` — string representation (2026-02-10)
 
-**Not Yet Implemented:**
+**Implemented (2026-03-05):**
 
-- [ ] `arr.iterator()` — custom iterator protocol for user types
-- [ ] `arr.keyValueIterator()` — key-value iteration
+- [x] `arr.iterator()` — returns ArrayIterator with hasNext()/next() protocol (2026-03-05)
+- [x] `arr.keyValueIterator()` — returns ArrayKeyValueIterator with {key, value} anon objects (2026-03-05)
 
 ### 16.6 String Interpolation 🟢
 
