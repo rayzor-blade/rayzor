@@ -1512,6 +1512,24 @@ impl<'a> TastToHirContext<'a> {
                 arguments,
                 ..
             } => {
+                // Try to inline static abstract method calls like Color.fromInt(1)
+                // where function is StaticFieldAccess(abstract_symbol, method_symbol)
+                if let TypedExpressionKind::StaticFieldAccess {
+                    class_symbol,
+                    field_symbol,
+                } = &function.kind
+                {
+                    if let Some(inlined) = self.try_inline_static_abstract_method(
+                        *class_symbol,
+                        *field_symbol,
+                        arguments,
+                        expr.expr_type,
+                        expr.source_location,
+                    ) {
+                        return inlined;
+                    }
+                }
+
                 HirExprKind::Call {
                     callee: Box::new(self.lower_expression(function)),
                     type_args: type_arguments.clone(),
@@ -2384,6 +2402,17 @@ impl<'a> TastToHirContext<'a> {
                         expected: type_arg.expr_type,
                     }
                 } else {
+                    // Try to inline static abstract methods (e.g., Color.fromInt(1))
+                    if let Some(inlined) = self.try_inline_static_abstract_method(
+                        *class_symbol,
+                        *method_symbol,
+                        arguments,
+                        expr.expr_type,
+                        expr.source_location,
+                    ) {
+                        return inlined;
+                    }
+
                     // Preserve class context in the callee to avoid collisions on
                     // short method names (e.g., Std.random vs Math.random).
                     let class_type = self
@@ -3915,6 +3944,114 @@ impl<'a> TastToHirContext<'a> {
         None
     }
 
+    /// Try to inline a static abstract method call (e.g., Color.fromInt(1))
+    /// Returns Some(inlined_expr) if successful, None otherwise
+    fn try_inline_static_abstract_method(
+        &mut self,
+        class_symbol: SymbolId,
+        method_symbol: SymbolId,
+        arguments: &[TypedExpression],
+        result_type: TypeId,
+        source_location: SourceLocation,
+    ) -> Option<HirExpr> {
+        let current_file = self.current_file?;
+
+        let method_name = self
+            .symbol_table
+            .get_symbol(method_symbol)
+            .map(|s| s.name)?;
+
+        // Find the abstract and method
+        let mut found_method: Option<&crate::tast::node::TypedFunction> = None;
+        for abstract_def in &current_file.abstracts {
+            if abstract_def.symbol_id != class_symbol {
+                // Also try matching by name
+                let abs_sym_match = self
+                    .symbol_table
+                    .get_symbol(abstract_def.symbol_id)
+                    .and_then(|s| {
+                        self.symbol_table
+                            .get_symbol(class_symbol)
+                            .map(|c| s.name == c.name)
+                    })
+                    .unwrap_or(false);
+                if !abs_sym_match {
+                    continue;
+                }
+            }
+            if let Some(method) = abstract_def
+                .methods
+                .iter()
+                .find(|m| m.symbol_id == method_symbol || m.name == method_name)
+            {
+                if method.is_static {
+                    found_method = Some(method);
+                    break;
+                }
+            }
+        }
+
+        let method = found_method?;
+
+        // Build parameter mapping
+        let lowered_arguments: Vec<HirExpr> = arguments
+            .iter()
+            .map(|arg| self.lower_expression(arg))
+            .collect();
+        let mut param_map: HashMap<SymbolId, HirExpr> = HashMap::new();
+        if method.parameters.len() == arguments.len() {
+            for (param, lowered_arg) in method.parameters.iter().zip(lowered_arguments.into_iter())
+            {
+                param_map.insert(param.symbol_id, lowered_arg);
+            }
+        }
+
+        // Extract single return expression
+        let return_expr = if method.body.len() == 1 {
+            match method.body.first() {
+                Some(TypedStatement::Return {
+                    value: Some(expr), ..
+                }) => Some(expr),
+                Some(TypedStatement::Expression { expression, .. }) => {
+                    if let TypedExpressionKind::Block { statements, .. } = &expression.kind {
+                        if statements.len() == 1 {
+                            if let TypedStatement::Return {
+                                value: Some(expr), ..
+                            } = &statements[0]
+                            {
+                                Some(expr)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+
+        if let Some(return_expr) = return_expr {
+            // Use a dummy this_replacement (not used for static methods)
+            let dummy_this = HirExpr::new(
+                HirExprKind::Null,
+                result_type,
+                self.current_lifetime,
+                source_location,
+            );
+            let inlined =
+                self.inline_expression_deep(return_expr, &dummy_this, &param_map, result_type);
+            return Some(inlined);
+        }
+
+        None
+    }
+
     /// Try to inline an abstract type method call
     /// Returns Some(inlined_expr) if successful, None otherwise
     fn try_inline_abstract_method(
@@ -4045,7 +4182,6 @@ impl<'a> TastToHirContext<'a> {
         // 2. Lower all statements
         // 3. Replace `this` and parameter references
         // For now, fall back to regular method call
-        // println!("DEBUG: Method body too complex to inline (has {} statements)", method.body.len());
         None
     }
 
@@ -4257,13 +4393,14 @@ impl<'a> TastToHirContext<'a> {
                 )
             }
 
-            // For checked casts (from type annotations like `(rhs : Int)`),
-            // recursively inline to substitute parameters. Only handle Checked
-            // casts to avoid interfering with other cast kinds during compilation.
+            // For casts, recursively inline to substitute `this` and parameters.
+            // All cast kinds need inlining so that `cast this : Int` (Explicit),
+            // `(this : Int)` (Checked), and `cast value` (Unsafe/Implicit) all
+            // correctly substitute the receiver and parameters.
             TypedExpressionKind::Cast {
                 expression,
                 target_type,
-                cast_kind: CastKind::Checked,
+                cast_kind,
             } => {
                 let lowered_inner = self.inline_expression_deep(
                     expression,
@@ -4271,11 +4408,69 @@ impl<'a> TastToHirContext<'a> {
                     param_map,
                     expression.expr_type,
                 );
+
+                // For abstract method inlining, `cast this` (Unsafe → Dynamic) is a no-op
+                // because `this` is already the underlying type. Eliminate the spurious cast
+                // to avoid Int→Ptr(Dynamic)→Int roundtrip that causes SIGSEGV at runtime.
+                // Resolve both types through abstract→underlying to compare.
+                let resolve_to_underlying = |ty: TypeId| -> TypeId {
+                    let tt = self.type_table.borrow();
+                    match tt.get(ty).map(|t| &t.kind) {
+                        Some(crate::tast::TypeKind::Abstract {
+                            underlying: Some(u),
+                            ..
+                        }) => *u,
+                        _ => ty,
+                    }
+                };
+                let from_resolved = resolve_to_underlying(lowered_inner.ty);
+                let to_resolved = resolve_to_underlying(*target_type);
+                if from_resolved == to_resolved {
+                    return lowered_inner;
+                }
+                // Also skip Unsafe cast to Dynamic when inner is already a concrete type
+                // (e.g., `cast this` in abstract method where this is the underlying type)
+                // Also covers abstract types whose underlying type is concrete (e.g., Color→Int)
+                if matches!(cast_kind, CastKind::Unsafe) {
+                    let tt = self.type_table.borrow();
+                    let target_is_dynamic = tt
+                        .get(*target_type)
+                        .map(|t| matches!(t.kind, crate::tast::TypeKind::Dynamic))
+                        .unwrap_or(false);
+                    let is_concrete = |ty: TypeId| -> bool {
+                        match tt.get(ty).map(|t| &t.kind) {
+                            Some(crate::tast::TypeKind::Int)
+                            | Some(crate::tast::TypeKind::Float)
+                            | Some(crate::tast::TypeKind::Bool)
+                            | Some(crate::tast::TypeKind::String) => true,
+                            Some(crate::tast::TypeKind::Abstract {
+                                underlying: Some(u),
+                                ..
+                            }) => {
+                                matches!(
+                                    tt.get(*u).map(|t| &t.kind),
+                                    Some(crate::tast::TypeKind::Int)
+                                        | Some(crate::tast::TypeKind::Float)
+                                        | Some(crate::tast::TypeKind::Bool)
+                                        | Some(crate::tast::TypeKind::String)
+                                )
+                            }
+                            _ => false,
+                        }
+                    };
+                    let inner_is_concrete = is_concrete(lowered_inner.ty);
+                    drop(tt);
+                    if target_is_dynamic && inner_is_concrete {
+                        return lowered_inner;
+                    }
+                }
+
+                let is_safe = matches!(cast_kind, CastKind::Checked | CastKind::Implicit);
                 HirExpr::new(
                     HirExprKind::Cast {
                         expr: Box::new(lowered_inner),
                         target: *target_type,
-                        is_safe: true,
+                        is_safe,
                     },
                     expr.expr_type,
                     self.current_lifetime,
@@ -4307,6 +4502,107 @@ impl<'a> TastToHirContext<'a> {
                     self.current_lifetime,
                     expr.source_location,
                 )
+            }
+
+            // For switch expressions, inline the discriminant and case bodies
+            // to substitute `this` and parameters (e.g., `toName()` with switch body)
+            TypedExpressionKind::Switch {
+                discriminant,
+                cases,
+                default_case,
+            } => {
+                // Inline the discriminant (may contain `this` or param references)
+                let inlined_discriminant = self.inline_expression_deep(
+                    discriminant,
+                    this_replacement,
+                    param_map,
+                    discriminant.expr_type,
+                );
+
+                // Build if-then-else chain (same strategy as value matching in lower_expression)
+                let mut current_expr = default_case
+                    .as_ref()
+                    .map(|d| {
+                        self.inline_expression_deep(d, this_replacement, param_map, d.expr_type)
+                    })
+                    .unwrap_or_else(|| self.make_null_literal());
+
+                let bool_type = self.get_bool_type();
+
+                for case in cases.iter().rev() {
+                    // Inline case body
+                    let case_body = match &case.body {
+                        TypedStatement::Expression { expression, .. } => self
+                            .inline_expression_deep(
+                                expression,
+                                this_replacement,
+                                param_map,
+                                expression.expr_type,
+                            ),
+                        _ => {
+                            // For non-expression bodies, lower normally (no this/param refs expected)
+                            let block = HirBlock {
+                                statements: vec![self.lower_statement(&case.body)],
+                                expr: None,
+                                scope: self.current_scope,
+                            };
+                            HirExpr::new(
+                                HirExprKind::Block(block),
+                                expr.expr_type,
+                                self.current_lifetime,
+                                expr.source_location,
+                            )
+                        }
+                    };
+
+                    // Lower case value (typically a literal — no this/param substitution needed)
+                    let case_value = self.lower_expression(&case.case_value);
+
+                    // Build condition: discriminant == case_value
+                    let mut condition = HirExpr::new(
+                        HirExprKind::Binary {
+                            op: HirBinaryOp::Eq,
+                            lhs: Box::new(inlined_discriminant.clone()),
+                            rhs: Box::new(case_value),
+                        },
+                        bool_type,
+                        self.current_lifetime,
+                        expr.source_location,
+                    );
+
+                    // Add guard if present
+                    if let Some(guard) = &case.guard {
+                        let guard_expr = self.inline_expression_deep(
+                            guard,
+                            this_replacement,
+                            param_map,
+                            guard.expr_type,
+                        );
+                        condition = HirExpr::new(
+                            HirExprKind::Binary {
+                                op: HirBinaryOp::And,
+                                lhs: Box::new(condition),
+                                rhs: Box::new(guard_expr),
+                            },
+                            bool_type,
+                            self.current_lifetime,
+                            expr.source_location,
+                        );
+                    }
+
+                    current_expr = HirExpr::new(
+                        HirExprKind::If {
+                            condition: Box::new(condition),
+                            then_expr: Box::new(case_body),
+                            else_expr: Box::new(current_expr),
+                        },
+                        expr.expr_type,
+                        self.current_lifetime,
+                        expr.source_location,
+                    );
+                }
+
+                current_expr
             }
 
             // For other expressions, lower them normally

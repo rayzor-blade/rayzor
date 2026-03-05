@@ -15951,6 +15951,39 @@ impl<'a> HirToMirContext<'a> {
                 target,
                 is_safe,
             } => {
+                // Collapse double-cast pattern from abstract methods:
+                // Cast(safe, target=Int) { Cast(unsafe, target=Dynamic) { This/Variable } }
+                // This pattern comes from `(cast this : Int)` syntax in abstract methods.
+                // The inner `cast this` (→Dynamic) is a no-op for abstract types, and the
+                // outer `(... : Int)` extracts the underlying value. Collapse to just the
+                // innermost expression.
+                if let HirExprKind::Cast {
+                    expr: inner_expr,
+                    target: inner_target,
+                    is_safe: false,
+                } = &expr.kind
+                {
+                    let inner_target_is_dynamic = {
+                        let type_table = self.type_table.borrow();
+                        type_table
+                            .get(*inner_target)
+                            .map(|t| matches!(t.kind, TypeKind::Dynamic))
+                            .unwrap_or(false)
+                    };
+                    let inner_source_is_abstract = {
+                        let type_table = self.type_table.borrow();
+                        type_table
+                            .get(inner_expr.ty)
+                            .map(|t| matches!(t.kind, TypeKind::Abstract { .. }))
+                            .unwrap_or(false)
+                    };
+                    if inner_target_is_dynamic && inner_source_is_abstract {
+                        // The whole double-cast is an identity: abstract → dynamic → underlying
+                        // Just lower the innermost expression directly
+                        return self.lower_expression(inner_expr);
+                    }
+                }
+
                 // Check if target is an abstract type with @:from conversion rules
                 // This generalizes the SIMD4f path to work with any abstract
                 if let Some(converted) = self.try_abstract_from_cast(expr, *target) {
@@ -15959,6 +15992,51 @@ impl<'a> HirToMirContext<'a> {
 
                 let from_type = self.convert_type(expr.ty);
                 let to_type = self.convert_type(*target);
+
+                // For abstract types, the cast between abstract and underlying is a no-op
+                // (they share the same MIR type)
+                if from_type == to_type {
+                    return self.lower_expression(expr);
+                }
+
+                // For `cast this` in abstract methods: the source is Abstract (resolves to
+                // underlying e.g. I32) but target is Dynamic (Ptr(U8)). This is NOT a real
+                // Dynamic boxing — it's just the Haxe syntax for extracting the underlying
+                // value. Skip the cast to avoid reinterpreting integers as pointers.
+                // Also handle the case where `cast this` target is Dynamic and the source
+                // is a primitive type (the underlying type of the abstract).
+                {
+                    let type_table = self.type_table.borrow();
+                    let source_kind = type_table.get(expr.ty).map(|t| t.kind.clone());
+                    let target_kind = type_table.get(*target).map(|t| t.kind.clone());
+                    drop(type_table);
+
+                    let source_is_abstract =
+                        matches!(&source_kind, Some(TypeKind::Abstract { .. }));
+                    let target_is_dynamic = matches!(&target_kind, Some(TypeKind::Dynamic));
+
+                    if source_is_abstract && target_is_dynamic {
+                        return self.lower_expression(expr);
+                    }
+
+                    // Also handle: source is concrete primitive, target is Dynamic,
+                    // inside an abstract method body where `this` was registered as
+                    // the underlying type. `cast this` produces
+                    // Cast(This(underlying_type) → Dynamic), which is a no-op.
+                    if target_is_dynamic
+                        && !*is_safe
+                        && matches!(
+                            &source_kind,
+                            Some(TypeKind::Int)
+                                | Some(TypeKind::Float)
+                                | Some(TypeKind::Bool)
+                                | Some(TypeKind::String)
+                        )
+                        && matches!(&expr.kind, HirExprKind::This)
+                    {
+                        return self.lower_expression(expr);
+                    }
+                }
 
                 // For unsafe casts, emit a direct cast instruction (no runtime check).
                 // For safe casts, we need to fall through to the type-specific
@@ -15991,7 +16069,41 @@ impl<'a> HirToMirContext<'a> {
                         self.builder.build_cast(value_reg, from_type, to_type)
                     }
 
-                    // Dynamic → concrete type: runtime downcast (null on failure)
+                    // Dynamic → primitive type: unbox the DynamicValue
+                    (Some(TypeKind::Dynamic), Some(TypeKind::Int)) => {
+                        let value_reg = self.lower_expression(expr)?;
+                        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                        let unbox_id = self.get_or_register_extern_function(
+                            "haxe_unbox_int_ptr",
+                            vec![ptr_u8],
+                            IrType::I32,
+                        );
+                        self.builder
+                            .build_call_direct(unbox_id, vec![value_reg], IrType::I32)
+                    }
+                    (Some(TypeKind::Dynamic), Some(TypeKind::Float)) => {
+                        let value_reg = self.lower_expression(expr)?;
+                        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                        let unbox_id = self.get_or_register_extern_function(
+                            "haxe_unbox_float_ptr",
+                            vec![ptr_u8],
+                            IrType::F64,
+                        );
+                        self.builder
+                            .build_call_direct(unbox_id, vec![value_reg], IrType::F64)
+                    }
+                    (Some(TypeKind::Dynamic), Some(TypeKind::Bool)) => {
+                        let value_reg = self.lower_expression(expr)?;
+                        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                        let unbox_id = self.get_or_register_extern_function(
+                            "haxe_unbox_bool_ptr",
+                            vec![ptr_u8],
+                            IrType::Bool,
+                        );
+                        self.builder
+                            .build_call_direct(unbox_id, vec![value_reg], IrType::Bool)
+                    }
+                    // Dynamic → non-primitive type: runtime downcast (null on failure)
                     (Some(TypeKind::Dynamic), _)
                         if !matches!(&target_kind, Some(TypeKind::Dynamic)) =>
                     {
