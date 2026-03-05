@@ -123,6 +123,9 @@ pub struct HirToMirContext<'a> {
     /// Error accumulator
     errors: Vec<LoweringError>,
 
+    /// Warning accumulator (non-fatal diagnostics like exhaustiveness checks)
+    diagnostics: Vec<diagnostics::Diagnostic>,
+
     /// SSA-derived optimization hints extracted from HIR metadata
     /// These are queried from DFG during HIR lowering and passed to MIR
     ssa_hints: SsaOptimizationHints,
@@ -485,6 +488,7 @@ impl<'a> HirToMirContext<'a> {
             loop_stack: Vec::new(),
             current_module: Some(module_name),
             errors: Vec::new(),
+            diagnostics: Vec::new(),
             ssa_hints: SsaOptimizationHints::default(),
             lambda_counter: 0,
             dynamic_globals: Vec::new(),
@@ -24434,7 +24438,237 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// Collect enum variant names covered by switch case patterns.
+    /// Returns (covered_variants, has_wildcard).
+    fn collect_covered_enum_variants(
+        &self,
+        cases: &[HirMatchCase],
+    ) -> (HashSet<InternedString>, bool) {
+        let mut covered = HashSet::new();
+        let mut has_wildcard = false;
+
+        for case in cases {
+            // Cases with guards don't guarantee coverage (guard may fail at runtime)
+            let case_has_guard = case.guard.is_some();
+
+            for pattern in &case.patterns {
+                self.collect_variants_from_pattern(
+                    pattern,
+                    case_has_guard,
+                    &mut covered,
+                    &mut has_wildcard,
+                );
+            }
+        }
+
+        (covered, has_wildcard)
+    }
+
+    /// Recursively walk a pattern collecting covered enum variants.
+    fn collect_variants_from_pattern(
+        &self,
+        pattern: &HirPattern,
+        has_guard: bool,
+        covered: &mut HashSet<InternedString>,
+        has_wildcard: &mut bool,
+    ) {
+        match pattern {
+            HirPattern::Constructor { variant, .. } => {
+                if !has_guard {
+                    covered.insert(*variant);
+                }
+            }
+            HirPattern::Wildcard => {
+                if !has_guard {
+                    *has_wildcard = true;
+                }
+            }
+            HirPattern::Variable { .. } => {
+                if !has_guard {
+                    *has_wildcard = true;
+                }
+            }
+            HirPattern::Or(sub_patterns) => {
+                for sub in sub_patterns {
+                    self.collect_variants_from_pattern(sub, has_guard, covered, has_wildcard);
+                }
+            }
+            HirPattern::Guard { .. } => {
+                // Guard patterns don't count for exhaustiveness
+            }
+            HirPattern::Typed { pattern, .. } => {
+                self.collect_variants_from_pattern(pattern, has_guard, covered, has_wildcard);
+            }
+            _ => {}
+        }
+    }
+
+    /// Check if a switch on a Bool type is exhaustive.
+    fn check_bool_exhaustiveness(&mut self, scrutinee: &HirExpr, cases: &[HirMatchCase]) {
+        let mut has_true = false;
+        let mut has_false = false;
+        let mut has_wildcard = false;
+
+        for case in cases {
+            if case.guard.is_some() {
+                continue;
+            }
+            for pattern in &case.patterns {
+                match pattern {
+                    HirPattern::Literal(HirLiteral::Bool(true)) => has_true = true,
+                    HirPattern::Literal(HirLiteral::Bool(false)) => has_false = true,
+                    HirPattern::Wildcard | HirPattern::Variable { .. } => has_wildcard = true,
+                    HirPattern::Or(subs) => {
+                        for sub in subs {
+                            match sub {
+                                HirPattern::Literal(HirLiteral::Bool(true)) => has_true = true,
+                                HirPattern::Literal(HirLiteral::Bool(false)) => has_false = true,
+                                HirPattern::Wildcard | HirPattern::Variable { .. } => {
+                                    has_wildcard = true
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        if has_wildcard || (has_true && has_false) {
+            return;
+        }
+
+        let missing = match (has_true, has_false) {
+            (false, false) => "true, false",
+            (true, false) => "false",
+            (false, true) => "true",
+            _ => return,
+        };
+
+        let span = Self::source_location_to_span(&scrutinee.source_location);
+        let diagnostic = diagnostics::DiagnosticBuilder::warning(
+            format!("non-exhaustive switch on Bool — missing: {}", missing),
+            span.clone(),
+        )
+        .code("W0007")
+        .label(span, "missing cases")
+        .help("consider adding a default case with `default:`")
+        .build();
+        self.diagnostics.push(diagnostic);
+    }
+
+    /// Convert a compiler SourceLocation to a diagnostics SourceSpan.
+    fn source_location_to_span(loc: &SourceLocation) -> diagnostics::SourceSpan {
+        let start = diagnostics::SourcePosition::new(
+            loc.line as usize,
+            loc.column as usize,
+            loc.byte_offset as usize,
+        );
+        let end = diagnostics::SourcePosition::new(
+            loc.line as usize,
+            (loc.column + 1) as usize,
+            (loc.byte_offset + 1) as usize,
+        );
+        diagnostics::SourceSpan::new(start, end, diagnostics::FileId::new(loc.file_id as usize))
+    }
+
+    /// Check exhaustiveness of a switch statement on enum or bool types.
+    /// Emits diagnostics for non-exhaustive matches — does not affect code generation.
+    fn check_switch_exhaustiveness(&mut self, scrutinee: &HirExpr, cases: &[HirMatchCase]) {
+        // Resolve scrutinee type to determine if it's an enum
+        let type_table = self.type_table.borrow();
+        let type_info = match type_table.get(scrutinee.ty) {
+            Some(info) => info,
+            None => return,
+        };
+
+        let enum_symbol = match &type_info.kind {
+            crate::tast::TypeKind::Enum { symbol_id, .. } => *symbol_id,
+            crate::tast::TypeKind::GenericInstance { base_type, .. } => {
+                match type_table.get(*base_type) {
+                    Some(base_info) => match &base_info.kind {
+                        crate::tast::TypeKind::Enum { symbol_id, .. } => *symbol_id,
+                        _ => return,
+                    },
+                    None => return,
+                }
+            }
+            crate::tast::TypeKind::Bool => {
+                drop(type_table); // Release borrow before calling method
+                self.check_bool_exhaustiveness(scrutinee, cases);
+                return;
+            }
+            _ => return,
+        };
+
+        // Get all variant names from enum definition
+        let variant_symbols = match self.symbol_table.get_enum_variants(enum_symbol) {
+            Some(v) => v.clone(),
+            None => return,
+        };
+        drop(type_table); // Release borrow
+
+        let all_variants: HashSet<InternedString> = variant_symbols
+            .iter()
+            .filter_map(|sid| self.symbol_table.get_symbol(*sid).map(|s| s.name))
+            .collect();
+
+        if all_variants.is_empty() {
+            return;
+        }
+
+        // Collect covered variants from patterns
+        let (covered, has_wildcard) = self.collect_covered_enum_variants(cases);
+
+        if has_wildcard {
+            return;
+        }
+
+        // Compute missing variants
+        let missing: Vec<InternedString> = all_variants
+            .iter()
+            .filter(|v| !covered.contains(v))
+            .copied()
+            .collect();
+
+        if missing.is_empty() {
+            return;
+        }
+
+        // Emit warning
+        let enum_name = self
+            .symbol_table
+            .get_symbol(enum_symbol)
+            .and_then(|s| self.string_interner.get(s.name))
+            .unwrap_or("?");
+        let missing_names: Vec<&str> = missing
+            .iter()
+            .filter_map(|n| self.string_interner.get(*n))
+            .collect();
+        let span = Self::source_location_to_span(&scrutinee.source_location);
+        let mut builder = diagnostics::DiagnosticBuilder::warning(
+            format!("non-exhaustive switch on enum '{}'", enum_name),
+            span.clone(),
+        )
+        .code("W0006")
+        .label(
+            span,
+            format!("missing variants: {}", missing_names.join(", ")),
+        );
+
+        for name in &missing_names {
+            builder = builder.note(format!("add case for `{}`", name));
+        }
+        builder = builder.help("consider adding a default case with `default:`");
+
+        self.diagnostics.push(builder.build());
+    }
+
     fn lower_switch_statement(&mut self, scrutinee: &HirExpr, cases: &[HirMatchCase]) {
+        // Check exhaustiveness (analysis only, no codegen effect)
+        self.check_switch_exhaustiveness(scrutinee, cases);
+
         // Switch/match statement lowering:
         // switch (scrutinee) {
         //   case pattern1 if guard1: body1
@@ -28743,6 +28977,8 @@ pub struct MirLoweringResult {
     /// Field SymbolId → class name string. Used by BLADE cache to store field entries
     /// with class names that survive across compilation contexts (where TypeIds differ).
     pub field_class_names: BTreeMap<SymbolId, String>,
+    /// Non-fatal diagnostics from the lowering pass (e.g., exhaustiveness warnings)
+    pub diagnostics: Vec<diagnostics::Diagnostic>,
 }
 
 /// Lower HIR to MIR and return both the module and function mappings
@@ -28810,5 +29046,6 @@ pub fn lower_hir_to_mir_with_function_map(
         class_method_symbols: context.class_method_symbols,
         class_type_to_symbol: context.class_type_to_symbol,
         field_class_names: context.field_class_names,
+        diagnostics: context.diagnostics,
     })
 }
