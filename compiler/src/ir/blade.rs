@@ -84,6 +84,9 @@ pub struct BladeCachedMaps {
     pub fields: Vec<BladeFieldEntry>,
     /// Class allocation sizes: (class_qualified_name, alloc_bytes)
     pub class_sizes: Vec<(String, u64)>,
+    /// Property access entries: (class_name, field_name, getter, setter)
+    #[serde(default)]
+    pub properties: Vec<BladePropertyEntry>,
 }
 
 /// A function entry in the cached maps
@@ -108,6 +111,29 @@ pub struct BladeFieldEntry {
     pub field_name: String,
     /// Field index in the class struct (0 = header, 1+ = user fields)
     pub field_index: u32,
+}
+
+/// A property access entry in the cached maps
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BladePropertyEntry {
+    /// Qualified class name
+    pub class_name: String,
+    /// Field name (the property field, e.g., "length")
+    pub field_name: String,
+    /// Getter accessor kind
+    pub getter: BladeAccessor,
+    /// Setter accessor kind
+    pub setter: BladeAccessor,
+}
+
+/// Serializable property accessor kind
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BladeAccessor {
+    Default,
+    Null,
+    Never,
+    Dynamic,
+    Method(String),
 }
 
 /// A complete BLADE module ready for serialization

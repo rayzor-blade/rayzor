@@ -690,9 +690,6 @@ impl<'a> TastToHirContext<'a> {
 
     /// Lower a function
     fn lower_function(&mut self, function: &TypedFunction) -> HirFunction {
-        // debug!(" TAST→HIR: Function {:?} has {} statements in body",
-        //           self.string_interner.get(function.name),
-        //           function.body.len());
 
         let hir_body = if !function.body.is_empty() {
             Some(self.lower_block(&function.body))

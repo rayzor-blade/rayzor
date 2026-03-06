@@ -8,8 +8,9 @@ use crate::dependency_graph::{CircularDependency, DependencyAnalysis, Dependency
 use crate::ir::{
     blade::{
         load_blade, load_symbol_manifest, save_blade_with_state, BladeAbstractInfo,
-        BladeCachedMaps, BladeClassInfo, BladeEnumInfo, BladeFieldEntry, BladeFuncEntry,
-        BladeMetadata, BladeMethodInfo, BladeSymbolManifest, BladeTypeAliasInfo, BladeTypeInfo,
+        BladeAccessor, BladeCachedMaps, BladeClassInfo, BladeEnumInfo, BladeFieldEntry,
+        BladeFuncEntry, BladeMetadata, BladeMethodInfo, BladePropertyEntry,
+        BladeSymbolManifest, BladeTypeAliasInfo, BladeTypeInfo,
     },
     IrInstruction, IrModule, Monomorphizer,
 };
@@ -651,6 +652,7 @@ impl CompilationUnit {
         constructor_name_map: &BTreeMap<String, crate::ir::IrFunctionId>,
         class_alloc_sizes: &BTreeMap<crate::tast::TypeId, u64>,
         field_class_names: &BTreeMap<crate::tast::SymbolId, String>,
+        property_access_map: &BTreeMap<crate::tast::SymbolId, crate::tast::PropertyAccessInfo>,
     ) -> BladeCachedMaps {
         let mut functions = Vec::new();
         let mut fields = Vec::new();
@@ -737,10 +739,47 @@ impl CompilationUnit {
             }
         }
 
+        // Convert property_access_map: SymbolId → PropertyAccessInfo to (class_name, field_name, getter, setter)
+        let mut properties = Vec::new();
+        for (symbol_id, prop_info) in property_access_map {
+            if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
+                let field_name = self
+                    .string_interner
+                    .get(sym.name)
+                    .unwrap_or("<unknown>")
+                    .to_string();
+                let class_name = field_class_names
+                    .get(symbol_id)
+                    .cloned()
+                    .or_else(|| self.import_field_class_names.get(symbol_id).cloned())
+                    .or_else(|| self.find_class_name_for_scope(sym.scope_id));
+                let to_blade = |acc: &crate::tast::PropertyAccessor| -> BladeAccessor {
+                    match acc {
+                        crate::tast::PropertyAccessor::Default => BladeAccessor::Default,
+                        crate::tast::PropertyAccessor::Null => BladeAccessor::Null,
+                        crate::tast::PropertyAccessor::Never => BladeAccessor::Never,
+                        crate::tast::PropertyAccessor::Dynamic => BladeAccessor::Dynamic,
+                        crate::tast::PropertyAccessor::Method(n) => {
+                            BladeAccessor::Method(
+                                self.string_interner.get(*n).unwrap_or("").to_string()
+                            )
+                        }
+                    }
+                };
+                properties.push(BladePropertyEntry {
+                    class_name: class_name.unwrap_or_default(),
+                    field_name,
+                    getter: to_blade(&prop_info.getter),
+                    setter: to_blade(&prop_info.setter),
+                });
+            }
+        }
+
         BladeCachedMaps {
             functions,
             fields,
             class_sizes,
+            properties,
         }
     }
 
@@ -2447,6 +2486,34 @@ impl CompilationUnit {
             }
         }
 
+        // Restore property access mappings
+        for entry in &cached_maps.properties {
+            if let Some((_class_sym, _class_type, class_scope)) = registered.get(&entry.class_name) {
+                let field_name_interned = self.string_interner.intern(&entry.field_name);
+                if let Some(scope) = self.scope_tree.get_scope(*class_scope) {
+                    if let Some(field_sym) = scope.get_symbol(field_name_interned) {
+                        let from_blade = |acc: &BladeAccessor| -> crate::tast::PropertyAccessor {
+                            match acc {
+                                BladeAccessor::Default => crate::tast::PropertyAccessor::Default,
+                                BladeAccessor::Null => crate::tast::PropertyAccessor::Null,
+                                BladeAccessor::Never => crate::tast::PropertyAccessor::Never,
+                                BladeAccessor::Dynamic => crate::tast::PropertyAccessor::Dynamic,
+                                BladeAccessor::Method(n) => {
+                                    crate::tast::PropertyAccessor::Method(
+                                        self.string_interner.intern(n)
+                                    )
+                                }
+                            }
+                        };
+                        self.import_property_access_map.insert(field_sym, crate::tast::PropertyAccessInfo {
+                            getter: from_blade(&entry.getter),
+                            setter: from_blade(&entry.setter),
+                        });
+                    }
+                }
+            }
+        }
+
         // Restore class_type_to_symbol and class_method_symbols mappings
         for (class_name, (class_sym, class_type, class_scope)) in registered {
             self.import_class_type_to_symbol
@@ -2469,11 +2536,14 @@ impl CompilationUnit {
 
         let import_base: u32 = 100_000 + (self.import_mir_modules.len() as u32 * 10_000);
 
-        // Build old→new ID mapping
+        // Build old→new ID mapping (include both functions and extern_functions)
         let mut id_map: std::collections::HashMap<IrFunctionId, IrFunctionId> =
             std::collections::HashMap::new();
         for old_id in import_mir.functions.keys() {
             id_map.insert(*old_id, IrFunctionId(old_id.0 + import_base));
+        }
+        for old_id in import_mir.extern_functions.keys() {
+            id_map.entry(*old_id).or_insert(IrFunctionId(old_id.0 + import_base));
         }
 
         // Renumber functions
@@ -2500,6 +2570,15 @@ impl CompilationUnit {
             }
 
             import_mir.functions.insert(new_id, func);
+        }
+
+        // Renumber extern_functions
+        let old_externs: std::collections::BTreeMap<_, _> =
+            std::mem::take(&mut import_mir.extern_functions);
+        for (old_id, mut efunc) in old_externs {
+            let new_id = id_map.get(&old_id).copied().unwrap_or(IrFunctionId(old_id.0 + import_base));
+            efunc.id = new_id;
+            import_mir.extern_functions.insert(new_id, efunc);
         }
 
         // Update all accumulated maps to point to renumbered IDs
@@ -3366,8 +3445,8 @@ impl CompilationUnit {
             || filename.contains("\\haxe-std\\");
 
         debug!(
-            "DEBUG: [MIR LOWERING] filename='{}', is_stdlib_file={}",
-            filename, is_stdlib_file
+            "[MIR_LOWER] filename='{}', is_stdlib_file={}, classes={}",
+            filename, is_stdlib_file, typed_file.classes.len()
         );
 
         // For user files, pass the stdlib function map so they can call stdlib functions
@@ -3443,6 +3522,7 @@ impl CompilationUnit {
                 &mir_result.constructor_name_map,
                 &mir_result.class_alloc_sizes,
                 &mir_result.field_class_names,
+                &mir_result.property_access_map,
             );
             self.last_compiled_cached_maps = Some(cached_maps);
         }
@@ -3533,6 +3613,11 @@ impl CompilationUnit {
                 }
                 for (func_id, func) in import_module.functions {
                     mir_module.functions.insert(func_id, func);
+                }
+                // Also merge extern_functions so import modules' extern declarations
+                // (e.g., haxe_string_length) are available for codegen linking.
+                for (func_id, extern_func) in import_module.extern_functions {
+                    mir_module.extern_functions.insert(func_id, extern_func);
                 }
             }
 
@@ -3669,10 +3754,6 @@ impl CompilationUnit {
             for (func_id, func) in &renumbered_functions {
                 if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
                     for &existing_id in existing_ids {
-                        debug!(
-                            "[STDLIB_REPLACE] '{}' replacing {:?} -> {:?}",
-                            func.name, existing_id, func_id
-                        );
                         id_replacements.insert(existing_id, *func_id);
                     }
                 }
@@ -3876,6 +3957,12 @@ impl CompilationUnit {
                         let mut discovered = Vec::new();
                         collect_qualified_type_refs_from_ast(&ast, &mut discovered);
                         imports.extend(discovered);
+
+                        // Extract full dependencies from user code (new Foo(), type annotations, etc.)
+                        // This ensures pure Haxe stdlib classes like StringBuf, StringTools, List
+                        // get compiled when referenced without explicit import statements.
+                        let user_deps = Self::extract_all_dependencies(&ast);
+                        imports.extend(user_deps);
                     }
                     (imports, usings)
                 },

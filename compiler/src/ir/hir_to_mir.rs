@@ -13716,16 +13716,19 @@ impl<'a> HirToMirContext<'a> {
                             // Fill in default values for any missing optional parameters
                             self.fill_default_args(func_id, &mut arg_regs, true);
 
-                            // Extract type_args from receiver's class type for generic method calls
-                            let ir_type_args = if !args.is_empty() {
+                            // Extract type_args for generic method calls.
+                            // Priority: 1) HIR type_args, 2) class type_args, 3) infer from args
+                            let ir_type_args = if !converted_hir_type_args.is_empty() {
+                                // Method-level type args from HIR (e.g., explicitly specified)
+                                converted_hir_type_args.clone()
+                            } else if !args.is_empty() {
                                 let receiver_type = args[0].ty;
-                                let type_args_copy = {
+                                let class_type_args = {
                                     let type_table = self.type_table.borrow();
                                     if let Some(receiver_info) = type_table.get(receiver_type) {
                                         if let crate::tast::TypeKind::Class { type_args, .. } =
                                             &receiver_info.kind
                                         {
-                                            // Clone type_args before releasing borrow
                                             type_args.clone()
                                         } else {
                                             Vec::new()
@@ -13734,11 +13737,55 @@ impl<'a> HirToMirContext<'a> {
                                         Vec::new()
                                     }
                                 };
-                                // Convert TypeId type_args to IrType (borrow released)
-                                type_args_copy
-                                    .iter()
-                                    .map(|&ty_id| self.convert_type(ty_id))
-                                    .collect::<Vec<_>>()
+                                if !class_type_args.is_empty() {
+                                    class_type_args
+                                        .iter()
+                                        .map(|&ty_id| self.convert_type(ty_id))
+                                        .collect::<Vec<_>>()
+                                } else {
+                                    // Infer method's own type params from argument types
+                                    // (e.g., add<T>(x:T) called with String → T=String)
+                                    if let Some(func) =
+                                        self.builder.module.functions.get(&func_id)
+                                    {
+                                        if !func.signature.type_params.is_empty() {
+                                            let mut inferred: Vec<IrType> = Vec::new();
+                                            for type_param in &func.signature.type_params {
+                                                let mut found = false;
+                                                for (i, sig_param) in
+                                                    func.signature.parameters.iter().enumerate()
+                                                {
+                                                    if let IrType::TypeVar(ref name) = sig_param.ty
+                                                    {
+                                                        if name == &type_param.name
+                                                            && i < args.len()
+                                                        {
+                                                            let arg_type =
+                                                                self.convert_type(args[i].ty);
+                                                            inferred.push(arg_type);
+                                                            found = true;
+                                                            break;
+                                                        }
+                                                    }
+                                                }
+                                                if !found
+                                                    && func.signature.type_params.len() == 1
+                                                    && args.len() > 1
+                                                {
+                                                    // Single type param, infer from first non-this arg
+                                                    let arg_type =
+                                                        self.convert_type(args[1].ty);
+                                                    inferred.push(arg_type);
+                                                }
+                                            }
+                                            inferred
+                                        } else {
+                                            Vec::new()
+                                        }
+                                    } else {
+                                        Vec::new()
+                                    }
+                                }
                             } else {
                                 Vec::new()
                             };
@@ -15434,6 +15481,46 @@ impl<'a> HirToMirContext<'a> {
                             vec![lhs_str_val, rhs_str_val],
                             string_ptr_ty,
                         );
+                    }
+                }
+
+                // String comparison: Eq/Ne/Lt/Le/Gt/Ge on strings need content comparison
+                if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne | HirBinaryOp::Lt | HirBinaryOp::Le | HirBinaryOp::Gt | HirBinaryOp::Ge) {
+                    let lhs_type_raw = self.convert_type(lhs.ty);
+                    let rhs_type_raw = self.convert_type(rhs.ty);
+                    let lhs_type = self.resolve_expr_ir_type(lhs, lhs_type_raw);
+                    let rhs_type = self.resolve_expr_ir_type(rhs, rhs_type_raw);
+
+                    let lhs_is_string = matches!(&lhs_type, IrType::String)
+                        || matches!(&lhs_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::String));
+                    let rhs_is_string = matches!(&rhs_type, IrType::String)
+                        || matches!(&rhs_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::String));
+
+                    if lhs_is_string && rhs_is_string {
+                        let lhs_reg = self.lower_expression(lhs)?;
+                        let rhs_reg = self.lower_expression(rhs)?;
+                        let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
+                        let cmp_func = self.get_or_register_extern_function(
+                            "haxe_string_compare",
+                            vec![string_ptr_ty.clone(), string_ptr_ty.clone()],
+                            IrType::I32,
+                        );
+                        let cmp_result = self.builder.build_call_direct(
+                            cmp_func,
+                            vec![lhs_reg, rhs_reg],
+                            IrType::I32,
+                        )?;
+                        let zero = self.builder.build_const(IrValue::I32(0))?;
+                        let cmp_op = match op {
+                            HirBinaryOp::Eq => CompareOp::Eq,
+                            HirBinaryOp::Ne => CompareOp::Ne,
+                            HirBinaryOp::Lt => CompareOp::Lt,
+                            HirBinaryOp::Le => CompareOp::Le,
+                            HirBinaryOp::Gt => CompareOp::Gt,
+                            HirBinaryOp::Ge => CompareOp::Ge,
+                            _ => unreachable!(),
+                        };
+                        return self.builder.build_cmp(cmp_op, cmp_result, zero);
                     }
                 }
 
@@ -17606,16 +17693,20 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Type parameters — type erasure: all type params are pointer-sized (8 bytes)
-            // This allows ONE struct layout per generic class for all instantiations.
-            // Coercion to/from concrete types happens at generic boundaries (field access, calls).
+            // Type parameters — preserve as TypeVar for monomorphization and inlining.
+            // Both passes substitute TypeVar(name) with concrete types.
+            // Cranelift backend treats unresolved TypeVar as I64 (pointer-sized fallback).
             // Exception: constrained type params (T:Interface) become Ptr(Void) — fat pointer
             // for vtable-based dispatch on interface methods.
-            Some(TypeKind::TypeParameter { constraints, .. }) => {
+            Some(TypeKind::TypeParameter { symbol_id, constraints, .. }) => {
                 if !constraints.is_empty() && self.has_interface_constraint(&constraints) {
                     IrType::Ptr(Box::new(IrType::Void))
                 } else {
-                    IrType::I64
+                    let param_name = self.symbol_table.get_symbol(*symbol_id)
+                        .and_then(|s| self.string_interner.get(s.name))
+                        .unwrap_or("T")
+                        .to_string();
+                    IrType::TypeVar(param_name)
                 }
             }
             Some(TypeKind::Dynamic) => {
@@ -17889,6 +17980,7 @@ impl<'a> HirToMirContext<'a> {
         builder.build()
     }
 
+
     /// Build function signature for an instance method with implicit 'this' parameter
     fn build_instance_method_signature(
         &self,
@@ -18089,7 +18181,30 @@ impl<'a> HirToMirContext<'a> {
                 // Other pointer types - use runtime dispatch via DynBox to_string
                 return self.convert_dynamic_to_string(value);
             }
-            IrType::TypeVar(_) | IrType::Any => {
+            IrType::TypeVar(ref type_param_name) => {
+                // Generic type parameter — use type-tag-aware conversion.
+                // The tag is a placeholder (0) that gets resolved during
+                // inlining or monomorphization via type_param_tag_fixups.
+                let tag_reg = self.builder.build_const(IrValue::I32(0))?;
+                if let Some(func) = self.builder.current_function_mut() {
+                    func.type_param_tag_fixups
+                        .push((tag_reg, type_param_name.clone()));
+                }
+                let func_id = self.get_or_register_extern_function(
+                    "haxe_value_to_string_by_tag",
+                    vec![IrType::I64, IrType::I32],
+                    IrType::Ptr(Box::new(IrType::String)),
+                );
+                // Bitcast value to I64 for the generic call
+                let val_as_i64 = self
+                    .builder
+                    .build_bitcast(value, IrType::I64)
+                    .unwrap_or(value);
+                return self
+                    .builder
+                    .build_call_direct(func_id, vec![val_as_i64, tag_reg], IrType::String);
+            }
+            IrType::Any => {
                 // Unknown types - use runtime dispatch
                 return self.convert_dynamic_to_string(value);
             }
@@ -21098,10 +21213,19 @@ impl<'a> HirToMirContext<'a> {
         } // end if !is_known_user_field
 
         // Check if this is a property with a custom getter
-        if let Some(property_info) = self.property_access_map.get(&field) {
+        // Try direct SymbolId lookup first, then fall back to name-based matching
+        let property_info_owned = self.property_access_map.get(&field).cloned().or_else(|| {
+            // Name-based fallback: SymbolIds may differ between import and user modules
+            let field_name = self.symbol_table.get_symbol(field).map(|s| s.name)?;
+            self.property_access_map.iter().find_map(|(sym_id, info)| {
+                let sym_name = self.symbol_table.get_symbol(*sym_id).map(|s| s.name)?;
+                if sym_name == field_name { Some(info.clone()) } else { None }
+            })
+        });
+        if let Some(property_info) = property_info_owned.as_ref() {
             match &property_info.getter {
                 crate::tast::PropertyAccessor::Method(getter_method_name) => {
-                    // Look up the getter method by name in function_map
+                    // Look up the getter method by name in function_map and external_function_map
                     let getter_func_id = self
                         .function_map
                         .iter()
@@ -21112,30 +21236,51 @@ impl<'a> HirToMirContext<'a> {
                                 false
                             }
                         })
-                        .map(|(_, func_id)| *func_id);
+                        .map(|(_, func_id)| *func_id)
+                        .or_else(|| {
+                            self.external_function_map
+                                .iter()
+                                .find(|(sym_id, _)| {
+                                    if let Some(symbol) = self.symbol_table.get_symbol(**sym_id) {
+                                        symbol.name == *getter_method_name
+                                    } else {
+                                        false
+                                    }
+                                })
+                                .map(|(_, func_id)| *func_id)
+                        });
 
                     if let Some(func_id) = getter_func_id {
-                        // Generate a call to the getter method
-                        // Getters are called with the object as the first parameter (this)
-                        let result_type = self.convert_type(field_ty);
-
+                        // Determine the result type: check the function signature first,
+                        // then try the definition-site field symbol (from property_access_map),
+                        // finally fall back to the expression-level field_ty.
+                        let result_type = self.builder.module.functions.get(&func_id)
+                            .map(|f| f.signature.return_type.clone())
+                            .unwrap_or_else(|| {
+                                // Function not in module (forward ref from import).
+                                // The access-site field symbol may have unresolved type.
+                                // Try the definition-site symbol from property_access_map
+                                // which was populated from the defining module.
+                                let def_sym_type = self.property_access_map.iter()
+                                    .find_map(|(def_sym, _)| {
+                                        let sym = self.symbol_table.get_symbol(*def_sym)?;
+                                        let name = self.symbol_table.get_symbol(field)?.name;
+                                        if sym.name == name && sym.type_id.as_raw() != u32::MAX {
+                                            Some(sym.type_id)
+                                        } else {
+                                            None
+                                        }
+                                    });
+                                let ty = def_sym_type.unwrap_or(field_ty);
+                                self.convert_type(ty)
+                            });
                         return self.builder.build_call_direct(
                             func_id,
-                            vec![obj], // Pass object as 'this'
+                            vec![obj],
                             result_type,
                         );
-                    } else {
-                        // Getter method not found - this is an error
-                        let method_name_str = self
-                            .string_interner
-                            .get(*getter_method_name)
-                            .unwrap_or("<unknown>");
-                        self.add_error(
-                            &format!("Property getter method '{}' not found", method_name_str),
-                            SourceLocation::unknown(),
-                        );
-                        return None;
                     }
+                    // Getter not found — fall through to other paths (stdlib dispatch, GEP, etc.)
                 }
                 crate::tast::PropertyAccessor::Null | crate::tast::PropertyAccessor::Never => {
                     self.add_error(
@@ -21564,7 +21709,13 @@ impl<'a> HirToMirContext<'a> {
         }
 
         if all_matches.len() == 1 {
-            return Some(all_matches[0]);
+            // Even with a single match, verify it belongs to the receiver's class.
+            // Without this check, String.length could incorrectly match StringBuf.length.
+            let (match_class_ty, match_idx) = all_matches[0];
+            if match_class_ty == receiver_ty {
+                return Some((match_class_ty, match_idx));
+            }
+            // Fall through to disambiguation logic which checks type chains
         }
 
         // Multiple classes have this field name — disambiguate by receiver type.
@@ -28280,6 +28431,21 @@ impl<'a> HirToMirContext<'a> {
                 continue; // Don't add to instance fields
             }
 
+            // Store property accessor info if this is a property with custom getters/setters
+            if let Some(ref property_info) = field.property_access {
+                self.property_access_map
+                    .insert(field.symbol_id, property_info.clone());
+
+                // Properties with non-Default getters have no backing storage —
+                // skip field_index_map and struct layout for them.
+                if !matches!(
+                    property_info.getter,
+                    crate::tast::PropertyAccessor::Default
+                ) {
+                    continue;
+                }
+            }
+
             // Store field index mapping for field access lowering (instance fields only)
             self.field_index_map
                 .insert(field.symbol_id, (type_id, field_index));
@@ -28293,12 +28459,6 @@ impl<'a> HirToMirContext<'a> {
                 .unwrap_or("<unknown>");
             self.field_class_names
                 .insert(field.symbol_id, class_name_str.to_string());
-
-            // Store property accessor info if this is a property with custom getters/setters
-            if let Some(ref property_info) = field.property_access {
-                self.property_access_map
-                    .insert(field.symbol_id, property_info.clone());
-            }
 
             fields.push(IrField {
                 name: self
