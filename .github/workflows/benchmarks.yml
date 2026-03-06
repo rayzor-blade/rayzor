@@ -18,8 +18,54 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  build:
+    name: Build & Bundle
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # --- Install LLVM 18 for Rayzor ---
+      - name: Install LLVM 18
+        run: |
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key | sudo apt-key add -
+          sudo add-apt-repository -y "deb http://apt.llvm.org/$(lsb_release -cs)/ llvm-toolchain-$(lsb_release -cs)-18 main"
+          sudo apt-get update
+          sudo apt-get install -y llvm-18 llvm-18-dev libpolly-18-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build rayzor-runtime static library
+        run: cargo build --release -p rayzor-runtime
+
+      - name: Build rayzor CLI
+        run: cargo build --release --features llvm-backend
+
+      - name: Generate precompiled bundles
+        run: |
+          ./target/release/rayzor bundle compiler/benchmarks/src/mandelbrot.hx -o compiler/benchmarks/precompiled/mandelbrot.rzb --strip
+          ./target/release/rayzor bundle compiler/benchmarks/src/nbody.hx -o compiler/benchmarks/precompiled/nbody.rzb --strip
+
+      - name: Upload precompiled bundles
+        uses: actions/upload-artifact@v4
+        with:
+          name: precompiled-bundles
+          path: compiler/benchmarks/precompiled/*.rzb
+          retention-days: 1
+
+      - name: Upload rayzor binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: rayzor-binaries
+          path: |
+            target/release/rayzor
+            target/release/librayzor_runtime.a
+          retention-days: 1
+
   benchmark:
     name: Benchmark Suite
+    needs: build
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -68,16 +114,14 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Build rayzor-runtime static library
-        run: cargo build --release -p rayzor-runtime
+      - name: Download precompiled bundles
+        uses: actions/download-artifact@v4
+        with:
+          name: precompiled-bundles
+          path: compiler/benchmarks/precompiled/
 
-      - name: Build rayzor CLI
-        run: cargo build --release --features llvm-backend
-
-      - name: Regenerate precompiled bundles
-        run: |
-          ./target/release/rayzor bundle compiler/benchmarks/src/mandelbrot.hx -o compiler/benchmarks/precompiled/mandelbrot.rzb --strip
-          ./target/release/rayzor bundle compiler/benchmarks/src/nbody.hx -o compiler/benchmarks/precompiled/nbody.rzb --strip
+      - name: Build compiler for benchmark runner
+        run: cargo build --release --package compiler --features all-backends
 
       - name: Run nbody benchmark
         run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- nbody --json
