@@ -118,7 +118,14 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: precompiled-bundles
-          path: compiler/benchmarks/precompiled/
+
+      - name: Download rayzor binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: rayzor-binaries
+
+      - name: Fix binary permissions
+        run: chmod +x target/release/rayzor
 
       - name: Build compiler for benchmark runner
         run: cargo build --release --package compiler --features all-backends
