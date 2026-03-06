@@ -22,6 +22,7 @@ pub fn dump_module(module: &IrModule) -> String {
 
     for &func_id in &func_ids {
         let func = &module.functions[func_id];
+        writeln!(out, "; {} = @{}", func_id, func.name).unwrap();
         writeln!(out, "{}", dump_function(func)).unwrap();
     }
 

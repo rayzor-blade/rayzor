@@ -2079,7 +2079,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 **Not Yet Implemented:**
 
-- [ ] User-defined methods on enum types (Haxe doesn't support this — abstract enums do)
+- [x] User-defined methods on enum types — N/A: Haxe enums are pure ADTs without methods; use `enum abstract` for methods (already supported via abstract type system)
 
 ### 16.14 Null Safety 🟡
 

@@ -897,9 +897,10 @@ impl<'a> TastToHirContext<'a> {
                 use crate::tast::Mutability;
                 let is_mutable = matches!(mutability, Mutability::Mutable);
 
+                let var_name = self.get_symbol_name(*symbol_id);
                 HirStatement::Let {
                     pattern: HirPattern::Variable {
-                        name: self.get_symbol_name(*symbol_id),
+                        name: var_name,
                         symbol: *symbol_id,
                     },
                     type_hint: Some(*var_type),

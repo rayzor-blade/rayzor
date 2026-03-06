@@ -7660,11 +7660,6 @@ impl<'a> HirToMirContext<'a> {
                             }
                         };
 
-                        debug!(
-                            "[DISPATCH] stdlib_info={:?} for field {:?}",
-                            stdlib_info.as_ref().map(|(c, m, r)| (c, m, r.runtime_name)),
-                            field
-                        );
                         if let Some((class_name, method_name, runtime_call)) = stdlib_info {
                             let runtime_func = runtime_call.runtime_name;
                             let is_mir_wrapper = runtime_call.is_mir_wrapper;
@@ -9652,6 +9647,7 @@ impl<'a> HirToMirContext<'a> {
                                                     | crate::tast::TypeKind::Dynamic
                                                     | crate::tast::TypeKind::Placeholder { .. }
                                                     | crate::tast::TypeKind::Array { .. }
+                                                    | crate::tast::TypeKind::Abstract { .. }
                                                 )
                                                         })
                                                         .unwrap_or(false)
