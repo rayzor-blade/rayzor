@@ -3694,7 +3694,17 @@ impl CraneliftBackend {
                             );
                             format!("Return value {:?} not found", val_id)
                         })?;
-                        // debug!("Cranelift: Found value, emitting return instruction");
+                        // Ensure return value type matches function signature return type
+                        let val_ty = builder.func.dfg.value_type(val);
+                        let expected_ret_ty = Self::mir_type_to_cranelift_static(&function.signature.return_type)
+                            .unwrap_or(types::I64);
+                        let val = if val_ty == types::I64 && expected_ret_ty == types::I32 {
+                            builder.ins().ireduce(types::I32, val)
+                        } else if val_ty == types::I32 && expected_ret_ty == types::I64 {
+                            builder.ins().sextend(types::I64, val)
+                        } else {
+                            val
+                        };
                         builder.ins().return_(&[val]);
                     } else {
                         // Validate: void return should only happen for void functions

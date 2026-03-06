@@ -93,6 +93,10 @@ register_symbol!(
     "haxe_string_index_of",
     crate::haxe_string::haxe_string_index_of
 );
+register_symbol!(
+    "haxe_string_compare",
+    crate::haxe_string::haxe_string_compare
+);
 // Commented out old out-param version to avoid conflicts
 // register_symbol!("haxe_string_split", crate::haxe_string::haxe_string_split);
 register_symbol!(
@@ -429,6 +433,10 @@ register_symbol!(
 register_symbol!(
     "haxe_string_from_bool",
     crate::haxe_sys::haxe_string_from_bool
+);
+register_symbol!(
+    "haxe_value_to_string_by_tag",
+    crate::haxe_sys::haxe_value_to_string_by_tag
 );
 register_symbol!(
     "haxe_string_from_string",

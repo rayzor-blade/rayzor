@@ -255,6 +255,28 @@ pub extern "C" fn haxe_string_from_bool(value: bool) -> *mut HaxeString {
     }))
 }
 
+/// Convert a value to string using a type tag for dispatch.
+/// Used for generic type parameters where the concrete type is resolved at compile time
+/// via type_param_tag_fixups (monomorphization/inlining).
+/// Tags: 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference/Object
+#[no_mangle]
+pub extern "C" fn haxe_value_to_string_by_tag(value: i64, type_tag: i32) -> *mut HaxeString {
+    match type_tag {
+        // String — value is already a HaxeString pointer, return it directly
+        5 => value as *mut HaxeString,
+        // Int
+        1 => haxe_string_from_int(value),
+        // Bool
+        2 => haxe_string_from_bool(value != 0),
+        // Float — reinterpret i64 bits as f64
+        4 => haxe_string_from_float(f64::from_bits(value as u64)),
+        // Reference/Object — use dynamic dispatch
+        6 => crate::type_system::haxe_std_string_ptr(value as *mut u8),
+        // Default: treat as int
+        _ => haxe_string_from_int(value),
+    }
+}
+
 /// Convert String to String (identity, but normalizes representation)
 #[no_mangle]
 pub extern "C" fn haxe_string_from_string(ptr: *const u8, len: usize) -> *mut HaxeString {

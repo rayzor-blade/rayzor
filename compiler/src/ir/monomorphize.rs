@@ -213,7 +213,7 @@ impl Monomorphizer {
             for (block_id, block) in &function.cfg.blocks {
                 for (inst_idx, inst) in block.instructions.iter().enumerate() {
                     if let Some((target_func, type_args)) =
-                        self.extract_generic_call(inst, generic_funcs, function)
+                        self.extract_generic_call(inst, generic_funcs, function, module)
                     {
                         let key = MonoKey::new(target_func, type_args);
                         let location = CallSiteLocation {
@@ -230,19 +230,51 @@ impl Monomorphizer {
         requests
     }
 
-    /// Extract generic call information from an instruction
+    /// Extract generic call information from an instruction.
+    /// When explicit type_args are empty, infers concrete types from argument register types.
     fn extract_generic_call(
         &self,
         inst: &IrInstruction,
         generic_funcs: &[IrFunctionId],
-        _context_func: &IrFunction,
+        context_func: &IrFunction,
+        module: &IrModule,
     ) -> Option<(IrFunctionId, Vec<IrType>)> {
         match inst {
             IrInstruction::CallDirect {
-                func_id, type_args, ..
+                func_id, type_args, args, ..
             } => {
-                if generic_funcs.contains(func_id) && !type_args.is_empty() {
-                    Some((*func_id, type_args.clone()))
+                if !generic_funcs.contains(func_id) {
+                    return None;
+                }
+                // Use explicit type_args if available
+                if !type_args.is_empty() {
+                    return Some((*func_id, type_args.clone()));
+                }
+                // Infer type_args from argument register types
+                let callee = module.functions.get(func_id)?;
+                let mut inferred_args = Vec::new();
+                for type_param in &callee.signature.type_params {
+                    let mut found = false;
+                    for (i, sig_param) in callee.signature.parameters.iter().enumerate() {
+                        if let IrType::TypeVar(ref name) = sig_param.ty {
+                            if name == &type_param.name && i < args.len() {
+                                if let Some(arg_ty) = context_func.register_types.get(&args[i]) {
+                                    if !matches!(arg_ty, IrType::TypeVar(_)) {
+                                        inferred_args.push(arg_ty.clone());
+                                        found = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if !found {
+                        // Can't infer all type params — skip
+                        return None;
+                    }
+                }
+                if !inferred_args.is_empty() {
+                    Some((*func_id, inferred_args))
                 } else {
                     None
                 }

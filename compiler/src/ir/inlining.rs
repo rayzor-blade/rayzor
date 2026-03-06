@@ -9,7 +9,7 @@ use super::loop_analysis::{DominatorTree, LoopNestInfo};
 use super::optimization::{InstructionExt, OptimizationPass, OptimizationResult};
 use super::{
     IrBasicBlock, IrBlockId, IrFunction, IrFunctionId, IrId, IrInstruction, IrModule, IrPhiNode,
-    IrTerminator, IrType,
+    IrTerminator, IrType, IrValue,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
@@ -264,6 +264,65 @@ impl InliningPass {
         call_site: &CallSite,
         next_reg_id: &mut u32,
     ) -> Result<(), String> {
+        // Extract type_args from the CallDirect instruction at the call site.
+        // Must do this before borrowing module mutably for caller.
+        let type_sub_map: HashMap<String, IrType> = {
+            let caller_func = module
+                .functions
+                .get(&call_site.caller)
+                .ok_or_else(|| format!("Caller function {:?} not found", call_site.caller))?;
+            let callee_func = module
+                .functions
+                .get(&call_site.callee)
+                .ok_or_else(|| format!("Callee function {:?} not found", call_site.callee))?;
+
+            let mut sub_map = HashMap::new();
+
+            // Try explicit type_args from CallDirect first
+            let block = caller_func
+                .cfg
+                .blocks
+                .get(&call_site.block)
+                .ok_or_else(|| format!("Block {:?} not found", call_site.block))?;
+            if call_site.instruction_index < block.instructions.len() {
+                let inst = &block.instructions[call_site.instruction_index];
+                if let IrInstruction::CallDirect { type_args, .. } = inst {
+                    if !type_args.is_empty() {
+                        for (param, arg) in
+                            callee_func.signature.type_params.iter().zip(type_args.iter())
+                        {
+                            sub_map.insert(param.name.clone(), arg.clone());
+                        }
+                    }
+                }
+            }
+
+            // If no explicit type_args but callee has type_params, infer from argument types.
+            // Match callee params with TypeVar types against caller argument register types.
+            if sub_map.is_empty() && !callee_func.signature.type_params.is_empty() {
+                for type_param in &callee_func.signature.type_params {
+                    for (i, sig_param) in callee_func.signature.parameters.iter().enumerate() {
+                        if let IrType::TypeVar(ref name) = sig_param.ty {
+                            if name == &type_param.name && i < call_site.args.len() {
+                                // Look up the register type of the argument in the caller
+                                if let Some(arg_ty) =
+                                    caller_func.register_types.get(&call_site.args[i])
+                                {
+                                    if !matches!(arg_ty, IrType::TypeVar(_)) {
+                                        sub_map
+                                            .insert(type_param.name.clone(), arg_ty.clone());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            sub_map
+        };
+
         // Get callee function (clone to avoid borrow issues)
         let callee = module
             .functions
@@ -306,10 +365,12 @@ impl InliningPass {
             }
         }
 
-        // Copy register types from callee to caller with remapped IDs
+        // Copy register types from callee to caller with remapped IDs,
+        // applying type substitution for generic inline methods
         for (old_reg, new_reg) in &reg_map {
             if let Some(ty) = callee.register_types.get(old_reg) {
-                caller.register_types.insert(*new_reg, ty.clone());
+                let substituted = substitute_type_with_map(ty, &type_sub_map);
+                caller.register_types.insert(*new_reg, substituted);
             }
         }
 
@@ -359,7 +420,7 @@ impl InliningPass {
                 new_phis.push(IrPhiNode {
                     dest,
                     incoming,
-                    ty: phi.ty.clone(),
+                    ty: substitute_type_with_map(&phi.ty, &type_sub_map),
                 });
             }
 
@@ -369,6 +430,13 @@ impl InliningPass {
                 .iter()
                 .map(|inst| Self::remap_instruction(inst, &reg_map, &block_map))
                 .collect();
+
+            // Apply type substitution for generic inline methods
+            if !type_sub_map.is_empty() {
+                for inst in &mut new_instructions {
+                    substitute_instruction_types(inst, &type_sub_map);
+                }
+            }
 
             // Handle terminator
             let new_terminator = match &old_block.terminator {
@@ -434,6 +502,25 @@ impl InliningPass {
                 new_block.phi_nodes = new_phis;
                 new_block.instructions = new_instructions;
                 new_block.terminator = new_terminator;
+            }
+        }
+
+        // Apply type_param_tag_fixups from callee (for Reflect.compare_typed type tags)
+        if !type_sub_map.is_empty() && !callee.type_param_tag_fixups.is_empty() {
+            for (fixup_reg, type_param_name) in &callee.type_param_tag_fixups {
+                if let Some(concrete_type) = type_sub_map.get(type_param_name) {
+                    let type_tag = ir_type_to_type_tag(concrete_type);
+                    let mapped_reg = reg_map.get(fixup_reg).unwrap_or(fixup_reg);
+                    for block in caller.cfg.blocks.values_mut() {
+                        for inst in &mut block.instructions {
+                            if let IrInstruction::Const { dest, value } = inst {
+                                if *dest == *mapped_reg {
+                                    *value = IrValue::I32(type_tag);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
@@ -652,6 +739,78 @@ impl OptimizationPass for InliningPass {
         }
 
         result
+    }
+}
+
+/// Substitute TypeVar names with concrete types using the provided map.
+fn substitute_type_with_map(ty: &IrType, sub_map: &HashMap<String, IrType>) -> IrType {
+    if sub_map.is_empty() {
+        return ty.clone();
+    }
+    match ty {
+        IrType::TypeVar(name) => sub_map.get(name).cloned().unwrap_or_else(|| ty.clone()),
+        IrType::Ptr(inner) => IrType::Ptr(Box::new(substitute_type_with_map(inner, sub_map))),
+        IrType::Ref(inner) => IrType::Ref(Box::new(substitute_type_with_map(inner, sub_map))),
+        IrType::Array(elem, size) => {
+            IrType::Array(Box::new(substitute_type_with_map(elem, sub_map)), *size)
+        }
+        IrType::Slice(elem) => IrType::Slice(Box::new(substitute_type_with_map(elem, sub_map))),
+        IrType::Function {
+            params,
+            return_type,
+            varargs,
+        } => IrType::Function {
+            params: params
+                .iter()
+                .map(|p| substitute_type_with_map(p, sub_map))
+                .collect(),
+            return_type: Box::new(substitute_type_with_map(return_type, sub_map)),
+            varargs: *varargs,
+        },
+        IrType::Generic { base, type_args } => IrType::Generic {
+            base: Box::new(substitute_type_with_map(base, sub_map)),
+            type_args: type_args
+                .iter()
+                .map(|a| substitute_type_with_map(a, sub_map))
+                .collect(),
+        },
+        _ => ty.clone(),
+    }
+}
+
+/// Apply type substitution to type-carrying fields within an instruction.
+fn substitute_instruction_types(inst: &mut IrInstruction, sub_map: &HashMap<String, IrType>) {
+    match inst {
+        IrInstruction::Alloc { ty, .. } => *ty = substitute_type_with_map(ty, sub_map),
+        IrInstruction::Load { ty, .. } => *ty = substitute_type_with_map(ty, sub_map),
+        IrInstruction::Cast {
+            from_ty, to_ty, ..
+        } => {
+            *from_ty = substitute_type_with_map(from_ty, sub_map);
+            *to_ty = substitute_type_with_map(to_ty, sub_map);
+        }
+        IrInstruction::BitCast { ty, .. } => *ty = substitute_type_with_map(ty, sub_map),
+        IrInstruction::CallDirect { type_args, .. } => {
+            for arg in type_args.iter_mut() {
+                *arg = substitute_type_with_map(arg, sub_map);
+            }
+        }
+        IrInstruction::GetElementPtr { ty, .. } => *ty = substitute_type_with_map(ty, sub_map),
+        _ => {}
+    }
+}
+
+/// Map IrType to runtime type tag for Reflect.compare_typed.
+fn ir_type_to_type_tag(ty: &IrType) -> i32 {
+    match ty {
+        IrType::I32 | IrType::I64 | IrType::I8 | IrType::I16 => 1,
+        IrType::U8 | IrType::U16 | IrType::U32 | IrType::U64 => 1,
+        IrType::Bool => 2,
+        IrType::F32 | IrType::F64 => 4,
+        IrType::String => 5,
+        IrType::Ptr(inner) if matches!(**inner, IrType::U8) => 5,
+        IrType::Ptr(_) => 6,
+        _ => 1,
     }
 }
 

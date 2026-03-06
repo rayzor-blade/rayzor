@@ -330,6 +330,31 @@ pub extern "C" fn haxe_string_index_of(
     }
 }
 
+/// Compare two strings lexicographically, returns -1/0/1
+#[no_mangle]
+pub extern "C" fn haxe_string_compare(a: *const HaxeString, b: *const HaxeString) -> i32 {
+    if a.is_null() && b.is_null() {
+        return 0;
+    }
+    if a.is_null() {
+        return -1;
+    }
+    if b.is_null() {
+        return 1;
+    }
+    unsafe {
+        let a_ref = &*a;
+        let b_ref = &*b;
+        let a_bytes = slice::from_raw_parts(a_ref.ptr, a_ref.len);
+        let b_bytes = slice::from_raw_parts(b_ref.ptr, b_ref.len);
+        match a_bytes.cmp(b_bytes) {
+            std::cmp::Ordering::Less => -1,
+            std::cmp::Ordering::Equal => 0,
+            std::cmp::Ordering::Greater => 1,
+        }
+    }
+}
+
 /// Split string by delimiter
 #[no_mangle]
 pub extern "C" fn haxe_string_split(
