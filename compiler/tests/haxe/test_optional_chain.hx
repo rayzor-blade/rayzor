@@ -18,15 +18,15 @@ class Main {
         var n = new Node(42);
         trace(n?.value);            // 42
 
-        // Optional field access on null - returns 0 (null as Int)
+        // Optional field access on null - returns null
         var n2:Node = null;
-        trace(n2?.value);           // 0
+        trace(n2?.value);           // null
 
         // Optional method call on non-null
         trace(n?.getValue());       // 42
 
         // Optional method call on null
-        trace(n2?.getValue());      // 0
+        trace(n2?.getValue());      // null
 
         // Chained optional access
         n.next = new Node(99);
@@ -34,7 +34,7 @@ class Main {
 
         // Chained optional where middle is null
         var n3 = new Node(7);
-        trace(n3?.next?.value);     // 0
+        trace(n3?.next?.value);     // null
 
         // Optional on non-null reference field
         trace(n?.next?.getValue()); // 99
