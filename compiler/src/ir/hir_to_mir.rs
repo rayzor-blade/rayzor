@@ -6581,6 +6581,8 @@ impl<'a> HirToMirContext<'a> {
         use crate::tast::core::TypeKind;
         let first = &args[0];
         let type_table = self.type_table.borrow();
+        debug!("[REFLECT_COMPARE_TYPE] first arg ty={:?}, type_info={:?}",
+            first.ty, type_table.get(first.ty).map(|ti| format!("{:?}", ti.kind)));
         if let Some(ti) = type_table.get(first.ty) {
             match &ti.kind {
                 TypeKind::Int => return Some(Ok(1)),
@@ -6677,6 +6679,49 @@ impl<'a> HirToMirContext<'a> {
                     self.builder
                         .build_call_direct(func_id, vec![value_dyn], IrType::Bool),
                 )
+            }
+            // Reflect.compare: use haxe_reflect_compare_typed with a type tag
+            // to avoid boxing-based comparison (which loses type info for generics)
+            "haxe_reflect_compare" => {
+                if args.len() >= 2 {
+                    let type_info = self.infer_reflect_compare_type_info(args);
+                    if let Some(info) = type_info {
+                        let mut arg_regs = Vec::new();
+                        for arg in args.iter() {
+                            if let Some(reg) = self.lower_expression(arg) {
+                                let reg_ty = self.builder.get_register_type(reg).unwrap_or(IrType::I64);
+                                let final_reg = if reg_ty != IrType::I64 {
+                                    self.builder.build_cast(reg, reg_ty, IrType::I64).unwrap_or(reg)
+                                } else {
+                                    reg
+                                };
+                                arg_regs.push(final_reg);
+                            }
+                        }
+                        let tag_reg = match info {
+                            Ok(tag_value) => self.builder.build_const(IrValue::I32(tag_value))?,
+                            Err(type_param_name) => {
+                                let tag = self.builder.build_const(IrValue::I32(0))?;
+                                if let Some(func) = self.builder.current_function_mut() {
+                                    func.type_param_tag_fixups.push((tag, type_param_name));
+                                }
+                                tag
+                            }
+                        };
+                        arg_regs.push(tag_reg);
+                        let extern_func_id = self.get_or_register_extern_function(
+                            "haxe_reflect_compare_typed",
+                            vec![IrType::I64, IrType::I64, IrType::I32],
+                            result_type.clone(),
+                        );
+                        return Some(self.builder.build_call_direct(
+                            extern_func_id,
+                            arg_regs,
+                            result_type,
+                        ));
+                    }
+                }
+                None
             }
             _ => None,
         }
@@ -7665,6 +7710,66 @@ impl<'a> HirToMirContext<'a> {
                             let is_mir_wrapper = runtime_call.is_mir_wrapper;
                             // Method redirected via runtime mapping
 
+                            // Reflect.compare: redirect to haxe_reflect_compare_typed with type tag
+                            // Must be done before the generic arg boxing loop below.
+                            if runtime_func == "haxe_reflect_compare" && args.len() >= 2 {
+                                let type_info = self.infer_reflect_compare_type_info(args);
+                                if let Some(info) = type_info {
+                                    let mut typed_args = Vec::new();
+                                    for arg in args.iter() {
+                                        if let Some(reg) = self.lower_expression(arg) {
+                                            let reg_ty = self
+                                                .builder
+                                                .get_register_type(reg)
+                                                .unwrap_or(IrType::I64);
+                                            let final_reg = if reg_ty != IrType::I64 {
+                                                self.builder
+                                                    .build_cast(reg, reg_ty, IrType::I64)
+                                                    .unwrap_or(reg)
+                                            } else {
+                                                reg
+                                            };
+                                            typed_args.push(final_reg);
+                                        }
+                                    }
+                                    let tag_reg = match info {
+                                        Ok(tag_value) => {
+                                            self.builder.build_const(IrValue::I32(tag_value))?
+                                        }
+                                        Err(type_param_name) => {
+                                            let tag =
+                                                self.builder.build_const(IrValue::I32(0))?;
+                                            if let Some(func) =
+                                                self.builder.current_function_mut()
+                                            {
+                                                func.type_param_tag_fixups
+                                                    .push((tag, type_param_name));
+                                            }
+                                            tag
+                                        }
+                                    };
+                                    typed_args.push(tag_reg);
+                                    let extern_func_id = self.get_or_register_extern_function(
+                                        "haxe_reflect_compare_typed",
+                                        vec![IrType::I64, IrType::I64, IrType::I32],
+                                        IrType::I64,
+                                    );
+                                    let call_result = self.builder.build_call_direct(
+                                        extern_func_id,
+                                        typed_args,
+                                        IrType::I64,
+                                    )?;
+                                    if result_type == IrType::I32 {
+                                        return self.builder.build_cast(
+                                            call_result,
+                                            IrType::I64,
+                                            IrType::I32,
+                                        );
+                                    }
+                                    return Some(call_result);
+                                }
+                            }
+
                             // Get expected parameter types from the extern function signature
                             // This is critical for generic classes like Deque<T> where the runtime
                             // expects boxed pointers but HIR types may be primitives
@@ -7738,6 +7843,14 @@ impl<'a> HirToMirContext<'a> {
                                 )?;
                                 arg_regs.push(final_reg);
                             }
+
+                            // Inject hidden enum type_id arg for runtime enum helpers
+                            // (enumEq, enumConstructor, enumParameters, getEnum)
+                            self.inject_hidden_enum_type_id_arg(
+                                runtime_func,
+                                args,
+                                &mut arg_regs,
+                            );
 
                             // Use the expected parameter types for the extern function registration
                             // This ensures the signature matches what the runtime expects
@@ -10327,23 +10440,36 @@ impl<'a> HirToMirContext<'a> {
                                     .and_then(|sym| self.string_interner.get(sym.name))
                                     .map(|s| s.to_string());
 
-                                if let Some(tp_name) = type_param_name {
-                                    let tag_reg = self.builder.build_const(IrValue::I32(0))?;
-                                    if let Some(func) = self.builder.current_function_mut() {
-                                        func.type_param_tag_fixups.push((tag_reg, tp_name));
+                                if let Some(ref tp_name) = type_param_name {
+                                    // Only emit a tag fixup if the current function actually
+                                    // has this type parameter (i.e., we're inside a generic function).
+                                    // If not, the fixup would never be resolved, so fall through
+                                    // to normal trace dispatch instead.
+                                    let current_func_has_param = self
+                                        .builder
+                                        .current_function()
+                                        .map(|f| f.signature.type_params.iter().any(|tp| tp.name == *tp_name))
+                                        .unwrap_or(false);
+
+                                    if current_func_has_param {
+                                        let tag_reg = self.builder.build_const(IrValue::I32(0))?;
+                                        if let Some(func) = self.builder.current_function_mut() {
+                                            func.type_param_tag_fixups.push((tag_reg, tp_name.clone()));
+                                        }
+
+                                        let trace_typed_id = self.get_or_register_extern_function(
+                                            "haxe_trace_typed",
+                                            vec![IrType::I64, IrType::I32],
+                                            IrType::Void,
+                                        );
+
+                                        return self.builder.build_call_direct(
+                                            trace_typed_id,
+                                            vec![arg_reg, tag_reg],
+                                            IrType::Void,
+                                        );
                                     }
-
-                                    let trace_typed_id = self.get_or_register_extern_function(
-                                        "haxe_trace_typed",
-                                        vec![IrType::I64, IrType::I32],
-                                        IrType::Void,
-                                    );
-
-                                    return self.builder.build_call_direct(
-                                        trace_typed_id,
-                                        vec![arg_reg, tag_reg],
-                                        IrType::Void,
-                                    );
+                                    // If not in a generic function, fall through to normal dispatch.
                                 }
                             }
                         }
@@ -10374,6 +10500,7 @@ impl<'a> HirToMirContext<'a> {
                                 IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::String) => {
                                     "traceString"
                                 }
+                                IrType::TypeVar(_) => "traceTypedGeneric", // tag-based dispatch
                                 _ => "traceAny", // Fallback for Dynamic or unknown types
                             }
                         };
@@ -10410,6 +10537,30 @@ impl<'a> HirToMirContext<'a> {
                             return self.builder.build_call_direct(
                                 string_trace_id,
                                 vec![arg_reg],
+                                IrType::Void,
+                            );
+                        }
+
+                        // TypeVar trace: use haxe_trace_typed with tag fixup.
+                        // Bitcast value to I64 (TypeVar is pointer-sized) to avoid
+                        // Cranelift type mismatch when inlining resolves to F64.
+                        if trace_method == "traceTypedGeneric" {
+                            let tag_reg = self.builder.build_const(IrValue::I32(0))?;
+                            if let IrType::TypeVar(ref name) = arg_type {
+                                if let Some(func) = self.builder.current_function_mut() {
+                                    func.type_param_tag_fixups.push((tag_reg, name.clone()));
+                                }
+                            }
+                            let val_as_i64 = self.builder.build_bitcast(arg_reg, IrType::I64)
+                                .unwrap_or(arg_reg);
+                            let trace_typed_id = self.get_or_register_extern_function(
+                                "haxe_trace_typed",
+                                vec![IrType::I64, IrType::I32],
+                                IrType::Void,
+                            );
+                            return self.builder.build_call_direct(
+                                trace_typed_id,
+                                vec![val_as_i64, tag_reg],
                                 IrType::Void,
                             );
                         }
@@ -14069,6 +14220,13 @@ impl<'a> HirToMirContext<'a> {
                                     .functions
                                     .get(&func_id)
                                     .map(|f| f.name.clone())
+                                    .or_else(|| {
+                                        self.builder
+                                            .module
+                                            .extern_functions
+                                            .get(&func_id)
+                                            .map(|f| f.name.clone())
+                                    })
                                     .unwrap_or_default();
                                 if let Some(result) = self.try_lower_special_runtime_call(
                                     &func_name,
@@ -15445,7 +15603,7 @@ impl<'a> HirToMirContext<'a> {
                             {
                                 reg
                             } else {
-                                self.convert_to_string(lhs_reg, &lhs_mir_type)?
+                                self.convert_to_string_with_hint(lhs_reg, &lhs_mir_type, Some(lhs.ty))?
                             }
                         } else {
                             lhs_reg
@@ -15459,7 +15617,7 @@ impl<'a> HirToMirContext<'a> {
                             {
                                 reg
                             } else {
-                                self.convert_to_string(rhs_reg, &rhs_mir_type)?
+                                self.convert_to_string_with_hint(rhs_reg, &rhs_mir_type, Some(rhs.ty))?
                             }
                         } else {
                             rhs_reg
@@ -17693,20 +17851,18 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
 
-            // Type parameters — preserve as TypeVar for monomorphization and inlining.
-            // Both passes substitute TypeVar(name) with concrete types.
-            // Cranelift backend treats unresolved TypeVar as I64 (pointer-sized fallback).
+            // Type parameters — type erasure: all type params are pointer-sized (8 bytes).
+            // This allows ONE struct layout per generic class for all instantiations.
+            // Coercion to/from concrete types happens at generic boundaries (field access, calls).
             // Exception: constrained type params (T:Interface) become Ptr(Void) — fat pointer
             // for vtable-based dispatch on interface methods.
-            Some(TypeKind::TypeParameter { symbol_id, constraints, .. }) => {
+            // NOTE: Functions that need TypeVar for generic dispatch (convert_to_string,
+            // trace handler) extract the type param name separately via resolve_type_param_name().
+            Some(TypeKind::TypeParameter { constraints, .. }) => {
                 if !constraints.is_empty() && self.has_interface_constraint(&constraints) {
                     IrType::Ptr(Box::new(IrType::Void))
                 } else {
-                    let param_name = self.symbol_table.get_symbol(*symbol_id)
-                        .and_then(|s| self.string_interner.get(s.name))
-                        .unwrap_or("T")
-                        .to_string();
-                    IrType::TypeVar(param_name)
+                    IrType::I64
                 }
             }
             Some(TypeKind::Dynamic) => {
@@ -18155,6 +18311,52 @@ impl<'a> HirToMirContext<'a> {
         }
 
         Some(None) // No toString() found
+    }
+
+    /// Check if a TypeId refers to a TypeParameter in the type table.
+    /// If so, returns the type param name for tag-based generic dispatch.
+    fn resolve_type_param_name(&self, type_id: crate::tast::TypeId) -> Option<String> {
+        let type_table = self.type_table.borrow();
+        if let Some(ti) = type_table.get(type_id) {
+            if let crate::tast::TypeKind::TypeParameter { symbol_id, constraints, .. } = &ti.kind {
+                if constraints.is_empty() || !self.has_interface_constraint(constraints) {
+                    return self.symbol_table.get_symbol(*symbol_id)
+                        .and_then(|s| self.string_interner.get(s.name))
+                        .map(|s| s.to_string());
+                }
+            }
+        }
+        None
+    }
+
+    /// Convert a value to a string pointer
+    /// Uses the appropriate *_to_string MIR wrapper based on the source type.
+    /// If hir_type_id is provided and is a TypeParameter, uses tag-based generic dispatch.
+    fn convert_to_string_with_hint(&mut self, value: IrId, from_type: &IrType, hir_type_id: Option<crate::tast::TypeId>) -> Option<IrId> {
+        // Check if the HIR type is a TypeParameter — if so, use tag-based dispatch
+        // even though the MIR type is I64 (type-erased).
+        if let Some(type_id) = hir_type_id {
+            if let Some(type_param_name) = self.resolve_type_param_name(type_id) {
+                let tag_reg = self.builder.build_const(IrValue::I32(0))?;
+                if let Some(func) = self.builder.current_function_mut() {
+                    func.type_param_tag_fixups
+                        .push((tag_reg, type_param_name));
+                }
+                let func_id = self.get_or_register_extern_function(
+                    "haxe_value_to_string_by_tag",
+                    vec![IrType::I64, IrType::I32],
+                    IrType::Ptr(Box::new(IrType::String)),
+                );
+                let val_as_i64 = self
+                    .builder
+                    .build_bitcast(value, IrType::I64)
+                    .unwrap_or(value);
+                return self
+                    .builder
+                    .build_call_direct(func_id, vec![val_as_i64, tag_reg], IrType::String);
+            }
+        }
+        self.convert_to_string(value, from_type)
     }
 
     /// Convert a value to a string pointer
@@ -28438,10 +28640,20 @@ impl<'a> HirToMirContext<'a> {
 
                 // Properties with non-Default getters have no backing storage —
                 // skip field_index_map and struct layout for them.
+                // But still record the class name for BLADE cache serialization
+                // so the property accessor can be restored from cache.
                 if !matches!(
                     property_info.getter,
                     crate::tast::PropertyAccessor::Default
                 ) {
+                    let class_name_str = self
+                        .symbol_table
+                        .get_symbol(class.symbol_id)
+                        .and_then(|sym| sym.qualified_name.and_then(|n| self.string_interner.get(n)))
+                        .or_else(|| self.string_interner.get(class.name))
+                        .unwrap_or("<unknown>");
+                    self.field_class_names
+                        .insert(field.symbol_id, class_name_str.to_string());
                     continue;
                 }
             }

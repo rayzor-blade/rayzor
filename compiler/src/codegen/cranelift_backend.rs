@@ -516,7 +516,14 @@ impl CraneliftBackend {
 
         // Also check extern_functions for malloc/realloc/free since heap allocation
         // now declares malloc as an extern function for proper linking
+        // GUARD: Skip extern IDs that collide with real (non-extern) function entries
         for (func_id, extern_func) in &mir_module.extern_functions {
+            // Don't overwrite function_map entries for real functions that share this ID
+            if let Some(real_func) = mir_module.functions.get(func_id) {
+                if !real_func.cfg.blocks.is_empty() {
+                    continue;
+                }
+            }
             if extern_func.name == "malloc" {
                 let libc_id = *self.runtime_functions.get("malloc").unwrap();
                 debug!(
@@ -551,10 +558,10 @@ impl CraneliftBackend {
             match self.compile_function(*func_id, mir_module, function) {
                 Ok(()) => {}
                 Err(e) => {
-                    warn!("Skipping function '{}' ({}): {}", function.name, func_id, e);
+                    warn!("[COMPILE_FAIL] Skipping function '{}' ({}): {}", function.name, func_id, e);
                     // Define a trap stub so finalize_definitions doesn't panic
                     if let Err(e2) = self.define_trap_stub(*func_id, function) {
-                        warn!("Failed to define trap stub for '{}': {}", function.name, e2);
+                        warn!("[COMPILE_FAIL] Failed to define trap stub for '{}': {}", function.name, e2);
                     }
                 }
             }
@@ -650,12 +657,24 @@ impl CraneliftBackend {
         for (func_id, extern_func) in &mir_module.extern_functions {
             if extern_func.name == "malloc" {
                 let libc_id = *self.runtime_functions.get("malloc").unwrap();
+                // GUARD: Don't overwrite function_map if this ID already has a real (non-extern) function
+                if let Some(real_func) = mir_module.functions.get(func_id) {
+                    if !real_func.cfg.blocks.is_empty() {
+                        continue;
+                    }
+                }
                 self.function_map.insert(*func_id, libc_id);
             } else if extern_func.name == "realloc" {
                 let libc_id = *self.runtime_functions.get("realloc").unwrap();
+                if let Some(real_func) = mir_module.functions.get(func_id) {
+                    if !real_func.cfg.blocks.is_empty() { continue; }
+                }
                 self.function_map.insert(*func_id, libc_id);
             } else if extern_func.name == "free" {
                 let libc_id = *self.runtime_functions.get("free").unwrap();
+                if let Some(real_func) = mir_module.functions.get(func_id) {
+                    if !real_func.cfg.blocks.is_empty() { continue; }
+                }
                 self.function_map.insert(*func_id, libc_id);
             }
         }
@@ -669,9 +688,9 @@ impl CraneliftBackend {
             match self.compile_function(*func_id, mir_module, function) {
                 Ok(()) => {}
                 Err(e) => {
-                    warn!("Skipping function '{}' ({}): {}", function.name, func_id, e);
+                    eprintln!("[COMPILE_FAIL] Skipping function '{}' ({:?}): {}", function.name, func_id, e);
                     if let Err(e2) = self.define_trap_stub(*func_id, function) {
-                        warn!("Failed to define trap stub for '{}': {}", function.name, e2);
+                        eprintln!("[COMPILE_FAIL] Failed to define trap stub for '{}': {}", function.name, e2);
                     }
                 }
             }
@@ -733,7 +752,13 @@ impl CraneliftBackend {
         }
 
         // Also check extern_functions for malloc/realloc/free
+        // GUARD: Skip extern IDs that collide with real (non-extern) function entries
         for (func_id, extern_func) in &mir_module.extern_functions {
+            if let Some(real_func) = mir_module.functions.get(func_id) {
+                if !real_func.cfg.blocks.is_empty() {
+                    continue;
+                }
+            }
             if extern_func.name == "malloc" {
                 let libc_id = *self.runtime_functions.get("malloc").unwrap();
                 self.function_map.insert(*func_id, libc_id);
@@ -3983,6 +4008,11 @@ impl CraneliftBackend {
             .get(&mir_func_id)
             .ok_or("Function not found")?;
 
+        // Guard: if function wasn't actually compiled/defined, return error
+        // instead of panicking inside cranelift's get_finalized_function
+        if !self.defined_functions.contains(&func_id) {
+            return Err(format!("Function {:?} (cl={:?}) not in defined_functions", mir_func_id, func_id));
+        }
         let code_ptr = self.module.get_finalized_function(func_id);
 
         Ok(code_ptr)
