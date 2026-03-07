@@ -301,14 +301,43 @@ impl InliningPass {
             // Match callee params with TypeVar types against caller argument register types.
             if sub_map.is_empty() && !callee_func.signature.type_params.is_empty() {
                 for type_param in &callee_func.signature.type_params {
+                    // Strategy 1: Match TypeVar-typed params against caller arg register types
                     for (i, sig_param) in callee_func.signature.parameters.iter().enumerate() {
                         if let IrType::TypeVar(ref name) = sig_param.ty {
                             if name == &type_param.name && i < call_site.args.len() {
-                                // Look up the register type of the argument in the caller
                                 if let Some(arg_ty) =
                                     caller_func.register_types.get(&call_site.args[i])
                                 {
                                     if !matches!(arg_ty, IrType::TypeVar(_)) {
+                                        sub_map
+                                            .insert(type_param.name.clone(), arg_ty.clone());
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Strategy 2: TypeParameter was erased to I64, but callee has tag_fixups.
+                    // For methods with `this` as param[0], match type param against param[1+]
+                    // using the caller's argument register types. An I64-typed callee param
+                    // paired with a non-I64 caller arg reveals the concrete type.
+                    if !sub_map.contains_key(&type_param.name)
+                        && !callee_func.type_param_tag_fixups.is_empty()
+                    {
+                        let self_offset =
+                            if callee_func.signature.parameters.first().map(|p| &p.name)
+                                == Some(&"this".to_string())
+                            { 1 } else { 0 };
+                        for (i, sig_param) in callee_func.signature.parameters.iter().enumerate() {
+                            if i < self_offset {
+                                continue;
+                            }
+                            // Type-erased param (I64) paired with a concrete caller arg type
+                            if sig_param.ty == IrType::I64 && i < call_site.args.len() {
+                                if let Some(arg_ty) =
+                                    caller_func.register_types.get(&call_site.args[i])
+                                {
+                                    if !matches!(arg_ty, IrType::I64 | IrType::TypeVar(_)) {
                                         sub_map
                                             .insert(type_param.name.clone(), arg_ty.clone());
                                         break;
