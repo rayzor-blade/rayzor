@@ -1492,6 +1492,10 @@ register_symbol!(
     crate::reflect::haxe_reflect_is_function
 );
 register_symbol!("haxe_reflect_copy", crate::reflect::haxe_reflect_copy);
+register_symbol!(
+    "haxe_reflect_compare_methods",
+    crate::reflect::haxe_reflect_compare_methods
+);
 register_symbol!("haxe_reflect_compare", crate::reflect::haxe_reflect_compare);
 register_symbol!(
     "haxe_reflect_compare_typed",
