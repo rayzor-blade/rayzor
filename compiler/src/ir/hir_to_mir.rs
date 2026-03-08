@@ -6600,8 +6600,11 @@ impl<'a> HirToMirContext<'a> {
         use crate::tast::core::TypeKind;
         let first = &args[0];
         let type_table = self.type_table.borrow();
-        debug!("[REFLECT_COMPARE_TYPE] first arg ty={:?}, type_info={:?}",
-            first.ty, type_table.get(first.ty).map(|ti| format!("{:?}", ti.kind)));
+        debug!(
+            "[REFLECT_COMPARE_TYPE] first arg ty={:?}, type_info={:?}",
+            first.ty,
+            type_table.get(first.ty).map(|ti| format!("{:?}", ti.kind))
+        );
         if let Some(ti) = type_table.get(first.ty) {
             match &ti.kind {
                 TypeKind::Int => return Some(Ok(1)),
@@ -6708,9 +6711,12 @@ impl<'a> HirToMirContext<'a> {
                         let mut arg_regs = Vec::new();
                         for arg in args.iter() {
                             if let Some(reg) = self.lower_expression(arg) {
-                                let reg_ty = self.builder.get_register_type(reg).unwrap_or(IrType::I64);
+                                let reg_ty =
+                                    self.builder.get_register_type(reg).unwrap_or(IrType::I64);
                                 let final_reg = if reg_ty != IrType::I64 {
-                                    self.builder.build_cast(reg, reg_ty, IrType::I64).unwrap_or(reg)
+                                    self.builder
+                                        .build_cast(reg, reg_ty, IrType::I64)
+                                        .unwrap_or(reg)
                                 } else {
                                     reg
                                 };
@@ -7756,10 +7762,8 @@ impl<'a> HirToMirContext<'a> {
                                             self.builder.build_const(IrValue::I32(tag_value))?
                                         }
                                         Err(type_param_name) => {
-                                            let tag =
-                                                self.builder.build_const(IrValue::I32(0))?;
-                                            if let Some(func) =
-                                                self.builder.current_function_mut()
+                                            let tag = self.builder.build_const(IrValue::I32(0))?;
+                                            if let Some(func) = self.builder.current_function_mut()
                                             {
                                                 func.type_param_tag_fixups
                                                     .push((tag, type_param_name));
@@ -7865,11 +7869,7 @@ impl<'a> HirToMirContext<'a> {
 
                             // Inject hidden enum type_id arg for runtime enum helpers
                             // (enumEq, enumConstructor, enumParameters, getEnum)
-                            self.inject_hidden_enum_type_id_arg(
-                                runtime_func,
-                                args,
-                                &mut arg_regs,
-                            );
+                            self.inject_hidden_enum_type_id_arg(runtime_func, args, &mut arg_regs);
 
                             // Use the expected parameter types for the extern function registration
                             // This ensures the signature matches what the runtime expects
@@ -10467,13 +10467,19 @@ impl<'a> HirToMirContext<'a> {
                                     let current_func_has_param = self
                                         .builder
                                         .current_function()
-                                        .map(|f| f.signature.type_params.iter().any(|tp| tp.name == *tp_name))
+                                        .map(|f| {
+                                            f.signature
+                                                .type_params
+                                                .iter()
+                                                .any(|tp| tp.name == *tp_name)
+                                        })
                                         .unwrap_or(false);
 
                                     if current_func_has_param {
                                         let tag_reg = self.builder.build_const(IrValue::I32(0))?;
                                         if let Some(func) = self.builder.current_function_mut() {
-                                            func.type_param_tag_fixups.push((tag_reg, tp_name.clone()));
+                                            func.type_param_tag_fixups
+                                                .push((tag_reg, tp_name.clone()));
                                         }
 
                                         let trace_typed_id = self.get_or_register_extern_function(
@@ -10570,7 +10576,9 @@ impl<'a> HirToMirContext<'a> {
                                     func.type_param_tag_fixups.push((tag_reg, name.clone()));
                                 }
                             }
-                            let val_as_i64 = self.builder.build_bitcast(arg_reg, IrType::I64)
+                            let val_as_i64 = self
+                                .builder
+                                .build_bitcast(arg_reg, IrType::I64)
                                 .unwrap_or(arg_reg);
                             let trace_typed_id = self.get_or_register_extern_function(
                                 "haxe_trace_typed",
@@ -13915,8 +13923,7 @@ impl<'a> HirToMirContext<'a> {
                                 } else {
                                     // Infer method's own type params from argument types
                                     // (e.g., add<T>(x:T) called with String → T=String)
-                                    if let Some(func) =
-                                        self.builder.module.functions.get(&func_id)
+                                    if let Some(func) = self.builder.module.functions.get(&func_id)
                                     {
                                         if !func.signature.type_params.is_empty() {
                                             let mut inferred: Vec<IrType> = Vec::new();
@@ -13943,8 +13950,7 @@ impl<'a> HirToMirContext<'a> {
                                                     && args.len() > 1
                                                 {
                                                     // Single type param, infer from first non-this arg
-                                                    let arg_type =
-                                                        self.convert_type(args[1].ty);
+                                                    let arg_type = self.convert_type(args[1].ty);
                                                     inferred.push(arg_type);
                                                 }
                                             }
@@ -15622,7 +15628,11 @@ impl<'a> HirToMirContext<'a> {
                             {
                                 reg
                             } else {
-                                self.convert_to_string_with_hint(lhs_reg, &lhs_mir_type, Some(lhs.ty))?
+                                self.convert_to_string_with_hint(
+                                    lhs_reg,
+                                    &lhs_mir_type,
+                                    Some(lhs.ty),
+                                )?
                             }
                         } else {
                             lhs_reg
@@ -15636,7 +15646,11 @@ impl<'a> HirToMirContext<'a> {
                             {
                                 reg
                             } else {
-                                self.convert_to_string_with_hint(rhs_reg, &rhs_mir_type, Some(rhs.ty))?
+                                self.convert_to_string_with_hint(
+                                    rhs_reg,
+                                    &rhs_mir_type,
+                                    Some(rhs.ty),
+                                )?
                             }
                         } else {
                             rhs_reg
@@ -15662,7 +15676,15 @@ impl<'a> HirToMirContext<'a> {
                 }
 
                 // String comparison: Eq/Ne/Lt/Le/Gt/Ge on strings need content comparison
-                if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne | HirBinaryOp::Lt | HirBinaryOp::Le | HirBinaryOp::Gt | HirBinaryOp::Ge) {
+                if matches!(
+                    op,
+                    HirBinaryOp::Eq
+                        | HirBinaryOp::Ne
+                        | HirBinaryOp::Lt
+                        | HirBinaryOp::Le
+                        | HirBinaryOp::Gt
+                        | HirBinaryOp::Ge
+                ) {
                     let lhs_type_raw = self.convert_type(lhs.ty);
                     let rhs_type_raw = self.convert_type(rhs.ty);
                     let lhs_type = self.resolve_expr_ir_type(lhs, lhs_type_raw);
@@ -16365,8 +16387,7 @@ impl<'a> HirToMirContext<'a> {
                             if matches!(reg_ty, Some(IrType::F64)) {
                                 Some(value_reg)
                             } else {
-                                self.builder
-                                    .build_cast(value_reg, IrType::F32, IrType::F64)
+                                self.builder.build_cast(value_reg, IrType::F32, IrType::F64)
                             }
                         } else {
                             let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
@@ -18100,19 +18121,21 @@ impl<'a> HirToMirContext<'a> {
             .module
             .functions
             .get(&func_id)
-            .map(|f| f.signature.parameters.iter().map(|p| p.ty.clone()).collect())
+            .map(|f| {
+                f.signature
+                    .parameters
+                    .iter()
+                    .map(|p| p.ty.clone())
+                    .collect()
+            })
             .or_else(|| {
-                self.builder
-                    .module
-                    .extern_functions
-                    .get(&func_id)
-                    .map(|f| {
-                        f.signature
-                            .parameters
-                            .iter()
-                            .map(|p| p.ty.clone())
-                            .collect()
-                    })
+                self.builder.module.extern_functions.get(&func_id).map(|f| {
+                    f.signature
+                        .parameters
+                        .iter()
+                        .map(|p| p.ty.clone())
+                        .collect()
+                })
             })
             .or_else(|| self.external_function_param_types.get(&func_id).cloned())
             .unwrap_or_default();
@@ -18218,7 +18241,6 @@ impl<'a> HirToMirContext<'a> {
 
         builder.build()
     }
-
 
     /// Build function signature for an instance method with implicit 'this' parameter
     fn build_instance_method_signature(
@@ -18401,9 +18423,16 @@ impl<'a> HirToMirContext<'a> {
     fn resolve_type_param_name(&self, type_id: crate::tast::TypeId) -> Option<String> {
         let type_table = self.type_table.borrow();
         if let Some(ti) = type_table.get(type_id) {
-            if let crate::tast::TypeKind::TypeParameter { symbol_id, constraints, .. } = &ti.kind {
+            if let crate::tast::TypeKind::TypeParameter {
+                symbol_id,
+                constraints,
+                ..
+            } = &ti.kind
+            {
                 if constraints.is_empty() || !self.has_interface_constraint(constraints) {
-                    return self.symbol_table.get_symbol(*symbol_id)
+                    return self
+                        .symbol_table
+                        .get_symbol(*symbol_id)
                         .and_then(|s| self.string_interner.get(s.name))
                         .map(|s| s.to_string());
                 }
@@ -18415,15 +18444,19 @@ impl<'a> HirToMirContext<'a> {
     /// Convert a value to a string pointer
     /// Uses the appropriate *_to_string MIR wrapper based on the source type.
     /// If hir_type_id is provided and is a TypeParameter, uses tag-based generic dispatch.
-    fn convert_to_string_with_hint(&mut self, value: IrId, from_type: &IrType, hir_type_id: Option<crate::tast::TypeId>) -> Option<IrId> {
+    fn convert_to_string_with_hint(
+        &mut self,
+        value: IrId,
+        from_type: &IrType,
+        hir_type_id: Option<crate::tast::TypeId>,
+    ) -> Option<IrId> {
         // Check if the HIR type is a TypeParameter — if so, use tag-based dispatch
         // even though the MIR type is I64 (type-erased).
         if let Some(type_id) = hir_type_id {
             if let Some(type_param_name) = self.resolve_type_param_name(type_id) {
                 let tag_reg = self.builder.build_const(IrValue::I32(0))?;
                 if let Some(func) = self.builder.current_function_mut() {
-                    func.type_param_tag_fixups
-                        .push((tag_reg, type_param_name));
+                    func.type_param_tag_fixups.push((tag_reg, type_param_name));
                 }
                 let func_id = self.get_or_register_extern_function(
                     "haxe_value_to_string_by_tag",
@@ -18434,9 +18467,11 @@ impl<'a> HirToMirContext<'a> {
                     .builder
                     .build_bitcast(value, IrType::I64)
                     .unwrap_or(value);
-                return self
-                    .builder
-                    .build_call_direct(func_id, vec![val_as_i64, tag_reg], IrType::String);
+                return self.builder.build_call_direct(
+                    func_id,
+                    vec![val_as_i64, tag_reg],
+                    IrType::String,
+                );
             }
         }
         self.convert_to_string(value, from_type)
@@ -18485,9 +18520,11 @@ impl<'a> HirToMirContext<'a> {
                     .builder
                     .build_bitcast(value, IrType::I64)
                     .unwrap_or(value);
-                return self
-                    .builder
-                    .build_call_direct(func_id, vec![val_as_i64, tag_reg], IrType::String);
+                return self.builder.build_call_direct(
+                    func_id,
+                    vec![val_as_i64, tag_reg],
+                    IrType::String,
+                );
             }
             IrType::Any => {
                 // Unknown types - use runtime dispatch
@@ -21504,7 +21541,11 @@ impl<'a> HirToMirContext<'a> {
             let field_name = self.symbol_table.get_symbol(field).map(|s| s.name)?;
             self.property_access_map.iter().find_map(|(sym_id, info)| {
                 let sym_name = self.symbol_table.get_symbol(*sym_id).map(|s| s.name)?;
-                if sym_name == field_name { Some(info.clone()) } else { None }
+                if sym_name == field_name {
+                    Some(info.clone())
+                } else {
+                    None
+                }
             })
         });
         if let Some(property_info) = property_info_owned.as_ref() {
@@ -21539,15 +21580,19 @@ impl<'a> HirToMirContext<'a> {
                         // Determine the result type: check the function signature first,
                         // then try the definition-site field symbol (from property_access_map),
                         // finally fall back to the expression-level field_ty.
-                        let result_type = self.builder.module.functions.get(&func_id)
+                        let result_type = self
+                            .builder
+                            .module
+                            .functions
+                            .get(&func_id)
                             .map(|f| f.signature.return_type.clone())
                             .unwrap_or_else(|| {
                                 // Function not in module (forward ref from import).
                                 // The access-site field symbol may have unresolved type.
                                 // Try the definition-site symbol from property_access_map
                                 // which was populated from the defining module.
-                                let def_sym_type = self.property_access_map.iter()
-                                    .find_map(|(def_sym, _)| {
+                                let def_sym_type =
+                                    self.property_access_map.iter().find_map(|(def_sym, _)| {
                                         let sym = self.symbol_table.get_symbol(*def_sym)?;
                                         let name = self.symbol_table.get_symbol(field)?.name;
                                         if sym.name == name && sym.type_id.as_raw() != u32::MAX {
@@ -21559,11 +21604,9 @@ impl<'a> HirToMirContext<'a> {
                                 let ty = def_sym_type.unwrap_or(field_ty);
                                 self.convert_type(ty)
                             });
-                        return self.builder.build_call_direct(
-                            func_id,
-                            vec![obj],
-                            result_type,
-                        );
+                        return self
+                            .builder
+                            .build_call_direct(func_id, vec![obj], result_type);
                     }
                     // Getter not found — fall through to other paths (stdlib dispatch, GEP, etc.)
                 }
@@ -28725,14 +28768,13 @@ impl<'a> HirToMirContext<'a> {
                 // skip field_index_map and struct layout for them.
                 // But still record the class name for BLADE cache serialization
                 // so the property accessor can be restored from cache.
-                if !matches!(
-                    property_info.getter,
-                    crate::tast::PropertyAccessor::Default
-                ) {
+                if !matches!(property_info.getter, crate::tast::PropertyAccessor::Default) {
                     let class_name_str = self
                         .symbol_table
                         .get_symbol(class.symbol_id)
-                        .and_then(|sym| sym.qualified_name.and_then(|n| self.string_interner.get(n)))
+                        .and_then(|sym| {
+                            sym.qualified_name.and_then(|n| self.string_interner.get(n))
+                        })
                         .or_else(|| self.string_interner.get(class.name))
                         .unwrap_or("<unknown>");
                     self.field_class_names

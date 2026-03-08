@@ -279,7 +279,9 @@ impl<'a> TastToHirContext<'a> {
                         // Bitwise operations
                         BinaryOperator::Shl => Some(HirLiteral::Int(l << r)),
                         BinaryOperator::Shr => Some(HirLiteral::Int(l >> r)),
-                        BinaryOperator::Ushr => Some(HirLiteral::Int(((*l as u32) >> (r & 31)) as i32 as i64)),
+                        BinaryOperator::Ushr => {
+                            Some(HirLiteral::Int(((*l as u32) >> (r & 31)) as i32 as i64))
+                        }
                         BinaryOperator::BitAnd => Some(HirLiteral::Int(l & r)),
                         BinaryOperator::BitOr => Some(HirLiteral::Int(l | r)),
                         BinaryOperator::BitXor => Some(HirLiteral::Int(l ^ r)),
@@ -691,7 +693,6 @@ impl<'a> TastToHirContext<'a> {
 
     /// Lower a function
     fn lower_function(&mut self, function: &TypedFunction) -> HirFunction {
-
         let hir_body = if !function.body.is_empty() {
             Some(self.lower_block(&function.body))
         } else {

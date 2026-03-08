@@ -241,7 +241,10 @@ impl Monomorphizer {
     ) -> Option<(IrFunctionId, Vec<IrType>)> {
         match inst {
             IrInstruction::CallDirect {
-                func_id, type_args, args, ..
+                func_id,
+                type_args,
+                args,
+                ..
             } => {
                 if !generic_funcs.contains(func_id) {
                     return None;
