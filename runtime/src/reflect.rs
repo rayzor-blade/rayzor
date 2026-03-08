@@ -168,6 +168,66 @@ pub extern "C" fn haxe_reflect_is_function(v: *mut u8) -> bool {
     }
 }
 
+/// Reflect.compareMethods(f1, f2) -> Bool
+///
+/// Returns true if f1 and f2 are the same function or method closure.
+/// For closures, compares both fn_ptr and env_ptr fields (16 bytes).
+/// f1, f2: DynamicValue pointers (boxed functions) or raw closure/function pointers
+#[no_mangle]
+pub extern "C" fn haxe_reflect_compare_methods(f1: *mut u8, f2: *mut u8) -> bool {
+    if f1.is_null() && f2.is_null() {
+        return true;
+    }
+    if f1.is_null() || f2.is_null() {
+        return false;
+    }
+
+    // Fast path: identical pointers
+    if f1 == f2 {
+        return true;
+    }
+
+    // Try to unwrap DynamicValue boxes to get the raw closure pointer.
+    // Only dereference if the pointer is properly aligned for DynamicValue.
+    let unwrap = |ptr: *mut u8| -> *mut u8 {
+        if (ptr as usize) % std::mem::align_of::<DynamicValue>() != 0 {
+            return ptr;
+        }
+        unsafe {
+            let dv = std::ptr::read(ptr as *const DynamicValue);
+            if dv.type_id == TYPE_FUNCTION && !dv.value_ptr.is_null() {
+                dv.value_ptr
+            } else {
+                ptr
+            }
+        }
+    };
+
+    let p1 = unwrap(f1);
+    let p2 = unwrap(f2);
+
+    // Same closure pointer after unwrapping
+    if p1 == p2 {
+        return true;
+    }
+
+    // Compare closure struct contents: {fn_ptr: i64, env_ptr: i64}
+    // Only if both pointers are 8-byte aligned (valid closure structs)
+    if !p1.is_null()
+        && !p2.is_null()
+        && (p1 as usize) % 8 == 0
+        && (p2 as usize) % 8 == 0
+    {
+        unsafe {
+            let fn1 = std::ptr::read(p1 as *const [i64; 2]);
+            let fn2 = std::ptr::read(p2 as *const [i64; 2]);
+            return fn1[0] == fn2[0] && fn1[1] == fn2[1];
+        }
+    }
+
+    false
+}
+
 /// Reflect.copy(obj) -> Dynamic
 ///
 /// Deep copies an anonymous object
