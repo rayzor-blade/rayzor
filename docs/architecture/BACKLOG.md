@@ -640,7 +640,7 @@ map.set(new Key(1, "foo"), "value");
 | Core Types (String, Array, Math) | 3 | 75+ | ✅ String ✅, Array ✅, Math ✅ |
 | Concurrency (Thread, Arc, Mutex, Channel) | 5 | 32 | ✅ 100% |
 | System I/O (Sys) | 1 | 18/18 | ✅ 100% |
-| Standard Utilities (Std, Type, Reflect) | 3 | 26/34 | 🟡 76% |
+| Standard Utilities (Std, Type, Reflect) | 3 | 34/34 | ✅ 100% |
 | File System (File, FileSystem, etc.) | 6 | 24/25 | ✅ 96% |
 | Date | 1 | 17/17 | ✅ 100% |
 | Bytes (haxe.io.Bytes) | 1 | 20 | ✅ 100% |
@@ -761,7 +761,7 @@ map.set(new Key(1, "foo"), "value");
 - [x] Std.is(v, t) - type check via `haxe_std_is` with class hierarchy walking (2026-02-21)
 - [x] Std.downcast<T>(v, c) - safe downcast via `haxe_std_downcast` with hierarchy walking (2026-02-21)
 
-**Type Class - 🟡 Mostly Complete (2026-02-27):**
+**Type Class - ✅ Complete (2026-02-27):**
 - [x] Type.getClass(o) - get class type_id from object header (2026-02-17)
 - [x] Type.getClassName(c) - class name via TYPE_REGISTRY (2026-02-17)
 - [x] Type.getSuperClass(c) - parent type_id via TYPE_REGISTRY (2026-02-17)
@@ -778,7 +778,7 @@ map.set(new Key(1, "foo"), "value");
 - [x] Type.resolveEnum(name) - lookup enum by qualified name via enum registry (2026-02-27)
 - [x] Type.allEnums(e) - list all zero-param enum constructors via `haxe_type_all_enums` (2026-02-27)
 
-**Reflect Class - 🟡 Mostly Complete (2026-02-27):**
+**Reflect Class - ✅ Complete (2026-03-08):**
 - [x] Reflect.field(o, name) - get field by name (2026-02-07)
 - [x] Reflect.setField(o, name, value) - set field by name (2026-02-07)
 - [x] Reflect.hasField(o, name) - check field exists (2026-02-07)
@@ -792,6 +792,7 @@ map.set(new Key(1, "foo"), "value");
 - [x] Reflect.isFunction(f) - function/closure detection via `haxe_box_function_ptr` + `TYPE_FUNCTION` tagging (2026-02-27)
 - [x] Reflect.callMethod(o, func, args) - reflective method call (2026-02-27)
 - [x] Reflect.makeVarArgs(f) - wrap function as varargs (2026-02-27)
+- [x] Reflect.compareMethods(f1, f2) - function/closure identity comparison (2026-03-08)
 
 **Priority 2: File System I/O - VERIFIED ✅ (2025-11-27)**
 
@@ -1014,7 +1015,7 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 ### 9.1 Completed
 
 - [x] **600/600 unit tests passing** (100% pass rate as of 2026-01-28)
-- [x] **87/87 haxe test files passing** (100% pass rate as of 2026-03-08)
+- [x] **88/88 haxe test files passing** (100% pass rate as of 2026-03-08)
 - [x] **9/9 e2e tests passing** (100% pass rate as of 2026-02-17, including arc_mutex_integration)
 - [x] **Docker stress test environment** (`ci/bench-test/`) for reproducible amd64 testing
 - [x] **SIGSEGV signal handler** for crash diagnosis with stack traces
@@ -1986,6 +1987,9 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [x] `haxe_object_get_type_id` / `haxe_object_is_instance` runtime functions (2026-02-13)
 - [x] Class hierarchy downcast via `haxe_safe_downcast_class` (2026-02-17) — reads object header, walks TYPE_REGISTRY parent chain
 - [x] TypeId consistency fix (2026-02-17) — object header, TYPE_REGISTRY, and class-as-value all use SymbolId-based TypeId
+
+**Bugs Fixed (2026-03-08):**
+- [x] Safe cast `cast(expr, Type)` now performs runtime downcast — was short-circuiting due to `from_type == to_type` (both classes are `Ptr(Void)` in MIR), bypassing `haxe_safe_downcast_class` entirely
 
 **Not Yet Implemented:**
 - [ ] Interface compatibility checks at runtime
