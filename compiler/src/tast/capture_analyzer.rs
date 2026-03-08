@@ -8,7 +8,7 @@ use crate::tast::{
     node::{TypedExpression, TypedExpressionKind, TypedStatement},
     ScopeId, SymbolId, TypeId,
 };
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 /// Information about a captured variable
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,13 +65,13 @@ impl CaptureAnalyzer {
     ///
     /// This walks the function body and identifies all variable references
     /// that refer to variables defined in outer scopes (not parameters or
-    /// local variables).
+    /// local variables). Types are resolved from the expression's `expr_type`.
     pub fn analyze_function_literal(
         &self,
         parameters: &[crate::tast::node::TypedParameter],
         body: &[TypedStatement],
     ) -> CaptureAnalysis {
-        let mut referenced_symbols = HashSet::new();
+        let mut referenced_symbols: HashMap<SymbolId, TypeId> = HashMap::new();
         let mut local_symbols = HashSet::new();
 
         // Parameters are local to the function
@@ -79,22 +79,19 @@ impl CaptureAnalyzer {
             local_symbols.insert(param.symbol_id);
         }
 
-        // Walk the body to find all variable references
+        // Walk the body to find all variable references with their types
         for stmt in body {
             self.collect_variable_references(stmt, &mut referenced_symbols, &mut local_symbols);
         }
 
         // Captured variables are those referenced but not local
         let mut captures = Vec::new();
-        for symbol_id in referenced_symbols {
+        for (symbol_id, type_id) in referenced_symbols {
             if !local_symbols.contains(&symbol_id) {
-                // This is a capture - we need the type information
-                // For now, we'll add it with a placeholder type
-                // In real usage, this would query the symbol table
                 captures.push(CapturedVariable {
                     symbol_id,
-                    type_id: TypeId::invalid(), // TODO: Look up from symbol table
-                    is_mutable_capture: false,  // TODO: Analyze mutability
+                    type_id,
+                    is_mutable_capture: false,
                 });
             }
         }
@@ -106,7 +103,7 @@ impl CaptureAnalyzer {
     fn collect_variable_references(
         &self,
         stmt: &TypedStatement,
-        referenced: &mut HashSet<SymbolId>,
+        referenced: &mut HashMap<SymbolId, TypeId>,
         locals: &mut HashSet<SymbolId>,
     ) {
         match stmt {
@@ -264,12 +261,13 @@ impl CaptureAnalyzer {
     fn collect_from_expression(
         &self,
         expr: &TypedExpression,
-        referenced: &mut HashSet<SymbolId>,
+        referenced: &mut HashMap<SymbolId, TypeId>,
         locals: &mut HashSet<SymbolId>,
     ) {
         match &expr.kind {
             TypedExpressionKind::Variable { symbol_id } => {
-                referenced.insert(*symbol_id);
+                // Use the expression's type — each TypedExpression carries its resolved type
+                referenced.entry(*symbol_id).or_insert(expr.expr_type);
             }
 
             TypedExpressionKind::FieldAccess { object, .. } => {

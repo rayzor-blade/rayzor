@@ -644,7 +644,7 @@ map.set(new Key(1, "foo"), "value");
 | File System (File, FileSystem, etc.) | 6 | 24/25 | ✅ 96% |
 | Date | 1 | 17/17 | ✅ 100% |
 | Bytes (haxe.io.Bytes) | 1 | 20 | ✅ 100% |
-| EReg (regex) | 1 | 10 | ✅ 100% |
+| EReg (regex) | 1 | 11 | ✅ 100% |
 | Data Structures (Maps, List) | 5 | 28/30 | ✅ 93% |
 | JSON (haxe.Json, haxe.format.JsonParser/Printer) | 3 | 4 | ✅ 100% |
 | Boxing / Dynamic | - | 14 | ✅ 100% |
@@ -863,7 +863,7 @@ map.set(new Key(1, "foo"), "value");
 - [x] setFloat/setDouble - floating point writes
 - [x] free() - deallocate (haxe_bytes_free)
 
-**EReg** ✅ Complete (10 runtime functions) — see Section 16.12
+**EReg** ✅ Complete (11 runtime functions) — see Section 16.12
 
 **Data Structure Classes** ✅ Complete (2026-02-21)
 - [x] IntMap<T> - Integer key hash map (runtime impl done)
@@ -997,14 +997,14 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 ### Pass Pipeline (per optimization level)
 
 **O0:** InsertFree → Inlining(forced, max=15) → DCE → SRA → CopyProp → DCE
-**O1:** InsertFree → Inlining → DCE → ConstFold → CopyProp → UnreachableBlockElim
-**O2:** InsertFree → Inlining → DCE → SRA → ConstFold → CopyProp → GlobalLoadCache → BCE → CSE → LICM → CFSimplify → UnreachableBlockElim → DCE
-**O3:** InsertFree → Inlining → GlobalLoadCache → DCE → SRA → ConstFold → CopyProp → BCE → GVN → CSE → LICM → LoopVec → TCO → CFSimplify → UnreachableBlockElim → DCE
+**O1:** InsertFree → Inlining → DCE → Devirt → ConstFold → CopyProp → UnreachableBlockElim
+**O2:** InsertFree → Inlining → DCE → Devirt → SRA → ConstFold → CopyProp → GlobalLoadCache → BCE → CSE → LICM → LoopUnroll → CFSimplify → UnreachableBlockElim → DCE
+**O3:** InsertFree → Inlining → GlobalLoadCache → DCE → Devirt → SRA → ConstFold → CopyProp → BCE → GVN → CSE → LICM → LoopUnroll → LoopVec → TCO → CFSimplify → UnreachableBlockElim → DCE
 
 ### Not Yet Implemented
 
-- [ ] Loop unrolling
-- [ ] Devirtualization
+- [x] Devirtualization (2026-03-08) — store-to-load forwarding resolves CallIndirect → CallDirect when function pointer origin is known
+- [x] Loop unrolling (2026-03-08) — full unrolling for constant-trip-count loops (≤16 iterations, ≤32 body instructions)
 - [ ] Full loop auto-vectorization (framework exists, transformation logic is limited)
 
 ---
@@ -1880,7 +1880,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 **Not Yet Implemented:**
 
-- [ ] Partial application / bind
+- [x] Partial application / `Function.bind()` with `_` placeholders (2026-03-08) — desugared at TAST level to FunctionLiteral
 - [x] `Reflect.isFunction()` support (2026-02-27)
 
 ### 16.5 Array Methods 🟢
@@ -2065,9 +2065,9 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 - [x] `matchedPos()` — returns anonymous object `{pos:Int, len:Int}` via `haxe_ereg_matched_pos_anon`
 
-**Deferred:**
+**Implemented (2026-03-08):**
 
-- `map()` — needs passing Haxe closure to runtime
+- [x] `map()` — closure-to-runtime bridge; MIR wrapper extracts fn_ptr/env_ptr from closure struct, runtime calls callback per match
 
 ### 16.13 Enum Methods and Statics 🟢
 

@@ -2341,6 +2341,48 @@ impl<'a> AstLowering<'a> {
                 {
                     // Reuse the pre-registered symbol from namespace
                     existing_symbol
+                } else if import.path.len() > 1 {
+                    // Import has a package path (e.g., rayzor.concurrent.Thread).
+                    // Search by qualified_name first to avoid bare-name collisions
+                    // (e.g., sys.thread.Thread vs rayzor.concurrent.Thread).
+                    let full_qualified_name = import.path.join(".");
+                    let qn_interned = self.context.string_interner.intern(&full_qualified_name);
+                    if let Some(existing_symbol) = self
+                        .context
+                        .symbol_table
+                        .resolve_qualified_name(qn_interned)
+                    {
+                        // Found the correct symbol — remap the name in the symbol table
+                        // so expression resolution (symbol_table.lookup_symbol) finds it
+                        self.context.symbol_table.remap_symbol_in_scope(
+                            ScopeId::first(),
+                            symbol_name,
+                            existing_symbol,
+                        );
+                        existing_symbol
+                    } else if let Some(existing_symbol) =
+                        self.resolve_symbol_in_scope_hierarchy(symbol_name)
+                    {
+                        // Bare-name fallback — set qualified_name to match the import path
+                        // so downstream code (e.g., Send/Sync validation) can identify the type
+                        if let Some(sym) = self.context.symbol_table.get_symbol_mut(existing_symbol)
+                        {
+                            if sym.qualified_name.is_none() {
+                                sym.qualified_name = Some(qn_interned);
+                            }
+                        }
+                        existing_symbol
+                    } else {
+                        // Create placeholder with correct qualified_name
+                        let new_sym = self
+                            .context
+                            .symbol_table
+                            .create_class_in_scope(symbol_name, ScopeId::first());
+                        if let Some(sym) = self.context.symbol_table.get_symbol_mut(new_sym) {
+                            sym.qualified_name = Some(qn_interned);
+                        }
+                        new_sym
+                    }
                 } else if let Some(existing_symbol) =
                     self.resolve_symbol_in_scope_hierarchy(symbol_name)
                 {
@@ -8163,7 +8205,9 @@ impl<'a> AstLowering<'a> {
             }
         };
 
-        let location = self.context.create_location_from_span(expression.span.clone());
+        let location = self
+            .context
+            .create_location_from_span(expression.span.clone());
 
         // Enter new function scope for the generated lambda
         let _function_scope = self.context.enter_scope(ScopeKind::Function);
@@ -8274,8 +8318,7 @@ impl<'a> AstLowering<'a> {
         self.context.exit_scope();
 
         // Result type: function from unbound params → return type
-        let lambda_param_types: Vec<TypeId> =
-            lambda_params.iter().map(|p| p.param_type).collect();
+        let lambda_param_types: Vec<TypeId> = lambda_params.iter().map(|p| p.param_type).collect();
         let result_type = self
             .context
             .type_table

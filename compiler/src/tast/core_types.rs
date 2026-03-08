@@ -5,44 +5,25 @@
 //! validation rules (e.g., Send/Sync constraints on Thread::spawn).
 
 use crate::tast::core::TypeKind;
-use crate::tast::{SymbolId, SymbolTable, TypeId, TypeTable};
+use crate::tast::{StringInterner, SymbolId, SymbolTable, TypeId, TypeTable};
 use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Fully qualified paths for Rayzor core types
 pub struct CoreTypePaths {
-    // Concurrency types
     pub thread: &'static str,
     pub channel: &'static str,
     pub mutex: &'static str,
     pub arc: &'static str,
-
-    // Memory types
-    pub rc: &'static str,
-    pub box_type: &'static str,
-
-    // Async types
-    pub promise: &'static str,
-    pub future: &'static str,
 }
 
 impl CoreTypePaths {
-    /// Get the standard core type paths
     pub fn standard() -> Self {
         Self {
-            // Concurrency
             thread: "rayzor.concurrent.Thread",
             channel: "rayzor.concurrent.Channel",
             mutex: "rayzor.concurrent.Mutex",
             arc: "rayzor.concurrent.Arc",
-
-            // Memory
-            rc: "rayzor.memory.Rc",
-            box_type: "rayzor.memory.Box",
-
-            // Async
-            promise: "rayzor.async.Promise",
-            future: "rayzor.async.Future",
         }
     }
 }
@@ -51,57 +32,39 @@ impl CoreTypePaths {
 pub struct CoreTypeChecker<'a> {
     type_table: &'a Rc<RefCell<TypeTable>>,
     symbol_table: &'a SymbolTable,
+    string_interner: &'a StringInterner,
     paths: CoreTypePaths,
 }
 
 impl<'a> CoreTypeChecker<'a> {
     /// Create a new core type checker
-    pub fn new(type_table: &'a Rc<RefCell<TypeTable>>, symbol_table: &'a SymbolTable) -> Self {
+    pub fn new(
+        type_table: &'a Rc<RefCell<TypeTable>>,
+        symbol_table: &'a SymbolTable,
+        string_interner: &'a StringInterner,
+    ) -> Self {
         Self {
             type_table,
             symbol_table,
+            string_interner,
             paths: CoreTypePaths::standard(),
         }
     }
 
-    /// Check if a type is rayzor.concurrent.Thread<T>
     pub fn is_thread(&self, type_id: TypeId) -> bool {
         self.is_core_type(type_id, self.paths.thread)
     }
 
-    /// Check if a type is rayzor.concurrent.Channel<T>
     pub fn is_channel(&self, type_id: TypeId) -> bool {
         self.is_core_type(type_id, self.paths.channel)
     }
 
-    /// Check if a type is rayzor.concurrent.Arc<T>
     pub fn is_arc(&self, type_id: TypeId) -> bool {
         self.is_core_type(type_id, self.paths.arc)
     }
 
-    /// Check if a type is rayzor.concurrent.Mutex<T>
     pub fn is_mutex(&self, type_id: TypeId) -> bool {
         self.is_core_type(type_id, self.paths.mutex)
-    }
-
-    /// Check if a type is rayzor.memory.Rc<T>
-    pub fn is_rc(&self, type_id: TypeId) -> bool {
-        self.is_core_type(type_id, self.paths.rc)
-    }
-
-    /// Check if a type is rayzor.memory.Box<T>
-    pub fn is_box(&self, type_id: TypeId) -> bool {
-        self.is_core_type(type_id, self.paths.box_type)
-    }
-
-    /// Check if a type is rayzor.async.Promise<T>
-    pub fn is_promise(&self, type_id: TypeId) -> bool {
-        self.is_core_type(type_id, self.paths.promise)
-    }
-
-    /// Check if a type is rayzor.async.Future<T>
-    pub fn is_future(&self, type_id: TypeId) -> bool {
-        self.is_core_type(type_id, self.paths.future)
     }
 
     /// Get the type argument from a generic type (e.g., T from Thread<T>)
@@ -147,32 +110,45 @@ impl<'a> CoreTypeChecker<'a> {
 
     /// Check if a symbol's fully qualified path matches the expected path
     fn check_symbol_path(&self, symbol_id: SymbolId, expected_path: &str) -> bool {
-        // Get the symbol
         let symbol = match self.symbol_table.get_symbol(symbol_id) {
             Some(s) => s,
             None => return false,
         };
 
-        // Get the fully qualified name
-        let qualified_name_interned = match symbol.qualified_name {
-            Some(qn) => qn,
-            None => return false,
-        };
+        // Try qualified_name first (most precise)
+        if let Some(qn) = symbol.qualified_name {
+            let fqn_str = self
+                .string_interner
+                .get(qn)
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    let type_table = self.type_table.borrow();
+                    type_table.get_string(qn).map(|s| s.to_string())
+                });
 
-        // Get the string from the interner
-        let type_table = self.type_table.borrow();
-        let fqn = match type_table.get_string(qualified_name_interned) {
-            Some(s) => s,
-            None => return false,
-        };
+            if let Some(fqn) = fqn_str {
+                let normalized_fqn = fqn.replace("::", ".");
+                let normalized_expected = expected_path.replace("::", ".");
+                return normalized_fqn == normalized_expected;
+            }
+        }
 
-        // Compare with expected path
-        // Handle both dot notation (rayzor.concurrent.Thread) and
-        // double-colon notation (rayzor::concurrent::Thread)
-        let normalized_fqn = fqn.replace("::", ".");
-        let normalized_expected = expected_path.replace("::", ".");
+        // Fallback: match by bare name against last component of expected path
+        let bare_name = self
+            .string_interner
+            .get(symbol.name)
+            .map(|s| s.to_string())
+            .or_else(|| {
+                let type_table = self.type_table.borrow();
+                type_table.get_string(symbol.name).map(|s| s.to_string())
+            });
 
-        normalized_fqn == normalized_expected
+        if let Some(name) = bare_name {
+            let expected_short = expected_path.rsplit('.').next().unwrap_or(expected_path);
+            return name == expected_short;
+        }
+
+        false
     }
 
     /// Validate Thread::spawn - all captured variables must be Send
@@ -198,11 +174,15 @@ impl<'a> CoreTypeChecker<'a> {
             }
 
             // Check if the method is "spawn"
-            let method_name = self.symbol_table.get_symbol(*method_symbol)?;
-            let method_name_str = {
-                let type_table = self.type_table.borrow();
-                type_table.get_string(method_name.name)?.to_string()
-            };
+            let method_sym = self.symbol_table.get_symbol(*method_symbol)?;
+            let method_name_str = self
+                .string_interner
+                .get(method_sym.name)
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    let tt = self.type_table.borrow();
+                    tt.get_string(method_sym.name).map(|s| s.to_string())
+                })?;
             if method_name_str != "spawn" {
                 return None;
             }

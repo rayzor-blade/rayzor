@@ -300,8 +300,12 @@ impl<'a> TypeCheckingPhase<'a> {
     /// - Arc<T> has T: Send + Sync
     fn run_send_sync_validation(&mut self, typed_file: &TypedFile) -> Result<(), String> {
         // Create the validator
-        let validator =
-            SendSyncValidator::new(self.type_table, self.symbol_table, &typed_file.classes);
+        let validator = SendSyncValidator::new(
+            self.type_table,
+            self.symbol_table,
+            self.string_interner,
+            &typed_file.classes,
+        );
 
         // Validate all classes
         for class in &typed_file.classes {
@@ -322,13 +326,11 @@ impl<'a> TypeCheckingPhase<'a> {
 
     /// Emit a Send/Sync validation error as a diagnostic
     fn emit_send_sync_error(&mut self, error: SendSyncError) {
-        use crate::tast::SourceLocation;
-
         self.emit_error(TypeCheckError {
             kind: TypeErrorKind::UndefinedType {
                 name: self.string_interner.intern("send_sync_violation"),
             },
-            location: SourceLocation::unknown(), // TODO: Get from error when source location added
+            location: error.source_location,
             context: error.message.clone(),
             suggestion: Some(
                 "Add @:derive([Send]) or @:derive([Send, Sync]) to the type".to_string(),

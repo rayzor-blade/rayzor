@@ -705,6 +705,19 @@ impl SymbolTable {
         symbol_id.and_then(|id| self.get_symbol(id))
     }
 
+    /// Remap a name in a scope to a different symbol.
+    /// Used when import resolution discovers the correct symbol after initial registration.
+    pub fn remap_symbol_in_scope(
+        &mut self,
+        scope_id: ScopeId,
+        name: InternedString,
+        new_symbol_id: SymbolId,
+    ) {
+        self.symbols_by_name.insert((scope_id, name), new_symbol_id);
+        // Invalidate cache for this lookup
+        self.symbol_cache.invalidate_scope(scope_id);
+    }
+
     /// Get all symbols in a scope (with caching)
     pub fn symbols_in_scope(&self, scope_id: ScopeId) -> Vec<&Symbol> {
         use super::symbol_cache::SymbolCacheKey;

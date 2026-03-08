@@ -27,11 +27,11 @@
 //! ```
 
 use crate::tast::{
-    capture_analyzer::{CaptureAnalysis, CaptureAnalyzer, CapturedVariable},
+    capture_analyzer::{CaptureAnalyzer, CapturedVariable},
     core_types::CoreTypeChecker,
-    node::{TypedClass, TypedExpression, TypedFunction, TypedParameter, TypedStatement},
+    node::{TypedClass, TypedExpression, TypedFunction, TypedStatement},
     trait_checker::TraitChecker,
-    ScopeId, SymbolId, SymbolTable, TypeId, TypeTable,
+    ScopeId, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -45,7 +45,8 @@ pub struct SendSyncError {
     pub type_id: TypeId,
     /// Symbol that failed validation (if applicable)
     pub symbol_id: Option<SymbolId>,
-    // TODO: Add source_location: SourceLocation field
+    /// Source location of the offending expression
+    pub source_location: SourceLocation,
 }
 
 impl SendSyncError {
@@ -54,11 +55,17 @@ impl SendSyncError {
             message,
             type_id,
             symbol_id: None,
+            source_location: SourceLocation::unknown(),
         }
     }
 
     pub fn with_symbol(mut self, symbol_id: SymbolId) -> Self {
         self.symbol_id = Some(symbol_id);
+        self
+    }
+
+    pub fn with_location(mut self, loc: SourceLocation) -> Self {
+        self.source_location = loc;
         self
     }
 }
@@ -72,6 +79,7 @@ pub struct SendSyncValidator<'a> {
     core_checker: CoreTypeChecker<'a>,
     type_table: &'a Rc<RefCell<TypeTable>>,
     symbol_table: &'a SymbolTable,
+    string_interner: &'a StringInterner,
 }
 
 impl<'a> SendSyncValidator<'a> {
@@ -79,13 +87,15 @@ impl<'a> SendSyncValidator<'a> {
     pub fn new(
         type_table: &'a Rc<RefCell<TypeTable>>,
         symbol_table: &'a SymbolTable,
+        string_interner: &'a StringInterner,
         classes: &'a [TypedClass],
     ) -> Self {
         Self {
-            trait_checker: TraitChecker::new(type_table, symbol_table, classes),
-            core_checker: CoreTypeChecker::new(type_table, symbol_table),
+            trait_checker: TraitChecker::new(type_table, symbol_table, string_interner, classes),
+            core_checker: CoreTypeChecker::new(type_table, symbol_table, string_interner),
             type_table,
             symbol_table,
+            string_interner,
         }
     }
 
@@ -100,7 +110,6 @@ impl<'a> SendSyncValidator<'a> {
             return self.validate_thread_spawn(call_expr, closure_type);
         }
 
-        // Add more validation rules here as needed
         Ok(())
     }
 
@@ -132,13 +141,14 @@ impl<'a> SendSyncValidator<'a> {
             parameters, body, ..
         } = &closure_expr.kind
         {
-            // Analyze captures
-            let analyzer = CaptureAnalyzer::new(ScopeId::invalid()); // TODO: Get actual scope
+            // Analyze captures — types resolved from expression's expr_type
+            let analyzer = CaptureAnalyzer::new(ScopeId::invalid());
             let analysis = analyzer.analyze_function_literal(parameters, body);
 
             // Validate all captures are Send
+            let call_loc = call_expr.source_location;
             for capture in &analysis.captures {
-                self.validate_capture_is_send(capture)?;
+                self.validate_capture_is_send(capture, call_loc)?;
             }
         }
 
@@ -146,44 +156,95 @@ impl<'a> SendSyncValidator<'a> {
     }
 
     /// Validate that a captured variable is Send
-    fn validate_capture_is_send(&self, capture: &CapturedVariable) -> ValidationResult<()> {
-        // TODO: capture.type_id is currently invalid - need to look up from symbol table
-        // For now, we'll use a placeholder
+    fn validate_capture_is_send(
+        &self,
+        capture: &CapturedVariable,
+        call_location: SourceLocation,
+    ) -> ValidationResult<()> {
         let type_id = capture.type_id;
 
         if !type_id.is_valid() {
-            // Type lookup not yet implemented in CaptureAnalyzer
-            // This is a TODO - for now we skip validation
+            // Type couldn't be resolved — skip (shouldn't happen with expr_type resolution)
             return Ok(());
         }
 
         if !self.trait_checker.is_send(type_id) {
+            let type_name = self.get_type_name(type_id);
             return Err(SendSyncError::new(
                 format!(
-                    "Cannot capture non-Send type in Thread::spawn. \
-                     Type must implement Send trait or use @:derive([Send])"
+                    "Cannot send value of type `{}` across threads: \
+                     type does not implement Send. \
+                     Add @:derive([Send]) to the class declaration",
+                    type_name
                 ),
                 type_id,
             )
-            .with_symbol(capture.symbol_id));
+            .with_symbol(capture.symbol_id)
+            .with_location(call_location));
         }
 
         Ok(())
     }
 
+    /// Get a human-readable name for a type
+    fn get_type_name(&self, type_id: TypeId) -> String {
+        let type_table = self.type_table.borrow();
+        match type_table.get(type_id) {
+            Some(info) => {
+                use crate::tast::core::TypeKind;
+                match &info.kind {
+                    TypeKind::Int => "Int".to_string(),
+                    TypeKind::Float => "Float".to_string(),
+                    TypeKind::Bool => "Bool".to_string(),
+                    TypeKind::String => "String".to_string(),
+                    TypeKind::Void => "Void".to_string(),
+                    TypeKind::Dynamic => "Dynamic".to_string(),
+                    TypeKind::Class { symbol_id, .. } => {
+                        if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
+                            if let Some(qn) = sym.qualified_name {
+                                return self
+                                    .string_interner
+                                    .get(qn)
+                                    .unwrap_or("unknown")
+                                    .to_string();
+                            }
+                            return self
+                                .string_interner
+                                .get(sym.name)
+                                .unwrap_or("unknown")
+                                .to_string();
+                        }
+                        "unknown class".to_string()
+                    }
+                    TypeKind::Function { .. } => "Function".to_string(),
+                    TypeKind::Array { .. } => "Array".to_string(),
+                    _ => format!("{:?}", type_id),
+                }
+            }
+            None => format!("{:?}", type_id),
+        }
+    }
+
     /// Validate a type used in a Channel<T>
     ///
     /// Ensures T is Send
-    pub fn validate_channel_type(&self, channel_type_id: TypeId) -> ValidationResult<()> {
+    pub fn validate_channel_type(
+        &self,
+        channel_type_id: TypeId,
+        loc: SourceLocation,
+    ) -> ValidationResult<()> {
         if let Some(element_type) = self.core_checker.get_channel_element_type(channel_type_id) {
             if !self.trait_checker.is_send(element_type) {
+                let type_name = self.get_type_name(element_type);
                 return Err(SendSyncError::new(
                     format!(
-                        "Channel<T> requires T to be Send. \
-                         Use @:derive([Send]) on the type or ensure all fields are Send"
+                        "Channel<{}> requires element type to implement Send. \
+                         Add @:derive([Send]) to `{}`",
+                        type_name, type_name
                     ),
                     element_type,
-                ));
+                )
+                .with_location(loc));
             }
         }
         Ok(())
@@ -192,28 +253,36 @@ impl<'a> SendSyncValidator<'a> {
     /// Validate a type used in Arc<T>
     ///
     /// Ensures T is Send + Sync
-    pub fn validate_arc_type(&self, arc_type_id: TypeId) -> ValidationResult<()> {
+    pub fn validate_arc_type(
+        &self,
+        arc_type_id: TypeId,
+        loc: SourceLocation,
+    ) -> ValidationResult<()> {
         if let Some(element_type) = self.core_checker.get_arc_element_type(arc_type_id) {
-            // Must be Send
+            let type_name = self.get_type_name(element_type);
+
             if !self.trait_checker.is_send(element_type) {
                 return Err(SendSyncError::new(
                     format!(
-                        "Arc<T> requires T to be Send. \
-                         Use @:derive([Send]) on the type"
+                        "Arc<{}> requires inner type to implement Send. \
+                         Add @:derive([Send]) to `{}`",
+                        type_name, type_name
                     ),
                     element_type,
-                ));
+                )
+                .with_location(loc));
             }
 
-            // Must be Sync
             if !self.trait_checker.is_sync(element_type) {
                 return Err(SendSyncError::new(
                     format!(
-                        "Arc<T> requires T to be Sync. \
-                         Use @:derive([Send, Sync]) on the type or ensure all fields are Sync"
+                        "Arc<{}> requires inner type to implement Sync. \
+                         Add @:derive([Send, Sync]) to `{}`",
+                        type_name, type_name
                     ),
                     element_type,
-                ));
+                )
+                .with_location(loc));
             }
         }
         Ok(())
@@ -393,11 +462,12 @@ impl<'a> SendSyncValidator<'a> {
                 }
 
                 // Validate Channel<T> and Arc<T> type constraints
+                let loc = expr.source_location;
                 if self.core_checker.is_channel(expr.expr_type) {
-                    self.validate_channel_type(expr.expr_type)?;
+                    self.validate_channel_type(expr.expr_type, loc)?;
                 }
                 if self.core_checker.is_arc(expr.expr_type) {
-                    self.validate_arc_type(expr.expr_type)?;
+                    self.validate_arc_type(expr.expr_type, loc)?;
                 }
             }
 
