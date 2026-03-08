@@ -1801,6 +1801,7 @@ impl PassManager {
                 manager.add_pass(super::inlining::InliningPass::new());
                 // manager.add_pass(GlobalLoadCachingPass::new()); // BUG: causes invalid IR
                 manager.add_pass(DeadCodeEliminationPass::new());
+                manager.add_pass(super::devirtualize::DevirtualizationPass::new());
                 manager.add_pass(ConstantFoldingPass::new());
                 manager.add_pass(CopyPropagationPass::new());
                 manager.add_pass(UnreachableBlockEliminationPass::new());
@@ -1809,6 +1810,7 @@ impl PassManager {
                 // Standard optimizations
                 manager.add_pass(super::inlining::InliningPass::new());
                 manager.add_pass(DeadCodeEliminationPass::new());
+                manager.add_pass(super::devirtualize::DevirtualizationPass::new());
                 // SRA enabled - regular SRA doesn't modify phi nodes, phi-aware SRA remains disabled
                 manager.add_pass(super::scalar_replacement::ScalarReplacementPass::new());
                 manager.add_pass(ConstantFoldingPass::new());
@@ -1822,6 +1824,8 @@ impl PassManager {
                 // CSE and LICM may contribute to non-determinism, keeping them for now
                 manager.add_pass(CSEPass::new());
                 manager.add_pass(LICMPass::new());
+                // Loop unrolling after LICM (invariants hoisted, trip counts visible)
+                manager.add_pass(super::loop_unrolling::LoopUnrollingPass::new());
                 manager.add_pass(ControlFlowSimplificationPass::new());
                 manager.add_pass(UnreachableBlockEliminationPass::new());
                 manager.add_pass(DeadCodeEliminationPass::new()); // Cleanup after other passes
@@ -1832,6 +1836,7 @@ impl PassManager {
                 manager.add_pass(super::inlining::InliningPass::new());
                 manager.add_pass(GlobalLoadCachingPass::new());
                 manager.add_pass(DeadCodeEliminationPass::new());
+                manager.add_pass(super::devirtualize::DevirtualizationPass::new());
                 manager.add_pass(super::scalar_replacement::ScalarReplacementPass::new());
                 manager.add_pass(ConstantFoldingPass::new());
                 manager.add_pass(CopyPropagationPass::new());
@@ -1841,6 +1846,8 @@ impl PassManager {
                 manager.add_pass(GVNPass::new());
                 manager.add_pass(CSEPass::new());
                 manager.add_pass(LICMPass::new());
+                // Loop unrolling after LICM
+                manager.add_pass(super::loop_unrolling::LoopUnrollingPass::new());
                 // Loop vectorization after LICM (LICM prepares loops for vectorization)
                 manager.add_pass(super::vectorization::LoopVectorizationPass::new());
                 manager.add_pass(TailCallOptimizationPass::new());
