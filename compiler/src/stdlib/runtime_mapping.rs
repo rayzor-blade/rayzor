@@ -261,6 +261,8 @@ impl StdlibMapping {
         mapping.register_native_stack_trace_methods();
         // Enum built-in methods (getIndex, getName, getParameters)
         mapping.register_enum_methods();
+        // JSON (haxe.format.JsonParser/JsonPrinter)
+        mapping.register_json_methods();
         mapping
     }
 
@@ -3365,6 +3367,27 @@ impl StdlibMapping {
             // Runtime signature: haxe_enum_get_parameters(type_id: u32, value: i64, is_boxed: i32) -> *mut HaxeArray
             map_method!(instance "Enum", "getParameters" => "haxe_enum_get_parameters", params: 0,
                 returns: primitive, types: &[I32, I64, I32] => PtrVoid),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    fn register_json_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            // haxe.Json.parse(text:String):Dynamic
+            map_method!(static "Json", "parse" => "haxe_json_parse", params: 1, returns: primitive,
+                types: &[PtrU8] => PtrU8),
+            // haxe.Json.stringify(value:Dynamic, ?replacer, ?space):String
+            map_method!(static "Json", "stringify" => "haxe_json_stringify", params: 1, returns: primitive,
+                types: &[PtrU8] => PtrU8),
+            // haxe.format.JsonParser.parse(str:String):Dynamic
+            map_method!(static "JsonParser", "parse" => "haxe_json_parse", params: 1, returns: primitive,
+                types: &[PtrU8] => PtrU8),
+            // haxe.format.JsonPrinter.print(o:Dynamic, ?replacer, ?space):String
+            map_method!(static "JsonPrinter", "print" => "haxe_json_stringify", params: 1, returns: primitive,
+                types: &[PtrU8] => PtrU8),
         ];
 
         self.register_from_tuples(mappings);

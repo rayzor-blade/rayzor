@@ -373,12 +373,18 @@ pub extern "C" fn rayzor_anon_set_field(
     } else {
         unsafe {
             let dv = *(value_ptr as *const DynamicValue);
-            let raw = if dv.value_ptr.is_null() {
-                0u64
+            if dv.value_ptr.is_null() {
+                (dv.type_id.0, 0u64)
+            } else if dv.type_id == TYPE_INT || dv.type_id == TYPE_FLOAT || dv.type_id == TYPE_BOOL
+            {
+                // Primitive types: dereference to get the raw value
+                (dv.type_id.0, *(dv.value_ptr as *const u64))
             } else {
-                *(dv.value_ptr as *const u64)
-            };
-            (dv.type_id.0, raw)
+                // Reference types (String, AnonObject, Array, user types):
+                // store the pointer itself, not the dereferenced value.
+                // StringPtr is 16 bytes — dereferencing would lose the length.
+                (dv.type_id.0, dv.value_ptr as u64)
+            }
         }
     };
 

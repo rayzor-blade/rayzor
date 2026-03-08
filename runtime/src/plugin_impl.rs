@@ -1520,6 +1520,12 @@ register_symbol!(
 );
 
 // ============================================================================
+// JSON (native parse/stringify)
+// ============================================================================
+register_symbol!("haxe_json_parse", crate::json::haxe_json_parse);
+register_symbol!("haxe_json_stringify", crate::json::haxe_json_stringify);
+
+// ============================================================================
 // Class Virtual Method Dispatch (Vtable)
 // ============================================================================
 register_symbol!("haxe_vtable_init", crate::type_system::haxe_vtable_init);

@@ -23,13 +23,11 @@
 package haxe;
 
 /**
-	Cross-platform JSON API: it will automatically use the optimized native API if available.
-	Use `-D haxeJSON` to force usage of the Haxe implementation even if a native API is found:
-	This will provide extra encoding (but not decoding) features such as enums (replaced by their index) and StringMaps.
+	Cross-platform JSON API backed by Rayzor's native Rust implementation.
 
 	@see https://haxe.org/manual/std-Json.html
 **/
-class Json {
+extern class Json {
 	/**
 		Parses given JSON-encoded `text` and returns the resulting object.
 
@@ -40,23 +38,12 @@ class Json {
 
 		@see https://haxe.org/manual/std-Json-parsing.html
 	**/
-	public static inline function parse(text:String):Dynamic {
-		return haxe.format.JsonParser.parse(text);
-	}
+	static public function parse(text:String):Dynamic;
 
 	/**
 		Encodes the given `value` and returns the resulting JSON string.
 
-		If `replacer` is given and is not null, it is used to retrieve the
-		actual object to be encoded. The `replacer` function takes two parameters,
-		the key and the value being encoded. Initial key value is an empty string.
-
-		If `space` is given and is not null, the result will be pretty-printed.
-		Successive levels will be indented by this string.
-
 		@see https://haxe.org/manual/std-Json-encoding.html
 	**/
-	public static inline function stringify(value:Dynamic, ?replacer:(key:Dynamic, value:Dynamic) -> Dynamic, ?space:String):String {
-		return haxe.format.JsonPrinter.print(value, replacer, space);
-	}
+	static public function stringify(value:Dynamic, ?replacer:(key:Dynamic, value:Dynamic) -> Dynamic, ?space:String):String;
 }

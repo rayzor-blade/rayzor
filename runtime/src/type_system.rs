@@ -50,6 +50,9 @@ pub const TYPE_FLOAT: TypeId = TypeId(4);
 pub const TYPE_STRING: TypeId = TypeId(5);
 pub const TYPE_FUNCTION: TypeId = TypeId(u32::MAX - 1);
 
+// Compound type IDs (6 = anon object defined in anon_object.rs, 7 = array)
+pub const TYPE_ARRAY: TypeId = TypeId(7);
+
 // Starting ID for user-defined types (classes, enums, etc.)
 pub const TYPE_USER_START: u32 = 1000;
 
@@ -254,6 +257,30 @@ pub fn init_type_system() {
             size: std::mem::size_of::<usize>(),
             align: std::mem::align_of::<usize>(),
             to_string: function_to_string,
+            enum_info: None,
+            class_info: None,
+        },
+    );
+
+    registry.insert(
+        crate::anon_object::TYPE_ANON_OBJECT,
+        TypeInfo {
+            name: "Object",
+            size: std::mem::size_of::<usize>(),
+            align: std::mem::align_of::<usize>(),
+            to_string: anon_object_to_string,
+            enum_info: None,
+            class_info: None,
+        },
+    );
+
+    registry.insert(
+        TYPE_ARRAY,
+        TypeInfo {
+            name: "Array",
+            size: std::mem::size_of::<usize>(),
+            align: std::mem::align_of::<usize>(),
+            to_string: array_to_string,
             enum_info: None,
             class_info: None,
         },
@@ -1725,6 +1752,114 @@ unsafe extern "C" fn function_to_string(_value_ptr: *const u8) -> StringPtr {
     StringPtr {
         ptr: s.as_ptr(),
         len: s.len(),
+    }
+}
+
+unsafe extern "C" fn anon_object_to_string(value_ptr: *const u8) -> StringPtr {
+    // value_ptr is an anon object handle — stringify it
+    let mut buf = String::from("{object}");
+    // Try to list fields
+    let fields_arr = crate::anon_object::rayzor_anon_fields(value_ptr as *mut u8);
+    if !fields_arr.is_null() {
+        let arr = &*(fields_arr as *const crate::haxe_array::HaxeArray);
+        if arr.len > 0 {
+            buf.clear();
+            buf.push('{');
+            for i in 0..arr.len {
+                let name_hs_ptr = *(arr.ptr.add(i * 8) as *const *mut u8);
+                if !name_hs_ptr.is_null() {
+                    let name_hs = &*(name_hs_ptr as *const crate::haxe_string::HaxeString);
+                    if !name_hs.ptr.is_null() && name_hs.len > 0 {
+                        if i > 0 {
+                            buf.push_str(", ");
+                        }
+                        let name = std::str::from_utf8(std::slice::from_raw_parts(
+                            name_hs.ptr,
+                            name_hs.len,
+                        ))
+                        .unwrap_or("?");
+                        buf.push_str(name);
+                        buf.push_str(": ");
+                        // Get field value and stringify
+                        let val = crate::anon_object::rayzor_anon_get_field(
+                            value_ptr as *mut u8,
+                            name_hs.ptr,
+                            name_hs.len as u32,
+                        );
+                        if val.is_null() {
+                            buf.push_str("null");
+                        } else {
+                            let hs = haxe_std_string_ptr(val);
+                            if !hs.is_null() {
+                                let h = &*hs;
+                                if !h.ptr.is_null() && h.len > 0 {
+                                    let s = std::str::from_utf8(std::slice::from_raw_parts(
+                                        h.ptr, h.len,
+                                    ))
+                                    .unwrap_or("?");
+                                    buf.push_str(s);
+                                } else {
+                                    buf.push_str("null");
+                                }
+                            } else {
+                                buf.push_str("null");
+                            }
+                        }
+                    }
+                }
+            }
+            buf.push('}');
+        }
+    }
+    let s_static = Box::leak(buf.into_boxed_str());
+    StringPtr {
+        ptr: s_static.as_ptr(),
+        len: s_static.len(),
+    }
+}
+
+unsafe extern "C" fn array_to_string(value_ptr: *const u8) -> StringPtr {
+    // value_ptr is a HaxeArray pointer — format as [e0, e1, ...]
+    if value_ptr.is_null() {
+        let s = "null";
+        return StringPtr {
+            ptr: s.as_ptr(),
+            len: s.len(),
+        };
+    }
+    let arr = &*(value_ptr as *const crate::haxe_array::HaxeArray);
+    let mut buf = String::from("[");
+    for i in 0..arr.len {
+        if i > 0 {
+            buf.push(',');
+        }
+        // Elements are DynamicValue* pointers stored as i64
+        let elem = *(arr.ptr.add(i * 8) as *const *mut u8);
+        if elem.is_null() {
+            buf.push_str("null");
+        } else {
+            let hs = haxe_std_string_ptr(elem);
+            if !hs.is_null() {
+                let h = &*hs;
+                if !h.ptr.is_null() && h.len > 0 {
+                    if let Ok(s) = std::str::from_utf8(std::slice::from_raw_parts(h.ptr, h.len)) {
+                        buf.push_str(s);
+                    } else {
+                        buf.push('?');
+                    }
+                } else {
+                    buf.push_str("null");
+                }
+            } else {
+                buf.push_str("null");
+            }
+        }
+    }
+    buf.push(']');
+    let s_static = Box::leak(buf.into_boxed_str());
+    StringPtr {
+        ptr: s_static.as_ptr(),
+        len: s_static.len(),
     }
 }
 
