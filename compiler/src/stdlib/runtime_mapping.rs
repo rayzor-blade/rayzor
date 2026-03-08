@@ -3325,6 +3325,9 @@ impl StdlibMapping {
             // replace(s:String, by:String):String
             map_method!(instance "EReg", "replace" => "haxe_ereg_replace", params: 2, returns: primitive,
                 types: &[PtrU8, PtrString, PtrString] => String),
+            // map(s:String, f:EReg->String):String — closure bridge via MIR wrapper
+            map_method!(instance "EReg", "map" => "EReg_map", params: 2, returns: primitive,
+                types: &[PtrU8, PtrString, PtrVoid] => String),
             // static escape(s:String):String
             map_method!(static "EReg", "escape" => "haxe_ereg_escape", params: 1, returns: primitive,
                 types: &[PtrString] => String),

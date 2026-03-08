@@ -1724,6 +1724,7 @@ register_symbol!(
 register_symbol!("haxe_ereg_match_sub", crate::ereg::haxe_ereg_match_sub);
 register_symbol!("haxe_ereg_split", crate::ereg::haxe_ereg_split);
 register_symbol!("haxe_ereg_replace", crate::ereg::haxe_ereg_replace);
+register_symbol!("haxe_ereg_map", crate::ereg::haxe_ereg_map);
 register_symbol!("haxe_ereg_escape", crate::ereg::haxe_ereg_escape);
 
 // ============================================================================
