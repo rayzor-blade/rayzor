@@ -3382,33 +3382,27 @@ impl CompilationUnit {
                 &self.string_interner,
                 &typed_file.classes,
             );
-            let mut send_sync_errors = Vec::new();
+            let mut send_sync_errors: Vec<CompilationError> = Vec::new();
+            let collect_error = |error: crate::tast::send_sync_validator::SendSyncError| {
+                CompilationError {
+                    message: error.message.clone(),
+                    location: error.source_location,
+                    category: ErrorCategory::ConcurrencyError,
+                    suggestion: Some(
+                        "Add @:derive([Send]) or @:derive([Send, Sync]) to the type"
+                            .to_string(),
+                    ),
+                    related_errors: Vec::new(),
+                }
+            };
             for class in &typed_file.classes {
                 if let Err(error) = validator.validate_class(class) {
-                    send_sync_errors.push(CompilationError {
-                        message: error.message.clone(),
-                        location: error.source_location,
-                        category: ErrorCategory::TypeError,
-                        suggestion: Some(
-                            "Add @:derive([Send]) or @:derive([Send, Sync]) to the type"
-                                .to_string(),
-                        ),
-                        related_errors: Vec::new(),
-                    });
+                    send_sync_errors.push(collect_error(error));
                 }
             }
             for function in &typed_file.functions {
                 if let Err(error) = validator.validate_function(function) {
-                    send_sync_errors.push(CompilationError {
-                        message: error.message.clone(),
-                        location: error.source_location,
-                        category: ErrorCategory::TypeError,
-                        suggestion: Some(
-                            "Add @:derive([Send]) or @:derive([Send, Sync]) to the type"
-                                .to_string(),
-                        ),
-                        related_errors: Vec::new(),
-                    });
+                    send_sync_errors.push(collect_error(error));
                 }
             }
             if !send_sync_errors.is_empty() {
@@ -4380,8 +4374,16 @@ impl CompilationUnit {
     pub fn print_compilation_errors(&self, errors: &[CompilationError]) {
         use diagnostics::{ErrorFormatter, SourceMap};
 
-        // Build source map with all parsed files
+        // Build source map — user files first (FileId 0) to match
+        // compiler's SourceLocation.file_id convention
         let mut source_map = SourceMap::new();
+
+        // User files must be FileId 0 (matching compiler's SourceLocation convention)
+        for user_file in &self.user_files {
+            if let Some(ref source) = user_file.input {
+                source_map.add_file(user_file.filename.clone(), source.clone());
+            }
+        }
 
         // Add stdlib files
         for stdlib_file in &self.stdlib_files {
@@ -4394,13 +4396,6 @@ impl CompilationUnit {
         for import_file in &self.import_hx_files {
             if let Some(ref source) = import_file.input {
                 source_map.add_file(import_file.filename.clone(), source.clone());
-            }
-        }
-
-        // Add user files
-        for user_file in &self.user_files {
-            if let Some(ref source) = user_file.input {
-                source_map.add_file(user_file.filename.clone(), source.clone());
             }
         }
 

@@ -127,6 +127,12 @@ pub enum TypeErrorKind {
 
     /// Unknown symbol reference
     UnknownSymbol { name: String },
+
+    /// Send/Sync concurrency violation
+    SendSyncViolation {
+        type_name: String,
+        reason: String,
+    },
 }
 
 /// Access levels for visibility checking
