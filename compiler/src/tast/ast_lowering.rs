@@ -6197,7 +6197,7 @@ impl<'a> AstLowering<'a> {
                             parser::AssignOp::ShlAssign => BinaryOperator::Shl,
                             parser::AssignOp::ShrAssign => BinaryOperator::Shr,
                             parser::AssignOp::UshrAssign => BinaryOperator::Ushr,
-                            parser::AssignOp::Assign => unreachable!(),          // Handled above
+                            parser::AssignOp::Assign => unreachable!(), // Handled above
                         };
 
                         // Create the binary operation: target op value

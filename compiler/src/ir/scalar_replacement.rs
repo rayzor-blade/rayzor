@@ -463,8 +463,8 @@ fn try_build_phi_candidate(
                 }
 
                 // Track copies/casts (Cast is pointer-type reinterpretation, alias of src)
-                if let IrInstruction::Copy { dest, src }
-                | IrInstruction::Cast { dest, src, .. } = inst
+                if let IrInstruction::Copy { dest, src } | IrInstruction::Cast { dest, src, .. } =
+                    inst
                 {
                     if all_tracked.contains(dest) {
                         continue;
@@ -809,11 +809,8 @@ fn apply_phi_sra(function: &mut IrFunction, candidate: &PhiSraCandidate) -> usiz
     }
 
     // Get back-edge info before mutating
-    let back_edge_info: Option<IrBlockId> = function
-        .cfg
-        .blocks
-        .get(&candidate.phi_block)
-        .and_then(|b| {
+    let back_edge_info: Option<IrBlockId> =
+        function.cfg.blocks.get(&candidate.phi_block).and_then(|b| {
             b.phi_nodes
                 .iter()
                 .find(|p| p.dest == candidate.phi_dest)

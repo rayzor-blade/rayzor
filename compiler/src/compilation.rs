@@ -7,10 +7,10 @@ use crate::compiler_plugin::CompilerPluginRegistry;
 use crate::dependency_graph::{CircularDependency, DependencyAnalysis, DependencyGraph};
 use crate::ir::{
     blade::{
-        load_blade, load_symbol_manifest, save_blade_with_state, BladeAbstractInfo,
-        BladeAccessor, BladeCachedMaps, BladeClassInfo, BladeEnumInfo, BladeFieldEntry,
-        BladeFuncEntry, BladeMetadata, BladeMethodInfo, BladePropertyEntry,
-        BladeSymbolManifest, BladeTypeAliasInfo, BladeTypeInfo,
+        load_blade, load_symbol_manifest, save_blade_with_state, BladeAbstractInfo, BladeAccessor,
+        BladeCachedMaps, BladeClassInfo, BladeEnumInfo, BladeFieldEntry, BladeFuncEntry,
+        BladeMetadata, BladeMethodInfo, BladePropertyEntry, BladeSymbolManifest,
+        BladeTypeAliasInfo, BladeTypeInfo,
     },
     IrInstruction, IrModule, Monomorphizer,
 };
@@ -759,11 +759,9 @@ impl CompilationUnit {
                         crate::tast::PropertyAccessor::Null => BladeAccessor::Null,
                         crate::tast::PropertyAccessor::Never => BladeAccessor::Never,
                         crate::tast::PropertyAccessor::Dynamic => BladeAccessor::Dynamic,
-                        crate::tast::PropertyAccessor::Method(n) => {
-                            BladeAccessor::Method(
-                                self.string_interner.get(*n).unwrap_or("").to_string()
-                            )
-                        }
+                        crate::tast::PropertyAccessor::Method(n) => BladeAccessor::Method(
+                            self.string_interner.get(*n).unwrap_or("").to_string(),
+                        ),
                     }
                 };
                 properties.push(BladePropertyEntry {
@@ -2488,7 +2486,8 @@ impl CompilationUnit {
 
         // Restore property access mappings
         for entry in &cached_maps.properties {
-            if let Some((_class_sym, _class_type, class_scope)) = registered.get(&entry.class_name) {
+            if let Some((_class_sym, _class_type, class_scope)) = registered.get(&entry.class_name)
+            {
                 let field_name_interned = self.string_interner.intern(&entry.field_name);
                 if let Some(scope) = self.scope_tree.get_scope(*class_scope) {
                     if let Some(field_sym) = scope.get_symbol(field_name_interned) {
@@ -2498,17 +2497,18 @@ impl CompilationUnit {
                                 BladeAccessor::Null => crate::tast::PropertyAccessor::Null,
                                 BladeAccessor::Never => crate::tast::PropertyAccessor::Never,
                                 BladeAccessor::Dynamic => crate::tast::PropertyAccessor::Dynamic,
-                                BladeAccessor::Method(n) => {
-                                    crate::tast::PropertyAccessor::Method(
-                                        self.string_interner.intern(n)
-                                    )
-                                }
+                                BladeAccessor::Method(n) => crate::tast::PropertyAccessor::Method(
+                                    self.string_interner.intern(n),
+                                ),
                             }
                         };
-                        self.import_property_access_map.insert(field_sym, crate::tast::PropertyAccessInfo {
-                            getter: from_blade(&entry.getter),
-                            setter: from_blade(&entry.setter),
-                        });
+                        self.import_property_access_map.insert(
+                            field_sym,
+                            crate::tast::PropertyAccessInfo {
+                                getter: from_blade(&entry.getter),
+                                setter: from_blade(&entry.setter),
+                            },
+                        );
                     }
                 }
             }
@@ -2543,7 +2543,9 @@ impl CompilationUnit {
             id_map.insert(*old_id, IrFunctionId(old_id.0 + import_base));
         }
         for old_id in import_mir.extern_functions.keys() {
-            id_map.entry(*old_id).or_insert(IrFunctionId(old_id.0 + import_base));
+            id_map
+                .entry(*old_id)
+                .or_insert(IrFunctionId(old_id.0 + import_base));
         }
 
         // Renumber functions
@@ -2576,7 +2578,10 @@ impl CompilationUnit {
         let old_externs: std::collections::BTreeMap<_, _> =
             std::mem::take(&mut import_mir.extern_functions);
         for (old_id, mut efunc) in old_externs {
-            let new_id = id_map.get(&old_id).copied().unwrap_or(IrFunctionId(old_id.0 + import_base));
+            let new_id = id_map
+                .get(&old_id)
+                .copied()
+                .unwrap_or(IrFunctionId(old_id.0 + import_base));
             efunc.id = new_id;
             import_mir.extern_functions.insert(new_id, efunc);
         }
@@ -3446,7 +3451,9 @@ impl CompilationUnit {
 
         debug!(
             "[MIR_LOWER] filename='{}', is_stdlib_file={}, classes={}",
-            filename, is_stdlib_file, typed_file.classes.len()
+            filename,
+            is_stdlib_file,
+            typed_file.classes.len()
         );
 
         // For user files, pass the stdlib function map so they can call stdlib functions

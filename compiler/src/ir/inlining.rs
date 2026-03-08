@@ -288,8 +288,11 @@ impl InliningPass {
                 let inst = &block.instructions[call_site.instruction_index];
                 if let IrInstruction::CallDirect { type_args, .. } = inst {
                     if !type_args.is_empty() {
-                        for (param, arg) in
-                            callee_func.signature.type_params.iter().zip(type_args.iter())
+                        for (param, arg) in callee_func
+                            .signature
+                            .type_params
+                            .iter()
+                            .zip(type_args.iter())
                         {
                             sub_map.insert(param.name.clone(), arg.clone());
                         }
@@ -309,8 +312,7 @@ impl InliningPass {
                                     caller_func.register_types.get(&call_site.args[i])
                                 {
                                     if !matches!(arg_ty, IrType::TypeVar(_)) {
-                                        sub_map
-                                            .insert(type_param.name.clone(), arg_ty.clone());
+                                        sub_map.insert(type_param.name.clone(), arg_ty.clone());
                                         break;
                                     }
                                 }
@@ -327,7 +329,11 @@ impl InliningPass {
                         let self_offset =
                             if callee_func.signature.parameters.first().map(|p| &p.name)
                                 == Some(&"this".to_string())
-                            { 1 } else { 0 };
+                            {
+                                1
+                            } else {
+                                0
+                            };
                         for (i, sig_param) in callee_func.signature.parameters.iter().enumerate() {
                             if i < self_offset {
                                 continue;
@@ -338,8 +344,7 @@ impl InliningPass {
                                     caller_func.register_types.get(&call_site.args[i])
                                 {
                                     if !matches!(arg_ty, IrType::I64 | IrType::TypeVar(_)) {
-                                        sub_map
-                                            .insert(type_param.name.clone(), arg_ty.clone());
+                                        sub_map.insert(type_param.name.clone(), arg_ty.clone());
                                         break;
                                     }
                                 }
@@ -813,9 +818,7 @@ fn substitute_instruction_types(inst: &mut IrInstruction, sub_map: &HashMap<Stri
     match inst {
         IrInstruction::Alloc { ty, .. } => *ty = substitute_type_with_map(ty, sub_map),
         IrInstruction::Load { ty, .. } => *ty = substitute_type_with_map(ty, sub_map),
-        IrInstruction::Cast {
-            from_ty, to_ty, ..
-        } => {
+        IrInstruction::Cast { from_ty, to_ty, .. } => {
             *from_ty = substitute_type_with_map(from_ty, sub_map);
             *to_ty = substitute_type_with_map(to_ty, sub_map);
         }
