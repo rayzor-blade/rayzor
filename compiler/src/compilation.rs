@@ -3476,6 +3476,24 @@ impl CompilationUnit {
             }
         }
 
+        // Build function param types from ALL import MIR modules for fill_default_args
+        let mut external_function_param_types: BTreeMap<
+            crate::ir::IrFunctionId,
+            Vec<crate::ir::IrType>,
+        > = BTreeMap::new();
+        for import_mir in &self.import_mir_modules {
+            for (func_id, func) in &import_mir.functions {
+                external_function_param_types.insert(
+                    *func_id,
+                    func.signature
+                        .parameters
+                        .iter()
+                        .map(|p| p.ty.clone())
+                        .collect(),
+                );
+            }
+        }
+
         let mir_result = lower_hir_to_mir_with_function_map(
             &hir_module,
             &self.string_interner,
@@ -3491,6 +3509,7 @@ impl CompilationUnit {
             self.import_class_method_symbols.clone(),
             self.import_class_type_to_symbol.clone(),
             constructor_param_counts,
+            external_function_param_types,
         )
         .map_err(|errors| {
             errors

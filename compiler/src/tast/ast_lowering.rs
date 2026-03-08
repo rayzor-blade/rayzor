@@ -6196,7 +6196,7 @@ impl<'a> AstLowering<'a> {
                             parser::AssignOp::XorAssign => BinaryOperator::BitXor,
                             parser::AssignOp::ShlAssign => BinaryOperator::Shl,
                             parser::AssignOp::ShrAssign => BinaryOperator::Shr,
-                            parser::AssignOp::UshrAssign => BinaryOperator::Shr, // UShr maps to Shr
+                            parser::AssignOp::UshrAssign => BinaryOperator::Ushr,
                             parser::AssignOp::Assign => unreachable!(),          // Handled above
                         };
 

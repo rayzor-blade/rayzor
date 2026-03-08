@@ -341,6 +341,10 @@ pub struct HirToMirContext<'a> {
     /// fill_default_args uses this when the constructor isn't in the local module yet.
     external_constructor_param_counts: BTreeMap<IrFunctionId, usize>,
 
+    /// Parameter types for ALL functions from imported modules.
+    /// Used by fill_default_args to fill missing optional params with correct types.
+    external_function_param_types: BTreeMap<IrFunctionId, Vec<IrType>>,
+
     /// HIR parameter types for functions/constructors.
     /// Keyed by IrFunctionId, value is Vec<TypeId> of param types (excludes implicit 'this').
     /// Used for structural subtyping: detecting class→anon or wider-anon→anon at call sites.
@@ -545,6 +549,7 @@ impl<'a> HirToMirContext<'a> {
             virtual_dispatch_info: BTreeMap::new(),
             function_param_defaults: BTreeMap::new(),
             external_constructor_param_counts: BTreeMap::new(),
+            external_function_param_types: BTreeMap::new(),
             function_param_hir_types: BTreeMap::new(),
             current_function_return_type: None,
             anon_views: BTreeMap::new(),
@@ -2427,25 +2432,39 @@ impl<'a> HirToMirContext<'a> {
 
         // For instance methods, add implicit 'this' parameter
         if let Some(type_id) = this_type {
-            // Abstract types use their underlying IR type directly (value, not pointer).
-            // Classes always use Ptr(Void) since 'this' is a heap-allocated object.
-            // We detect this by checking if the converted type is a non-pointer type.
-            let converted = self.convert_type(type_id);
-            let this_ir_type = match &converted {
-                IrType::I8
-                | IrType::I16
-                | IrType::I32
-                | IrType::I64
-                | IrType::U8
-                | IrType::U16
-                | IrType::U32
-                | IrType::U64
-                | IrType::F32
-                | IrType::F64
-                | IrType::Bool => {
-                    converted // Raw value type for abstract underlying types
+            // Check the actual HIR TypeKind to distinguish abstracts from classes.
+            // convert_type() can misresolve class types to I32 in cross-module
+            // compilation when the type table entry is missing. Use TypeKind directly.
+            let is_abstract_value_type = {
+                let type_table = self.type_table.borrow();
+                match type_table.get(type_id).map(|t| &t.kind) {
+                    Some(crate::tast::TypeKind::Abstract {
+                        underlying: Some(u),
+                        ..
+                    }) => {
+                        let u_ty = self.convert_type(*u);
+                        matches!(
+                            u_ty,
+                            IrType::I8
+                                | IrType::I16
+                                | IrType::I32
+                                | IrType::I64
+                                | IrType::U8
+                                | IrType::U16
+                                | IrType::U32
+                                | IrType::U64
+                                | IrType::F32
+                                | IrType::F64
+                                | IrType::Bool
+                        )
+                    }
+                    _ => false, // Classes, interfaces, etc. always use pointer
                 }
-                _ => IrType::Ptr(Box::new(IrType::Void)), // Heap pointer for classes
+            };
+            let this_ir_type = if is_abstract_value_type {
+                self.convert_type(type_id) // Raw value type for abstract underlying types
+            } else {
+                IrType::Ptr(Box::new(IrType::Void)) // Heap pointer for classes
             };
             signature.parameters.insert(
                 0,
@@ -16311,38 +16330,70 @@ impl<'a> HirToMirContext<'a> {
                     }
 
                     // Dynamic → primitive type: unbox the DynamicValue
+                    // But skip unboxing if the source register is already a raw
+                    // primitive (e.g., `cast this` in enum abstract methods where
+                    // `this` is the underlying Int value, not a boxed DynamicValue*).
                     (Some(TypeKind::Dynamic), Some(TypeKind::Int)) => {
                         let value_reg = self.lower_expression(expr)?;
-                        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                        let unbox_id = self.get_or_register_extern_function(
-                            "haxe_unbox_int_ptr",
-                            vec![ptr_u8],
-                            IrType::I32,
-                        );
-                        self.builder
-                            .build_call_direct(unbox_id, vec![value_reg], IrType::I32)
+                        let reg_ty = self.builder.get_register_type(value_reg);
+                        if matches!(
+                            reg_ty,
+                            Some(IrType::I32) | Some(IrType::I64) | Some(IrType::U32)
+                        ) {
+                            // Already a raw integer — cast to I32 if needed
+                            if matches!(reg_ty, Some(IrType::I32)) {
+                                Some(value_reg)
+                            } else {
+                                self.builder
+                                    .build_cast(value_reg, reg_ty.unwrap(), IrType::I32)
+                            }
+                        } else {
+                            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                            let unbox_id = self.get_or_register_extern_function(
+                                "haxe_unbox_int_ptr",
+                                vec![ptr_u8],
+                                IrType::I32,
+                            );
+                            self.builder
+                                .build_call_direct(unbox_id, vec![value_reg], IrType::I32)
+                        }
                     }
                     (Some(TypeKind::Dynamic), Some(TypeKind::Float)) => {
                         let value_reg = self.lower_expression(expr)?;
-                        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                        let unbox_id = self.get_or_register_extern_function(
-                            "haxe_unbox_float_ptr",
-                            vec![ptr_u8],
-                            IrType::F64,
-                        );
-                        self.builder
-                            .build_call_direct(unbox_id, vec![value_reg], IrType::F64)
+                        let reg_ty = self.builder.get_register_type(value_reg);
+                        if matches!(reg_ty, Some(IrType::F32) | Some(IrType::F64)) {
+                            if matches!(reg_ty, Some(IrType::F64)) {
+                                Some(value_reg)
+                            } else {
+                                self.builder
+                                    .build_cast(value_reg, IrType::F32, IrType::F64)
+                            }
+                        } else {
+                            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                            let unbox_id = self.get_or_register_extern_function(
+                                "haxe_unbox_float_ptr",
+                                vec![ptr_u8],
+                                IrType::F64,
+                            );
+                            self.builder
+                                .build_call_direct(unbox_id, vec![value_reg], IrType::F64)
+                        }
                     }
                     (Some(TypeKind::Dynamic), Some(TypeKind::Bool)) => {
                         let value_reg = self.lower_expression(expr)?;
-                        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                        let unbox_id = self.get_or_register_extern_function(
-                            "haxe_unbox_bool_ptr",
-                            vec![ptr_u8],
-                            IrType::Bool,
-                        );
-                        self.builder
-                            .build_call_direct(unbox_id, vec![value_reg], IrType::Bool)
+                        let reg_ty = self.builder.get_register_type(value_reg);
+                        if matches!(reg_ty, Some(IrType::Bool)) {
+                            Some(value_reg)
+                        } else {
+                            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                            let unbox_id = self.get_or_register_extern_function(
+                                "haxe_unbox_bool_ptr",
+                                vec![ptr_u8],
+                                IrType::Bool,
+                            );
+                            self.builder
+                                .build_call_direct(unbox_id, vec![value_reg], IrType::Bool)
+                        }
                     }
                     // Dynamic → non-primitive type: runtime downcast (null on failure)
                     (Some(TypeKind::Dynamic), _)
@@ -17708,6 +17759,7 @@ impl<'a> HirToMirContext<'a> {
             HirBinaryOp::BitXor => BinaryOp::Xor,
             HirBinaryOp::Shl => BinaryOp::Shl,
             HirBinaryOp::Shr => BinaryOp::Shr,
+            HirBinaryOp::Ushr => BinaryOp::Ushr,
             _ => BinaryOp::Add, // Default fallback
         }
     }
@@ -17730,6 +17782,7 @@ impl<'a> HirToMirContext<'a> {
             HirBinaryOp::BitXor => MirBinaryOp::Binary(BinaryOp::Xor),
             HirBinaryOp::Shl => MirBinaryOp::Binary(BinaryOp::Shl),
             HirBinaryOp::Shr => MirBinaryOp::Binary(BinaryOp::Shr),
+            HirBinaryOp::Ushr => MirBinaryOp::Binary(BinaryOp::Ushr),
             _ => MirBinaryOp::Binary(BinaryOp::Add), // Default
         }
     }
@@ -18039,26 +18092,56 @@ impl<'a> HirToMirContext<'a> {
             return;
         }
 
-        // Fallback for BLADE-cached functions: HIR defaults aren't available.
-        // Fill missing params with null (0) based on the function's known param count.
-        let sig_param_count = self
+        // Fallback for BLADE-cached or cross-module functions: HIR defaults aren't available.
+        // Fill missing params with null/zero using the correct type from the signature.
+        // Check both local functions and extern function declarations (cross-module calls).
+        let sig_params: Vec<IrType> = self
             .builder
             .module
             .functions
             .get(&func_id)
-            .map(|f| f.signature.parameters.len())
+            .map(|f| f.signature.parameters.iter().map(|p| p.ty.clone()).collect())
             .or_else(|| {
-                self.external_constructor_param_counts
+                self.builder
+                    .module
+                    .extern_functions
                     .get(&func_id)
-                    .copied()
+                    .map(|f| {
+                        f.signature
+                            .parameters
+                            .iter()
+                            .map(|p| p.ty.clone())
+                            .collect()
+                    })
             })
-            .unwrap_or(0);
+            .or_else(|| self.external_function_param_types.get(&func_id).cloned())
+            .unwrap_or_default();
+
+        let sig_param_count = if sig_params.is_empty() {
+            self.external_constructor_param_counts
+                .get(&func_id)
+                .copied()
+                .unwrap_or(0)
+        } else {
+            sig_params.len()
+        };
 
         let total_provided = arg_regs.len();
         if total_provided < sig_param_count {
-            for _ in total_provided..sig_param_count {
-                // Default optional params to null/zero (i64 0 works for null pointers and ints)
-                if let Some(reg) = self.builder.build_const(IrValue::I64(0)) {
+            for i in total_provided..sig_param_count {
+                // Use the correct type from the function signature
+                let default_val = if i < sig_params.len() {
+                    match &sig_params[i] {
+                        IrType::I32 | IrType::U32 => IrValue::I32(0),
+                        IrType::F32 => IrValue::F32(0.0),
+                        IrType::F64 => IrValue::F64(0.0),
+                        IrType::Bool => IrValue::Bool(false),
+                        _ => IrValue::I64(0), // pointers, strings, etc.
+                    }
+                } else {
+                    IrValue::I64(0)
+                };
+                if let Some(reg) = self.builder.build_const(default_val) {
                     arg_regs.push(reg);
                 }
             }
@@ -29480,6 +29563,7 @@ pub fn lower_hir_to_mir_with_function_map(
     external_class_method_symbols: BTreeMap<(SymbolId, InternedString), SymbolId>,
     external_class_type_to_symbol: BTreeMap<TypeId, SymbolId>,
     external_constructor_param_counts: BTreeMap<IrFunctionId, usize>,
+    external_function_param_types: BTreeMap<IrFunctionId, Vec<IrType>>,
 ) -> Result<MirLoweringResult, Vec<LoweringError>> {
     let mut context = HirToMirContext::new(
         hir_module.name.clone(),
@@ -29513,6 +29597,9 @@ pub fn lower_hir_to_mir_with_function_map(
 
     // Seed constructor param counts for fill_default_args fallback
     context.external_constructor_param_counts = external_constructor_param_counts;
+
+    // Seed function param types for fill_default_args (cross-module optional params)
+    context.external_function_param_types = external_function_param_types;
 
     let module = context.lower_module(hir_module)?;
 

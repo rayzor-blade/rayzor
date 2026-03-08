@@ -349,6 +349,7 @@ impl InliningPass {
                 }
             }
 
+            // Type substitution map built from type_args + callee type_params
             sub_map
         };
 

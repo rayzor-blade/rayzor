@@ -322,6 +322,7 @@ impl NanBoxedValue {
                 BinaryOp::Xor => Self::from_i32(l ^ r),
                 BinaryOp::Shl => Self::from_i32(l << (r & 31)),
                 BinaryOp::Shr => Self::from_i32(l >> (r & 31)),
+                BinaryOp::Ushr => Self::from_i32(((l as u32) >> (r & 31)) as i32),
                 _ => return None,
             });
         }
@@ -2183,6 +2184,7 @@ impl MirInterpreter {
                 BinaryOp::Xor => Ok(InterpValue::I32(l ^ r)),
                 BinaryOp::Shl => Ok(InterpValue::I32(l << (r & 31))),
                 BinaryOp::Shr => Ok(InterpValue::I32(l >> (r & 31))),
+                BinaryOp::Ushr => Ok(InterpValue::I32(((*l as u32) >> (r & 31)) as i32)),
                 _ => self.eval_binary_op_slow(op, left, right),
             };
         }
@@ -2210,6 +2212,7 @@ impl MirInterpreter {
                 BinaryOp::Xor => Ok(InterpValue::I64(l ^ r)),
                 BinaryOp::Shl => Ok(InterpValue::I64(l << (r & 63))),
                 BinaryOp::Shr => Ok(InterpValue::I64(l >> (r & 63))),
+                BinaryOp::Ushr => Ok(InterpValue::I64(((*l as u64) >> (r & 63)) as i64)),
                 _ => self.eval_binary_op_slow(op, left, right),
             };
         }
@@ -2329,6 +2332,11 @@ impl MirInterpreter {
                 let l = left.to_i64()?;
                 let r = right.to_i64()?;
                 Ok(InterpValue::I64(l >> (r & 63)))
+            }
+            BinaryOp::Ushr => {
+                let l = left.to_i64()?;
+                let r = right.to_i64()?;
+                Ok(InterpValue::I64(((l as u64) >> (r & 63)) as i64))
             }
 
             // Floating point arithmetic
