@@ -7238,6 +7238,28 @@ impl<'a> AstLowering<'a> {
         expr: &Expr,
         args: &[Expr],
     ) -> LoweringResult<TypedExpression> {
+        // Intercept f.bind(args...) before lowering args (args may contain `_` placeholder)
+        if let ExprKind::Field {
+            expr: receiver_expr,
+            field,
+            ..
+        } = &expr.kind
+        {
+            if field == "bind" {
+                let receiver = self.lower_expression(receiver_expr)?;
+                let is_func_type = {
+                    let tt = self.context.type_table.borrow();
+                    tt.get(receiver.expr_type)
+                        .map(|t| matches!(t.kind, crate::tast::core::TypeKind::Function { .. }))
+                        .unwrap_or(false)
+                };
+                if is_func_type {
+                    return self.lower_bind_expression(expression, receiver, args);
+                }
+                // Not function-typed — fall through to normal method call handling
+            }
+        }
+
         let arg_exprs = args
             .iter()
             .map(|arg| self.lower_expression(arg))
@@ -8103,6 +8125,174 @@ impl<'a> AstLowering<'a> {
             lifetime_id,
             source_location: self.context.span_to_location(&expression.span),
             metadata,
+        })
+    }
+
+    /// Desugar f.bind(a, _, c) → function(b) { return f(a, b, c); }
+    /// Handles partial application where `_` marks unbound parameters.
+    fn lower_bind_expression(
+        &mut self,
+        expression: &Expr,
+        receiver: TypedExpression,
+        bind_args: &[Expr],
+    ) -> LoweringResult<TypedExpression> {
+        use crate::tast::core::TypeKind;
+
+        // Get function type info
+        let (func_params, func_return_type) = {
+            let tt = self.context.type_table.borrow();
+            if let Some(type_info) = tt.get(receiver.expr_type) {
+                if let TypeKind::Function {
+                    params,
+                    return_type,
+                    ..
+                } = &type_info.kind
+                {
+                    (params.clone(), *return_type)
+                } else {
+                    return Err(LoweringError::IncompleteImplementation {
+                        feature: "bind on non-function type".to_string(),
+                        location: self.context.create_location(),
+                    });
+                }
+            } else {
+                return Err(LoweringError::IncompleteImplementation {
+                    feature: "bind: unknown function type".to_string(),
+                    location: self.context.create_location(),
+                });
+            }
+        };
+
+        let location = self.context.create_location_from_span(expression.span.clone());
+
+        // Enter new function scope for the generated lambda
+        let _function_scope = self.context.enter_scope(ScopeKind::Function);
+
+        let mut lambda_params = Vec::new();
+        let mut call_args: Vec<TypedExpression> = Vec::new();
+
+        // Process bind args — `_` becomes a lambda parameter, others are bound values
+        for (i, bind_arg) in bind_args.iter().enumerate() {
+            let is_placeholder = matches!(&bind_arg.kind, ExprKind::Ident(name) if name == "_");
+
+            if is_placeholder {
+                // Create a lambda parameter for this placeholder
+                let param_type = if i < func_params.len() {
+                    func_params[i]
+                } else {
+                    self.context.type_table.borrow().dynamic_type()
+                };
+                let param_name = format!("_bind_{}", i);
+                let param_interned = self.context.string_interner.intern(&param_name);
+                let param_symbol = self.context.symbol_table.create_variable_with_type(
+                    param_interned,
+                    self.context.current_scope,
+                    param_type,
+                );
+
+                lambda_params.push(TypedParameter {
+                    symbol_id: param_symbol,
+                    name: param_interned,
+                    param_type,
+                    is_optional: false,
+                    default_value: None,
+                    mutability: crate::tast::symbols::Mutability::Immutable,
+                    source_location: location,
+                });
+
+                // Reference to this parameter in the call
+                call_args.push(TypedExpression {
+                    kind: TypedExpressionKind::Variable {
+                        symbol_id: param_symbol,
+                    },
+                    expr_type: param_type,
+                    usage: VariableUsage::Copy,
+                    lifetime_id: crate::tast::LifetimeId::default(),
+                    source_location: location,
+                    metadata: ExpressionMetadata::default(),
+                });
+            } else {
+                // Bound value — lower normally
+                let lowered = self.lower_expression(bind_arg)?;
+                call_args.push(lowered);
+            }
+        }
+
+        // Any remaining function params not covered by bind args become lambda params
+        for i in bind_args.len()..func_params.len() {
+            let param_type = func_params[i];
+            let param_name = format!("_bind_{}", i);
+            let param_interned = self.context.string_interner.intern(&param_name);
+            let param_symbol = self.context.symbol_table.create_variable_with_type(
+                param_interned,
+                self.context.current_scope,
+                param_type,
+            );
+
+            lambda_params.push(TypedParameter {
+                symbol_id: param_symbol,
+                name: param_interned,
+                param_type,
+                is_optional: false,
+                default_value: None,
+                mutability: crate::tast::symbols::Mutability::Immutable,
+                source_location: location,
+            });
+
+            call_args.push(TypedExpression {
+                kind: TypedExpressionKind::Variable {
+                    symbol_id: param_symbol,
+                },
+                expr_type: param_type,
+                usage: VariableUsage::Copy,
+                lifetime_id: crate::tast::LifetimeId::default(),
+                source_location: location,
+                metadata: ExpressionMetadata::default(),
+            });
+        }
+
+        // Body: return f(bound_args..., unbound_args...)
+        let call_expr = TypedExpression {
+            kind: TypedExpressionKind::FunctionCall {
+                function: Box::new(receiver),
+                arguments: call_args,
+                type_arguments: Vec::new(),
+            },
+            expr_type: func_return_type,
+            usage: VariableUsage::Copy,
+            lifetime_id: crate::tast::LifetimeId::default(),
+            source_location: location,
+            metadata: ExpressionMetadata::default(),
+        };
+
+        let body = vec![TypedStatement::Return {
+            value: Some(call_expr),
+            source_location: location,
+        }];
+
+        // Exit function scope
+        self.context.exit_scope();
+
+        // Result type: function from unbound params → return type
+        let lambda_param_types: Vec<TypeId> =
+            lambda_params.iter().map(|p| p.param_type).collect();
+        let result_type = self
+            .context
+            .type_table
+            .borrow_mut()
+            .create_function_type(lambda_param_types, func_return_type);
+
+        Ok(TypedExpression {
+            kind: TypedExpressionKind::FunctionLiteral {
+                parameters: lambda_params,
+                body,
+                return_type: func_return_type,
+            },
+            expr_type: result_type,
+            usage: VariableUsage::Copy,
+            lifetime_id: crate::tast::LifetimeId::default(),
+            source_location: location,
+            metadata: ExpressionMetadata::default(),
         })
     }
 
