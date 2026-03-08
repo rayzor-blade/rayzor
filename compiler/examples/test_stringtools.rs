@@ -83,7 +83,19 @@ fn main() {
     let mut backend =
         CraneliftBackend::with_symbols(&symbols_ref).expect("Failed to create backend");
 
-    for (i, module) in mir_modules.iter().enumerate() {
+    // Apply O0 optimization (mandatory inlining for Haxe `inline` functions)
+    use compiler::ir::optimization::{OptimizationLevel, PassManager};
+    let optimized_modules: Vec<_> = mir_modules
+        .iter()
+        .map(|m| {
+            let mut module = (**m).clone();
+            let mut pass_manager = PassManager::for_level(OptimizationLevel::O0);
+            let _ = pass_manager.run(&mut module);
+            module
+        })
+        .collect();
+
+    for (i, module) in optimized_modules.iter().enumerate() {
         println!("Compiling module {}...", i);
         if let Err(e) = backend.compile_module(module) {
             eprintln!("Failed to compile module {}: {}", i, e);
@@ -92,7 +104,7 @@ fn main() {
     }
 
     // Find and execute main
-    for module in mir_modules.iter() {
+    for module in optimized_modules.iter() {
         if let Ok(()) = backend.call_main(module) {
             println!("\nTest completed successfully!");
             return;

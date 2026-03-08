@@ -1421,12 +1421,8 @@ impl StdlibMapping {
             // StringTools.replace(s: String, sub: String, by: String) -> String
             map_method!(static "StringTools", "replace" => "haxe_string_replace", params: 3, returns: primitive,
                 types: &[PtrString, PtrString, PtrString] => PtrString),
-            // StringTools.lpad(s: String, c: String, l: Int) -> String
-            map_method!(static "StringTools", "lpad" => "haxe_string_lpad", params: 3, returns: primitive,
-                types: &[PtrString, PtrString, I32] => PtrString),
-            // StringTools.rpad(s: String, c: String, l: Int) -> String
-            map_method!(static "StringTools", "rpad" => "haxe_string_rpad", params: 3, returns: primitive,
-                types: &[PtrString, PtrString, I32] => PtrString),
+            // StringTools.lpad/rpad/hex are implemented in Haxe, don't map to runtime
+            // They use StringBuf, charAt, etc. which ARE mapped
         ];
 
         self.register_from_tuples(mappings);

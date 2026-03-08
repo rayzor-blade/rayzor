@@ -83,14 +83,14 @@ class Main {
             trace("FAIL: Expected 'Hello Rayzor'");
         }
 
-        // Test 8: hex
+        // Test 8: hex (2 args, no default fill)
         trace("--- Test 8: hex ---");
         var hexVal = StringTools.hex(255, 2);
-        trace("hex(255, 2) result: '" + hexVal + "'");
+        trace("hex(255,2): '" + hexVal + "'");
         if (hexVal == "FF") {
             trace("PASS: hex works");
         } else {
-            trace("FAIL: Expected 'FF'");
+            trace("FAIL: Expected 'FF', got '" + hexVal + "'");
         }
 
         trace("=== StringTools tests completed! ===");

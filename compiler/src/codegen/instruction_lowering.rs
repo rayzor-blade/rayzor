@@ -196,6 +196,7 @@ impl CraneliftBackend {
                     builder.ins().ushr(lhs, rhs)
                 }
             }
+            BinaryOp::Ushr => builder.ins().ushr(lhs, rhs),
             // Floating point operations
             BinaryOp::FAdd => builder.ins().fadd(lhs, rhs),
             BinaryOp::FSub => builder.ins().fsub(lhs, rhs),
@@ -623,6 +624,7 @@ impl CraneliftBackend {
                     builder.ins().ushr(lhs, rhs)
                 }
             }
+            BinaryOp::Ushr => builder.ins().ushr(lhs, rhs),
             BinaryOp::FAdd => builder.ins().fadd(lhs, rhs),
             BinaryOp::FSub => builder.ins().fsub(lhs, rhs),
             BinaryOp::FMul => builder.ins().fmul(lhs, rhs),

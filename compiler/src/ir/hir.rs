@@ -558,6 +558,7 @@ pub enum HirBinaryOp {
     BitXor,
     Shl,
     Shr,
+    Ushr, // Unsigned right shift (>>>)
 
     // Range
     Range,     // ...

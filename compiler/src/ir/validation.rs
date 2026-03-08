@@ -738,7 +738,7 @@ fn binary_op_result_type(op: super::BinaryOp, operand_ty: &IrType) -> IrType {
     use super::BinaryOp::*;
     match op {
         Add | Sub | Mul | Div | Rem => operand_ty.clone(),
-        And | Or | Xor | Shl | Shr => operand_ty.clone(),
+        And | Or | Xor | Shl | Shr | Ushr => operand_ty.clone(),
         FAdd | FSub | FMul | FDiv | FRem => operand_ty.clone(),
     }
 }

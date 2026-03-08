@@ -532,6 +532,7 @@ pub fn dump_binop(op: &BinaryOp) -> String {
         BinaryOp::Xor => "xor",
         BinaryOp::Shl => "shl",
         BinaryOp::Shr => "shr",
+        BinaryOp::Ushr => "ushr",
         BinaryOp::FAdd => "fadd",
         BinaryOp::FSub => "fsub",
         BinaryOp::FMul => "fmul",

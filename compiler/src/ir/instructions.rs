@@ -396,6 +396,7 @@ pub enum BinaryOp {
     Xor,
     Shl,
     Shr,
+    Ushr,
 
     // Floating point
     FAdd,

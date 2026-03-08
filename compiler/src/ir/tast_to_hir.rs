@@ -279,6 +279,7 @@ impl<'a> TastToHirContext<'a> {
                         // Bitwise operations
                         BinaryOperator::Shl => Some(HirLiteral::Int(l << r)),
                         BinaryOperator::Shr => Some(HirLiteral::Int(l >> r)),
+                        BinaryOperator::Ushr => Some(HirLiteral::Int(((*l as u32) >> (r & 31)) as i32 as i64)),
                         BinaryOperator::BitAnd => Some(HirLiteral::Int(l & r)),
                         BinaryOperator::BitOr => Some(HirLiteral::Int(l | r)),
                         BinaryOperator::BitXor => Some(HirLiteral::Int(l ^ r)),
@@ -2773,6 +2774,7 @@ impl<'a> TastToHirContext<'a> {
             BinaryOperator::BitXor => HirBinaryOp::BitXor,
             BinaryOperator::Shl => HirBinaryOp::Shl,
             BinaryOperator::Shr => HirBinaryOp::Shr,
+            BinaryOperator::Ushr => HirBinaryOp::Ushr,
             BinaryOperator::NullCoal => HirBinaryOp::NullCoalesce,
             BinaryOperator::Range => HirBinaryOp::Range,
             _ => HirBinaryOp::Add, // Default fallback

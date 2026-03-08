@@ -462,8 +462,10 @@ fn try_build_phi_candidate(
                     }
                 }
 
-                // Track copies/casts
-                if let IrInstruction::Copy { dest, src } = inst {
+                // Track copies/casts (Cast is pointer-type reinterpretation, alias of src)
+                if let IrInstruction::Copy { dest, src }
+                | IrInstruction::Cast { dest, src, .. } = inst
+                {
                     if all_tracked.contains(dest) {
                         continue;
                     }
@@ -646,6 +648,23 @@ fn try_build_phi_candidate(
         return None;
     }
 
+    // Bail out if any malloc GEP is used by a Load instruction.
+    // Phi SRA removes mallocs and their GEPs, replacing them with scalar phis.
+    // If intermediate blocks (between malloc and phi header) load from malloc GEPs
+    // (e.g., rpad's pre-loop `add(s)` inlined body), those loads would become dangling.
+    for (malloc_id, gep_map) in &malloc_gep_maps {
+        let malloc_geps: std::collections::HashSet<&IrId> = gep_map.keys().collect();
+        for &(_, block) in &sorted {
+            for inst in &block.instructions {
+                if let IrInstruction::Load { ptr, .. } = inst {
+                    if malloc_geps.contains(ptr) {
+                        return None;
+                    }
+                }
+            }
+        }
+    }
+
     let num_fields = phi_gep_map.values().max().copied().unwrap_or(0) + 1;
 
     // Safety check: reject candidates where any ACCESSED field lacks a known type.
@@ -663,6 +682,66 @@ fn try_build_phi_candidate(
         for field_idx in phi_gep_map.values() {
             if !stores.contains_key(field_idx) {
                 return None; // Missing field store
+            }
+        }
+    }
+
+    // Bail out if there are stores to phi GEPs on the exit path (outside the loop body).
+    // The scalar phi approach only captures field values within the loop. Exit-path
+    // modifications can't be represented by the scalar phi and would be silently dropped.
+    if _has_back_edge {
+        // Find loop body blocks by backward reachability from the back-edge sources
+        let back_edge_blocks: Vec<IrBlockId> = phi
+            .incoming
+            .iter()
+            .filter(|(_, v)| *v == phi.dest)
+            .map(|(block, _)| *block)
+            .collect();
+        let mut loop_body: BTreeSet<IrBlockId> = BTreeSet::new();
+        let mut worklist: Vec<IrBlockId> = back_edge_blocks;
+        while let Some(bid) = worklist.pop() {
+            if !loop_body.insert(bid) {
+                continue;
+            }
+            if bid == phi_block {
+                continue; // don't go past loop header
+            }
+            for &(pred_id, block) in &sorted {
+                let is_pred = match &block.terminator {
+                    super::IrTerminator::Branch { target } => *target == bid,
+                    super::IrTerminator::CondBranch {
+                        true_target,
+                        false_target,
+                        ..
+                    } => *true_target == bid || *false_target == bid,
+                    _ => false,
+                };
+                if is_pred && !loop_body.contains(&pred_id) {
+                    worklist.push(pred_id);
+                }
+            }
+        }
+        // Also include blocks where the initial mallocs store their values
+        let mut init_blocks: BTreeSet<IrBlockId> = BTreeSet::new();
+        for (src_block, _) in incoming_mallocs {
+            init_blocks.insert(*src_block);
+        }
+        for (alloc_block, _) in malloc_locations.values() {
+            init_blocks.insert(*alloc_block);
+        }
+        // Check for stores to phi GEPs outside loop body and init blocks
+        for &(block_id, block) in &sorted {
+            if loop_body.contains(&block_id) || init_blocks.contains(&block_id) {
+                continue;
+            }
+            for inst in &block.instructions {
+                if let IrInstruction::Store { ptr, .. } = inst {
+                    if phi_tracked.contains(ptr) {
+                        if let Some(&_field_idx) = phi_gep_map.get(ptr) {
+                            return None; // Exit-path store — bail out
+                        }
+                    }
+                }
             }
         }
     }
@@ -729,20 +808,83 @@ fn apply_phi_sra(function: &mut IrFunction, candidate: &PhiSraCandidate) -> usiz
         field_phi_regs.insert(*field_idx, id);
     }
 
+    // Get back-edge info before mutating
+    let back_edge_info: Option<IrBlockId> = function
+        .cfg
+        .blocks
+        .get(&candidate.phi_block)
+        .and_then(|b| {
+            b.phi_nodes
+                .iter()
+                .find(|p| p.dest == candidate.phi_dest)
+                .and_then(|p| {
+                    p.incoming
+                        .iter()
+                        .find(|(_, v)| *v == candidate.phi_dest)
+                        .map(|(block, _)| *block)
+                })
+        });
+
+    // For each accessed field, find the last stored value in the LOOP BODY only.
+    // This is used as the back-edge value instead of the scalar phi itself,
+    // because loop bodies may modify fields (e.g., StringBuf.add updates field 1).
+    // We identify loop body blocks by backward reachability from the back-edge block
+    // to the phi block (excluding the phi block itself to avoid crossing the loop boundary).
+    let mut back_edge_values: HashMap<usize, IrId> = HashMap::new();
+    if let Some(back_edge_block) = back_edge_info {
+        // Find loop body blocks: blocks reachable backward from back_edge_block
+        // without crossing the phi block
+        let mut loop_body_blocks: BTreeSet<IrBlockId> = BTreeSet::new();
+        let mut worklist = vec![back_edge_block];
+        while let Some(block_id) = worklist.pop() {
+            if !loop_body_blocks.insert(block_id) {
+                continue; // already visited
+            }
+            if block_id == candidate.phi_block {
+                continue; // don't go past loop header
+            }
+            // Find predecessors
+            for (&bid, block) in &function.cfg.blocks {
+                let is_pred = match &block.terminator {
+                    super::IrTerminator::Branch { target } => *target == block_id,
+                    super::IrTerminator::CondBranch {
+                        true_target,
+                        false_target,
+                        ..
+                    } => *true_target == block_id || *false_target == block_id,
+                    _ => false,
+                };
+                if is_pred {
+                    worklist.push(bid);
+                }
+            }
+        }
+
+        let sorted_scan = sorted_blocks(&function.cfg);
+        for &field_idx in &accessed_fields {
+            let phi_geps_for_field: Vec<IrId> = candidate
+                .phi_gep_map
+                .iter()
+                .filter(|(_, &idx)| idx == field_idx)
+                .map(|(&gep_id, _)| gep_id)
+                .collect();
+            for &(block_id, block) in &sorted_scan {
+                if !loop_body_blocks.contains(&block_id) {
+                    continue; // skip blocks outside the loop
+                }
+                for inst in &block.instructions {
+                    if let IrInstruction::Store { ptr, value } = inst {
+                        if phi_geps_for_field.contains(ptr) {
+                            back_edge_values.insert(field_idx, *value);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Create scalar phi nodes in the phi block
     let phi_block = function.cfg.blocks.get_mut(&candidate.phi_block).unwrap();
-
-    // Get back-edge info before mutating
-    let back_edge_info: Option<IrBlockId> = phi_block
-        .phi_nodes
-        .iter()
-        .find(|p| p.dest == candidate.phi_dest)
-        .and_then(|p| {
-            p.incoming
-                .iter()
-                .find(|(_, v)| *v == candidate.phi_dest)
-                .map(|(block, _)| *block)
-        });
 
     for &field_idx in &accessed_fields {
         let field_reg = field_phi_regs[&field_idx];
@@ -760,9 +902,13 @@ fn apply_phi_sra(function: &mut IrFunction, candidate: &PhiSraCandidate) -> usiz
             }
         }
 
-        // Handle back edge - use the scalar phi itself
+        // Handle back edge: use the last stored value if the field is modified in the loop body
         if let Some(back_edge_block) = back_edge_info {
-            incoming.push((back_edge_block, field_reg));
+            let back_edge_value = back_edge_values
+                .get(&field_idx)
+                .copied()
+                .unwrap_or(field_reg);
+            incoming.push((back_edge_block, back_edge_value));
         }
 
         let scalar_phi = IrPhiNode {
@@ -1026,21 +1172,50 @@ fn apply_phi_sra(function: &mut IrFunction, candidate: &PhiSraCandidate) -> usiz
         }
     }
 
-    // Now re-process to remove Free instructions that reference the expanded dead_pointers
+    // Re-process to remove instructions that reference the expanded dead_pointers
+    // (GEPs, Stores, Loads, Frees, Casts/Copies from downstream removed phis)
     for block_id in &block_order {
         let block = match function.cfg.blocks.get_mut(block_id) {
             Some(b) => b,
             None => continue,
         };
 
-        let old_len = block.instructions.len();
-        block.instructions.retain(|inst| match inst {
-            IrInstruction::Free { ptr } => !dead_pointers.contains(ptr),
-            _ => true,
-        });
-        if block.instructions.len() < old_len {
-            eliminated += old_len - block.instructions.len();
+        let old_instructions = std::mem::take(&mut block.instructions);
+        let mut new_instructions = Vec::with_capacity(old_instructions.len());
+
+        for inst in old_instructions.into_iter() {
+            let should_remove = match &inst {
+                IrInstruction::Free { ptr } => dead_pointers.contains(ptr),
+                IrInstruction::GetElementPtr { ptr, .. } => dead_pointers.contains(ptr),
+                IrInstruction::Store { ptr, .. } => dead_pointers.contains(ptr),
+                IrInstruction::Load { dest, ptr, .. } => {
+                    if let Some(&scalar_reg) = load_replacements.get(ptr) {
+                        // Replace load with copy from scalar reg
+                        new_instructions.push(IrInstruction::Copy {
+                            dest: *dest,
+                            src: scalar_reg,
+                        });
+                        true // remove original Load
+                    } else {
+                        false
+                    }
+                }
+                IrInstruction::Copy { src, .. } | IrInstruction::Cast { src, .. } => {
+                    dead_pointers.contains(src)
+                }
+                IrInstruction::CallDirect { dest: Some(d), .. } => dead_pointers.contains(d),
+                IrInstruction::Alloc { dest, .. } => dead_pointers.contains(dest),
+                _ => false,
+            };
+
+            if should_remove {
+                eliminated += 1;
+            } else {
+                new_instructions.push(inst);
+            }
         }
+
+        block.instructions = new_instructions;
     }
 
     // Remove the original pointer phi
