@@ -49,9 +49,30 @@ unsafe fn extract_field_name(field_ptr: *mut u8) -> Option<(*const u8, u32)> {
 // Reflect API
 // ============================================================================
 
+/// Try to unwrap a DynamicValue* that wraps an anonymous object.
+///
+/// If `ptr` points to a DynamicValue with type_id == TYPE_ANON_OBJECT,
+/// returns the inner `value_ptr` (the actual anon handle). Otherwise returns
+/// `ptr` unchanged. This enables Reflect methods to work on both raw anon
+/// handles and DynamicValue-wrapped anon objects (e.g. from Json.parse).
+///
+/// Safety: the first 4 bytes of a raw anon handle (`Box<Arc<AnonObject>>`)
+/// are the low bits of a heap pointer — always a large number, never 6.
+/// So the `type_id == 6` check reliably distinguishes the two cases.
+unsafe fn unwrap_anon_dynamic(ptr: *mut u8) -> *mut u8 {
+    let type_id = std::ptr::read_unaligned(ptr as *const u32);
+    if type_id == anon_object::TYPE_ANON_OBJECT.0 {
+        let dv = std::ptr::read_unaligned(ptr as *const DynamicValue);
+        if !dv.value_ptr.is_null() {
+            return dv.value_ptr;
+        }
+    }
+    ptr
+}
+
 /// Reflect.hasField(obj, field) -> Bool
 ///
-/// obj: anonymous object handle pointer
+/// obj: anonymous object handle pointer (or DynamicValue wrapping one)
 /// field: HaxeString pointer
 #[no_mangle]
 pub extern "C" fn haxe_reflect_has_field(obj: *mut u8, field: *mut u8) -> bool {
@@ -59,8 +80,9 @@ pub extern "C" fn haxe_reflect_has_field(obj: *mut u8, field: *mut u8) -> bool {
         return false;
     }
     unsafe {
+        let actual = unwrap_anon_dynamic(obj);
         if let Some((name_ptr, name_len)) = extract_field_name(field) {
-            anon_object::rayzor_anon_has_field(obj, name_ptr, name_len)
+            anon_object::rayzor_anon_has_field(actual, name_ptr, name_len)
         } else {
             false
         }
@@ -69,7 +91,7 @@ pub extern "C" fn haxe_reflect_has_field(obj: *mut u8, field: *mut u8) -> bool {
 
 /// Reflect.field(obj, field) -> Dynamic
 ///
-/// obj: anonymous object handle pointer
+/// obj: anonymous object handle pointer (or DynamicValue wrapping one)
 /// field: HaxeString pointer
 /// Returns: DynamicValue pointer (caller must manage), or null if field not found
 #[no_mangle]
@@ -78,8 +100,9 @@ pub extern "C" fn haxe_reflect_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
         return std::ptr::null_mut();
     }
     unsafe {
+        let actual = unwrap_anon_dynamic(obj);
         if let Some((name_ptr, name_len)) = extract_field_name(field) {
-            anon_object::rayzor_anon_get_field(obj, name_ptr, name_len)
+            anon_object::rayzor_anon_get_field(actual, name_ptr, name_len)
         } else {
             std::ptr::null_mut()
         }
@@ -88,7 +111,7 @@ pub extern "C" fn haxe_reflect_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
 
 /// Reflect.setField(obj, field, value) -> Void
 ///
-/// obj: anonymous object handle pointer
+/// obj: anonymous object handle pointer (or DynamicValue wrapping one)
 /// field: HaxeString pointer
 /// value: DynamicValue pointer
 #[no_mangle]
@@ -97,8 +120,9 @@ pub extern "C" fn haxe_reflect_set_field(obj: *mut u8, field: *mut u8, value: *m
         return;
     }
     unsafe {
+        let actual = unwrap_anon_dynamic(obj);
         if let Some((name_ptr, name_len)) = extract_field_name(field) {
-            anon_object::rayzor_anon_set_field(obj, name_ptr, name_len, value);
+            anon_object::rayzor_anon_set_field(actual, name_ptr, name_len, value);
         }
     }
 }
