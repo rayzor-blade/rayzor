@@ -646,10 +646,11 @@ map.set(new Key(1, "foo"), "value");
 | Bytes (haxe.io.Bytes) | 1 | 20 | ✅ 100% |
 | EReg (regex) | 1 | 10 | ✅ 100% |
 | Data Structures (Maps, List) | 5 | 28/30 | ✅ 93% |
+| JSON (haxe.Json, haxe.format.JsonParser/Printer) | 3 | 4 | ✅ 100% |
 | Boxing / Dynamic | - | 14 | ✅ 100% |
 | Trace / Debug | - | 10 | ✅ 100% |
 | Networking (Socket, Host, SSL) | 6 | 0 | 🔴 0% |
-| **Total** | **~35** | **~277/290** | **~96%** |
+| **Total** | **~38** | **~281/294** | **~96%** |
 
 ### 6.2 Core Types Status
 
@@ -1015,7 +1016,7 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 ### 9.1 Completed
 
 - [x] **600/600 unit tests passing** (100% pass rate as of 2026-01-28)
-- [x] **88/88 haxe test files passing** (100% pass rate as of 2026-03-08)
+- [x] **89/89 haxe test files passing** (100% pass rate as of 2026-03-08)
 - [x] **9/9 e2e tests passing** (100% pass rate as of 2026-02-17, including arc_mutex_integration)
 - [x] **Docker stress test environment** (`ci/bench-test/`) for reproducible amd64 testing
 - [x] **SIGSEGV signal handler** for crash diagnosis with stack traces
@@ -1737,7 +1738,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 | 12 | EReg (regex runtime) | P1 | Medium | 🟢 Complete | text processing |
 | 13 | Enum methods + statics | P1 | Medium | 🟢 Complete | rich enums |
 | 14 | Abstract types (operator overloading) | P1 | High | 🟢 Complete | custom types |
-| 15 | Dynamic type operations | P1 | Medium | 🟢 Complete (anon r/w, arithmetic, class fields, method calls) | interop, JSON |
+| 15 | Dynamic type operations | P1 | Medium | 🟢 Complete (anon r/w, arithmetic, class fields, method calls, JSON) | interop, JSON |
 | 16 | Type parameters on functions | P1 | Medium | 🟢 Complete | generic functions |
 | 17 | Null safety (`Null<T>`) | P2 | Medium | 🟢 Complete (`??`, `?.`, `Null<T>` wrapper) | null checks |
 | 18 | Structural subtyping | P2 | Medium | 🟢 Complete (deferred wrap, 2026-02-21) | structural interfaces |
@@ -2040,7 +2041,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 **Remaining (Tier 3):**
 
-- [ ] JSON parsing returns Dynamic
+- [x] JSON parse/stringify — native Rust implementation via extern `haxe.Json`, `haxe.format.JsonParser`, `haxe.format.JsonPrinter` (2026-03-08)
 
 ### 16.12 EReg (Regular Expressions) 🟢
 
@@ -2060,9 +2061,12 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [x] Runtime backed by Rust `regex` crate (runtime/src/ereg.rs)
 - [x] Regex literal properly typed as EReg class for method resolution
 
+**Implemented (2026-03-05):**
+
+- [x] `matchedPos()` — returns anonymous object `{pos:Int, len:Int}` via `haxe_ereg_matched_pos_anon`
+
 **Deferred:**
 
-- `matchedPos()` — returns anonymous object `{pos:Int, len:Int}`, needs MIR wrapper
 - `map()` — needs passing Haxe closure to runtime
 
 ### 16.13 Enum Methods and Statics 🟢

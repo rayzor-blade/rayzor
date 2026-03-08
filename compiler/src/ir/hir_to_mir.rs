@@ -256,6 +256,9 @@ pub struct HirToMirContext<'a> {
     /// Interface method ordering: maps interface SymbolId → ordered list of method names
     interface_method_names: BTreeMap<SymbolId, Vec<InternedString>>,
 
+    /// Interface method return types: maps (interface SymbolId, method name) → return TypeId
+    interface_method_return_types: BTreeMap<(SymbolId, InternedString), TypeId>,
+
     /// Interface vtables: maps (class SymbolId, interface SymbolId) → method SymbolIds
     /// Each entry's method order matches the interface's method_names order
     interface_vtables: BTreeMap<(SymbolId, SymbolId), Vec<SymbolId>>,
@@ -528,6 +531,7 @@ impl<'a> HirToMirContext<'a> {
             anonymous_shapes: BTreeMap::new(),
             next_anon_shape_id: 0,
             interface_method_names: BTreeMap::new(),
+            interface_method_return_types: BTreeMap::new(),
             interface_vtables: BTreeMap::new(),
             interface_extends: BTreeMap::new(),
             class_method_symbols: BTreeMap::new(),
@@ -3627,10 +3631,19 @@ impl<'a> HirToMirContext<'a> {
                             final_value
                         };
 
-                        // Wrap class instance in interface fat pointer if needed
+                        // Wrap class instance in interface fat pointer if needed.
+                        // Skip for SafeCast results — the SafeCast handler already creates
+                        // the fat pointer (or null for failed casts). Cloning a null pointer
+                        // from a failed SafeCast would SIGSEGV.
+                        let init_is_safe_cast =
+                            matches!(&init_expr.kind, HirExprKind::Cast { is_safe: true, .. });
                         let (final_value, wrapped_for_interface) = if let Some(target_ty) = var_type
                         {
-                            self.maybe_wrap_for_interface(final_value, init_expr.ty, target_ty)
+                            if init_is_safe_cast {
+                                (final_value, false)
+                            } else {
+                                self.maybe_wrap_for_interface(final_value, init_expr.ty, target_ty)
+                            }
                         } else {
                             (final_value, false)
                         };
@@ -7620,7 +7633,12 @@ impl<'a> HirToMirContext<'a> {
                                     }
                                     types
                                 };
-                                let return_type = Box::new(self.convert_type(expr.ty));
+                                // Resolve return type from the method's symbol type,
+                                // not expr.ty (which may be the interface type instead
+                                // of the method's return type in some TAST configurations)
+                                let return_ir_type =
+                                    self.resolve_interface_method_return_type(*field, expr.ty);
+                                let return_type = Box::new(return_ir_type);
                                 let func_signature = IrType::Function {
                                     params: param_types,
                                     return_type,
@@ -9563,7 +9581,12 @@ impl<'a> HirToMirContext<'a> {
                                         }
                                         types
                                     };
-                                    let return_type = Box::new(self.convert_type(expr.ty));
+                                    // Resolve return type from the method's symbol type,
+                                    // not expr.ty (which may be the interface type instead
+                                    // of the method's return type in some TAST configurations)
+                                    let return_ir_type =
+                                        self.resolve_interface_method_return_type(*symbol, expr.ty);
+                                    let return_type = Box::new(return_ir_type);
                                     let func_signature = IrType::Function {
                                         params: param_types,
                                         return_type,
@@ -16283,19 +16306,29 @@ impl<'a> HirToMirContext<'a> {
                     return self.lower_expression(expr);
                 }
                 if from_type == to_type && *is_safe {
-                    // Same MIR type — but if both are class types, fall through to
-                    // the Class→Class handler for runtime downcast verification.
+                    // Same MIR type — but for class/interface types, fall through to
+                    // the type-kind handlers for runtime verification and fat pointer wrapping.
                     let type_table = self.type_table.borrow();
-                    let src_is_class = matches!(
-                        type_table.get(expr.ty).map(|t| &t.kind),
-                        Some(TypeKind::Class { .. })
-                    );
-                    let tgt_is_class = matches!(
-                        type_table.get(*target).map(|t| &t.kind),
-                        Some(TypeKind::Class { .. })
-                    );
+                    let src_kind = type_table.get(expr.ty).map(|t| &t.kind).cloned();
+                    let tgt_kind = type_table.get(*target).map(|t| &t.kind).cloned();
                     drop(type_table);
-                    if !src_is_class || !tgt_is_class {
+                    let needs_runtime_check = matches!(
+                        (&src_kind, &tgt_kind),
+                        (Some(TypeKind::Class { .. }), Some(TypeKind::Class { .. }))
+                            | (
+                                Some(TypeKind::Class { .. }),
+                                Some(TypeKind::Interface { .. })
+                            )
+                            | (
+                                Some(TypeKind::Interface { .. }),
+                                Some(TypeKind::Class { .. })
+                            )
+                            | (
+                                Some(TypeKind::Interface { .. }),
+                                Some(TypeKind::Interface { .. })
+                            )
+                    );
+                    if !needs_runtime_check {
                         return self.lower_expression(expr);
                     }
                     // Fall through to Class→Class safe cast handler
@@ -16507,10 +16540,70 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // Class/Interface: pass-through (interface dispatch handles vtable)
-                    (Some(TypeKind::Class { .. }), Some(TypeKind::Interface { .. }))
-                    | (Some(TypeKind::Interface { .. }), Some(TypeKind::Class { .. }))
-                    | (Some(TypeKind::Interface { .. }), Some(TypeKind::Interface { .. })) => {
+                    // Class → Interface safe cast: wrap in fat pointer if implements, null if not
+                    (
+                        Some(TypeKind::Class {
+                            symbol_id: src_sym, ..
+                        }),
+                        Some(TypeKind::Interface {
+                            symbol_id: tgt_sym, ..
+                        }),
+                    ) => {
+                        let src_sym = *src_sym;
+                        let tgt_sym = *tgt_sym;
+
+                        // Check at compile time if this class implements the interface
+                        if self.interface_vtables.contains_key(&(src_sym, tgt_sym)) {
+                            // Known to implement — wrap in fat pointer here.
+                            // Cannot defer to Let handler because SafeCast's result type
+                            // is the interface type, so Let would see Interface→Interface
+                            // instead of Class→Interface.
+                            let value_reg = self.lower_expression(expr)?;
+                            match self.wrap_in_interface_fat_ptr(value_reg, src_sym, tgt_sym) {
+                                Some(fat_ptr) => Some(fat_ptr),
+                                None => Some(value_reg),
+                            }
+                        } else {
+                            // Not known to implement at compile time — return null
+                            self.builder.build_const(IrValue::Null)
+                        }
+                    }
+
+                    // Interface → Class safe cast: extract raw obj + downcast
+                    (
+                        Some(TypeKind::Interface { .. }),
+                        Some(TypeKind::Class {
+                            symbol_id: tgt_sym, ..
+                        }),
+                    ) => {
+                        let tgt_sym = *tgt_sym;
+                        let value_reg = self.lower_expression(expr)?;
+
+                        // Load raw object pointer from fat pointer offset 0
+                        let raw_obj = self
+                            .builder
+                            .build_load(value_reg, IrType::Ptr(Box::new(IrType::U8)))?;
+
+                        // Downcast via object header type_id check
+                        let resolved = self.resolve_runtime_class_type_id(*target, tgt_sym);
+                        let target_type_id = resolved.as_raw() as i64;
+                        let type_id_const =
+                            self.builder.build_const(IrValue::I64(target_type_id))?;
+                        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                        let downcast_func = self.get_or_register_extern_function(
+                            "haxe_safe_downcast_class",
+                            vec![ptr_u8.clone(), IrType::I64],
+                            ptr_u8.clone(),
+                        );
+                        self.builder.build_call_direct(
+                            downcast_func,
+                            vec![raw_obj, type_id_const],
+                            ptr_u8,
+                        )
+                    }
+
+                    // Interface → Interface: pass-through cast (both are fat pointers)
+                    (Some(TypeKind::Interface { .. }), Some(TypeKind::Interface { .. })) => {
                         let value_reg = self.lower_expression(expr)?;
                         self.builder.build_cast(value_reg, from_type, to_type)
                     }
@@ -27112,6 +27205,35 @@ impl<'a> HirToMirContext<'a> {
         Some(cloned_ptr)
     }
 
+    /// Resolve the return type for an interface method call.
+    /// If the method symbol has a Function type in the type table, extract the return type.
+    /// Otherwise fall back to convert_type(expr_ty).
+    fn resolve_interface_method_return_type(
+        &self,
+        method_symbol: SymbolId,
+        expr_ty: TypeId,
+    ) -> IrType {
+        let fallback = self.convert_type(expr_ty);
+        // If fallback is already a concrete type (not Ptr), it's correct
+        if !matches!(fallback, IrType::Ptr(_)) {
+            return fallback;
+        }
+        // Look up the method name from the symbol table
+        let method_name_interned = self.symbol_table.get_symbol(method_symbol).map(|s| s.name);
+        if let Some(method_name) = method_name_interned {
+            // Search all interfaces for this method's return type
+            for ((_, name), &ret_type_id) in &self.interface_method_return_types {
+                if *name == method_name {
+                    let resolved = self.convert_type(ret_type_id);
+                    if !matches!(resolved, IrType::Ptr(_)) {
+                        return resolved;
+                    }
+                }
+            }
+        }
+        fallback
+    }
+
     /// Check if a type is an interface type and return its SymbolId.
     /// Also handles TypeParameters with interface constraints (T:Printable).
     fn get_interface_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
@@ -27208,8 +27330,9 @@ impl<'a> HirToMirContext<'a> {
             };
         }
 
-        // Interface -> interface: clone wrapper so destination does not alias source wrapper
-        // ownership. This keeps reassignment semantics stable for both variables.
+        // Interface -> same or different interface: clone the fat pointer so destination
+        // does not alias source wrapper. This prevents use-after-free when one variable
+        // is later reassigned (freeing its old fat pointer while the other still uses it).
         if let Some(src_iface_sym) = self.get_interface_symbol(value_type) {
             return match self.clone_interface_fat_ptr(value_reg, src_iface_sym, iface_sym) {
                 Some(cloned) => (cloned, true),
@@ -28911,6 +29034,66 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Inherit interface vtables from parent class.
+        // If a parent implements IDrawable, Button (which extends Widget) also implements IDrawable.
+        // Build vtables for inherited interfaces using the child's methods (which may override).
+        if let Some(extends_type_id) = class.extends {
+            let parent_symbol = {
+                let type_table = self.type_table.borrow();
+                type_table.get(extends_type_id).and_then(|t| {
+                    if let TypeKind::Class { symbol_id, .. } = &t.kind {
+                        Some(*symbol_id)
+                    } else {
+                        None
+                    }
+                })
+            };
+            if let Some(parent_sym) = parent_symbol {
+                // Find all interfaces the parent implements
+                let parent_iface_keys: Vec<(SymbolId, SymbolId)> = self
+                    .interface_vtables
+                    .keys()
+                    .filter(|(cs, _)| *cs == parent_sym)
+                    .cloned()
+                    .collect();
+                for (_, iface_sym) in parent_iface_keys {
+                    // Skip if child already has a vtable for this interface
+                    if self
+                        .interface_vtables
+                        .contains_key(&(class.symbol_id, iface_sym))
+                    {
+                        continue;
+                    }
+                    // Build vtable using child's methods (with overrides) or parent's vtable entry
+                    if let Some(method_names) = self.interface_method_names.get(&iface_sym).cloned()
+                    {
+                        let parent_vtable = self
+                            .interface_vtables
+                            .get(&(parent_sym, iface_sym))
+                            .cloned()
+                            .unwrap_or_default();
+                        let mut vtable_entries = Vec::new();
+                        for (i, iface_method_name) in method_names.iter().enumerate() {
+                            // Prefer child's own method (override)
+                            let child_method = class
+                                .methods
+                                .iter()
+                                .find(|m| m.function.name == *iface_method_name)
+                                .map(|m| m.function.symbol_id);
+                            if let Some(sym) = child_method {
+                                vtable_entries.push(sym);
+                            } else if i < parent_vtable.len() {
+                                // Fall back to parent's vtable entry
+                                vtable_entries.push(parent_vtable[i]);
+                            }
+                        }
+                        self.interface_vtables
+                            .insert((class.symbol_id, iface_sym), vtable_entries);
+                    }
+                }
+            }
+        }
+
         // Register class method symbols for iterator protocol lookup
         for method in &class.methods {
             self.class_method_symbols.insert(
@@ -28981,11 +29164,13 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Add own methods after inherited ones
+        // Add own methods after inherited ones, and store return types
         for method in &interface.methods {
             if !all_method_names.contains(&method.name) {
                 all_method_names.push(method.name);
             }
+            self.interface_method_return_types
+                .insert((interface.symbol_id, method.name), method.return_type);
         }
 
         // Store extends relationships for transitive vtable building
