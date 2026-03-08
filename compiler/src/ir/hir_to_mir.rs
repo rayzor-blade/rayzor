@@ -16276,9 +16276,29 @@ impl<'a> HirToMirContext<'a> {
                 let to_type = self.convert_type(*target);
 
                 // For abstract types, the cast between abstract and underlying is a no-op
-                // (they share the same MIR type)
-                if from_type == to_type {
+                // (they share the same MIR type).
+                // BUT: for safe casts between class types, we must NOT skip — even though
+                // both are Ptr(Void), the runtime needs to verify the class hierarchy.
+                if from_type == to_type && !*is_safe {
                     return self.lower_expression(expr);
+                }
+                if from_type == to_type && *is_safe {
+                    // Same MIR type — but if both are class types, fall through to
+                    // the Class→Class handler for runtime downcast verification.
+                    let type_table = self.type_table.borrow();
+                    let src_is_class = matches!(
+                        type_table.get(expr.ty).map(|t| &t.kind),
+                        Some(TypeKind::Class { .. })
+                    );
+                    let tgt_is_class = matches!(
+                        type_table.get(*target).map(|t| &t.kind),
+                        Some(TypeKind::Class { .. })
+                    );
+                    drop(type_table);
+                    if !src_is_class || !tgt_is_class {
+                        return self.lower_expression(expr);
+                    }
+                    // Fall through to Class→Class safe cast handler
                 }
 
                 // For `cast this` in abstract methods: the source is Abstract (resolves to

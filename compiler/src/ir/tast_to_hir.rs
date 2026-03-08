@@ -4466,7 +4466,10 @@ impl<'a> TastToHirContext<'a> {
                     }
                 }
 
-                let is_safe = matches!(cast_kind, CastKind::Checked | CastKind::Implicit);
+                let is_safe = matches!(
+                    cast_kind,
+                    CastKind::Checked | CastKind::Implicit | CastKind::Explicit
+                );
                 HirExpr::new(
                     HirExprKind::Cast {
                         expr: Box::new(lowered_inner),
