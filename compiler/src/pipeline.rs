@@ -414,6 +414,9 @@ pub enum ErrorCategory {
     /// Lifetime error
     LifetimeError,
 
+    /// Concurrency safety error (Send/Sync violations)
+    ConcurrencyError,
+
     /// Import/module error
     ImportError,
 
@@ -443,7 +446,7 @@ impl ErrorCategory {
     /// - E0001-E0099: Parser/syntax errors (defined in diagnostics/haxe.rs)
     /// - E0100-E0199: Type system errors
     /// - E0200-E0299: Symbol resolution errors
-    /// - E0300-E0399: Ownership/lifetime errors
+    /// - E0300-E0399: Ownership/lifetime/concurrency errors
     /// - E0400-E0499: Import/module errors
     /// - E0500-E0599: HIR errors
     /// - E0600-E0699: Semantic analysis errors
@@ -460,9 +463,10 @@ impl ErrorCategory {
             // Symbol resolution errors: E0200-E0299
             ErrorCategory::SymbolError => "E0200",
 
-            // Ownership/lifetime errors: E0300-E0399
+            // Ownership/lifetime/concurrency errors: E0300-E0399
             ErrorCategory::OwnershipError => "E0300",
             ErrorCategory::LifetimeError => "E0301",
+            ErrorCategory::ConcurrencyError => "E0302",
 
             // Import/module errors: E0400-E0499
             ErrorCategory::ImportError => "E0400",

@@ -39,8 +39,12 @@ use std::rc::Rc;
 /// Validation error for Send/Sync constraints
 #[derive(Debug, Clone)]
 pub struct SendSyncError {
-    /// Error message
+    /// Full error message for display
     pub message: String,
+    /// Name of the type that failed validation (e.g., "Function", "MyClass")
+    pub type_name: String,
+    /// Reason the type is not Send/Sync (e.g., "type does not derive Send")
+    pub reason: String,
     /// Type that failed validation
     pub type_id: TypeId,
     /// Symbol that failed validation (if applicable)
@@ -50,9 +54,15 @@ pub struct SendSyncError {
 }
 
 impl SendSyncError {
-    pub fn new(message: String, type_id: TypeId) -> Self {
+    pub fn new(type_name: String, reason: String, type_id: TypeId) -> Self {
+        let message = format!(
+            "Cannot send value of type `{}` across threads: {}",
+            type_name, reason
+        );
         Self {
             message,
+            type_name,
+            reason,
             type_id,
             symbol_id: None,
             source_location: SourceLocation::unknown(),
@@ -128,6 +138,7 @@ impl<'a> SendSyncValidator<'a> {
             TypedExpressionKind::StaticMethodCall { arguments, .. } => {
                 arguments.first().ok_or_else(|| {
                     SendSyncError::new(
+                        "closure".to_string(),
                         "Thread::spawn requires a closure argument".to_string(),
                         closure_type,
                     )
@@ -171,12 +182,8 @@ impl<'a> SendSyncValidator<'a> {
         if !self.trait_checker.is_send(type_id) {
             let type_name = self.get_type_name(type_id);
             return Err(SendSyncError::new(
-                format!(
-                    "Cannot send value of type `{}` across threads: \
-                     type does not implement Send. \
-                     Add @:derive([Send]) to the class declaration",
-                    type_name
-                ),
+                type_name,
+                "type does not derive Send".to_string(),
                 type_id,
             )
             .with_symbol(capture.symbol_id)
@@ -237,11 +244,8 @@ impl<'a> SendSyncValidator<'a> {
             if !self.trait_checker.is_send(element_type) {
                 let type_name = self.get_type_name(element_type);
                 return Err(SendSyncError::new(
-                    format!(
-                        "Channel<{}> requires element type to implement Send. \
-                         Add @:derive([Send]) to `{}`",
-                        type_name, type_name
-                    ),
+                    format!("Channel<{}>", type_name),
+                    format!("element type `{}` does not derive Send", type_name),
                     element_type,
                 )
                 .with_location(loc));
@@ -263,11 +267,8 @@ impl<'a> SendSyncValidator<'a> {
 
             if !self.trait_checker.is_send(element_type) {
                 return Err(SendSyncError::new(
-                    format!(
-                        "Arc<{}> requires inner type to implement Send. \
-                         Add @:derive([Send]) to `{}`",
-                        type_name, type_name
-                    ),
+                    format!("Arc<{}>", type_name),
+                    format!("inner type `{}` does not derive Send", type_name),
                     element_type,
                 )
                 .with_location(loc));
@@ -275,11 +276,8 @@ impl<'a> SendSyncValidator<'a> {
 
             if !self.trait_checker.is_sync(element_type) {
                 return Err(SendSyncError::new(
-                    format!(
-                        "Arc<{}> requires inner type to implement Sync. \
-                         Add @:derive([Send, Sync]) to `{}`",
-                        type_name, type_name
-                    ),
+                    format!("Arc<{}>", type_name),
+                    format!("inner type `{}` does not derive Sync", type_name),
                     element_type,
                 )
                 .with_location(loc));

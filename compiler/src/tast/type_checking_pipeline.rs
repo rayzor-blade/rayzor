@@ -327,8 +327,9 @@ impl<'a> TypeCheckingPhase<'a> {
     /// Emit a Send/Sync validation error as a diagnostic
     fn emit_send_sync_error(&mut self, error: SendSyncError) {
         self.emit_error(TypeCheckError {
-            kind: TypeErrorKind::UndefinedType {
-                name: self.string_interner.intern("send_sync_violation"),
+            kind: TypeErrorKind::SendSyncViolation {
+                type_name: error.type_name.clone(),
+                reason: error.reason.clone(),
             },
             location: error.source_location,
             context: error.message.clone(),

@@ -501,6 +501,14 @@ impl<'a> TypeDiagnosticEmitter<'a> {
             ),
             TypeErrorKind::ImportError { message } => todo!(),
             TypeErrorKind::UnknownSymbol { name } => todo!(),
+            TypeErrorKind::SendSyncViolation { type_name, reason } => {
+                self.emit_send_sync_violation(
+                    error.location,
+                    &type_name,
+                    &reason,
+                    error.suggestion.as_deref(),
+                )
+            }
         }
     }
 
@@ -999,6 +1007,35 @@ impl<'a> TypeDiagnosticEmitter<'a> {
             .note(reason)
             .help("Consider adding explicit type annotations")
             .build()
+    }
+
+    /// Emit Send/Sync concurrency violation diagnostic
+    fn emit_send_sync_violation(
+        &self,
+        location: SourceLocation,
+        type_name: &str,
+        reason: &str,
+        suggestion: Option<&str>,
+    ) -> Diagnostic {
+        let source_span = self.location_to_span_with_length(location, Some(type_name));
+
+        let mut builder = DiagnosticBuilder::error(
+            format!(
+                "Cannot send value of type `{}` across threads",
+                type_name
+            ),
+            source_span.clone(),
+        )
+        .code("E0302")
+        .label(source_span, reason.to_string());
+
+        if let Some(hint) = suggestion {
+            builder = builder.help(hint);
+        } else {
+            builder = builder.help("Add @:derive([Send]) to the type declaration, or use a Send-safe alternative");
+        }
+
+        builder.build()
     }
 
     /// Helper: Convert SourceLocation to SourceSpan
