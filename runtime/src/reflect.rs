@@ -190,7 +190,7 @@ pub extern "C" fn haxe_reflect_compare_methods(f1: *mut u8, f2: *mut u8) -> bool
     // Try to unwrap DynamicValue boxes to get the raw closure pointer.
     // Only dereference if the pointer is properly aligned for DynamicValue.
     let unwrap = |ptr: *mut u8| -> *mut u8 {
-        if (ptr as usize) % std::mem::align_of::<DynamicValue>() != 0 {
+        if !(ptr as usize).is_multiple_of(std::mem::align_of::<DynamicValue>()) {
             return ptr;
         }
         unsafe {
@@ -215,8 +215,8 @@ pub extern "C" fn haxe_reflect_compare_methods(f1: *mut u8, f2: *mut u8) -> bool
     // Only if both pointers are 8-byte aligned (valid closure structs)
     if !p1.is_null()
         && !p2.is_null()
-        && (p1 as usize) % 8 == 0
-        && (p2 as usize) % 8 == 0
+        && (p1 as usize).is_multiple_of(8)
+        && (p2 as usize).is_multiple_of(8)
     {
         unsafe {
             let fn1 = std::ptr::read(p1 as *const [i64; 2]);
