@@ -8,6 +8,7 @@ use crate::ir::{CallingConvention, IrType};
 /// Build all EReg type functions
 pub fn build_ereg_type(builder: &mut MirBuilder) {
     declare_ereg_externs(builder);
+    build_ereg_map(builder);
     build_ereg_match_sub_2(builder);
 }
 
@@ -120,6 +121,18 @@ fn declare_ereg_externs(builder: &mut MirBuilder) {
         .build();
     builder.mark_as_extern(func_id);
 
+    // haxe_ereg_map(ereg: *mut u8, s: *const HaxeString, fn_ptr: usize, env_ptr: *mut u8) -> *mut u8
+    let func_id = builder
+        .begin_function("haxe_ereg_map")
+        .param("ereg", ptr_u8.clone())
+        .param("s", string_ty.clone())
+        .param("fn_ptr", IrType::I64)
+        .param("env_ptr", ptr_void.clone())
+        .returns(string_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
     // haxe_ereg_escape(s: *const HaxeString) -> String
     let func_id = builder
         .begin_function("haxe_ereg_escape")
@@ -128,6 +141,53 @@ fn declare_ereg_externs(builder: &mut MirBuilder) {
         .calling_convention(CallingConvention::C)
         .build();
     builder.mark_as_extern(func_id);
+}
+
+/// MIR wrapper for map: extracts fn_ptr + env_ptr from closure struct
+/// EReg_map(ereg, s, closure) → haxe_ereg_map(ereg, s, fn_ptr, env_ptr)
+fn build_ereg_map(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+    let string_ty = IrType::String;
+
+    let func_id = builder
+        .begin_function("EReg_map")
+        .param("ereg", ptr_u8.clone())
+        .param("s", string_ty.clone())
+        .param("closure", IrType::Any)
+        .returns(string_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let ereg = builder.get_param(0);
+    let s = builder.get_param(1);
+    let closure = builder.get_param(2);
+
+    // Cast closure from Any to Ptr to load fields
+    let closure_ptr = builder.cast(closure, IrType::Any, ptr_u8.clone());
+
+    // Load fn_ptr from closure[0]
+    let fn_ptr = builder.load(closure_ptr, IrType::I64);
+
+    // Load env_ptr from closure[8]
+    let offset_8 = builder.const_i64(8);
+    let env_slot = builder.ptr_add(closure_ptr, offset_8, ptr_u8.clone());
+    let env_ptr = builder.load(env_slot, IrType::I64);
+    let env_ptr_cast = builder.cast(env_ptr, IrType::I64, ptr_void.clone());
+
+    // Call haxe_ereg_map(ereg, s, fn_ptr, env_ptr)
+    let map_func = builder
+        .get_function_by_name("haxe_ereg_map")
+        .expect("haxe_ereg_map extern not found");
+    let result = builder
+        .call(map_func, vec![ereg, s, fn_ptr, env_ptr_cast])
+        .unwrap();
+
+    builder.ret(Some(result));
 }
 
 /// MIR wrapper for matchSub with 2 params (default len = -1)

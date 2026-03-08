@@ -367,6 +367,80 @@ pub extern "C" fn haxe_ereg_replace(
     }
 }
 
+/// Map regex matches using a callback function.
+/// Callback receives (env_ptr, ereg_ptr) and returns HaxeString*.
+/// If global, replaces all matches; otherwise only the first.
+#[no_mangle]
+pub extern "C" fn haxe_ereg_map(
+    ereg: *mut u8,
+    s: *const HaxeString,
+    fn_ptr: usize,
+    env_ptr: *mut u8,
+) -> *mut u8 {
+    if ereg.is_null() || s.is_null() || fn_ptr == 0 {
+        return rust_str_to_hs("");
+    }
+    unsafe {
+        let ereg_ref = &mut *(ereg as *mut HaxeEReg);
+        let input = hs_to_str(s).to_string();
+        let mut result = String::new();
+        let mut offset = 0;
+
+        let callback: extern "C" fn(*mut u8, *mut u8) -> *mut u8 = std::mem::transmute(fn_ptr);
+
+        loop {
+            let sub = &input[offset..];
+            if let Some(caps) = ereg_ref.regex.captures(sub) {
+                let full_match = caps.get(0).unwrap();
+                let match_start = full_match.start();
+                let match_end = full_match.end();
+
+                // Append text before match
+                result.push_str(&sub[..match_start]);
+
+                // Update ereg state so callback can use matched()/matchedLeft()/etc.
+                let mut capture_ranges = Vec::new();
+                for i in 0..caps.len() {
+                    capture_ranges
+                        .push(caps.get(i).map(|m| (m.start() + offset, m.end() + offset)));
+                }
+                ereg_ref.last_captures = Some(capture_ranges);
+                ereg_ref.last_input = Some(input.clone());
+
+                // Call the callback: fn(env_ptr, ereg) -> HaxeString*
+                let replacement_hs = callback(env_ptr, ereg);
+                let replacement_str = hs_to_str(replacement_hs as *const HaxeString);
+                result.push_str(replacement_str);
+
+                // Advance past match
+                offset += match_end;
+
+                // Guard against zero-length matches to prevent infinite loops
+                if match_start == match_end {
+                    if offset < input.len() {
+                        result.push(input.as_bytes()[offset] as char);
+                        offset += 1;
+                    } else {
+                        break;
+                    }
+                }
+
+                if !ereg_ref.global {
+                    // Non-global: only replace first match, append rest
+                    result.push_str(&input[offset..]);
+                    break;
+                }
+            } else {
+                // No more matches, append rest
+                result.push_str(&input[offset..]);
+                break;
+            }
+        }
+
+        rust_str_to_hs(&result)
+    }
+}
+
 /// Escape regex metacharacters in the string.
 /// Static method — does not use an EReg instance.
 #[no_mangle]
