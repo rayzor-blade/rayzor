@@ -119,6 +119,9 @@ This document tracks major features, enhancements, and technical debt for the Ra
 - [ ] Use SymbolFlags::GENERIC to identify monomorphizable types
 - [ ] Handle recursive generic instantiation
 - [x] Preserve TypeVar in MIR signatures (TypeParameter → TypeVar conversion)
+- [x] Generic type substitution in MIR inlining — inline_call_site() maps callee type params to concrete type_args from CallDirect (2026-03-05)
+- [x] Inline generic tag fixup resolution — type_param_tag_fixups resolved during inlining so runtime dispatch (e.g., haxe_value_to_string_by_tag) gets correct type tag (2026-03-05)
+- [x] Transitive monomorphization for generic class methods — functions that transitively call functions with type_param_tag_fixups are also specialized (2026-02-19)
 
 **Reference:** Based on Zyntax proven approach - see GENERICS_DESIGN.md
 
@@ -974,7 +977,7 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 - [x] Dead code elimination (DCE)
 - [x] Constant folding
 - [x] Copy propagation
-- [x] Inlining (method and function, configurable max_size, cost model with loop depth bonus)
+- [x] Inlining (method and function, configurable max_size, cost model with loop depth bonus, generic type substitution)
 - [x] Scalar Replacement of Aggregates (SRA) — replaces heap allocs with scalar registers, phi-aware
 - [x] Bounds Check Elimination (BCE) — eliminates redundant array bounds checks in for-in loops
 - [x] Global Load Caching — eliminates redundant global loads within functions (~1.67x on nbody)
@@ -1011,7 +1014,7 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 ### 9.1 Completed
 
 - [x] **600/600 unit tests passing** (100% pass rate as of 2026-01-28)
-- [x] **43/43 haxe test files passing** (100% pass rate as of 2026-02-17)
+- [x] **87/87 haxe test files passing** (100% pass rate as of 2026-03-08)
 - [x] **9/9 e2e tests passing** (100% pass rate as of 2026-02-17, including arc_mutex_integration)
 - [x] **Docker stress test environment** (`ci/bench-test/`) for reproducible amd64 testing
 - [x] **SIGSEGV signal handler** for crash diagnosis with stack traces
@@ -2344,7 +2347,45 @@ trace("The point is: " + p);    // ✅ (calls toString())
 - **Async state machines** build on generics and memory safety
 - Implementation should follow dependency order to avoid rework
 
-**Last Updated:** 2026-02-17 (Close 5 medium items: Safe Cast, Properties, Enum, Abstract, RTTI; TypeId consistency fix)
+**Last Updated:** 2026-03-08 (Generic inline type substitution, Cranelift verifier fixes, cross-module default args, LLVM Ushr, 87/87 tests)
+
+## Recent Progress (Session 2026-03-08 - Generic Inlining, Verifier Fixes & Full Test Suite)
+
+**Generic Type Substitution in MIR Inlining:** ✅ Complete
+
+- ✅ **Inline generic type substitution** — `inline_call_site()` now maps callee type params to concrete `type_args` from `CallDirect`. Fixes `StringBuf.add<T>("hello")` outputting raw pointer values instead of string content. When `type_args` are absent and callee params are type-erased to I64, infers concrete type from caller argument register types.
+- ✅ **TypeVar preservation in MIR** — `TypeParameter` now emits `IrType::TypeVar(name)` instead of erasing to `I64`, enabling both monomorphization and inlining to perform type substitution.
+- ✅ **type_param_tag_fixups resolved during inlining** — `haxe_value_to_string_by_tag` and similar runtime dispatch functions now receive correct type tags for inlined generic call sites.
+- ✅ **BLADE cache property_access_map** — Cross-module property getters (e.g., `StringBuf.length`) now resolve on BLADE cache hits.
+- ✅ **Cranelift return type coercion** — `ireduce`/`sextend` applied when function body returns a different-width integer than the signature declares.
+- ✅ **String comparison runtime functions** — Added `haxe_string_compare` and `haxe_string_equal`.
+
+**Reflect.compare Typed Dispatch:** ✅ Complete
+
+- ✅ **Reflect.compare typed dispatch in Field callee path** — `get_stdlib_runtime_info` branch now intercepts `haxe_reflect_compare` and redirects to `haxe_reflect_compare_typed` with correct type tag and `type_param_tag_fixups`. Fixes string-keyed BalancedTree returning zeros.
+- ✅ **Cranelift extern_functions ID collision guard** — Monomorphized functions (ID 10000+) can collide with extern entries (malloc/realloc/free) after renumbering. Skip extern mapping when a real function body exists at the same ID. Fixes test_balanced_tree_generic crash.
+
+**Cranelift Verifier Error Elimination:** ✅ Complete
+
+- ✅ **Dynamic→primitive cast skip-unbox guard** — When casting from Dynamic to Int/Float/Bool, checks actual MIR register type first. If already a raw primitive (I32/F64/Bool), skips `haxe_unbox_*_ptr` call. Fixes enum abstract methods like `doubled()` where `(cast this : Int)` produces a double-cast pattern with inner HIR type `Dynamic`.
+- ✅ **StringIterator this-type resolution** — `register_function_signature_with_class_type_params` now checks actual HIR `TypeKind` instead of using `convert_type()` (which misresolves class types to I32 in cross-module contexts). Only uses raw value type for `Abstract` with primitive underlying; everything else uses `Ptr(Void)`.
+- ✅ **Cross-module optional parameter default filling** — Added `external_function_param_types` map populated from all import MIR modules. `fill_default_args` uses it as third fallback after local functions and extern_functions. Default values now use correct type from signature (I32, F32, F64, Bool) instead of always `IrValue::I64(0)`. Fixes `StringTools.hex(16)` SIGILL with missing `?digits` arg.
+- ✅ **StringTools.hex() ?digits padding** — Restored `while (s.length < digits)` zero-padding loop.
+
+**LLVM Backend Ushr:** ✅ Complete
+
+- ✅ **Unsigned right shift (`>>>`) operator** — Added `BinaryOp::Ushr` match arm to LLVM JIT backend using `build_right_shift(..., false)` for logical (zero-extend) shift. Fixes `clippy --all-features -D warnings` build failure.
+
+**Test Suite & Maintenance:**
+
+- ✅ **87/87 Haxe test files passing** (100% pass rate, up from 43/43)
+- ✅ **run_haxe_tests.sh** — Batch test runner with color-coded output (PASS/FAIL/CRASH/TIMEOUT), results written to `test_results.txt`
+- ✅ **Cleaned up debug/dump example files** — Removed 13 temporary debug files (dump_hex.rs, dump_func_names.rs, debug_array_iterator.rs, etc.)
+- ✅ **Rebundled precompiled benchmarks** — nbody.rzb (8.63 KB), mandelbrot.rzb (4.78 KB) with latest compiler + `--strip`
+
+**Verification:** 87/87 haxe test files pass, `cargo clippy --all-features --workspace -- -D warnings` clean, `cargo doc --no-deps` builds.
+
+---
 
 ## Recent Progress (Session 2026-02-17 - Dynamic BinaryOp Fix & Codegen Hardening)
 
