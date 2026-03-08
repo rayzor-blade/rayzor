@@ -4502,6 +4502,36 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 Ok(result.into())
             }
 
+            BinaryOp::Ushr => {
+                let left_int = if left.is_float_value() {
+                    self.builder
+                        .build_float_to_signed_int(
+                            left.into_float_value(),
+                            self.context.i64_type(),
+                            "ushr_l_cast",
+                        )
+                        .map_err(|e| format!("Failed to cast ushr left: {}", e))?
+                } else {
+                    left.into_int_value()
+                };
+                let right_int = if right.is_float_value() {
+                    self.builder
+                        .build_float_to_signed_int(
+                            right.into_float_value(),
+                            self.context.i64_type(),
+                            "ushr_r_cast",
+                        )
+                        .map_err(|e| format!("Failed to cast ushr right: {}", e))?
+                } else {
+                    right.into_int_value()
+                };
+                let result = self
+                    .builder
+                    .build_right_shift(left_int, right_int, false, &name)
+                    .map_err(|e| format!("Failed to build ushr: {}", e))?;
+                Ok(result.into())
+            }
+
             // Float arithmetic (explicit float operations)
             BinaryOp::FAdd => {
                 let left_f = left.into_float_value();
