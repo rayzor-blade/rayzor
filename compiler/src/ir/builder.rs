@@ -519,6 +519,10 @@ impl IrBuilder {
         signature: IrType,
     ) -> Option<IrId> {
         let dest = self.alloc_reg()?;
+        // Extract return type from signature and set it on the dest register
+        if let IrType::Function { return_type, .. } = &signature {
+            self.set_register_type(dest, *return_type.clone());
+        }
         // Default to Move ownership for all arguments
         let arg_ownership = args
             .iter()
