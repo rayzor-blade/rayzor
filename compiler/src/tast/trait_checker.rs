@@ -6,8 +6,9 @@
 
 use crate::tast::{
     core::{Mutability, TypeKind},
+    core_types::CoreTypeChecker,
     node::{DerivedTrait, TypedClass},
-    SymbolId, SymbolTable, TypeId, TypeTable,
+    StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -18,6 +19,8 @@ pub struct TraitChecker<'a> {
     symbol_table: &'a SymbolTable,
     /// Map from SymbolId to TypedClass for quick lookup
     class_map: std::collections::HashMap<SymbolId, &'a TypedClass>,
+    /// Core type checker for identifying stdlib concurrent types
+    core_checker: CoreTypeChecker<'a>,
 }
 
 impl<'a> TraitChecker<'a> {
@@ -25,6 +28,7 @@ impl<'a> TraitChecker<'a> {
     pub fn new(
         type_table: &'a Rc<RefCell<TypeTable>>,
         symbol_table: &'a SymbolTable,
+        string_interner: &'a StringInterner,
         classes: &'a [TypedClass],
     ) -> Self {
         // Build a map from SymbolId to TypedClass
@@ -37,6 +41,7 @@ impl<'a> TraitChecker<'a> {
             type_table,
             symbol_table,
             class_map,
+            core_checker: CoreTypeChecker::new(type_table, symbol_table, string_interner),
         }
     }
 
@@ -88,7 +93,19 @@ impl<'a> TraitChecker<'a> {
             TypeKind::Void => true,
 
             // Check class for derived traits
-            TypeKind::Class { symbol_id, .. } => self.class_implements_trait(*symbol_id, trait_),
+            TypeKind::Class { symbol_id, .. } => {
+                // Stdlib concurrent types are inherently Send + Sync
+                if matches!(trait_, DerivedTrait::Send | DerivedTrait::Sync) {
+                    if self.core_checker.is_arc(type_id)
+                        || self.core_checker.is_mutex(type_id)
+                        || self.core_checker.is_channel(type_id)
+                        || self.core_checker.is_thread(type_id)
+                    {
+                        return true;
+                    }
+                }
+                self.class_implements_trait(*symbol_id, trait_)
+            }
 
             // Function types: NOT Send/Sync by default (captures unknown)
             TypeKind::Function { .. } => false,
@@ -196,17 +213,18 @@ impl<'a> TraitChecker<'a> {
 mod tests {
     use super::*;
 
-    fn create_test_context() -> (Rc<RefCell<TypeTable>>, SymbolTable) {
+    fn create_test_context() -> (Rc<RefCell<TypeTable>>, SymbolTable, StringInterner) {
         let type_table = Rc::new(RefCell::new(TypeTable::new()));
         let symbol_table = SymbolTable::new();
-        (type_table, symbol_table)
+        let string_interner = StringInterner::new();
+        (type_table, symbol_table, string_interner)
     }
 
     #[test]
     fn test_primitives_are_send_sync() {
-        let (type_table, symbol_table) = create_test_context();
+        let (type_table, symbol_table, string_interner) = create_test_context();
         let classes: Vec<TypedClass> = vec![];
-        let checker = TraitChecker::new(&type_table, &symbol_table, &classes);
+        let checker = TraitChecker::new(&type_table, &symbol_table, &string_interner, &classes);
 
         // Use common types from type table
         let int_type = type_table.borrow().int_type();
@@ -226,9 +244,9 @@ mod tests {
 
     #[test]
     fn test_string_is_send_not_sync() {
-        let (type_table, symbol_table) = create_test_context();
+        let (type_table, symbol_table, string_interner) = create_test_context();
         let classes: Vec<TypedClass> = vec![];
-        let checker = TraitChecker::new(&type_table, &symbol_table, &classes);
+        let checker = TraitChecker::new(&type_table, &symbol_table, &string_interner, &classes);
 
         let string_type = type_table.borrow().string_type();
 
@@ -239,9 +257,9 @@ mod tests {
 
     #[test]
     fn test_function_types_not_send_sync() {
-        let (type_table, symbol_table) = create_test_context();
+        let (type_table, symbol_table, string_interner) = create_test_context();
         let classes: Vec<TypedClass> = vec![];
-        let checker = TraitChecker::new(&type_table, &symbol_table, &classes);
+        let checker = TraitChecker::new(&type_table, &symbol_table, &string_interner, &classes);
 
         let void_type = type_table.borrow().void_type();
         let func_type = type_table

@@ -3372,6 +3372,50 @@ impl CompilationUnit {
             }]
         })?;
 
+        // Send/Sync validation — check thread safety constraints (user files only)
+        let is_stdlib = filename.contains("haxe-std/") || filename.contains("haxe-std\\");
+        if !is_stdlib {
+            use crate::tast::send_sync_validator::SendSyncValidator;
+            let validator = SendSyncValidator::new(
+                &self.type_table,
+                &self.symbol_table,
+                &self.string_interner,
+                &typed_file.classes,
+            );
+            let mut send_sync_errors = Vec::new();
+            for class in &typed_file.classes {
+                if let Err(error) = validator.validate_class(class) {
+                    send_sync_errors.push(CompilationError {
+                        message: error.message.clone(),
+                        location: error.source_location,
+                        category: ErrorCategory::TypeError,
+                        suggestion: Some(
+                            "Add @:derive([Send]) or @:derive([Send, Sync]) to the type"
+                                .to_string(),
+                        ),
+                        related_errors: Vec::new(),
+                    });
+                }
+            }
+            for function in &typed_file.functions {
+                if let Err(error) = validator.validate_function(function) {
+                    send_sync_errors.push(CompilationError {
+                        message: error.message.clone(),
+                        location: error.source_location,
+                        category: ErrorCategory::TypeError,
+                        suggestion: Some(
+                            "Add @:derive([Send]) or @:derive([Send, Sync]) to the type"
+                                .to_string(),
+                        ),
+                        related_errors: Vec::new(),
+                    });
+                }
+            }
+            if !send_sync_errors.is_empty() {
+                return Err(send_sync_errors);
+            }
+        } // end if !is_stdlib
+
         // Lower to HIR
         use crate::ir::tast_to_hir::lower_tast_to_hir;
         let hir_module = lower_tast_to_hir(
