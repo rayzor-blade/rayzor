@@ -18,6 +18,7 @@ pub mod blade; // BLADE format - Blazing Language Artifact Deployment Environmen
 pub mod blocks;
 pub mod bounds_check_elimination; // Bounds Check Elimination for array loops
 pub mod builder;
+pub mod devirtualize; // Devirtualization: indirect → direct calls
 pub mod dump; // MIR pretty-printer for debugging
 pub mod environment_layout; // Closure environment layout abstraction
 pub mod escape_analysis; // Intra-loop escape analysis for Alloc hoisting
@@ -26,6 +27,7 @@ pub mod inlining; // Function inlining and call graph analysis
 pub mod insert_free; // Insert Free instructions for non-escaping allocations
 pub mod instructions;
 pub mod loop_analysis; // Loop analysis: dominators, natural loops, nesting
+pub mod loop_unrolling; // Loop unrolling for constant-trip-count loops
 pub mod lowering; // Legacy TAST to MIR (being phased out)
 pub mod mir_builder; // Programmatic MIR construction API
 pub mod modules;
