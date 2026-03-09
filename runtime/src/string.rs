@@ -165,7 +165,11 @@ fn haxe_string_concat_impl(a: *const HaxeString, b: *const HaxeString) -> HaxeSt
             &*b
         };
 
-        let new_len = a_ref.len + b_ref.len;
+        // Guard against corrupted HaxeString structs
+        let a_len = if a_ref.ptr.is_null() { 0 } else { a_ref.len };
+        let b_len = if b_ref.ptr.is_null() { 0 } else { b_ref.len };
+
+        let new_len = a_len + b_len;
         let new_cap = if new_len < 16 { 16 } else { new_len };
 
         let layout = Layout::from_size_align_unchecked(new_cap, 1);
@@ -176,11 +180,11 @@ fn haxe_string_concat_impl(a: *const HaxeString, b: *const HaxeString) -> HaxeSt
         }
 
         // Copy both strings
-        if a_ref.len > 0 {
-            ptr::copy_nonoverlapping(a_ref.ptr, new_ptr, a_ref.len);
+        if a_len > 0 && !a_ref.ptr.is_null() {
+            ptr::copy_nonoverlapping(a_ref.ptr, new_ptr, a_len);
         }
-        if b_ref.len > 0 {
-            ptr::copy_nonoverlapping(b_ref.ptr, new_ptr.add(a_ref.len), b_ref.len);
+        if b_len > 0 && !b_ref.ptr.is_null() {
+            ptr::copy_nonoverlapping(b_ref.ptr, new_ptr.add(a_len), b_len);
         }
 
         HaxeString {

@@ -85,6 +85,7 @@ pub extern "C" fn rayzor_throw_typed(exception_value: i64, type_id: u32) {
 
         if let Some(handler) = state.handlers.last_mut() {
             let buf_ptr = handler.jmp_buf.as_mut_ptr();
+
             // Must drop the borrow before longjmp
             drop(state);
             unsafe {

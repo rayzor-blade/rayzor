@@ -3173,8 +3173,7 @@ impl<'a> AstLowering<'a> {
             let has_hashcode = typed_class.methods.iter().any(|m| m.name == hash_code_name);
             if !has_hashcode {
                 let int_type = self.context.type_table.borrow().int_type();
-                let func_symbol_id =
-                    SymbolId::from_raw(self.context.symbol_table.len() as u32);
+                let func_symbol_id = SymbolId::from_raw(self.context.symbol_table.len() as u32);
                 let func_symbol = Symbol {
                     id: func_symbol_id,
                     name: hash_code_name,
