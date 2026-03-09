@@ -19,7 +19,7 @@ TOTAL=0
 
 # Build rayzor first
 echo "Building rayzor..."
-cargo build -p rayzor 2>&1 | tail -3
+cargo build --release -p rayzor 2>&1 | tail -3
 
 # Clear blade cache
 rm -f .rayzor/blade/cache/*.blade 2>/dev/null || true
