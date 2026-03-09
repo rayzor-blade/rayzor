@@ -87,20 +87,24 @@ fn devirtualize_function(
                         _ => None,
                     };
                     if let Some(v) = v {
-                        origins.insert(*dest, ValueOrigin::PtrOffset { base: *dest, offset: v });
+                        origins.insert(
+                            *dest,
+                            ValueOrigin::PtrOffset {
+                                base: *dest,
+                                offset: v,
+                            },
+                        );
                     }
                 }
 
                 // Track PtrAdd: dest = base + offset_reg
                 IrInstruction::PtrAdd {
-                    dest,
-                    ptr,
-                    offset,
-                    ..
+                    dest, ptr, offset, ..
                 } => {
                     // If offset is a known constant, track the pointer arithmetic
-                    if let Some(ValueOrigin::PtrOffset { offset: off_val, .. }) =
-                        origins.get(offset)
+                    if let Some(ValueOrigin::PtrOffset {
+                        offset: off_val, ..
+                    }) = origins.get(offset)
                     {
                         origins.insert(
                             *dest,
@@ -146,8 +150,12 @@ fn devirtualize_function(
                 }
 
                 // Track casts (propagate origin through type casts)
-                IrInstruction::Cast { dest, src: source, .. }
-                | IrInstruction::BitCast { dest, src: source, .. } => {
+                IrInstruction::Cast {
+                    dest, src: source, ..
+                }
+                | IrInstruction::BitCast {
+                    dest, src: source, ..
+                } => {
                     if let Some(origin) = origins.get(source).cloned() {
                         origins.insert(*dest, origin);
                     }
@@ -199,7 +207,9 @@ fn devirtualize_function(
 
     if devirtualized > 0 {
         let mut result = OptimizationResult::changed();
-        result.stats.insert("devirtualized_calls".to_string(), devirtualized);
+        result
+            .stats
+            .insert("devirtualized_calls".to_string(), devirtualized);
         result
     } else {
         OptimizationResult::unchanged()

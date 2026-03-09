@@ -84,7 +84,8 @@ fn analyze_loop_trip_count(
         let init_const = find_const_value(function, init_reg)?;
 
         // Check if step_reg = iv + constant (the increment)
-        let (step_amount, step_op) = find_step_instruction(function, step_reg, phi.dest, loop_blocks)?;
+        let (step_amount, step_op) =
+            find_step_instruction(function, step_reg, phi.dest, loop_blocks)?;
 
         // Find the exit condition: the header (or a block in the loop) should have
         // a CondBranch comparing iv against a bound
@@ -232,7 +233,11 @@ fn find_loop_bound(
                         if *right == iv {
                             if let Some(bound) = find_const_value(function, *left) {
                                 let swapped = swap_cmp(*op);
-                                let effective_op = if true_in { swapped } else { negate_cmp(swapped) };
+                                let effective_op = if true_in {
+                                    swapped
+                                } else {
+                                    negate_cmp(swapped)
+                                };
                                 return Some((bound, effective_op));
                             }
                         }
@@ -493,14 +498,17 @@ fn fully_unroll_loop(
             dest: iv_const_reg,
             value: IrValue::I32(iv_value as i32),
         });
-        function
-            .register_types
-            .insert(iv_const_reg, IrType::I32);
+        function.register_types.insert(iv_const_reg, IrType::I32);
         reg_map.insert(info.iv_phi, iv_const_reg);
 
         // Clone body instructions with register remapping
         for inst in &body_instructions {
-            let new_inst = remap_instruction(inst, &mut reg_map, &mut reg_id, &mut function.register_types);
+            let new_inst = remap_instruction(
+                inst,
+                &mut reg_map,
+                &mut reg_id,
+                &mut function.register_types,
+            );
             unrolled_instructions.push(new_inst);
         }
     }
@@ -524,7 +532,9 @@ fn fully_unroll_loop(
 
     // Update exit target's predecessors: replace header with unrolled block
     if let Some(exit_block) = function.cfg.get_block_mut(exit_target) {
-        exit_block.predecessors.retain(|&p| !loop_blocks.contains(&p));
+        exit_block
+            .predecessors
+            .retain(|&p| !loop_blocks.contains(&p));
         if !exit_block.predecessors.contains(&unrolled_block_id) {
             exit_block.predecessors.push(unrolled_block_id);
         }
@@ -562,11 +572,14 @@ fn remap_instruction(
     register_types: &mut HashMap<IrId, IrType>,
 ) -> IrInstruction {
     // Helper to remap a register, creating a new one if it's a definition
-    let map_use = |r: IrId, reg_map: &HashMap<IrId, IrId>| -> IrId {
-        reg_map.get(&r).copied().unwrap_or(r)
-    };
+    let map_use =
+        |r: IrId, reg_map: &HashMap<IrId, IrId>| -> IrId { reg_map.get(&r).copied().unwrap_or(r) };
 
-    let alloc_new = |old: IrId, next_reg: &mut u32, reg_map: &mut HashMap<IrId, IrId>, register_types: &mut HashMap<IrId, IrType>| -> IrId {
+    let alloc_new = |old: IrId,
+                     next_reg: &mut u32,
+                     reg_map: &mut HashMap<IrId, IrId>,
+                     register_types: &mut HashMap<IrId, IrType>|
+     -> IrId {
         let new = IrId::new(*next_reg);
         *next_reg += 1;
         reg_map.insert(old, new);
@@ -661,11 +674,7 @@ fn remap_instruction(
             from_ty: from_ty.clone(),
             to_ty: to_ty.clone(),
         },
-        IrInstruction::BitCast {
-            dest,
-            src,
-            ty,
-        } => IrInstruction::BitCast {
+        IrInstruction::BitCast { dest, src, ty } => IrInstruction::BitCast {
             dest: alloc_new(*dest, next_reg, reg_map, register_types),
             src: map_use(*src, reg_map),
             ty: ty.clone(),
