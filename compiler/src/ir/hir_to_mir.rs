@@ -309,6 +309,11 @@ pub struct HirToMirContext<'a> {
     /// Used by the New handler to allocate the correct size for objects.
     class_alloc_sizes: BTreeMap<TypeId, u64>,
 
+    /// Name-keyed class allocation sizes (qualified_name → bytes).
+    /// TypeIds are unstable across compilation contexts. This map provides a stable
+    /// fallback for classes compiled in separate units (e.g., stdlib Exception).
+    class_alloc_sizes_by_name: BTreeMap<String, u64>,
+
     /// Maps class registration TypeId → class SymbolId. Survives type_table overwrites.
     /// Used for field disambiguation when multiple classes have same-named fields.
     class_type_to_symbol: BTreeMap<TypeId, SymbolId>,
@@ -557,6 +562,7 @@ impl<'a> HirToMirContext<'a> {
             value_type_symbols: BTreeSet::new(),
             raw_anon_symbols: BTreeSet::new(),
             class_alloc_sizes: BTreeMap::new(),
+            class_alloc_sizes_by_name: BTreeMap::new(),
             class_type_to_symbol: BTreeMap::new(),
             field_class_names: BTreeMap::new(),
             override_methods: BTreeSet::new(),
@@ -15439,6 +15445,16 @@ impl<'a> HirToMirContext<'a> {
                             None
                         }
                     })
+                    // Fallback: look up by class name (stable across compilation contexts)
+                    .or_else(|| {
+                        let sym_id = actual_symbol_id?;
+                        let class_name = self.symbol_table.get_symbol(sym_id).and_then(|sym| {
+                            sym.qualified_name
+                                .and_then(|n| self.string_interner.get(n))
+                                .or_else(|| self.string_interner.get(sym.name))
+                        })?;
+                        self.class_alloc_sizes_by_name.get(class_name).copied()
+                    })
                     .unwrap_or_else(|| ((args.len() as u64 + 1) * 8).max(16));
                 // Use heap allocation (malloc) for class instances
                 let obj_ptr = self.build_heap_alloc(obj_size);
@@ -15828,8 +15844,7 @@ impl<'a> HirToMirContext<'a> {
                         });
                         match (lhs_sym, rhs_sym) {
                             (Some(l), Some(r))
-                                if l == r
-                                    && self.derive_partial_eq_classes.contains(&l) =>
+                                if l == r && self.derive_partial_eq_classes.contains(&l) =>
                             {
                                 Some(l)
                             }
@@ -15844,10 +15859,7 @@ impl<'a> HirToMirContext<'a> {
                 // @:derive(PartialOrd) lexicographic ordering for class instances
                 if matches!(
                     op,
-                    HirBinaryOp::Lt
-                        | HirBinaryOp::Le
-                        | HirBinaryOp::Gt
-                        | HirBinaryOp::Ge
+                    HirBinaryOp::Lt | HirBinaryOp::Le | HirBinaryOp::Gt | HirBinaryOp::Ge
                 ) {
                     let class_sym = {
                         let type_table = self.type_table.borrow();
@@ -15867,10 +15879,7 @@ impl<'a> HirToMirContext<'a> {
                         });
                         match (lhs_sym, rhs_sym) {
                             (Some(l), Some(r))
-                                if l == r
-                                    && self
-                                        .derive_partial_ord_classes
-                                        .contains(&l) =>
+                                if l == r && self.derive_partial_ord_classes.contains(&l) =>
                             {
                                 Some(l)
                             }
@@ -22961,29 +22970,23 @@ impl<'a> HirToMirContext<'a> {
 
         // Fast path: pointer equality (handles same-object and both-null)
         let ptr_eq = self.builder.build_cmp(CompareOp::Eq, lhs_reg, rhs_reg)?;
-        self.builder
-            .build_cond_branch(ptr_eq, pass, null_check)?;
+        self.builder.build_cond_branch(ptr_eq, pass, null_check)?;
 
         // Null check LHS (ptr_eq was false, so if lhs is null → rhs is not → not equal)
         self.builder.switch_to_block(null_check);
         let null_val = self.builder.build_const(IrValue::I64(0))?;
-        let lhs_is_null = self
-            .builder
-            .build_cmp(CompareOp::Eq, lhs_reg, null_val)?;
+        let lhs_is_null = self.builder.build_cmp(CompareOp::Eq, lhs_reg, null_val)?;
         self.builder
             .build_cond_branch(lhs_is_null, fail, null_check2)?;
 
         // Null check RHS
         self.builder.switch_to_block(null_check2);
         let null_val2 = self.builder.build_const(IrValue::I64(0))?;
-        let rhs_is_null = self
-            .builder
-            .build_cmp(CompareOp::Eq, rhs_reg, null_val2)?;
+        let rhs_is_null = self.builder.build_cmp(CompareOp::Eq, rhs_reg, null_val2)?;
 
         if fields.is_empty() {
             // No instance fields — both non-null objects of same type are equal
-            self.builder
-                .build_cond_branch(rhs_is_null, fail, pass)?;
+            self.builder.build_cond_branch(rhs_is_null, fail, pass)?;
         } else {
             let first_field = self.builder.create_block()?;
             self.builder
@@ -22995,41 +22998,28 @@ impl<'a> HirToMirContext<'a> {
                 self.builder.switch_to_block(current_block);
 
                 let field_ir_type = self.convert_type(field_type_id);
-                let idx_const =
-                    self.builder.build_const(IrValue::I32(gep_idx as i32))?;
+                let idx_const = self.builder.build_const(IrValue::I32(gep_idx as i32))?;
 
                 // Load field from LHS
-                let lhs_ptr = self.builder.build_gep(
-                    lhs_reg,
-                    vec![idx_const],
-                    field_ir_type.clone(),
-                )?;
-                let lhs_val =
-                    self.builder.build_load(lhs_ptr, field_ir_type.clone())?;
+                let lhs_ptr =
+                    self.builder
+                        .build_gep(lhs_reg, vec![idx_const], field_ir_type.clone())?;
+                let lhs_val = self.builder.build_load(lhs_ptr, field_ir_type.clone())?;
 
                 // Load field from RHS (reuse same index constant — IrId is Copy)
-                let rhs_ptr = self.builder.build_gep(
-                    rhs_reg,
-                    vec![idx_const],
-                    field_ir_type.clone(),
-                )?;
-                let rhs_val =
-                    self.builder.build_load(rhs_ptr, field_ir_type.clone())?;
+                let rhs_ptr =
+                    self.builder
+                        .build_gep(rhs_reg, vec![idx_const], field_ir_type.clone())?;
+                let rhs_val = self.builder.build_load(rhs_ptr, field_ir_type.clone())?;
 
-                let field_eq = self.emit_field_equality(
-                    field_type_id,
-                    lhs_val,
-                    rhs_val,
-                )?;
+                let field_eq = self.emit_field_equality(field_type_id, lhs_val, rhs_val)?;
 
                 if i == fields.len() - 1 {
                     // Last field — branch to pass or fail
-                    self.builder
-                        .build_cond_branch(field_eq, pass, fail)?;
+                    self.builder.build_cond_branch(field_eq, pass, fail)?;
                 } else {
                     let next = self.builder.create_block()?;
-                    self.builder
-                        .build_cond_branch(field_eq, next, fail)?;
+                    self.builder.build_cond_branch(field_eq, next, fail)?;
                     current_block = next;
                 }
             }
@@ -23058,12 +23048,7 @@ impl<'a> HirToMirContext<'a> {
 
     /// Emit equality comparison for a single field based on its type.
     /// Returns a Bool register: true if equal.
-    fn emit_field_equality(
-        &mut self,
-        type_id: TypeId,
-        lhs: IrId,
-        rhs: IrId,
-    ) -> Option<IrId> {
+    fn emit_field_equality(&mut self, type_id: TypeId, lhs: IrId, rhs: IrId) -> Option<IrId> {
         let is_string = {
             let type_table = self.type_table.borrow();
             type_table
@@ -23079,11 +23064,9 @@ impl<'a> HirToMirContext<'a> {
                 vec![string_ptr_ty.clone(), string_ptr_ty.clone()],
                 IrType::I32,
             );
-            let cmp_result = self.builder.build_call_direct(
-                cmp_func,
-                vec![lhs, rhs],
-                IrType::I32,
-            )?;
+            let cmp_result =
+                self.builder
+                    .build_call_direct(cmp_func, vec![lhs, rhs], IrType::I32)?;
             let zero = self.builder.build_const(IrValue::I32(0))?;
             self.builder.build_cmp(CompareOp::Eq, cmp_result, zero)
         } else {
@@ -23113,9 +23096,7 @@ impl<'a> HirToMirContext<'a> {
         // Fast path: pointer equality → cmp_val = 0 (equal)
         let null_check = self.builder.create_block()?;
         let same_ptr = self.builder.create_block()?;
-        let ptr_eq = self
-            .builder
-            .build_cmp(CompareOp::Eq, lhs_reg, rhs_reg)?;
+        let ptr_eq = self.builder.build_cmp(CompareOp::Eq, lhs_reg, rhs_reg)?;
         self.builder
             .build_cond_branch(ptr_eq, same_ptr, null_check)?;
 
@@ -23127,9 +23108,7 @@ impl<'a> HirToMirContext<'a> {
         // Null guards: null is treated as "less than" any non-null value
         self.builder.switch_to_block(null_check);
         let null_val = self.builder.build_const(IrValue::I64(0))?;
-        let lhs_is_null = self
-            .builder
-            .build_cmp(CompareOp::Eq, lhs_reg, null_val)?;
+        let lhs_is_null = self.builder.build_cmp(CompareOp::Eq, lhs_reg, null_val)?;
         let lhs_null_block = self.builder.create_block()?;
         let null_check2 = self.builder.create_block()?;
         self.builder
@@ -23143,9 +23122,7 @@ impl<'a> HirToMirContext<'a> {
 
         self.builder.switch_to_block(null_check2);
         let null_val2 = self.builder.build_const(IrValue::I64(0))?;
-        let rhs_is_null = self
-            .builder
-            .build_cmp(CompareOp::Eq, rhs_reg, null_val2)?;
+        let rhs_is_null = self.builder.build_cmp(CompareOp::Eq, rhs_reg, null_val2)?;
         let rhs_null_block = self.builder.create_block()?;
         let field_start = self.builder.create_block()?;
         self.builder
@@ -23167,27 +23144,19 @@ impl<'a> HirToMirContext<'a> {
         } else {
             for (i, &(_field_sym, field_type_id, gep_idx)) in fields.iter().enumerate() {
                 let field_ir_type = self.convert_type(field_type_id);
-                let idx_const =
-                    self.builder.build_const(IrValue::I32(gep_idx as i32))?;
+                let idx_const = self.builder.build_const(IrValue::I32(gep_idx as i32))?;
 
-                let lhs_ptr = self.builder.build_gep(
-                    lhs_reg,
-                    vec![idx_const],
-                    field_ir_type.clone(),
-                )?;
-                let lhs_val =
-                    self.builder.build_load(lhs_ptr, field_ir_type.clone())?;
+                let lhs_ptr =
+                    self.builder
+                        .build_gep(lhs_reg, vec![idx_const], field_ir_type.clone())?;
+                let lhs_val = self.builder.build_load(lhs_ptr, field_ir_type.clone())?;
 
-                let rhs_ptr = self.builder.build_gep(
-                    rhs_reg,
-                    vec![idx_const],
-                    field_ir_type.clone(),
-                )?;
-                let rhs_val =
-                    self.builder.build_load(rhs_ptr, field_ir_type.clone())?;
+                let rhs_ptr =
+                    self.builder
+                        .build_gep(rhs_reg, vec![idx_const], field_ir_type.clone())?;
+                let rhs_val = self.builder.build_load(rhs_ptr, field_ir_type.clone())?;
 
-                let cmp_val =
-                    self.emit_field_three_way_cmp(field_type_id, lhs_val, rhs_val)?;
+                let cmp_val = self.emit_field_three_way_cmp(field_type_id, lhs_val, rhs_val)?;
 
                 if i == fields.len() - 1 {
                     // Last field — always go to final_cmp
@@ -23197,13 +23166,11 @@ impl<'a> HirToMirContext<'a> {
                 } else {
                     // Non-zero → decided, go to final_cmp; zero → next field
                     let zero = self.builder.build_const(IrValue::I32(0))?;
-                    let is_ne =
-                        self.builder.build_cmp(CompareOp::Ne, cmp_val, zero)?;
+                    let is_ne = self.builder.build_cmp(CompareOp::Ne, cmp_val, zero)?;
                     let cur = self.builder.current_block()?;
                     phi_inputs.push((cur, cmp_val));
                     let next = self.builder.create_block()?;
-                    self.builder
-                        .build_cond_branch(is_ne, final_cmp, next)?;
+                    self.builder.build_cond_branch(is_ne, final_cmp, next)?;
                     self.builder.switch_to_block(next);
                 }
             }
@@ -23228,12 +23195,7 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Compute a three-way comparison value (i32: -1, 0, 1) for a single field.
-    fn emit_field_three_way_cmp(
-        &mut self,
-        type_id: TypeId,
-        lhs: IrId,
-        rhs: IrId,
-    ) -> Option<IrId> {
+    fn emit_field_three_way_cmp(&mut self, type_id: TypeId, lhs: IrId, rhs: IrId) -> Option<IrId> {
         let is_string = {
             let type_table = self.type_table.borrow();
             type_table
@@ -23261,8 +23223,7 @@ impl<'a> HirToMirContext<'a> {
             let cmp_merge = self.builder.create_block()?;
 
             let is_lt = self.builder.build_cmp(CompareOp::Lt, lhs, rhs)?;
-            self.builder
-                .build_cond_branch(is_lt, lt_block, gt_check)?;
+            self.builder.build_cond_branch(is_lt, lt_block, gt_check)?;
 
             self.builder.switch_to_block(lt_block);
             let neg_one = self.builder.build_const(IrValue::I32(-1))?;
@@ -23270,8 +23231,7 @@ impl<'a> HirToMirContext<'a> {
 
             self.builder.switch_to_block(gt_check);
             let is_gt = self.builder.build_cmp(CompareOp::Gt, lhs, rhs)?;
-            self.builder
-                .build_cond_branch(is_gt, gt_block, eq_block)?;
+            self.builder.build_cond_branch(is_gt, gt_block, eq_block)?;
 
             self.builder.switch_to_block(gt_block);
             let pos_one = self.builder.build_const(IrValue::I32(1))?;
@@ -23296,37 +23256,25 @@ impl<'a> HirToMirContext<'a> {
 
     /// Lower inline hash computation for classes that @:derive([Hash]).
     /// Computes: hash = seed; for each field: hash = hash * 31 + field_hash; return hash as I32.
-    fn lower_derived_hash_code(
-        &mut self,
-        object: &HirExpr,
-        class_sym: SymbolId,
-    ) -> Option<IrId> {
+    fn lower_derived_hash_code(&mut self, object: &HirExpr, class_sym: SymbolId) -> Option<IrId> {
         let fields = self.class_instance_fields.get(&class_sym)?.clone();
         let obj_reg = self.lower_expression(object)?;
 
         // Start with seed based on number of fields (deterministic per-class)
-        let mut hash_reg = self
-            .builder
-            .build_const(IrValue::I64(2166136261i64))?; // FNV offset basis
+        let mut hash_reg = self.builder.build_const(IrValue::I64(2166136261i64))?; // FNV offset basis
 
         let thirty_one = self.builder.build_const(IrValue::I64(31))?;
 
         for &(_field_sym, field_type_id, gep_idx) in &fields {
             let field_ir_type = self.convert_type(field_type_id);
-            let idx_const = self
-                .builder
-                .build_const(IrValue::I32(gep_idx as i32))?;
-            let field_ptr = self.builder.build_gep(
-                obj_reg,
-                vec![idx_const],
-                field_ir_type.clone(),
-            )?;
-            let field_val =
-                self.builder.build_load(field_ptr, field_ir_type.clone())?;
+            let idx_const = self.builder.build_const(IrValue::I32(gep_idx as i32))?;
+            let field_ptr =
+                self.builder
+                    .build_gep(obj_reg, vec![idx_const], field_ir_type.clone())?;
+            let field_val = self.builder.build_load(field_ptr, field_ir_type.clone())?;
 
             // Compute field hash based on type
-            let field_hash =
-                self.emit_field_hash(field_type_id, &field_ir_type, field_val)?;
+            let field_hash = self.emit_field_hash(field_type_id, &field_ir_type, field_val)?;
 
             // hash = hash * 31 + field_hash
             let mul = self
@@ -23340,12 +23288,7 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Compute a hash value (i64) for a single field based on its type.
-    fn emit_field_hash(
-        &mut self,
-        type_id: TypeId,
-        ir_type: &IrType,
-        val: IrId,
-    ) -> Option<IrId> {
+    fn emit_field_hash(&mut self, type_id: TypeId, ir_type: &IrType, val: IrId) -> Option<IrId> {
         let type_kind = {
             let type_table = self.type_table.borrow();
             type_table.get(type_id).map(|t| t.kind.clone())
@@ -23360,11 +23303,9 @@ impl<'a> HirToMirContext<'a> {
                     vec![string_ptr_ty],
                     IrType::I32,
                 );
-                let hash_i32 = self.builder.build_call_direct(
-                    hash_func,
-                    vec![val],
-                    IrType::I32,
-                )?;
+                let hash_i32 = self
+                    .builder
+                    .build_call_direct(hash_func, vec![val], IrType::I32)?;
                 self.builder.build_cast(hash_i32, IrType::I32, IrType::I64)
             }
             Some(TypeKind::Int) => {
@@ -23382,13 +23323,9 @@ impl<'a> HirToMirContext<'a> {
             _ => {
                 // Pointer/enum/other — use as i64 directly
                 match ir_type {
-                    IrType::I32 => {
-                        self.builder.build_cast(val, IrType::I32, IrType::I64)
-                    }
+                    IrType::I32 => self.builder.build_cast(val, IrType::I32, IrType::I64),
                     IrType::I64 => Some(val),
-                    _ => {
-                        self.builder.build_cast(val, ir_type.clone(), IrType::I64)
-                    }
+                    _ => self.builder.build_cast(val, ir_type.clone(), IrType::I64),
                 }
             }
         }
@@ -29403,8 +29340,7 @@ impl<'a> HirToMirContext<'a> {
         fields: &mut Vec<(SymbolId, TypeId, u32)>,
         idx: &mut u32,
     ) {
-        if let Some(HirTypeDecl::Class(parent_class)) =
-            self.current_hir_types.get(&parent_type_id)
+        if let Some(HirTypeDecl::Class(parent_class)) = self.current_hir_types.get(&parent_type_id)
         {
             // Recurse to grandparent first
             if let Some(gp_ty) = parent_class.extends {
@@ -29597,6 +29533,16 @@ impl<'a> HirToMirContext<'a> {
         // so total slots = field_index (includes header at index 0).
         let alloc_size = (field_index as u64 * 8).max(16);
         self.class_alloc_sizes.insert(type_id, alloc_size);
+        // Also store by qualified class name for cross-compilation-context lookups.
+        // TypeIds are unstable across compilation units, but class names are stable.
+        let class_name_for_alloc = self
+            .symbol_table
+            .get_symbol(class.symbol_id)
+            .and_then(|sym| sym.qualified_name.and_then(|n| self.string_interner.get(n)))
+            .or_else(|| self.string_interner.get(class.name))
+            .unwrap_or("<unknown>");
+        self.class_alloc_sizes_by_name
+            .insert(class_name_for_alloc.to_string(), alloc_size);
 
         // Build interface vtables for each implemented interface AND their
         // transitive parent interfaces. For each interface method, find the
@@ -29788,10 +29734,7 @@ impl<'a> HirToMirContext<'a> {
                 for field in &class.fields {
                     if !field.is_static {
                         if let Some(ref prop) = field.property_access {
-                            if !matches!(
-                                prop.getter,
-                                crate::tast::PropertyAccessor::Default
-                            ) {
+                            if !matches!(prop.getter, crate::tast::PropertyAccessor::Default) {
                                 continue; // Skip computed properties
                             }
                         }
@@ -30451,6 +30394,9 @@ pub struct MirLoweringResult {
     /// Class allocation sizes (TypeId -> byte size)
     /// Exported so importing modules know how much memory to allocate for `new ClassName()`
     pub class_alloc_sizes: BTreeMap<TypeId, u64>,
+    /// Name-keyed class allocation sizes (class_name → bytes).
+    /// Stable across compilation contexts where TypeIds differ.
+    pub class_alloc_sizes_by_name: BTreeMap<String, u64>,
     /// Class method symbols (class_symbol, method_name) -> method_symbol
     /// Exported so importing modules can resolve iterator protocol methods
     pub class_method_symbols: BTreeMap<(SymbolId, InternedString), SymbolId>,
@@ -30484,6 +30430,7 @@ pub fn lower_hir_to_mir_with_function_map(
     external_class_type_to_symbol: BTreeMap<TypeId, SymbolId>,
     external_constructor_param_counts: BTreeMap<IrFunctionId, usize>,
     external_function_param_types: BTreeMap<IrFunctionId, Vec<IrType>>,
+    external_class_alloc_sizes_by_name: BTreeMap<String, u64>,
 ) -> Result<MirLoweringResult, Vec<LoweringError>> {
     let mut context = HirToMirContext::new(
         hir_module.name.clone(),
@@ -30515,13 +30462,93 @@ pub fn lower_hir_to_mir_with_function_map(
     // Seed class_type_to_symbol from previously compiled imports
     context.class_type_to_symbol = external_class_type_to_symbol;
 
+    // Seed name-keyed alloc sizes from previously compiled imports (stable across contexts)
+    context.class_alloc_sizes_by_name = external_class_alloc_sizes_by_name;
+
+    // Also populate from the TypeId-keyed map + symbol table.
+    for (&type_id, &size) in &context.class_alloc_sizes {
+        if let Some(&sym_id) = context.class_type_to_symbol.get(&type_id) {
+            if let Some(sym) = symbol_table.get_symbol(sym_id) {
+                let name = sym
+                    .qualified_name
+                    .and_then(|n| string_interner.get(n))
+                    .or_else(|| string_interner.get(sym.name));
+                if let Some(name) = name {
+                    context
+                        .class_alloc_sizes_by_name
+                        .insert(name.to_string(), size);
+                }
+            }
+        }
+    }
+    // Also try to resolve names directly from the type_table for entries not in class_type_to_symbol
+    {
+        let tt = type_table.borrow();
+        for (&type_id, &size) in &context.class_alloc_sizes {
+            if context.class_type_to_symbol.contains_key(&type_id) {
+                continue; // Already handled above
+            }
+            if let Some(info) = tt.get(type_id) {
+                if let crate::tast::core::TypeKind::Class { symbol_id, .. } = &info.kind {
+                    if let Some(sym) = symbol_table.get_symbol(*symbol_id) {
+                        let name = sym
+                            .qualified_name
+                            .and_then(|n| string_interner.get(n))
+                            .or_else(|| string_interner.get(sym.name));
+                        if let Some(name) = name {
+                            context
+                                .class_alloc_sizes_by_name
+                                .insert(name.to_string(), size);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Seed constructor param counts for fill_default_args fallback
     context.external_constructor_param_counts = external_constructor_param_counts;
 
     // Seed function param types for fill_default_args (cross-module optional params)
     context.external_function_param_types = external_function_param_types;
 
-    let module = context.lower_module(hir_module)?;
+    let mut module = context.lower_module(hir_module)?;
+
+    // Build reverse map: func_id -> qualified_name for all external functions.
+    // This enables blade cache to resolve cross-module references when function IDs
+    // change between sessions (different renumbering bases).
+    {
+        let mut ext_id_to_name: BTreeMap<IrFunctionId, String> = BTreeMap::new();
+        for (name, &func_id) in &context.external_function_name_map {
+            ext_id_to_name
+                .entry(func_id)
+                .or_insert_with(|| name.clone());
+        }
+        // Scan module for references to external functions
+        for func in module.functions.values() {
+            for block in func.cfg.blocks.values() {
+                for inst in &block.instructions {
+                    let ref_ids: Vec<IrFunctionId> = match inst {
+                        crate::ir::IrInstruction::CallDirect { func_id, .. }
+                        | crate::ir::IrInstruction::FunctionRef { func_id, .. }
+                        | crate::ir::IrInstruction::MakeClosure { func_id, .. } => {
+                            vec![*func_id]
+                        }
+                        _ => vec![],
+                    };
+                    for fid in ref_ids {
+                        if !module.functions.contains_key(&fid)
+                            && !module.extern_functions.contains_key(&fid)
+                        {
+                            if let Some(name) = ext_id_to_name.get(&fid) {
+                                module.external_function_names.insert(fid, name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     Ok(MirLoweringResult {
         module,
@@ -30530,6 +30557,7 @@ pub fn lower_hir_to_mir_with_function_map(
         property_access_map: context.property_access_map,
         constructor_name_map: context.constructor_name_map,
         class_alloc_sizes: context.class_alloc_sizes,
+        class_alloc_sizes_by_name: context.class_alloc_sizes_by_name,
         class_method_symbols: context.class_method_symbols,
         class_type_to_symbol: context.class_type_to_symbol,
         field_class_names: context.field_class_names,

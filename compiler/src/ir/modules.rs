@@ -46,6 +46,12 @@ pub struct IrModule {
 
     /// Register-to-symbol reverse mapping
     pub register_to_symbol: HashMap<IrId, SymbolId>,
+
+    /// Maps external function IDs (from other modules) to their qualified names.
+    /// Used to resolve cross-module references when loading from blade cache,
+    /// since function IDs are session-specific (renumbered with different bases).
+    #[serde(default)]
+    pub external_function_names: BTreeMap<IrFunctionId, String>,
 }
 
 /// Global variable identifier
@@ -308,6 +314,7 @@ impl IrModule {
             next_typedef_id: 0,
             symbol_to_register: HashMap::new(),
             register_to_symbol: HashMap::new(),
+            external_function_names: BTreeMap::new(),
         }
     }
 

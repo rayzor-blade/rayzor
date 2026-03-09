@@ -97,10 +97,7 @@ register_symbol!(
     "haxe_string_compare",
     crate::haxe_string::haxe_string_compare
 );
-register_symbol!(
-    "haxe_string_hash",
-    crate::haxe_string::haxe_string_hash
-);
+register_symbol!("haxe_string_hash", crate::haxe_string::haxe_string_hash);
 // Commented out old out-param version to avoid conflicts
 // register_symbol!("haxe_string_split", crate::haxe_string::haxe_string_split);
 register_symbol!(

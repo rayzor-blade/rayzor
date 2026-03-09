@@ -114,6 +114,10 @@ pub struct CompilationUnit {
     /// Passed to user file's MIR lowering so it knows how much memory to allocate for imported classes
     import_class_alloc_sizes: BTreeMap<crate::tast::TypeId, u64>,
 
+    /// Name-keyed class allocation sizes (class_name → bytes).
+    /// Stable across compilation contexts where TypeIds differ.
+    import_class_alloc_sizes_by_name: BTreeMap<String, u64>,
+
     /// Accumulated class TypeId → SymbolId mapping from imported files.
     /// Used for field disambiguation when multiple classes share the same field name.
     import_class_type_to_symbol: BTreeMap<crate::tast::TypeId, crate::tast::SymbolId>,
@@ -450,6 +454,7 @@ impl CompilationUnit {
             import_property_access_map: BTreeMap::new(),
             import_constructor_name_map: BTreeMap::new(),
             import_class_alloc_sizes: BTreeMap::new(),
+            import_class_alloc_sizes_by_name: BTreeMap::new(),
             import_class_type_to_symbol: BTreeMap::new(),
             import_class_method_symbols: BTreeMap::new(),
             compiler_plugin_registry: CompilerPluginRegistry::new(),
@@ -2213,6 +2218,12 @@ impl CompilationUnit {
             self.try_compile_import(&name, &file_path, &source, deps);
         }
 
+        // Fixup pass: resolve stale cross-module refs that couldn't be resolved during
+        // renumbering because the target module hadn't been loaded yet (ordering issue
+        // with blade cache). Now that ALL modules are loaded, stdlib_function_name_map
+        // is complete and we can resolve any remaining stale refs.
+        self.fixup_stale_cross_module_refs();
+
         Ok(())
     }
 
@@ -2479,6 +2490,10 @@ impl CompilationUnit {
 
         // Restore class allocation sizes
         for (class_name, size) in &cached_maps.class_sizes {
+            // Name-based (stable across contexts)
+            self.import_class_alloc_sizes_by_name
+                .insert(class_name.clone(), *size);
+            // TypeId-based (may be unstable)
             if let Some((_class_sym, class_type, _)) = registered.get(class_name) {
                 self.import_class_alloc_sizes.insert(*class_type, *size);
             }
@@ -2530,6 +2545,51 @@ impl CompilationUnit {
         }
     }
 
+    /// Post-load fixup: resolve stale cross-module function references in all import modules.
+    /// During renumbering, some refs couldn't be resolved because the target module hadn't
+    /// been loaded yet. Now all modules are loaded and stdlib_function_name_map is complete.
+    fn fixup_stale_cross_module_refs(&mut self) {
+        use crate::ir::IrInstruction;
+
+        // Build a set of all valid function IDs across all import modules
+        let mut all_func_ids: std::collections::HashSet<crate::ir::IrFunctionId> =
+            std::collections::HashSet::new();
+        for m in &self.import_mir_modules {
+            all_func_ids.extend(m.functions.keys().copied());
+            all_func_ids.extend(m.extern_functions.keys().copied());
+        }
+
+        for module in &mut self.import_mir_modules {
+            // Collect the external_function_names before mutating
+            let ext_names = module.external_function_names.clone();
+            for func in module.functions.values_mut() {
+                for block in func.cfg.blocks.values_mut() {
+                    for inst in &mut block.instructions {
+                        match inst {
+                            IrInstruction::CallDirect { func_id, .. }
+                            | IrInstruction::FunctionRef { func_id, .. }
+                            | IrInstruction::MakeClosure { func_id, .. } => {
+                                // Skip if already valid
+                                if all_func_ids.contains(func_id) {
+                                    continue;
+                                }
+                                // Try to resolve via external_function_names
+                                if let Some(name) = ext_names.get(func_id) {
+                                    if let Some(&current_id) =
+                                        self.stdlib_function_name_map.get(name)
+                                    {
+                                        *func_id = current_id;
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Renumber import MIR function IDs to avoid collisions and push to import_mir_modules
     fn renumber_and_push_import_mir(&mut self, mut import_mir: IrModule) {
         use crate::ir::{IrFunctionId, IrInstruction};
@@ -2564,6 +2624,14 @@ impl CompilationUnit {
                         | IrInstruction::MakeClosure { func_id, .. } => {
                             if let Some(new_func_id) = id_map.get(func_id) {
                                 *func_id = *new_func_id;
+                            } else if let Some(name) =
+                                import_mir.external_function_names.get(func_id)
+                            {
+                                // Resolve stale cross-module ref (from blade cache)
+                                // by looking up the function by qualified name
+                                if let Some(&current_id) = self.stdlib_function_name_map.get(name) {
+                                    *func_id = current_id;
+                                }
                             }
                         }
                         _ => {}
@@ -3553,6 +3621,7 @@ impl CompilationUnit {
             self.import_class_type_to_symbol.clone(),
             constructor_param_counts,
             external_function_param_types,
+            self.import_class_alloc_sizes_by_name.clone(),
         )
         .map_err(|errors| {
             errors
@@ -3610,6 +3679,11 @@ impl CompilationUnit {
         // Collect class allocation sizes from ALL files
         for (type_id, size) in mir_result.class_alloc_sizes {
             self.import_class_alloc_sizes.insert(type_id, size);
+        }
+
+        // Collect name-keyed class allocation sizes (stable across compilation contexts)
+        for (name, size) in mir_result.class_alloc_sizes_by_name {
+            self.import_class_alloc_sizes_by_name.insert(name, size);
         }
 
         // Collect class method symbols from ALL files
