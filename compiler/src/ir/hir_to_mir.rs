@@ -361,6 +361,20 @@ pub struct HirToMirContext<'a> {
     /// a different runtime representation (class pointer or wider anonymous object).
     /// Field access is redirected at compile time; materialization only at escape points.
     anon_views: BTreeMap<SymbolId, AnonBacking>,
+
+    /// Classes that derive PartialEq — enables field-by-field == / != codegen
+    derive_partial_eq_classes: BTreeSet<SymbolId>,
+
+    /// Classes that derive PartialOrd — enables field-by-field < / <= / > / >= codegen
+    derive_partial_ord_classes: BTreeSet<SymbolId>,
+
+    /// Classes that derive Hash — enables synthetic hashCode() method
+    derive_hash_classes: BTreeSet<SymbolId>,
+
+    /// Instance fields for classes with derive traits.
+    /// Maps class SymbolId → list of (field_symbol, field_type, gep_index) for non-static fields.
+    /// Used by PartialEq/PartialOrd/Hash codegen to iterate fields in order.
+    class_instance_fields: BTreeMap<SymbolId, Vec<(SymbolId, TypeId, u32)>>,
 }
 
 /// Tracks the backing representation of an anonymous-typed variable.
@@ -557,6 +571,10 @@ impl<'a> HirToMirContext<'a> {
             function_param_hir_types: BTreeMap::new(),
             current_function_return_type: None,
             anon_views: BTreeMap::new(),
+            derive_partial_eq_classes: BTreeSet::new(),
+            derive_partial_ord_classes: BTreeSet::new(),
+            derive_hash_classes: BTreeSet::new(),
+            class_instance_fields: BTreeMap::new(),
         };
 
         // Pre-declare malloc so it's available for heap allocations during lowering
@@ -7436,6 +7454,29 @@ impl<'a> HirToMirContext<'a> {
                         is_method,
                         args.len()
                     );
+
+                    // @:derive(Hash) synthetic hashCode() — intercept Variable callee path
+                    // Instance method calls are desugared to Variable callee with receiver as first arg
+                    if vname == "hashCode" && *is_method && args.len() == 1 {
+                        let receiver = &args[0];
+                        let class_sym = {
+                            let type_table = self.type_table.borrow();
+                            type_table.get(receiver.ty).and_then(|t| {
+                                if let TypeKind::Class { symbol_id, .. } = &t.kind {
+                                    if self.derive_hash_classes.contains(symbol_id) {
+                                        Some(*symbol_id)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                        };
+                        if let Some(sym) = class_sym {
+                            return self.lower_derived_hash_code(receiver, sym);
+                        }
+                    }
                 }
                 if let HirExprKind::Field { object, field } = &callee.kind {
                     // This is a method call: object.method(args)
@@ -7504,6 +7545,27 @@ impl<'a> HirToMirContext<'a> {
                             if let Some(cdef) = cdef_str {
                                 return self.builder.build_const(IrValue::String(cdef));
                             }
+                        }
+                    }
+
+                    // @:derive(Hash) synthetic hashCode() — inline field-based hash computation
+                    if method_name == Some("hashCode") && args.is_empty() {
+                        let class_sym = {
+                            let type_table = self.type_table.borrow();
+                            type_table.get(object.ty).and_then(|t| {
+                                if let TypeKind::Class { symbol_id, .. } = &t.kind {
+                                    if self.derive_hash_classes.contains(symbol_id) {
+                                        Some(*symbol_id)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                        };
+                        if let Some(sym) = class_sym {
+                            return self.lower_derived_hash_code(object, sym);
                         }
                     }
 
@@ -15746,6 +15808,80 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
 
+                // @:derive(PartialEq) field-by-field equality for class instances
+                if matches!(op, HirBinaryOp::Eq | HirBinaryOp::Ne) {
+                    let class_sym = {
+                        let type_table = self.type_table.borrow();
+                        let lhs_sym = type_table.get(lhs.ty).and_then(|t| {
+                            if let TypeKind::Class { symbol_id, .. } = &t.kind {
+                                Some(*symbol_id)
+                            } else {
+                                None
+                            }
+                        });
+                        let rhs_sym = type_table.get(rhs.ty).and_then(|t| {
+                            if let TypeKind::Class { symbol_id, .. } = &t.kind {
+                                Some(*symbol_id)
+                            } else {
+                                None
+                            }
+                        });
+                        match (lhs_sym, rhs_sym) {
+                            (Some(l), Some(r))
+                                if l == r
+                                    && self.derive_partial_eq_classes.contains(&l) =>
+                            {
+                                Some(l)
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(sym) = class_sym {
+                        return self.lower_derived_equality(op, lhs, rhs, sym);
+                    }
+                }
+
+                // @:derive(PartialOrd) lexicographic ordering for class instances
+                if matches!(
+                    op,
+                    HirBinaryOp::Lt
+                        | HirBinaryOp::Le
+                        | HirBinaryOp::Gt
+                        | HirBinaryOp::Ge
+                ) {
+                    let class_sym = {
+                        let type_table = self.type_table.borrow();
+                        let lhs_sym = type_table.get(lhs.ty).and_then(|t| {
+                            if let TypeKind::Class { symbol_id, .. } = &t.kind {
+                                Some(*symbol_id)
+                            } else {
+                                None
+                            }
+                        });
+                        let rhs_sym = type_table.get(rhs.ty).and_then(|t| {
+                            if let TypeKind::Class { symbol_id, .. } = &t.kind {
+                                Some(*symbol_id)
+                            } else {
+                                None
+                            }
+                        });
+                        match (lhs_sym, rhs_sym) {
+                            (Some(l), Some(r))
+                                if l == r
+                                    && self
+                                        .derive_partial_ord_classes
+                                        .contains(&l) =>
+                            {
+                                Some(l)
+                            }
+                            _ => None,
+                        }
+                    };
+                    if let Some(sym) = class_sym {
+                        return self.lower_derived_ordering(op, lhs, rhs, sym);
+                    }
+                }
+
                 // Dynamic arithmetic: when both HIR types are actually Dynamic, check actual
                 // MIR register types after lowering to determine if values are truly boxed
                 // DynamicValue pointers vs raw concrete values (e.g., class field access on
@@ -22802,6 +22938,462 @@ impl<'a> HirToMirContext<'a> {
         Some(result)
     }
 
+    /// Lower field-by-field equality for classes that @:derive([PartialEq]).
+    /// Generates: ptr_eq fast path → null guards → field-by-field short-circuit chain.
+    fn lower_derived_equality(
+        &mut self,
+        op: &HirBinaryOp,
+        lhs: &HirExpr,
+        rhs: &HirExpr,
+        class_sym: SymbolId,
+    ) -> Option<IrId> {
+        let is_eq = matches!(op, HirBinaryOp::Eq);
+        let fields = self.class_instance_fields.get(&class_sym)?.clone();
+
+        let lhs_reg = self.lower_expression(lhs)?;
+        let rhs_reg = self.lower_expression(rhs)?;
+
+        let null_check = self.builder.create_block()?;
+        let null_check2 = self.builder.create_block()?;
+        let fail = self.builder.create_block()?;
+        let pass = self.builder.create_block()?;
+        let merge = self.builder.create_block()?;
+
+        // Fast path: pointer equality (handles same-object and both-null)
+        let ptr_eq = self.builder.build_cmp(CompareOp::Eq, lhs_reg, rhs_reg)?;
+        self.builder
+            .build_cond_branch(ptr_eq, pass, null_check)?;
+
+        // Null check LHS (ptr_eq was false, so if lhs is null → rhs is not → not equal)
+        self.builder.switch_to_block(null_check);
+        let null_val = self.builder.build_const(IrValue::I64(0))?;
+        let lhs_is_null = self
+            .builder
+            .build_cmp(CompareOp::Eq, lhs_reg, null_val)?;
+        self.builder
+            .build_cond_branch(lhs_is_null, fail, null_check2)?;
+
+        // Null check RHS
+        self.builder.switch_to_block(null_check2);
+        let null_val2 = self.builder.build_const(IrValue::I64(0))?;
+        let rhs_is_null = self
+            .builder
+            .build_cmp(CompareOp::Eq, rhs_reg, null_val2)?;
+
+        if fields.is_empty() {
+            // No instance fields — both non-null objects of same type are equal
+            self.builder
+                .build_cond_branch(rhs_is_null, fail, pass)?;
+        } else {
+            let first_field = self.builder.create_block()?;
+            self.builder
+                .build_cond_branch(rhs_is_null, fail, first_field)?;
+
+            // Field-by-field comparison with short-circuit
+            let mut current_block = first_field;
+            for (i, &(_field_sym, field_type_id, gep_idx)) in fields.iter().enumerate() {
+                self.builder.switch_to_block(current_block);
+
+                let field_ir_type = self.convert_type(field_type_id);
+                let idx_const =
+                    self.builder.build_const(IrValue::I32(gep_idx as i32))?;
+
+                // Load field from LHS
+                let lhs_ptr = self.builder.build_gep(
+                    lhs_reg,
+                    vec![idx_const],
+                    field_ir_type.clone(),
+                )?;
+                let lhs_val =
+                    self.builder.build_load(lhs_ptr, field_ir_type.clone())?;
+
+                // Load field from RHS (reuse same index constant — IrId is Copy)
+                let rhs_ptr = self.builder.build_gep(
+                    rhs_reg,
+                    vec![idx_const],
+                    field_ir_type.clone(),
+                )?;
+                let rhs_val =
+                    self.builder.build_load(rhs_ptr, field_ir_type.clone())?;
+
+                let field_eq = self.emit_field_equality(
+                    field_type_id,
+                    lhs_val,
+                    rhs_val,
+                )?;
+
+                if i == fields.len() - 1 {
+                    // Last field — branch to pass or fail
+                    self.builder
+                        .build_cond_branch(field_eq, pass, fail)?;
+                } else {
+                    let next = self.builder.create_block()?;
+                    self.builder
+                        .build_cond_branch(field_eq, next, fail)?;
+                    current_block = next;
+                }
+            }
+        }
+
+        // Pass block
+        self.builder.switch_to_block(pass);
+        let pass_val = self.builder.build_bool(is_eq)?;
+        self.builder.build_branch(merge)?;
+
+        // Fail block
+        self.builder.switch_to_block(fail);
+        let fail_val = self.builder.build_bool(!is_eq)?;
+        self.builder.build_branch(merge)?;
+
+        // Merge
+        self.builder.switch_to_block(merge);
+        let result = self.builder.build_phi(merge, IrType::Bool)?;
+        self.builder
+            .add_phi_incoming(merge, result, pass, pass_val)?;
+        self.builder
+            .add_phi_incoming(merge, result, fail, fail_val)?;
+
+        Some(result)
+    }
+
+    /// Emit equality comparison for a single field based on its type.
+    /// Returns a Bool register: true if equal.
+    fn emit_field_equality(
+        &mut self,
+        type_id: TypeId,
+        lhs: IrId,
+        rhs: IrId,
+    ) -> Option<IrId> {
+        let is_string = {
+            let type_table = self.type_table.borrow();
+            type_table
+                .get(type_id)
+                .map(|t| matches!(t.kind, TypeKind::String))
+                .unwrap_or(false)
+        };
+
+        if is_string {
+            let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
+            let cmp_func = self.get_or_register_extern_function(
+                "haxe_string_compare",
+                vec![string_ptr_ty.clone(), string_ptr_ty.clone()],
+                IrType::I32,
+            );
+            let cmp_result = self.builder.build_call_direct(
+                cmp_func,
+                vec![lhs, rhs],
+                IrType::I32,
+            )?;
+            let zero = self.builder.build_const(IrValue::I32(0))?;
+            self.builder.build_cmp(CompareOp::Eq, cmp_result, zero)
+        } else {
+            // Direct comparison: Int, Float, Bool, pointers (class/enum)
+            self.builder.build_cmp(CompareOp::Eq, lhs, rhs)
+        }
+    }
+
+    /// Lower lexicographic ordering for classes that @:derive([PartialOrd]).
+    /// Computes a three-way comparison per field, short-circuiting on first difference.
+    fn lower_derived_ordering(
+        &mut self,
+        op: &HirBinaryOp,
+        lhs: &HirExpr,
+        rhs: &HirExpr,
+        class_sym: SymbolId,
+    ) -> Option<IrId> {
+        let fields = self.class_instance_fields.get(&class_sym)?.clone();
+
+        let lhs_reg = self.lower_expression(lhs)?;
+        let rhs_reg = self.lower_expression(rhs)?;
+
+        // All paths converge at final_cmp with a three-way i32 value
+        let final_cmp = self.builder.create_block()?;
+        let mut phi_inputs: Vec<(IrBlockId, IrId)> = Vec::new();
+
+        // Fast path: pointer equality → cmp_val = 0 (equal)
+        let null_check = self.builder.create_block()?;
+        let same_ptr = self.builder.create_block()?;
+        let ptr_eq = self
+            .builder
+            .build_cmp(CompareOp::Eq, lhs_reg, rhs_reg)?;
+        self.builder
+            .build_cond_branch(ptr_eq, same_ptr, null_check)?;
+
+        self.builder.switch_to_block(same_ptr);
+        let zero_same = self.builder.build_const(IrValue::I32(0))?;
+        phi_inputs.push((same_ptr, zero_same));
+        self.builder.build_branch(final_cmp)?;
+
+        // Null guards: null is treated as "less than" any non-null value
+        self.builder.switch_to_block(null_check);
+        let null_val = self.builder.build_const(IrValue::I64(0))?;
+        let lhs_is_null = self
+            .builder
+            .build_cmp(CompareOp::Eq, lhs_reg, null_val)?;
+        let lhs_null_block = self.builder.create_block()?;
+        let null_check2 = self.builder.create_block()?;
+        self.builder
+            .build_cond_branch(lhs_is_null, lhs_null_block, null_check2)?;
+
+        // LHS is null, RHS is not → LHS < RHS → cmp_val = -1
+        self.builder.switch_to_block(lhs_null_block);
+        let neg_one_null = self.builder.build_const(IrValue::I32(-1))?;
+        phi_inputs.push((lhs_null_block, neg_one_null));
+        self.builder.build_branch(final_cmp)?;
+
+        self.builder.switch_to_block(null_check2);
+        let null_val2 = self.builder.build_const(IrValue::I64(0))?;
+        let rhs_is_null = self
+            .builder
+            .build_cmp(CompareOp::Eq, rhs_reg, null_val2)?;
+        let rhs_null_block = self.builder.create_block()?;
+        let field_start = self.builder.create_block()?;
+        self.builder
+            .build_cond_branch(rhs_is_null, rhs_null_block, field_start)?;
+
+        // RHS is null, LHS is not → LHS > RHS → cmp_val = 1
+        self.builder.switch_to_block(rhs_null_block);
+        let pos_one_null = self.builder.build_const(IrValue::I32(1))?;
+        phi_inputs.push((rhs_null_block, pos_one_null));
+        self.builder.build_branch(final_cmp)?;
+
+        // Field-by-field three-way comparison
+        self.builder.switch_to_block(field_start);
+        if fields.is_empty() {
+            // No fields → equal → cmp_val = 0
+            let zero_empty = self.builder.build_const(IrValue::I32(0))?;
+            phi_inputs.push((field_start, zero_empty));
+            self.builder.build_branch(final_cmp)?;
+        } else {
+            for (i, &(_field_sym, field_type_id, gep_idx)) in fields.iter().enumerate() {
+                let field_ir_type = self.convert_type(field_type_id);
+                let idx_const =
+                    self.builder.build_const(IrValue::I32(gep_idx as i32))?;
+
+                let lhs_ptr = self.builder.build_gep(
+                    lhs_reg,
+                    vec![idx_const],
+                    field_ir_type.clone(),
+                )?;
+                let lhs_val =
+                    self.builder.build_load(lhs_ptr, field_ir_type.clone())?;
+
+                let rhs_ptr = self.builder.build_gep(
+                    rhs_reg,
+                    vec![idx_const],
+                    field_ir_type.clone(),
+                )?;
+                let rhs_val =
+                    self.builder.build_load(rhs_ptr, field_ir_type.clone())?;
+
+                let cmp_val =
+                    self.emit_field_three_way_cmp(field_type_id, lhs_val, rhs_val)?;
+
+                if i == fields.len() - 1 {
+                    // Last field — always go to final_cmp
+                    let cur = self.builder.current_block()?;
+                    phi_inputs.push((cur, cmp_val));
+                    self.builder.build_branch(final_cmp)?;
+                } else {
+                    // Non-zero → decided, go to final_cmp; zero → next field
+                    let zero = self.builder.build_const(IrValue::I32(0))?;
+                    let is_ne =
+                        self.builder.build_cmp(CompareOp::Ne, cmp_val, zero)?;
+                    let cur = self.builder.current_block()?;
+                    phi_inputs.push((cur, cmp_val));
+                    let next = self.builder.create_block()?;
+                    self.builder
+                        .build_cond_branch(is_ne, final_cmp, next)?;
+                    self.builder.switch_to_block(next);
+                }
+            }
+        }
+
+        // Final comparison: cmp_val <op> 0
+        self.builder.switch_to_block(final_cmp);
+        let cmp_val = self.builder.build_phi(final_cmp, IrType::I32)?;
+        for &(block, val) in &phi_inputs {
+            self.builder
+                .add_phi_incoming(final_cmp, cmp_val, block, val)?;
+        }
+        let zero_final = self.builder.build_const(IrValue::I32(0))?;
+        let cmp_op = match op {
+            HirBinaryOp::Lt => CompareOp::Lt,
+            HirBinaryOp::Le => CompareOp::Le,
+            HirBinaryOp::Gt => CompareOp::Gt,
+            HirBinaryOp::Ge => CompareOp::Ge,
+            _ => unreachable!(),
+        };
+        self.builder.build_cmp(cmp_op, cmp_val, zero_final)
+    }
+
+    /// Compute a three-way comparison value (i32: -1, 0, 1) for a single field.
+    fn emit_field_three_way_cmp(
+        &mut self,
+        type_id: TypeId,
+        lhs: IrId,
+        rhs: IrId,
+    ) -> Option<IrId> {
+        let is_string = {
+            let type_table = self.type_table.borrow();
+            type_table
+                .get(type_id)
+                .map(|t| matches!(t.kind, TypeKind::String))
+                .unwrap_or(false)
+        };
+
+        if is_string {
+            // haxe_string_compare already returns a three-way i32
+            let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
+            let cmp_func = self.get_or_register_extern_function(
+                "haxe_string_compare",
+                vec![string_ptr_ty.clone(), string_ptr_ty.clone()],
+                IrType::I32,
+            );
+            self.builder
+                .build_call_direct(cmp_func, vec![lhs, rhs], IrType::I32)
+        } else {
+            // (a < b) ? -1 : ((a > b) ? 1 : 0)
+            let lt_block = self.builder.create_block()?;
+            let gt_check = self.builder.create_block()?;
+            let gt_block = self.builder.create_block()?;
+            let eq_block = self.builder.create_block()?;
+            let cmp_merge = self.builder.create_block()?;
+
+            let is_lt = self.builder.build_cmp(CompareOp::Lt, lhs, rhs)?;
+            self.builder
+                .build_cond_branch(is_lt, lt_block, gt_check)?;
+
+            self.builder.switch_to_block(lt_block);
+            let neg_one = self.builder.build_const(IrValue::I32(-1))?;
+            self.builder.build_branch(cmp_merge)?;
+
+            self.builder.switch_to_block(gt_check);
+            let is_gt = self.builder.build_cmp(CompareOp::Gt, lhs, rhs)?;
+            self.builder
+                .build_cond_branch(is_gt, gt_block, eq_block)?;
+
+            self.builder.switch_to_block(gt_block);
+            let pos_one = self.builder.build_const(IrValue::I32(1))?;
+            self.builder.build_branch(cmp_merge)?;
+
+            self.builder.switch_to_block(eq_block);
+            let zero = self.builder.build_const(IrValue::I32(0))?;
+            self.builder.build_branch(cmp_merge)?;
+
+            self.builder.switch_to_block(cmp_merge);
+            let result = self.builder.build_phi(cmp_merge, IrType::I32)?;
+            self.builder
+                .add_phi_incoming(cmp_merge, result, lt_block, neg_one)?;
+            self.builder
+                .add_phi_incoming(cmp_merge, result, gt_block, pos_one)?;
+            self.builder
+                .add_phi_incoming(cmp_merge, result, eq_block, zero)?;
+
+            Some(result)
+        }
+    }
+
+    /// Lower inline hash computation for classes that @:derive([Hash]).
+    /// Computes: hash = seed; for each field: hash = hash * 31 + field_hash; return hash as I32.
+    fn lower_derived_hash_code(
+        &mut self,
+        object: &HirExpr,
+        class_sym: SymbolId,
+    ) -> Option<IrId> {
+        let fields = self.class_instance_fields.get(&class_sym)?.clone();
+        let obj_reg = self.lower_expression(object)?;
+
+        // Start with seed based on number of fields (deterministic per-class)
+        let mut hash_reg = self
+            .builder
+            .build_const(IrValue::I64(2166136261i64))?; // FNV offset basis
+
+        let thirty_one = self.builder.build_const(IrValue::I64(31))?;
+
+        for &(_field_sym, field_type_id, gep_idx) in &fields {
+            let field_ir_type = self.convert_type(field_type_id);
+            let idx_const = self
+                .builder
+                .build_const(IrValue::I32(gep_idx as i32))?;
+            let field_ptr = self.builder.build_gep(
+                obj_reg,
+                vec![idx_const],
+                field_ir_type.clone(),
+            )?;
+            let field_val =
+                self.builder.build_load(field_ptr, field_ir_type.clone())?;
+
+            // Compute field hash based on type
+            let field_hash =
+                self.emit_field_hash(field_type_id, &field_ir_type, field_val)?;
+
+            // hash = hash * 31 + field_hash
+            let mul = self
+                .builder
+                .build_binop(BinaryOp::Mul, hash_reg, thirty_one)?;
+            hash_reg = self.builder.build_binop(BinaryOp::Add, mul, field_hash)?;
+        }
+
+        // Truncate to I32 for Haxe Int return type
+        self.builder.build_cast(hash_reg, IrType::I64, IrType::I32)
+    }
+
+    /// Compute a hash value (i64) for a single field based on its type.
+    fn emit_field_hash(
+        &mut self,
+        type_id: TypeId,
+        ir_type: &IrType,
+        val: IrId,
+    ) -> Option<IrId> {
+        let type_kind = {
+            let type_table = self.type_table.borrow();
+            type_table.get(type_id).map(|t| t.kind.clone())
+        };
+
+        match type_kind.as_ref() {
+            Some(TypeKind::String) => {
+                // Call haxe_string_hash → i32, then widen to i64
+                let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
+                let hash_func = self.get_or_register_extern_function(
+                    "haxe_string_hash",
+                    vec![string_ptr_ty],
+                    IrType::I32,
+                );
+                let hash_i32 = self.builder.build_call_direct(
+                    hash_func,
+                    vec![val],
+                    IrType::I32,
+                )?;
+                self.builder.build_cast(hash_i32, IrType::I32, IrType::I64)
+            }
+            Some(TypeKind::Int) => {
+                // Widen i32 to i64
+                self.builder.build_cast(val, IrType::I32, IrType::I64)
+            }
+            Some(TypeKind::Bool) => {
+                // false → 0, true → 1
+                self.builder.build_cast(val, IrType::Bool, IrType::I64)
+            }
+            Some(TypeKind::Float) => {
+                // Bitcast f64 to i64 for hash
+                self.builder.build_bitcast(val, IrType::I64)
+            }
+            _ => {
+                // Pointer/enum/other — use as i64 directly
+                match ir_type {
+                    IrType::I32 => {
+                        self.builder.build_cast(val, IrType::I32, IrType::I64)
+                    }
+                    IrType::I64 => Some(val),
+                    _ => {
+                        self.builder.build_cast(val, ir_type.clone(), IrType::I64)
+                    }
+                }
+            }
+        }
+    }
+
     fn lower_null_coalesce(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Option<IrId> {
         // Null coalescing: lhs ?? rhs
         // If lhs is non-null, return lhs; otherwise evaluate and return rhs
@@ -28803,6 +29395,36 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
+    /// Collect parent instance fields for derive codegen (PartialEq/PartialOrd/Hash).
+    /// Builds a simple (SymbolId, TypeId, gep_index) list by walking the parent chain.
+    fn collect_parent_instance_fields(
+        &self,
+        parent_type_id: TypeId,
+        fields: &mut Vec<(SymbolId, TypeId, u32)>,
+        idx: &mut u32,
+    ) {
+        if let Some(HirTypeDecl::Class(parent_class)) =
+            self.current_hir_types.get(&parent_type_id)
+        {
+            // Recurse to grandparent first
+            if let Some(gp_ty) = parent_class.extends {
+                self.collect_parent_instance_fields(gp_ty, fields, idx);
+            }
+            // Then parent's own fields
+            for field in &parent_class.fields {
+                if !field.is_static {
+                    if let Some(ref prop) = field.property_access {
+                        if !matches!(prop.getter, crate::tast::PropertyAccessor::Default) {
+                            continue;
+                        }
+                    }
+                    fields.push((field.symbol_id, field.ty, *idx));
+                    *idx += 1;
+                }
+            }
+        }
+    }
+
     /// Add parent class fields to the field list
     fn add_parent_fields(
         &mut self,
@@ -29128,6 +29750,57 @@ impl<'a> HirToMirContext<'a> {
             };
             if let Some(parent_sym) = parent_symbol {
                 self.class_parent_map.insert(class.symbol_id, parent_sym);
+            }
+        }
+
+        // Populate derive trait sets from HirClass metadata
+        {
+            use crate::tast::DerivedTrait;
+            for trait_ in &class.derived_traits {
+                match trait_ {
+                    DerivedTrait::PartialEq | DerivedTrait::Eq => {
+                        self.derive_partial_eq_classes.insert(class.symbol_id);
+                    }
+                    DerivedTrait::PartialOrd | DerivedTrait::Ord => {
+                        self.derive_partial_ord_classes.insert(class.symbol_id);
+                    }
+                    DerivedTrait::Hash => {
+                        self.derive_hash_classes.insert(class.symbol_id);
+                    }
+                    _ => {}
+                }
+            }
+
+            // Build instance field list for derive codegen (non-static fields only)
+            let needs_field_list = self.derive_partial_eq_classes.contains(&class.symbol_id)
+                || self.derive_partial_ord_classes.contains(&class.symbol_id)
+                || self.derive_hash_classes.contains(&class.symbol_id);
+
+            if needs_field_list {
+                let mut instance_fields = Vec::new();
+                // field_index starts at 1 (0 = type_id header)
+                let mut idx = 1u32;
+                // Include inherited fields (walk parent chain)
+                if let Some(extends_ty) = class.extends {
+                    self.collect_parent_instance_fields(extends_ty, &mut instance_fields, &mut idx);
+                }
+                // Then this class's own fields
+                for field in &class.fields {
+                    if !field.is_static {
+                        if let Some(ref prop) = field.property_access {
+                            if !matches!(
+                                prop.getter,
+                                crate::tast::PropertyAccessor::Default
+                            ) {
+                                continue; // Skip computed properties
+                            }
+                        }
+                        instance_fields.push((field.symbol_id, field.ty, idx));
+                        idx += 1;
+                    }
+                }
+                self.class_instance_fields
+                    .insert(class.symbol_id, instance_fields);
             }
         }
     }

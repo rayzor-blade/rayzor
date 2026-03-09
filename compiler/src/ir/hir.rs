@@ -58,6 +58,7 @@ pub struct HirClass {
     pub is_final: bool,
     pub is_abstract: bool,
     pub is_extern: bool,
+    pub derived_traits: Vec<crate::tast::DerivedTrait>,
 }
 
 /// Interface declaration

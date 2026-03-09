@@ -3163,6 +3163,81 @@ impl<'a> AstLowering<'a> {
         let mut typed_class = typed_class;
         typed_class.derived_traits = derived_traits;
 
+        // Synthesize hashCode():Int method for classes that derive Hash
+        if typed_class
+            .derived_traits
+            .iter()
+            .any(|t| matches!(t, crate::tast::DerivedTrait::Hash))
+        {
+            let hash_code_name = self.context.intern_string("hashCode");
+            let has_hashcode = typed_class.methods.iter().any(|m| m.name == hash_code_name);
+            if !has_hashcode {
+                let int_type = self.context.type_table.borrow().int_type();
+                let func_symbol_id =
+                    SymbolId::from_raw(self.context.symbol_table.len() as u32);
+                let func_symbol = Symbol {
+                    id: func_symbol_id,
+                    name: hash_code_name,
+                    kind: SymbolKind::Function,
+                    type_id: int_type,
+                    scope_id: ScopeId::first(),
+                    lifetime_id: LifetimeId::invalid(),
+                    visibility: Visibility::Public,
+                    mutability: crate::tast::symbols::Mutability::Immutable,
+                    definition_location: SourceLocation::unknown(),
+                    is_used: true,
+                    is_exported: false,
+                    documentation: None,
+                    flags: SymbolFlags::NONE,
+                    package_id: None,
+                    qualified_name: None,
+                    native_name: None,
+                    frameworks: None,
+                    c_includes: None,
+                    c_sources: None,
+                    c_libs: None,
+                };
+                self.context.symbol_table.add_symbol(func_symbol);
+
+                // Stub body: return 0 (replaced at MIR level with actual hash computation)
+                let return_expr = TypedExpression {
+                    expr_type: int_type,
+                    kind: TypedExpressionKind::Literal {
+                        value: LiteralValue::Int(0),
+                    },
+                    usage: VariableUsage::Copy,
+                    lifetime_id: crate::tast::LifetimeId::default(),
+                    source_location: SourceLocation::default(),
+                    metadata: ExpressionMetadata::default(),
+                };
+
+                typed_class.methods.push(TypedFunction {
+                    symbol_id: func_symbol_id,
+                    name: hash_code_name,
+                    parameters: vec![],
+                    return_type: int_type,
+                    body: vec![TypedStatement::Return {
+                        value: Some(return_expr),
+                        source_location: SourceLocation::default(),
+                    }],
+                    visibility: Visibility::Public,
+                    effects: crate::tast::node::FunctionEffects {
+                        can_throw: false,
+                        async_kind: AsyncKind::Sync,
+                        is_pure: true,
+                        is_inline: false,
+                        exception_types: vec![],
+                        memory_effects: crate::tast::node::MemoryEffects::default(),
+                        resource_effects: ResourceEffects::default(),
+                    },
+                    type_parameters: vec![],
+                    is_static: false,
+                    source_location: SourceLocation::default(),
+                    metadata: FunctionMetadata::default(),
+                });
+            }
+        }
+
         Ok(TypedDeclaration::Class(typed_class))
     }
 
@@ -5318,6 +5393,124 @@ impl<'a> AstLowering<'a> {
             }
         }
 
+        // Validate trait dependency chains
+        let has_partial_eq = derived_traits.contains(&DerivedTrait::PartialEq);
+        let has_eq = derived_traits.contains(&DerivedTrait::Eq);
+        let has_partial_ord = derived_traits.contains(&DerivedTrait::PartialOrd);
+        let has_ord = derived_traits.contains(&DerivedTrait::Ord);
+        let has_hash = derived_traits.contains(&DerivedTrait::Hash);
+
+        // Eq requires PartialEq
+        if has_eq && !has_partial_eq {
+            eprintln!(
+                "ERROR: Class '{}' derives Eq but not PartialEq. Eq requires PartialEq.",
+                class_name
+            );
+            eprintln!("  Use @:derive([PartialEq, Eq]) instead");
+            derived_traits.retain(|t| *t != DerivedTrait::Eq);
+        }
+
+        // PartialOrd requires PartialEq
+        if has_partial_ord && !has_partial_eq {
+            eprintln!(
+                "ERROR: Class '{}' derives PartialOrd but not PartialEq. PartialOrd requires PartialEq.",
+                class_name
+            );
+            eprintln!("  Use @:derive([PartialEq, PartialOrd]) instead");
+            derived_traits.retain(|t| *t != DerivedTrait::PartialOrd);
+        }
+
+        // Ord requires PartialOrd + Eq
+        if has_ord && (!has_partial_ord || !has_eq) {
+            eprintln!(
+                "ERROR: Class '{}' derives Ord but is missing required traits.",
+                class_name
+            );
+            eprintln!("  Ord requires PartialEq, Eq, and PartialOrd.");
+            eprintln!("  Use @:derive([PartialEq, Eq, PartialOrd, Ord]) instead");
+            derived_traits.retain(|t| *t != DerivedTrait::Ord);
+        }
+
+        // Validate PartialEq: all fields must support equality
+        if has_partial_eq {
+            let mut bad_fields = Vec::new();
+            for field in &typed_class.fields {
+                if !field.is_static && !self.is_type_equatable(field.field_type) {
+                    let name = self
+                        .context
+                        .string_interner
+                        .get(field.name)
+                        .unwrap_or("?")
+                        .to_string();
+                    bad_fields.push(name);
+                }
+            }
+            if !bad_fields.is_empty() {
+                eprintln!(
+                    "ERROR: Class '{}' derives PartialEq but has non-equatable fields:",
+                    class_name
+                );
+                for f in &bad_fields {
+                    eprintln!("  - Field '{}' does not support equality", f);
+                }
+                derived_traits.retain(|t| *t != DerivedTrait::PartialEq);
+                derived_traits.retain(|t| *t != DerivedTrait::Eq);
+            }
+        }
+
+        // Validate PartialOrd: all fields must support ordering
+        if derived_traits.contains(&DerivedTrait::PartialOrd) {
+            let mut bad_fields = Vec::new();
+            for field in &typed_class.fields {
+                if !field.is_static && !self.is_type_orderable(field.field_type) {
+                    let name = self
+                        .context
+                        .string_interner
+                        .get(field.name)
+                        .unwrap_or("?")
+                        .to_string();
+                    bad_fields.push(name);
+                }
+            }
+            if !bad_fields.is_empty() {
+                eprintln!(
+                    "ERROR: Class '{}' derives PartialOrd but has non-orderable fields:",
+                    class_name
+                );
+                for f in &bad_fields {
+                    eprintln!("  - Field '{}' does not support ordering", f);
+                }
+                derived_traits.retain(|t| *t != DerivedTrait::PartialOrd);
+                derived_traits.retain(|t| *t != DerivedTrait::Ord);
+            }
+        }
+
+        // Validate Hash: all fields must be hashable
+        if derived_traits.contains(&DerivedTrait::Hash) {
+            let mut bad_fields = Vec::new();
+            for field in &typed_class.fields {
+                if !field.is_static && !self.is_type_hashable(field.field_type) {
+                    let name = self
+                        .context
+                        .string_interner
+                        .get(field.name)
+                        .unwrap_or("?")
+                        .to_string();
+                    bad_fields.push(name);
+                }
+            }
+            if !bad_fields.is_empty() {
+                eprintln!(
+                    "ERROR: Class '{}' derives Hash but has non-hashable fields:",
+                    class_name
+                );
+                for f in &bad_fields {
+                    eprintln!("  - Field '{}' is not hashable", f);
+                }
+                derived_traits.retain(|t| *t != DerivedTrait::Hash);
+            }
+        }
+
         // Validate Copy: all fields must be Copy
         if has_copy {
             let mut non_copy_fields = Vec::new();
@@ -5410,6 +5603,87 @@ impl<'a> AstLowering<'a> {
                 }
 
                 // String, Arrays, and other heap types are NOT Copy
+                _ => false,
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Check if a type supports equality comparison (for @:derive(PartialEq))
+    fn is_type_equatable(&self, type_id: TypeId) -> bool {
+        let type_table = self.context.type_table.borrow();
+        if let Some(type_info) = type_table.get(type_id) {
+            match &type_info.kind {
+                crate::tast::core::TypeKind::Int
+                | crate::tast::core::TypeKind::Float
+                | crate::tast::core::TypeKind::Bool
+                | crate::tast::core::TypeKind::Void
+                | crate::tast::core::TypeKind::String => true,
+
+                crate::tast::core::TypeKind::Class { .. } => {
+                    // Classes are equatable if they derive PartialEq (checked at codegen)
+                    // or are compared by pointer (fallback). Accept for now.
+                    true
+                }
+
+                crate::tast::core::TypeKind::Enum { .. } => true,
+                crate::tast::core::TypeKind::Array { element_type } => {
+                    self.is_type_equatable(*element_type)
+                }
+
+                // Function types and Dynamic are not equatable
+                crate::tast::core::TypeKind::Function { .. } => false,
+                crate::tast::core::TypeKind::Dynamic => false,
+
+                _ => true, // Conservative: allow other types
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Check if a type supports ordering (for @:derive(PartialOrd))
+    fn is_type_orderable(&self, type_id: TypeId) -> bool {
+        let type_table = self.context.type_table.borrow();
+        if let Some(type_info) = type_table.get(type_id) {
+            match &type_info.kind {
+                crate::tast::core::TypeKind::Int
+                | crate::tast::core::TypeKind::Float
+                | crate::tast::core::TypeKind::Bool
+                | crate::tast::core::TypeKind::String => true,
+
+                crate::tast::core::TypeKind::Class { .. } => true,
+                crate::tast::core::TypeKind::Enum { .. } => true,
+
+                crate::tast::core::TypeKind::Function { .. } => false,
+                crate::tast::core::TypeKind::Dynamic => false,
+
+                _ => true,
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Check if a type is hashable (for @:derive(Hash))
+    fn is_type_hashable(&self, type_id: TypeId) -> bool {
+        let type_table = self.context.type_table.borrow();
+        if let Some(type_info) = type_table.get(type_id) {
+            match &type_info.kind {
+                crate::tast::core::TypeKind::Int
+                | crate::tast::core::TypeKind::Bool
+                | crate::tast::core::TypeKind::String => true,
+
+                // Float is technically hashable but fragile (NaN != NaN)
+                crate::tast::core::TypeKind::Float => true,
+
+                crate::tast::core::TypeKind::Class { .. } => true,
+                crate::tast::core::TypeKind::Enum { .. } => true,
+
+                crate::tast::core::TypeKind::Function { .. } => false,
+                crate::tast::core::TypeKind::Dynamic => false,
+
                 _ => false,
             }
         } else {
