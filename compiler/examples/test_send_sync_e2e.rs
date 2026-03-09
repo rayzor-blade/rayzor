@@ -185,7 +185,10 @@ class Main {
             } else {
                 println!(
                     "FAIL: expected ConcurrencyError, got: {:?}",
-                    errors.iter().map(|e| format!("{:?}: {}", e.category, e.message)).collect::<Vec<_>>()
+                    errors
+                        .iter()
+                        .map(|e| format!("{:?}: {}", e.category, e.message))
+                        .collect::<Vec<_>>()
                 );
                 fail += 1;
             }

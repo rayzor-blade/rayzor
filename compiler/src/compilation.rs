@@ -3383,18 +3383,16 @@ impl CompilationUnit {
                 &typed_file.classes,
             );
             let mut send_sync_errors: Vec<CompilationError> = Vec::new();
-            let collect_error = |error: crate::tast::send_sync_validator::SendSyncError| {
-                CompilationError {
+            let collect_error =
+                |error: crate::tast::send_sync_validator::SendSyncError| CompilationError {
                     message: error.message.clone(),
                     location: error.source_location,
                     category: ErrorCategory::ConcurrencyError,
                     suggestion: Some(
-                        "Add @:derive([Send]) or @:derive([Send, Sync]) to the type"
-                            .to_string(),
+                        "Add @:derive([Send]) or @:derive([Send, Sync]) to the type".to_string(),
                     ),
                     related_errors: Vec::new(),
-                }
-            };
+                };
             for class in &typed_file.classes {
                 if let Err(error) = validator.validate_class(class) {
                     send_sync_errors.push(collect_error(error));

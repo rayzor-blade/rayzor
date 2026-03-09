@@ -501,14 +501,13 @@ impl<'a> TypeDiagnosticEmitter<'a> {
             ),
             TypeErrorKind::ImportError { message } => todo!(),
             TypeErrorKind::UnknownSymbol { name } => todo!(),
-            TypeErrorKind::SendSyncViolation { type_name, reason } => {
-                self.emit_send_sync_violation(
+            TypeErrorKind::SendSyncViolation { type_name, reason } => self
+                .emit_send_sync_violation(
                     error.location,
                     &type_name,
                     &reason,
                     error.suggestion.as_deref(),
-                )
-            }
+                ),
         }
     }
 
@@ -1020,10 +1019,7 @@ impl<'a> TypeDiagnosticEmitter<'a> {
         let source_span = self.location_to_span_with_length(location, Some(type_name));
 
         let mut builder = DiagnosticBuilder::error(
-            format!(
-                "Cannot send value of type `{}` across threads",
-                type_name
-            ),
+            format!("Cannot send value of type `{}` across threads", type_name),
             source_span.clone(),
         )
         .code("E0302")
@@ -1032,7 +1028,9 @@ impl<'a> TypeDiagnosticEmitter<'a> {
         if let Some(hint) = suggestion {
             builder = builder.help(hint);
         } else {
-            builder = builder.help("Add @:derive([Send]) to the type declaration, or use a Send-safe alternative");
+            builder = builder.help(
+                "Add @:derive([Send]) to the type declaration, or use a Send-safe alternative",
+            );
         }
 
         builder.build()
