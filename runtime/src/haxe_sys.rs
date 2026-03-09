@@ -7,6 +7,7 @@ use std::cell::RefCell;
 use std::io::{self, Write};
 
 // Use the canonical HaxeString definition from haxe_string module
+use crate::arena::arena_alloc_haxe_string;
 use crate::haxe_string::HaxeString;
 
 // Thread-local trace prefix for identifying which backend owns the output
@@ -227,7 +228,7 @@ pub extern "C" fn haxe_string_from_int(value: i64) -> *mut HaxeString {
     let ptr = bytes.as_ptr() as *mut u8;
     std::mem::forget(bytes); // Transfer ownership to HaxeString
 
-    Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
+    arena_alloc_haxe_string(HaxeString { ptr, len, cap })
 }
 
 /// Convert Float to String - returns heap-allocated HaxeString pointer
@@ -240,7 +241,7 @@ pub extern "C" fn haxe_string_from_float(value: f64) -> *mut HaxeString {
     let ptr = bytes.as_ptr() as *mut u8;
     std::mem::forget(bytes);
 
-    Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
+    arena_alloc_haxe_string(HaxeString { ptr, len, cap })
 }
 
 /// Convert Bool to String - returns heap-allocated HaxeString pointer
@@ -248,11 +249,11 @@ pub extern "C" fn haxe_string_from_float(value: f64) -> *mut HaxeString {
 pub extern "C" fn haxe_string_from_bool(value: bool) -> *mut HaxeString {
     let s = if value { "true" } else { "false" };
     // For static strings, use the static pointer with cap=0 to indicate no-free
-    Box::into_raw(Box::new(HaxeString {
+    arena_alloc_haxe_string(HaxeString {
         ptr: s.as_ptr() as *mut u8,
         len: s.len(),
         cap: 0, // cap=0 means static string, don't free
-    }))
+    })
 }
 
 /// Convert a value to string using a type tag for dispatch.
@@ -287,22 +288,22 @@ pub extern "C" fn haxe_string_from_string(ptr: *const u8, len: usize) -> *mut Ha
     let new_ptr = vec.as_ptr() as *mut u8;
     std::mem::forget(vec);
 
-    Box::into_raw(Box::new(HaxeString {
+    arena_alloc_haxe_string(HaxeString {
         ptr: new_ptr,
         len,
         cap,
-    }))
+    })
 }
 
 /// Convert null to String - returns heap-allocated HaxeString pointer
 #[no_mangle]
 pub extern "C" fn haxe_string_from_null() -> *mut HaxeString {
     let s = "null";
-    Box::into_raw(Box::new(HaxeString {
+    arena_alloc_haxe_string(HaxeString {
         ptr: s.as_ptr() as *mut u8,
         len: s.len(),
         cap: 0, // static string
-    }))
+    })
 }
 
 /// Create a string literal from embedded bytes
@@ -310,11 +311,11 @@ pub extern "C" fn haxe_string_from_null() -> *mut HaxeString {
 /// The bytes are NOT copied - they must remain valid (e.g., in JIT code section)
 #[no_mangle]
 pub extern "C" fn haxe_string_literal(ptr: *const u8, len: usize) -> *mut HaxeString {
-    Box::into_raw(Box::new(HaxeString {
+    arena_alloc_haxe_string(HaxeString {
         ptr: ptr as *mut u8,
         len,
         cap: 0, // cap=0 means static/borrowed, don't free the data
-    }))
+    })
 }
 
 /// Convert string to uppercase (wrapper returning pointer)
@@ -322,20 +323,20 @@ pub extern "C" fn haxe_string_literal(ptr: *const u8, len: usize) -> *mut HaxeSt
 #[no_mangle]
 pub extern "C" fn haxe_string_upper(s: *const HaxeString) -> *mut HaxeString {
     if s.is_null() {
-        return Box::into_raw(Box::new(HaxeString {
+        return arena_alloc_haxe_string(HaxeString {
             ptr: std::ptr::null_mut(),
             len: 0,
             cap: 0,
-        }));
+        });
     }
     unsafe {
         let s_ref = &*s;
         if s_ref.ptr.is_null() || s_ref.len == 0 {
-            return Box::into_raw(Box::new(HaxeString {
+            return arena_alloc_haxe_string(HaxeString {
                 ptr: std::ptr::null_mut(),
                 len: 0,
                 cap: 0,
-            }));
+            });
         }
         let slice = std::slice::from_raw_parts(s_ref.ptr, s_ref.len);
         if let Ok(rust_str) = std::str::from_utf8(slice) {
@@ -345,7 +346,7 @@ pub extern "C" fn haxe_string_upper(s: *const HaxeString) -> *mut HaxeString {
             let cap = bytes.capacity();
             let ptr = bytes.as_ptr() as *mut u8;
             std::mem::forget(bytes);
-            Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
+            arena_alloc_haxe_string(HaxeString { ptr, len, cap })
         } else {
             // Invalid UTF-8, return copy of original
             let new_bytes = slice.to_vec();
@@ -353,7 +354,7 @@ pub extern "C" fn haxe_string_upper(s: *const HaxeString) -> *mut HaxeString {
             let cap = new_bytes.capacity();
             let ptr = new_bytes.as_ptr() as *mut u8;
             std::mem::forget(new_bytes);
-            Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
+            arena_alloc_haxe_string(HaxeString { ptr, len, cap })
         }
     }
 }
@@ -363,20 +364,20 @@ pub extern "C" fn haxe_string_upper(s: *const HaxeString) -> *mut HaxeString {
 #[no_mangle]
 pub extern "C" fn haxe_string_lower(s: *const HaxeString) -> *mut HaxeString {
     if s.is_null() {
-        return Box::into_raw(Box::new(HaxeString {
+        return arena_alloc_haxe_string(HaxeString {
             ptr: std::ptr::null_mut(),
             len: 0,
             cap: 0,
-        }));
+        });
     }
     unsafe {
         let s_ref = &*s;
         if s_ref.ptr.is_null() || s_ref.len == 0 {
-            return Box::into_raw(Box::new(HaxeString {
+            return arena_alloc_haxe_string(HaxeString {
                 ptr: std::ptr::null_mut(),
                 len: 0,
                 cap: 0,
-            }));
+            });
         }
         let slice = std::slice::from_raw_parts(s_ref.ptr, s_ref.len);
         if let Ok(rust_str) = std::str::from_utf8(slice) {
@@ -386,7 +387,7 @@ pub extern "C" fn haxe_string_lower(s: *const HaxeString) -> *mut HaxeString {
             let cap = bytes.capacity();
             let ptr = bytes.as_ptr() as *mut u8;
             std::mem::forget(bytes);
-            Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
+            arena_alloc_haxe_string(HaxeString { ptr, len, cap })
         } else {
             // Invalid UTF-8, return copy of original
             let new_bytes = slice.to_vec();
@@ -394,7 +395,7 @@ pub extern "C" fn haxe_string_lower(s: *const HaxeString) -> *mut HaxeString {
             let cap = new_bytes.capacity();
             let ptr = new_bytes.as_ptr() as *mut u8;
             std::mem::forget(new_bytes);
-            Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
+            arena_alloc_haxe_string(HaxeString { ptr, len, cap })
         }
     }
 }
@@ -417,21 +418,21 @@ pub extern "C" fn haxe_string_len(s: *const HaxeString) -> i32 {
 #[no_mangle]
 pub extern "C" fn haxe_string_char_at_ptr(s: *const HaxeString, index: i64) -> *mut HaxeString {
     if s.is_null() {
-        return Box::into_raw(Box::new(HaxeString {
+        return arena_alloc_haxe_string(HaxeString {
             ptr: std::ptr::null_mut(),
             len: 0,
             cap: 0,
-        }));
+        });
     }
     unsafe {
         let s_ref = &*s;
         if index < 0 || (index as usize) >= s_ref.len || s_ref.ptr.is_null() {
             // Return empty string for out of bounds
-            return Box::into_raw(Box::new(HaxeString {
+            return arena_alloc_haxe_string(HaxeString {
                 ptr: std::ptr::null_mut(),
                 len: 0,
                 cap: 0,
-            }));
+            });
         }
 
         // Get the byte at the index
@@ -441,7 +442,7 @@ pub extern "C" fn haxe_string_char_at_ptr(s: *const HaxeString, index: i64) -> *
         let cap = bytes.capacity();
         let ptr = bytes.as_ptr() as *mut u8;
         std::mem::forget(bytes);
-        Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
+        arena_alloc_haxe_string(HaxeString { ptr, len, cap })
     }
 }
 
@@ -570,20 +571,20 @@ pub extern "C" fn haxe_string_substr_ptr(
     len: i32,
 ) -> *mut HaxeString {
     if s.is_null() {
-        return Box::into_raw(Box::new(HaxeString {
+        return arena_alloc_haxe_string(HaxeString {
             ptr: std::ptr::null_mut(),
             len: 0,
             cap: 0,
-        }));
+        });
     }
     unsafe {
         let s_ref = &*s;
         if s_ref.ptr.is_null() || s_ref.len == 0 || len < 0 {
-            return Box::into_raw(Box::new(HaxeString {
+            return arena_alloc_haxe_string(HaxeString {
                 ptr: std::ptr::null_mut(),
                 len: 0,
                 cap: 0,
-            }));
+            });
         }
 
         // Handle negative pos (from end)
@@ -595,22 +596,22 @@ pub extern "C" fn haxe_string_substr_ptr(
         };
 
         if actual_pos >= s_ref.len {
-            return Box::into_raw(Box::new(HaxeString {
+            return arena_alloc_haxe_string(HaxeString {
                 ptr: std::ptr::null_mut(),
                 len: 0,
                 cap: 0,
-            }));
+            });
         }
 
         let available = s_ref.len - actual_pos;
         let actual_len = (len as usize).min(available);
 
         if actual_len == 0 {
-            return Box::into_raw(Box::new(HaxeString {
+            return arena_alloc_haxe_string(HaxeString {
                 ptr: std::ptr::null_mut(),
                 len: 0,
                 cap: 0,
-            }));
+            });
         }
 
         let slice = std::slice::from_raw_parts(s_ref.ptr.add(actual_pos), actual_len);
@@ -619,11 +620,11 @@ pub extern "C" fn haxe_string_substr_ptr(
         let cap = bytes.capacity();
         let ptr = bytes.as_ptr() as *mut u8;
         std::mem::forget(bytes);
-        Box::into_raw(Box::new(HaxeString {
+        arena_alloc_haxe_string(HaxeString {
             ptr,
             len: new_len,
             cap,
-        }))
+        })
     }
 }
 
@@ -637,20 +638,20 @@ pub extern "C" fn haxe_string_substring_ptr(
     end_index: i32,
 ) -> *mut HaxeString {
     if s.is_null() {
-        return Box::into_raw(Box::new(HaxeString {
+        return arena_alloc_haxe_string(HaxeString {
             ptr: std::ptr::null_mut(),
             len: 0,
             cap: 0,
-        }));
+        });
     }
     unsafe {
         let s_ref = &*s;
         if s_ref.ptr.is_null() || s_ref.len == 0 {
-            return Box::into_raw(Box::new(HaxeString {
+            return arena_alloc_haxe_string(HaxeString {
                 ptr: std::ptr::null_mut(),
                 len: 0,
                 cap: 0,
-            }));
+            });
         }
 
         // Clamp negative values to 0
@@ -671,11 +672,11 @@ pub extern "C" fn haxe_string_substring_ptr(
         }
 
         if start == end {
-            return Box::into_raw(Box::new(HaxeString {
+            return arena_alloc_haxe_string(HaxeString {
                 ptr: std::ptr::null_mut(),
                 len: 0,
                 cap: 0,
-            }));
+            });
         }
 
         let slice = std::slice::from_raw_parts(s_ref.ptr.add(start), end - start);
@@ -684,11 +685,11 @@ pub extern "C" fn haxe_string_substring_ptr(
         let cap = bytes.capacity();
         let ptr = bytes.as_ptr() as *mut u8;
         std::mem::forget(bytes);
-        Box::into_raw(Box::new(HaxeString {
+        arena_alloc_haxe_string(HaxeString {
             ptr,
             len: new_len,
             cap,
-        }))
+        })
     }
 }
 
@@ -697,11 +698,11 @@ pub extern "C" fn haxe_string_substring_ptr(
 pub extern "C" fn haxe_string_from_char_code(code: i32) -> *mut HaxeString {
     if !(0..=0x10FFFF).contains(&code) {
         // Invalid code point, return empty string
-        return Box::into_raw(Box::new(HaxeString {
+        return arena_alloc_haxe_string(HaxeString {
             ptr: std::ptr::null_mut(),
             len: 0,
             cap: 0,
-        }));
+        });
     }
 
     // Convert to char and encode as UTF-8
@@ -713,13 +714,13 @@ pub extern "C" fn haxe_string_from_char_code(code: i32) -> *mut HaxeString {
         let cap = bytes.capacity();
         let ptr = bytes.as_ptr() as *mut u8;
         std::mem::forget(bytes);
-        Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
+        arena_alloc_haxe_string(HaxeString { ptr, len, cap })
     } else {
-        Box::into_raw(Box::new(HaxeString {
+        arena_alloc_haxe_string(HaxeString {
             ptr: std::ptr::null_mut(),
             len: 0,
             cap: 0,
-        }))
+        })
     }
 }
 
@@ -727,20 +728,20 @@ pub extern "C" fn haxe_string_from_char_code(code: i32) -> *mut HaxeString {
 #[no_mangle]
 pub extern "C" fn haxe_string_copy(s: *const HaxeString) -> *mut HaxeString {
     if s.is_null() {
-        return Box::into_raw(Box::new(HaxeString {
+        return arena_alloc_haxe_string(HaxeString {
             ptr: std::ptr::null_mut(),
             len: 0,
             cap: 0,
-        }));
+        });
     }
     unsafe {
         let s_ref = &*s;
         if s_ref.ptr.is_null() || s_ref.len == 0 {
-            return Box::into_raw(Box::new(HaxeString {
+            return arena_alloc_haxe_string(HaxeString {
                 ptr: std::ptr::null_mut(),
                 len: 0,
                 cap: 0,
-            }));
+            });
         }
 
         let slice = std::slice::from_raw_parts(s_ref.ptr, s_ref.len);
@@ -749,7 +750,7 @@ pub extern "C" fn haxe_string_copy(s: *const HaxeString) -> *mut HaxeString {
         let cap = bytes.capacity();
         let ptr = bytes.as_ptr() as *mut u8;
         std::mem::forget(bytes);
-        Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
+        arena_alloc_haxe_string(HaxeString { ptr, len, cap })
     }
 }
 
@@ -776,11 +777,11 @@ pub extern "C" fn haxe_string_split_ptr(
         // Handle null or empty string
         if s_ref.ptr.is_null() || s_ref.len == 0 {
             // Return array with one empty string
-            let empty = Box::into_raw(Box::new(HaxeString {
+            let empty = arena_alloc_haxe_string(HaxeString {
                 ptr: std::ptr::null_mut(),
                 len: 0,
                 cap: 0,
-            }));
+            });
             let result = Box::into_raw(vec![empty].into_boxed_slice()) as *mut *mut HaxeString;
             *out_len = 1;
             return result;
@@ -807,7 +808,7 @@ pub extern "C" fn haxe_string_split_ptr(
                 let cap = bytes.capacity();
                 let ptr = bytes.as_ptr() as *mut u8;
                 std::mem::forget(bytes);
-                parts.push(Box::into_raw(Box::new(HaxeString { ptr, len: 1, cap })));
+                parts.push(arena_alloc_haxe_string(HaxeString { ptr, len: 1, cap }));
             }
             *out_len = parts.len() as i64;
             Box::into_raw(parts.into_boxed_slice()) as *mut *mut HaxeString
@@ -832,18 +833,18 @@ pub extern "C" fn haxe_string_split_ptr(
                         // Add substring before delimiter
                         let part_len = idx - start;
                         if part_len == 0 {
-                            parts.push(Box::into_raw(Box::new(HaxeString {
+                            parts.push(arena_alloc_haxe_string(HaxeString {
                                 ptr: std::ptr::null_mut(),
                                 len: 0,
                                 cap: 0,
-                            })));
+                            }));
                         } else {
                             let bytes = haystack[start..idx].to_vec();
                             let len = bytes.len();
                             let cap = bytes.capacity();
                             let ptr = bytes.as_ptr() as *mut u8;
                             std::mem::forget(bytes);
-                            parts.push(Box::into_raw(Box::new(HaxeString { ptr, len, cap })));
+                            parts.push(arena_alloc_haxe_string(HaxeString { ptr, len, cap }));
                         }
                         start = idx + delim_ref.len;
                     }
@@ -851,18 +852,18 @@ pub extern "C" fn haxe_string_split_ptr(
                         // Add remaining string
                         let part_len = s_ref.len - start;
                         if part_len == 0 {
-                            parts.push(Box::into_raw(Box::new(HaxeString {
+                            parts.push(arena_alloc_haxe_string(HaxeString {
                                 ptr: std::ptr::null_mut(),
                                 len: 0,
                                 cap: 0,
-                            })));
+                            }));
                         } else {
                             let bytes = haystack[start..].to_vec();
                             let len = bytes.len();
                             let cap = bytes.capacity();
                             let ptr = bytes.as_ptr() as *mut u8;
                             std::mem::forget(bytes);
-                            parts.push(Box::into_raw(Box::new(HaxeString { ptr, len, cap })));
+                            parts.push(arena_alloc_haxe_string(HaxeString { ptr, len, cap }));
                         }
                         break;
                     }
@@ -940,11 +941,11 @@ fn build_args_array(args: &[&str]) -> *mut crate::haxe_array::HaxeArray {
                 if !str_ptr.is_null() {
                     std::ptr::copy_nonoverlapping(bytes.as_ptr(), str_ptr, len);
                 }
-                let hs = Box::into_raw(Box::new(HaxeString {
+                let hs = arena_alloc_haxe_string(HaxeString {
                     ptr: str_ptr,
                     len,
                     cap: len,
-                }));
+                });
                 *i64_ptr.add(i) = hs as i64;
             }
             ptr
@@ -1043,7 +1044,7 @@ pub extern "C" fn haxe_sys_get_env(name: *const HaxeString) -> *mut HaxeString {
                 let cap = bytes.capacity();
                 let ptr = bytes.as_ptr() as *mut u8;
                 std::mem::forget(bytes);
-                Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
+                arena_alloc_haxe_string(HaxeString { ptr, len, cap })
             }
             Err(_) => std::ptr::null_mut(), // Variable not found
         }
@@ -1102,7 +1103,7 @@ pub extern "C" fn haxe_sys_get_cwd() -> *mut HaxeString {
             let cap = bytes.capacity();
             let ptr = bytes.as_ptr() as *mut u8;
             std::mem::forget(bytes);
-            Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
+            arena_alloc_haxe_string(HaxeString { ptr, len, cap })
         }
         Err(_) => std::ptr::null_mut(),
     }
@@ -1167,11 +1168,11 @@ pub extern "C" fn haxe_sys_system_name() -> *mut HaxeString {
     };
 
     // Return a static string (cap=0 means no-free)
-    Box::into_raw(Box::new(HaxeString {
+    arena_alloc_haxe_string(HaxeString {
         ptr: name.as_ptr() as *mut u8,
         len: name.len(),
         cap: 0,
-    }))
+    })
 }
 
 /// Get CPU time for current process (in seconds)
@@ -1197,7 +1198,7 @@ pub extern "C" fn haxe_sys_program_path() -> *mut HaxeString {
             let cap = bytes.capacity();
             let ptr = bytes.as_ptr() as *mut u8;
             std::mem::forget(bytes);
-            Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
+            arena_alloc_haxe_string(HaxeString { ptr, len, cap })
         }
         Err(_) => std::ptr::null_mut(),
     }
@@ -1274,7 +1275,7 @@ fn rust_string_to_haxe(s: String) -> *mut HaxeString {
     let cap = bytes.capacity();
     let ptr = bytes.as_ptr() as *mut u8;
     std::mem::forget(bytes);
-    Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
+    arena_alloc_haxe_string(HaxeString { ptr, len, cap })
 }
 
 /// Read entire file content as string
