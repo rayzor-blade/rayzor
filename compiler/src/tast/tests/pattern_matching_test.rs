@@ -2,6 +2,28 @@
 mod pattern_matching_tests {
     use crate::pipeline::compile_haxe_source;
 
+    /// Run compile_haxe_source on a thread with 16MB stack to handle the deep
+    /// recursion of the full compilation pipeline (stdlib + TAST + HIR + MIR).
+    /// The default test thread stack (~8MB) is insufficient for complex patterns.
+    /// Returns error messages (empty vec on success).
+    fn compile_with_stack(code: &str) -> Vec<String> {
+        let code = code.to_string();
+        std::thread::Builder::new()
+            .name("compile-test".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                let result = compile_haxe_source(&code);
+                result
+                    .errors
+                    .iter()
+                    .map(|e| e.message.clone())
+                    .collect::<Vec<String>>()
+            })
+            .expect("failed to spawn thread")
+            .join()
+            .expect("compilation thread panicked")
+    }
+
     #[test]
     fn test_const_pattern() {
         let haxe_code = r#"
@@ -19,11 +41,11 @@ class Test {
 }
         "#;
 
-        let result = compile_haxe_source(haxe_code);
+        let errors = compile_with_stack(haxe_code);
         assert!(
-            result.errors.is_empty(),
+            errors.is_empty(),
             "Expected no errors, but got: {:?}",
-            result.errors
+            errors
         );
     }
 
@@ -41,11 +63,11 @@ class Test {
 }
         "#;
 
-        let result = compile_haxe_source(haxe_code);
+        let errors = compile_with_stack(haxe_code);
         assert!(
-            result.errors.is_empty(),
+            errors.is_empty(),
             "Expected no errors, but got: {:?}",
-            result.errors
+            errors
         );
     }
 
@@ -67,11 +89,11 @@ class Test {
 }
         "#;
 
-        let result = compile_haxe_source(haxe_code);
+        let errors = compile_with_stack(haxe_code);
         assert!(
-            result.errors.is_empty(),
+            errors.is_empty(),
             "Expected no errors, but got: {:?}",
-            result.errors
+            errors
         );
     }
 
@@ -91,11 +113,11 @@ class Test {
 }
         "#;
 
-        let result = compile_haxe_source(haxe_code);
+        let errors = compile_with_stack(haxe_code);
         assert!(
-            result.errors.is_empty(),
+            errors.is_empty(),
             "Expected no errors, but got: {:?}",
-            result.errors
+            errors
         );
     }
 
@@ -116,11 +138,11 @@ class Test {
 }
         "#;
 
-        let result = compile_haxe_source(haxe_code);
+        let errors = compile_with_stack(haxe_code);
         assert!(
-            result.errors.is_empty(),
+            errors.is_empty(),
             "Expected no errors, but got: {:?}",
-            result.errors
+            errors
         );
     }
 
@@ -139,11 +161,11 @@ class Test {
 }
         "#;
 
-        let result = compile_haxe_source(haxe_code);
+        let errors = compile_with_stack(haxe_code);
         assert!(
-            result.errors.is_empty(),
+            errors.is_empty(),
             "Expected no errors, but got: {:?}",
-            result.errors
+            errors
         );
     }
 
@@ -162,11 +184,11 @@ class Test {
 }
         "#;
 
-        let result = compile_haxe_source(haxe_code);
+        let errors = compile_with_stack(haxe_code);
         assert!(
-            result.errors.is_empty(),
+            errors.is_empty(),
             "Expected no errors, but got: {:?}",
-            result.errors
+            errors
         );
     }
 
@@ -186,11 +208,11 @@ class Test {
 }
         "#;
 
-        let result = compile_haxe_source(haxe_code);
+        let errors = compile_with_stack(haxe_code);
         assert!(
-            result.errors.is_empty(),
+            errors.is_empty(),
             "Expected no errors, but got: {:?}",
-            result.errors
+            errors
         );
     }
 
@@ -211,11 +233,11 @@ class Test {
 }
         "#;
 
-        let result = compile_haxe_source(haxe_code);
+        let errors = compile_with_stack(haxe_code);
         assert!(
-            result.errors.is_empty(),
+            errors.is_empty(),
             "Expected no errors, but got: {:?}",
-            result.errors
+            errors
         );
     }
 
@@ -235,11 +257,11 @@ class Test {
 }
         "#;
 
-        let result = compile_haxe_source(haxe_code);
+        let errors = compile_with_stack(haxe_code);
         assert!(
-            result.errors.is_empty(),
+            errors.is_empty(),
             "Expected no errors, but got: {:?}",
-            result.errors
+            errors
         );
     }
 
@@ -263,11 +285,11 @@ class Test {
 }
         "#;
 
-        let result = compile_haxe_source(haxe_code);
+        let errors = compile_with_stack(haxe_code);
         assert!(
-            result.errors.is_empty(),
+            errors.is_empty(),
             "Expected no errors, but got: {:?}",
-            result.errors
+            errors
         );
     }
 
@@ -294,11 +316,11 @@ class Test {
 }
         "#;
 
-        let result = compile_haxe_source(haxe_code);
+        let errors = compile_with_stack(haxe_code);
         assert!(
-            result.errors.is_empty(),
+            errors.is_empty(),
             "Expected no errors, but got: {:?}",
-            result.errors
+            errors
         );
     }
 
@@ -325,11 +347,11 @@ class Test {
 }
         "#;
 
-        let result = compile_haxe_source(haxe_code);
+        let errors = compile_with_stack(haxe_code);
         assert!(
-            result.errors.is_empty(),
+            errors.is_empty(),
             "Expected no errors, but got: {:?}",
-            result.errors
+            errors
         );
     }
 }
