@@ -636,3 +636,25 @@ pub extern "C" fn haxe_string_to_cstr(s: *const HaxeString) -> *const u8 {
     }
     unsafe { (*s).ptr }
 }
+
+/// Hash a string using FNV-1a. Returns i32 for Haxe Int compatibility.
+#[no_mangle]
+pub extern "C" fn haxe_string_hash(s: *const HaxeString) -> i32 {
+    if s.is_null() {
+        return 0;
+    }
+    unsafe {
+        let hs = &*s;
+        if hs.ptr.is_null() || hs.len == 0 {
+            return 0;
+        }
+        let bytes = slice::from_raw_parts(hs.ptr, hs.len);
+        // FNV-1a hash
+        let mut hash: u32 = 2166136261;
+        for &b in bytes {
+            hash ^= b as u32;
+            hash = hash.wrapping_mul(16777619);
+        }
+        hash as i32
+    }
+}

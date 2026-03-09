@@ -448,6 +448,7 @@ impl<'a> TastToHirContext<'a> {
             is_final: self.is_class_final(class.symbol_id),
             is_abstract: self.is_class_abstract(class.symbol_id),
             is_extern: false, // Would be in effects or metadata when available
+            derived_traits: class.derived_traits.clone(),
         };
 
         self.module
