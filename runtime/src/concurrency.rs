@@ -254,10 +254,7 @@ pub unsafe extern "C" fn rayzor_thread_spawn(
         let env_ptr = env_addr as *const u8;
         let func: ClosureFn = unsafe { std::mem::transmute(func_addr) };
 
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| func(env_ptr))) {
-            Ok(result) => result,
-            Err(_) => -1, // Return -1 on panic (matches join unwrap_or convention)
-        }
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| func(env_ptr))).unwrap_or(-1)
     });
 
     // Return simple handle

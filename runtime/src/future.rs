@@ -128,8 +128,7 @@ fn spawn_future(handle: &FutureHandle, handle_ptr: *mut FutureHandle) {
                         crate::type_system::haxe_box_int_ptr(value)
                     };
                     type CallbackFn = extern "C" fn(*const u8, *mut u8);
-                    let callback: CallbackFn =
-                        unsafe { std::mem::transmute(then_fn as usize) };
+                    let callback: CallbackFn = unsafe { std::mem::transmute(then_fn as usize) };
                     callback(then_env, cb_result);
                 }
             }
@@ -443,78 +442,76 @@ pub extern "C" fn rayzor_future_all(arr_ptr: *const u8) -> *mut u8 {
     thread::spawn(move || {
         crate::concurrency::arm64_jit_barrier();
 
-        let coordinating_result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // Phase 1: Spawn ALL sub-futures
-                let mut fh_ptrs: Vec<*mut FutureHandle> = Vec::with_capacity(n);
-                for &h_addr in &sub_handles {
-                    let h = h_addr as *mut FutureHandle;
-                    fh_ptrs.push(h);
-                    if h.is_null() {
-                        continue;
-                    }
-                    let future = unsafe { &*h };
-                    if future
-                        .state
-                        .compare_exchange(
-                            STATE_PENDING,
-                            STATE_RUNNING,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        spawn_future(future, h);
-                    }
+        let coordinating_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Phase 1: Spawn ALL sub-futures
+            let mut fh_ptrs: Vec<*mut FutureHandle> = Vec::with_capacity(n);
+            for &h_addr in &sub_handles {
+                let h = h_addr as *mut FutureHandle;
+                fh_ptrs.push(h);
+                if h.is_null() {
+                    continue;
                 }
-
-                // Phase 2: Await each, build Haxe Array of raw results
-                let mut result_arr = crate::haxe_array::HaxeArray {
-                    ptr: ptr::null_mut(),
-                    len: 0,
-                    cap: 0,
-                    elem_size: 8,
-                };
-                crate::haxe_array::haxe_array_new(&mut result_arr, 8);
-
-                for &h in &fh_ptrs {
-                    let raw_val: i64 = if h.is_null() {
-                        0
-                    } else {
-                        let future = unsafe { &*h };
-                        let mut val = future.value.lock().unwrap();
-                        while future.state.load(Ordering::Acquire) != STATE_RESOLVED {
-                            val = future.cvar.wait(val).unwrap();
-                        }
-                        *val
-                    };
-                    crate::haxe_array::haxe_array_push(
-                        &mut result_arr,
-                        &raw_val as *const i64 as *const u8,
-                    );
-                }
-
-                // Store full 64-bit Array* in the outer FutureHandle
-                let arr_box = Box::new(result_arr);
-                let arr_ptr_i64 = Box::into_raw(arr_box) as i64;
-                let outer = unsafe { &*(handle_addr as *const FutureHandle) };
+                let future = unsafe { &*h };
+                if future
+                    .state
+                    .compare_exchange(
+                        STATE_PENDING,
+                        STATE_RUNNING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
                 {
-                    let mut val = outer.value.lock().unwrap();
-                    *val = arr_ptr_i64;
+                    spawn_future(future, h);
                 }
-                outer.state.store(STATE_RESOLVED, Ordering::Release);
-                outer.cvar.notify_all();
+            }
 
-                // Call .then() callback if registered
-                let then_fn = outer.then_fn.load(Ordering::Acquire);
-                if !then_fn.is_null() {
-                    let then_env = outer.then_env.load(Ordering::Acquire);
-                    type CallbackFn = extern "C" fn(*const u8, *mut u8);
-                    let callback: CallbackFn =
-                        unsafe { std::mem::transmute(then_fn as usize) };
-                    callback(then_env, arr_ptr_i64 as *mut u8);
-                }
-            }));
+            // Phase 2: Await each, build Haxe Array of raw results
+            let mut result_arr = crate::haxe_array::HaxeArray {
+                ptr: ptr::null_mut(),
+                len: 0,
+                cap: 0,
+                elem_size: 8,
+            };
+            crate::haxe_array::haxe_array_new(&mut result_arr, 8);
+
+            for &h in &fh_ptrs {
+                let raw_val: i64 = if h.is_null() {
+                    0
+                } else {
+                    let future = unsafe { &*h };
+                    let mut val = future.value.lock().unwrap();
+                    while future.state.load(Ordering::Acquire) != STATE_RESOLVED {
+                        val = future.cvar.wait(val).unwrap();
+                    }
+                    *val
+                };
+                crate::haxe_array::haxe_array_push(
+                    &mut result_arr,
+                    &raw_val as *const i64 as *const u8,
+                );
+            }
+
+            // Store full 64-bit Array* in the outer FutureHandle
+            let arr_box = Box::new(result_arr);
+            let arr_ptr_i64 = Box::into_raw(arr_box) as i64;
+            let outer = unsafe { &*(handle_addr as *const FutureHandle) };
+            {
+                let mut val = outer.value.lock().unwrap();
+                *val = arr_ptr_i64;
+            }
+            outer.state.store(STATE_RESOLVED, Ordering::Release);
+            outer.cvar.notify_all();
+
+            // Call .then() callback if registered
+            let then_fn = outer.then_fn.load(Ordering::Acquire);
+            if !then_fn.is_null() {
+                let then_env = outer.then_env.load(Ordering::Acquire);
+                type CallbackFn = extern "C" fn(*const u8, *mut u8);
+                let callback: CallbackFn = unsafe { std::mem::transmute(then_fn as usize) };
+                callback(then_env, arr_ptr_i64 as *mut u8);
+            }
+        }));
 
         if coordinating_result.is_err() {
             // Panic in coordinating thread — resolve outer handle so .await() doesn't hang
@@ -548,7 +545,7 @@ pub extern "C" fn rayzor_future_race(arr_ptr: *const u8) -> *mut u8 {
 
     // Read the Haxe Array of sub-future handles (same layout as Future.all)
     let arr = unsafe { &*(arr_ptr as *const crate::haxe_array::HaxeArray) };
-    let n = arr.len as usize;
+    let n = arr.len;
 
     if n == 0 {
         return ptr::null_mut();
@@ -585,69 +582,61 @@ pub extern "C" fn rayzor_future_race(arr_ptr: *const u8) -> *mut u8 {
     thread::spawn(move || {
         crate::concurrency::arm64_jit_barrier();
 
-        let coordinating_result =
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                // Phase 1: Spawn ALL sub-futures
-                let mut fh_ptrs: Vec<*mut FutureHandle> = Vec::with_capacity(n);
-                for &h_addr in &sub_handles {
-                    let h = h_addr as *mut FutureHandle;
-                    fh_ptrs.push(h);
+        let coordinating_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Phase 1: Spawn ALL sub-futures
+            let mut fh_ptrs: Vec<*mut FutureHandle> = Vec::with_capacity(n);
+            for &h_addr in &sub_handles {
+                let h = h_addr as *mut FutureHandle;
+                fh_ptrs.push(h);
+                if h.is_null() {
+                    continue;
+                }
+                let future = unsafe { &*h };
+                if future
+                    .state
+                    .compare_exchange(
+                        STATE_PENDING,
+                        STATE_RUNNING,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    )
+                    .is_ok()
+                {
+                    spawn_future(future, h);
+                }
+            }
+
+            // Phase 2: Poll until any resolves
+            loop {
+                for &h in &fh_ptrs {
                     if h.is_null() {
                         continue;
                     }
                     let future = unsafe { &*h };
-                    if future
-                        .state
-                        .compare_exchange(
-                            STATE_PENDING,
-                            STATE_RUNNING,
-                            Ordering::AcqRel,
-                            Ordering::Acquire,
-                        )
-                        .is_ok()
-                    {
-                        spawn_future(future, h);
+                    if future.state.load(Ordering::Acquire) == STATE_RESOLVED {
+                        // First to resolve — grab its value
+                        let val = *future.value.lock().unwrap();
+                        let outer = unsafe { &*(handle_addr as *const FutureHandle) };
+
+                        // Propagate error if the winner had one
+                        if future.has_error.load(Ordering::Acquire) {
+                            let exc_val = *future.error_value.lock().unwrap();
+                            let exc_tid = future.error_type_id.load(Ordering::Acquire);
+                            *outer.error_value.lock().unwrap() = exc_val;
+                            outer.error_type_id.store(exc_tid, Ordering::Release);
+                            outer.has_error.store(true, Ordering::Release);
+                        } else {
+                            *outer.value.lock().unwrap() = val;
+                        }
+
+                        outer.state.store(STATE_RESOLVED, Ordering::Release);
+                        outer.cvar.notify_all();
+                        return;
                     }
                 }
-
-                // Phase 2: Poll until any resolves
-                loop {
-                    for &h in &fh_ptrs {
-                        if h.is_null() {
-                            continue;
-                        }
-                        let future = unsafe { &*h };
-                        if future.state.load(Ordering::Acquire) == STATE_RESOLVED {
-                            // First to resolve — grab its value
-                            let val = *future.value.lock().unwrap();
-                            let outer =
-                                unsafe { &*(handle_addr as *const FutureHandle) };
-
-                            // Propagate error if the winner had one
-                            if future.has_error.load(Ordering::Acquire) {
-                                let exc_val =
-                                    *future.error_value.lock().unwrap();
-                                let exc_tid =
-                                    future.error_type_id.load(Ordering::Acquire);
-                                *outer.error_value.lock().unwrap() = exc_val;
-                                outer
-                                    .error_type_id
-                                    .store(exc_tid, Ordering::Release);
-                                outer.has_error.store(true, Ordering::Release);
-                            } else {
-                                *outer.value.lock().unwrap() = val;
-                            }
-
-                            outer
-                                .state
-                                .store(STATE_RESOLVED, Ordering::Release);
-                            outer.cvar.notify_all();
-                            return;
-                        }
-                    }
-                    thread::sleep(std::time::Duration::from_millis(1));
-                }
-            }));
+                thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }));
 
         if coordinating_result.is_err() {
             let outer = unsafe { &*(handle_addr as *const FutureHandle) };

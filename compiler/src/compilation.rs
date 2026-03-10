@@ -4841,7 +4841,50 @@ fn collect_qualified_type_refs_from_ast(ast: &parser::HaxeFile, out: &mut Vec<St
                     collect_from_expr(a, seen, out);
                 }
             }
-            ExprKind::Field { expr: obj, .. } => {
+            ExprKind::Field {
+                expr: obj, field, ..
+            } => {
+                // Try to extract qualified type reference from field chains like
+                // `rayzor.concurrent.Thread.spawn()` → import "rayzor.concurrent.Thread"
+                // Walk the chain collecting segments; if the base is a lowercase ident
+                // (package root), reconstruct the qualified path up to the last
+                // capitalized segment (class name).
+                let mut segments = vec![field.as_str()];
+                let mut cur = obj.as_ref();
+                loop {
+                    match &cur.kind {
+                        ExprKind::Field {
+                            expr: inner,
+                            field: seg,
+                            ..
+                        } => {
+                            segments.push(seg.as_str());
+                            cur = inner.as_ref();
+                        }
+                        ExprKind::Ident(name) => {
+                            segments.push(name.as_str());
+                            break;
+                        }
+                        _ => break,
+                    }
+                }
+                segments.reverse();
+                // Need at least 3 segments: package.Class.method
+                // Find the last capitalized segment (class name)
+                if segments.len() >= 3 {
+                    if let Some(class_idx) = segments
+                        .iter()
+                        .rposition(|s| s.chars().next().map_or(false, |c| c.is_uppercase()))
+                    {
+                        // Everything before and including class_idx is the qualified type
+                        if class_idx >= 1 {
+                            let qualified = segments[..=class_idx].join(".");
+                            if seen.insert(qualified.clone()) {
+                                out.push(qualified);
+                            }
+                        }
+                    }
+                }
                 collect_from_expr(obj, seen, out);
             }
             ExprKind::If {
