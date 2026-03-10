@@ -39,8 +39,8 @@ pub mod generic_vec;
 pub mod anon_object; // Anonymous object runtime (Arc-based, COW)
 pub mod concurrency; // Concurrency primitives (Thread, Arc, Mutex, Channel)
 pub mod ereg; // EReg regular expressions (regex crate)
-pub mod future; // Future<T> — lazy async futures
 pub mod exception;
+pub mod future; // Future<T> — lazy async futures
 // Note: ArrayIterator/ArrayKeyValueIterator are compiled as regular Haxe classes.
 // The array_iterator module is kept for potential future use but not registered.
 pub mod haxe_array; // Dynamic Array API

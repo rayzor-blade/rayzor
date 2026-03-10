@@ -143,7 +143,12 @@ pub extern "C" fn rayzor_future_await(handle: *mut u8) -> *mut u8 {
     // Try to transition Pending → Running (we do the spawn)
     if future
         .state
-        .compare_exchange(STATE_PENDING, STATE_RUNNING, Ordering::AcqRel, Ordering::Acquire)
+        .compare_exchange(
+            STATE_PENDING,
+            STATE_RUNNING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
         .is_ok()
     {
         spawn_future(future, handle as *mut FutureHandle);
@@ -177,12 +182,8 @@ pub extern "C" fn rayzor_future_then(handle: *mut u8, cb_fn: *const u8, cb_env: 
     let future = unsafe { &*(handle as *const FutureHandle) };
 
     // Store the callback
-    future
-        .then_fn
-        .store(cb_fn as *mut u8, Ordering::Release);
-    future
-        .then_env
-        .store(cb_env as *mut u8, Ordering::Release);
+    future.then_fn.store(cb_fn as *mut u8, Ordering::Release);
+    future.then_env.store(cb_env as *mut u8, Ordering::Release);
 
     let current_state = future.state.load(Ordering::Acquire);
 
@@ -271,8 +272,7 @@ mod tests {
 
     #[test]
     fn test_create_and_await() {
-        let handle =
-            rayzor_future_create(simple_return_42 as *const u8, ptr::null());
+        let handle = rayzor_future_create(simple_return_42 as *const u8, ptr::null());
         assert!(!handle.is_null());
 
         let result = unbox_result(rayzor_future_await(handle));
@@ -285,8 +285,7 @@ mod tests {
 
     #[test]
     fn test_lazy_not_started() {
-        let handle =
-            rayzor_future_create(simple_return_42 as *const u8, ptr::null());
+        let handle = rayzor_future_create(simple_return_42 as *const u8, ptr::null());
         assert!(!handle.is_null());
 
         // Should be pending (not started)
@@ -305,10 +304,7 @@ mod tests {
     #[test]
     fn test_with_environment() {
         let env: [i64; 2] = [10, 20];
-        let handle = rayzor_future_create(
-            add_env_values as *const u8,
-            env.as_ptr() as *const u8,
-        );
+        let handle = rayzor_future_create(add_env_values as *const u8, env.as_ptr() as *const u8);
 
         let result = unbox_result(rayzor_future_await(handle));
         assert_eq!(result, 30);
@@ -320,10 +316,8 @@ mod tests {
 
     #[test]
     fn test_multiple_futures() {
-        let h1 =
-            rayzor_future_create(simple_return_42 as *const u8, ptr::null());
-        let h2 =
-            rayzor_future_create(simple_return_42 as *const u8, ptr::null());
+        let h1 = rayzor_future_create(simple_return_42 as *const u8, ptr::null());
+        let h2 = rayzor_future_create(simple_return_42 as *const u8, ptr::null());
 
         let r1 = unbox_result(rayzor_future_await(h1));
         let r2 = unbox_result(rayzor_future_await(h2));
