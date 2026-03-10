@@ -323,6 +323,8 @@ impl SymbolFlags {
     pub const GPU_STRUCT: Self = Self(1 << 16);
     /// @:keep - preserve symbol even if seemingly unreachable (skip DCE)
     pub const KEEP: Self = Self(1 << 17);
+    /// @:notNull - value is guaranteed non-null (enables null safety checks)
+    pub const NOT_NULL: Self = Self(1 << 18);
 
     pub const fn empty() -> Self {
         Self::NONE

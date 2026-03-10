@@ -3084,6 +3084,23 @@ impl HaxeCompilationPipeline {
                         format!("Effect mismatch: expected {}, got {}", expected, actual),
                         ErrorCategory::TypeError,
                     ),
+                    FlowSafetyError::NullAssignedToNotNull {
+                        variable,
+                        location: _,
+                    } => (
+                        format!("Cannot assign null to @:notNull variable: {:?}", variable),
+                        ErrorCategory::TypeError,
+                    ),
+                    FlowSafetyError::NullableAssignedToNotNull {
+                        variable,
+                        location: _,
+                    } => (
+                        format!(
+                            "Cannot assign potentially-null value to @:notNull variable: {:?}",
+                            variable
+                        ),
+                        ErrorCategory::TypeError,
+                    ),
                 };
 
                 let location = match &err {
@@ -3094,7 +3111,11 @@ impl HaxeCompilationPipeline {
                     | FlowSafetyError::DeadCode { location }
                     | FlowSafetyError::ResourceLeak { location, .. }
                     | FlowSafetyError::DanglingReference { location, .. }
-                    | FlowSafetyError::InvalidBorrow { location, .. } => location.clone(),
+                    | FlowSafetyError::InvalidBorrow { location, .. }
+                    | FlowSafetyError::NullAssignedToNotNull { location, .. }
+                    | FlowSafetyError::NullableAssignedToNotNull { location, .. } => {
+                        location.clone()
+                    }
                     FlowSafetyError::UseAfterFree { use_location, .. }
                     | FlowSafetyError::UseAfterMove { use_location, .. } => use_location.clone(),
                     FlowSafetyError::TypeError { .. } => {

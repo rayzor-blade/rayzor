@@ -130,6 +130,18 @@ pub enum TypeErrorKind {
 
     /// Send/Sync concurrency violation
     SendSyncViolation { type_name: String, reason: String },
+
+    /// Assigning null to a @:notNull variable
+    NullAssignmentToNonNull { variable_name: String },
+
+    /// Passing nullable value to @:notNull parameter
+    NullableToNonNullParam {
+        param_name: String,
+        function_name: String,
+    },
+
+    /// Returning nullable value from @:notNull function
+    NullableReturn { function_name: String },
 }
 
 /// Access levels for visibility checking

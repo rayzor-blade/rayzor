@@ -7,6 +7,7 @@ use crate::tast::{
     control_flow_analysis::{BlockId, ControlFlowGraph, VariableState},
     core::TypeKind,
     node::{BinaryOperator, TypedExpression, TypedExpressionKind, TypedFunction, TypedStatement},
+    symbols::SymbolFlags,
     SourceLocation, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
@@ -64,6 +65,10 @@ pub enum NullViolationKind {
     NullArgumentToNonNullable,
     /// Returning null from non-nullable function
     NullReturnFromNonNullable,
+    /// Assigning null literal to @:notNull variable
+    NullAssignedToNotNull,
+    /// Assigning potentially-null value to @:notNull variable
+    NullableAssignedToNotNull,
 }
 
 /// Null safety analyzer
@@ -80,6 +85,9 @@ pub struct NullSafetyAnalyzer<'a> {
     violations: Vec<NullSafetyViolation>,
     /// Null checks found in the code
     null_checks: HashMap<BlockId, Vec<NullCheck>>,
+    /// Scoped null narrowing stack — branch-sensitive refinements.
+    /// Each entry maps a variable to its narrowed NullState within the current scope.
+    narrowing_stack: Vec<HashMap<SymbolId, NullState>>,
 }
 
 impl<'a> NullSafetyAnalyzer<'a> {
@@ -96,6 +104,7 @@ impl<'a> NullSafetyAnalyzer<'a> {
             null_states: HashMap::new(),
             violations: Vec::new(),
             null_checks: HashMap::new(),
+            narrowing_stack: Vec::new(),
         }
     }
 
@@ -116,6 +125,15 @@ impl<'a> NullSafetyAnalyzer<'a> {
         std::mem::take(&mut self.violations)
     }
 
+    /// Check if a symbol has @:notNull metadata
+    fn is_symbol_not_null(&self, symbol_id: SymbolId) -> bool {
+        if let Some(sym) = self.symbol_table.get_symbol(symbol_id) {
+            sym.flags.contains(SymbolFlags::NOT_NULL)
+        } else {
+            false
+        }
+    }
+
     /// Initialize null states for function parameters
     fn initialize_parameter_states(&mut self, function: &TypedFunction) {
         let entry_block = self.cfg.entry_block;
@@ -123,7 +141,10 @@ impl<'a> NullSafetyAnalyzer<'a> {
         // Collect parameter states first
         let mut param_states = HashMap::new();
         for param in &function.parameters {
-            let null_state = if self.is_nullable_type(param.param_type) {
+            let null_state = if self.is_symbol_not_null(param.symbol_id) {
+                // @:notNull parameters are guaranteed non-null
+                NullState::NotNull
+            } else if self.is_nullable_type(param.param_type) {
                 NullState::MaybeNull
             } else {
                 NullState::NotNull
@@ -139,10 +160,14 @@ impl<'a> NullSafetyAnalyzer<'a> {
         entry_states.extend(param_states);
     }
 
-    /// Check if a type is nullable
+    /// Check if a type is nullable, considering @:notNull flags
     fn is_nullable_type(&self, type_id: TypeId) -> bool {
         let type_table = self.type_table.borrow();
         if let Some(type_info) = type_table.get(type_id) {
+            // @:notNull types are never nullable
+            if type_info.flags.is_non_null {
+                return false;
+            }
             match &type_info.kind {
                 TypeKind::Optional { .. } => true,
                 TypeKind::Dynamic => true, // Dynamic is always potentially null
@@ -382,6 +407,33 @@ impl<'a> NullSafetyAnalyzer<'a> {
                 self.check_violations_in_expression(expression);
             }
             TypedStatement::Assignment { target, value, .. } => {
+                // Check for null assignment to @:notNull variable
+                if let Some(var_id) = self.extract_variable_from_expression(target) {
+                    if self.is_symbol_not_null(var_id) {
+                        if self.is_null_literal(value) {
+                            self.violations.push(NullSafetyViolation {
+                                variable: var_id,
+                                violation_kind: NullViolationKind::NullAssignedToNotNull,
+                                location: value.source_location,
+                                suggestion: Some(
+                                    "Cannot assign null to @:notNull variable".to_string(),
+                                ),
+                            });
+                        } else if let Some(rhs_var) = self.extract_variable_from_expression(value) {
+                            if self.is_potentially_null(rhs_var) {
+                                self.violations.push(NullSafetyViolation {
+                                    variable: var_id,
+                                    violation_kind: NullViolationKind::NullableAssignedToNotNull,
+                                    location: value.source_location,
+                                    suggestion: Some(
+                                        "Add null check before assigning to @:notNull variable"
+                                            .to_string(),
+                                    ),
+                                });
+                            }
+                        }
+                    }
+                }
                 self.check_violations_in_expression(target);
                 self.check_violations_in_expression(value);
             }
@@ -392,9 +444,44 @@ impl<'a> NullSafetyAnalyzer<'a> {
                 ..
             } => {
                 self.check_violations_in_expression(condition);
-                self.check_violations_in_statement(then_branch, function);
-                if let Some(else_stmt) = else_branch {
-                    self.check_violations_in_statement(else_stmt, function);
+
+                // Branch-sensitive null narrowing:
+                // if (x != null) { then: x is NotNull } else { else: x is Null }
+                // if (x == null) { then: x is Null } else { else: x is NotNull }
+                if let Some((var_id, is_not_null_check)) =
+                    self.extract_null_check_from_condition(condition)
+                {
+                    // then-branch narrowing
+                    let then_state = if is_not_null_check {
+                        NullState::NotNull
+                    } else {
+                        NullState::Null
+                    };
+                    let mut then_refinements = HashMap::new();
+                    then_refinements.insert(var_id, then_state);
+                    self.push_narrowing(then_refinements);
+                    self.check_violations_in_statement(then_branch, function);
+                    self.pop_narrowing();
+
+                    // else-branch narrowing (inverse)
+                    if let Some(else_stmt) = else_branch {
+                        let else_state = if is_not_null_check {
+                            NullState::Null
+                        } else {
+                            NullState::NotNull
+                        };
+                        let mut else_refinements = HashMap::new();
+                        else_refinements.insert(var_id, else_state);
+                        self.push_narrowing(else_refinements);
+                        self.check_violations_in_statement(else_stmt, function);
+                        self.pop_narrowing();
+                    }
+                } else {
+                    // No null check in condition — analyze branches without narrowing
+                    self.check_violations_in_statement(then_branch, function);
+                    if let Some(else_stmt) = else_branch {
+                        self.check_violations_in_statement(else_stmt, function);
+                    }
                 }
             }
             TypedStatement::While {
@@ -509,8 +596,74 @@ impl<'a> NullSafetyAnalyzer<'a> {
         }
     }
 
-    /// Check if a variable is potentially null
+    /// Push a narrowing scope with refined null states
+    fn push_narrowing(&mut self, refinements: HashMap<SymbolId, NullState>) {
+        self.narrowing_stack.push(refinements);
+    }
+
+    /// Pop the current narrowing scope
+    fn pop_narrowing(&mut self) {
+        self.narrowing_stack.pop();
+    }
+
+    /// Get the narrowed state for a variable, checking the narrowing stack top-down
+    fn get_narrowed_state(&self, var_id: SymbolId) -> Option<NullState> {
+        for scope in self.narrowing_stack.iter().rev() {
+            if let Some(&state) = scope.get(&var_id) {
+                return Some(state);
+            }
+        }
+        None
+    }
+
+    /// Extract null check info from a condition expression.
+    /// Returns (variable, is_not_null_check) — true if `x != null`, false if `x == null`.
+    fn extract_null_check_from_condition(
+        &self,
+        condition: &TypedExpression,
+    ) -> Option<(SymbolId, bool)> {
+        match &condition.kind {
+            TypedExpressionKind::BinaryOp {
+                left,
+                right,
+                operator,
+            } if matches!(operator, BinaryOperator::Eq | BinaryOperator::Ne) => {
+                let is_ne = matches!(operator, BinaryOperator::Ne);
+                // x != null or x == null
+                if let (Some(var_id), true) = (
+                    self.extract_variable_from_expression(left),
+                    self.is_null_literal(right),
+                ) {
+                    return Some((var_id, is_ne));
+                }
+                // null != x or null == x
+                if let (Some(var_id), true) = (
+                    self.extract_variable_from_expression(right),
+                    self.is_null_literal(left),
+                ) {
+                    return Some((var_id, is_ne));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Check if a variable is potentially null, respecting narrowing scopes
     fn is_potentially_null(&self, var_id: SymbolId) -> bool {
+        // First check narrowing stack — branch-sensitive refinements take priority
+        if let Some(narrowed) = self.get_narrowed_state(var_id) {
+            return matches!(
+                narrowed,
+                NullState::Null | NullState::MaybeNull | NullState::Uninitialized
+            );
+        }
+
+        // Then check @:notNull flag on the symbol
+        if self.is_symbol_not_null(var_id) {
+            return false;
+        }
+
         // Check across all blocks (simplified - should check current block context)
         for states in self.null_states.values() {
             if let Some(state) = states.get(&var_id) {
@@ -562,6 +715,12 @@ pub fn suggest_null_safety_fixes(violations: &[NullSafetyViolation]) -> Vec<Stri
             }
             NullViolationKind::NullReturnFromNonNullable => {
                 format!("Return non-null value or change return type to optional")
+            }
+            NullViolationKind::NullAssignedToNotNull => {
+                format!("Cannot assign null to @:notNull variable; use a non-null value")
+            }
+            NullViolationKind::NullableAssignedToNotNull => {
+                format!("Add a null check before assigning to @:notNull variable")
             }
         };
 
