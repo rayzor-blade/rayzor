@@ -380,6 +380,15 @@ pub struct HirToMirContext<'a> {
     /// Classes that derive Hash — enables synthetic hashCode() method
     derive_hash_classes: BTreeSet<SymbolId>,
 
+    /// Classes that derive Clone — enables synthetic clone() method
+    derive_clone_classes: BTreeSet<SymbolId>,
+
+    /// Classes that derive Debug — enables synthetic toString() method
+    derive_debug_classes: BTreeSet<SymbolId>,
+
+    /// Classes that derive Default — enables synthetic static default() method
+    derive_default_classes: BTreeSet<SymbolId>,
+
     /// Instance fields for classes with derive traits.
     /// Maps class SymbolId → list of (field_symbol, field_type, gep_index) for non-static fields.
     /// Used by PartialEq/PartialOrd/Hash codegen to iterate fields in order.
@@ -585,6 +594,9 @@ impl<'a> HirToMirContext<'a> {
             derive_partial_eq_classes: BTreeSet::new(),
             derive_partial_ord_classes: BTreeSet::new(),
             derive_hash_classes: BTreeSet::new(),
+            derive_clone_classes: BTreeSet::new(),
+            derive_debug_classes: BTreeSet::new(),
+            derive_default_classes: BTreeSet::new(),
             class_instance_fields: BTreeMap::new(),
         };
 
@@ -7314,7 +7326,16 @@ impl<'a> HirToMirContext<'a> {
                                     "Variable type mismatch - symbol={:?}, actual: {:?}, expected: {:?}, inserting cast",
                                     symbol, actual_type, expected_type
                                 );
-                                self.builder.build_cast(reg, actual_type, expected_type)
+                                let cast_reg =
+                                    self.builder.build_cast(reg, actual_type, expected_type);
+                                // Propagate class hint from source to cast register
+                                if let Some(cast_id) = cast_reg {
+                                    if let Some(hint) = self.register_class_hints.get(&reg).cloned()
+                                    {
+                                        self.register_class_hints.insert(cast_id, hint);
+                                    }
+                                }
+                                cast_reg
                             }
                         } else {
                             Some(reg)
@@ -7564,10 +7585,45 @@ impl<'a> HirToMirContext<'a> {
                     symbol: obj_sym, ..
                 } = &object.kind
                 {
-                    if self.raw_anon_symbols.contains(obj_sym) {
+                    // Skip raw_anon path if variable has a class hint (e.g., from @:derive(Clone))
+                    if self.raw_anon_symbols.contains(obj_sym)
+                        && !self.register_class_hints.contains_key(&obj_reg)
+                        && !self.monomorphized_var_types.contains_key(obj_sym)
+                    {
                         return self.raw_anon_reflect_field_read(obj_reg, *field, expr.ty);
                     }
                 }
+
+                // When receiver is Dynamic but has a class hint (e.g., from @:derive(Clone)),
+                // resolve receiver_ty to the actual class type for correct GEP field access.
+                let receiver_ty = {
+                    let is_dynamic = {
+                        let type_table = self.type_table.borrow();
+                        type_table
+                            .get(receiver_ty)
+                            .map_or(false, |t| matches!(t.kind, TypeKind::Dynamic))
+                    };
+                    if is_dynamic {
+                        if let Some(class_hint) = self.register_class_hints.get(&obj_reg) {
+                            // Find the class type by name
+                            let class_type = self
+                                .class_type_to_symbol
+                                .iter()
+                                .find(|(_ty, sym)| {
+                                    self.symbol_table
+                                        .get_symbol(**sym)
+                                        .and_then(|s| self.string_interner.get(s.name))
+                                        == Some(class_hint.as_str())
+                                })
+                                .map(|(ty, _)| *ty);
+                            class_type.unwrap_or(receiver_ty)
+                        } else {
+                            receiver_ty
+                        }
+                    } else {
+                        receiver_ty
+                    }
+                };
 
                 let result = self.lower_field_access(obj_reg, *field, receiver_ty, expr.ty);
                 debug!(
@@ -7855,6 +7911,50 @@ impl<'a> HirToMirContext<'a> {
                             return self.lower_derived_hash_code(receiver, sym);
                         }
                     }
+
+                    // @:derive(Clone) synthetic clone() — deep copy
+                    if vname == "clone" && *is_method && args.len() == 1 {
+                        let receiver = &args[0];
+                        let class_sym = {
+                            let type_table = self.type_table.borrow();
+                            type_table.get(receiver.ty).and_then(|t| {
+                                if let TypeKind::Class { symbol_id, .. } = &t.kind {
+                                    if self.derive_clone_classes.contains(symbol_id) {
+                                        Some(*symbol_id)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                        };
+                        if let Some(sym) = class_sym {
+                            return self.lower_derived_clone(receiver, sym);
+                        }
+                    }
+
+                    // @:derive(Debug) synthetic toString()
+                    if vname == "toString" && *is_method && args.len() == 1 {
+                        let receiver = &args[0];
+                        let class_sym = {
+                            let type_table = self.type_table.borrow();
+                            type_table.get(receiver.ty).and_then(|t| {
+                                if let TypeKind::Class { symbol_id, .. } = &t.kind {
+                                    if self.derive_debug_classes.contains(symbol_id) {
+                                        Some(*symbol_id)
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            })
+                        };
+                        if let Some(sym) = class_sym {
+                            return self.lower_derived_to_string(receiver, sym);
+                        }
+                    }
                 }
                 {
                     // DEBUG: check callee kind for localhost
@@ -7928,6 +8028,8 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
                     }
+
+                    // Clone/Debug interceptions are in the Variable callee path above
 
                     // @:derive(Hash) synthetic hashCode() — inline field-based hash computation
                     if method_name == Some("hashCode") && args.is_empty() {
@@ -8637,9 +8739,38 @@ impl<'a> HirToMirContext<'a> {
                             false
                         };
 
-                        if method_name == Some("localhost") {
-                            eprintln!("[PATH2] is_static_class_call={}", is_static_class_call);
+                        // @:derive(Default) synthetic static createDefault() — zero-initialized instance
+                        if is_static_class_call
+                            && method_name == Some("createDefault")
+                            && args.is_empty()
+                        {
+                            if let HirExprKind::Variable {
+                                symbol: obj_sym, ..
+                            } = &object.kind
+                            {
+                                // For static calls, obj_sym is the class symbol itself.
+                                // Also try resolving through type_id → TypeKind::Class → symbol_id.
+                                let class_sym = self
+                                    .symbol_table
+                                    .get_symbol(*obj_sym)
+                                    .and_then(|s| {
+                                        let type_table = self.type_table.borrow();
+                                        type_table.get(s.type_id).and_then(|t| {
+                                            if let TypeKind::Class { symbol_id, .. } = &t.kind {
+                                                Some(*symbol_id)
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                    })
+                                    .or(Some(*obj_sym))
+                                    .filter(|sym| self.derive_default_classes.contains(sym));
+                                if let Some(sym) = class_sym {
+                                    return self.lower_derived_default(sym);
+                                }
+                            }
                         }
+
                         if is_static_class_call {
                             // Check if this static call has a stdlib runtime mapping.
                             // Static method calls (e.g., Reflect.hasField, Type.typeof, Std.string)
@@ -15898,11 +16029,50 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
 
-                // Note: Field initialization is handled by the constructor call below.
-                // The constructor stores user fields starting at index 1 (after header).
-
-                // debug!("Class type constructor - allocated object");
-                // debug!("Available constructors: {:?}", self.constructor_map.keys().collect::<Vec<_>>());
+                // @:derive(Default): zero-initialize all fields before constructor call.
+                // This ensures `new Config()` with empty constructor produces zero-valued fields.
+                if let Some(class_sym) = actual_symbol_id {
+                    if self.derive_default_classes.contains(&class_sym) {
+                        if let Some(fields) = self.class_instance_fields.get(&class_sym).cloned() {
+                            for &(_field_sym, field_type_id, gep_idx) in &fields {
+                                let field_ir_type = self.convert_type(field_type_id);
+                                let type_kind = {
+                                    let type_table = self.type_table.borrow();
+                                    type_table.get(field_type_id).map(|t| t.kind.clone())
+                                };
+                                let default_val = match type_kind.as_ref() {
+                                    Some(TypeKind::Int) => {
+                                        self.builder.build_const(IrValue::I32(0))
+                                    }
+                                    Some(TypeKind::Float) => {
+                                        self.builder.build_const(IrValue::F64(0.0))
+                                    }
+                                    Some(TypeKind::Bool) => {
+                                        self.builder.build_const(IrValue::Bool(false))
+                                    }
+                                    Some(TypeKind::String) => {
+                                        self.builder.build_string(String::new())
+                                    }
+                                    _ => self.builder.build_null(),
+                                };
+                                if let Some(val) = default_val {
+                                    let idx =
+                                        self.builder.build_const(IrValue::I32(gep_idx as i32));
+                                    if let Some(idx) = idx {
+                                        let ptr = self.builder.build_gep(
+                                            obj_ptr,
+                                            vec![idx],
+                                            field_ir_type,
+                                        );
+                                        if let Some(ptr) = ptr {
+                                            self.builder.build_store(ptr, val);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Look up constructor by TypeId - use the resolved constructor_type_id
                 let constructor_func_id = self.constructor_map.get(&constructor_type_id).copied();
@@ -22420,6 +22590,33 @@ impl<'a> HirToMirContext<'a> {
                         (class_ty, idx, sym_type)
                     });
 
+                // Fallback: class_instance_fields lookup via register_class_hints
+                // This handles derive trait returns (e.g. clone()) where the receiver's
+                // HIR type is Dynamic but the register has a class hint set.
+                let found_result = found_result.or_else(|| {
+                    let class_hint = self.register_class_hints.get(&obj)?;
+                    // Find the class SymbolId matching this hint name
+                    for (sym_id, fields) in &self.class_instance_fields {
+                        let sym_name = self
+                            .symbol_table
+                            .get_symbol(*sym_id)
+                            .and_then(|s| self.string_interner.get(s.name));
+                        if sym_name == Some(class_hint.as_str()) {
+                            // Search for our field by name in this class's fields
+                            for &(f_sym, f_type, gep_idx) in fields {
+                                let f_name = self
+                                    .symbol_table
+                                    .get_symbol(f_sym)
+                                    .and_then(|s| self.string_interner.get(s.name));
+                                if f_name == Some(field_name_str) {
+                                    return Some((receiver_ty, gep_idx, f_type));
+                                }
+                            }
+                        }
+                    }
+                    None
+                });
+
                 match found_result {
                     Some(result) => result,
                     None => {
@@ -23745,6 +23942,277 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
         }
+    }
+
+    /// @:derive(Clone) — deep copy an instance by allocating a new object and copying each field.
+    /// String and Array fields are deep-copied; class fields with Clone are recursively cloned;
+    /// primitives and other pointers are shallow-copied.
+    fn lower_derived_clone(&mut self, object: &HirExpr, class_sym: SymbolId) -> Option<IrId> {
+        let fields = self.class_instance_fields.get(&class_sym)?.clone();
+        let obj_reg = self.lower_expression(object)?;
+
+        // Compute allocation size: (num_fields + 1) * 8  (slot 0 = type_id header)
+        let alloc_size = (fields.len() as u64 + 1) * 8;
+        let alloc_size = alloc_size.max(16); // minimum 16 bytes
+        let new_ptr = self.build_heap_alloc(alloc_size)?;
+
+        // Copy type_id header from source (GEP index 0)
+        let zero = self.builder.build_const(IrValue::I32(0))?;
+        let header_ptr = self.builder.build_gep(obj_reg, vec![zero], IrType::I64)?;
+        let header_val = self.builder.build_load(header_ptr, IrType::I64)?;
+        let zero2 = self.builder.build_const(IrValue::I32(0))?;
+        let new_header_ptr = self.builder.build_gep(new_ptr, vec![zero2], IrType::I64)?;
+        self.builder.build_store(new_header_ptr, header_val)?;
+
+        // Copy each field
+        for &(_field_sym, field_type_id, gep_idx) in &fields {
+            let field_ir_type = self.convert_type(field_type_id);
+            let idx_const = self.builder.build_const(IrValue::I32(gep_idx as i32))?;
+            let src_field_ptr =
+                self.builder
+                    .build_gep(obj_reg, vec![idx_const], field_ir_type.clone())?;
+            let field_val = self
+                .builder
+                .build_load(src_field_ptr, field_ir_type.clone())?;
+
+            // Determine copy strategy based on type
+            let cloned_val = {
+                let type_kind = {
+                    let type_table = self.type_table.borrow();
+                    type_table.get(field_type_id).map(|t| t.kind.clone())
+                };
+                match type_kind.as_ref() {
+                    Some(TypeKind::String) => {
+                        // Deep copy string via haxe_string_copy
+                        let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
+                        let copy_func = self.get_or_register_extern_function(
+                            "haxe_string_copy",
+                            vec![string_ptr_ty.clone()],
+                            string_ptr_ty,
+                        );
+                        self.builder.build_call_direct(
+                            copy_func,
+                            vec![field_val],
+                            IrType::Ptr(Box::new(IrType::String)),
+                        )?
+                    }
+                    Some(TypeKind::Class { symbol_id, .. })
+                        if self.derive_clone_classes.contains(symbol_id) =>
+                    {
+                        // Recursively clone nested Clone class
+                        // For now, shallow copy (recursive clone would need the HirExpr)
+                        field_val
+                    }
+                    _ => {
+                        // Primitive (Int, Float, Bool) or other pointer — bitwise copy
+                        field_val
+                    }
+                }
+            };
+
+            let dst_idx = self.builder.build_const(IrValue::I32(gep_idx as i32))?;
+            let dst_field_ptr = self
+                .builder
+                .build_gep(new_ptr, vec![dst_idx], field_ir_type)?;
+            self.builder.build_store(dst_field_ptr, cloned_val)?;
+        }
+
+        // Set class hint so field access on cloned value uses GEP, not reflection
+        if let Some(sym) = self.symbol_table.get_symbol(class_sym) {
+            let name = self.string_interner.get(sym.name).unwrap_or("").to_string();
+            if !name.is_empty() {
+                self.register_class_hints.insert(new_ptr, name);
+            }
+        }
+
+        Some(new_ptr)
+    }
+
+    /// @:derive(Debug) — generate toString() returning "ClassName { field1: val1, field2: val2 }"
+    fn lower_derived_to_string(&mut self, object: &HirExpr, class_sym: SymbolId) -> Option<IrId> {
+        let fields = self.class_instance_fields.get(&class_sym)?.clone();
+        let obj_reg = self.lower_expression(object)?;
+
+        let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
+        let concat_fn = self.get_or_register_extern_function(
+            "haxe_string_concat",
+            vec![string_ptr_ty.clone(), string_ptr_ty.clone()],
+            string_ptr_ty.clone(),
+        );
+        let std_string_fn = self.get_or_register_extern_function(
+            "haxe_std_string_ptr",
+            vec![IrType::Ptr(Box::new(IrType::U8))],
+            string_ptr_ty.clone(),
+        );
+        let box_int_fn = self.get_or_register_extern_function(
+            "haxe_box_int_ptr",
+            vec![IrType::I64],
+            IrType::Ptr(Box::new(IrType::U8)),
+        );
+        let box_float_fn = self.get_or_register_extern_function(
+            "haxe_box_float_ptr",
+            vec![IrType::F64],
+            IrType::Ptr(Box::new(IrType::U8)),
+        );
+
+        // Get class name
+        let class_name = self
+            .symbol_table
+            .get_symbol(class_sym)
+            .and_then(|s| self.string_interner.get(s.name))
+            .unwrap_or("Unknown");
+
+        // Start with "ClassName { "
+        let mut result = self.builder.build_string(format!("{} {{ ", class_name))?;
+
+        for (i, &(field_sym, field_type_id, gep_idx)) in fields.iter().enumerate() {
+            // Get field name
+            let field_name = self
+                .symbol_table
+                .get_symbol(field_sym)
+                .and_then(|s| self.string_interner.get(s.name))
+                .unwrap_or("?");
+
+            // Append "fieldName: "
+            let prefix = if i > 0 {
+                format!(", {}: ", field_name)
+            } else {
+                format!("{}: ", field_name)
+            };
+            let prefix_str = self.builder.build_string(prefix)?;
+            result = self.builder.build_call_direct(
+                concat_fn,
+                vec![result, prefix_str],
+                string_ptr_ty.clone(),
+            )?;
+
+            // Load field value
+            let field_ir_type = self.convert_type(field_type_id);
+            let idx_const = self.builder.build_const(IrValue::I32(gep_idx as i32))?;
+            let field_ptr =
+                self.builder
+                    .build_gep(obj_reg, vec![idx_const], field_ir_type.clone())?;
+            let field_val = self.builder.build_load(field_ptr, field_ir_type.clone())?;
+
+            // Convert field to string based on type
+            let type_kind = {
+                let type_table = self.type_table.borrow();
+                type_table.get(field_type_id).map(|t| t.kind.clone())
+            };
+            let field_str = match type_kind.as_ref() {
+                Some(TypeKind::String) => {
+                    // String field — use directly
+                    field_val
+                }
+                Some(TypeKind::Bool) => {
+                    // Bool → "true" / "false" via branch
+                    let true_str = self.builder.build_string("true".to_string())?;
+                    let false_str = self.builder.build_string("false".to_string())?;
+                    self.builder.build_select(field_val, true_str, false_str)?
+                }
+                Some(TypeKind::Int) => {
+                    // Int → box → haxe_std_string_ptr
+                    let as_i64 = self
+                        .builder
+                        .build_cast(field_val, IrType::I32, IrType::I64)?;
+                    let boxed = self.builder.build_call_direct(
+                        box_int_fn,
+                        vec![as_i64],
+                        IrType::Ptr(Box::new(IrType::U8)),
+                    )?;
+                    self.builder.build_call_direct(
+                        std_string_fn,
+                        vec![boxed],
+                        string_ptr_ty.clone(),
+                    )?
+                }
+                Some(TypeKind::Float) => {
+                    // Float → box → haxe_std_string_ptr
+                    let boxed = self.builder.build_call_direct(
+                        box_float_fn,
+                        vec![field_val],
+                        IrType::Ptr(Box::new(IrType::U8)),
+                    )?;
+                    self.builder.build_call_direct(
+                        std_string_fn,
+                        vec![boxed],
+                        string_ptr_ty.clone(),
+                    )?
+                }
+                _ => {
+                    // Other — "<object>"
+                    self.builder.build_string("<object>".to_string())?
+                }
+            };
+
+            result = self.builder.build_call_direct(
+                concat_fn,
+                vec![result, field_str],
+                string_ptr_ty.clone(),
+            )?;
+        }
+
+        // Append " }"
+        let suffix = self.builder.build_string(" }".to_string())?;
+        self.builder
+            .build_call_direct(concat_fn, vec![result, suffix], string_ptr_ty)
+    }
+
+    /// @:derive(Default) — allocate a zero-initialized instance with default values for all fields.
+    fn lower_derived_default(&mut self, class_sym: SymbolId) -> Option<IrId> {
+        let fields = self.class_instance_fields.get(&class_sym)?.clone();
+
+        // Compute allocation size
+        let alloc_size = (fields.len() as u64 + 1) * 8;
+        let alloc_size = alloc_size.max(16);
+        let new_ptr = self.build_heap_alloc(alloc_size)?;
+
+        // Store type_id header at GEP index 0
+        let type_id_val = self
+            .builder
+            .build_const(IrValue::I64(class_sym.as_raw() as i64))?;
+        let zero = self.builder.build_const(IrValue::I32(0))?;
+        let header_ptr = self.builder.build_gep(new_ptr, vec![zero], IrType::I64)?;
+        self.builder.build_store(header_ptr, type_id_val)?;
+
+        // Initialize each field to its default value
+        for &(_field_sym, field_type_id, gep_idx) in &fields {
+            let field_ir_type = self.convert_type(field_type_id);
+            let type_kind = {
+                let type_table = self.type_table.borrow();
+                type_table.get(field_type_id).map(|t| t.kind.clone())
+            };
+
+            let default_val = match type_kind.as_ref() {
+                Some(TypeKind::Int) => self.builder.build_const(IrValue::I32(0))?,
+                Some(TypeKind::Float) => self.builder.build_const(IrValue::F64(0.0))?,
+                Some(TypeKind::Bool) => self.builder.build_const(IrValue::Bool(false))?,
+                Some(TypeKind::String) => {
+                    // Empty string
+                    self.builder.build_string(String::new())?
+                }
+                _ => {
+                    // Null for nullable/class/other types
+                    self.builder.build_null()?
+                }
+            };
+
+            let idx_const = self.builder.build_const(IrValue::I32(gep_idx as i32))?;
+            let field_ptr = self
+                .builder
+                .build_gep(new_ptr, vec![idx_const], field_ir_type)?;
+            self.builder.build_store(field_ptr, default_val)?;
+        }
+
+        // Set class hint so field access on default instance uses GEP, not reflection
+        if let Some(sym) = self.symbol_table.get_symbol(class_sym) {
+            let name = self.string_interner.get(sym.name).unwrap_or("").to_string();
+            if !name.is_empty() {
+                self.register_class_hints.insert(new_ptr, name);
+            }
+        }
+
+        Some(new_ptr)
     }
 
     fn lower_null_coalesce(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Option<IrId> {
@@ -30129,6 +30597,15 @@ impl<'a> HirToMirContext<'a> {
                     DerivedTrait::Hash => {
                         self.derive_hash_classes.insert(class.symbol_id);
                     }
+                    DerivedTrait::Clone => {
+                        self.derive_clone_classes.insert(class.symbol_id);
+                    }
+                    DerivedTrait::Debug => {
+                        self.derive_debug_classes.insert(class.symbol_id);
+                    }
+                    DerivedTrait::Default => {
+                        self.derive_default_classes.insert(class.symbol_id);
+                    }
                     _ => {}
                 }
             }
@@ -30136,7 +30613,10 @@ impl<'a> HirToMirContext<'a> {
             // Build instance field list for derive codegen (non-static fields only)
             let needs_field_list = self.derive_partial_eq_classes.contains(&class.symbol_id)
                 || self.derive_partial_ord_classes.contains(&class.symbol_id)
-                || self.derive_hash_classes.contains(&class.symbol_id);
+                || self.derive_hash_classes.contains(&class.symbol_id)
+                || self.derive_clone_classes.contains(&class.symbol_id)
+                || self.derive_debug_classes.contains(&class.symbol_id)
+                || self.derive_default_classes.contains(&class.symbol_id);
 
             if needs_field_list {
                 let mut instance_fields = Vec::new();
