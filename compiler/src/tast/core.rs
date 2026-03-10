@@ -270,6 +270,9 @@ pub struct TypeFlags {
 
     /// Type is zero-sized
     pub is_zero_sized: bool,
+
+    /// Type is guaranteed non-null (@:notNull)
+    pub is_non_null: bool,
 }
 
 impl Type {

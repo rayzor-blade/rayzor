@@ -84,6 +84,16 @@ pub enum FlowSafetyError {
         actual: String,
         location: SourceLocation,
     },
+    /// Null assigned to @:notNull variable
+    NullAssignedToNotNull {
+        variable: SymbolId,
+        location: SourceLocation,
+    },
+    /// Nullable value assigned to @:notNull variable
+    NullableAssignedToNotNull {
+        variable: SymbolId,
+        location: SourceLocation,
+    },
 }
 
 /// Results of TypeFlowGuard safety analysis
@@ -201,6 +211,66 @@ impl<'a> TypeFlowGuard<'a> {
                 variable: null_deref.variable,
                 location: null_deref.location,
             });
+        }
+
+        // Run null safety analysis with @:notNull checking
+        let null_start = std::time::Instant::now();
+        let cfg = analyzer.get_cfg();
+        let null_violations = crate::tast::null_safety_analysis::analyze_function_null_safety(
+            function,
+            cfg,
+            self.type_table,
+            self.symbol_table,
+        );
+        self.results.metrics.null_safety_time_us += null_start.elapsed().as_micros() as u64;
+
+        for violation in null_violations {
+            use crate::tast::null_safety_analysis::NullViolationKind;
+            match violation.violation_kind {
+                NullViolationKind::NullAssignedToNotNull => {
+                    self.results
+                        .errors
+                        .push(FlowSafetyError::NullAssignedToNotNull {
+                            variable: violation.variable,
+                            location: violation.location,
+                        });
+                }
+                NullViolationKind::NullableAssignedToNotNull => {
+                    self.results
+                        .errors
+                        .push(FlowSafetyError::NullableAssignedToNotNull {
+                            variable: violation.variable,
+                            location: violation.location,
+                        });
+                }
+                NullViolationKind::PotentialNullDereference
+                | NullViolationKind::PotentialNullMethodCall
+                | NullViolationKind::PotentialNullFieldAccess
+                | NullViolationKind::PotentialNullArrayAccess => {
+                    self.results
+                        .warnings
+                        .push(FlowSafetyError::NullDereference {
+                            variable: violation.variable,
+                            location: violation.location,
+                        });
+                }
+                NullViolationKind::NullReturnFromNonNullable => {
+                    self.results
+                        .warnings
+                        .push(FlowSafetyError::NullDereference {
+                            variable: violation.variable,
+                            location: violation.location,
+                        });
+                }
+                NullViolationKind::NullArgumentToNonNullable => {
+                    self.results
+                        .warnings
+                        .push(FlowSafetyError::NullDereference {
+                            variable: violation.variable,
+                            location: violation.location,
+                        });
+                }
+            }
         }
 
         for dead_code in &analysis_result.dead_code {

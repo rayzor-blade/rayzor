@@ -508,6 +508,16 @@ impl<'a> TypeDiagnosticEmitter<'a> {
                     &reason,
                     error.suggestion.as_deref(),
                 ),
+            TypeErrorKind::NullAssignmentToNonNull { variable_name } => {
+                self.emit_null_assignment_to_not_null(error.location, &variable_name)
+            }
+            TypeErrorKind::NullableToNonNullParam {
+                param_name,
+                function_name,
+            } => self.emit_nullable_to_non_null_param(error.location, &param_name, &function_name),
+            TypeErrorKind::NullableReturn { function_name } => {
+                self.emit_nullable_return(error.location, &function_name)
+            }
         }
     }
 
@@ -1034,6 +1044,57 @@ impl<'a> TypeDiagnosticEmitter<'a> {
         }
 
         builder.build()
+    }
+
+    fn emit_null_assignment_to_not_null(
+        &self,
+        location: SourceLocation,
+        variable_name: &str,
+    ) -> Diagnostic {
+        let source_span = self.location_to_span_with_length(location, Some(variable_name));
+        DiagnosticBuilder::error(
+            format!(
+                "Cannot assign null to @:notNull variable '{}'",
+                variable_name
+            ),
+            source_span,
+        )
+        .code("E0400")
+        .help("Use a non-null value or remove the @:notNull annotation")
+        .build()
+    }
+
+    fn emit_nullable_to_non_null_param(
+        &self,
+        location: SourceLocation,
+        param_name: &str,
+        function_name: &str,
+    ) -> Diagnostic {
+        let source_span = self.location_to_span_with_length(location, Some(param_name));
+        DiagnosticBuilder::error(
+            format!(
+                "Cannot pass nullable value to @:notNull parameter '{}' of '{}'",
+                param_name, function_name
+            ),
+            source_span,
+        )
+        .code("E0401")
+        .help("Add a null check before the call")
+        .build()
+    }
+
+    fn emit_nullable_return(&self, location: SourceLocation, function_name: &str) -> Diagnostic {
+        let source_span = self.location_to_span_with_length(location, Some(function_name));
+        DiagnosticBuilder::error(
+            format!(
+                "Cannot return nullable value from @:notNull function '{}'",
+                function_name
+            ),
+            source_span,
+        )
+        .code("E0402")
+        .help("Return a non-null value or remove @:notNull from the return type")
+        .build()
     }
 
     /// Helper: Convert SourceLocation to SourceSpan

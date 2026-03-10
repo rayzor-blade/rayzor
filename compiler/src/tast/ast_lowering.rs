@@ -669,6 +669,7 @@ impl<'a> AstLowering<'a> {
                     flags = flags.union(SymbolFlags::GPU_STRUCT);
                 }
                 "no_mangle" => flags = flags.union(SymbolFlags::NO_MANGLE),
+                "notNull" => flags = flags.union(SymbolFlags::NOT_NULL),
                 "frameworks" | "cInclude" | "cSource" | "clib" => {
                     // @:frameworks(["Accelerate"]), @:cInclude(["vendor/stb"]), @:cSource(["lib.c"])
                     if let Some(first_param) = meta.params.first() {
