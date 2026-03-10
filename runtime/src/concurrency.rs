@@ -83,7 +83,7 @@ pub(crate) static ACTIVE_THREAD_COUNT: AtomicU64 = AtomicU64::new(0);
 lazy_static::lazy_static! {
     /// Global registry of all active thread handles
     /// Maps thread ID -> JoinHandle wrapped in an Option (taken when joined)
-    static ref THREAD_REGISTRY: Mutex<HashMap<u64, Option<JoinHandle<i32>>>> =
+    static ref THREAD_REGISTRY: Mutex<HashMap<u64, Option<JoinHandle<i64>>>> =
         Mutex::new(HashMap::new());
 }
 
@@ -155,7 +155,7 @@ impl ThreadHandle {
 struct PthreadContext {
     closure: *const u8,
     env: *const u8,
-    result: i32,
+    result: i64,
 }
 
 /// pthread thread entry point
@@ -166,7 +166,7 @@ extern "C" fn pthread_entry(arg: *mut libc::c_void) -> *mut libc::c_void {
         let ctx = &mut *(arg as *mut PthreadContext);
 
         // Cast closure to function pointer
-        type ClosureFn = extern "C" fn(*const u8) -> i32;
+        type ClosureFn = extern "C" fn(*const u8) -> i64;
         let func: ClosureFn = std::mem::transmute(ctx.closure);
 
         // Call the JIT'd function
@@ -245,15 +245,19 @@ pub unsafe extern "C" fn rayzor_thread_spawn(
     // Execute barrier on main thread before spawning to ensure JIT code is visible
     arm64_jit_barrier();
 
-    // Spawn thread
+    // Spawn thread — wrapped in catch_unwind so panics don't leak ACTIVE_THREAD_COUNT
     let handle = thread::spawn(move || {
         // Execute barrier before calling JIT code
         arm64_jit_barrier();
 
-        type ClosureFn = extern "C" fn(*const u8) -> i32;
+        type ClosureFn = extern "C" fn(*const u8) -> i64;
         let env_ptr = env_addr as *const u8;
         let func: ClosureFn = unsafe { std::mem::transmute(func_addr) };
-        func(env_ptr)
+
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| func(env_ptr))) {
+            Ok(result) => result,
+            Err(_) => -1, // Return -1 on panic (matches join unwrap_or convention)
+        }
     });
 
     // Return simple handle
@@ -273,12 +277,12 @@ pub unsafe extern "C" fn rayzor_thread_join(handle: *mut u8) -> *mut u8 {
     }
 
     // Simple implementation using std::thread
-    let boxed_handle: Box<JoinHandle<i32>> = Box::from_raw(handle as *mut JoinHandle<i32>);
+    let boxed_handle: Box<JoinHandle<i64>> = Box::from_raw(handle as *mut JoinHandle<i64>);
     let result = boxed_handle.join().unwrap_or(-1);
     ACTIVE_THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
     // Box the result as a DynamicValue* so the compiler can properly unbox it
     // (matching the convention used by Channel and other generic containers)
-    crate::type_system::haxe_box_int_ptr(result as i64)
+    crate::type_system::haxe_box_int_ptr(result)
 }
 
 /// Check if a thread has finished executing
@@ -1254,7 +1258,7 @@ pub extern "C" fn rayzor_jit_cleanup() {
 mod tests {
     use super::*;
 
-    extern "C" fn test_thread_fn(_env: *const u8) -> i32 {
+    extern "C" fn test_thread_fn(_env: *const u8) -> i64 {
         42
     }
 

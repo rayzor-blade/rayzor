@@ -13,11 +13,15 @@
 //! - `rayzor_future_is_ready(handle) -> bool` — check if resolved
 
 use std::ptr;
-use std::sync::atomic::{AtomicPtr, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Condvar, Mutex};
 use std::thread;
 
 use crate::concurrency::{arm64_jit_barrier, ACTIVE_THREAD_COUNT};
+
+extern "C" {
+    fn _setjmp(buf: *mut u8) -> i32;
+}
 
 /// Future states
 const STATE_PENDING: u8 = 0;
@@ -46,6 +50,14 @@ struct FutureHandle {
     /// If true, value is a pre-boxed/raw pointer — await returns it directly
     /// without wrapping in haxe_box_int_ptr. Used by Future.all().
     raw_result: bool,
+    /// True if the closure threw an exception or panicked
+    has_error: AtomicBool,
+    /// Exception value (pointer to Exception object) — valid when has_error is true
+    error_value: Mutex<i64>,
+    /// Exception type_id for typed re-throw
+    error_type_id: AtomicU32,
+    /// Cooperative cancellation flag — checked by worker thread
+    cancelled: AtomicBool,
 }
 
 // Safety: FutureHandle fields are either atomic or behind a Mutex.
@@ -70,35 +82,77 @@ fn spawn_future(handle: &FutureHandle, handle_ptr: *mut FutureHandle) {
     thread::spawn(move || {
         arm64_jit_barrier();
 
-        // Call the closure — JIT closures return i32 (same convention as thread spawn)
-        type ClosureFn = extern "C" fn(*const u8) -> i32;
+        // Call the closure — wrapped in catch_unwind so panics don't leak ACTIVE_THREAD_COUNT.
+        // Inside, we also install a setjmp handler to catch Haxe exceptions (which use longjmp).
+        type ClosureFn = extern "C" fn(*const u8) -> i64;
         let func: ClosureFn = unsafe { std::mem::transmute(func_addr) };
         let env_ptr = env_addr as *const u8;
-        let result = func(env_ptr) as i64;
 
-        // Resolve the future
-        let handle = unsafe { &*(handle_addr as *const FutureHandle) };
-        {
-            let mut val = handle.value.lock().unwrap();
-            *val = result;
-        }
-        handle.state.store(STATE_RESOLVED, Ordering::Release);
-        handle.cvar.notify_all();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // Install Haxe exception handler on this worker thread
+            let jmp_buf = crate::exception::rayzor_exception_push_handler();
+            let caught = unsafe { _setjmp(jmp_buf) };
 
-        // Call .then() callback if registered
-        let then_fn = handle.then_fn.load(Ordering::Acquire);
-        if !then_fn.is_null() {
-            let then_env = handle.then_env.load(Ordering::Acquire);
-            let cb_result = if handle.raw_result {
-                result as *mut u8
+            if caught == 0 {
+                // Normal path — call the closure
+                let value = func(env_ptr);
+                crate::exception::rayzor_exception_pop_handler();
+                Ok(value)
             } else {
-                crate::type_system::haxe_box_int_ptr(result)
-            };
-            type CallbackFn = extern "C" fn(*const u8, *mut u8);
-            let callback: CallbackFn = unsafe { std::mem::transmute(then_fn as usize) };
-            callback(then_env, cb_result);
+                // Exception was thrown via longjmp — capture it
+                let exc_value = crate::exception::rayzor_get_exception();
+                let exc_type_id = crate::exception::rayzor_get_exception_type_id();
+                Err((exc_value, exc_type_id))
+            }
+        }));
+
+        let handle = unsafe { &*(handle_addr as *const FutureHandle) };
+
+        match result {
+            Ok(Ok(value)) => {
+                // Resolve the future with the computed value
+                {
+                    let mut val = handle.value.lock().unwrap();
+                    *val = value;
+                }
+                handle.state.store(STATE_RESOLVED, Ordering::Release);
+                handle.cvar.notify_all();
+
+                // Call .then() callback if registered
+                let then_fn = handle.then_fn.load(Ordering::Acquire);
+                if !then_fn.is_null() {
+                    let then_env = handle.then_env.load(Ordering::Acquire);
+                    let cb_result = if handle.raw_result {
+                        value as *mut u8
+                    } else {
+                        crate::type_system::haxe_box_int_ptr(value)
+                    };
+                    type CallbackFn = extern "C" fn(*const u8, *mut u8);
+                    let callback: CallbackFn =
+                        unsafe { std::mem::transmute(then_fn as usize) };
+                    callback(then_env, cb_result);
+                }
+            }
+            Ok(Err((exc_value, exc_type_id))) => {
+                // Haxe exception was thrown — store for re-throw on .await()
+                {
+                    let mut ev = handle.error_value.lock().unwrap();
+                    *ev = exc_value;
+                }
+                handle.error_type_id.store(exc_type_id, Ordering::Release);
+                handle.has_error.store(true, Ordering::Release);
+                handle.state.store(STATE_RESOLVED, Ordering::Release);
+                handle.cvar.notify_all();
+            }
+            Err(_panic) => {
+                // Rust panic — resolve with error so .await() doesn't hang
+                handle.has_error.store(true, Ordering::Release);
+                handle.state.store(STATE_RESOLVED, Ordering::Release);
+                handle.cvar.notify_all();
+            }
         }
 
+        // ALWAYS decrement, even on panic/exception
         ACTIVE_THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
     });
 }
@@ -126,6 +180,10 @@ pub extern "C" fn rayzor_future_create(fn_ptr: *const u8, env_ptr: *const u8) ->
         then_fn: AtomicPtr::new(ptr::null_mut()),
         then_env: AtomicPtr::new(ptr::null_mut()),
         raw_result: false,
+        has_error: AtomicBool::new(false),
+        error_value: Mutex::new(0),
+        error_type_id: AtomicU32::new(0),
+        cancelled: AtomicBool::new(false),
     });
 
     Box::into_raw(handle) as *mut u8
@@ -168,11 +226,88 @@ pub extern "C" fn rayzor_future_await(handle: *mut u8) -> *mut u8 {
     while future.state.load(Ordering::Acquire) != STATE_RESOLVED {
         val = future.cvar.wait(val).unwrap();
     }
+
+    // Check if the closure threw an exception — re-throw in caller's context
+    if future.has_error.load(Ordering::Acquire) {
+        let exc_value = *future.error_value.lock().unwrap();
+        let exc_type_id = future.error_type_id.load(Ordering::Acquire);
+        if exc_value != 0 {
+            // Re-throw the captured Haxe exception
+            crate::exception::rayzor_throw_typed(exc_value, exc_type_id);
+        }
+        // Rust panic with no exception info — return null
+        return ptr::null_mut();
+    }
+
     if future.raw_result {
         // Value is already a usable pointer (e.g., Array* from Future.all)
         *val as *mut u8
     } else {
         // Box the result as DynamicValue* (same convention as thread_join)
+        crate::type_system::haxe_box_int_ptr(*val)
+    }
+}
+
+/// Await a future with a timeout in milliseconds.
+///
+/// Same as `rayzor_future_await` but returns null if the timeout expires.
+/// Uses `condvar.wait_timeout` for efficient waiting.
+///
+/// # Returns
+/// - Boxed DynamicValue* on success
+/// - null pointer on timeout or cancellation
+#[no_mangle]
+pub extern "C" fn rayzor_future_await_timeout(handle: *mut u8, millis: i64) -> *mut u8 {
+    if handle.is_null() {
+        return ptr::null_mut();
+    }
+
+    let future = unsafe { &*(handle as *const FutureHandle) };
+
+    // Try to transition Pending → Running
+    if future
+        .state
+        .compare_exchange(
+            STATE_PENDING,
+            STATE_RUNNING,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+    {
+        spawn_future(future, handle as *mut FutureHandle);
+    }
+
+    // Wait with timeout
+    let timeout = std::time::Duration::from_millis(millis as u64);
+    let deadline = std::time::Instant::now() + timeout;
+    let mut val = future.value.lock().unwrap();
+
+    while future.state.load(Ordering::Acquire) != STATE_RESOLVED {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if remaining.is_zero() {
+            return ptr::null_mut(); // Timeout
+        }
+        let (guard, wait_result) = future.cvar.wait_timeout(val, remaining).unwrap();
+        val = guard;
+        if wait_result.timed_out() {
+            return ptr::null_mut(); // Timeout
+        }
+    }
+
+    // Check for error
+    if future.has_error.load(Ordering::Acquire) {
+        let exc_value = *future.error_value.lock().unwrap();
+        let exc_type_id = future.error_type_id.load(Ordering::Acquire);
+        if exc_value != 0 {
+            crate::exception::rayzor_throw_typed(exc_value, exc_type_id);
+        }
+        return ptr::null_mut();
+    }
+
+    if future.raw_result {
+        *val as *mut u8
+    } else {
         crate::type_system::haxe_box_int_ptr(*val)
     }
 }
@@ -290,6 +425,10 @@ pub extern "C" fn rayzor_future_all(arr_ptr: *const u8) -> *mut u8 {
         then_fn: AtomicPtr::new(ptr::null_mut()),
         then_env: AtomicPtr::new(ptr::null_mut()),
         raw_result: true,
+        has_error: AtomicBool::new(false),
+        error_value: Mutex::new(0),
+        error_type_id: AtomicU32::new(0),
+        cancelled: AtomicBool::new(false),
     });
     let handle_ptr = Box::into_raw(handle);
     let handle_addr = handle_ptr as usize;
@@ -304,73 +443,216 @@ pub extern "C" fn rayzor_future_all(arr_ptr: *const u8) -> *mut u8 {
     thread::spawn(move || {
         crate::concurrency::arm64_jit_barrier();
 
-        // Phase 1: Spawn ALL sub-futures
-        let mut fh_ptrs: Vec<*mut FutureHandle> = Vec::with_capacity(n);
-        for &h_addr in &sub_handles {
-            let h = h_addr as *mut FutureHandle;
-            fh_ptrs.push(h);
-            if h.is_null() {
-                continue;
-            }
-            let future = unsafe { &*h };
-            if future
-                .state
-                .compare_exchange(
-                    STATE_PENDING,
-                    STATE_RUNNING,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_ok()
-            {
-                spawn_future(future, h);
-            }
-        }
-
-        // Phase 2: Await each, build Haxe Array of raw results
-        let mut result_arr = crate::haxe_array::HaxeArray {
-            ptr: ptr::null_mut(),
-            len: 0,
-            cap: 0,
-            elem_size: 8,
-        };
-        crate::haxe_array::haxe_array_new(&mut result_arr, 8);
-
-        for &h in &fh_ptrs {
-            let raw_val: i64 = if h.is_null() {
-                0
-            } else {
-                let future = unsafe { &*h };
-                let mut val = future.value.lock().unwrap();
-                while future.state.load(Ordering::Acquire) != STATE_RESOLVED {
-                    val = future.cvar.wait(val).unwrap();
+        let coordinating_result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Phase 1: Spawn ALL sub-futures
+                let mut fh_ptrs: Vec<*mut FutureHandle> = Vec::with_capacity(n);
+                for &h_addr in &sub_handles {
+                    let h = h_addr as *mut FutureHandle;
+                    fh_ptrs.push(h);
+                    if h.is_null() {
+                        continue;
+                    }
+                    let future = unsafe { &*h };
+                    if future
+                        .state
+                        .compare_exchange(
+                            STATE_PENDING,
+                            STATE_RUNNING,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        spawn_future(future, h);
+                    }
                 }
-                *val
-            };
-            crate::haxe_array::haxe_array_push(
-                &mut result_arr,
-                &raw_val as *const i64 as *const u8,
-            );
+
+                // Phase 2: Await each, build Haxe Array of raw results
+                let mut result_arr = crate::haxe_array::HaxeArray {
+                    ptr: ptr::null_mut(),
+                    len: 0,
+                    cap: 0,
+                    elem_size: 8,
+                };
+                crate::haxe_array::haxe_array_new(&mut result_arr, 8);
+
+                for &h in &fh_ptrs {
+                    let raw_val: i64 = if h.is_null() {
+                        0
+                    } else {
+                        let future = unsafe { &*h };
+                        let mut val = future.value.lock().unwrap();
+                        while future.state.load(Ordering::Acquire) != STATE_RESOLVED {
+                            val = future.cvar.wait(val).unwrap();
+                        }
+                        *val
+                    };
+                    crate::haxe_array::haxe_array_push(
+                        &mut result_arr,
+                        &raw_val as *const i64 as *const u8,
+                    );
+                }
+
+                // Store full 64-bit Array* in the outer FutureHandle
+                let arr_box = Box::new(result_arr);
+                let arr_ptr_i64 = Box::into_raw(arr_box) as i64;
+                let outer = unsafe { &*(handle_addr as *const FutureHandle) };
+                {
+                    let mut val = outer.value.lock().unwrap();
+                    *val = arr_ptr_i64;
+                }
+                outer.state.store(STATE_RESOLVED, Ordering::Release);
+                outer.cvar.notify_all();
+
+                // Call .then() callback if registered
+                let then_fn = outer.then_fn.load(Ordering::Acquire);
+                if !then_fn.is_null() {
+                    let then_env = outer.then_env.load(Ordering::Acquire);
+                    type CallbackFn = extern "C" fn(*const u8, *mut u8);
+                    let callback: CallbackFn =
+                        unsafe { std::mem::transmute(then_fn as usize) };
+                    callback(then_env, arr_ptr_i64 as *mut u8);
+                }
+            }));
+
+        if coordinating_result.is_err() {
+            // Panic in coordinating thread — resolve outer handle so .await() doesn't hang
+            let outer = unsafe { &*(handle_addr as *const FutureHandle) };
+            outer.state.store(STATE_RESOLVED, Ordering::Release);
+            outer.cvar.notify_all();
         }
 
-        // Store full 64-bit Array* in the outer FutureHandle
-        let arr_box = Box::new(result_arr);
-        let arr_ptr_i64 = Box::into_raw(arr_box) as i64;
-        let outer = unsafe { &*(handle_addr as *const FutureHandle) };
-        {
-            let mut val = outer.value.lock().unwrap();
-            *val = arr_ptr_i64;
-        }
-        outer.state.store(STATE_RESOLVED, Ordering::Release);
-        outer.cvar.notify_all();
+        // ALWAYS decrement
+        ACTIVE_THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
+    });
 
-        // Call .then() callback if registered
-        let then_fn = outer.then_fn.load(Ordering::Acquire);
-        if !then_fn.is_null() {
-            let then_env = outer.then_env.load(Ordering::Acquire);
-            type CallbackFn = extern "C" fn(*const u8, *mut u8);
-            let callback: CallbackFn = unsafe { std::mem::transmute(then_fn as usize) };
-            callback(then_env, arr_ptr_i64 as *mut u8);
+    handle_ptr as *mut u8
+}
+
+/// Race multiple futures — returns a Future that resolves with the first result.
+///
+/// Spawns all sub-futures in parallel. The outer Future resolves as soon as
+/// ANY sub-future completes.
+///
+/// # Arguments
+/// * `arr_ptr` - Pointer to a Haxe Array of Future handles
+///
+/// # Returns
+/// A new Future handle that resolves with the first completed result
+#[no_mangle]
+pub extern "C" fn rayzor_future_race(arr_ptr: *const u8) -> *mut u8 {
+    if arr_ptr.is_null() {
+        return ptr::null_mut();
+    }
+
+    // Read the Haxe Array of sub-future handles (same layout as Future.all)
+    let arr = unsafe { &*(arr_ptr as *const crate::haxe_array::HaxeArray) };
+    let n = arr.len as usize;
+
+    if n == 0 {
+        return ptr::null_mut();
+    }
+
+    let data_ptr = arr.ptr as *const u8;
+    let mut sub_handles: Vec<usize> = Vec::with_capacity(n);
+    for i in 0..n {
+        let handle = unsafe { *(data_ptr.add(i * 8) as *const i64) } as usize;
+        sub_handles.push(handle);
+    }
+
+    // Create outer Future — raw_result=true so we return the value directly
+    let handle = Box::new(FutureHandle {
+        state: AtomicU8::new(STATE_RUNNING),
+        fn_ptr: ptr::null(),
+        env_ptr: ptr::null(),
+        value: Mutex::new(0),
+        cvar: Condvar::new(),
+        then_fn: AtomicPtr::new(ptr::null_mut()),
+        then_env: AtomicPtr::new(ptr::null_mut()),
+        raw_result: false,
+        has_error: AtomicBool::new(false),
+        error_value: Mutex::new(0),
+        error_type_id: AtomicU32::new(0),
+        cancelled: AtomicBool::new(false),
+    });
+    let handle_ptr = Box::into_raw(handle);
+    let handle_addr = handle_ptr as usize;
+
+    ACTIVE_THREAD_COUNT.fetch_add(1, Ordering::SeqCst);
+    crate::concurrency::arm64_jit_barrier();
+
+    thread::spawn(move || {
+        crate::concurrency::arm64_jit_barrier();
+
+        let coordinating_result =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                // Phase 1: Spawn ALL sub-futures
+                let mut fh_ptrs: Vec<*mut FutureHandle> = Vec::with_capacity(n);
+                for &h_addr in &sub_handles {
+                    let h = h_addr as *mut FutureHandle;
+                    fh_ptrs.push(h);
+                    if h.is_null() {
+                        continue;
+                    }
+                    let future = unsafe { &*h };
+                    if future
+                        .state
+                        .compare_exchange(
+                            STATE_PENDING,
+                            STATE_RUNNING,
+                            Ordering::AcqRel,
+                            Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        spawn_future(future, h);
+                    }
+                }
+
+                // Phase 2: Poll until any resolves
+                loop {
+                    for &h in &fh_ptrs {
+                        if h.is_null() {
+                            continue;
+                        }
+                        let future = unsafe { &*h };
+                        if future.state.load(Ordering::Acquire) == STATE_RESOLVED {
+                            // First to resolve — grab its value
+                            let val = *future.value.lock().unwrap();
+                            let outer =
+                                unsafe { &*(handle_addr as *const FutureHandle) };
+
+                            // Propagate error if the winner had one
+                            if future.has_error.load(Ordering::Acquire) {
+                                let exc_val =
+                                    *future.error_value.lock().unwrap();
+                                let exc_tid =
+                                    future.error_type_id.load(Ordering::Acquire);
+                                *outer.error_value.lock().unwrap() = exc_val;
+                                outer
+                                    .error_type_id
+                                    .store(exc_tid, Ordering::Release);
+                                outer.has_error.store(true, Ordering::Release);
+                            } else {
+                                *outer.value.lock().unwrap() = val;
+                            }
+
+                            outer
+                                .state
+                                .store(STATE_RESOLVED, Ordering::Release);
+                            outer.cvar.notify_all();
+                            return;
+                        }
+                    }
+                    thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }));
+
+        if coordinating_result.is_err() {
+            let outer = unsafe { &*(handle_addr as *const FutureHandle) };
+            outer.state.store(STATE_RESOLVED, Ordering::Release);
+            outer.cvar.notify_all();
         }
 
         ACTIVE_THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
@@ -393,20 +675,64 @@ pub extern "C" fn rayzor_future_is_ready(handle: *const u8) -> bool {
     future.state.load(Ordering::Acquire) == STATE_RESOLVED
 }
 
+/// Cancel a future (cooperative cancellation).
+///
+/// - If Pending: transitions to Resolved immediately, returns true
+/// - If Running: sets cancellation flag (worker thread should check), returns true
+/// - If already Resolved: returns false
+///
+/// After cancellation, `.await()` returns null.
+#[no_mangle]
+pub extern "C" fn rayzor_future_cancel(handle: *mut u8) -> bool {
+    if handle.is_null() {
+        return false;
+    }
+
+    let future = unsafe { &*(handle as *const FutureHandle) };
+    let state = future.state.load(Ordering::Acquire);
+
+    match state {
+        STATE_PENDING => {
+            // Not yet started — cancel immediately
+            future.cancelled.store(true, Ordering::Release);
+            future.state.store(STATE_RESOLVED, Ordering::Release);
+            future.cvar.notify_all();
+            true
+        }
+        STATE_RUNNING => {
+            // Running — set flag for cooperative cancellation
+            future.cancelled.store(true, Ordering::Release);
+            true
+        }
+        _ => false, // Already resolved
+    }
+}
+
+/// Check if a future has been cancelled.
+#[no_mangle]
+pub extern "C" fn rayzor_future_is_cancelled(handle: *const u8) -> bool {
+    if handle.is_null() {
+        return false;
+    }
+
+    let future = unsafe { &*(handle as *const FutureHandle) };
+    future.cancelled.load(Ordering::Acquire)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Test closures use i32 return type to match JIT convention
-    extern "C" fn simple_return_42(_env: *const u8) -> i32 {
+    // Test closures use i64 return type to match JIT convention
+    extern "C" fn simple_return_42(_env: *const u8) -> i64 {
         42
     }
 
-    extern "C" fn add_env_values(env: *const u8) -> i32 {
+    extern "C" fn add_env_values(env: *const u8) -> i64 {
         unsafe {
             let a = *(env as *const i64);
             let b = *((env as *const i64).add(1));
-            (a + b) as i32
+            a + b
         }
     }
 

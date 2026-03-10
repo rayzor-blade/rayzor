@@ -4202,6 +4202,7 @@ impl CraneliftBackend {
         // and the JIT module is dropped
         debug!("  🔄 Waiting for spawned threads to complete...");
         rayzor_runtime::concurrency::rayzor_wait_all_threads();
+        rayzor_runtime::concurrency::rayzor_jit_cleanup();
 
         debug!("  ✅ Execution completed successfully!");
 

@@ -34,6 +34,18 @@ class Main {
         trace(results[1]); // 20
         trace(results[2]); // 30
 
+        // Test 7: Exception propagation across .await()
+        try {
+            var bad = Future.create(() -> {
+                throw "future error";
+                return 0;
+            });
+            bad.await();
+            trace("unreachable");
+        } catch (e:Dynamic) {
+            trace("caught"); // caught
+        }
+
         // Wait for all outstanding futures to complete
         Future.join();
         trace("done");

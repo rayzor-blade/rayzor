@@ -24,6 +24,10 @@ pub fn build_future_type(builder: &mut MirBuilder) {
     build_future_is_ready(builder);
     build_future_join(builder);
     build_future_all(builder);
+    build_future_await_timeout(builder);
+    build_future_race(builder);
+    build_future_cancel(builder);
+    build_future_is_cancelled(builder);
 }
 
 /// Declare extern runtime functions
@@ -31,6 +35,8 @@ fn declare_future_externs(builder: &mut MirBuilder) {
     let ptr_u8 = builder.ptr_type(builder.u8_type());
     let void_ty = builder.void_type();
     let bool_ty = builder.bool_type();
+    let bool_ty2 = builder.bool_type();
+    let bool_ty3 = builder.bool_type();
     let i64_ty = IrType::I64;
 
     // extern fn rayzor_future_create(fn_ptr: *u8, env_ptr: *u8) -> *u8
@@ -93,7 +99,44 @@ fn declare_future_externs(builder: &mut MirBuilder) {
     let func_id = builder
         .begin_function("rayzor_future_all")
         .param("arr_ptr", ptr_u8.clone())
-        .returns(ptr_u8)
+        .returns(ptr_u8.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // extern fn rayzor_future_await_timeout(handle: *u8, millis: i64) -> *u8
+    let func_id = builder
+        .begin_function("rayzor_future_await_timeout")
+        .param("handle", ptr_u8.clone())
+        .param("millis", i64_ty)
+        .returns(ptr_u8.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // extern fn rayzor_future_race(arr_ptr: *u8) -> *u8
+    let func_id = builder
+        .begin_function("rayzor_future_race")
+        .param("arr_ptr", ptr_u8.clone())
+        .returns(ptr_u8.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // extern fn rayzor_future_cancel(handle: *u8) -> bool
+    let func_id = builder
+        .begin_function("rayzor_future_cancel")
+        .param("handle", ptr_u8.clone())
+        .returns(bool_ty2)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // extern fn rayzor_future_is_cancelled(handle: *u8) -> bool
+    let func_id = builder
+        .begin_function("rayzor_future_is_cancelled")
+        .param("handle", ptr_u8.clone())
+        .returns(bool_ty3)
         .calling_convention(CallingConvention::C)
         .build();
     builder.mark_as_extern(func_id);
@@ -304,5 +347,102 @@ fn build_future_all(builder: &mut MirBuilder) {
         .expect("rayzor_future_all not found");
     let result = builder.call(all_id, vec![arr]).unwrap();
 
+    builder.ret(Some(result));
+}
+
+/// Build: fn Future_awaitTimeout(handle: *u8, millis: i64) -> *u8
+fn build_future_await_timeout(builder: &mut MirBuilder) {
+    let ptr_u8 = builder.ptr_type(builder.u8_type());
+
+    let func_id = builder
+        .begin_function("Future_awaitTimeout")
+        .param("handle", ptr_u8.clone())
+        .param("millis", IrType::I64)
+        .returns(ptr_u8)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let handle = builder.get_param(0);
+    let millis = builder.get_param(1);
+
+    let timeout_id = builder
+        .get_function_by_name("rayzor_future_await_timeout")
+        .expect("rayzor_future_await_timeout not found");
+    let result = builder.call(timeout_id, vec![handle, millis]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// Build: fn Future_race(arr: *u8) -> *u8
+fn build_future_race(builder: &mut MirBuilder) {
+    let ptr_u8 = builder.ptr_type(builder.u8_type());
+
+    let func_id = builder
+        .begin_function("Future_race")
+        .param("arr", ptr_u8.clone())
+        .returns(ptr_u8)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+    let race_id = builder
+        .get_function_by_name("rayzor_future_race")
+        .expect("rayzor_future_race not found");
+    let result = builder.call(race_id, vec![arr]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// Build: fn Future_cancel(handle: *u8) -> bool
+fn build_future_cancel(builder: &mut MirBuilder) {
+    let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let bool_ty = builder.bool_type();
+
+    let func_id = builder
+        .begin_function("Future_cancel")
+        .param("handle", ptr_u8)
+        .returns(bool_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let handle = builder.get_param(0);
+    let cancel_id = builder
+        .get_function_by_name("rayzor_future_cancel")
+        .expect("rayzor_future_cancel not found");
+    let result = builder.call(cancel_id, vec![handle]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// Build: fn Future_isCancelled(handle: *u8) -> bool
+fn build_future_is_cancelled(builder: &mut MirBuilder) {
+    let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let bool_ty = builder.bool_type();
+
+    let func_id = builder
+        .begin_function("Future_isCancelled")
+        .param("handle", ptr_u8)
+        .returns(bool_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let handle = builder.get_param(0);
+    let is_cancelled_id = builder
+        .get_function_by_name("rayzor_future_is_cancelled")
+        .expect("rayzor_future_is_cancelled not found");
+    let result = builder.call(is_cancelled_id, vec![handle]).unwrap();
     builder.ret(Some(result));
 }

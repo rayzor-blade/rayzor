@@ -1005,6 +1005,16 @@ register_symbol!(
     crate::future::rayzor_future_is_ready
 );
 register_symbol!("rayzor_future_all", crate::future::rayzor_future_all);
+register_symbol!(
+    "rayzor_future_await_timeout",
+    crate::future::rayzor_future_await_timeout
+);
+register_symbol!("rayzor_future_race", crate::future::rayzor_future_race);
+register_symbol!("rayzor_future_cancel", crate::future::rayzor_future_cancel);
+register_symbol!(
+    "rayzor_future_is_cancelled",
+    crate::future::rayzor_future_is_cancelled
+);
 
 // Arc functions
 register_symbol!("rayzor_arc_init", crate::concurrency::rayzor_arc_init);
