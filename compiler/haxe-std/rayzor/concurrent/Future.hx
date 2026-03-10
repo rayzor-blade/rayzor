@@ -88,6 +88,40 @@ extern class Future<T> {
     public static function join():Void;
 
     /**
+     * Await the future with a timeout in milliseconds.
+     *
+     * Same as `.await()` but returns null if the timeout expires
+     * before the future resolves.
+     *
+     * @param millis Maximum time to wait in milliseconds
+     * @return The result if resolved within timeout, null otherwise
+     */
+    @:native("awaitTimeout")
+    public function awaitTimeout(millis:Int):Null<T>;
+
+    /**
+     * Cancel the future (cooperative cancellation).
+     *
+     * - If pending: cancels immediately, returns true
+     * - If running: sets cancellation flag, returns true
+     * - If resolved: returns false
+     *
+     * After cancellation, `.await()` returns null.
+     *
+     * @return true if cancellation was requested
+     */
+    @:native("cancel")
+    public function cancel():Bool;
+
+    /**
+     * Check if the future has been cancelled.
+     *
+     * @return true if cancellation was requested
+     */
+    @:native("isCancelled")
+    public function isCancelled():Bool;
+
+    /**
      * Like JavaScript's `Promise.all()`: takes an array of futures,
      * spawns them all in parallel, and returns a new Future that
      * resolves to an Array of results.
@@ -97,4 +131,15 @@ extern class Future<T> {
      */
     @:native("all")
     public static function all<T>(futures:Array<Future<T>>):Future<Array<T>>;
+
+    /**
+     * Like JavaScript's `Promise.race()`: takes an array of futures,
+     * spawns them all in parallel, and returns a new Future that
+     * resolves with the first result.
+     *
+     * @param futures Array of Future handles
+     * @return A Future that resolves with the first completed result
+     */
+    @:native("race")
+    public static function race<T>(futures:Array<Future<T>>):Future<T>;
 }

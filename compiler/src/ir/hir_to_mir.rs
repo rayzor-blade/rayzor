@@ -3040,14 +3040,14 @@ impl<'a> HirToMirContext<'a> {
             self.lower_block(body);
             self.ensure_terminator();
 
-            // Fix up return type: inner closure returns I32 (JIT convention)
+            // Fix up return type: inner closure returns I64 (JIT convention)
             if let Some(inner_func) = self
                 .builder
                 .module
                 .functions
                 .get_mut(&inner_context.func_id)
             {
-                inner_func.signature.return_type = IrType::I32;
+                inner_func.signature.return_type = IrType::I64;
             }
 
             self.current_env_layout = None;

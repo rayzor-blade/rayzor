@@ -2045,6 +2045,18 @@ impl StdlibMapping {
             // MIR wrapper: spawns all sub-futures in parallel, returns combined future
             map_method!(static "rayzor_concurrent_Future", "all" => "Future_all", params: 1, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
+            // Future.awaitTimeout(millis: Int) -> Null<T>
+            map_method!(instance "rayzor_concurrent_Future", "awaitTimeout" => "Future_awaitTimeout", params: 1, mir_wrapper,
+                types: &[PtrU8, I64] => PtrU8),
+            // Future.race(futures: Array<Future<T>>) -> Future<T>
+            map_method!(static "rayzor_concurrent_Future", "race" => "Future_race", params: 1, mir_wrapper,
+                types: &[PtrU8] => PtrU8),
+            // Future.cancel() -> Bool
+            map_method!(instance "rayzor_concurrent_Future", "cancel" => "Future_cancel", params: 0, mir_wrapper,
+                types: &[PtrU8] => Bool),
+            // Future.isCancelled() -> Bool
+            map_method!(instance "rayzor_concurrent_Future", "isCancelled" => "Future_isCancelled", params: 0, mir_wrapper,
+                types: &[PtrU8] => Bool),
         ];
 
         self.register_from_tuples(mappings);
