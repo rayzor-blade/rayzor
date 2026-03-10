@@ -42,6 +42,9 @@ pub mod future;
 pub mod sync;
 pub mod thread;
 
+// Rayzor networking (Socket, Host)
+pub mod socket;
+
 // Rayzor systems-level types (Box, Ptr, Ref, Usize)
 pub mod systems;
 
@@ -101,6 +104,9 @@ pub fn build_stdlib() -> IrModule {
     sync::build_sync_types(&mut builder);
     future::build_future_type(&mut builder);
 
+    // Build networking types (Socket, Host)
+    socket::build_socket_type(&mut builder);
+
     // Build systems-level types (Box, Ptr, Ref, Usize)
     systems::build_systems_types(&mut builder);
 
@@ -134,6 +140,7 @@ pub fn build_stdlib_with_plugins(registry: &CompilerPluginRegistry) -> IrModule 
     channel::build_channel_type(&mut builder);
     sync::build_sync_types(&mut builder);
     future::build_future_type(&mut builder);
+    socket::build_socket_type(&mut builder);
     systems::build_systems_types(&mut builder);
     tensor::build_tensor_types(&mut builder);
     ereg::build_ereg_type(&mut builder);
@@ -172,5 +179,31 @@ mod tests {
             .any(|(_, f)| f.name.contains("string"));
 
         assert!(has_string_concat, "Should have string functions");
+    }
+
+    #[test]
+    fn test_stdlib_has_socket_functions() {
+        let stdlib = build_stdlib();
+        let socket_names: Vec<_> = stdlib
+            .functions
+            .values()
+            .filter(|f| {
+                f.name.contains("socket")
+                    || f.name.contains("Socket")
+                    || f.name.contains("host")
+                    || f.name.contains("Host")
+            })
+            .map(|f| f.name.as_str())
+            .collect();
+        assert!(
+            !socket_names.is_empty(),
+            "Should have socket/host functions, found: {:?}",
+            socket_names
+        );
+        assert!(
+            socket_names.iter().any(|n| n.contains("rayzor_socket_new")),
+            "Missing rayzor_socket_new. Found: {:?}",
+            socket_names
+        );
     }
 }

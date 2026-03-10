@@ -2105,7 +2105,8 @@ impl<'a> HirToMirContext<'a> {
         // Pass 2a: Lower class methods and constructors
         for (type_id, type_decl) in &hir_module.types {
             let name_str = if let HirTypeDecl::Class(c) = type_decl {
-                self.string_interner.get(c.name).unwrap_or("<unknown>")
+                let n = self.string_interner.get(c.name).unwrap_or("<unknown>");
+                n
             } else {
                 "<not-a-class>"
             };
@@ -3726,7 +3727,7 @@ impl<'a> HirToMirContext<'a> {
     /// Lower a HIR block to MIR
     fn lower_block(&mut self, block: &HirBlock) {
         // Process all statements
-        for stmt in &block.statements {
+        for stmt in block.statements.iter() {
             self.lower_statement(stmt);
 
             // Check if any variables have their last use at this statement
@@ -3747,7 +3748,7 @@ impl<'a> HirToMirContext<'a> {
     /// Lower a HIR block expression to MIR, returning the trailing expression's value
     fn lower_block_expr(&mut self, block: &HirBlock) -> Option<IrId> {
         // Process all statements
-        for stmt in &block.statements {
+        for stmt in block.statements.iter() {
             self.lower_statement(stmt);
             self.check_drop_points_after_statement();
             self.current_stmt_index += 1;
@@ -4840,6 +4841,18 @@ impl<'a> HirToMirContext<'a> {
                 if let Some(native) = sym.native_name {
                     if let Some(native_str) = self.string_interner.get(native) {
                         return Some(native_str.replace("::", "_"));
+                    }
+                }
+                // Try qualified_name (e.g. "sys.net.Host" → "sys_net_Host")
+                // This covers extern classes where native_name wasn't propagated
+                // across compilation contexts but qualified_name was set by the import resolver.
+                if let Some(qn) = sym.qualified_name {
+                    if let Some(qs) = self.string_interner.get(qn) {
+                        // Only use qualified name if it contains a package separator
+                        // (avoid turning "Host" into "Host" redundantly)
+                        if qs.contains('.') {
+                            return Some(qs.replace('.', "_"));
+                        }
                     }
                 }
             }
@@ -7843,6 +7856,9 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
                 }
+                {
+                    // DEBUG: check callee kind for localhost
+                }
                 if let HirExprKind::Field { object, field } = &callee.kind {
                     // This is a method call: object.method(args)
                     // The method symbol should be in our function_map (local or external)
@@ -8391,11 +8407,20 @@ impl<'a> HirToMirContext<'a> {
                             // Store class hint on result register for subsequent method dispatch.
                             // E.g., Array.iterator() returns ArrayIterator — tag the result so
                             // it.hasNext()/it.next() can find the correct stdlib mapping.
-                            let final_result = self.maybe_unbox_for_extern_return(
-                                call_result,
-                                &actual_return_type,
-                                &resolved_expected,
-                            );
+                            //
+                            // MIR wrappers return values in their declared type directly —
+                            // they don't return boxed DynamicValue* pointers. Skip unboxing
+                            // for MIR wrapper calls to avoid spurious dereferences
+                            // (e.g., Host.localhost() returns a raw string pointer, not a boxed value).
+                            let final_result = if is_mir_wrapper {
+                                Some(call_result)
+                            } else {
+                                self.maybe_unbox_for_extern_return(
+                                    call_result,
+                                    &actual_return_type,
+                                    &resolved_expected,
+                                )
+                            };
                             if let Some(result_reg) = final_result {
                                 let return_class =
                                     Self::get_return_class_hint(class_name, method_name);
@@ -8598,21 +8623,23 @@ impl<'a> HirToMirContext<'a> {
                             ..
                         } = &object.kind
                         {
-                            self.symbol_table
-                                .get_symbol(*obj_sym)
-                                .map(|s| {
-                                    matches!(
-                                        s.kind,
-                                        crate::tast::symbols::SymbolKind::Class
-                                            | crate::tast::symbols::SymbolKind::Abstract
-                                            | crate::tast::symbols::SymbolKind::TypeAlias
-                                    )
-                                })
-                                .unwrap_or(false)
+                            let kind = self.symbol_table.get_symbol(*obj_sym).map(|s| s.kind);
+                            kind.map(|k| {
+                                matches!(
+                                    k,
+                                    crate::tast::symbols::SymbolKind::Class
+                                        | crate::tast::symbols::SymbolKind::Abstract
+                                        | crate::tast::symbols::SymbolKind::TypeAlias
+                                )
+                            })
+                            .unwrap_or(false)
                         } else {
                             false
                         };
 
+                        if method_name == Some("localhost") {
+                            eprintln!("[PATH2] is_static_class_call={}", is_static_class_call);
+                        }
                         if is_static_class_call {
                             // Check if this static call has a stdlib runtime mapping.
                             // Static method calls (e.g., Reflect.hasField, Type.typeof, Std.string)
@@ -8626,16 +8653,30 @@ impl<'a> HirToMirContext<'a> {
                                 .and_then(|s| self.string_interner.get(s.name))
                                 .map(|s| s.to_string());
 
-                            // Also try to get class name from the object symbol directly
+                            // Also try to get class name from the object symbol directly.
+                            // Prefer native_name or qualified_name (fully qualified) over
+                            // bare name so that extern classes like sys.net.Host resolve to
+                            // "sys_net_Host" instead of just "Host".
                             let static_class_name = static_class_name.or_else(|| {
                                 if let HirExprKind::Variable {
                                     symbol: obj_sym, ..
                                 } = &object.kind
                                 {
-                                    self.symbol_table
-                                        .get_symbol(*obj_sym)
-                                        .and_then(|s| self.string_interner.get(s.name))
-                                        .map(|s| s.to_string())
+                                    let sym = self.symbol_table.get_symbol(*obj_sym)?;
+                                    // 1) native_name  (e.g. "sys::net::Host" → "sys_net_Host")
+                                    if let Some(native) = sym.native_name {
+                                        if let Some(ns) = self.string_interner.get(native) {
+                                            return Some(ns.replace("::", "_"));
+                                        }
+                                    }
+                                    // 2) qualified_name  (e.g. "sys.net.Host" → "sys_net_Host")
+                                    if let Some(qn) = sym.qualified_name {
+                                        if let Some(qs) = self.string_interner.get(qn) {
+                                            return Some(qs.replace('.', "_"));
+                                        }
+                                    }
+                                    // 3) bare name fallback
+                                    self.string_interner.get(sym.name).map(|s| s.to_string())
                                 } else {
                                     None
                                 }
@@ -9054,12 +9095,18 @@ impl<'a> HirToMirContext<'a> {
                             });
 
                             if let Some(sym_id) = class_symbol_id {
-                                // Get the class name from qualified_name
+                                // Get the class name from qualified_name or native_name
                                 let class_name_from_obj =
                                     self.symbol_table.get_symbol(sym_id).and_then(|s| {
-                                        s.qualified_name
-                                            .and_then(|qn| self.string_interner.get(qn))
-                                            .map(|s| s.replace(".", "_"))
+                                        // Prefer native_name (from @:native annotation)
+                                        s.native_name
+                                            .and_then(|nn| self.string_interner.get(nn))
+                                            .map(|ns| ns.replace("::", "_"))
+                                            .or_else(|| {
+                                                s.qualified_name
+                                                    .and_then(|qn| self.string_interner.get(qn))
+                                                    .map(|s| s.replace(".", "_"))
+                                            })
                                     });
 
                                 let method_name_opt = self
@@ -9334,12 +9381,9 @@ impl<'a> HirToMirContext<'a> {
                                                 }
                                             };
 
-                                            // Auto-unbox if MIR wrapper returns Ptr(U8) but caller expects primitive
-                                            return self.maybe_unbox_for_extern_return(
-                                                call_result,
-                                                &mir_return_type,
-                                                &resolved_result,
-                                            );
+                                            // MIR wrappers return values in their declared type directly —
+                                            // no unboxing needed (they don't return boxed DynamicValue*).
+                                            return Some(call_result);
                                         } else {
                                             // Inject hidden enum type_id arg for runtime enum helpers
                                             let pre = arg_regs.len();
@@ -10975,6 +11019,18 @@ impl<'a> HirToMirContext<'a> {
                                 // Also handle Ptr(String) - returned by String methods like toUpperCase()
                                 IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::String) => {
                                     "traceString"
+                                }
+                                // Ptr(U8) when HIR type is String — from MIR wrappers returning raw string pointers
+                                IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::U8) => {
+                                    let is_hir_string = matches!(
+                                        &hir_type_kind,
+                                        Some(crate::tast::core::TypeKind::String)
+                                    );
+                                    if is_hir_string {
+                                        "traceString"
+                                    } else {
+                                        "traceAny"
+                                    }
                                 }
                                 IrType::TypeVar(_) => "traceTypedGeneric", // tag-based dispatch
                                 _ => "traceAny", // Fallback for Dynamic or unknown types

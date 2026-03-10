@@ -25,35 +25,30 @@ package sys.net;
 /**
 	A given IP host name.
 **/
+@:native("sys::net::Host")
 extern class Host {
-	/**
-		The provided host string.
-	**/
-	var host(default, null):String;
-
-	/**
-		The actual IP corresponding to the host.
-	**/
-	var ip(default, null):Int;
-
 	/**
 		Creates a new Host : the name can be an IP in the form "127.0.0.1" or an host name such as "google.com", in which case
 		the corresponding IP address is resolved using DNS. An exception occur if the host name could not be found.
 	**/
+	@:native("new")
 	function new(name:String):Void;
 
 	/**
 		Returns the IP representation of the host
 	**/
+	@:native("toString")
 	function toString():String;
 
 	/**
 		Perform a reverse-DNS query to resolve a host name from an IP.
 	**/
+	@:native("reverse")
 	function reverse():String;
 
 	/**
 		Returns the local computer host name
 	**/
+	@:native("localhost")
 	static function localhost():String;
 }

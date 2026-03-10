@@ -1030,6 +1030,56 @@ register_symbol!(
 );
 register_symbol!("rayzor_arc_as_ptr", crate::concurrency::rayzor_arc_as_ptr);
 
+// Socket/Host networking functions
+register_symbol!("rayzor_socket_new", crate::socket::rayzor_socket_new);
+register_symbol!(
+    "rayzor_socket_connect",
+    crate::socket::rayzor_socket_connect
+);
+register_symbol!("rayzor_socket_bind", crate::socket::rayzor_socket_bind);
+register_symbol!("rayzor_socket_listen", crate::socket::rayzor_socket_listen);
+register_symbol!("rayzor_socket_accept", crate::socket::rayzor_socket_accept);
+register_symbol!("rayzor_socket_close", crate::socket::rayzor_socket_close);
+register_symbol!("rayzor_socket_read", crate::socket::rayzor_socket_read);
+register_symbol!("rayzor_socket_write", crate::socket::rayzor_socket_write);
+register_symbol!(
+    "rayzor_socket_shutdown",
+    crate::socket::rayzor_socket_shutdown
+);
+register_symbol!(
+    "rayzor_socket_set_blocking",
+    crate::socket::rayzor_socket_set_blocking
+);
+register_symbol!(
+    "rayzor_socket_set_timeout",
+    crate::socket::rayzor_socket_set_timeout
+);
+register_symbol!(
+    "rayzor_socket_set_fast_send",
+    crate::socket::rayzor_socket_set_fast_send
+);
+register_symbol!(
+    "rayzor_socket_wait_for_read",
+    crate::socket::rayzor_socket_wait_for_read
+);
+register_symbol!("rayzor_socket_peer", crate::socket::rayzor_socket_peer);
+register_symbol!(
+    "rayzor_socket_host_info",
+    crate::socket::rayzor_socket_host_info
+);
+register_symbol!("rayzor_socket_select", crate::socket::rayzor_socket_select);
+register_symbol!("rayzor_host_new", crate::socket::rayzor_host_new);
+register_symbol!("rayzor_host_get_ip", crate::socket::rayzor_host_get_ip);
+register_symbol!(
+    "rayzor_host_to_string",
+    crate::socket::rayzor_host_to_string
+);
+register_symbol!("rayzor_host_reverse", crate::socket::rayzor_host_reverse);
+register_symbol!(
+    "rayzor_host_localhost",
+    crate::socket::rayzor_host_localhost
+);
+
 // Box<T> functions
 register_symbol!("rayzor_box_init", crate::box_runtime::rayzor_box_init);
 register_symbol!("rayzor_box_unbox", crate::box_runtime::rayzor_box_unbox);
