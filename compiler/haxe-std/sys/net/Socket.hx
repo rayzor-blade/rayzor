@@ -28,6 +28,16 @@ package sys.net;
 @:native("sys::net::Socket")
 extern class Socket {
 	/**
+		Read from the socket using the standard haxe.io.Input API.
+	**/
+	var input:SocketInput;
+
+	/**
+		Write to the socket using the standard haxe.io.Output API.
+	**/
+	var output:SocketOutput;
+
+	/**
 		A custom value that can be associated with the socket. Can be used to retrieve your custom infos after a `select`.
 	***/
 	var custom:Dynamic;

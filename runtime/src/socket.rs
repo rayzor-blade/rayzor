@@ -4,6 +4,7 @@
 //! and DNS host resolution. All functions use extern "C" ABI for JIT integration.
 
 use crate::haxe_string::HaxeString;
+use crate::haxe_sys::HaxeBytes;
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::ptr;
@@ -367,6 +368,138 @@ pub extern "C" fn rayzor_socket_select(
     // TODO: Implement with libc::poll or similar
     // For now, return null — users should use Future.create() for async patterns
     ptr::null_mut()
+}
+
+// =============================================================================
+// SocketInput / SocketOutput — byte-level I/O adapters
+// =============================================================================
+// These operate on the same SocketHandle pointer. Socket.input and Socket.output
+// return the socket handle directly — no separate allocation needed.
+
+/// Get the socket's input adapter (returns the socket handle itself).
+#[no_mangle]
+pub extern "C" fn rayzor_socket_get_input(handle: *mut u8) -> *mut u8 {
+    handle
+}
+
+/// Get the socket's output adapter (returns the socket handle itself).
+#[no_mangle]
+pub extern "C" fn rayzor_socket_get_output(handle: *mut u8) -> *mut u8 {
+    handle
+}
+
+/// Read a single byte from the socket. Returns -1 on EOF/error.
+#[no_mangle]
+pub extern "C" fn rayzor_socket_read_byte(handle: *mut u8) -> i32 {
+    if handle.is_null() {
+        return -1;
+    }
+    let sock = unsafe { &mut *(handle as *mut SocketHandle) };
+    if let Some(ref mut stream) = sock.stream {
+        let mut buf = [0u8; 1];
+        match stream.read_exact(&mut buf) {
+            Ok(()) => buf[0] as i32,
+            Err(_) => -1,
+        }
+    } else {
+        -1
+    }
+}
+
+/// Read bytes into a Bytes buffer. Returns number of bytes actually read.
+#[no_mangle]
+pub extern "C" fn rayzor_socket_read_bytes(
+    handle: *mut u8,
+    bytes_ptr: *mut HaxeBytes,
+    pos: i32,
+    len: i32,
+) -> i32 {
+    if handle.is_null() || bytes_ptr.is_null() || pos < 0 || len <= 0 {
+        return 0;
+    }
+    let sock = unsafe { &mut *(handle as *mut SocketHandle) };
+    if let Some(ref mut stream) = sock.stream {
+        let b = unsafe { &mut *bytes_ptr };
+        let pos = pos as usize;
+        let len = len as usize;
+        if pos + len > b.len {
+            return 0;
+        }
+        let buf = unsafe { std::slice::from_raw_parts_mut(b.ptr.add(pos), len) };
+        match stream.read(buf) {
+            Ok(n) => n as i32,
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => 0,
+            Err(_) => 0,
+        }
+    } else {
+        0
+    }
+}
+
+/// Write a single byte to the socket.
+#[no_mangle]
+pub extern "C" fn rayzor_socket_write_byte(handle: *mut u8, byte: i32) {
+    if handle.is_null() {
+        return;
+    }
+    let sock = unsafe { &mut *(handle as *mut SocketHandle) };
+    if let Some(ref mut stream) = sock.stream {
+        let _ = stream.write_all(&[byte as u8]);
+    }
+}
+
+/// Write bytes from a Bytes buffer to the socket. Returns number of bytes written.
+#[no_mangle]
+pub extern "C" fn rayzor_socket_write_bytes(
+    handle: *mut u8,
+    bytes_ptr: *mut HaxeBytes,
+    pos: i32,
+    len: i32,
+) -> i32 {
+    if handle.is_null() || bytes_ptr.is_null() || pos < 0 || len <= 0 {
+        return 0;
+    }
+    let sock = unsafe { &mut *(handle as *mut SocketHandle) };
+    if let Some(ref mut stream) = sock.stream {
+        let b = unsafe { &*bytes_ptr };
+        let pos = pos as usize;
+        let len = len as usize;
+        if pos + len > b.len {
+            return 0;
+        }
+        let buf = unsafe { std::slice::from_raw_parts(b.ptr.add(pos), len) };
+        match stream.write(buf) {
+            Ok(n) => n as i32,
+            Err(_) => 0,
+        }
+    } else {
+        0
+    }
+}
+
+/// Write a string to the socket.
+#[no_mangle]
+pub extern "C" fn rayzor_socket_write_string(handle: *mut u8, str_ptr: *const u8) {
+    if handle.is_null() || str_ptr.is_null() {
+        return;
+    }
+    let sock = unsafe { &mut *(handle as *mut SocketHandle) };
+    let content = unsafe { haxe_string_to_rust(str_ptr) };
+    if let Some(ref mut stream) = sock.stream {
+        let _ = stream.write_all(content.as_bytes());
+    }
+}
+
+/// Flush the socket output.
+#[no_mangle]
+pub extern "C" fn rayzor_socket_flush(handle: *mut u8) {
+    if handle.is_null() {
+        return;
+    }
+    let sock = unsafe { &mut *(handle as *mut SocketHandle) };
+    if let Some(ref mut stream) = sock.stream {
+        let _ = stream.flush();
+    }
 }
 
 // =============================================================================

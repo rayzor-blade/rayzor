@@ -1068,6 +1068,36 @@ register_symbol!(
     crate::socket::rayzor_socket_host_info
 );
 register_symbol!("rayzor_socket_select", crate::socket::rayzor_socket_select);
+// SocketInput / SocketOutput byte-level I/O
+register_symbol!(
+    "rayzor_socket_get_input",
+    crate::socket::rayzor_socket_get_input
+);
+register_symbol!(
+    "rayzor_socket_get_output",
+    crate::socket::rayzor_socket_get_output
+);
+register_symbol!(
+    "rayzor_socket_read_byte",
+    crate::socket::rayzor_socket_read_byte
+);
+register_symbol!(
+    "rayzor_socket_read_bytes",
+    crate::socket::rayzor_socket_read_bytes
+);
+register_symbol!(
+    "rayzor_socket_write_byte",
+    crate::socket::rayzor_socket_write_byte
+);
+register_symbol!(
+    "rayzor_socket_write_bytes",
+    crate::socket::rayzor_socket_write_bytes
+);
+register_symbol!(
+    "rayzor_socket_write_string",
+    crate::socket::rayzor_socket_write_string
+);
+register_symbol!("rayzor_socket_flush", crate::socket::rayzor_socket_flush);
 register_symbol!("rayzor_host_new", crate::socket::rayzor_host_new);
 register_symbol!("rayzor_host_get_ip", crate::socket::rayzor_host_get_ip);
 register_symbol!(

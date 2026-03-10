@@ -10,6 +10,7 @@ use crate::ir::{CallingConvention, IrType};
 pub fn build_socket_type(builder: &mut MirBuilder) {
     declare_socket_externs(builder);
     declare_host_externs(builder);
+    declare_socket_io_externs(builder);
 
     // Socket MIR wrappers
     build_socket_new(builder);
@@ -25,6 +26,18 @@ pub fn build_socket_type(builder: &mut MirBuilder) {
     build_socket_set_timeout(builder);
     build_socket_set_fast_send(builder);
     build_socket_wait_for_read(builder);
+    build_socket_get_input(builder);
+    build_socket_get_output(builder);
+
+    // SocketInput / SocketOutput MIR wrappers
+    build_socket_input_read_byte(builder);
+    build_socket_input_read_bytes(builder);
+    build_socket_input_close(builder);
+    build_socket_output_write_byte(builder);
+    build_socket_output_write_bytes(builder);
+    build_socket_output_write_string(builder);
+    build_socket_output_flush(builder);
+    build_socket_output_close(builder);
 
     // Host MIR wrappers
     build_host_new(builder);
@@ -666,4 +679,309 @@ fn build_host_localhost(builder: &mut MirBuilder) {
         .unwrap();
     let result = builder.call(rt, vec![]).unwrap();
     builder.ret(Some(result));
+}
+
+// =============================================================================
+// SocketInput / SocketOutput extern declarations
+// =============================================================================
+
+fn declare_socket_io_externs(builder: &mut MirBuilder) {
+    let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let i32_ty = builder.i32_type();
+    let void_ty = builder.void_type();
+
+    let id = builder
+        .begin_function("rayzor_socket_get_input")
+        .param("handle", ptr_u8.clone())
+        .returns(ptr_u8.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(id);
+
+    let id = builder
+        .begin_function("rayzor_socket_get_output")
+        .param("handle", ptr_u8.clone())
+        .returns(ptr_u8.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(id);
+
+    let id = builder
+        .begin_function("rayzor_socket_read_byte")
+        .param("handle", ptr_u8.clone())
+        .returns(i32_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(id);
+
+    let id = builder
+        .begin_function("rayzor_socket_read_bytes")
+        .param("handle", ptr_u8.clone())
+        .param("bytes", ptr_u8.clone())
+        .param("pos", i32_ty.clone())
+        .param("len", i32_ty.clone())
+        .returns(i32_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(id);
+
+    let id = builder
+        .begin_function("rayzor_socket_write_byte")
+        .param("handle", ptr_u8.clone())
+        .param("byte", i32_ty.clone())
+        .returns(void_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(id);
+
+    let id = builder
+        .begin_function("rayzor_socket_write_bytes")
+        .param("handle", ptr_u8.clone())
+        .param("bytes", ptr_u8.clone())
+        .param("pos", i32_ty.clone())
+        .param("len", i32_ty.clone())
+        .returns(i32_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(id);
+
+    let id = builder
+        .begin_function("rayzor_socket_write_string")
+        .param("handle", ptr_u8.clone())
+        .param("str", ptr_u8.clone())
+        .returns(void_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(id);
+
+    let id = builder
+        .begin_function("rayzor_socket_flush")
+        .param("handle", ptr_u8)
+        .returns(void_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(id);
+}
+
+// =============================================================================
+// Socket input/output getter MIR wrappers
+// =============================================================================
+
+fn build_socket_get_input(builder: &mut MirBuilder) {
+    let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let func_id = builder
+        .begin_function("sys_net_Socket_input")
+        .param("self", ptr_u8.clone())
+        .returns(ptr_u8)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_reg = builder.get_param(0);
+    let rt = builder
+        .get_function_by_name("rayzor_socket_get_input")
+        .unwrap();
+    let result = builder.call(rt, vec![self_reg]).unwrap();
+    builder.ret(Some(result));
+}
+
+fn build_socket_get_output(builder: &mut MirBuilder) {
+    let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let func_id = builder
+        .begin_function("sys_net_Socket_output")
+        .param("self", ptr_u8.clone())
+        .returns(ptr_u8)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_reg = builder.get_param(0);
+    let rt = builder
+        .get_function_by_name("rayzor_socket_get_output")
+        .unwrap();
+    let result = builder.call(rt, vec![self_reg]).unwrap();
+    builder.ret(Some(result));
+}
+
+// =============================================================================
+// SocketInput MIR wrapper functions
+// =============================================================================
+
+fn build_socket_input_read_byte(builder: &mut MirBuilder) {
+    let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let i32_ty = builder.i32_type();
+    let func_id = builder
+        .begin_function("sys_net_SocketInput_readByte")
+        .param("self", ptr_u8)
+        .returns(i32_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_reg = builder.get_param(0);
+    let rt = builder
+        .get_function_by_name("rayzor_socket_read_byte")
+        .unwrap();
+    let result = builder.call(rt, vec![self_reg]).unwrap();
+    builder.ret(Some(result));
+}
+
+fn build_socket_input_read_bytes(builder: &mut MirBuilder) {
+    let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let i32_ty = builder.i32_type();
+    let func_id = builder
+        .begin_function("sys_net_SocketInput_readBytes")
+        .param("self", ptr_u8.clone())
+        .param("bytes", ptr_u8)
+        .param("pos", i32_ty.clone())
+        .param("len", i32_ty.clone())
+        .returns(i32_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_reg = builder.get_param(0);
+    let bytes = builder.get_param(1);
+    let pos = builder.get_param(2);
+    let len = builder.get_param(3);
+    let rt = builder
+        .get_function_by_name("rayzor_socket_read_bytes")
+        .unwrap();
+    let result = builder.call(rt, vec![self_reg, bytes, pos, len]).unwrap();
+    builder.ret(Some(result));
+}
+
+fn build_socket_input_close(builder: &mut MirBuilder) {
+    let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let void_ty = builder.void_type();
+    let func_id = builder
+        .begin_function("sys_net_SocketInput_close")
+        .param("self", ptr_u8)
+        .returns(void_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    builder.ret(None);
+}
+
+// =============================================================================
+// SocketOutput MIR wrapper functions
+// =============================================================================
+
+fn build_socket_output_write_byte(builder: &mut MirBuilder) {
+    let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let i32_ty = builder.i32_type();
+    let void_ty = builder.void_type();
+    let func_id = builder
+        .begin_function("sys_net_SocketOutput_writeByte")
+        .param("self", ptr_u8.clone())
+        .param("c", i32_ty)
+        .returns(void_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_reg = builder.get_param(0);
+    let c = builder.get_param(1);
+    let rt = builder
+        .get_function_by_name("rayzor_socket_write_byte")
+        .unwrap();
+    builder.call(rt, vec![self_reg, c]);
+    builder.ret(None);
+}
+
+fn build_socket_output_write_bytes(builder: &mut MirBuilder) {
+    let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let i32_ty = builder.i32_type();
+    let func_id = builder
+        .begin_function("sys_net_SocketOutput_writeBytes")
+        .param("self", ptr_u8.clone())
+        .param("bytes", ptr_u8)
+        .param("pos", i32_ty.clone())
+        .param("len", i32_ty.clone())
+        .returns(i32_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_reg = builder.get_param(0);
+    let bytes = builder.get_param(1);
+    let pos = builder.get_param(2);
+    let len = builder.get_param(3);
+    let rt = builder
+        .get_function_by_name("rayzor_socket_write_bytes")
+        .unwrap();
+    let result = builder.call(rt, vec![self_reg, bytes, pos, len]).unwrap();
+    builder.ret(Some(result));
+}
+
+fn build_socket_output_write_string(builder: &mut MirBuilder) {
+    let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let void_ty = builder.void_type();
+    let func_id = builder
+        .begin_function("sys_net_SocketOutput_writeString")
+        .param("self", ptr_u8.clone())
+        .param("s", ptr_u8)
+        .returns(void_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_reg = builder.get_param(0);
+    let s = builder.get_param(1);
+    let rt = builder
+        .get_function_by_name("rayzor_socket_write_string")
+        .unwrap();
+    builder.call(rt, vec![self_reg, s]);
+    builder.ret(None);
+}
+
+fn build_socket_output_flush(builder: &mut MirBuilder) {
+    let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let void_ty = builder.void_type();
+    let func_id = builder
+        .begin_function("sys_net_SocketOutput_flush")
+        .param("self", ptr_u8)
+        .returns(void_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_reg = builder.get_param(0);
+    let rt = builder.get_function_by_name("rayzor_socket_flush").unwrap();
+    builder.call(rt, vec![self_reg]);
+    builder.ret(None);
+}
+
+fn build_socket_output_close(builder: &mut MirBuilder) {
+    let ptr_u8 = builder.ptr_type(builder.u8_type());
+    let void_ty = builder.void_type();
+    let func_id = builder
+        .begin_function("sys_net_SocketOutput_close")
+        .param("self", ptr_u8)
+        .returns(void_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    builder.ret(None);
 }
