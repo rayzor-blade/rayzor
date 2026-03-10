@@ -2878,13 +2878,19 @@ impl<'a> HirToMirContext<'a> {
 
     /// Ensure Future runtime extern functions are declared in the current module.
     /// Returns (create_id, await_id, poll_id, is_ready_id).
-    fn ensure_future_externs(&mut self) -> (IrFunctionId, IrFunctionId, IrFunctionId, IrFunctionId) {
+    fn ensure_future_externs(
+        &mut self,
+    ) -> (IrFunctionId, IrFunctionId, IrFunctionId, IrFunctionId) {
         use crate::ir::modules::IrExternFunction;
 
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
 
         let externs_to_declare: Vec<(&str, Vec<IrType>, IrType)> = vec![
-            ("rayzor_future_create", vec![ptr_u8.clone(), ptr_u8.clone()], ptr_u8.clone()),
+            (
+                "rayzor_future_create",
+                vec![ptr_u8.clone(), ptr_u8.clone()],
+                ptr_u8.clone(),
+            ),
             ("rayzor_future_await", vec![ptr_u8.clone()], ptr_u8.clone()),
             ("rayzor_future_poll", vec![ptr_u8.clone()], ptr_u8.clone()),
             ("rayzor_future_is_ready", vec![ptr_u8.clone()], IrType::Bool),
@@ -2893,7 +2899,11 @@ impl<'a> HirToMirContext<'a> {
         let mut ids = Vec::new();
         for (name, params, ret) in externs_to_declare {
             // Check if already declared
-            let existing = self.builder.module.extern_functions.iter()
+            let existing = self
+                .builder
+                .module
+                .extern_functions
+                .iter()
                 .find(|(_, f)| f.name == name)
                 .map(|(id, _)| *id);
             if let Some(id) = existing {
@@ -2903,25 +2913,32 @@ impl<'a> HirToMirContext<'a> {
             // Declare it
             let id = self.builder.module.alloc_function_id();
             let sig = crate::ir::IrFunctionSignature {
-                parameters: params.into_iter().enumerate().map(|(i, ty)| crate::ir::functions::IrParameter {
-                    name: format!("p{}", i),
-                    ty,
-                    reg: IrId(i as u32),
-                    by_ref: false,
-                }).collect(),
+                parameters: params
+                    .into_iter()
+                    .enumerate()
+                    .map(|(i, ty)| crate::ir::functions::IrParameter {
+                        name: format!("p{}", i),
+                        ty,
+                        reg: IrId(i as u32),
+                        by_ref: false,
+                    })
+                    .collect(),
                 return_type: ret,
                 calling_convention: crate::ir::CallingConvention::C,
                 can_throw: false,
                 type_params: Vec::new(),
                 uses_sret: false,
             };
-            self.builder.module.extern_functions.insert(id, IrExternFunction {
+            self.builder.module.extern_functions.insert(
                 id,
-                name: name.to_string(),
-                symbol_id: SymbolId::from_raw(9999),
-                signature: sig,
-                source: "runtime".to_string(),
-            });
+                IrExternFunction {
+                    id,
+                    name: name.to_string(),
+                    symbol_id: SymbolId::from_raw(9999),
+                    signature: sig,
+                    source: "runtime".to_string(),
+                },
+            );
             ids.push(id);
         }
 
@@ -2943,7 +2960,10 @@ impl<'a> HirToMirContext<'a> {
     ) {
         use crate::ir::hir::{HirCapture, HirCaptureMode, HirExprKind};
 
-        debug!("[lower_async_function_body]: transforming {} to return Future", func_name);
+        debug!(
+            "[lower_async_function_body]: transforming {} to return Future",
+            func_name
+        );
 
         // 1. Create captures from function params (the inner closure captures all params)
         let captures: Vec<HirCapture> = hir_func
@@ -2983,7 +3003,9 @@ impl<'a> HirToMirContext<'a> {
             if let Some(layout) = &inner_context.env_layout {
                 let env_ptr = IrId::new(0); // First parameter
                 for field in &layout.fields {
-                    if let Some(value_reg) = layout.load_field(&mut self.builder, env_ptr, field.symbol) {
+                    if let Some(value_reg) =
+                        layout.load_field(&mut self.builder, env_ptr, field.symbol)
+                    {
                         self.symbol_map.insert(field.symbol, value_reg);
                         // Register as local for type inference
                         let param_name = self
@@ -3019,7 +3041,12 @@ impl<'a> HirToMirContext<'a> {
             self.ensure_terminator();
 
             // Fix up return type: inner closure returns I32 (JIT convention)
-            if let Some(inner_func) = self.builder.module.functions.get_mut(&inner_context.func_id) {
+            if let Some(inner_func) = self
+                .builder
+                .module
+                .functions
+                .get_mut(&inner_context.func_id)
+            {
                 inner_func.signature.return_type = IrType::I32;
             }
 
@@ -3037,7 +3064,10 @@ impl<'a> HirToMirContext<'a> {
 
         // Create closure object (MakeClosure instruction)
         // MakeClosure allocates struct { fn_ptr: i64, env_ptr: i64 } on heap
-        let closure_reg = match self.builder.build_make_closure(inner_func_id, captured_values) {
+        let closure_reg = match self
+            .builder
+            .build_make_closure(inner_func_id, captured_values)
+        {
             Some(r) => r,
             None => {
                 self.ensure_terminator();
@@ -3062,7 +3092,10 @@ impl<'a> HirToMirContext<'a> {
                 return;
             }
         };
-        let env_field_ptr = match self.builder.build_ptr_add(closure_reg, eight, ptr_u8_ty.clone()) {
+        let env_field_ptr = match self
+            .builder
+            .build_ptr_add(closure_reg, eight, ptr_u8_ty.clone())
+        {
             Some(r) => r,
             None => {
                 self.ensure_terminator();
@@ -3816,19 +3849,17 @@ impl<'a> HirToMirContext<'a> {
                     // Track @:async function call results
                     let is_async_call = if let HirExprKind::Call { callee, .. } = &init_expr.kind {
                         match &callee.kind {
-                            HirExprKind::Variable { symbol, .. } => {
-                                self.symbol_table
-                                    .get_symbol(*symbol)
-                                    .map(|s| s.flags.contains(SymbolFlags::ASYNC))
-                                    .unwrap_or(false)
-                            }
+                            HirExprKind::Variable { symbol, .. } => self
+                                .symbol_table
+                                .get_symbol(*symbol)
+                                .map(|s| s.flags.contains(SymbolFlags::ASYNC))
+                                .unwrap_or(false),
                             // StaticMethodCall produces Field { object: Variable(class), field: method }
-                            HirExprKind::Field { field, .. } => {
-                                self.symbol_table
-                                    .get_symbol(*field)
-                                    .map(|s| s.flags.contains(SymbolFlags::ASYNC))
-                                    .unwrap_or(false)
-                            }
+                            HirExprKind::Field { field, .. } => self
+                                .symbol_table
+                                .get_symbol(*field)
+                                .map(|s| s.flags.contains(SymbolFlags::ASYNC))
+                                .unwrap_or(false),
                             _ => false,
                         }
                     } else {
@@ -7619,7 +7650,10 @@ impl<'a> HirToMirContext<'a> {
                                     };
                                     if let Some(extern_name) = ext_name {
                                         // Look up the extern directly (declared by ensure_future_externs)
-                                        let func_id = self.builder.module.extern_functions
+                                        let func_id = self
+                                            .builder
+                                            .module
+                                            .extern_functions
                                             .iter()
                                             .find(|(_, f)| f.name == extern_name)
                                             .map(|(id, _)| *id);

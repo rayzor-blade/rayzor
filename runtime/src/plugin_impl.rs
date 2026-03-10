@@ -996,22 +996,10 @@ register_symbol!(
 );
 
 // Future functions
-register_symbol!(
-    "rayzor_future_create",
-    crate::future::rayzor_future_create
-);
-register_symbol!(
-    "rayzor_future_await",
-    crate::future::rayzor_future_await
-);
-register_symbol!(
-    "rayzor_future_then",
-    crate::future::rayzor_future_then
-);
-register_symbol!(
-    "rayzor_future_poll",
-    crate::future::rayzor_future_poll
-);
+register_symbol!("rayzor_future_create", crate::future::rayzor_future_create);
+register_symbol!("rayzor_future_await", crate::future::rayzor_future_await);
+register_symbol!("rayzor_future_then", crate::future::rayzor_future_then);
+register_symbol!("rayzor_future_poll", crate::future::rayzor_future_poll);
 register_symbol!(
     "rayzor_future_is_ready",
     crate::future::rayzor_future_is_ready
