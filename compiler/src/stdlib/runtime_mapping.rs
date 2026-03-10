@@ -229,6 +229,8 @@ impl StdlibMapping {
         mapping.register_mutex_methods();
         mapping.register_future_methods();
         mapping.register_socket_methods();
+        mapping.register_socket_input_methods();
+        mapping.register_socket_output_methods();
         mapping.register_host_methods();
         mapping.register_vec_methods();
         mapping.register_stringmap_methods();
@@ -2110,6 +2112,54 @@ impl StdlibMapping {
                 types: &[PtrU8, I32]),
             // socket.waitForRead()
             map_method!(instance "sys_net_Socket", "waitForRead" => "sys_net_Socket_waitForRead", params: 0, mir_wrapper,
+                types: &[PtrU8]),
+            // socket.input -> SocketInput (field accessor as 0-param method)
+            map_method!(instance "sys_net_Socket", "input" => "sys_net_Socket_input", params: 0, mir_wrapper,
+                types: &[PtrU8] => PtrU8),
+            // socket.output -> SocketOutput (field accessor as 0-param method)
+            map_method!(instance "sys_net_Socket", "output" => "sys_net_Socket_output", params: 0, mir_wrapper,
+                types: &[PtrU8] => PtrU8),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // SocketInput Methods (sys.net.SocketInput)
+    // ============================================================================
+
+    fn register_socket_input_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            map_method!(instance "SocketInput", "readByte" => "sys_net_SocketInput_readByte", params: 0, mir_wrapper,
+                types: &[PtrU8] => I32),
+            map_method!(instance "SocketInput", "readBytes" => "sys_net_SocketInput_readBytes", params: 3, mir_wrapper,
+                types: &[PtrU8, PtrVoid, I32, I32] => I32),
+            map_method!(instance "SocketInput", "close" => "sys_net_SocketInput_close", params: 0, mir_wrapper,
+                types: &[PtrU8]),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // SocketOutput Methods (sys.net.SocketOutput)
+    // ============================================================================
+
+    fn register_socket_output_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            map_method!(instance "SocketOutput", "writeByte" => "sys_net_SocketOutput_writeByte", params: 1, mir_wrapper,
+                types: &[PtrU8, I32]),
+            map_method!(instance "SocketOutput", "writeBytes" => "sys_net_SocketOutput_writeBytes", params: 3, mir_wrapper,
+                types: &[PtrU8, PtrVoid, I32, I32] => I32),
+            map_method!(instance "SocketOutput", "writeString" => "sys_net_SocketOutput_writeString", params: 1, mir_wrapper,
+                types: &[PtrU8, PtrU8]),
+            map_method!(instance "SocketOutput", "flush" => "sys_net_SocketOutput_flush", params: 0, mir_wrapper,
+                types: &[PtrU8]),
+            map_method!(instance "SocketOutput", "close" => "sys_net_SocketOutput_close", params: 0, mir_wrapper,
                 types: &[PtrU8]),
         ];
 
