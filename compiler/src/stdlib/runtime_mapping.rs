@@ -2037,6 +2037,14 @@ impl StdlibMapping {
             // MIR wrapper: takes future handle, returns bool
             map_method!(instance "rayzor_concurrent_Future", "isReady" => "Future_isReady", params: 0, mir_wrapper,
                 types: &[PtrU8] => Bool),
+            // Future::join() -> Void
+            // MIR wrapper: waits for all outstanding futures/threads
+            map_method!(static "rayzor_concurrent_Future", "join" => "Future_join", params: 0, mir_wrapper,
+                types: &[]),
+            // Future::all(arr: Array<Future<T>>) -> Future<Array<T>>
+            // MIR wrapper: spawns all sub-futures in parallel, returns combined future
+            map_method!(static "rayzor_concurrent_Future", "all" => "Future_all", params: 1, mir_wrapper,
+                types: &[PtrU8] => PtrU8),
         ];
 
         self.register_from_tuples(mappings);

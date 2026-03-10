@@ -1004,6 +1004,7 @@ register_symbol!(
     "rayzor_future_is_ready",
     crate::future::rayzor_future_is_ready
 );
+register_symbol!("rayzor_future_all", crate::future::rayzor_future_all);
 
 // Arc functions
 register_symbol!("rayzor_arc_init", crate::concurrency::rayzor_arc_init);

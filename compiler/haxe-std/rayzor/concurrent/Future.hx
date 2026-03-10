@@ -76,4 +76,25 @@ extern class Future<T> {
      */
     @:native("isReady")
     public function isReady():Bool;
+
+    /**
+     * Wait for all outstanding futures (and threads) to complete.
+     *
+     * Blocks the calling thread until every spawned future and thread
+     * has finished. Useful before program exit to ensure `.then()`
+     * callbacks have completed.
+     */
+    @:native("join")
+    public static function join():Void;
+
+    /**
+     * Like JavaScript's `Promise.all()`: takes an array of futures,
+     * spawns them all in parallel, and returns a new Future that
+     * resolves to an Array of results.
+     *
+     * @param futures Array of Future handles
+     * @return A Future that resolves to Array<T> when all complete
+     */
+    @:native("all")
+    public static function all<T>(futures:Array<Future<T>>):Future<Array<T>>;
 }

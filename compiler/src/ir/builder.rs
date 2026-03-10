@@ -689,6 +689,8 @@ impl IrBuilder {
             func_id,
             captured_values,
         })?;
+        // Closure objects are heap-allocated structs {fn_ptr, env_ptr} — pointer type
+        self.set_register_type(dest, IrType::Ptr(Box::new(IrType::U8)));
         Some(dest)
     }
 
