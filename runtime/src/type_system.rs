@@ -26,7 +26,6 @@
 //!    let s = dynamic_to_string(dynamic);  // Dispatches based on type_id
 //!    ```
 
-use crate::arena::arena_alloc_haxe_string;
 use log::debug;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Once, RwLock};
@@ -1237,11 +1236,12 @@ pub extern "C" fn haxe_enum_variant_name(
     if let Some(name) = get_enum_variant_name(TypeId(type_id), discriminant) {
         // Create a HaxeString from the static variant name
         // cap=0 indicates static/borrowed string that shouldn't be freed
-        arena_alloc_haxe_string(HaxeString {
+        let result = Box::new(HaxeString {
             ptr: name.as_ptr() as *mut u8,
             len: name.len(),
             cap: 0, // Static string, don't free
-        })
+        });
+        Box::into_raw(result)
     } else {
         std::ptr::null_mut()
     }
@@ -2034,11 +2034,11 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
     if dynamic_ptr.is_null() {
         // Return "null" for null pointer
         let s = "null";
-        return arena_alloc_haxe_string(HaxeString {
+        return Box::into_raw(Box::new(HaxeString {
             ptr: s.as_ptr() as *mut u8,
             len: s.len(),
             cap: 0,
-        });
+        }));
     }
 
     unsafe {
@@ -2047,22 +2047,22 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
         // Handle null type
         if dynamic.type_id == TYPE_NULL || dynamic.value_ptr.is_null() {
             let s = "null";
-            return arena_alloc_haxe_string(HaxeString {
+            return Box::into_raw(Box::new(HaxeString {
                 ptr: s.as_ptr() as *mut u8,
                 len: s.len(),
                 cap: 0,
-            });
+            }));
         }
 
         // Look up type info and call toString, then convert to HaxeString
         if let Some(type_info) = get_type_info(dynamic.type_id) {
             let str_ptr = (type_info.to_string)(dynamic.value_ptr);
             // Convert StringPtr to HaxeString (adding cap=0)
-            arena_alloc_haxe_string(HaxeString {
+            Box::into_raw(Box::new(HaxeString {
                 ptr: str_ptr.ptr as *mut u8,
                 len: str_ptr.len,
                 cap: 0, // StringPtr strings are either static or leaked
-            })
+            }))
         } else {
             // Unknown type, return type name
             let s = format!("<unknown type {}>", dynamic.type_id.0);
@@ -2071,7 +2071,7 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
             let cap = bytes.capacity();
             let ptr = bytes.as_ptr() as *mut u8;
             std::mem::forget(bytes);
-            arena_alloc_haxe_string(HaxeString { ptr, len, cap })
+            Box::into_raw(Box::new(HaxeString { ptr, len, cap }))
         }
     }
 }

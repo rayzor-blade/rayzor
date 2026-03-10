@@ -7,7 +7,6 @@ use regex::Regex;
 use std::alloc::{alloc, Layout};
 use std::ptr;
 
-use crate::arena::arena_alloc_haxe_string;
 use crate::haxe_array::HaxeArray;
 use crate::haxe_string::{haxe_string_from_bytes, HaxeString};
 
@@ -35,11 +34,12 @@ unsafe fn hs_to_str<'a>(s: *const HaxeString) -> &'a str {
 
 /// Create a new heap-allocated HaxeString from a Rust &str, return as *mut u8 (i64-sized pointer)
 fn rust_str_to_hs(s: &str) -> *mut u8 {
-    let hs_ptr = arena_alloc_haxe_string(HaxeString {
+    let hs = Box::new(HaxeString {
         ptr: ptr::null_mut(),
         len: 0,
         cap: 0,
     });
+    let hs_ptr = Box::into_raw(hs);
     haxe_string_from_bytes(hs_ptr, s.as_ptr(), s.len());
     hs_ptr as *mut u8
 }

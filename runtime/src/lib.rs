@@ -37,7 +37,6 @@ pub mod generic_vec;
 
 // Export Haxe core type runtime modules
 pub mod anon_object; // Anonymous object runtime (Arc-based, COW)
-pub mod arena; // Bump arena allocator for string memory
 pub mod concurrency; // Concurrency primitives (Thread, Arc, Mutex, Channel)
 pub mod ereg; // EReg regular expressions (regex crate)
 pub mod exception;

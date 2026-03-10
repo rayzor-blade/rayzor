@@ -7,7 +7,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-RAYZOR="$SCRIPT_DIR/target/debug/rayzor"
+RAYZOR="$SCRIPT_DIR/target/release/rayzor"
 TESTS_DIR="compiler/tests/haxe"
 RESULTS_FILE="test_results.txt"
 

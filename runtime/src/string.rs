@@ -1,22 +1,37 @@
 //! String implementation for Haxe
 //!
-//! Haxe strings are immutable value types. All string data is bump-allocated
-//! from a thread-local arena and freed in bulk at program exit.
+//! Haxe strings are UTF-8 encoded and backed by a Vec<u8>
 
-use crate::arena::{arena_alloc_bytes, arena_alloc_haxe_string};
+use std::alloc::{alloc, dealloc, Layout};
 use std::ptr;
 
-// Re-export from the canonical definition in haxe_string module
-pub use crate::haxe_string::HaxeString;
+/// Haxe String representation: { ptr: *mut u8, len: usize, cap: usize }
+/// Same as HaxeVec but guarantees valid UTF-8
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct HaxeString {
+    pub ptr: *mut u8,
+    pub len: usize,
+    pub cap: usize,
+}
 
 /// Create a new empty string (internal helper, not exported)
 pub fn haxe_string_new() -> HaxeString {
     const INITIAL_CAPACITY: usize = 16;
-    let ptr = arena_alloc_bytes(INITIAL_CAPACITY);
-    HaxeString {
-        ptr,
-        len: 0,
-        cap: INITIAL_CAPACITY,
+
+    unsafe {
+        let layout = Layout::from_size_align_unchecked(INITIAL_CAPACITY, 1);
+        let ptr = alloc(layout);
+
+        if ptr.is_null() {
+            panic!("Failed to allocate memory for String");
+        }
+
+        HaxeString {
+            ptr,
+            len: 0,
+            cap: INITIAL_CAPACITY,
+        }
     }
 }
 
@@ -36,7 +51,12 @@ fn haxe_string_from_cstr(cstr: *const u8) -> HaxeString {
 
         // Allocate
         let cap = if len < 16 { 16 } else { len };
-        let ptr = arena_alloc_bytes(cap);
+        let layout = Layout::from_size_align_unchecked(cap, 1);
+        let ptr = alloc(layout);
+
+        if ptr.is_null() {
+            panic!("Failed to allocate memory for String");
+        }
 
         // Copy
         ptr::copy_nonoverlapping(cstr, ptr, len);
@@ -47,18 +67,25 @@ fn haxe_string_from_cstr(cstr: *const u8) -> HaxeString {
 
 /// Create a string from bytes with length - internal helper
 fn haxe_string_from_bytes(bytes: *const u8, len: usize) -> HaxeString {
-    if bytes.is_null() || len == 0 {
-        return haxe_string_new();
-    }
-
-    let cap = if len < 16 { 16 } else { len };
-    let ptr = arena_alloc_bytes(cap);
-
     unsafe {
-        ptr::copy_nonoverlapping(bytes, ptr, len);
-    }
+        if bytes.is_null() || len == 0 {
+            return haxe_string_new();
+        }
 
-    HaxeString { ptr, len, cap }
+        // Allocate
+        let cap = if len < 16 { 16 } else { len };
+        let layout = Layout::from_size_align_unchecked(cap, 1);
+        let ptr = alloc(layout);
+
+        if ptr.is_null() {
+            panic!("Failed to allocate memory for String");
+        }
+
+        // Copy
+        ptr::copy_nonoverlapping(bytes, ptr, len);
+
+        HaxeString { ptr, len, cap }
+    }
 }
 
 /// Get the length of the string in bytes - internal helper
@@ -106,7 +133,9 @@ pub extern "C" fn haxe_string_concat_ptr(
     b: *const HaxeString,
 ) -> *mut HaxeString {
     let result = haxe_string_concat_impl(a, b);
-    arena_alloc_haxe_string(result)
+    // Allocate on heap and return pointer
+    let boxed = Box::new(result);
+    Box::into_raw(boxed)
 }
 
 /// Concatenate two strings (returns value - may have ABI issues with large structs)
@@ -143,7 +172,12 @@ fn haxe_string_concat_impl(a: *const HaxeString, b: *const HaxeString) -> HaxeSt
         let new_len = a_len + b_len;
         let new_cap = if new_len < 16 { 16 } else { new_len };
 
-        let new_ptr = arena_alloc_bytes(new_cap);
+        let layout = Layout::from_size_align_unchecked(new_cap, 1);
+        let new_ptr = alloc(layout);
+
+        if new_ptr.is_null() {
+            panic!("Failed to allocate memory for String concat");
+        }
 
         // Copy both strings
         if a_len > 0 && !a_ref.ptr.is_null() {
@@ -229,11 +263,25 @@ fn haxe_string_to_upper(s: *const HaxeString) -> HaxeString {
     }
 }
 
-/// Free a string — no-op with arena allocation.
-/// Kept for API compatibility; arena frees all memory in bulk at program exit.
+/// Free a string - internal helper
 #[allow(dead_code)]
-fn haxe_string_free(_s: *mut HaxeString) {
-    // No-op: arena handles deallocation
+fn haxe_string_free(s: *mut HaxeString) {
+    unsafe {
+        if s.is_null() {
+            return;
+        }
+
+        let str_ref = &*s;
+
+        if !str_ref.ptr.is_null() && str_ref.cap > 0 {
+            let layout = Layout::from_size_align_unchecked(str_ref.cap, 1);
+            dealloc(str_ref.ptr, layout);
+        }
+
+        (*s).ptr = ptr::null_mut();
+        (*s).len = 0;
+        (*s).cap = 0;
+    }
 }
 
 /// Get pointer to the string data (for debugging/printing) - internal helper
@@ -371,6 +419,8 @@ mod tests {
         assert!(!s.ptr.is_null());
         assert_eq!(s.len, 0);
         assert_eq!(s.cap, 16);
+
+        haxe_string_free(&mut s.clone());
     }
 
     #[test]
@@ -383,6 +433,7 @@ mod tests {
         unsafe {
             let slice = slice::from_raw_parts(s.ptr, s.len);
             assert_eq!(slice, bytes);
+            haxe_string_free(&mut s.clone());
         }
     }
 
@@ -398,6 +449,10 @@ mod tests {
         unsafe {
             let slice = slice::from_raw_parts(result.ptr, result.len);
             assert_eq!(slice, b"Hello, World!");
+
+            haxe_string_free(&mut s1.clone());
+            haxe_string_free(&mut s2.clone());
+            haxe_string_free(&mut result.clone());
         }
     }
 
@@ -414,6 +469,10 @@ mod tests {
 
             assert_eq!(upper_slice, b"HELLO");
             assert_eq!(lower_slice, b"hello");
+
+            haxe_string_free(&mut s.clone());
+            haxe_string_free(&mut upper.clone());
+            haxe_string_free(&mut lower.clone());
         }
     }
 }

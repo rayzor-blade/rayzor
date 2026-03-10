@@ -3,7 +3,6 @@
 //! Memory layout: [length: usize, capacity: usize, data...]
 //! All strings are UTF-8 encoded and null-terminated for C interop
 
-use crate::arena::arena_alloc_haxe_string;
 use log::debug;
 use std::alloc::{alloc, dealloc, Layout};
 use std::ptr;
@@ -486,22 +485,24 @@ pub extern "C" fn haxe_string_split_array(
             let idx = haxe_string_index_of(s, delimiter, start);
             if idx < 0 {
                 // Last part - allocate and store substring
-                let substr_ptr = arena_alloc_haxe_string(HaxeString {
+                let substring = Box::new(HaxeString {
                     ptr: ptr::null_mut(),
                     len: 0,
                     cap: 0,
                 });
+                let substr_ptr = Box::into_raw(substring);
                 haxe_string_substring(substr_ptr, s, start, s_ref.len);
                 *i64_ptr.add(array_idx) = substr_ptr as i64;
                 break;
             }
 
             // Allocate and store substring
-            let substr_ptr = arena_alloc_haxe_string(HaxeString {
+            let substring = Box::new(HaxeString {
                 ptr: ptr::null_mut(),
                 len: 0,
                 cap: 0,
             });
+            let substr_ptr = Box::into_raw(substring);
             haxe_string_substring(substr_ptr, s, start, idx as usize);
             *i64_ptr.add(array_idx) = substr_ptr as i64;
 
@@ -582,11 +583,12 @@ pub extern "C" fn haxe_string_replace(
     needle: *const HaxeString,
     replacement: *const HaxeString,
 ) -> *mut HaxeString {
-    let result_ptr = arena_alloc_haxe_string(HaxeString {
+    let result = Box::new(HaxeString {
         ptr: ptr::null_mut(),
         len: 0,
         cap: 0,
     });
+    let result_ptr = Box::into_raw(result);
     haxe_string_new(result_ptr);
 
     if haystack.is_null() || needle.is_null() || replacement.is_null() {

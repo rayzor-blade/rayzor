@@ -24,7 +24,6 @@
 //!   triggers per-char decoding.
 
 use crate::anon_object::{self, DYNAMIC_SHAPE};
-use crate::arena::arena_alloc_haxe_string;
 use crate::haxe_string::HaxeString;
 use crate::type_system::{
     DynamicValue, StringPtr, TypeId, TYPE_BOOL, TYPE_FLOAT, TYPE_INT, TYPE_STRING,
@@ -614,7 +613,7 @@ fn alloc_haxe_string(s: &str) -> *mut u8 {
     let cap = bytes.capacity();
     let ptr = bytes.as_ptr() as *mut u8;
     std::mem::forget(bytes);
-    arena_alloc_haxe_string(HaxeString { ptr, len, cap }) as *mut u8
+    Box::into_raw(Box::new(HaxeString { ptr, len, cap })) as *mut u8
 }
 
 // ---------------------------------------------------------------------------
