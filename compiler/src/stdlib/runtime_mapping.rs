@@ -228,6 +228,8 @@ impl StdlibMapping {
         mapping.register_arc_methods();
         mapping.register_mutex_methods();
         mapping.register_future_methods();
+        mapping.register_socket_methods();
+        mapping.register_host_methods();
         mapping.register_vec_methods();
         mapping.register_stringmap_methods();
         mapping.register_intmap_methods();
@@ -2057,6 +2059,83 @@ impl StdlibMapping {
             // Future.isCancelled() -> Bool
             map_method!(instance "rayzor_concurrent_Future", "isCancelled" => "Future_isCancelled", params: 0, mir_wrapper,
                 types: &[PtrU8] => Bool),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // Socket Methods (sys.net.Socket)
+    // ============================================================================
+
+    fn register_socket_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            // Socket.new() -> Socket
+            map_method!(constructor "sys_net_Socket", "new" => "sys_net_Socket_new", params: 0, mir_wrapper,
+                types: &[] => PtrU8),
+            // socket.connect(host: Host, port: Int)
+            map_method!(instance "sys_net_Socket", "connect" => "sys_net_Socket_connect", params: 2, mir_wrapper,
+                types: &[PtrU8, PtrU8, I32]),
+            // socket.bind(host: Host, port: Int)
+            map_method!(instance "sys_net_Socket", "bind" => "sys_net_Socket_bind", params: 2, mir_wrapper,
+                types: &[PtrU8, PtrU8, I32]),
+            // socket.listen(connections: Int)
+            map_method!(instance "sys_net_Socket", "listen" => "sys_net_Socket_listen", params: 1, mir_wrapper,
+                types: &[PtrU8, I32]),
+            // socket.accept() -> Socket
+            map_method!(instance "sys_net_Socket", "accept" => "sys_net_Socket_accept", params: 0, mir_wrapper,
+                types: &[PtrU8] => PtrU8),
+            // socket.close()
+            map_method!(instance "sys_net_Socket", "close" => "sys_net_Socket_close", params: 0, mir_wrapper,
+                types: &[PtrU8]),
+            // socket.read() -> String
+            map_method!(instance "sys_net_Socket", "read" => "sys_net_Socket_read", params: 0, mir_wrapper,
+                types: &[PtrU8] => PtrU8),
+            // socket.write(content: String)
+            map_method!(instance "sys_net_Socket", "write" => "sys_net_Socket_write", params: 1, mir_wrapper,
+                types: &[PtrU8, PtrU8]),
+            // socket.shutdown(read: Bool, write: Bool)
+            map_method!(instance "sys_net_Socket", "shutdown" => "sys_net_Socket_shutdown", params: 2, mir_wrapper,
+                types: &[PtrU8, I32, I32]),
+            // socket.setBlocking(b: Bool)
+            map_method!(instance "sys_net_Socket", "setBlocking" => "sys_net_Socket_setBlocking", params: 1, mir_wrapper,
+                types: &[PtrU8, I32]),
+            // socket.setTimeout(timeout: Float)
+            map_method!(instance "sys_net_Socket", "setTimeout" => "sys_net_Socket_setTimeout", params: 1, mir_wrapper,
+                types: &[PtrU8, F64]),
+            // socket.setFastSend(b: Bool)
+            map_method!(instance "sys_net_Socket", "setFastSend" => "sys_net_Socket_setFastSend", params: 1, mir_wrapper,
+                types: &[PtrU8, I32]),
+            // socket.waitForRead()
+            map_method!(instance "sys_net_Socket", "waitForRead" => "sys_net_Socket_waitForRead", params: 0, mir_wrapper,
+                types: &[PtrU8]),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // Host Methods (sys.net.Host)
+    // ============================================================================
+
+    fn register_host_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            // Host.new(name: String) -> Host
+            map_method!(constructor "sys_net_Host", "new" => "sys_net_Host_new", params: 1, mir_wrapper,
+                types: &[PtrU8] => PtrU8),
+            // host.toString() -> String
+            map_method!(instance "sys_net_Host", "toString" => "sys_net_Host_toString", params: 0, mir_wrapper,
+                types: &[PtrU8] => PtrU8),
+            // host.reverse() -> String
+            map_method!(instance "sys_net_Host", "reverse" => "sys_net_Host_reverse", params: 0, mir_wrapper,
+                types: &[PtrU8] => PtrU8),
+            // Host.localhost() -> String
+            map_method!(static "sys_net_Host", "localhost" => "sys_net_Host_localhost", params: 0, mir_wrapper,
+                types: &[] => PtrU8),
         ];
 
         self.register_from_tuples(mappings);

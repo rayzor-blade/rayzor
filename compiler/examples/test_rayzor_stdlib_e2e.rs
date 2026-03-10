@@ -840,6 +840,79 @@ class Main {
     );
 
     // ============================================================================
+    // TEST 10: Socket + Host — TCP echo via localhost
+    // ============================================================================
+    suite.add_test(
+        E2ETestCase::new(
+            "socket_host_basic",
+            "Socket and Host creation with connect/bind/accept/read/write",
+            r#"
+package test;
+
+import sys.net.Socket;
+import sys.net.Host;
+
+class Main {
+    static function main() {
+        // Create server socket and bind to localhost
+        var server = new Socket();
+        var host = new Host("127.0.0.1");
+        server.bind(host, 19876);
+        server.listen(1);
+
+        // Create client socket and connect
+        var client = new Socket();
+        client.connect(new Host("127.0.0.1"), 19876);
+
+        // Accept the connection on server side
+        var conn = server.accept();
+
+        // Client sends data
+        client.write("hello");
+
+        // Server reads it
+        var data = conn.read();
+
+        // Close all
+        conn.close();
+        client.close();
+        server.close();
+    }
+}
+"#,
+        )
+        .expect_mir_calls(vec![
+            "rayzor_socket_new",
+            "rayzor_host_new",
+            "rayzor_socket_connect",
+            "rayzor_socket_bind",
+        ])
+        .expect_level(TestLevel::Execution),
+    );
+
+    // ============================================================================
+    // TEST 11: Host.localhost() static method
+    // ============================================================================
+    suite.add_test(
+        E2ETestCase::new(
+            "host_localhost",
+            "Host.localhost() returns hostname string",
+            r#"
+package test;
+
+import sys.net.Host;
+
+class Main {
+    static function main() {
+        var name = Host.localhost();
+    }
+}
+"#,
+        )
+        .expect_mir_calls(vec!["rayzor_host_localhost"]),
+    );
+
+    // ============================================================================
     // Run all tests
     // ============================================================================
     // NOTE: Static extension tests (using StringTools) are in isolated test:

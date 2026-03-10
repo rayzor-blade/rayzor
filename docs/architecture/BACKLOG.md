@@ -474,7 +474,7 @@ Thread.spawn(() -> {
 
 ### 3.4 Send and Sync Traits
 
-**Status:** 🟡 Parsing Complete, Validation Not Enforced
+**Status:** 🟢 Complete (2026-03-05)
 **Dependencies:** Derived Traits System
 **Design:** See [SEND_SYNC_VALIDATION.md](SEND_SYNC_VALIDATION.md) for validation strategy
 
@@ -482,14 +482,13 @@ Thread.spawn(() -> {
 - [x] `Send` and `Sync` in `DerivedTrait` enum
 - [x] `@:derive([Send, Sync])` parsing works
 - [x] Classes can be annotated with Send/Sync
+- [x] Compile-time validation that captured variables are Send (Thread.spawn, Future.create)
+- [x] Compile-time validation that channel element types are Send
+- [x] Auto-derivation rules (struct is Send if all fields are Send)
+- [x] Closure capture analysis for Send validation (`CaptureAnalyzer` + `TraitChecker`)
+- [x] Arc<T> requires Send + Sync validation
 
-**Not Yet Enforced:**
-- [ ] Compile-time validation that captured variables are Send
-- [ ] Compile-time validation that channel element types are Send
-- [ ] Auto-derivation rules (struct is Send if all fields are Send)
-- [ ] Closure capture analysis for Send validation
-
-**Note:** The threading system works correctly at runtime. Send/Sync annotations are parsed but not enforced at compile time. This is a future enhancement for compile-time safety guarantees.
+**Implementation:** `send_sync_validator.rs` validates at call sites (Thread.spawn, Future.create, Channel, Arc). `trait_checker.rs` implements auto-derivation (all fields Send → type is Send). Errors reported as `ConcurrencyError` diagnostics with fix suggestions.
 
 ### 3.5 Memory Safety Integration
 
@@ -502,109 +501,57 @@ Thread.spawn(() -> {
 - [x] Channel for ownership transfer between threads
 
 **Not Yet Enforced:**
-- [ ] Validate Send/Sync at MIR level
+- [x] Validate Send/Sync at TAST level (via `SendSyncValidator` — validates Thread.spawn, Future.create, Channel, Arc call sites)
 - [ ] Compile-time data race prevention
 - [ ] Enforce "no shared mutable state" rule at compile time
 
 ---
 
-## 4. Derived Trait Enforcement 🟡
+## 4. Derived Trait Enforcement 🟢
 
 **Priority:** High
 **Complexity:** Medium
-**Status:** Infrastructure Complete, Enforcement Partial
+**Status:** Core Traits Complete (2026-03-09), Debug/Default Pending
 
 **Related Files:**
-- `compiler/src/tast/node.rs` - DerivedTrait enum
-- `compiler/src/tast/ast_lowering.rs` - Trait extraction/validation
-- `compiler/docs/memory_safety_wiki.md`
+- `compiler/src/tast/node.rs` - DerivedTrait enum (11 variants)
+- `compiler/src/tast/ast_lowering.rs` - Trait extraction/validation (lines 5284-5650)
+- `compiler/src/ir/hir_to_mir.rs` - Codegen for PartialEq/PartialOrd/Hash
+- `compiler/src/tast/trait_checker.rs` - Auto-derivation rules for Send/Sync
+- `compiler/src/tast/send_sync_validator.rs` - Call-site enforcement
 
 ### 4.1 Existing Traits (Implemented)
 
-- [x] Clone - Explicit deep copy
-- [x] Copy - Implicit bitwise copy
-- [x] Debug - toString() generation (not enforced)
-- [x] Default - default() static method (not enforced)
+- [x] Clone - Field compatibility validation (no `.clone()` codegen yet)
+- [x] Copy - Field compatibility validation (no copy semantics yet)
+- [x] Send - Call-site validation + auto-derivation (all fields Send → type is Send)
+- [x] Sync - Call-site validation + auto-derivation (all fields Sync → type is Sync)
 
 ### 4.2 Equality Traits
 
-**Status:** 🔴 Not Started
+**Status:** 🟢 Complete (2026-03-09)
 
-**Tasks:**
-- [ ] Implement PartialEq enforcement
-  - Generate `==` operator implementation
-  - Validate all fields support equality
-- [ ] Implement Eq enforcement
-  - Requires PartialEq
-  - Validate reflexivity, symmetry, transitivity
-- [ ] Generate equality methods in MIR
-- [ ] Test equality with complex types
-
-**Example:**
-```haxe
-@:derive([PartialEq, Eq])
-class Point {
-    public var x: Int;
-    public var y: Int;
-}
-
-var p1 = new Point(1, 2);
-var p2 = new Point(1, 2);
-trace(p1 == p2);  // true (auto-generated)
-```
+- [x] PartialEq — field-by-field comparison codegen (pointer fast-path, null checks, string via `haxe_string_compare`)
+- [x] Eq — requires PartialEq (auto-corrected), same codegen
+- [x] `derive_partial_eq_classes: BTreeSet<SymbolId>` tracks eligible classes
+- [x] `==` and `!=` on derived classes generate lexicographic field comparison
 
 ### 4.3 Ordering Traits
 
-**Status:** 🔴 Not Started
+**Status:** 🟢 Complete (2026-03-09)
 
-**Tasks:**
-- [ ] Implement PartialOrd enforcement
-  - Generate `<`, `<=`, `>`, `>=` operators
-  - Requires PartialEq
-  - Validate all fields are PartialOrd
-- [ ] Implement Ord enforcement
-  - Requires PartialOrd + Eq
-  - Validate total ordering (antisymmetric, transitive)
-  - Generate `compare()` method
-- [ ] Support custom comparison logic
-- [ ] Test ordering with collections (sorting)
-
-**Example:**
-```haxe
-@:derive([PartialEq, Eq, PartialOrd, Ord])
-class Student {
-    public var name: String;
-    public var grade: Int;
-}
-
-var students = [student1, student2, student3];
-students.sort();  // Uses auto-generated Ord
-```
+- [x] PartialOrd — lexicographic three-way comparison codegen (returns -1/0/+1)
+- [x] Ord — requires PartialOrd + Eq (auto-corrected)
+- [x] `derive_partial_ord_classes: BTreeSet<SymbolId>` tracks eligible classes
+- [x] `<`, `<=`, `>`, `>=` on derived classes generate lexicographic ordering
 
 ### 4.4 Hash Trait
 
-**Status:** 🔴 Not Started
+**Status:** 🟢 Complete (2026-03-09)
 
-**Tasks:**
-- [ ] Implement Hash enforcement
-  - Generate `hash()` method
-  - Validate all fields are hashable
-  - Ensure hash consistency with Eq
-- [ ] Implement hash combining algorithm
-- [ ] Integrate with HashMap<K, V> (requires K: Hash + Eq)
-- [ ] Test hash distribution and collisions
-
-**Example:**
-```haxe
-@:derive([PartialEq, Eq, Hash])
-class Key {
-    public var id: Int;
-    public var name: String;
-}
-
-var map = new HashMap<Key, String>();
-map.set(new Key(1, "foo"), "value");
-```
+- [x] Hash — field-by-field hashing codegen (FNV-1a, string via `haxe_string_hash`)
+- [x] `derive_hash_classes: BTreeSet<SymbolId>` tracks eligible classes
+- [x] `.hashCode()` on derived classes generates combined hash
 
 ### 4.5 Default Trait
 
@@ -625,6 +572,11 @@ map.set(new Key(1, "foo"), "value");
 - [ ] Format nested structures
 - [ ] Handle circular references
 - [ ] Customizable formatting via metadata
+
+### 4.7 Remaining Codegen Gaps
+
+- [ ] Clone: Generate `.clone()` method (deep copy)
+- [ ] Copy: Enforce implicit copy semantics (currently parsed but no effect on behavior)
 
 ---
 
@@ -1087,8 +1039,8 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 
 ### Phase 1: Foundation (Mostly Complete)
 1. ✅ Memory safety infrastructure
-2. ✅ Property access support (getter/setter)
-3. 🟡 Derived traits (Clone, Copy, Send, Sync parsing)
+2. ✅ Property access support (getter/setter) — full method dispatch working
+3. ✅ Derived traits (PartialEq/Ord/Hash codegen, Send/Sync validation, Clone/Copy field checks)
 4. 🔴 Generic metadata pipeline integration
 
 ### Phase 2: JIT Execution ✅ COMPLETE (2026-01-28)
@@ -1101,18 +1053,18 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 
 8. ✅ Generics type system (type erasure approach, 2026-02-08)
 9. ✅ Monomorphization (specialization working)
-10. 🔴 Equality and ordering traits
-11. 🔴 Hash trait
+10. ✅ Equality and ordering traits (PartialEq/Eq/PartialOrd/Ord codegen, 2026-03-09)
+11. ✅ Hash trait (field hashing codegen, 2026-03-09)
 
 ### Phase 4: Advanced Features ✅ COMPLETE (2026-03-10)
 12. ✅ Async/await infrastructure — lazy Future<T> with @:async function transform
 13. ✅ Future<T> implementation — create, await, then, poll, isReady, join, all
 14. ✅ Function splitting transform (replaces state machine — simpler, sufficient for lazy futures)
 
-### Phase 5: Concurrency Safety
-15. 🔴 Send/Sync validation (compiler-enforced)
-16. 🔴 Capture analysis for closures
-17. 🔴 Thread safety validation in MIR
+### Phase 5: Concurrency Safety ✅ COMPLETE (2026-03-05)
+15. ✅ Send/Sync validation (compiler-enforced via `SendSyncValidator` + `TraitChecker`)
+16. ✅ Capture analysis for closures (`CaptureAnalyzer` validates Thread.spawn/Future.create)
+17. 🟡 Thread safety validation in MIR (TAST-level validation complete, MIR-level not needed)
 
 ### Phase 6: Polish
 18. 🔴 Performance optimization
@@ -1128,10 +1080,10 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 - ~~Alloc instruction LICM hoisting~~ ✅ Fixed - Alloc now has side effects
 - ~~Break/continue drop scope corruption~~ ✅ Fixed - State preserved across branches
 
-**For Full Concurrency Support:**
+**For Full Concurrency Support:** ✅ RESOLVED (2026-03-05)
 1. ✅ JIT execution works (tiered backend 20/20 stress tests passing)
-2. 🔴 Send/Sync trait validation (design exists, not implemented)
-3. 🔴 Capture analysis for closures
+2. ✅ Send/Sync trait validation (`SendSyncValidator` enforces at Thread.spawn/Future.create/Channel/Arc call sites)
+3. ✅ Capture analysis for closures (`CaptureAnalyzer` validates captured variables are Send)
 
 **Remaining Work:**
 
@@ -1139,7 +1091,7 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 2. ~~Async/await~~ ✅ Lazy Future<T> + @:async transform complete (2026-03-10)
 3. Full RTTI for Type/Reflect classes
 4. ~~Multi-catch exception handling (typed catch blocks)~~ ✅ Complete (2026-02-13)
-5. Equality/ordering/hash traits
+5. ~~Equality/ordering/hash traits~~ ✅ Complete (2026-03-09)
 6. ~~Async exception propagation across .await() boundaries~~ ✅ Complete (2026-03-10)
 7. ~~Future cancellation + timeout support~~ ✅ Complete (2026-03-10)
 8. ~~Future.race()~~ ✅ Complete (2026-03-10)
@@ -1148,11 +1100,11 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 
 ---
 
-## 11. Haxe Property Access Support 🟡
+## 11. Haxe Property Access Support 🟢
 
 **Priority:** Medium
 **Complexity:** Medium
-**Status:** Infrastructure Complete - Basic structure in place, method call generation pending
+**Status:** ✅ Complete (Phases 1-4) — Parsing, storage, getter/setter method dispatch all working
 
 **Related Files:**
 - `compiler/src/tast/node.rs` - PropertyAccessInfo and PropertyAccessor types ✅
@@ -1172,11 +1124,11 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 - property_access_map populated during MIR lowering
 - Field access checks for property getters (infrastructure)
 
-**What's Missing:** ❌
-- Method call generation for custom getters (placeholder only)
-- Setter call generation in lower_lvalue_write
-- Method name resolution (get_x/set_x convention)
-- Full enforcement of property access modes (null, never) - partially done
+**What Was Missing (now complete):** ✅
+- ~~Method call generation for custom getters~~ ✅ `lower_field_access()` dispatches to getter method
+- ~~Setter call generation in lower_lvalue_write~~ ✅ Assign handler dispatches to setter method
+- ~~Method name resolution (get_x/set_x convention)~~ ✅ `convert_property_accessor` derives names
+- ~~Full enforcement of property access modes (null, never)~~ ✅ Errors on read/write violations
 
 ### Property Access Modes
 
@@ -2124,10 +2076,10 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 - [x] User-defined methods on enum types — N/A: Haxe enums are pure ADTs without methods; use `enum abstract` for methods (already supported via abstract type system)
 
-### 16.14 Null Safety 🟡
+### 16.14 Null Safety 🟢
 
 **Priority:** P2
-**Current State:** Core null safety complete: `??`, `?.`, and `Null<T>` wrapper type.
+**Current State:** ✅ Complete (2026-03-10) — Full null safety pipeline including compile-time flow analysis.
 
 **Implemented (2026-02-13):**
 
@@ -2138,10 +2090,10 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [x] Optional chaining `?.` — desugared at TAST→HIR level to `if (obj != null) obj.field else null`; supports field access (`obj?.field`), method calls (`obj?.method()`), and chaining (`a?.b?.c`). Simple variable objects use clone; complex expressions use Let binding to avoid double evaluation.
 - [x] `Null<T>` wrapper type — `Null<Int>` boxes primitives as `DynamicValue*` pointers to distinguish null from 0/0.0/false. `??` with `Null<T>` LHS unboxes in pass-through path. Null literal assigned to `Null<T>` stays as null pointer (not boxed).
 
-**What's Missing (future):**
+**Implemented (2026-03-10):**
 
-- [ ] Compile-time null flow analysis
-- [ ] `@:notNull` metadata
+- [x] Compile-time null flow analysis — `NullSafetyAnalyzer` (768 lines) with iterative dataflow over CFG, flow-sensitive narrowing (`if (x != null)` refines state), violation detection for field/method/array access on nullable values. Integrated via `TypeFlowGuard` at stage 2b of type checking. Error codes E0400-E0402 with fix suggestions.
+- [x] `@:notNull` metadata — parsed to `SymbolFlags::NOT_NULL` (bit 18). Primitives (Int, Float, Bool, Single) marked `@:notNull` in StdTypes.hx. Assignment of null to `@:notNull` variables reported as compilation error.
 
 ### 16.15 Structural Subtyping 🟢
 
