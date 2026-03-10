@@ -1811,7 +1811,11 @@ impl<'a> TypeCheckingPhase<'a> {
             TypedExpressionKind::Await {
                 expression,
                 await_type,
-            } => todo!(),
+            } => {
+                self.check_expression(expression)?;
+                // await_type is the inner type T from Future<T>
+                return Ok(*await_type);
+            }
         }
 
         // Return the annotated type

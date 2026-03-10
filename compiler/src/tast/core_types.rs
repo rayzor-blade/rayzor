@@ -15,6 +15,7 @@ pub struct CoreTypePaths {
     pub channel: &'static str,
     pub mutex: &'static str,
     pub arc: &'static str,
+    pub future: &'static str,
 }
 
 impl CoreTypePaths {
@@ -24,6 +25,7 @@ impl CoreTypePaths {
             channel: "rayzor.concurrent.Channel",
             mutex: "rayzor.concurrent.Mutex",
             arc: "rayzor.concurrent.Arc",
+            future: "rayzor.concurrent.Future",
         }
     }
 }
@@ -65,6 +67,10 @@ impl<'a> CoreTypeChecker<'a> {
 
     pub fn is_mutex(&self, type_id: TypeId) -> bool {
         self.is_core_type(type_id, self.paths.mutex)
+    }
+
+    pub fn is_future(&self, type_id: TypeId) -> bool {
+        self.is_core_type(type_id, self.paths.future)
     }
 
     /// Get the type argument from a generic type (e.g., T from Thread<T>)
@@ -195,6 +201,46 @@ impl<'a> CoreTypeChecker<'a> {
         }
     }
 
+    /// Validate Future::create - closure captures must be Send
+    ///
+    /// Returns the closure type ID if this is a Future.create call
+    pub fn get_future_create_closure(
+        &self,
+        call_expr: &crate::tast::node::TypedExpression,
+    ) -> Option<TypeId> {
+        use crate::tast::node::TypedExpressionKind;
+
+        if let TypedExpressionKind::StaticMethodCall {
+            class_symbol,
+            method_symbol,
+            arguments,
+            ..
+        } = &call_expr.kind
+        {
+            if !self.check_symbol_path(*class_symbol, self.paths.future) {
+                return None;
+            }
+
+            let method_sym = self.symbol_table.get_symbol(*method_symbol)?;
+            let method_name_str = self
+                .string_interner
+                .get(method_sym.name)
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    let tt = self.type_table.borrow();
+                    tt.get_string(method_sym.name).map(|s| s.to_string())
+                })?;
+            if method_name_str != "create" {
+                return None;
+            }
+
+            let closure_arg = arguments.first()?;
+            Some(closure_arg.expr_type)
+        } else {
+            None
+        }
+    }
+
     /// Validate Channel::new - T must be Send
     ///
     /// Returns the channel element type if this is a Channel::new call
@@ -228,6 +274,7 @@ mod tests {
         assert_eq!(paths.thread, "rayzor.concurrent.Thread");
         assert_eq!(paths.channel, "rayzor.concurrent.Channel");
         assert_eq!(paths.arc, "rayzor.concurrent.Arc");
+        assert_eq!(paths.future, "rayzor.concurrent.Future");
     }
 
     // TODO: Add integration tests with actual TypeTable and SymbolTable

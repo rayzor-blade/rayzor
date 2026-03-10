@@ -227,6 +227,7 @@ impl StdlibMapping {
         mapping.register_channel_methods();
         mapping.register_arc_methods();
         mapping.register_mutex_methods();
+        mapping.register_future_methods();
         mapping.register_vec_methods();
         mapping.register_stringmap_methods();
         mapping.register_intmap_methods();
@@ -2003,6 +2004,39 @@ impl StdlibMapping {
             // MIR wrapper: takes guard handle
             map_method!(instance "rayzor_concurrent_MutexGuard", "unlock" => "MutexGuard_unlock", params: 0, mir_wrapper,
                 types: &[PtrU8]),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // Future<T> Methods (rayzor.concurrent.Future)
+    // ============================================================================
+
+    fn register_future_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            // Future::create<T>(fn: Void->T) -> Future<T>
+            // MIR wrapper: takes closure (*u8), returns future handle (*u8)
+            map_method!(static "rayzor_concurrent_Future", "create" => "Future_create", params: 1, mir_wrapper,
+                types: &[PtrU8] => PtrU8),
+            // Future<T>::await() -> T
+            // MIR wrapper: takes future handle (*u8), returns result (*u8 / i64)
+            map_method!(instance "rayzor_concurrent_Future", "await" => "Future_await", params: 0, mir_wrapper,
+                types: &[PtrU8] => PtrU8),
+            // Future<T>::then(callback: T->Void) -> Void
+            // MIR wrapper: takes future handle + callback closure
+            map_method!(instance "rayzor_concurrent_Future", "then" => "Future_then", params: 1, mir_wrapper,
+                types: &[PtrU8, PtrU8]),
+            // Future<T>::poll() -> Null<T>
+            // MIR wrapper: takes future handle, returns value or 0
+            map_method!(instance "rayzor_concurrent_Future", "poll" => "Future_poll", params: 0, mir_wrapper,
+                types: &[PtrU8] => PtrU8),
+            // Future<T>::isReady() -> Bool
+            // MIR wrapper: takes future handle, returns bool
+            map_method!(instance "rayzor_concurrent_Future", "isReady" => "Future_isReady", params: 0, mir_wrapper,
+                types: &[PtrU8] => Bool),
         ];
 
         self.register_from_tuples(mappings);

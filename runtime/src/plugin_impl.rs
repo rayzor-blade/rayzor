@@ -995,6 +995,28 @@ register_symbol!(
     crate::concurrency::rayzor_active_thread_count
 );
 
+// Future functions
+register_symbol!(
+    "rayzor_future_create",
+    crate::future::rayzor_future_create
+);
+register_symbol!(
+    "rayzor_future_await",
+    crate::future::rayzor_future_await
+);
+register_symbol!(
+    "rayzor_future_then",
+    crate::future::rayzor_future_then
+);
+register_symbol!(
+    "rayzor_future_poll",
+    crate::future::rayzor_future_poll
+);
+register_symbol!(
+    "rayzor_future_is_ready",
+    crate::future::rayzor_future_is_ready
+);
+
 // Arc functions
 register_symbol!("rayzor_arc_init", crate::concurrency::rayzor_arc_init);
 register_symbol!("rayzor_arc_clone", crate::concurrency::rayzor_arc_clone);

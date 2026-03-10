@@ -367,6 +367,10 @@ pub struct HirToMirContext<'a> {
     /// Field access is redirected at compile time; materialization only at escape points.
     anon_views: BTreeMap<SymbolId, AnonBacking>,
 
+    /// Registers that hold async function results (Future handles).
+    /// Method calls like `.await()` on these registers are dispatched to Future_await.
+    async_result_registers: BTreeSet<IrId>,
+
     /// Classes that derive PartialEq — enables field-by-field == / != codegen
     derive_partial_eq_classes: BTreeSet<SymbolId>,
 
@@ -577,6 +581,7 @@ impl<'a> HirToMirContext<'a> {
             function_param_hir_types: BTreeMap::new(),
             current_function_return_type: None,
             anon_views: BTreeMap::new(),
+            async_result_registers: BTreeSet::new(),
             derive_partial_eq_classes: BTreeSet::new(),
             derive_partial_ord_classes: BTreeSet::new(),
             derive_hash_classes: BTreeSet::new(),
@@ -2816,7 +2821,15 @@ impl<'a> HirToMirContext<'a> {
             .get(hir_func.name)
             .unwrap_or("?")
             .to_string();
-        if let Some(body) = &hir_func.body {
+
+        // @:async function transform: wrap body in a closure and return Future handle
+        if hir_func.is_async {
+            if let Some(body) = &hir_func.body {
+                self.lower_async_function_body(func_id, hir_func, body, &func_name);
+            } else {
+                self.ensure_terminator();
+            }
+        } else if let Some(body) = &hir_func.body {
             debug!(
                 "[lower_function_body]: {} has body with {} statements, expr: {}",
                 func_name,
@@ -2861,6 +2874,227 @@ impl<'a> HirToMirContext<'a> {
         self.symbol_map.clear();
         self.block_map.clear();
         self.current_this_type = None;
+    }
+
+    /// Ensure Future runtime extern functions are declared in the current module.
+    /// Returns (create_id, await_id, poll_id, is_ready_id).
+    fn ensure_future_externs(&mut self) -> (IrFunctionId, IrFunctionId, IrFunctionId, IrFunctionId) {
+        use crate::ir::modules::IrExternFunction;
+
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+
+        let externs_to_declare: Vec<(&str, Vec<IrType>, IrType)> = vec![
+            ("rayzor_future_create", vec![ptr_u8.clone(), ptr_u8.clone()], ptr_u8.clone()),
+            ("rayzor_future_await", vec![ptr_u8.clone()], ptr_u8.clone()),
+            ("rayzor_future_poll", vec![ptr_u8.clone()], ptr_u8.clone()),
+            ("rayzor_future_is_ready", vec![ptr_u8.clone()], IrType::Bool),
+        ];
+
+        let mut ids = Vec::new();
+        for (name, params, ret) in externs_to_declare {
+            // Check if already declared
+            let existing = self.builder.module.extern_functions.iter()
+                .find(|(_, f)| f.name == name)
+                .map(|(id, _)| *id);
+            if let Some(id) = existing {
+                ids.push(id);
+                continue;
+            }
+            // Declare it
+            let id = self.builder.module.alloc_function_id();
+            let sig = crate::ir::IrFunctionSignature {
+                parameters: params.into_iter().enumerate().map(|(i, ty)| crate::ir::functions::IrParameter {
+                    name: format!("p{}", i),
+                    ty,
+                    reg: IrId(i as u32),
+                    by_ref: false,
+                }).collect(),
+                return_type: ret,
+                calling_convention: crate::ir::CallingConvention::C,
+                can_throw: false,
+                type_params: Vec::new(),
+                uses_sret: false,
+            };
+            self.builder.module.extern_functions.insert(id, IrExternFunction {
+                id,
+                name: name.to_string(),
+                symbol_id: SymbolId::from_raw(9999),
+                signature: sig,
+                source: "runtime".to_string(),
+            });
+            ids.push(id);
+        }
+
+        (ids[0], ids[1], ids[2], ids[3])
+    }
+
+    /// Lower an @:async function body.
+    ///
+    /// Transforms the function so that:
+    /// 1. The original body becomes an inner closure function (env_ptr -> i32)
+    /// 2. The outer function allocates an environment, stores params, and calls
+    ///    rayzor_future_create(fn_ptr, env_ptr) to return a lazy Future handle.
+    fn lower_async_function_body(
+        &mut self,
+        func_id: IrFunctionId,
+        hir_func: &HirFunction,
+        body: &HirBlock,
+        func_name: &str,
+    ) {
+        use crate::ir::hir::{HirCapture, HirCaptureMode, HirExprKind};
+
+        debug!("[lower_async_function_body]: transforming {} to return Future", func_name);
+
+        // 1. Create captures from function params (the inner closure captures all params)
+        let captures: Vec<HirCapture> = hir_func
+            .params
+            .iter()
+            .map(|p| HirCapture {
+                symbol: p.symbol_id,
+                mode: HirCaptureMode::ByValue,
+                ty: p.ty,
+            })
+            .collect();
+
+        // 2. Generate the inner closure function (async body)
+        //    Signature: (env_ptr: *u8) -> i32 (JIT closure convention)
+        //    The inner function has NO explicit params — all values are loaded from env.
+        let inner_context = self.generate_lambda_skeleton(&[], &captures);
+        let inner_func_id = inner_context.func_id;
+
+        // 3. Lower the original body into the inner function
+        {
+            let saved_state = self.save_state();
+
+            self.builder.current_function = Some(inner_context.func_id);
+            self.builder.current_block = Some(inner_context.entry_block);
+            self.symbol_map.clear();
+            self.current_env_layout = inner_context.env_layout.clone();
+
+            // Clear drop tracking for inner function
+            self.owned_heap_values.clear();
+            self.drop_scope_stack.clear();
+            self.temp_heap_values.clear();
+            self.reassigned_in_scope.clear();
+            self.current_drop_points = None;
+            self.current_stmt_index = 0;
+
+            // Load captured params from environment
+            if let Some(layout) = &inner_context.env_layout {
+                let env_ptr = IrId::new(0); // First parameter
+                for field in &layout.fields {
+                    if let Some(value_reg) = layout.load_field(&mut self.builder, env_ptr, field.symbol) {
+                        self.symbol_map.insert(field.symbol, value_reg);
+                        // Register as local for type inference
+                        let param_name = self
+                            .string_interner
+                            .get(
+                                self.symbol_table
+                                    .get_symbol(field.symbol)
+                                    .map(|s| s.name)
+                                    .unwrap_or_default(),
+                            )
+                            .unwrap_or("<capture>")
+                            .to_string();
+                        let field_type = field.storage_ty.clone();
+                        if let Some(func) = self.builder.current_function_mut() {
+                            func.locals.insert(
+                                value_reg,
+                                super::IrLocal {
+                                    name: param_name,
+                                    ty: field_type,
+                                    mutable: false,
+                                    source_location: super::IrSourceLocation::unknown(),
+                                    allocation: super::AllocationHint::Register,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+
+            // Lower the function body
+            self.enter_drop_scope();
+            self.lower_block(body);
+            self.ensure_terminator();
+
+            // Fix up return type: inner closure returns I32 (JIT convention)
+            if let Some(inner_func) = self.builder.module.functions.get_mut(&inner_context.func_id) {
+                inner_func.signature.return_type = IrType::I32;
+            }
+
+            self.current_env_layout = None;
+            self.restore_state(saved_state);
+        }
+
+        // 4. Back in the outer function: create closure and call rayzor_future_create
+        // Collect captured values (param registers from the outer function's symbol_map)
+        let captured_values: Vec<IrId> = hir_func
+            .params
+            .iter()
+            .filter_map(|p| self.symbol_map.get(&p.symbol_id).copied())
+            .collect();
+
+        // Create closure object (MakeClosure instruction)
+        // MakeClosure allocates struct { fn_ptr: i64, env_ptr: i64 } on heap
+        let closure_reg = match self.builder.build_make_closure(inner_func_id, captured_values) {
+            Some(r) => r,
+            None => {
+                self.ensure_terminator();
+                return;
+            }
+        };
+
+        // Extract fn_ptr (offset 0) and env_ptr (offset 8) from closure struct
+        let ptr_u8_ty = IrType::Ptr(Box::new(IrType::U8));
+        let fn_ptr = match self.builder.build_load(closure_reg, ptr_u8_ty.clone()) {
+            Some(r) => r,
+            None => {
+                self.ensure_terminator();
+                return;
+            }
+        };
+        // PtrAdd closure_reg + 8 bytes to get env_ptr field address
+        let eight = match self.builder.build_const(IrValue::I64(8)) {
+            Some(r) => r,
+            None => {
+                self.ensure_terminator();
+                return;
+            }
+        };
+        let env_field_ptr = match self.builder.build_ptr_add(closure_reg, eight, ptr_u8_ty.clone()) {
+            Some(r) => r,
+            None => {
+                self.ensure_terminator();
+                return;
+            }
+        };
+        let env_ptr = match self.builder.build_load(env_field_ptr, ptr_u8_ty.clone()) {
+            Some(r) => r,
+            None => {
+                self.ensure_terminator();
+                return;
+            }
+        };
+
+        // Ensure all Future runtime externs are declared in this module
+        let (create_id, _await_id, _poll_id, _is_ready_id) = self.ensure_future_externs();
+
+        let ptr_u8_ty = IrType::Ptr(Box::new(IrType::U8));
+        if let Some(future_handle) =
+            self.builder
+                .build_call_direct(create_id, vec![fn_ptr, env_ptr], ptr_u8_ty)
+        {
+            // Return the future handle
+            self.builder.build_return(Some(future_handle));
+
+            // Update the outer function's return type to Ptr(U8) (future handle)
+            if let Some(outer_func) = self.builder.module.functions.get_mut(&func_id) {
+                outer_func.signature.return_type = IrType::Ptr(Box::new(IrType::U8));
+            }
+        } else {
+            self.ensure_terminator();
+        }
     }
 
     /// Lower constructor body (Pass 2)
@@ -3579,7 +3813,38 @@ impl<'a> HirToMirContext<'a> {
                             pattern
                         );
                     }
+                    // Track @:async function call results
+                    let is_async_call = if let HirExprKind::Call { callee, .. } = &init_expr.kind {
+                        match &callee.kind {
+                            HirExprKind::Variable { symbol, .. } => {
+                                self.symbol_table
+                                    .get_symbol(*symbol)
+                                    .map(|s| s.flags.contains(SymbolFlags::ASYNC))
+                                    .unwrap_or(false)
+                            }
+                            // StaticMethodCall produces Field { object: Variable(class), field: method }
+                            HirExprKind::Field { field, .. } => {
+                                self.symbol_table
+                                    .get_symbol(*field)
+                                    .map(|s| s.flags.contains(SymbolFlags::ASYNC))
+                                    .unwrap_or(false)
+                            }
+                            _ => false,
+                        }
+                    } else {
+                        false
+                    };
+
                     if let Some(value_reg) = value {
+                        // Mark variable as async result for Future method dispatch
+                        if is_async_call {
+                            self.async_result_registers.insert(value_reg);
+                            if let HirPattern::Variable { symbol, .. } = pattern {
+                                // Also mark any register the symbol maps to later
+                                self.async_result_registers.insert(value_reg);
+                            }
+                        }
+
                         // Track monomorphized class name for this variable (by SymbolId)
                         if let Some(mono_class) = monomorphized_class {
                             if let HirPattern::Variable { symbol, .. } = pattern {
@@ -7316,6 +7581,66 @@ impl<'a> HirToMirContext<'a> {
                     "[CALL] expr.ty={:?}, result_type={:?}, is_method={}",
                     expr.ty, result_type, is_method
                 );
+
+                // @:async method dispatch: .await(), .poll(), .isReady()
+                // on registers known to hold Future handles from async function calls.
+                // MethodCall pattern: callee = Variable(method_symbol), args[0] = receiver
+                if *is_method {
+                    // Get method name from callee symbol
+                    let async_method_sym = match &callee.kind {
+                        HirExprKind::Variable { symbol, .. } => Some(*symbol),
+                        HirExprKind::Field { field, .. } => Some(*field),
+                        _ => None,
+                    };
+                    // Get receiver symbol from first arg (MethodCall puts receiver as args[0])
+                    let receiver_sym_from_args = args.first().and_then(|a| {
+                        if let HirExprKind::Variable { symbol, .. } = &a.kind {
+                            Some(*symbol)
+                        } else {
+                            None
+                        }
+                    });
+                    if let (Some(method_sym), Some(recv_sym)) =
+                        (async_method_sym, receiver_sym_from_args)
+                    {
+                        let receiver_reg = self.symbol_map.get(&recv_sym).copied();
+                        if let Some(recv_reg) = receiver_reg {
+                            if self.async_result_registers.contains(&recv_reg) {
+                                let method_name = self
+                                    .symbol_table
+                                    .get_symbol(method_sym)
+                                    .and_then(|s| self.string_interner.get(s.name));
+                                if let Some(method) = method_name {
+                                    let ext_name = match method {
+                                        "await" => Some("rayzor_future_await"),
+                                        "poll" => Some("rayzor_future_poll"),
+                                        "isReady" => Some("rayzor_future_is_ready"),
+                                        _ => None,
+                                    };
+                                    if let Some(extern_name) = ext_name {
+                                        // Look up the extern directly (declared by ensure_future_externs)
+                                        let func_id = self.builder.module.extern_functions
+                                            .iter()
+                                            .find(|(_, f)| f.name == extern_name)
+                                            .map(|(id, _)| *id);
+                                        if let Some(func_id) = func_id {
+                                            let ret_ty = if method == "isReady" {
+                                                IrType::Bool
+                                            } else {
+                                                IrType::Ptr(Box::new(IrType::U8))
+                                            };
+                                            return self.builder.build_call_direct(
+                                                func_id,
+                                                vec![recv_reg],
+                                                ret_ty,
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Static synthetic calls resolved as Variable — find parent class
                 if let HirExprKind::Variable { symbol, .. } = &callee.kind {

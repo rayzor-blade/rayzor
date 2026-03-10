@@ -325,6 +325,8 @@ impl SymbolFlags {
     pub const KEEP: Self = Self(1 << 17);
     /// @:notNull - value is guaranteed non-null (enables null safety checks)
     pub const NOT_NULL: Self = Self(1 << 18);
+    /// @:async - function returns a lazy Future<T>
+    pub const ASYNC: Self = Self(1 << 19);
 
     pub const fn empty() -> Self {
         Self::NONE
