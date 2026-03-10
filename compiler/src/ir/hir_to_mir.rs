@@ -16053,7 +16053,11 @@ impl<'a> HirToMirContext<'a> {
                                     Some(TypeKind::String) => {
                                         self.builder.build_string(String::new())
                                     }
-                                    _ => self.builder.build_null(),
+                                    _ => {
+                                        // Try recursive default or no-arg constructor
+                                        self.try_default_for_class_field(field_type_id)
+                                            .or_else(|| self.builder.build_null())
+                                    }
                                 };
                                 if let Some(val) = default_val {
                                     let idx =
@@ -24192,8 +24196,9 @@ impl<'a> HirToMirContext<'a> {
                     self.builder.build_string(String::new())?
                 }
                 _ => {
-                    // Null for nullable/class/other types
-                    self.builder.build_null()?
+                    // Try recursive default or no-arg constructor, else null
+                    self.try_default_for_class_field(field_type_id)
+                        .unwrap_or_else(|| self.builder.build_null().unwrap())
                 }
             };
 
@@ -24213,6 +24218,88 @@ impl<'a> HirToMirContext<'a> {
         }
 
         Some(new_ptr)
+    }
+
+    /// Try to produce a default value for a class-typed field:
+    /// 1. If the field's class has @:derive(Default), recursively default-initialize it
+    /// 2. Else if the field's class has a no-arg constructor, call it
+    /// 3. Else return None (caller should use null)
+    fn try_default_for_class_field(&mut self, field_type_id: TypeId) -> Option<IrId> {
+        // Resolve field type to class symbol
+        let (class_symbol, class_name) = {
+            let type_table = self.type_table.borrow();
+            match type_table.get(field_type_id).map(|t| &t.kind) {
+                Some(TypeKind::Class { symbol_id, .. }) => {
+                    let name = self
+                        .symbol_table
+                        .get_symbol(*symbol_id)
+                        .and_then(|s| self.string_interner.get(s.name))
+                        .map(|s| s.to_string());
+                    Some((*symbol_id, name))
+                }
+                _ => None,
+            }
+        }?;
+
+        // Option 1: field's class has @:derive(Default) — recursive
+        if self.derive_default_classes.contains(&class_symbol) {
+            return self.lower_derived_default(class_symbol);
+        }
+
+        // Option 2: field's class has a no-arg constructor
+        let class_name_str = class_name?;
+        let ctor_id = self.constructor_name_map.get(&class_name_str).copied()?;
+
+        // Check that constructor has no required params (only `this`)
+        let sig_params = self
+            .builder
+            .module
+            .functions
+            .get(&ctor_id)
+            .map(|f| f.signature.parameters.len())
+            .unwrap_or(0);
+
+        // All params must have defaults, or there's only the `this` param
+        let all_optional = if sig_params <= 1 {
+            true // only `this` or no params
+        } else if let Some(defaults) = self.function_param_defaults.get(&ctor_id) {
+            // defaults[0] is `this` (always None), check params 1..
+            defaults.iter().skip(1).all(|d| d.is_some())
+        } else {
+            sig_params <= 1
+        };
+
+        if !all_optional {
+            return None;
+        }
+
+        // Allocate and call constructor
+        let alloc_size = self
+            .class_alloc_sizes_by_name
+            .get(&class_name_str)
+            .copied()
+            .unwrap_or(16);
+        let obj_ptr = self.build_heap_alloc(alloc_size)?;
+
+        // Store type_id header
+        let type_id_const = self
+            .builder
+            .build_const(IrValue::I64(class_symbol.as_raw() as i64))?;
+        let zero = self.builder.build_const(IrValue::I32(0))?;
+        let header_ptr = self.builder.build_gep(obj_ptr, vec![zero], IrType::I64)?;
+        self.builder.build_store(header_ptr, type_id_const);
+
+        // Call constructor with just `this`
+        let mut args = vec![obj_ptr];
+        self.fill_default_args(ctor_id, &mut args, true);
+        self.builder
+            .build_call_direct(ctor_id, args, IrType::Void);
+
+        // Set class hint
+        self.register_class_hints
+            .insert(obj_ptr, class_name_str);
+
+        Some(obj_ptr)
     }
 
     fn lower_null_coalesce(&mut self, lhs: &HirExpr, rhs: &HirExpr) -> Option<IrId> {
