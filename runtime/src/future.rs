@@ -43,6 +43,9 @@ struct FutureHandle {
     then_fn: AtomicPtr<u8>,
     /// .then() callback environment pointer
     then_env: AtomicPtr<u8>,
+    /// If true, value is a pre-boxed/raw pointer — await returns it directly
+    /// without wrapping in haxe_box_int_ptr. Used by Future.all().
+    raw_result: bool,
 }
 
 // Safety: FutureHandle fields are either atomic or behind a Mutex.
@@ -86,9 +89,14 @@ fn spawn_future(handle: &FutureHandle, handle_ptr: *mut FutureHandle) {
         let then_fn = handle.then_fn.load(Ordering::Acquire);
         if !then_fn.is_null() {
             let then_env = handle.then_env.load(Ordering::Acquire);
-            type CallbackFn = extern "C" fn(*const u8, i64);
+            let cb_result = if handle.raw_result {
+                result as *mut u8
+            } else {
+                crate::type_system::haxe_box_int_ptr(result)
+            };
+            type CallbackFn = extern "C" fn(*const u8, *mut u8);
             let callback: CallbackFn = unsafe { std::mem::transmute(then_fn as usize) };
-            callback(then_env, result);
+            callback(then_env, cb_result);
         }
 
         ACTIVE_THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
@@ -117,6 +125,7 @@ pub extern "C" fn rayzor_future_create(fn_ptr: *const u8, env_ptr: *const u8) ->
         cvar: Condvar::new(),
         then_fn: AtomicPtr::new(ptr::null_mut()),
         then_env: AtomicPtr::new(ptr::null_mut()),
+        raw_result: false,
     });
 
     Box::into_raw(handle) as *mut u8
@@ -159,8 +168,13 @@ pub extern "C" fn rayzor_future_await(handle: *mut u8) -> *mut u8 {
     while future.state.load(Ordering::Acquire) != STATE_RESOLVED {
         val = future.cvar.wait(val).unwrap();
     }
-    // Box the result as DynamicValue* (same convention as thread_join)
-    crate::type_system::haxe_box_int_ptr(*val)
+    if future.raw_result {
+        // Value is already a usable pointer (e.g., Array* from Future.all)
+        *val as *mut u8
+    } else {
+        // Box the result as DynamicValue* (same convention as thread_join)
+        crate::type_system::haxe_box_int_ptr(*val)
+    }
 }
 
 /// Register a callback and spawn the future (non-blocking).
@@ -190,9 +204,14 @@ pub extern "C" fn rayzor_future_then(handle: *mut u8, cb_fn: *const u8, cb_env: 
     if current_state == STATE_RESOLVED {
         // Already resolved — call callback immediately
         let result = *future.value.lock().unwrap();
-        type CallbackFn = extern "C" fn(*const u8, i64);
+        let cb_result = if future.raw_result {
+            result as *mut u8
+        } else {
+            crate::type_system::haxe_box_int_ptr(result)
+        };
+        type CallbackFn = extern "C" fn(*const u8, *mut u8);
         let callback: CallbackFn = unsafe { std::mem::transmute(cb_fn as usize) };
-        callback(cb_env, result);
+        callback(cb_env, cb_result);
     } else if current_state == STATE_PENDING {
         // Spawn the future
         if future
@@ -229,6 +248,135 @@ pub extern "C" fn rayzor_future_poll(handle: *mut u8) -> *mut u8 {
     } else {
         ptr::null_mut()
     }
+}
+
+/// Create a lazy Future that resolves to an Array of results from multiple futures.
+///
+/// Like JavaScript's `Promise.all()`: returns a Future that, when awaited,
+/// spawns all sub-futures in parallel, awaits each, and returns a Haxe Array.
+///
+/// # Arguments
+/// * `arr_ptr` - Pointer to a Haxe Array of future handles (elem_size=8)
+///
+/// # Returns
+/// A new lazy Future handle. When awaited, resolves to a Haxe Array* of boxed results.
+#[no_mangle]
+pub extern "C" fn rayzor_future_all(arr_ptr: *const u8) -> *mut u8 {
+    if arr_ptr.is_null() {
+        return ptr::null_mut();
+    }
+
+    // Read the Haxe Array struct: { ptr, len, cap, elem_size }
+    let arr = unsafe { &*(arr_ptr as *const crate::haxe_array::HaxeArray) };
+    let n = arr.len;
+    let data_ptr = arr.ptr;
+
+    // Copy the sub-future handle pointers (they're i64-sized elements)
+    let mut sub_handles: Vec<usize> = Vec::with_capacity(n);
+    for i in 0..n {
+        let handle = unsafe { *(data_ptr.add(i * 8) as *const i64) } as usize;
+        sub_handles.push(handle);
+    }
+
+    // Create the outer "all" future with raw_result=true so await returns
+    // the Array* directly without int-boxing it.
+    // State = Running because we eagerly spawn the coordinating thread.
+    let handle = Box::new(FutureHandle {
+        state: AtomicU8::new(STATE_RUNNING),
+        fn_ptr: ptr::null(),
+        env_ptr: ptr::null(),
+        value: Mutex::new(0),
+        cvar: Condvar::new(),
+        then_fn: AtomicPtr::new(ptr::null_mut()),
+        then_env: AtomicPtr::new(ptr::null_mut()),
+        raw_result: true,
+    });
+    let handle_ptr = Box::into_raw(handle);
+    let handle_addr = handle_ptr as usize;
+
+    // Spawn a coordinating thread that:
+    // 1. Spawns all sub-futures in parallel
+    // 2. Awaits each in order
+    // 3. Stores full 64-bit Array* result in outer FutureHandle
+    ACTIVE_THREAD_COUNT.fetch_add(1, Ordering::SeqCst);
+    crate::concurrency::arm64_jit_barrier();
+
+    thread::spawn(move || {
+        crate::concurrency::arm64_jit_barrier();
+
+        // Phase 1: Spawn ALL sub-futures
+        let mut fh_ptrs: Vec<*mut FutureHandle> = Vec::with_capacity(n);
+        for &h_addr in &sub_handles {
+            let h = h_addr as *mut FutureHandle;
+            fh_ptrs.push(h);
+            if h.is_null() {
+                continue;
+            }
+            let future = unsafe { &*h };
+            if future
+                .state
+                .compare_exchange(
+                    STATE_PENDING,
+                    STATE_RUNNING,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                spawn_future(future, h);
+            }
+        }
+
+        // Phase 2: Await each, build Haxe Array of raw results
+        let mut result_arr = crate::haxe_array::HaxeArray {
+            ptr: ptr::null_mut(),
+            len: 0,
+            cap: 0,
+            elem_size: 8,
+        };
+        crate::haxe_array::haxe_array_new(&mut result_arr, 8);
+
+        for &h in &fh_ptrs {
+            let raw_val: i64 = if h.is_null() {
+                0
+            } else {
+                let future = unsafe { &*h };
+                let mut val = future.value.lock().unwrap();
+                while future.state.load(Ordering::Acquire) != STATE_RESOLVED {
+                    val = future.cvar.wait(val).unwrap();
+                }
+                *val
+            };
+            crate::haxe_array::haxe_array_push(
+                &mut result_arr,
+                &raw_val as *const i64 as *const u8,
+            );
+        }
+
+        // Store full 64-bit Array* in the outer FutureHandle
+        let arr_box = Box::new(result_arr);
+        let arr_ptr_i64 = Box::into_raw(arr_box) as i64;
+        let outer = unsafe { &*(handle_addr as *const FutureHandle) };
+        {
+            let mut val = outer.value.lock().unwrap();
+            *val = arr_ptr_i64;
+        }
+        outer.state.store(STATE_RESOLVED, Ordering::Release);
+        outer.cvar.notify_all();
+
+        // Call .then() callback if registered
+        let then_fn = outer.then_fn.load(Ordering::Acquire);
+        if !then_fn.is_null() {
+            let then_env = outer.then_env.load(Ordering::Acquire);
+            type CallbackFn = extern "C" fn(*const u8, *mut u8);
+            let callback: CallbackFn = unsafe { std::mem::transmute(then_fn as usize) };
+            callback(then_env, arr_ptr_i64 as *mut u8);
+        }
+
+        ACTIVE_THREAD_COUNT.fetch_sub(1, Ordering::SeqCst);
+    });
+
+    handle_ptr as *mut u8
 }
 
 /// Check if a future has resolved.

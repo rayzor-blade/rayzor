@@ -10230,6 +10230,7 @@ impl<'a> HirToMirContext<'a> {
                                                     | crate::tast::TypeKind::Placeholder { .. }
                                                     | crate::tast::TypeKind::Array { .. }
                                                     | crate::tast::TypeKind::Abstract { .. }
+                                                    | crate::tast::TypeKind::Function { .. }
                                                 )
                                                         })
                                                         .unwrap_or(false)

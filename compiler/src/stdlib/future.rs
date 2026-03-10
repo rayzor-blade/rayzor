@@ -22,6 +22,8 @@ pub fn build_future_type(builder: &mut MirBuilder) {
     build_future_then(builder);
     build_future_poll(builder);
     build_future_is_ready(builder);
+    build_future_join(builder);
+    build_future_all(builder);
 }
 
 /// Declare extern runtime functions
@@ -75,6 +77,23 @@ fn declare_future_externs(builder: &mut MirBuilder) {
         .begin_function("rayzor_future_is_ready")
         .param("handle", ptr_u8.clone())
         .returns(bool_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // extern fn rayzor_wait_all_threads() -> void
+    let func_id = builder
+        .begin_function("rayzor_wait_all_threads")
+        .returns(void_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // extern fn rayzor_future_all(arr_ptr: *u8) -> *u8
+    let func_id = builder
+        .begin_function("rayzor_future_all")
+        .param("arr_ptr", ptr_u8.clone())
+        .returns(ptr_u8)
         .calling_convention(CallingConvention::C)
         .build();
     builder.mark_as_extern(func_id);
@@ -232,6 +251,58 @@ fn build_future_is_ready(builder: &mut MirBuilder) {
         .get_function_by_name("rayzor_future_is_ready")
         .expect("rayzor_future_is_ready not found");
     let result = builder.call(is_ready_id, vec![handle]).unwrap();
+
+    builder.ret(Some(result));
+}
+
+/// Build: fn Future_join() -> void
+/// Blocks until all outstanding futures and threads complete
+fn build_future_join(builder: &mut MirBuilder) {
+    let void_ty = builder.void_type();
+
+    let func_id = builder
+        .begin_function("Future_join")
+        .returns(void_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let wait_id = builder
+        .get_function_by_name("rayzor_wait_all_threads")
+        .expect("rayzor_wait_all_threads not found");
+    let _ = builder.call(wait_id, vec![]);
+
+    builder.ret(None);
+}
+
+/// Build: fn Future_all(arr: *u8) -> *u8
+/// Takes a Haxe Array of future handles, returns a lazy Future that
+/// resolves to a Haxe Array of results when awaited.
+fn build_future_all(builder: &mut MirBuilder) {
+    let ptr_u8 = builder.ptr_type(builder.u8_type());
+
+    let func_id = builder
+        .begin_function("Future_all")
+        .param("arr", ptr_u8.clone())
+        .returns(ptr_u8.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr = builder.get_param(0);
+
+    let all_id = builder
+        .get_function_by_name("rayzor_future_all")
+        .expect("rayzor_future_all not found");
+    let result = builder.call(all_id, vec![arr]).unwrap();
 
     builder.ret(Some(result));
 }
