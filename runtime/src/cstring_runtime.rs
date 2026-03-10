@@ -3,7 +3,6 @@
 //! Bridges Haxe's managed String (HaxeString) with C's `char*` convention.
 //! Used by `rayzor.CString` extern abstract and `@:cstruct` fields.
 
-use crate::arena::arena_alloc_haxe_string;
 use crate::haxe_string::HaxeString;
 use std::alloc::{alloc, dealloc, Layout};
 use std::ptr;
@@ -46,11 +45,12 @@ pub extern "C" fn rayzor_cstring_from(source: *const HaxeString) -> i64 {
 #[no_mangle]
 pub extern "C" fn rayzor_cstring_to_string(cstr_addr: i64) -> *mut HaxeString {
     let cstr = cstr_addr as *const u8;
-    let hs_ptr = arena_alloc_haxe_string(HaxeString {
+    let hs = Box::new(HaxeString {
         ptr: ptr::null_mut(),
         len: 0,
         cap: 0,
     });
+    let hs_ptr = Box::into_raw(hs);
 
     if cstr.is_null() {
         crate::haxe_string::haxe_string_new(hs_ptr);

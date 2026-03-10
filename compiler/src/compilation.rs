@@ -2499,6 +2499,33 @@ impl CompilationUnit {
             }
         }
 
+        // Derive class sizes from field entries for old caches that lack class_sizes.
+        // For each class with fields but no size entry, compute (max_field_index + 1) * 8.
+        {
+            let mut class_max_idx: BTreeMap<&str, u32> = BTreeMap::new();
+            for entry in &cached_maps.fields {
+                if !entry.class_name.is_empty() {
+                    let cur = class_max_idx.entry(&entry.class_name).or_insert(0);
+                    if entry.field_index > *cur {
+                        *cur = entry.field_index;
+                    }
+                }
+            }
+            for (class_name, max_idx) in &class_max_idx {
+                if !self
+                    .import_class_alloc_sizes_by_name
+                    .contains_key(*class_name)
+                {
+                    let size = ((*max_idx as u64) + 1) * 8;
+                    self.import_class_alloc_sizes_by_name
+                        .insert(class_name.to_string(), size);
+                    if let Some((_class_sym, class_type, _)) = registered.get(*class_name) {
+                        self.import_class_alloc_sizes.insert(*class_type, size);
+                    }
+                }
+            }
+        }
+
         // Restore property access mappings
         for entry in &cached_maps.properties {
             if let Some((_class_sym, _class_type, class_scope)) = registered.get(&entry.class_name)

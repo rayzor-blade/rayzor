@@ -4,7 +4,6 @@
 //! Both are opaque pointer types: Box<Struct> cast to *mut u8.
 
 use crate::anon_object::{rayzor_anon_new, rayzor_anon_set_field_by_index, rayzor_ensure_shape};
-use crate::arena::arena_alloc_haxe_string;
 use crate::haxe_array::HaxeArray;
 use crate::haxe_string::HaxeString;
 use std::ptr;
@@ -33,11 +32,12 @@ static KV_SHAPE_INIT: Once = Once::new();
 
 /// Create a heap-allocated HaxeString from a Rust &str
 fn str_to_hs(s: &str) -> *mut u8 {
-    let hs_ptr = arena_alloc_haxe_string(HaxeString {
+    let hs = Box::new(HaxeString {
         ptr: ptr::null_mut(),
         len: 0,
         cap: 0,
     });
+    let hs_ptr = Box::into_raw(hs);
     crate::haxe_string::haxe_string_from_bytes(hs_ptr, s.as_ptr(), s.len());
     hs_ptr as *mut u8
 }

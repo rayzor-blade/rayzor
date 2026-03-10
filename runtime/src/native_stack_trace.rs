@@ -5,10 +5,10 @@
 //! compilation. At throw time, raw backtrace IPs are resolved against this registry to produce
 //! human-readable Haxe stack traces with function name, file, line, and column.
 
-use crate::arena::arena_alloc_haxe_string;
 use crate::exception::get_exception_stack_trace;
 use crate::haxe_array::HaxeArray;
 use crate::haxe_string::HaxeString;
+use std::alloc::{alloc, Layout};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, RwLock};
 
@@ -439,16 +439,19 @@ pub extern "C" fn rayzor_native_stack_trace_save_stack(_exception: *mut u8) {
 pub fn make_haxe_string(s: String) -> *mut HaxeString {
     let bytes = s.into_bytes();
     let len = bytes.len();
-    let cap = len + 1;
     unsafe {
-        let layout = std::alloc::Layout::from_size_align_unchecked(cap, 1);
-        let ptr = std::alloc::alloc(layout);
+        let layout = Layout::from_size_align_unchecked(len + 1, 1);
+        let ptr = alloc(layout);
         if ptr.is_null() {
             return std::ptr::null_mut();
         }
         std::ptr::copy_nonoverlapping(bytes.as_ptr(), ptr, len);
         *ptr.add(len) = 0; // null terminator
-        arena_alloc_haxe_string(HaxeString { ptr, len, cap })
+        Box::into_raw(Box::new(HaxeString {
+            ptr,
+            len,
+            cap: len + 1,
+        }))
     }
 }
 
