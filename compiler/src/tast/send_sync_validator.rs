@@ -120,6 +120,11 @@ impl<'a> SendSyncValidator<'a> {
             return self.validate_thread_spawn(call_expr, closure_type);
         }
 
+        // Check if this is Future::create (same Send constraint as Thread::spawn)
+        if let Some(closure_type) = self.core_checker.get_future_create_closure(call_expr) {
+            return self.validate_thread_spawn(call_expr, closure_type);
+        }
+
         Ok(())
     }
 

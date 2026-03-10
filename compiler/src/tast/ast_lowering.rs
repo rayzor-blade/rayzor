@@ -670,6 +670,7 @@ impl<'a> AstLowering<'a> {
                 }
                 "no_mangle" => flags = flags.union(SymbolFlags::NO_MANGLE),
                 "notNull" => flags = flags.union(SymbolFlags::NOT_NULL),
+                "async" => flags = flags.union(SymbolFlags::ASYNC),
                 "frameworks" | "cInclude" | "cSource" | "clib" => {
                     // @:frameworks(["Accelerate"]), @:cInclude(["vendor/stb"]), @:cSource(["lib.c"])
                     if let Some(first_param) = meta.params.first() {
@@ -4584,7 +4585,7 @@ impl<'a> AstLowering<'a> {
             visibility,
             effects: crate::tast::node::FunctionEffects {
                 can_throw: self.analyze_can_throw(&func.body),
-                async_kind: self.detect_async_kind(&func),
+                async_kind: self.detect_async_kind(&field.meta),
                 is_pure: self.analyze_is_pure(&func.body),
                 is_inline: modifier_info.is_inline,
                 exception_types: vec![],
@@ -13597,10 +13598,14 @@ impl<'a> AstLowering<'a> {
         }
     }
 
-    /// Detect if function is async
-    fn detect_async_kind(&self, _func: &parser::Function) -> AsyncKind {
-        // Haxe doesn't have native async/await, but might use promises/futures
-        // For now, return Sync
+    /// Detect if function is async based on @:async metadata
+    fn detect_async_kind(&self, meta: &[parser::haxe_ast::Metadata]) -> AsyncKind {
+        for m in meta {
+            let name = m.name.strip_prefix(':').unwrap_or(&m.name);
+            if name == "async" {
+                return AsyncKind::Async;
+            }
+        }
         AsyncKind::Sync
     }
 

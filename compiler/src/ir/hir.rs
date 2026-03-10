@@ -156,6 +156,8 @@ pub struct HirFunction {
     pub is_keep: bool,
     /// Source location of the function definition (for stack traces)
     pub source_location: crate::tast::symbols::SourceLocation,
+    /// @:async function — returns lazy Future<T> instead of T
+    pub is_async: bool,
 }
 
 impl HirFunction {

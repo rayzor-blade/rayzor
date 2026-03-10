@@ -78,7 +78,7 @@ impl<F: FnOnce()> Drop for PanicGuard<F> {
 static THREAD_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 /// Global count of active threads (spawned but not yet joined)
-static ACTIVE_THREAD_COUNT: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ACTIVE_THREAD_COUNT: AtomicU64 = AtomicU64::new(0);
 
 lazy_static::lazy_static! {
     /// Global registry of all active thread handles
@@ -196,7 +196,7 @@ struct NativePthreadHandle {
 /// ISB SY: Instruction Synchronization Barrier - flushes the instruction pipeline
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]
 #[inline(always)]
-fn arm64_jit_barrier() {
+pub(crate) fn arm64_jit_barrier() {
     unsafe {
         // Switch to execute mode - required for spawned threads to execute JIT code
         // Newly spawned threads start in write mode by default, so we must switch
@@ -216,7 +216,7 @@ fn arm64_jit_barrier() {
 
 #[cfg(not(all(target_arch = "aarch64", target_os = "macos")))]
 #[inline(always)]
-fn arm64_jit_barrier() {
+pub(crate) fn arm64_jit_barrier() {
     // No-op on other architectures
 }
 

@@ -535,6 +535,7 @@ mod tests {
             is_main,
             is_keep,
             source_location: SourceLocation::unknown(),
+            is_async: false,
         }
     }
 

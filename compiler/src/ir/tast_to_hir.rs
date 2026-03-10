@@ -737,6 +737,7 @@ impl<'a> TastToHirContext<'a> {
             is_main,
             is_keep,
             source_location: function.source_location,
+            is_async: matches!(function.effects.async_kind, crate::tast::node::AsyncKind::Async),
         }
     }
 
