@@ -45,6 +45,12 @@ pub mod thread;
 // Rayzor networking (Socket, Host)
 pub mod socket;
 
+// DEFLATE compression (haxe.zip.Compress/Uncompress)
+pub mod compress;
+
+// SSL/TLS (sys.ssl.Socket, Certificate, Key, Digest)
+pub mod ssl;
+
 // Rayzor systems-level types (Box, Ptr, Ref, Usize)
 pub mod systems;
 
@@ -116,6 +122,12 @@ pub fn build_stdlib() -> IrModule {
     // Build EReg (regular expressions)
     ereg::build_ereg_type(&mut builder);
 
+    // Build DEFLATE compression (haxe.zip.Compress/Uncompress)
+    compress::build_compress_type(&mut builder);
+
+    // Build SSL/TLS types (sys.ssl.Socket, Certificate, Key, Digest)
+    ssl::build_ssl_types(&mut builder);
+
     // Build Vec<T> extern declarations (monomorphized specializations)
     vec::build_vec_externs(&mut builder);
 
@@ -144,6 +156,8 @@ pub fn build_stdlib_with_plugins(registry: &CompilerPluginRegistry) -> IrModule 
     systems::build_systems_types(&mut builder);
     tensor::build_tensor_types(&mut builder);
     ereg::build_ereg_type(&mut builder);
+    compress::build_compress_type(&mut builder);
+    ssl::build_ssl_types(&mut builder);
     vec::build_vec_externs(&mut builder);
 
     // Plugin-provided extern declarations and MIR wrappers
