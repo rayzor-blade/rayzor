@@ -19268,10 +19268,13 @@ impl<'a> HirToMirContext<'a> {
         }
 
         for param in &func.params {
-            let param_type = self.convert_type_or_type_var(param.ty, &type_param_names);
+            let param_type = self.convert_type(param.ty);
             builder = builder.param(param.name.to_string(), param_type);
         }
 
+        // Use TypeVar only for return type so the monomorphizer and call-site
+        // can resolve the concrete return type. Parameters stay I64 (type-erased)
+        // to keep the function body compilable as a generic template.
         let return_type = self.convert_type_or_type_var(func.return_type, &type_param_names);
         builder = builder.returns(return_type);
 

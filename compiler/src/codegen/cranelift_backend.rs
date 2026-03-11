@@ -549,10 +549,41 @@ impl CraneliftBackend {
         }
 
         // Second pass: compile function bodies (skip extern functions with empty CFGs)
+        // Track failed function IDs so we can also skip functions that call them
+        // (calling a trap stub with mismatched args would panic cranelift).
+        let mut failed_funcs: std::collections::HashSet<IrFunctionId> = std::collections::HashSet::new();
+        // Also skip unmonomorphized generic templates
+        for (func_id, function) in &mir_module.functions {
+            if !function.signature.type_params.is_empty() {
+                failed_funcs.insert(*func_id);
+            }
+        }
         for (func_id, function) in &mir_module.functions {
             // Skip extern functions (empty CFG means extern declaration)
             if function.cfg.blocks.is_empty() {
                 debug!("Skipping extern function: {}", function.name);
+                continue;
+            }
+            // Skip unmonomorphized generic template functions
+            if !function.signature.type_params.is_empty() {
+                debug!("Skipping generic template function: {}", function.name);
+                if let Err(_) = self.define_trap_stub(*func_id, function) {}
+                continue;
+            }
+            // Skip functions that call any failed function (avoids cranelift ABI panics)
+            let calls_failed = function.cfg.blocks.values().any(|block| {
+                block.instructions.iter().any(|inst| {
+                    if let crate::ir::IrInstruction::CallDirect { func_id: callee, .. } = inst {
+                        failed_funcs.contains(callee)
+                    } else {
+                        false
+                    }
+                })
+            });
+            if calls_failed {
+                debug!("Skipping function '{}' (calls a failed function)", function.name);
+                failed_funcs.insert(*func_id);
+                if let Err(_) = self.define_trap_stub(*func_id, function) {}
                 continue;
             }
             match self.compile_function(*func_id, mir_module, function) {
@@ -562,6 +593,7 @@ impl CraneliftBackend {
                         "[COMPILE_FAIL] Skipping function '{}' ({}): {}",
                         function.name, func_id, e
                     );
+                    failed_funcs.insert(*func_id);
                     // Define a trap stub so finalize_definitions doesn't panic
                     if let Err(e2) = self.define_trap_stub(*func_id, function) {
                         warn!(
@@ -690,20 +722,49 @@ impl CraneliftBackend {
         }
 
         // Second pass: compile function bodies (skip extern functions with empty CFGs)
+        // Track failed functions to skip callers (prevents cranelift ABI panics)
+        let mut failed_funcs: std::collections::HashSet<IrFunctionId> = std::collections::HashSet::new();
+        for (func_id, function) in &mir_module.functions {
+            if !function.signature.type_params.is_empty() {
+                failed_funcs.insert(*func_id);
+            }
+        }
         for (func_id, function) in &mir_module.functions {
             if function.cfg.blocks.is_empty() {
                 debug!("Skipping extern function: {}", function.name);
                 continue;
             }
+            if !function.signature.type_params.is_empty() {
+                debug!("Skipping generic template function: {}", function.name);
+                if let Err(_) = self.define_trap_stub(*func_id, function) {}
+                continue;
+            }
+            // Skip functions that call any failed function
+            let calls_failed = function.cfg.blocks.values().any(|block| {
+                block.instructions.iter().any(|inst| {
+                    if let crate::ir::IrInstruction::CallDirect { func_id: callee, .. } = inst {
+                        failed_funcs.contains(callee)
+                    } else {
+                        false
+                    }
+                })
+            });
+            if calls_failed {
+                debug!("Skipping function '{}' (calls a failed function)", function.name);
+                failed_funcs.insert(*func_id);
+                if let Err(_) = self.define_trap_stub(*func_id, function) {}
+                continue;
+            }
             match self.compile_function(*func_id, mir_module, function) {
                 Ok(()) => {}
                 Err(e) => {
-                    eprintln!(
+                    warn!(
                         "[COMPILE_FAIL] Skipping function '{}' ({:?}): {}",
                         function.name, func_id, e
                     );
+                    failed_funcs.insert(*func_id);
                     if let Err(e2) = self.define_trap_stub(*func_id, function) {
-                        eprintln!(
+                        warn!(
                             "[COMPILE_FAIL] Failed to define trap stub for '{}': {}",
                             function.name, e2
                         );
@@ -1499,7 +1560,7 @@ impl CraneliftBackend {
                         }
                     }
                 }
-                Self::translate_instruction(
+                let inst_result = Self::translate_instruction(
                     &mut self.value_map,
                     &mut builder,
                     instruction,
@@ -1512,7 +1573,8 @@ impl CraneliftBackend {
                     self.current_env_param,
                     &mut self.string_data,
                     &mut self.string_counter,
-                )?;
+                );
+                inst_result?;
             }
 
             // Translate terminator
