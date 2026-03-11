@@ -10159,6 +10159,9 @@ impl<'a> HirToMirContext<'a> {
                     // This avoids bare-name collisions (e.g., user "add" vs "rayzor_ssl_cert_add").
                     // Only intercept for user-defined functions — extern/stdlib methods need the
                     // more specific handlers below (auto-boxing, runtime mapping, etc.).
+                    //
+                    // IMPORTANT: Skip this fast path when the receiver is Dynamic or Interface-typed,
+                    // because those need special dispatch (unboxing / fat pointer extraction) handled below.
                     if let Some(func_id) = self.resolve_function_id_with_qualified_fallback(*symbol)
                     {
                         let is_user_defined = self
@@ -10169,7 +10172,28 @@ impl<'a> HirToMirContext<'a> {
                             .map(|f| f.kind == crate::ir::functions::FunctionKind::UserDefined)
                             .unwrap_or(false);
 
-                        if is_user_defined {
+                        // Check if receiver needs special dispatch (Dynamic unbox or Interface fat pointer)
+                        let receiver_needs_special_dispatch = if *is_method && !args.is_empty() {
+                            let receiver_type = self.resolve_through_aliases(args[0].ty);
+                            let type_table = self.type_table.borrow();
+                            type_table
+                                .get(receiver_type)
+                                .map(|t| {
+                                    matches!(
+                                        t.kind,
+                                        TypeKind::Dynamic
+                                            | TypeKind::Interface { .. }
+                                            | TypeKind::TypeParameter { .. }
+                                            | TypeKind::Placeholder { .. }
+                                            | TypeKind::Unknown
+                                    )
+                                })
+                                .unwrap_or(false)
+                        } else {
+                            false
+                        };
+
+                        if is_user_defined && !receiver_needs_special_dispatch {
                             let arg_regs: Vec<_> = args
                                 .iter()
                                 .filter_map(|a| self.lower_expression(a))
@@ -10182,6 +10206,77 @@ impl<'a> HirToMirContext<'a> {
                                     result_type.clone()
                                 };
 
+                            // For generic class method calls, extract concrete type args
+                            // from the receiver's type (e.g., Container<String>.get() → type_args=[String]).
+                            // This enables the monomorphizer to specialize the function.
+                            let has_type_params = self
+                                .builder
+                                .module
+                                .functions
+                                .get(&func_id)
+                                .map(|f| !f.signature.type_params.is_empty())
+                                .unwrap_or(false);
+
+                            // Gather type_args: first from HIR call-site type_args, then from receiver's
+                            // generic instance type_args, then from the converted HIR type_args computed
+                            // earlier in the Call handler.
+                            let call_type_args = if has_type_params {
+                                if !converted_hir_type_args.is_empty() {
+                                    converted_hir_type_args.clone()
+                                } else if *is_method && !args.is_empty() {
+                                    // Extract from receiver's GenericInstance / Class type_args
+                                    let receiver_type = self.resolve_through_aliases(args[0].ty);
+                                    let type_table = self.type_table.borrow();
+                                    type_table
+                                        .get(receiver_type)
+                                        .and_then(|t| match &t.kind {
+                                            TypeKind::GenericInstance { type_args, .. }
+                                            | TypeKind::Class { type_args, .. } => {
+                                                if type_args.is_empty() {
+                                                    None
+                                                } else {
+                                                    Some(
+                                                        type_args
+                                                            .iter()
+                                                            .map(|&ta| self.convert_type(ta))
+                                                            .collect::<Vec<_>>(),
+                                                    )
+                                                }
+                                            }
+                                            _ => None,
+                                        })
+                                        .unwrap_or_default()
+                                } else {
+                                    vec![]
+                                }
+                            } else {
+                                vec![]
+                            };
+
+                            if !call_type_args.is_empty() {
+                                let result = self.builder.build_call_direct_with_type_args(
+                                    func_id,
+                                    arg_regs,
+                                    actual_return_type,
+                                    call_type_args,
+                                );
+                                // The function body uses type-erased I64 for all type param values.
+                                // When the resolved concrete type differs (F64, I32, String, etc.),
+                                // the caller's register has the right TYPE but the value is still
+                                // the I64 bit pattern. After inlining + SRA, this becomes visible.
+                                // Insert a bitcast for float types where i64→f64 reinterpretation
+                                // is needed at the calling convention level.
+                                if let Some(reg) = result {
+                                    let reg_type =
+                                        self.builder.get_register_type(reg).unwrap_or(IrType::I64);
+                                    if matches!(reg_type, IrType::F64 | IrType::F32) {
+                                        // Bitcast from i64 to f64 to ensure calling convention
+                                        // uses the float register file
+                                        return self.builder.build_bitcast(reg, reg_type);
+                                    }
+                                }
+                                return result;
+                            }
                             return self.builder.build_call_direct(
                                 func_id,
                                 arg_regs,
@@ -19147,6 +19242,9 @@ impl<'a> HirToMirContext<'a> {
     ) -> super::IrFunctionSignature {
         let mut builder = FunctionSignatureBuilder::new();
 
+        // Collect all type param names (class + method) for TypeVar resolution
+        let mut type_param_names: Vec<String> = Vec::new();
+
         // Add class type parameters first (T, U, etc from the generic class)
         for type_param in class_type_params {
             let param_name = self
@@ -19154,6 +19252,7 @@ impl<'a> HirToMirContext<'a> {
                 .get(type_param.name)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("T{}", type_param.name.as_raw()));
+            type_param_names.push(param_name.clone());
             builder = builder.type_param(param_name);
         }
 
@@ -19164,15 +19263,16 @@ impl<'a> HirToMirContext<'a> {
                 .get(type_param.name)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("T{}", type_param.name.as_raw()));
+            type_param_names.push(param_name.clone());
             builder = builder.type_param(param_name);
         }
 
         for param in &func.params {
-            let param_type = self.convert_type(param.ty);
+            let param_type = self.convert_type_or_type_var(param.ty, &type_param_names);
             builder = builder.param(param.name.to_string(), param_type);
         }
 
-        let return_type = self.convert_type(func.return_type);
+        let return_type = self.convert_type_or_type_var(func.return_type, &type_param_names);
         builder = builder.returns(return_type);
 
         if func.is_extern {
@@ -19180,6 +19280,24 @@ impl<'a> HirToMirContext<'a> {
         }
 
         builder.build()
+    }
+
+    /// Like convert_type but returns TypeVar for TypeParameter types that match
+    /// a known type param name. This preserves generic type info in function signatures
+    /// so the monomorphizer can specialize them.
+    fn convert_type_or_type_var(
+        &self,
+        type_id: crate::tast::TypeId,
+        type_param_names: &[String],
+    ) -> IrType {
+        if !type_param_names.is_empty() {
+            if let Some(name) = self.resolve_type_param_name(type_id) {
+                if type_param_names.contains(&name) {
+                    return IrType::TypeVar(name);
+                }
+            }
+        }
+        self.convert_type(type_id)
     }
 
     /// Build function signature for an instance method with implicit 'this' parameter
