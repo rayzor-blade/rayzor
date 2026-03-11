@@ -24292,12 +24292,10 @@ impl<'a> HirToMirContext<'a> {
         // Call constructor with just `this`
         let mut args = vec![obj_ptr];
         self.fill_default_args(ctor_id, &mut args, true);
-        self.builder
-            .build_call_direct(ctor_id, args, IrType::Void);
+        self.builder.build_call_direct(ctor_id, args, IrType::Void);
 
         // Set class hint
-        self.register_class_hints
-            .insert(obj_ptr, class_name_str);
+        self.register_class_hints.insert(obj_ptr, class_name_str);
 
         Some(obj_ptr)
     }

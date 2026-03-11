@@ -303,7 +303,7 @@ pub extern "C" fn rayzor_ssl_socket_close(handle: *mut u8) {
     unsafe {
         let ssl = &mut *(handle as *mut SslSocketHandle);
         if let Some(ref mut tls_stream) = ssl.tls_stream {
-            let _ = tls_stream.conn.send_close_notify();
+            tls_stream.conn.send_close_notify();
         }
         ssl.tls_stream = None;
     }
