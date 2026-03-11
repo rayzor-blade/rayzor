@@ -8,6 +8,7 @@ use crate::ir::{CallingConvention, IrType};
 /// Build all Compress/Uncompress type functions
 pub fn build_compress_type(builder: &mut MirBuilder) {
     declare_compress_externs(builder);
+    build_uncompress_new_default(builder);
 }
 
 /// Declare Compress/Uncompress extern runtime functions
@@ -107,4 +108,33 @@ fn declare_compress_externs(builder: &mut MirBuilder) {
         .calling_convention(CallingConvention::C)
         .build();
     builder.mark_as_extern(func_id);
+}
+
+/// MIR wrapper: Uncompress_new_default() -> *mut u8
+/// Calls rayzor_uncompress_new(0) with default windowBits=0 (zlib wrapper mode)
+fn build_uncompress_new_default(builder: &mut MirBuilder) {
+    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+
+    let func_id = builder
+        .begin_function("Uncompress_new_default")
+        .returns(ptr_u8)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let default_bits = builder.const_i32(0);
+
+    let uncompress_new = builder
+        .get_function_by_name("rayzor_uncompress_new")
+        .expect("rayzor_uncompress_new extern not found");
+
+    if let Some(result) = builder.call(uncompress_new, vec![default_bits]) {
+        builder.ret(Some(result));
+    } else {
+        let null_val = builder.const_value(crate::ir::IrValue::Null);
+        builder.ret(Some(null_val));
+    }
 }

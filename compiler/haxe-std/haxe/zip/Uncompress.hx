@@ -22,20 +22,10 @@
 
 package haxe.zip;
 
-class Uncompress {
-	public function new(?windowBits:Int) {
-		throw new haxe.exceptions.NotImplementedException("Not implemented for this platform");
-	}
-
-	public function execute(src:haxe.io.Bytes, srcPos:Int, dst:haxe.io.Bytes, dstPos:Int):{done:Bool, read:Int, write:Int} {
-		return null;
-	}
-
-	public function setFlushMode(f:FlushMode) {}
-
-	public function close() {}
-
-	public static function run(src:haxe.io.Bytes, ?bufsize:Int):haxe.io.Bytes {
-		return InflateImpl.run(new haxe.io.BytesInput(src), bufsize);
-	}
+extern class Uncompress {
+	public function new(?windowBits:Int):Void;
+	public function execute(src:haxe.io.Bytes, srcPos:Int, dst:haxe.io.Bytes, dstPos:Int):{done:Bool, read:Int, write:Int};
+	public function setFlushMode(f:FlushMode):Void;
+	public function close():Void;
+	public static function run(src:haxe.io.Bytes, ?bufsize:Int):haxe.io.Bytes;
 }

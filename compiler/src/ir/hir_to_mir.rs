@@ -5392,10 +5392,32 @@ impl<'a> HirToMirContext<'a> {
             .or(receiver_class_hint)
             .unwrap_or(base_class_name);
 
+        // PRIORITY: If receiver_class_hint is a fully qualified name (contains '.'),
+        // normalize it and try exact lookup FIRST. This handles subclass method dispatch
+        // (e.g., sys.ssl.Socket.close should call rayzor_ssl_socket_close, not sys_net_Socket_close).
+        if let Some(hint) = receiver_class_hint {
+            if hint.contains('.') {
+                let normalized_hint = hint.replace(".", "_");
+                if let Some(count) = param_count {
+                    if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(
+                        &normalized_hint,
+                        method_name,
+                        count,
+                    ) {
+                        return Some((sig.class, sig.method, mapping));
+                    }
+                }
+                if let Some((sig, mapping)) = self
+                    .stdlib_mapping
+                    .find_by_name(&normalized_hint, method_name)
+                {
+                    return Some((sig.class, sig.method, mapping));
+                }
+            }
+        }
+
         // Try to find this method in the stdlib mapping
         // First try qualified name (e.g., "rayzor_Bytes"), then fall back to simple name
-        // This avoids hardcoding class names and lets the StdlibMapping be the single source of truth
-        // If param_count is provided, use find_by_name_and_params to disambiguate overloaded methods
         if let Some(ref qn) = qualified_class_name {
             // Try with param_count first if available (to disambiguate overloads)
             if let Some(count) = param_count {
@@ -15648,46 +15670,40 @@ impl<'a> HirToMirContext<'a> {
                     // Check if this class has a "new" constructor registered in the runtime mapping
                     // Use find_constructor to look up the registered constructor mapping
                     // This returns both the MethodSignature and RuntimeFunctionCall from the registry
-                    // PRIORITY: Try qualified class name FIRST (e.g., "sys_thread_Mutex")
-                    // This ensures sys.thread.Mutex uses sys_mutex_alloc, not Mutex_init (rayzor.concurrent.Mutex)
+                    // PRIORITY: Try HIR class name first (may be fully qualified, e.g., "sys.ssl.Socket")
+                    // This is critical for subclasses like sys.ssl.Socket that extend sys.net.Socket,
+                    // because the symbol's qualified_name resolves to the parent class.
                     // Look up constructor: extract needed data (Copy types) to avoid holding
                     // a borrow on self.stdlib_mapping while calling self.lower_expression later.
                     let constructor_info: Option<(&'static str, bool, bool)> = {
                         let mut found = None;
-                        if let Some(sym_id) = actual_symbol_id {
-                            if let Some(sym) = self.symbol_table.get_symbol(sym_id) {
-                                // Try lowered @:native name first
-                                if let Some(native) = sym.native_name {
-                                    if let Some(native_str) = self.string_interner.get(native) {
-                                        let native_class_name = native_str.replace("::", "_");
-                                        if let Some((_, rc)) =
-                                            self.stdlib_mapping.find_constructor(&native_class_name)
-                                        {
-                                            debug!(
+                        // PRIORITY #0: Try HIR class name as qualified (e.g., "sys.ssl.Socket" -> "sys_ssl_Socket")
+                        // This handles subclass constructors before the symbol-based lookup (which may
+                        // resolve to the parent class due to class inheritance).
+                        if class_name.contains('.') {
+                            let qualified_hir = class_name.replace(".", "_");
+                            if let Some((_, rc)) =
+                                self.stdlib_mapping.find_constructor(&qualified_hir)
+                            {
+                                found =
+                                    Some((rc.runtime_name, rc.needs_out_param, rc.is_mir_wrapper));
+                            }
+                        }
+                        if found.is_none() {
+                            if let Some(sym_id) = actual_symbol_id {
+                                if let Some(sym) = self.symbol_table.get_symbol(sym_id) {
+                                    // Try lowered @:native name first
+                                    if let Some(native) = sym.native_name {
+                                        if let Some(native_str) = self.string_interner.get(native) {
+                                            let native_class_name = native_str.replace("::", "_");
+                                            if let Some((_, rc)) = self
+                                                .stdlib_mapping
+                                                .find_constructor(&native_class_name)
+                                            {
+                                                debug!(
                                                 "[NEW EXPR]: find_constructor(native='{}') = {:?}",
                                                 native_class_name, rc.runtime_name
                                             );
-                                            found = Some((
-                                                rc.runtime_name,
-                                                rc.needs_out_param,
-                                                rc.is_mir_wrapper,
-                                            ));
-                                        }
-                                    }
-                                }
-                                // Fall back to qualified name
-                                if found.is_none() {
-                                    if let Some(qn) = sym.qualified_name {
-                                        if let Some(qual_name) = self.string_interner.get(qn) {
-                                            let qualified_class_name = qual_name.replace(".", "_");
-                                            if let Some((_, rc)) = self
-                                                .stdlib_mapping
-                                                .find_constructor(&qualified_class_name)
-                                            {
-                                                debug!(
-                                                    "[NEW EXPR]: find_constructor(qualified='{}') = {:?}",
-                                                    qualified_class_name, rc.runtime_name
-                                                );
                                                 found = Some((
                                                     rc.runtime_name,
                                                     rc.needs_out_param,
@@ -15696,21 +15712,48 @@ impl<'a> HirToMirContext<'a> {
                                             }
                                         }
                                     }
+                                    // Fall back to qualified name
+                                    if found.is_none() {
+                                        if let Some(qn) = sym.qualified_name {
+                                            if let Some(qual_name) = self.string_interner.get(qn) {
+                                                let qualified_class_name =
+                                                    qual_name.replace(".", "_");
+                                                if let Some((_, rc)) = self
+                                                    .stdlib_mapping
+                                                    .find_constructor(&qualified_class_name)
+                                                {
+                                                    debug!(
+                                                    "[NEW EXPR]: find_constructor(qualified='{}') = {:?}",
+                                                    qualified_class_name, rc.runtime_name
+                                                );
+                                                    found = Some((
+                                                        rc.runtime_name,
+                                                        rc.needs_out_param,
+                                                        rc.is_mir_wrapper,
+                                                    ));
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
                             }
-                        }
-                        // FALLBACK: If not found via qualified name, try simple class name
-                        if found.is_none() {
-                            if let Some((_, rc)) = self.stdlib_mapping.find_constructor(class_name)
-                            {
-                                debug!(
-                                    "[NEW EXPR]: find_constructor('{}') = {:?}",
-                                    class_name, rc.runtime_name
-                                );
-                                found =
-                                    Some((rc.runtime_name, rc.needs_out_param, rc.is_mir_wrapper));
+                            // FALLBACK: If not found via qualified name, try simple class name
+                            if found.is_none() {
+                                if let Some((_, rc)) =
+                                    self.stdlib_mapping.find_constructor(class_name)
+                                {
+                                    debug!(
+                                        "[NEW EXPR]: find_constructor('{}') = {:?}",
+                                        class_name, rc.runtime_name
+                                    );
+                                    found = Some((
+                                        rc.runtime_name,
+                                        rc.needs_out_param,
+                                        rc.is_mir_wrapper,
+                                    ));
+                                }
                             }
-                        }
+                        } // close PRIORITY #0 if found.is_none()
                         found
                     };
                     if let Some((wrapper_name, needs_out_param, is_mir_wrapper)) = constructor_info
