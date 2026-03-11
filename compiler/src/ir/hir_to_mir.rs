@@ -10114,6 +10114,43 @@ impl<'a> HirToMirContext<'a> {
                         args.len()
                     );
 
+                    // DIRECT SYMBOL RESOLUTION:
+                    // For static extension methods (using IntTools; → x.add(3)) and
+                    // other user-defined method calls, try resolving the function by symbol ID first.
+                    // This avoids bare-name collisions (e.g., user "add" vs "rayzor_ssl_cert_add").
+                    // Only intercept for user-defined functions — extern/stdlib methods need the
+                    // more specific handlers below (auto-boxing, runtime mapping, etc.).
+                    if let Some(func_id) = self.resolve_function_id_with_qualified_fallback(*symbol)
+                    {
+                        let is_user_defined = self
+                            .builder
+                            .module
+                            .functions
+                            .get(&func_id)
+                            .map(|f| f.kind == crate::ir::functions::FunctionKind::UserDefined)
+                            .unwrap_or(false);
+
+                        if is_user_defined {
+                            let arg_regs: Vec<_> = args
+                                .iter()
+                                .filter_map(|a| self.lower_expression(a))
+                                .collect();
+
+                            let actual_return_type =
+                                if let Some(func) = self.builder.module.functions.get(&func_id) {
+                                    func.signature.return_type.clone()
+                                } else {
+                                    result_type.clone()
+                                };
+
+                            return self.builder.build_call_direct(
+                                func_id,
+                                arg_regs,
+                                actual_return_type,
+                            );
+                        }
+                    }
+
                     // INTERFACE DISPATCH:
                     // When is_method=true, args[0] is the receiver. If the receiver has
                     // an interface type, dispatch through the fat pointer vtable.
