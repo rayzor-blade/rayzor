@@ -6604,9 +6604,15 @@ impl<'a> AstLowering<'a> {
                 };
 
                 // Extract and intern the class name for extern stdlib classes
-                // The type_path.name contains the simple class name (e.g., "Channel" from "rayzor.concurrent.Channel")
-                let class_name_str = &type_path.name;
-                let interned_class_name = self.context.string_interner.intern(class_name_str);
+                // Use fully qualified name (package + name) when package is non-empty
+                // so that subclass constructors (e.g., sys.ssl.Socket extends sys.net.Socket)
+                // resolve to the correct runtime function instead of the parent's.
+                let class_name_str = if type_path.package.is_empty() {
+                    type_path.name.clone()
+                } else {
+                    format!("{}.{}", type_path.package.join("."), type_path.name)
+                };
+                let interned_class_name = self.context.string_interner.intern(&class_name_str);
 
                 TypedExpressionKind::New {
                     class_type: actual_class_type,

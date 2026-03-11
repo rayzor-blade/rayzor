@@ -383,7 +383,7 @@ impl StdlibMapping {
     pub fn is_stdlib_class(&self, class_name: &str) -> bool {
         self.mappings
             .keys()
-            .any(|sig| sig.class == class_name || sig.class.ends_with(&format!("_{}", class_name)))
+            .any(|sig| self.class_matches(class_name, sig.class))
     }
 
     /// Check if methods of this class are typically static
@@ -516,6 +516,22 @@ impl StdlibMapping {
     ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
         self.mappings.iter().find(|(sig, _)| {
             self.class_matches(class, &sig.class) && sig.method == "new" && sig.is_constructor
+        })
+    }
+
+    /// Find a constructor mapping for a class with a specific param count.
+    /// For classes with overloaded constructors (e.g., optional params), this
+    /// ensures the correct overload is selected based on the actual arg count.
+    pub fn find_constructor_with_params(
+        &self,
+        class: &str,
+        param_count: usize,
+    ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
+        self.mappings.iter().find(|(sig, call)| {
+            self.class_matches(class, &sig.class)
+                && sig.method == "new"
+                && sig.is_constructor
+                && call.param_count == param_count
         })
     }
 
@@ -3534,19 +3550,19 @@ impl StdlibMapping {
 
         let mappings = vec![
             // Constructor: new Compress(level:Int) -> handle
-            map_method!(constructor "Compress", "new" => "rayzor_compress_new", params: 1, returns: primitive,
+            map_method!(constructor "haxe_zip_Compress", "new" => "rayzor_compress_new", params: 1, returns: primitive,
                 types: &[I32] => PtrU8),
             // execute(src:Bytes, srcPos:Int, dst:Bytes, dstPos:Int):{done:Bool, read:Int, write:Int}
-            map_method!(instance "Compress", "execute" => "rayzor_compress_execute", params: 4, returns: primitive,
+            map_method!(instance "haxe_zip_Compress", "execute" => "rayzor_compress_execute", params: 4, returns: primitive,
                 types: &[PtrU8, PtrU8, I32, PtrU8, I32] => PtrU8),
             // setFlushMode(f:FlushMode):Void
-            map_method!(instance "Compress", "setFlushMode" => "rayzor_compress_set_flush", params: 1, returns: void,
+            map_method!(instance "haxe_zip_Compress", "setFlushMode" => "rayzor_compress_set_flush", params: 1, returns: void,
                 types: &[PtrU8, I32]),
             // close():Void
-            map_method!(instance "Compress", "close" => "rayzor_compress_close", params: 0, returns: void,
+            map_method!(instance "haxe_zip_Compress", "close" => "rayzor_compress_close", params: 0, returns: void,
                 types: &[PtrU8]),
             // static run(s:Bytes, level:Int):Bytes
-            map_method!(static "Compress", "run" => "rayzor_compress_run", params: 2, returns: primitive,
+            map_method!(static "haxe_zip_Compress", "run" => "rayzor_compress_run", params: 2, returns: primitive,
                 types: &[PtrU8, I32] => PtrU8),
         ];
 
@@ -3558,19 +3574,20 @@ impl StdlibMapping {
 
         let mappings = vec![
             // Constructor: new Uncompress(?windowBits:Int) -> handle
-            map_method!(constructor "Uncompress", "new" => "rayzor_uncompress_new", params: 1, returns: primitive,
+            map_method!(constructor "haxe_zip_Uncompress", "new" => "rayzor_uncompress_new", params: 1, returns: primitive,
                 types: &[I32] => PtrU8),
             // Constructor: new Uncompress() with 0 params (optional windowBits defaults to 0)
-            map_method!(constructor "Uncompress", "new" => "rayzor_uncompress_new", params: 0, returns: primitive,
-                types: &[I32] => PtrU8),
+            // Uses MIR wrapper that calls rayzor_uncompress_new(0)
+            map_method!(constructor "haxe_zip_Uncompress", "new" => "Uncompress_new_default", params: 0, mir_wrapper,
+                types: &[] => PtrU8),
             // execute(src:Bytes, srcPos:Int, dst:Bytes, dstPos:Int):{done:Bool, read:Int, write:Int}
-            map_method!(instance "Uncompress", "execute" => "rayzor_uncompress_execute", params: 4, returns: primitive,
+            map_method!(instance "haxe_zip_Uncompress", "execute" => "rayzor_uncompress_execute", params: 4, returns: primitive,
                 types: &[PtrU8, PtrU8, I32, PtrU8, I32] => PtrU8),
             // setFlushMode(f:FlushMode):Void
-            map_method!(instance "Uncompress", "setFlushMode" => "rayzor_uncompress_set_flush", params: 1, returns: void,
+            map_method!(instance "haxe_zip_Uncompress", "setFlushMode" => "rayzor_uncompress_set_flush", params: 1, returns: void,
                 types: &[PtrU8, I32]),
             // close():Void
-            map_method!(instance "Uncompress", "close" => "rayzor_uncompress_close", params: 0, returns: void,
+            map_method!(instance "haxe_zip_Uncompress", "close" => "rayzor_uncompress_close", params: 0, returns: void,
                 types: &[PtrU8]),
         ];
 
@@ -3659,43 +3676,43 @@ impl StdlibMapping {
 
         let mappings = vec![
             // static loadFile(file:String):Certificate
-            map_method!(static "Certificate", "loadFile" => "rayzor_ssl_cert_load_file", params: 1, returns: primitive,
+            map_method!(static "sys_ssl_Certificate", "loadFile" => "rayzor_ssl_cert_load_file", params: 1, returns: primitive,
                 types: &[PtrString] => PtrU8),
             // static loadPath(path:String):Certificate
-            map_method!(static "Certificate", "loadPath" => "rayzor_ssl_cert_load_path", params: 1, returns: primitive,
+            map_method!(static "sys_ssl_Certificate", "loadPath" => "rayzor_ssl_cert_load_path", params: 1, returns: primitive,
                 types: &[PtrString] => PtrU8),
             // static fromString(str:String):Certificate
-            map_method!(static "Certificate", "fromString" => "rayzor_ssl_cert_from_string", params: 1, returns: primitive,
+            map_method!(static "sys_ssl_Certificate", "fromString" => "rayzor_ssl_cert_from_string", params: 1, returns: primitive,
                 types: &[PtrString] => PtrU8),
             // static loadDefaults():Certificate
-            map_method!(static "Certificate", "loadDefaults" => "rayzor_ssl_cert_load_defaults", params: 0, returns: primitive,
+            map_method!(static "sys_ssl_Certificate", "loadDefaults" => "rayzor_ssl_cert_load_defaults", params: 0, returns: primitive,
                 types: &[] => PtrU8),
             // commonName:String (getter)
-            map_method!(instance "Certificate", "get_commonName" => "rayzor_ssl_cert_common_name", params: 0, returns: primitive,
+            map_method!(instance "sys_ssl_Certificate", "get_commonName" => "rayzor_ssl_cert_common_name", params: 0, returns: primitive,
                 types: &[PtrU8] => PtrString),
             // altNames:Array<String> (getter)
-            map_method!(instance "Certificate", "get_altNames" => "rayzor_ssl_cert_alt_names", params: 0, returns: primitive,
+            map_method!(instance "sys_ssl_Certificate", "get_altNames" => "rayzor_ssl_cert_alt_names", params: 0, returns: primitive,
                 types: &[PtrU8] => PtrU8),
             // notBefore:Date (getter, returns epoch float)
-            map_method!(instance "Certificate", "get_notBefore" => "rayzor_ssl_cert_not_before", params: 0, returns: primitive,
+            map_method!(instance "sys_ssl_Certificate", "get_notBefore" => "rayzor_ssl_cert_not_before", params: 0, returns: primitive,
                 types: &[PtrU8] => F64),
             // notAfter:Date (getter, returns epoch float)
-            map_method!(instance "Certificate", "get_notAfter" => "rayzor_ssl_cert_not_after", params: 0, returns: primitive,
+            map_method!(instance "sys_ssl_Certificate", "get_notAfter" => "rayzor_ssl_cert_not_after", params: 0, returns: primitive,
                 types: &[PtrU8] => F64),
             // subject(field:String):String
-            map_method!(instance "Certificate", "subject" => "rayzor_ssl_cert_subject", params: 1, returns: primitive,
+            map_method!(instance "sys_ssl_Certificate", "subject" => "rayzor_ssl_cert_subject", params: 1, returns: primitive,
                 types: &[PtrU8, PtrString] => PtrString),
             // issuer(field:String):String
-            map_method!(instance "Certificate", "issuer" => "rayzor_ssl_cert_issuer", params: 1, returns: primitive,
+            map_method!(instance "sys_ssl_Certificate", "issuer" => "rayzor_ssl_cert_issuer", params: 1, returns: primitive,
                 types: &[PtrU8, PtrString] => PtrString),
             // next():Certificate
-            map_method!(instance "Certificate", "next" => "rayzor_ssl_cert_next", params: 0, returns: primitive,
+            map_method!(instance "sys_ssl_Certificate", "next" => "rayzor_ssl_cert_next", params: 0, returns: primitive,
                 types: &[PtrU8] => PtrU8),
             // add(pem:String):Void
-            map_method!(instance "Certificate", "add" => "rayzor_ssl_cert_add", params: 1, returns: void,
+            map_method!(instance "sys_ssl_Certificate", "add" => "rayzor_ssl_cert_add", params: 1, returns: void,
                 types: &[PtrU8, PtrString]),
             // addDER(der:Bytes):Void
-            map_method!(instance "Certificate", "addDER" => "rayzor_ssl_cert_add_der", params: 1, returns: void,
+            map_method!(instance "sys_ssl_Certificate", "addDER" => "rayzor_ssl_cert_add_der", params: 1, returns: void,
                 types: &[PtrU8, PtrU8]),
         ];
 
@@ -3707,17 +3724,17 @@ impl StdlibMapping {
 
         let mappings = vec![
             // static loadFile(file:String, ?isPublic:Bool, ?pass:String):Key
-            map_method!(static "Key", "loadFile" => "rayzor_ssl_key_load_file", params: 3, returns: primitive,
+            map_method!(static "sys_ssl_Key", "loadFile" => "rayzor_ssl_key_load_file", params: 3, returns: primitive,
                 types: &[PtrString, I32, PtrString] => PtrU8),
-            map_method!(static "Key", "loadFile" => "rayzor_ssl_key_load_file", params: 1, returns: primitive,
+            map_method!(static "sys_ssl_Key", "loadFile" => "rayzor_ssl_key_load_file", params: 1, returns: primitive,
                 types: &[PtrString, I32, PtrString] => PtrU8),
             // static readPEM(data:String, isPublic:Bool, ?pass:String):Key
-            map_method!(static "Key", "readPEM" => "rayzor_ssl_key_read_pem", params: 3, returns: primitive,
+            map_method!(static "sys_ssl_Key", "readPEM" => "rayzor_ssl_key_read_pem", params: 3, returns: primitive,
                 types: &[PtrString, I32, PtrString] => PtrU8),
-            map_method!(static "Key", "readPEM" => "rayzor_ssl_key_read_pem", params: 2, returns: primitive,
+            map_method!(static "sys_ssl_Key", "readPEM" => "rayzor_ssl_key_read_pem", params: 2, returns: primitive,
                 types: &[PtrString, I32, PtrString] => PtrU8),
             // static readDER(data:Bytes, isPublic:Bool):Key
-            map_method!(static "Key", "readDER" => "rayzor_ssl_key_read_der", params: 2, returns: primitive,
+            map_method!(static "sys_ssl_Key", "readDER" => "rayzor_ssl_key_read_der", params: 2, returns: primitive,
                 types: &[PtrU8, I32] => PtrU8),
         ];
 
@@ -3729,13 +3746,13 @@ impl StdlibMapping {
 
         let mappings = vec![
             // static make(data:Bytes, alg:DigestAlgorithm):Bytes
-            map_method!(static "Digest", "make" => "rayzor_ssl_digest_make", params: 2, returns: primitive,
+            map_method!(static "sys_ssl_Digest", "make" => "rayzor_ssl_digest_make", params: 2, returns: primitive,
                 types: &[PtrU8, PtrString] => PtrU8),
             // static sign(data:Bytes, privKey:Key, alg:DigestAlgorithm):Bytes
-            map_method!(static "Digest", "sign" => "rayzor_ssl_digest_sign", params: 3, returns: primitive,
+            map_method!(static "sys_ssl_Digest", "sign" => "rayzor_ssl_digest_sign", params: 3, returns: primitive,
                 types: &[PtrU8, PtrU8, PtrString] => PtrU8),
             // static verify(data:Bytes, signature:Bytes, pubKey:Key, alg:DigestAlgorithm):Bool
-            map_method!(static "Digest", "verify" => "rayzor_ssl_digest_verify", params: 4, returns: primitive,
+            map_method!(static "sys_ssl_Digest", "verify" => "rayzor_ssl_digest_verify", params: 4, returns: primitive,
                 types: &[PtrU8, PtrU8, PtrU8, PtrString] => Bool),
         ];
 

@@ -22,21 +22,10 @@
 
 package haxe.zip;
 
-class Compress {
-	public function new(level:Int) {
-		throw new haxe.exceptions.NotImplementedException("Not implemented for this platform");
-	}
-
-	public function execute(src:haxe.io.Bytes, srcPos:Int, dst:haxe.io.Bytes, dstPos:Int):{done:Bool, read:Int, write:Int} {
-		return null;
-	}
-
-	public function setFlushMode(f:FlushMode) {}
-
-	public function close() {}
-
-	public static function run(s:haxe.io.Bytes, level:Int):haxe.io.Bytes {
-		throw new haxe.exceptions.NotImplementedException("Not implemented for this platform");
-		return null;
-	}
+extern class Compress {
+	public function new(level:Int):Void;
+	public function execute(src:haxe.io.Bytes, srcPos:Int, dst:haxe.io.Bytes, dstPos:Int):{done:Bool, read:Int, write:Int};
+	public function setFlushMode(f:FlushMode):Void;
+	public function close():Void;
+	public static function run(s:haxe.io.Bytes, level:Int):haxe.io.Bytes;
 }
