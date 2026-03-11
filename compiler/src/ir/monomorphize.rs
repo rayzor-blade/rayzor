@@ -607,11 +607,20 @@ impl Monomorphizer {
                         ..
                     } = inst
                     {
-                        // Handle calls to functions with fixups. Monomorphized clones
-                        // (created in Phase 3) may still carry stale erased type_args
-                        // (e.g., [I64, I64]) from before Phase 5 cleared them. We must
-                        // propagate regardless so transitive fixups get correct types.
-                        if funcs_with_fixups.contains(callee_id) {
+                        // Handle calls to functions with fixups OR unmonomorphized
+                        // generic functions. Monomorphized clones (created in Phase 3)
+                        // may still carry stale erased type_args (e.g., [I64, I64])
+                        // from before Phase 5 cleared them. We must propagate regardless
+                        // so transitive fixups get correct types.
+                        //
+                        // Also catch calls to generic functions that still have type_params
+                        // but no fixups (e.g., balance() called from setLoop()). These
+                        // need monomorphization too, even though they have no fixups.
+                        let callee_is_generic = module
+                            .functions
+                            .get(callee_id)
+                            .map_or(false, |f| !f.signature.type_params.is_empty());
+                        if funcs_with_fixups.contains(callee_id) || callee_is_generic {
                             // Specialize this callee with our substitution map
                             if let Some(callee) = module.functions.get(callee_id).cloned() {
                                 let (new_id, is_new) =
@@ -694,6 +703,9 @@ impl Monomorphizer {
 
         // Clear any type params (shouldn't have any, but be safe)
         specialized.signature.type_params.clear();
+
+        // Substitute types in signature (params + return type)
+        specialized.signature = self.substitute_signature(&specialized.signature);
 
         // Substitute types in register_types
         let mut new_register_types = HashMap::new();

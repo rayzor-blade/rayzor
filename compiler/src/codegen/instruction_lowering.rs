@@ -430,11 +430,6 @@ impl CraneliftBackend {
         right: IrId,
     ) -> Result<Value, String> {
         let lhs = *value_map.get(&left).ok_or_else(|| {
-            eprintln!(
-                "ERROR: Left operand {:?} not found. Available keys: {:?}",
-                left,
-                value_map.keys().collect::<Vec<_>>()
-            );
             format!("Left operand {:?} not found in value_map", left)
         })?;
         let rhs = *value_map
@@ -702,11 +697,6 @@ impl CraneliftBackend {
         right: IrId,
     ) -> Result<Value, String> {
         let lhs = *value_map.get(&left).ok_or_else(|| {
-            eprintln!(
-                "ERROR: Left operand {:?} not found. Available keys: {:?}",
-                left,
-                value_map.keys().collect::<Vec<_>>()
-            );
             format!("Left operand {:?} not found in value_map", left)
         })?;
         let rhs = *value_map
