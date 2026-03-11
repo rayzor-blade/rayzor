@@ -5459,6 +5459,23 @@ impl<'a> HirToMirContext<'a> {
             return Some((sig.class, sig.method, mapping));
         }
 
+        // Bare-name fallback: if class_name is qualified (e.g., "haxe.ds.ObjectMap"),
+        // try the bare class name (e.g., "ObjectMap") for methods registered with simple names.
+        if class_name.contains('.') {
+            let bare_name = class_name.rsplit('.').next().unwrap_or(class_name);
+            if let Some(count) = param_count {
+                if let Some((sig, mapping)) =
+                    self.stdlib_mapping
+                        .find_by_name_and_params(bare_name, method_name, count)
+                {
+                    return Some((sig.class, sig.method, mapping));
+                }
+            }
+            if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(bare_name, method_name) {
+                return Some((sig.class, sig.method, mapping));
+            }
+        }
+
         // @:forward fallback: if the abstract's own name didn't match, try underlying type
         {
             let type_table = self.type_table.borrow();
@@ -15675,19 +15692,47 @@ impl<'a> HirToMirContext<'a> {
                     // because the symbol's qualified_name resolves to the parent class.
                     // Look up constructor: extract needed data (Copy types) to avoid holding
                     // a borrow on self.stdlib_mapping while calling self.lower_expression later.
+                    let arg_count = args.len();
                     let constructor_info: Option<(&'static str, bool, bool)> = {
                         let mut found = None;
+
+                        // Helper: try constructor lookup with param count first, then without.
+                        // This ensures overloaded constructors (e.g., Uncompress with 0 or 1 args)
+                        // select the correct overload.
+                        macro_rules! try_find_ctor {
+                            ($name:expr) => {
+                                if found.is_none() {
+                                    // Try param-count-aware lookup first
+                                    if let Some((_, rc)) = self
+                                        .stdlib_mapping
+                                        .find_constructor_with_params($name, arg_count)
+                                    {
+                                        found = Some((
+                                            rc.runtime_name,
+                                            rc.needs_out_param,
+                                            rc.is_mir_wrapper,
+                                        ));
+                                    }
+                                    // Fall back to any-param lookup
+                                    else if let Some((_, rc)) =
+                                        self.stdlib_mapping.find_constructor($name)
+                                    {
+                                        found = Some((
+                                            rc.runtime_name,
+                                            rc.needs_out_param,
+                                            rc.is_mir_wrapper,
+                                        ));
+                                    }
+                                }
+                            };
+                        }
+
                         // PRIORITY #0: Try HIR class name as qualified (e.g., "sys.ssl.Socket" -> "sys_ssl_Socket")
                         // This handles subclass constructors before the symbol-based lookup (which may
                         // resolve to the parent class due to class inheritance).
                         if class_name.contains('.') {
                             let qualified_hir = class_name.replace(".", "_");
-                            if let Some((_, rc)) =
-                                self.stdlib_mapping.find_constructor(&qualified_hir)
-                            {
-                                found =
-                                    Some((rc.runtime_name, rc.needs_out_param, rc.is_mir_wrapper));
-                            }
+                            try_find_ctor!(&qualified_hir);
                         }
                         if found.is_none() {
                             if let Some(sym_id) = actual_symbol_id {
@@ -15696,20 +15741,7 @@ impl<'a> HirToMirContext<'a> {
                                     if let Some(native) = sym.native_name {
                                         if let Some(native_str) = self.string_interner.get(native) {
                                             let native_class_name = native_str.replace("::", "_");
-                                            if let Some((_, rc)) = self
-                                                .stdlib_mapping
-                                                .find_constructor(&native_class_name)
-                                            {
-                                                debug!(
-                                                "[NEW EXPR]: find_constructor(native='{}') = {:?}",
-                                                native_class_name, rc.runtime_name
-                                            );
-                                                found = Some((
-                                                    rc.runtime_name,
-                                                    rc.needs_out_param,
-                                                    rc.is_mir_wrapper,
-                                                ));
-                                            }
+                                            try_find_ctor!(&native_class_name);
                                         }
                                     }
                                     // Fall back to qualified name
@@ -15718,40 +15750,20 @@ impl<'a> HirToMirContext<'a> {
                                             if let Some(qual_name) = self.string_interner.get(qn) {
                                                 let qualified_class_name =
                                                     qual_name.replace(".", "_");
-                                                if let Some((_, rc)) = self
-                                                    .stdlib_mapping
-                                                    .find_constructor(&qualified_class_name)
-                                                {
-                                                    debug!(
-                                                    "[NEW EXPR]: find_constructor(qualified='{}') = {:?}",
-                                                    qualified_class_name, rc.runtime_name
-                                                );
-                                                    found = Some((
-                                                        rc.runtime_name,
-                                                        rc.needs_out_param,
-                                                        rc.is_mir_wrapper,
-                                                    ));
-                                                }
+                                                try_find_ctor!(&qualified_class_name);
                                             }
                                         }
                                     }
                                 }
                             }
-                            // FALLBACK: If not found via qualified name, try simple class name
-                            if found.is_none() {
-                                if let Some((_, rc)) =
-                                    self.stdlib_mapping.find_constructor(class_name)
-                                {
-                                    debug!(
-                                        "[NEW EXPR]: find_constructor('{}') = {:?}",
-                                        class_name, rc.runtime_name
-                                    );
-                                    found = Some((
-                                        rc.runtime_name,
-                                        rc.needs_out_param,
-                                        rc.is_mir_wrapper,
-                                    ));
-                                }
+                            // FALLBACK: Try simple class name
+                            try_find_ctor!(class_name);
+
+                            // FALLBACK #2: Try bare class name for qualified paths
+                            // (e.g., "haxe.ds.ObjectMap" -> "ObjectMap")
+                            if found.is_none() && class_name.contains('.') {
+                                let bare_name = class_name.rsplit('.').next().unwrap_or(class_name);
+                                try_find_ctor!(bare_name);
                             }
                         } // close PRIORITY #0 if found.is_none()
                         found
