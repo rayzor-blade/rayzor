@@ -460,12 +460,36 @@ impl IrBuilder {
         type_args: Vec<IrType>,
     ) -> Option<IrId> {
         // Same logic as build_call_direct but with type_args
-        let actual_return_type = if let Some(func) = self.module.functions.get(&func_id) {
+        let raw_return_type = if let Some(func) = self.module.functions.get(&func_id) {
             func.signature.return_type.clone()
         } else if let Some(extern_func) = self.module.extern_functions.get(&func_id) {
             extern_func.signature.return_type.clone()
         } else {
             ty.clone()
+        };
+
+        // Resolve TypeVar in return type using the concrete type_args.
+        // E.g., Container<String>.get() has signature returning TypeVar("T"),
+        // with type_args=[String] → resolved return type is String.
+        let actual_return_type = if !type_args.is_empty() {
+            if let IrType::TypeVar(ref name) = raw_return_type {
+                // Find which type param index this TypeVar corresponds to
+                let type_params = self
+                    .module
+                    .functions
+                    .get(&func_id)
+                    .map(|f| f.signature.type_params.clone())
+                    .unwrap_or_default();
+                let resolved = type_params
+                    .iter()
+                    .position(|tp| &tp.name == name)
+                    .and_then(|idx| type_args.get(idx).cloned());
+                resolved.unwrap_or(raw_return_type)
+            } else {
+                raw_return_type
+            }
+        } else {
+            raw_return_type
         };
 
         let dest = if actual_return_type == IrType::Void {
@@ -490,7 +514,9 @@ impl IrBuilder {
         if let Some(dest_reg) = dest {
             self.set_register_type(dest_reg, actual_return_type.clone());
 
-            if actual_return_type != ty {
+            // Skip cast when ty is TypeVar — we've already resolved the concrete type
+            // from type_args. The TypeVar was a placeholder in the caller's context.
+            if actual_return_type != ty && !matches!(ty, IrType::TypeVar(_)) {
                 let actual_is_ptr = matches!(actual_return_type, IrType::Ptr(_));
                 let expected_is_scalar = matches!(
                     ty,
