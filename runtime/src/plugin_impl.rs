@@ -1830,6 +1830,191 @@ register_symbol!("haxe_ereg_map", crate::ereg::haxe_ereg_map);
 register_symbol!("haxe_ereg_escape", crate::ereg::haxe_ereg_escape);
 
 // ============================================================================
+// DEFLATE Compression (haxe.zip.Compress / Uncompress)
+// ============================================================================
+register_symbol!("rayzor_compress_new", crate::compress::rayzor_compress_new);
+register_symbol!(
+    "rayzor_compress_execute",
+    crate::compress::rayzor_compress_execute
+);
+register_symbol!(
+    "rayzor_compress_set_flush",
+    crate::compress::rayzor_compress_set_flush
+);
+register_symbol!(
+    "rayzor_compress_close",
+    crate::compress::rayzor_compress_close
+);
+register_symbol!("rayzor_compress_run", crate::compress::rayzor_compress_run);
+register_symbol!(
+    "rayzor_uncompress_new",
+    crate::compress::rayzor_uncompress_new
+);
+register_symbol!(
+    "rayzor_uncompress_execute",
+    crate::compress::rayzor_uncompress_execute
+);
+register_symbol!(
+    "rayzor_uncompress_set_flush",
+    crate::compress::rayzor_uncompress_set_flush
+);
+register_symbol!(
+    "rayzor_uncompress_close",
+    crate::compress::rayzor_uncompress_close
+);
+
+// ============================================================================
+// SSL/TLS (sys.ssl.Socket, Certificate, Key, Digest)
+// ============================================================================
+// Socket
+register_symbol!("rayzor_ssl_socket_new", crate::ssl::rayzor_ssl_socket_new);
+register_symbol!(
+    "rayzor_ssl_socket_connect",
+    crate::ssl::rayzor_ssl_socket_connect
+);
+register_symbol!(
+    "rayzor_ssl_socket_handshake",
+    crate::ssl::rayzor_ssl_socket_handshake
+);
+register_symbol!(
+    "rayzor_ssl_socket_set_hostname",
+    crate::ssl::rayzor_ssl_socket_set_hostname
+);
+register_symbol!(
+    "rayzor_ssl_socket_set_ca",
+    crate::ssl::rayzor_ssl_socket_set_ca
+);
+register_symbol!(
+    "rayzor_ssl_socket_set_certificate",
+    crate::ssl::rayzor_ssl_socket_set_certificate
+);
+register_symbol!(
+    "rayzor_ssl_socket_peer_certificate",
+    crate::ssl::rayzor_ssl_socket_peer_certificate
+);
+register_symbol!("rayzor_ssl_socket_read", crate::ssl::rayzor_ssl_socket_read);
+register_symbol!(
+    "rayzor_ssl_socket_write",
+    crate::ssl::rayzor_ssl_socket_write
+);
+register_symbol!(
+    "rayzor_ssl_socket_close",
+    crate::ssl::rayzor_ssl_socket_close
+);
+register_symbol!(
+    "rayzor_ssl_socket_set_blocking",
+    crate::ssl::rayzor_ssl_socket_set_blocking
+);
+register_symbol!(
+    "rayzor_ssl_socket_set_timeout",
+    crate::ssl::rayzor_ssl_socket_set_timeout
+);
+register_symbol!(
+    "rayzor_ssl_socket_get_input",
+    crate::ssl::rayzor_ssl_socket_get_input
+);
+register_symbol!(
+    "rayzor_ssl_socket_get_output",
+    crate::ssl::rayzor_ssl_socket_get_output
+);
+register_symbol!(
+    "rayzor_ssl_socket_shutdown",
+    crate::ssl::rayzor_ssl_socket_shutdown
+);
+register_symbol!(
+    "rayzor_ssl_socket_set_fast_send",
+    crate::ssl::rayzor_ssl_socket_set_fast_send
+);
+register_symbol!(
+    "rayzor_ssl_socket_read_byte",
+    crate::ssl::rayzor_ssl_socket_read_byte
+);
+register_symbol!(
+    "rayzor_ssl_socket_read_bytes",
+    crate::ssl::rayzor_ssl_socket_read_bytes
+);
+register_symbol!(
+    "rayzor_ssl_socket_write_byte",
+    crate::ssl::rayzor_ssl_socket_write_byte
+);
+register_symbol!(
+    "rayzor_ssl_socket_write_bytes",
+    crate::ssl::rayzor_ssl_socket_write_bytes
+);
+register_symbol!(
+    "rayzor_ssl_socket_write_string",
+    crate::ssl::rayzor_ssl_socket_write_string
+);
+register_symbol!(
+    "rayzor_ssl_socket_flush",
+    crate::ssl::rayzor_ssl_socket_flush
+);
+// Certificate
+register_symbol!(
+    "rayzor_ssl_cert_load_file",
+    crate::ssl::rayzor_ssl_cert_load_file
+);
+register_symbol!(
+    "rayzor_ssl_cert_load_path",
+    crate::ssl::rayzor_ssl_cert_load_path
+);
+register_symbol!(
+    "rayzor_ssl_cert_from_string",
+    crate::ssl::rayzor_ssl_cert_from_string
+);
+register_symbol!(
+    "rayzor_ssl_cert_load_defaults",
+    crate::ssl::rayzor_ssl_cert_load_defaults
+);
+register_symbol!(
+    "rayzor_ssl_cert_common_name",
+    crate::ssl::rayzor_ssl_cert_common_name
+);
+register_symbol!(
+    "rayzor_ssl_cert_alt_names",
+    crate::ssl::rayzor_ssl_cert_alt_names
+);
+register_symbol!(
+    "rayzor_ssl_cert_not_before",
+    crate::ssl::rayzor_ssl_cert_not_before
+);
+register_symbol!(
+    "rayzor_ssl_cert_not_after",
+    crate::ssl::rayzor_ssl_cert_not_after
+);
+register_symbol!(
+    "rayzor_ssl_cert_subject",
+    crate::ssl::rayzor_ssl_cert_subject
+);
+register_symbol!("rayzor_ssl_cert_issuer", crate::ssl::rayzor_ssl_cert_issuer);
+register_symbol!("rayzor_ssl_cert_next", crate::ssl::rayzor_ssl_cert_next);
+register_symbol!("rayzor_ssl_cert_add", crate::ssl::rayzor_ssl_cert_add);
+register_symbol!(
+    "rayzor_ssl_cert_add_der",
+    crate::ssl::rayzor_ssl_cert_add_der
+);
+// Key
+register_symbol!(
+    "rayzor_ssl_key_load_file",
+    crate::ssl::rayzor_ssl_key_load_file
+);
+register_symbol!(
+    "rayzor_ssl_key_read_pem",
+    crate::ssl::rayzor_ssl_key_read_pem
+);
+register_symbol!(
+    "rayzor_ssl_key_read_der",
+    crate::ssl::rayzor_ssl_key_read_der
+);
+// Digest
+register_symbol!("rayzor_ssl_digest_make", crate::ssl::rayzor_ssl_digest_make);
+register_symbol!("rayzor_ssl_digest_sign", crate::ssl::rayzor_ssl_digest_sign);
+register_symbol!(
+    "rayzor_ssl_digest_verify",
+    crate::ssl::rayzor_ssl_digest_verify
+);
+
+// ============================================================================
 // TinyCC Runtime API (rayzor.runtime.CC) — registered above
 
 /// Rayzor Runtime Plugin
