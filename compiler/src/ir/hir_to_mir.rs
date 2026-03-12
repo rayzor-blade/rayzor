@@ -28033,14 +28033,27 @@ impl<'a> HirToMirContext<'a> {
                 // Constructor pattern: check enum tag and optionally extract fields.
                 // Resolve whether this enum uses boxed or unboxed representation.
                 let enum_symbol = self.resolve_enum_symbol(*enum_type);
-                let is_boxed = enum_symbol.map_or(false, |s| self.enum_is_boxed(s));
+                let mut is_boxed = enum_symbol.map_or(false, |s| self.enum_is_boxed(s));
+
+                // If scrutinee is a scalar integer (I32/I64), force unboxed path.
+                // This handles cases like Type.typeof() which returns a plain ordinal
+                // even though ValueType has parameterized variants (TClass/TEnum).
+                // Treating a scalar as a pointer would SIGSEGV.
+                let scrut_type = self.builder.get_register_type(scrutinee);
+                if matches!(scrut_type, Some(IrType::I32) | Some(IrType::I64)) {
+                    is_boxed = false;
+                }
+
                 let variant_discriminant = self
                     .resolve_enum_variant_discriminant(*enum_type, *variant)
                     .unwrap_or(0);
 
                 if !is_boxed {
-                    // Unboxed enum: scrutinee IS the discriminant (i64)
-                    let expected = self.builder.build_int(variant_discriminant, IrType::I64)?;
+                    // Unboxed enum: scrutinee IS the discriminant (i32 or i64)
+                    let scrut_ir_type = scrut_type.unwrap_or(IrType::I64);
+                    let expected = self
+                        .builder
+                        .build_int(variant_discriminant, scrut_ir_type)?;
                     return self.builder.build_cmp(CompareOp::Eq, scrutinee, expected);
                 }
 
