@@ -718,6 +718,11 @@ mod ownership_analysis_tests {
             .nodes
             .insert(use_node_id, use_node);
 
+        // Record the use-after-move in the ownership graph
+        semantic_graphs
+            .ownership_graph
+            .record_use(moved_var, SourceLocation::new(1, 3, 1, 30));
+
         semantic_graphs
     }
 
@@ -741,6 +746,11 @@ mod ownership_analysis_tests {
             .ownership_graph
             .move_edges
             .insert(MoveEdgeId::from_raw(2), second_move);
+
+        // The second move is a use of the already-moved variable
+        semantic_graphs
+            .ownership_graph
+            .record_use(source_var, SourceLocation::new(1, 3, 1, 30));
 
         semantic_graphs
     }
