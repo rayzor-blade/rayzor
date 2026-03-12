@@ -2938,12 +2938,14 @@ rayzor bundle main.hx <span class="cf">--output</span> app.rzb</pre>
     </footer>
 
     <script>
-      // Tab switching
-      document.querySelectorAll('.code-tab').forEach(tab => {
+      // Tab switching — scoped to parent container
+      document.querySelectorAll('.code-tab[data-tab]').forEach(tab => {
         tab.addEventListener('click', () => {
           const target = tab.dataset.tab;
-          document.querySelectorAll('.code-tab').forEach(t => t.classList.remove('active'));
-          document.querySelectorAll('.code-panel').forEach(p => p.classList.remove('active'));
+          const container = tab.closest('.hero-code');
+          if (!container) return;
+          container.querySelectorAll('.code-tab').forEach(t => t.classList.remove('active'));
+          container.querySelectorAll('.code-panel').forEach(p => p.classList.remove('active'));
           tab.classList.add('active');
           document.getElementById('tab-' + target).classList.add('active');
         });
