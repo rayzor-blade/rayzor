@@ -1,37 +1,7 @@
 ============================================
   Rayzor Haxe Test Results
-  Tue Mar 10 13:54:20 GMT 2026
+  Thu Mar 12 11:54:56 GMT 2026
 ============================================
-
---- test_interface_wrapper_copy [PASS] ---
-🚀 Running compiler/tests/haxe/test_interface_wrapper_copy.hx [debug] [preset: Application]...
-10
-20
-20
-30
-✓ Complete
-
---- test_iterator [PASS] ---
-🚀 Running compiler/tests/haxe/test_iterator.hx [debug] [preset: Application]...
-15
-33
-done
-✓ Complete
-
---- test_json [PASS] ---
-🚀 Running compiler/tests/haxe/test_json.hx [debug] [preset: Application]...
-Alice
-30
-[1,2,3]
-true
-42
-3.14
-true
-false
-null
-hello
-done
-✓ Complete
 
 --- DebugChecksum [PASS] ---
 🚀 Running compiler/tests/haxe/DebugChecksum.hx [debug] [preset: Application]...
@@ -76,13 +46,6 @@ Set arr[17500] = 456, length: 17501
 Test passed!
 ✓ Complete
 
---- test_macro [PASS] ---
-🚀 Running compiler/tests/haxe/test_macro.hx [debug] [preset: Application]...
-300
-42
-done
-✓ Complete
-
 --- debug_array_ops [PASS] ---
 🚀 Running compiler/tests/haxe/debug_array_ops.hx [debug] [preset: Application]...
 Test 1: push()
@@ -97,18 +60,6 @@ Test 3: Direct index on empty array
 arr3.length before = 0
 arr3[0] = 1
 All tests passed!
-✓ Complete
-
---- test_macro2 [PASS] ---
-🚀 Running compiler/tests/haxe/test_macro2.hx [debug] [preset: Application]...
-300
-42
-Hello, World!
-55
-0
-16
-rayzor
-done
 ✓ Complete
 
 --- debug_array_set [PASS] ---
@@ -133,14 +84,6 @@ Direct comparison: arr[2] == 999 -> true
 Direct comparison: arr[2] == 30 -> false
 ✓ Complete
 
---- test_map_kv [PASS] ---
-🚀 Running compiler/tests/haxe/test_map_kv.hx [debug] [preset: Application]...
-60
-182
-300
-done
-✓ Complete
-
 --- debug_bitshift [PASS] ---
 🚀 Running compiler/tests/haxe/debug_bitshift.hx [debug] [preset: Application]...
 static inline var SHIFT_16 = 1 << 16: 65536
@@ -152,45 +95,10 @@ Direct 1 << 16: 65536
 Direct 1 << 8: 256
 ✓ Complete
 
---- test_map_literal [PASS] ---
-🚀 Running compiler/tests/haxe/test_map_literal.hx [debug] [preset: Application]...
-{hello => 42}
-42
-✓ Complete
-
 --- debug_channel [PASS] ---
 🚀 Running compiler/tests/haxe/debug_channel.hx [debug] [preset: Application]...
 5
 100
-done
-✓ Complete
-
---- test_map_literal2 [PASS] ---
-🚀 Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]...
-{hello => 42, world => 99}
-42
-99
-true
-false
-{2 => 200, 1 => 100}
-100
-200
-true
-false
-10
-20
-30
-111
-222
-333
-✓ Complete
-
---- test_not_null [PASS] ---
-🚀 Running compiler/tests/haxe/test_not_null.hx [debug] [preset: Application]...
-5
-is null
-5
-z=assigned
 done
 ✓ Complete
 
@@ -224,6 +132,14 @@ Full Checksum: 112798515
 
 --- debug_division [PASS] ---
 🚀 Running compiler/tests/haxe/debug_division.hx [debug] [preset: Application]...
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `i`[0m
+  [96m-->[0m compiler/tests/haxe/debug_division.hx:31:23
+   [96m|[0m
+[96m31[0m [96m|[0m         var result5 = i / 1000;
+   [96m|[0m                       [31m^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/debug_division.hx:25:24: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = i.clone();`[0m
 i = 4
 MaxIterations = 1000
 i / MaxIterations = 0.004
@@ -233,19 +149,6 @@ fi / fm = 0.004
 i / 1000 = 0.004
 i / 1000.0 = 0.004
 4.0 / 1000 = 0.004
-✓ Complete
-
---- test_null_array [PASS] ---
-🚀 Running compiler/tests/haxe/test_null_array.hx [debug] [preset: Application]...
-Test 1: Setting null at index 10
-Array created, length: 0
-After null set, length: 11
-arr[10] = 0
-
-Test 2: Object array with null
-Array2 created, length: 0
-After null set, length: 6
-All tests passed!
 ✓ Complete
 
 --- debug_palette [PASS] ---
@@ -274,13 +177,6 @@ arr[4] = 40
 arr[9] = 90
 ✓ Complete
 
---- test_null_safety [PASS] ---
-🚀 Running compiler/tests/haxe/test_null_safety.hx [debug] [preset: Application]...
-10
-hello
-done
-✓ Complete
-
 --- debug_static_div [PASS] ---
 🚀 Running compiler/tests/haxe/debug_static_div.hx [debug] [preset: Application]...
 MAX = 1000
@@ -297,15 +193,6 @@ localInline = 1000
 f / MAX = 0.004
 f / localMax = 0.004
 f / 1000 = 0.004
-✓ Complete
-
---- test_null_t [PASS] ---
-🚀 Running compiler/tests/haxe/test_null_t.hx [debug] [preset: Application]...
-42
-null
-42
--1
-done
 ✓ Complete
 
 --- debug_static_inline [PASS] ---
@@ -328,18 +215,6 @@ TYPED = 1000
 4 / TYPED = 0.004
 i / UNTYPED = 0.004
 i / TYPED = 0.004
-✓ Complete
-
---- test_objectmap [PASS] ---
-🚀 Running compiler/tests/haxe/test_objectmap.hx [debug] [preset: Application]...
-10
-20
-true
-false
-true
-false
-30
-done
 ✓ Complete
 
 --- debug_while [PASS] ---
@@ -366,18 +241,6 @@ Iteration 3: i=-10.9375, j=21
 Final iteration = 4
 ✓ Complete
 
---- test_optional_chain [PASS] ---
-🚀 Running compiler/tests/haxe/test_optional_chain.hx [debug] [preset: Application]...
-42
-null
-42
-null
-99
-null
-99
-done
-✓ Complete
-
 --- mandelbrot_small [PASS] ---
 🚀 Running compiler/tests/haxe/mandelbrot_small.hx [debug] [preset: Application]...
 Creating palette...
@@ -398,38 +261,22 @@ Row 90...
 Checksum: 4511136
 ✓ Complete
 
---- test_property [PASS] ---
-🚀 Running compiler/tests/haxe/test_property.hx [debug] [preset: Application]...
-10
-42
-hello
-done
-✓ Complete
-
 --- test_abstract_static [PASS] ---
 🚀 Running compiler/tests/haxe/test_abstract_static.hx [debug] [preset: Application]...
 21
 42
 ✓ Complete
 
---- test_recursive_class [PASS] ---
-🚀 Running compiler/tests/haxe/test_recursive_class.hx [debug] [preset: Application]...
-1
-2
-done
-✓ Complete
-
---- test_recursive_ctor [PASS] ---
-🚀 Running compiler/tests/haxe/test_recursive_ctor.hx [debug] [preset: Application]...
-1
-1
-2
-2
-done
-✓ Complete
-
 --- test_anon_object [PASS] ---
 🚀 Running compiler/tests/haxe/test_anon_object.hx [debug] [preset: Application]...
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `a`[0m
+  [96m-->[0m compiler/tests/haxe/test_anon_object.hx:20:15
+   [96m|[0m
+[96m20[0m [96m|[0m         trace(a.x);    // 1
+   [96m|[0m               [31m^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_anon_object.hx:19:17: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = a.clone();`[0m
 10
 20
 3.14
@@ -455,13 +302,6 @@ true
 10
 ✓ Complete
 
---- test_reflect_call_method [PASS] ---
-🚀 Running compiler/tests/haxe/test_reflect_call_method.hx [debug] [preset: Application]...
-42
-21
-true
-✓ Complete
-
 --- test_array_comprehension_scope [PASS] ---
 🚀 Running compiler/tests/haxe/test_array_comprehension_scope.hx [debug] [preset: Application]...
 0
@@ -473,17 +313,6 @@ true
 2
 4
 6
-✓ Complete
-
---- test_reflect_compare_methods [PASS] ---
-🚀 Running compiler/tests/haxe/test_reflect_compare_methods.hx [debug] [preset: Application]...
-true
-false
-true
-false
-true
-false
-done
 ✓ Complete
 
 --- test_array_iterator [PASS] ---
@@ -519,14 +348,6 @@ done
 5
 ✓ Complete
 
---- test_reflect_isfunction [PASS] ---
-🚀 Running compiler/tests/haxe/test_reflect_isfunction.hx [debug] [preset: Application]...
-true
-TFunction
-false
-false
-✓ Complete
-
 --- test_async_await [PASS] ---
 🚀 Running compiler/tests/haxe/test_async_await.hx [debug] [preset: Application]...
 42
@@ -536,38 +357,11 @@ not blocked
 done
 ✓ Complete
 
---- test_rtti [PASS] ---
-🚀 Running compiler/tests/haxe/test_rtti.hx [debug] [preset: Application]...
-true
-true
-true
-true
-true
-true
-true
-true
-true
-true
-false
-false
-false
-false
-done
-✓ Complete
-
 --- test_balanced_tree [PASS] ---
 🚀 Running compiler/tests/haxe/test_balanced_tree.hx [debug] [preset: Application]...
 10
 20
 30
-done
-✓ Complete
-
---- test_safe_cast [PASS] ---
-🚀 Running compiler/tests/haxe/test_safe_cast.hx [debug] [preset: Application]...
-Shepherd
-null
-Whiskers
 done
 ✓ Complete
 
@@ -586,15 +380,6 @@ false
 done
 ✓ Complete
 
---- test_send_sync [PASS] ---
-🚀 Running compiler/tests/haxe/test_send_sync.hx [debug] [preset: Application]...
-84
-15
-100
-42
-done
-✓ Complete
-
 --- test_bind [PASS] ---
 🚀 Running compiler/tests/haxe/test_bind.hx [debug] [preset: Application]...
 8
@@ -606,11 +391,6 @@ done
 Hello, World!
 100
 done
-✓ Complete
-
---- test_simd_from_array [PASS] ---
-🚀 Running compiler/tests/haxe/test_simd_from_array.hx [debug] [preset: Application]...
-10
 ✓ Complete
 
 --- test_bitshift [PASS] ---
@@ -632,9 +412,23 @@ Expected: 65536
 15
 ✓ Complete
 
---- test_stack_trace [PASS] ---
-🚀 Running compiler/tests/haxe/test_stack_trace.hx [debug] [preset: Application]...
-boom
+--- test_compress [PASS] ---
+🚀 Running compiler/tests/haxe/test_compress.hx [debug] [preset: Application]...
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `input`[0m
+  [96m-->[0m compiler/tests/haxe/test_compress.hx:11:35
+   [96m|[0m
+[96m11[0m [96m|[0m         trace(compressed.length < input.length);  // true — repetitive data compresses well
+   [96m|[0m                                   [31m^^^^^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_compress.hx:8:48: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = input.clone();`[0m
+55
+true
+true
+true
+true
+true
+true
 done
 ✓ Complete
 
@@ -644,9 +438,39 @@ rayzor
 done
 ✓ Complete
 
---- test_stack_trace_same [PASS] ---
-🚀 Running compiler/tests/haxe/test_stack_trace_same.hx [debug] [preset: Application]...
-boom
+--- test_copy [PASS] ---
+🚀 Running compiler/tests/haxe/test_copy.hx [debug] [preset: Application]...
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `a`[0m
+  [96m-->[0m compiler/tests/haxe/test_copy.hx:21:15
+   [96m|[0m
+[96m21[0m [96m|[0m         trace(a.x);            // should still be 3
+   [96m|[0m               [31m^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_copy.hx:20:16: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = a.clone();`[0m
+3
+42
+3
+10
+done
+✓ Complete
+
+--- test_copy_clone_identity [PASS] ---
+🚀 Running compiler/tests/haxe/test_copy_clone_identity.hx [debug] [preset: Application]...
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `a`[0m
+  [96m-->[0m compiler/tests/haxe/test_copy_clone_identity.hx:24:15
+   [96m|[0m
+[96m24[0m [96m|[0m         trace(a.x);         // 10
+   [96m|[0m               [31m^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_copy_clone_identity.hx:22:17: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = a.clone();`[0m
+10
+99
+100
+50
+Hero
+Hero
 done
 ✓ Complete
 
@@ -655,15 +479,6 @@ done
 0
 1
 2
-✓ Complete
-
---- test_static_extension [PASS] ---
-🚀 Running compiler/tests/haxe/test_static_extension.hx [debug] [preset: Application]...
-10
-false
-8
-8
-true
 ✓ Complete
 
 --- test_default_params [PASS] ---
@@ -684,13 +499,6 @@ Hi World
 done
 ✓ Complete
 
---- test_std_is_interface [PASS] ---
-🚀 Running compiler/tests/haxe/test_std_is_interface.hx [debug] [preset: Application]...
-true
-false
-true
-✓ Complete
-
 --- test_default_params2 [PASS] ---
 🚀 Running compiler/tests/haxe/test_default_params2.hx [debug] [preset: Application]...
 1
@@ -700,6 +508,60 @@ true
 3
 6
 done
+✓ Complete
+
+--- test_derive_clone [PASS] ---
+🚀 Running compiler/tests/haxe/test_derive_clone.hx [debug] [preset: Application]...
+3
+7
+3
+99
+✓ Complete
+
+--- test_derive_debug [PASS] ---
+🚀 Running compiler/tests/haxe/test_derive_debug.hx [debug] [preset: Application]...
+Point { x: 3, y: 7 }
+✓ Complete
+
+--- test_derive_debug_format [PASS] ---
+🚀 Running compiler/tests/haxe/test_derive_debug_format.hx [debug] [preset: Application]...
+(3, 7)
+[Player #42]
+done
+✓ Complete
+
+--- test_derive_debug_nested [PASS] ---
+🚀 Running compiler/tests/haxe/test_derive_debug_nested.hx [debug] [preset: Application]...
+Point { x: 3, y: 7 }
+Rect { topLeft: Point { x: 0, y: 0 }, bottomRight: Point { x: 10, y: 20 }, label: box }
+done
+✓ Complete
+
+--- test_derive_default [PASS] ---
+🚀 Running compiler/tests/haxe/test_derive_default.hx [debug] [preset: Application]...
+0
+0
+0
+false
+✓ Complete
+
+--- test_derive_default_custom [PASS] ---
+🚀 Running compiler/tests/haxe/test_derive_default_custom.hx [debug] [preset: Application]...
+8080
+60
+0
+true
+done
+✓ Complete
+
+--- test_derive_default_nested [PASS] ---
+🚀 Running compiler/tests/haxe/test_derive_default_nested.hx [debug] [preset: Application]...
+0
+
+0
+0
+42
+false
 ✓ Complete
 
 --- test_derive_string_fields [PASS] ---
@@ -731,26 +593,13 @@ true
 true
 ✓ Complete
 
---- test_stringbuf_stringtools [PASS] ---
-🚀 Running compiler/tests/haxe/test_stringbuf_stringtools.hx [debug] [preset: Application]...
-Hello World
-11
-Hello World!
-hello
-hello  
-  hello
-true
-false
-true
-false
-true
-false
-hello haxe
-bbbbbb
-true
-false
-00042
-hi...
+--- test_drop [PASS] ---
+🚀 Running compiler/tests/haxe/test_drop.hx [debug] [preset: Application]...
+1
+drop 1
+2
+done
+drop 2
 ✓ Complete
 
 --- test_dynamic_arith [PASS] ---
@@ -763,20 +612,6 @@ hi...
 false
 true
 true
-done
-✓ Complete
-
---- test_structural [PASS] ---
-🚀 Running compiler/tests/haxe/test_structural.hx [debug] [preset: Application]...
-10
-20
-3
-7
-3
-7
-100
-200
-42
 done
 ✓ Complete
 
@@ -799,15 +634,6 @@ done
 done
 ✓ Complete
 
---- test_try_catch [PASS] ---
-🚀 Running compiler/tests/haxe/test_try_catch.hx [debug] [preset: Application]...
-before
-42
-done
-no throw
-ok
-✓ Complete
-
 --- test_enum_abstract [PASS] ---
 🚀 Running compiler/tests/haxe/test_enum_abstract.hx [debug] [preset: Application]...
 0
@@ -815,15 +641,40 @@ ok
 2
 ✓ Complete
 
---- test_type_api [PASS] ---
-🚀 Running compiler/tests/haxe/test_type_api.hx [debug] [preset: Application]...
-Animal
-Dog
-Dog
-✓ Complete
-
 --- test_enum_abstract_methods [PASS] ---
 🚀 Running compiler/tests/haxe/test_enum_abstract_methods.hx [debug] [preset: Application]...
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `c2`[0m
+  [96m-->[0m compiler/tests/haxe/test_enum_abstract_methods.hx:71:15
+   [96m|[0m
+[96m71[0m [96m|[0m         trace(c2.doubled());  // 2
+   [96m|[0m               [31m^^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_enum_abstract_methods.hx:68:15: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = c2.clone();`[0m
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `g`[0m
+  [96m-->[0m compiler/tests/haxe/test_enum_abstract_methods.hx:58:15
+   [96m|[0m
+[96m58[0m [96m|[0m         trace(g.doubled());  // 2
+   [96m|[0m               [31m^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_enum_abstract_methods.hx:53:15: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = g.clone();`[0m
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `r`[0m
+  [96m-->[0m compiler/tests/haxe/test_enum_abstract_methods.hx:57:15
+   [96m|[0m
+[96m57[0m [96m|[0m         trace(r.doubled());  // 0
+   [96m|[0m               [31m^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_enum_abstract_methods.hx:52:15: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = r.clone();`[0m
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `b`[0m
+  [96m-->[0m compiler/tests/haxe/test_enum_abstract_methods.hx:59:15
+   [96m|[0m
+[96m59[0m [96m|[0m         trace(b.doubled());  // 4
+   [96m|[0m               [31m^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_enum_abstract_methods.hx:54:15: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = b.clone();`[0m
 0
 1
 2
@@ -852,14 +703,6 @@ none
 other
 ✓ Complete
 
---- test_type_create_empty_instance [PASS] ---
-🚀 Running compiler/tests/haxe/test_type_create_empty_instance.hx [debug] [preset: Application]...
-0
-true
-7
-ctor
-✓ Complete
-
 --- test_ereg [PASS] ---
 🚀 Running compiler/tests/haxe/test_ereg.hx [debug] [preset: Application]...
 match1: true
@@ -882,12 +725,6 @@ test
 done
 ✓ Complete
 
---- test_type_create_instance [PASS] ---
-🚀 Running compiler/tests/haxe/test_type_create_instance.hx [debug] [preset: Application]...
-3
-4
-✓ Complete
-
 --- test_ereg_map [PASS] ---
 🚀 Running compiler/tests/haxe/test_ereg_map.hx [debug] [preset: Application]...
 123ABC456def
@@ -897,37 +734,16 @@ hello world
 done
 ✓ Complete
 
---- test_type_enum_reflection [PASS] ---
-🚀 Running compiler/tests/haxe/test_type_enum_reflection.hx [debug] [preset: Application]...
-Color
-Color
-3
-true
-false
-true
-false
-false
-✓ Complete
-
 --- test_exception [PASS] ---
 🚀 Running compiler/tests/haxe/test_exception.hx [debug] [preset: Application]...
 basic error
 custom error
-null
+specific
 42
 caught dynamic
 has stack
 has callstack
 done
-✓ Complete
-
---- test_typed_catch [PASS] ---
-🚀 Running compiler/tests/haxe/test_typed_catch.hx [debug] [preset: Application]...
-42
-hello
-99
-boom
-caught dynamic
 ✓ Complete
 
 --- test_exception_method_parity [PASS] ---
@@ -943,13 +759,6 @@ Called from Main.main (test_exception_method_parity.hx:10:13)
      |             ^
 hasMessage=true
 hasStack=true
-✓ Complete
-
---- test_typedef [PASS] ---
-🚀 Running compiler/tests/haxe/test_typedef.hx [debug] [preset: Application]...
-Alice
-25
-30
 ✓ Complete
 
 --- test_exhaustive_switch [PASS] ---
@@ -978,66 +787,6 @@ red
 done
 ✓ Complete
 
---- test_typeof_output_parity [PASS] ---
-🚀 Running compiler/tests/haxe/test_typeof_output_parity.hx [debug] [preset: Application]...
-TFunction
-TClass(String)
-TEnum(Color)
-TClass
-TClass
-TInt
-TClass
-TClass
-TInt
-TClass
-TClass
-TInt
-✓ Complete
-
---- test_typeof_parity [PASS] ---
-🚀 Running compiler/tests/haxe/test_typeof_parity.hx [debug] [preset: Application]...
-fn-ok
-int-ok
-string-class-ok
-enum-bad
-✓ Complete
-
---- test_uncaught_exception_parity [PASS] ---
-🚀 Running compiler/tests/haxe/test_uncaught_exception_parity.hx [debug] [preset: Application]...
-boom
-caught
-done
-✓ Complete
-
---- test_virtual_dispatch [PASS] ---
-🚀 Running compiler/tests/haxe/test_virtual_dispatch.hx [debug] [preset: Application]...
-Base
-Child
-GrandChild
-Base
-Child
-GrandChild
-1
-2
-3
-done
-✓ Complete
-
---- trace_test [PASS] ---
-🚀 Running compiler/tests/haxe/trace_test.hx [debug] [preset: Application]...
-Hello from trace!
-42
-3.14
-Done
-✓ Complete
-
-
-=========================================
-  TOTAL:        98
-  PASSED:       98
-  FAILED:       0
-  CRASHED:      0
-=========================================
 --- test_file_readall [PASS] ---
 🚀 Running compiler/tests/haxe/test_file_readall.hx [debug] [preset: Application]...
 3
@@ -1059,8 +808,8 @@ done
 2
 hello
 world
-20
 10
+20
 30
 done
 ✓ Complete
@@ -1086,11 +835,20 @@ done
 10
 20
 30
+caught
 done
 ✓ Complete
 
 --- test_generic_tree [PASS] ---
 🚀 Running compiler/tests/haxe/test_generic_tree.hx [debug] [preset: Application]...
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `c`[0m
+  [96m-->[0m compiler/tests/haxe/test_generic_tree.hx:20:17
+   [96m|[0m
+[96m20[0m [96m|[0m             if (c == 0)
+   [96m|[0m                 [31m^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_generic_tree.hx:19:19: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = c.clone();`[0m
 0
 -1
 0
@@ -1130,6 +888,15 @@ over10
 hello
 ✓ Complete
 
+--- test_host_localhost [PASS] ---
+🚀 Running compiler/tests/haxe/test_host_localhost.hx [debug] [preset: Application]...
+Damilares-MBP.lan
+✓ Complete
+
+--- test_host_simple [PASS] ---
+🚀 Running compiler/tests/haxe/test_host_simple.hx [debug] [preset: Application]...
+✓ Complete
+
 --- test_interface [PASS] ---
 🚀 Running compiler/tests/haxe/test_interface.hx [debug] [preset: Application]...
 circle
@@ -1164,6 +931,22 @@ done
 
 --- test_interface_lifetime [PASS] ---
 🚀 Running compiler/tests/haxe/test_interface_lifetime.hx [debug] [preset: Application]...
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `c2`[0m
+  [96m-->[0m compiler/tests/haxe/test_interface_lifetime.hx:30:15
+   [96m|[0m
+[96m30[0m [96m|[0m         trace(c2.value()); // 3
+   [96m|[0m               [31m^^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_interface_lifetime.hx:28:19: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = c2.clone();`[0m
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `c`[0m
+  [96m-->[0m compiler/tests/haxe/test_interface_lifetime.hx:22:13
+   [96m|[0m
+[96m22[0m [96m|[0m             c = new C(2);
+   [96m|[0m             [31m^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_interface_lifetime.hx:21:23: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = c.clone();`[0m
 1
 2
 3
@@ -1172,6 +955,14 @@ done
 
 --- test_interface_wrapper_copy [PASS] ---
 🚀 Running compiler/tests/haxe/test_interface_wrapper_copy.hx [debug] [preset: Application]...
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `i`[0m
+  [96m-->[0m compiler/tests/haxe/test_interface_wrapper_copy.hx:28:9
+   [96m|[0m
+[96m28[0m [96m|[0m         i = new ValueBox(30);
+   [96m|[0m         [31m^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_interface_wrapper_copy.hx:27:24: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = i.clone();`[0m
 10
 20
 20
@@ -1219,6 +1010,13 @@ rayzor
 done
 ✓ Complete
 
+--- test_manual_drop [PASS] ---
+🚀 Running compiler/tests/haxe/test_manual_drop.hx [debug] [preset: Application]...
+42
+Released handle 42
+done
+✓ Complete
+
 --- test_map_kv [PASS] ---
 🚀 Running compiler/tests/haxe/test_map_kv.hx [debug] [preset: Application]...
 60
@@ -1229,12 +1027,36 @@ done
 
 --- test_map_literal [PASS] ---
 🚀 Running compiler/tests/haxe/test_map_literal.hx [debug] [preset: Application]...
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `m`[0m
+  [96m-->[0m compiler/tests/haxe/test_map_literal.hx:8:19
+  [96m|[0m
+[96m8[0m [96m|[0m         var val = m.get("hello");
+  [96m|[0m                   [31m^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_map_literal.hx:7:15: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = m.clone();`[0m
 {hello => 42}
 42
 ✓ Complete
 
 --- test_map_literal2 [PASS] ---
 🚀 Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]...
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `m`[0m
+  [96m-->[0m compiler/tests/haxe/test_map_literal2.hx:11:15
+   [96m|[0m
+[96m11[0m [96m|[0m         trace(m.get("hello"));
+   [96m|[0m               [31m^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_map_literal2.hx:10:15: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = m.clone();`[0m
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `im`[0m
+  [96m-->[0m compiler/tests/haxe/test_map_literal2.hx:21:15
+   [96m|[0m
+[96m21[0m [96m|[0m         trace(im.get(1));
+   [96m|[0m               [31m^^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_map_literal2.hx:20:15: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = im.clone();`[0m
 {hello => 42, world => 99}
 42
 99
@@ -1284,6 +1106,22 @@ done
 
 --- test_null_t [PASS] ---
 🚀 Running compiler/tests/haxe/test_null_t.hx [debug] [preset: Application]...
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `x`[0m
+  [96m-->[0m compiler/tests/haxe/test_null_t.hx:11:17
+   [96m|[0m
+[96m11[0m [96m|[0m         var z = x ?? 0;
+   [96m|[0m                 [31m^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_null_t.hx:5:15: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = x.clone();`[0m
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `y`[0m
+  [96m-->[0m compiler/tests/haxe/test_null_t.hx:14:17
+   [96m|[0m
+[96m14[0m [96m|[0m         var w = y ?? -1;
+   [96m|[0m                 [31m^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_null_t.hx:8:15: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = y.clone();`[0m
 42
 null
 42
@@ -1392,6 +1230,20 @@ Whiskers
 done
 ✓ Complete
 
+--- test_safety_use_after_move [PASS] ---
+🚀 Running compiler/tests/haxe/test_safety_use_after_move.hx [debug] [preset: Application]...
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `r`[0m
+  [96m-->[0m compiler/tests/haxe/test_safety_use_after_move.hx:16:15
+   [96m|[0m
+[96m16[0m [96m|[0m         trace(r.data);  // use after move — should warn
+   [96m|[0m               [31m^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_safety_use_after_move.hx:15:17: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = r.clone();`[0m
+42
+42
+✓ Complete
+
 --- test_send_sync [PASS] ---
 🚀 Running compiler/tests/haxe/test_send_sync.hx [debug] [preset: Application]...
 84
@@ -1404,6 +1256,26 @@ done
 --- test_simd_from_array [PASS] ---
 🚀 Running compiler/tests/haxe/test_simd_from_array.hx [debug] [preset: Application]...
 10
+✓ Complete
+
+--- test_socket_basic [PASS] ---
+🚀 Running compiler/tests/haxe/test_socket_basic.hx [debug] [preset: Application]...
+✓ Complete
+
+--- test_socket_new [PASS] ---
+🚀 Running compiler/tests/haxe/test_socket_new.hx [debug] [preset: Application]...
+Damilares-MBP.lan
+socket created
+socket closed
+✓ Complete
+
+--- test_ssl [PASS] ---
+🚀 Running compiler/tests/haxe/test_ssl.hx [debug] [preset: Application]...
+true
+true
+hostname set
+ca set
+done
 ✓ Complete
 
 --- test_stack_trace [PASS] ---
@@ -1452,12 +1324,22 @@ hello haxe
 bbbbbb
 true
 false
+00FF
+10
 00042
 hi...
 ✓ Complete
 
 --- test_structural [PASS] ---
 🚀 Running compiler/tests/haxe/test_structural.hx [debug] [preset: Application]...
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `pt`[0m
+  [96m-->[0m compiler/tests/haxe/test_structural.hx:32:9
+   [96m|[0m
+[96m32[0m [96m|[0m         pt.x = 42;
+   [96m|[0m         [31m^^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_structural.hx:26:17: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = pt.clone();`[0m
 10
 20
 3
@@ -1561,12 +1443,36 @@ done
 
 --- test_virtual_dispatch [PASS] ---
 🚀 Running compiler/tests/haxe/test_virtual_dispatch.hx [debug] [preset: Application]...
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `grand`[0m
+  [96m-->[0m compiler/tests/haxe/test_virtual_dispatch.hx:60:15
+   [96m|[0m
+[96m60[0m [96m|[0m         trace(grand.getValue());  // 3
+   [96m|[0m               [31m^^^^^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_virtual_dispatch.hx:55:25: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = grand.clone();`[0m
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `child`[0m
+  [96m-->[0m compiler/tests/haxe/test_virtual_dispatch.hx:59:15
+   [96m|[0m
+[96m59[0m [96m|[0m         trace(child.getValue());  // 2
+   [96m|[0m               [31m^^^^^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_virtual_dispatch.hx:54:25: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = child.clone();`[0m
+
+[33mwarning[E0382][0m: [1;97muse of moved value: `base`[0m
+  [96m-->[0m compiler/tests/haxe/test_virtual_dispatch.hx:58:15
+   [96m|[0m
+[96m58[0m [96m|[0m         trace(base.getValue());   // 1
+   [96m|[0m               [31m^^^^[0m [1;4;31mvalue used here after move[0m
+  [96m-->[0m compiler/tests/haxe/test_virtual_dispatch.hx:53:25: value moved here
+     [32mhelp[0m: [33mConsider cloning: `var copy = base.clone();`[0m
 Base
 Child
 GrandChild
 Base
-Child
-GrandChild
+Base
+Base
 1
 2
 3
@@ -1583,8 +1489,8 @@ Done
 
 
 =========================================
-  TOTAL:        98
-  PASSED:       98
+  TOTAL:        116
+  PASSED:       116
   FAILED:       0
   CRASHED:      0
 =========================================

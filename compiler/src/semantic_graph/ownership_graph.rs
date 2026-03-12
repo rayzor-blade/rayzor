@@ -43,6 +43,9 @@ pub struct OwnershipGraph {
     /// Source location tracking for error reporting
     pub location_tracker: SourceLocationTracker,
 
+    /// Use sites for each variable (for use-after-move detection)
+    pub use_sites: HashMap<SymbolId, Vec<SourceLocation>>,
+
     /// Next available IDs for allocation
     next_lifetime_id: u32,
     next_borrow_edge_id: u32,
@@ -271,6 +274,7 @@ impl OwnershipGraph {
             lifetime_constraints: Vec::new(),
             statistics: OwnershipStatistics::default(),
             location_tracker: SourceLocationTracker::new(),
+            use_sites: HashMap::new(),
             next_lifetime_id: 2, // Start after global and static
             next_borrow_edge_id: 1,
             next_move_edge_id: 1,
@@ -448,6 +452,11 @@ impl OwnershipGraph {
         id
     }
 
+    /// Record a use site for a variable (for use-after-move detection)
+    pub fn record_use(&mut self, variable: SymbolId, location: SourceLocation) {
+        self.use_sites.entry(variable).or_default().push(location);
+    }
+
     /// Add a lifetime constraint
     pub fn add_lifetime_constraint(&mut self, constraint: LifetimeConstraint) {
         self.lifetime_constraints.push(constraint);
@@ -542,17 +551,27 @@ impl OwnershipGraph {
     pub fn check_use_after_move(&self) -> Vec<OwnershipViolation> {
         let mut violations = Vec::new();
 
-        // This would be integrated with data flow analysis to find actual uses
-        // For now, we can identify variables that have been moved
         for (variable, node) in &self.variables {
             if node.is_moved {
                 if let Some(move_edge_id) = node.move_site {
                     if let Some(move_edge) = self.move_edges.get(&move_edge_id) {
-                        violations.push(OwnershipViolation::UseAfterMove {
-                            variable: *variable,
-                            move_location: move_edge.move_location.clone(),
-                            move_type: move_edge.move_type,
-                        });
+                        // Only report if there's a use AFTER the move
+                        if let Some(uses) = self.use_sites.get(variable) {
+                            for use_loc in uses {
+                                if use_loc.line > move_edge.move_location.line
+                                    || (use_loc.line == move_edge.move_location.line
+                                        && use_loc.column > move_edge.move_location.column)
+                                {
+                                    violations.push(OwnershipViolation::UseAfterMove {
+                                        variable: *variable,
+                                        use_location: use_loc.clone(),
+                                        move_location: move_edge.move_location.clone(),
+                                        move_type: move_edge.move_type,
+                                    });
+                                    break; // One violation per variable is enough
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -617,6 +636,7 @@ pub enum OwnershipViolation {
     /// Variable used after being moved
     UseAfterMove {
         variable: SymbolId,
+        use_location: SourceLocation,
         move_location: SourceLocation,
         move_type: MoveType,
     },

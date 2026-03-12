@@ -354,16 +354,15 @@ impl OwnershipAnalyzer {
             }
             GraphOwnershipViolation::UseAfterMove {
                 variable,
+                use_location,
                 move_location,
-                move_type,
-            } => {
-                OwnershipViolation::UseAfterMove {
-                    variable,
-                    use_location: move_location.clone(), // In practice, this would be the use location
-                    move_location,
-                    move_destination: None, // Would be determined from move analysis
-                }
-            }
+                ..
+            } => OwnershipViolation::UseAfterMove {
+                variable,
+                use_location,
+                move_location,
+                move_destination: None,
+            },
             GraphOwnershipViolation::DanglingPointer {
                 variable,
                 use_location,
