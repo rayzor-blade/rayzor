@@ -59,6 +59,7 @@ pub struct HirClass {
     pub is_abstract: bool,
     pub is_extern: bool,
     pub derived_traits: Vec<crate::tast::DerivedTrait>,
+    pub debug_format: Option<String>,
 }
 
 /// Interface declaration
@@ -621,6 +622,7 @@ pub struct HirClassField {
     pub is_static: bool,
     pub is_final: bool,
     pub property_access: Option<crate::tast::PropertyAccessInfo>, // Property accessor info from TAST
+    pub metadata_default: Option<HirExpr>, // @:default(value) for @:derive(Default)
 }
 
 #[derive(Debug, Clone)]

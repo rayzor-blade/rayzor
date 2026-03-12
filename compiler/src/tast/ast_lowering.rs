@@ -3143,6 +3143,20 @@ impl<'a> AstLowering<'a> {
         let mut derived_traits = self.extract_derived_traits(class_decl);
 
         // Create typed class first (needed for validation)
+        // Extract @:debugFormat("pattern") metadata
+        let debug_format = class_decl
+            .meta
+            .iter()
+            .find(|m| m.name == "debugFormat")
+            .and_then(|m| m.params.first())
+            .and_then(|expr| {
+                if let parser::haxe_ast::ExprKind::String(s) = &expr.kind {
+                    Some(s.clone())
+                } else {
+                    None
+                }
+            });
+
         let typed_class = TypedClass {
             symbol_id: class_symbol,
             name: class_name,
@@ -3156,6 +3170,7 @@ impl<'a> AstLowering<'a> {
             source_location: self.context.create_location_from_span(class_decl.span),
             memory_annotations,
             derived_traits: derived_traits.clone(),
+            debug_format,
         };
 
         // Validate derived traits against field types
@@ -4146,6 +4161,14 @@ impl<'a> AstLowering<'a> {
         let modifier_info = self.lower_modifiers(&field.modifiers)?;
         let visibility = self.lower_access(&field.access);
 
+        // Extract @:default(value) metadata for @:derive(Default)
+        let metadata_default = field
+            .meta
+            .iter()
+            .find(|m| m.name == "default")
+            .and_then(|m| m.params.first())
+            .and_then(|expr| self.lower_expression(expr).ok());
+
         Ok(TypedField {
             symbol_id: field_symbol,
             name: interned_field_name,
@@ -4155,6 +4178,7 @@ impl<'a> AstLowering<'a> {
             visibility, // Use visibility from access keyword (public/private), not from modifiers
             is_static: modifier_info.is_static,
             property_access,
+            metadata_default,
             source_location: self.context.create_location_from_span(field.span),
         })
     }

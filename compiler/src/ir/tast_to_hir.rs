@@ -428,6 +428,10 @@ impl<'a> TastToHirContext<'a> {
                 is_static: field.is_static,
                 is_final: !matches!(field.mutability, crate::tast::Mutability::Mutable),
                 property_access: field.property_access.clone(), // Preserve property accessor info
+                metadata_default: field
+                    .metadata_default
+                    .as_ref()
+                    .map(|e| self.lower_expression(e)),
             });
         }
 
@@ -449,6 +453,7 @@ impl<'a> TastToHirContext<'a> {
             is_abstract: self.is_class_abstract(class.symbol_id),
             is_extern: false, // Would be in effects or metadata when available
             derived_traits: class.derived_traits.clone(),
+            debug_format: class.debug_format.clone(),
         };
 
         self.module

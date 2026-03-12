@@ -45,6 +45,13 @@
       href="https://fonts.googleapis.com/css2?family=Geom:ital,wght@0,300..900;1,300..900&family=JetBrains+Mono:wght@300;400;500&display=swap"
       rel="stylesheet"
     />
+    <script>
+      // Prevent flash of wrong theme on load
+      (function(){
+        var t = localStorage.getItem('rayzor-theme');
+        if (t) document.documentElement.setAttribute('data-theme', t);
+      })();
+    </script>
     <style>
       :root {
         /* Light theme - Mojo-inspired */
@@ -423,7 +430,7 @@
       /* ===== CODE TABS (Hero) ===== */
       .hero-code {
         width: 100%;
-        max-width: 720px;
+        max-width: 820px;
         margin-top: 3rem;
         animation: fadeInUp 0.8s ease-out 0.65s both;
       }
@@ -443,6 +450,11 @@
       .hero-code .code-tabs {
         background: rgba(245, 245, 248, 0.8);
         border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+        overflow-x: auto;
+        scrollbar-width: none;
+      }
+      .hero-code .code-tabs::-webkit-scrollbar {
+        display: none;
       }
 
       .hero-code .code-tab {
@@ -485,9 +497,11 @@
       }
 
       .code-tab {
-        padding: 0.7rem 1.2rem;
+        padding: 0.7rem 1rem;
         font-family: "JetBrains Mono", monospace;
         font-size: 0.72rem;
+        white-space: nowrap;
+        flex-shrink: 0;
         color: rgba(255, 255, 255, 0.4);
         cursor: pointer;
         border-bottom: 2px solid transparent;
@@ -1756,6 +1770,254 @@
           padding: 1rem;
         }
       }
+
+      /* ===== DARK MODE ===== */
+      /* System preference (unless user forced light) */
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) {
+          --bg-primary: #111113;
+          --bg-secondary: #18181b;
+          --bg-tertiary: #222226;
+          --bg-code: #16161a;
+          --bg-code-bar: #1e1e22;
+          --text-primary: #e4e4e7;
+          --text-secondary: #a1a1aa;
+          --text-tertiary: #71717a;
+          --accent-primary: #f97316;
+          --accent-primary-hover: #fb923c;
+          --accent-glow: rgba(249, 115, 22, 0.10);
+          --accent-warm: #f97316;
+          --accent-warm-light: #fb923c;
+          --border-subtle: rgba(255, 255, 255, 0.08);
+          --border-card: rgba(255, 255, 255, 0.08);
+          --border-hover: rgba(249, 115, 22, 0.35);
+          --code-keyword: #c084fc;
+          --code-string: #4ade80;
+          --code-comment: rgba(255, 255, 255, 0.25);
+          --code-type: #fbbf24;
+          --code-number: #f87171;
+          --code-function: #60a5fa;
+        }
+      }
+      /* Manual toggle override */
+      :root[data-theme="dark"] {
+        --bg-primary: #111113;
+        --bg-secondary: #18181b;
+        --bg-tertiary: #222226;
+        --bg-code: #16161a;
+        --bg-code-bar: #1e1e22;
+        --text-primary: #e4e4e7;
+        --text-secondary: #a1a1aa;
+        --text-tertiary: #71717a;
+        --accent-primary: #f97316;
+        --accent-primary-hover: #fb923c;
+        --accent-glow: rgba(249, 115, 22, 0.10);
+        --accent-warm: #f97316;
+        --accent-warm-light: #fb923c;
+        --border-subtle: rgba(255, 255, 255, 0.08);
+        --border-card: rgba(255, 255, 255, 0.08);
+        --border-hover: rgba(249, 115, 22, 0.35);
+        --code-keyword: #c084fc;
+        --code-string: #4ade80;
+        --code-comment: rgba(255, 255, 255, 0.25);
+        --code-type: #fbbf24;
+        --code-number: #f87171;
+        --code-function: #60a5fa;
+      }
+
+      /* Dark mode hard-coded overrides — shared selector */
+      @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) ~ body { --_dark: 1; } }
+      :root[data-theme="dark"] ~ body { --_dark: 1; }
+
+      /* Use a cleaner approach: repeat overrides in both contexts */
+      @media (prefers-color-scheme: dark) {
+        :root:not([data-theme="light"]) .nav { background: rgba(17, 17, 19, 0.85); }
+        :root:not([data-theme="light"]) .nav.scrolled { background: rgba(17, 17, 19, 0.95); box-shadow: 0 1px 8px rgba(0, 0, 0, 0.3); }
+        :root:not([data-theme="light"]) .nav-mobile { background: rgba(17, 17, 19, 0.98); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3); }
+
+        :root:not([data-theme="light"]) .hero-code .code-block {
+          background: rgba(22, 22, 26, 0.85);
+          border-color: rgba(255, 255, 255, 0.08);
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.2), 0 20px 50px rgba(0, 0, 0, 0.15);
+        }
+        :root:not([data-theme="light"]) .hero-code .code-tabs { background: rgba(30, 30, 34, 0.8); border-bottom-color: rgba(255, 255, 255, 0.06); }
+        :root:not([data-theme="light"]) .hero-code .code-tab { color: rgba(255, 255, 255, 0.35); }
+        :root:not([data-theme="light"]) .hero-code .code-tab:hover { color: rgba(255, 255, 255, 0.6); }
+        :root:not([data-theme="light"]) .hero-code .code-tab.active { color: #f97316; border-bottom-color: #f97316; }
+        :root:not([data-theme="light"]) .hero-code .code-panel { color: #e4e4e7; }
+        :root:not([data-theme="light"]) .hero-code .ck { color: #c084fc; }
+        :root:not([data-theme="light"]) .hero-code .cs { color: #4ade80; }
+        :root:not([data-theme="light"]) .hero-code .cc { color: rgba(255, 255, 255, 0.25); }
+        :root:not([data-theme="light"]) .hero-code .cf { color: #89ddff; }
+        :root:not([data-theme="light"]) .hero-code .ct { color: #fbbf24; }
+        :root:not([data-theme="light"]) .hero-code .cn { color: #f87171; }
+        :root:not([data-theme="light"]) .hero-code .cfn { color: #60a5fa; }
+
+        :root:not([data-theme="light"]) .bm-card-face { background: rgba(40, 40, 46, 0.75); border-color: rgba(255, 255, 255, 0.10); box-shadow: 20px 40px 60px -15px rgba(0,0,0,0.3), 0 0 20px rgba(0,0,0,0.15); }
+        :root:not([data-theme="light"]) .macro-card-face { background: rgba(24, 24, 27, 0.7); box-shadow: 20px 40px 60px -15px rgba(0,0,0,0.3), 0 0 20px rgba(0,0,0,0.15); }
+        :root:not([data-theme="light"]) .macro-canvas-wrap { background: #111113; }
+        :root:not([data-theme="light"]) .blade-card { background: rgba(40, 40, 46, 0.75); box-shadow: 0 12px 40px rgba(6, 182, 212, 0.06); }
+        :root:not([data-theme="light"]) .own-card-face { background: #18181b; border-color: rgba(255, 255, 255, 0.08); box-shadow: 20px 40px 60px -15px rgba(0,0,0,0.3), 0 0 20px rgba(0,0,0,0.15); }
+        :root:not([data-theme="light"]) .own-card-glow-1 { background: rgba(186, 230, 253, 0.08); }
+        :root:not([data-theme="light"]) .own-card-glow-2 { background: rgba(199, 210, 254, 0.08); }
+
+        :root:not([data-theme="light"]) .feature:hover { box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3); }
+        :root:not([data-theme="light"]) .feature-stat { background: rgba(249, 115, 22, 0.10); }
+        :root:not([data-theme="light"]) .showcase-stat { background: rgba(249, 115, 22, 0.10); }
+        :root:not([data-theme="light"]) .btn-secondary { background: var(--bg-secondary); }
+        :root:not([data-theme="light"]) .btn-secondary:hover { border-color: rgba(255, 255, 255, 0.2); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3); }
+
+        /* Blob opacity — hero */
+        :root:not([data-theme="light"]) .hero-backdrop .blob-1 { background: rgba(234, 140, 60, 0.16); }
+        :root:not([data-theme="light"]) .hero-backdrop .blob-2 { background: rgba(100, 160, 245, 0.14); }
+        :root:not([data-theme="light"]) .hero-backdrop .blob-3 { background: rgba(185, 130, 220, 0.12); }
+        :root:not([data-theme="light"]) .hero-backdrop .blob-4 { background: rgba(245, 200, 100, 0.12); }
+        /* Blob opacity — bare metal */
+        :root:not([data-theme="light"]) .baremetal-backdrop .bm-blob-1 { background: rgba(234, 88, 12, 0.08); }
+        :root:not([data-theme="light"]) .baremetal-backdrop .bm-blob-2 { background: rgba(245, 158, 11, 0.07); }
+        :root:not([data-theme="light"]) .baremetal-backdrop .bm-blob-3 { background: rgba(251, 146, 60, 0.08); }
+        :root:not([data-theme="light"]) .baremetal-backdrop .bm-blob-4 { background: rgba(148, 163, 184, 0.07); }
+        /* Blob opacity — blade */
+        :root:not([data-theme="light"]) .blade-backdrop .blob-1 { background: rgba(6, 182, 212, 0.12); }
+        :root:not([data-theme="light"]) .blade-backdrop .blob-2 { background: rgba(20, 184, 166, 0.10); }
+        :root:not([data-theme="light"]) .blade-backdrop .blob-3 { background: rgba(56, 189, 248, 0.10); }
+        :root:not([data-theme="light"]) .blade-backdrop .blob-4 { background: rgba(110, 231, 183, 0.08); }
+        /* Blob opacity — macro */
+        :root:not([data-theme="light"]) .macro-backdrop .blob-1 { background: rgba(249, 115, 22, 0.10); }
+        :root:not([data-theme="light"]) .macro-backdrop .blob-2 { background: rgba(251, 146, 60, 0.08); }
+        :root:not([data-theme="light"]) .macro-backdrop .blob-3 { background: rgba(234, 88, 12, 0.08); }
+        :root:not([data-theme="light"]) .macro-backdrop .blob-4 { background: rgba(245, 158, 11, 0.07); }
+        /* Blob opacity — ownership */
+        :root:not([data-theme="light"]) .ownership-backdrop .blob-1 { background: rgba(16, 185, 129, 0.12); }
+        :root:not([data-theme="light"]) .ownership-backdrop .blob-2 { background: rgba(34, 197, 94, 0.10); }
+        :root:not([data-theme="light"]) .ownership-backdrop .blob-3 { background: rgba(132, 204, 22, 0.08); }
+        :root:not([data-theme="light"]) .ownership-backdrop .blob-4 { background: rgba(20, 184, 166, 0.08); }
+        /* Blob opacity — SSA */
+        :root:not([data-theme="light"]) .ssa-backdrop .blob-1 { background: rgba(139, 92, 246, 0.12); }
+        :root:not([data-theme="light"]) .ssa-backdrop .blob-2 { background: rgba(99, 102, 241, 0.10); }
+        :root:not([data-theme="light"]) .ssa-backdrop .blob-3 { background: rgba(167, 139, 250, 0.10); }
+        :root:not([data-theme="light"]) .ssa-backdrop .blob-4 { background: rgba(236, 72, 153, 0.08); }
+
+        /* SVG overrides */
+        :root:not([data-theme="light"]) .fan-svg line,
+        :root:not([data-theme="light"]) .fan-svg circle[stroke="#e2e8f0"] { stroke: rgba(255, 255, 255, 0.18); }
+        :root:not([data-theme="light"]) .fan-svg circle[fill="#fafafa"] { fill: #2a2a30; }
+        :root:not([data-theme="light"]) .fan-svg circle[fill="#ffffff"] { fill: #2a2a30; }
+        :root:not([data-theme="light"]) .own-spine-gap { stroke: #18181b; }
+
+        /* SSA code block */
+        :root:not([data-theme="light"]) .ssa-diagram .code-block { box-shadow: 0 8px 32px rgba(139, 92, 246, 0.08); }
+
+        /* Toggle button */
+        :root:not([data-theme="light"]) .theme-toggle { border-color: rgba(255, 255, 255, 0.12); }
+        :root:not([data-theme="light"]) .badge-icon { filter: brightness(0) invert(1); }
+        :root:not([data-theme="light"]) .badge-icon[src*="apache"] { filter: none; }
+      }
+
+      /* Manual dark: duplicate hard-coded overrides for [data-theme="dark"] */
+      [data-theme="dark"] .nav { background: rgba(17, 17, 19, 0.85); }
+      [data-theme="dark"] .nav.scrolled { background: rgba(17, 17, 19, 0.95); box-shadow: 0 1px 8px rgba(0, 0, 0, 0.3); }
+      [data-theme="dark"] .nav-mobile { background: rgba(17, 17, 19, 0.98); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3); }
+
+      [data-theme="dark"] .hero-code .code-block {
+        background: rgba(22, 22, 26, 0.85);
+        border-color: rgba(255, 255, 255, 0.08);
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3), 0 8px 24px rgba(0, 0, 0, 0.2), 0 20px 50px rgba(0, 0, 0, 0.15);
+      }
+      [data-theme="dark"] .hero-code .code-tabs { background: rgba(30, 30, 34, 0.8); border-bottom-color: rgba(255, 255, 255, 0.06); }
+      [data-theme="dark"] .hero-code .code-tab { color: rgba(255, 255, 255, 0.35); }
+      [data-theme="dark"] .hero-code .code-tab:hover { color: rgba(255, 255, 255, 0.6); }
+      [data-theme="dark"] .hero-code .code-tab.active { color: #f97316; border-bottom-color: #f97316; }
+      [data-theme="dark"] .hero-code .code-panel { color: #e4e4e7; }
+      [data-theme="dark"] .hero-code .ck { color: #c084fc; }
+      [data-theme="dark"] .hero-code .cs { color: #4ade80; }
+      [data-theme="dark"] .hero-code .cc { color: rgba(255, 255, 255, 0.25); }
+      [data-theme="dark"] .hero-code .cf { color: #89ddff; }
+      [data-theme="dark"] .hero-code .ct { color: #fbbf24; }
+      [data-theme="dark"] .hero-code .cn { color: #f87171; }
+      [data-theme="dark"] .hero-code .cfn { color: #60a5fa; }
+
+      [data-theme="dark"] .bm-card-face { background: rgba(40, 40, 46, 0.75); border-color: rgba(255, 255, 255, 0.10); box-shadow: 20px 40px 60px -15px rgba(0,0,0,0.3), 0 0 20px rgba(0,0,0,0.15); }
+      [data-theme="dark"] .macro-card-face { background: rgba(24, 24, 27, 0.7); box-shadow: 20px 40px 60px -15px rgba(0,0,0,0.3), 0 0 20px rgba(0,0,0,0.15); }
+      [data-theme="dark"] .macro-canvas-wrap { background: #111113; }
+      [data-theme="dark"] .blade-card { background: rgba(40, 40, 46, 0.75); box-shadow: 0 12px 40px rgba(6, 182, 212, 0.06); }
+      [data-theme="dark"] .own-card-face { background: #18181b; border-color: rgba(255, 255, 255, 0.08); box-shadow: 20px 40px 60px -15px rgba(0,0,0,0.3), 0 0 20px rgba(0,0,0,0.15); }
+      [data-theme="dark"] .own-card-glow-1 { background: rgba(186, 230, 253, 0.08); }
+      [data-theme="dark"] .own-card-glow-2 { background: rgba(199, 210, 254, 0.08); }
+
+      [data-theme="dark"] .feature:hover { box-shadow: 0 12px 32px rgba(0, 0, 0, 0.3); }
+      [data-theme="dark"] .feature-stat { background: rgba(249, 115, 22, 0.10); }
+      [data-theme="dark"] .showcase-stat { background: rgba(249, 115, 22, 0.10); }
+      [data-theme="dark"] .btn-secondary { background: var(--bg-secondary); }
+      [data-theme="dark"] .btn-secondary:hover { border-color: rgba(255, 255, 255, 0.2); box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3); }
+
+      /* Blob opacity — hero */
+      [data-theme="dark"] .hero-backdrop .blob-1 { background: rgba(234, 140, 60, 0.16); }
+      [data-theme="dark"] .hero-backdrop .blob-2 { background: rgba(100, 160, 245, 0.14); }
+      [data-theme="dark"] .hero-backdrop .blob-3 { background: rgba(185, 130, 220, 0.12); }
+      [data-theme="dark"] .hero-backdrop .blob-4 { background: rgba(245, 200, 100, 0.12); }
+      /* Blob opacity — bare metal */
+      [data-theme="dark"] .baremetal-backdrop .bm-blob-1 { background: rgba(234, 88, 12, 0.08); }
+      [data-theme="dark"] .baremetal-backdrop .bm-blob-2 { background: rgba(245, 158, 11, 0.07); }
+      [data-theme="dark"] .baremetal-backdrop .bm-blob-3 { background: rgba(251, 146, 60, 0.08); }
+      [data-theme="dark"] .baremetal-backdrop .bm-blob-4 { background: rgba(148, 163, 184, 0.07); }
+      /* Blob opacity — blade */
+      [data-theme="dark"] .blade-backdrop .blob-1 { background: rgba(6, 182, 212, 0.12); }
+      [data-theme="dark"] .blade-backdrop .blob-2 { background: rgba(20, 184, 166, 0.10); }
+      [data-theme="dark"] .blade-backdrop .blob-3 { background: rgba(56, 189, 248, 0.10); }
+      [data-theme="dark"] .blade-backdrop .blob-4 { background: rgba(110, 231, 183, 0.08); }
+      /* Blob opacity — macro */
+      [data-theme="dark"] .macro-backdrop .blob-1 { background: rgba(249, 115, 22, 0.10); }
+      [data-theme="dark"] .macro-backdrop .blob-2 { background: rgba(251, 146, 60, 0.08); }
+      [data-theme="dark"] .macro-backdrop .blob-3 { background: rgba(234, 88, 12, 0.08); }
+      [data-theme="dark"] .macro-backdrop .blob-4 { background: rgba(245, 158, 11, 0.07); }
+      /* Blob opacity — ownership */
+      [data-theme="dark"] .ownership-backdrop .blob-1 { background: rgba(16, 185, 129, 0.12); }
+      [data-theme="dark"] .ownership-backdrop .blob-2 { background: rgba(34, 197, 94, 0.10); }
+      [data-theme="dark"] .ownership-backdrop .blob-3 { background: rgba(132, 204, 22, 0.08); }
+      [data-theme="dark"] .ownership-backdrop .blob-4 { background: rgba(20, 184, 166, 0.08); }
+      /* Blob opacity — SSA */
+      [data-theme="dark"] .ssa-backdrop .blob-1 { background: rgba(139, 92, 246, 0.12); }
+      [data-theme="dark"] .ssa-backdrop .blob-2 { background: rgba(99, 102, 241, 0.10); }
+      [data-theme="dark"] .ssa-backdrop .blob-3 { background: rgba(167, 139, 250, 0.10); }
+      [data-theme="dark"] .ssa-backdrop .blob-4 { background: rgba(236, 72, 153, 0.08); }
+
+      /* SVG overrides */
+      [data-theme="dark"] .fan-svg line,
+      [data-theme="dark"] .fan-svg circle[stroke="#e2e8f0"] { stroke: rgba(255, 255, 255, 0.18); }
+      [data-theme="dark"] .fan-svg circle[fill="#fafafa"] { fill: #2a2a30; }
+      [data-theme="dark"] .fan-svg circle[fill="#ffffff"] { fill: #2a2a30; }
+      [data-theme="dark"] .own-spine-gap { stroke: #18181b; }
+
+      [data-theme="dark"] .ssa-diagram .code-block { box-shadow: 0 8px 32px rgba(139, 92, 246, 0.08); }
+
+      [data-theme="dark"] .theme-toggle { border-color: rgba(255, 255, 255, 0.12); }
+      [data-theme="dark"] .badge-icon { filter: brightness(0) invert(1); }
+      [data-theme="dark"] .badge-icon[src*="apache"] { filter: none; }
+
+      /* Theme toggle button */
+      .theme-toggle {
+        background: none;
+        border: 1px solid var(--border-card);
+        border-radius: 6px;
+        padding: 0.35rem;
+        cursor: pointer;
+        color: var(--text-secondary);
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        transition: all 0.2s ease;
+        width: 32px;
+        height: 32px;
+      }
+      .theme-toggle:hover {
+        color: var(--text-primary);
+        border-color: var(--border-hover);
+      }
+      .theme-toggle svg {
+        width: 16px;
+        height: 16px;
+      }
     </style>
   </head>
   <body>
@@ -1776,6 +2038,10 @@
         <a href="https://github.com/rayzor-blade/rayzor" target="_blank">GitHub</a>
         <a href="/benchmarks/" target="_blank">Benchmarks</a>
         <a href="https://github.com/rayzor-blade/rayzor/blob/main/README.md" target="_blank">Docs</a>
+        <button class="theme-toggle" id="themeToggle" aria-label="Toggle theme" title="Toggle theme">
+          <svg class="theme-icon-sun" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+          <svg class="theme-icon-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
         <a href="#getting-started" class="nav-cta">Get Started</a>
       </div>
       <button class="nav-hamburger" id="hamburger" aria-label="Menu">
@@ -1790,6 +2056,10 @@
       <a href="/benchmarks/" target="_blank">Benchmarks</a>
       <a href="https://github.com/rayzor-blade/rayzor/blob/main/README.md" target="_blank">Docs</a>
       <a href="#getting-started">Get Started</a>
+      <button class="theme-toggle" id="themeToggleMobile" aria-label="Toggle theme" title="Toggle theme">
+        <svg class="theme-icon-sun" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
+        <svg class="theme-icon-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+      </button>
     </div>
 
     <main>
@@ -2318,7 +2588,7 @@
               <text x="295" y="180" fill="#16a34a" font-size="10" font-weight="700" font-family="sans-serif" letter-spacing="1">COPY</text>
               <!-- 3. MOVE branch -->
               <path d="M 150,250 Q 320,250 320,320" fill="none" stroke="#dc2626" stroke-width="3" class="own-branch own-branch-2"/>
-              <line x1="150" y1="270" x2="150" y2="320" stroke="#ffffff" stroke-width="6"/>
+              <line x1="150" y1="270" x2="150" y2="320" stroke="#ffffff" stroke-width="6" class="own-spine-gap"/>
               <line x1="150" y1="270" x2="150" y2="320" stroke="#dc2626" stroke-width="2" stroke-dasharray="4,4" opacity="0.4"/>
               <circle cx="320" cy="320" r="7" fill="#dc2626"/>
               <g transform="translate(332,275) scale(0.65)" fill="none" stroke="#dc2626" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -2770,7 +3040,9 @@ rayzor bundle main.hx <span class="cf">--output</span> app.rzb</pre>
           var dpr = window.devicePixelRatio || 1;
           var lw = canvas.width / dpr;
           var lh = canvas.height / dpr;
-          ctx.fillStyle = '#ffffff';
+          var _dt = document.documentElement.getAttribute('data-theme');
+          var _isDark = _dt === 'dark' || (!_dt && window.matchMedia('(prefers-color-scheme: dark)').matches);
+          ctx.fillStyle = _isDark ? '#111113' : '#ffffff';
           ctx.fillRect(0, 0, lw, lh);
 
           var cx = lw / 2;
@@ -3050,6 +3322,52 @@ rayzor bundle main.hx <span class="cf">--output</span> app.rzb</pre>
           entries.forEach(e => { if (e.isIntersecting) { start(); vizObs.unobserve(e.target); } });
         }, { threshold: 0.15 });
         vizObs.observe(svg);
+      })();
+    </script>
+    <script>
+      // Theme toggle
+      (function() {
+        var toggle = document.getElementById('themeToggle');
+        var mobileToggle = document.getElementById('themeToggleMobile');
+        var storageKey = 'rayzor-theme';
+
+        function getEffectiveTheme() {
+          var stored = localStorage.getItem(storageKey);
+          if (stored === 'dark' || stored === 'light') return stored;
+          return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+        }
+
+        function applyTheme() {
+          var stored = localStorage.getItem(storageKey);
+          if (stored) {
+            document.documentElement.setAttribute('data-theme', stored);
+          } else {
+            document.documentElement.removeAttribute('data-theme');
+          }
+          updateIcons();
+        }
+
+        function updateIcons() {
+          var isDark = getEffectiveTheme() === 'dark';
+          document.querySelectorAll('.theme-icon-sun').forEach(function(el) { el.style.display = isDark ? 'none' : 'block'; });
+          document.querySelectorAll('.theme-icon-moon').forEach(function(el) { el.style.display = isDark ? 'block' : 'none'; });
+        }
+
+        function cycleTheme() {
+          var current = localStorage.getItem(storageKey);
+          var systemDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+          if (!current) {
+            localStorage.setItem(storageKey, systemDark ? 'light' : 'dark');
+          } else {
+            localStorage.removeItem(storageKey);
+          }
+          applyTheme();
+        }
+
+        if (toggle) toggle.addEventListener('click', cycleTheme);
+        if (mobileToggle) mobileToggle.addEventListener('click', cycleTheme);
+        window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', applyTheme);
+        applyTheme();
       })();
     </script>
   </body>
