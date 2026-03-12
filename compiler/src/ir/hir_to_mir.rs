@@ -383,6 +383,15 @@ pub struct HirToMirContext<'a> {
     /// Classes that derive Clone — enables synthetic clone() method
     derive_clone_classes: BTreeSet<SymbolId>,
 
+    /// Classes that derive Copy — implicit shallow copy at Let/Assign/Call boundaries
+    derive_copy_classes: BTreeSet<SymbolId>,
+
+    /// Classes that derive Drop — user-defined destructor called before Free
+    derive_drop_classes: BTreeSet<SymbolId>,
+
+    /// Maps IrId (allocation register) → class SymbolId for Drop dispatch
+    ir_to_drop_class: BTreeMap<IrId, SymbolId>,
+
     /// Classes that derive Debug — enables synthetic toString() method
     derive_debug_classes: BTreeSet<SymbolId>,
 
@@ -603,6 +612,9 @@ impl<'a> HirToMirContext<'a> {
             derive_partial_ord_classes: BTreeSet::new(),
             derive_hash_classes: BTreeSet::new(),
             derive_clone_classes: BTreeSet::new(),
+            derive_copy_classes: BTreeSet::new(),
+            derive_drop_classes: BTreeSet::new(),
+            ir_to_drop_class: BTreeMap::new(),
             derive_debug_classes: BTreeSet::new(),
             derive_default_classes: BTreeSet::new(),
             class_instance_fields: BTreeMap::new(),
@@ -728,6 +740,8 @@ impl<'a> HirToMirContext<'a> {
 
                 // Free this value if not terminated
                 if !self.is_terminated() {
+                    // @:derive(Drop) — call drop() before Free
+                    self.maybe_emit_drop_call(current_ir_id);
                     self.builder.build_free(current_ir_id);
                 }
 
@@ -740,16 +754,10 @@ impl<'a> HirToMirContext<'a> {
     /// Cleanup all scopes - used for early return from functions
     /// Frees all heap values in all active scopes (innermost to outermost)
     fn cleanup_all_scopes(&mut self) {
-        // Free all values in all scopes (innermost to outermost)
-        // Skip reassigned values (already freed) and lambda captures (owned by closure)
+        // Collect IrIds to free first (to avoid borrow conflict with maybe_emit_drop_call)
+        let mut to_free = Vec::new();
         for scope in self.drop_scope_stack.iter().rev() {
             for (symbol, ir_id) in scope {
-                // Skip reassigned symbols
-                if self.reassigned_in_scope.contains(symbol) {
-                    trace!("Drop: Skipping {:?} in cleanup (was reassigned)", symbol);
-                    continue;
-                }
-
                 // Skip lambda captures
                 if let Some(drop_points) = &self.current_drop_points {
                     if drop_points.lambda_captures.contains(symbol) {
@@ -758,19 +766,72 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
 
-                // Free if not terminated
-                if !self.is_terminated() {
-                    self.builder.build_free(*ir_id);
-                    trace!(
-                        "Drop: Freed {:?} ({:?}) in cleanup_all_scopes",
-                        symbol,
-                        ir_id
-                    );
+                if self.reassigned_in_scope.contains(symbol) {
+                    // For reassigned variables, free the CURRENT value from owned_heap_values
+                    // (the old value was already freed at reassignment time)
+                    if let Some(&current_ir) = self.owned_heap_values.get(symbol) {
+                        to_free.push((*symbol, current_ir));
+                    }
+                } else {
+                    to_free.push((*symbol, *ir_id));
                 }
+            }
+        }
+
+        // Now emit drop calls and frees
+        for (symbol, ir_id) in to_free {
+            if !self.is_terminated() {
+                // @:derive(Drop) — call drop() before Free
+                self.maybe_emit_drop_call(ir_id);
+                self.builder.build_free(ir_id);
+                trace!(
+                    "Drop: Freed {:?} ({:?}) in cleanup_all_scopes",
+                    symbol,
+                    ir_id
+                );
             }
         }
         // Note: We don't clear the scopes here because the function is about to return.
         // The scopes will be cleared when the function context is dropped.
+    }
+
+    /// Cleanup only @:derive(Drop) class values at implicit function end.
+    /// Unlike cleanup_all_scopes(), this only touches Drop-class values to avoid
+    /// double-freeing non-Drop values that InsertFreePass handles.
+    fn cleanup_drop_classes_only(&mut self) {
+        let mut to_free = Vec::new();
+        for scope in self.drop_scope_stack.iter().rev() {
+            for (symbol, ir_id) in scope {
+                // Skip lambda captures
+                if let Some(drop_points) = &self.current_drop_points {
+                    if drop_points.lambda_captures.contains(symbol) {
+                        continue;
+                    }
+                }
+
+                // Get the current IrId (may differ from scope entry if reassigned)
+                let current_ir = if self.reassigned_in_scope.contains(symbol) {
+                    match self.owned_heap_values.get(symbol).copied() {
+                        Some(ir) => ir,
+                        None => continue,
+                    }
+                } else {
+                    *ir_id
+                };
+
+                // Only process Drop-class values
+                if self.get_drop_class_for_ir(current_ir).is_some() {
+                    to_free.push(current_ir);
+                }
+            }
+        }
+
+        for ir_id in to_free {
+            if !self.is_terminated() {
+                self.maybe_emit_drop_call(ir_id);
+                self.builder.build_free(ir_id);
+            }
+        }
     }
 
     /// Register a heap-allocated value as owned by a variable
@@ -783,6 +844,8 @@ impl<'a> HirToMirContext<'a> {
             // - If from initial assignment: that block dominates all subsequent blocks
             // - If from phi node: phi is in loop header which dominates loop body
             if !self.is_terminated() {
+                // @:derive(Drop) — call drop() before Free
+                self.maybe_emit_drop_call(old_ir_id);
                 self.builder.build_free(old_ir_id);
             }
 
@@ -800,6 +863,20 @@ impl<'a> HirToMirContext<'a> {
 
         // Track the current value
         self.owned_heap_values.insert(symbol, ir_id);
+
+        // Track Drop class association for @:derive(Drop)
+        if !self.derive_drop_classes.is_empty() {
+            if let Some(class_name) = self.register_class_hints.get(&ir_id).cloned() {
+                for &class_sym in &self.derive_drop_classes {
+                    if let Some(symbol_info) = self.symbol_table.get_symbol(class_sym) {
+                        if self.string_interner.get(symbol_info.name) == Some(class_name.as_str()) {
+                            self.ir_to_drop_class.insert(ir_id, class_sym);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Register a temporary heap-allocated value that needs dropping after use
@@ -867,6 +944,10 @@ impl<'a> HirToMirContext<'a> {
                             return DropBehavior::RuntimeManaged;
                         }
                     }
+                    // Check for @:derive(Drop) — user-defined destructor
+                    if self.derive_drop_classes.contains(symbol_id) {
+                        return DropBehavior::AutoDropWithDtor;
+                    }
                     // User-defined (non-extern) classes need AutoDrop
                     DropBehavior::AutoDrop
                 }
@@ -904,7 +985,7 @@ impl<'a> HirToMirContext<'a> {
 
     /// Check if a type needs drop (convenience wrapper for get_drop_behavior)
     fn type_needs_drop(&self, type_id: TypeId) -> bool {
-        self.get_drop_behavior(type_id) == DropBehavior::AutoDrop
+        matches!(self.get_drop_behavior(type_id), DropBehavior::AutoDrop | DropBehavior::AutoDropWithDtor)
     }
 
     /// Detect reflective Type allocation calls that return fresh class instances.
@@ -2871,8 +2952,15 @@ impl<'a> HirToMirContext<'a> {
             // This ensures they're freed on function exit via cleanup_all_scopes()
             self.enter_drop_scope();
             self.lower_block(body);
-            // Note: cleanup_all_scopes() is called in Return handling
-            // For functions that don't explicitly return, ensure_terminator adds a return
+            // For functions that don't explicitly return (void functions without `return`),
+            // emit drop() calls for @:derive(Drop) owned values before the implicit return.
+            // Note: Functions WITH explicit return handle this in the Return statement handler.
+            // We DON'T call cleanup_all_scopes() here because non-Drop allocations are
+            // handled by InsertFreePass — calling free unconditionally would cause double-free.
+            // Instead, we only emit drop() + free for Drop-class values specifically.
+            if !self.is_terminated() && !self.derive_drop_classes.is_empty() {
+                self.cleanup_drop_classes_only();
+            }
             self.ensure_terminator();
         } else {
             debug!("[lower_function_body]: {} has NO body", func_name);
@@ -3842,7 +3930,7 @@ impl<'a> HirToMirContext<'a> {
                     // Track ownership for explicit allocations:
                     // - `new` class expressions (except array literals)
                     // - reflective Type.createInstance/createEmptyInstance calls
-                    let is_heap_alloc = match &init_expr.kind {
+                    let mut is_heap_alloc = match &init_expr.kind {
                         HirExprKind::New { .. } => {
                             let type_table = self.type_table.borrow();
                             let is_array = if let Some(type_ref) = type_table.get(init_expr.ty) {
@@ -3860,7 +3948,26 @@ impl<'a> HirToMirContext<'a> {
                         _ => false,
                     };
 
+                    // @:derive(Copy) — check if RHS is a variable with Copy type
+                    let copy_class_sym = if let HirExprKind::Variable { .. } = &init_expr.kind {
+                        self.get_copy_class_symbol(init_expr.ty)
+                    } else {
+                        None
+                    };
+
                     let value = self.lower_expression(init_expr);
+
+                    // If Copy type, emit shallow copy and mark as heap alloc for drop tracking
+                    let value = if let (Some(class_sym), Some(val)) = (copy_class_sym, value) {
+                        if let Some(copy_ptr) = self.emit_shallow_copy(val, class_sym) {
+                            is_heap_alloc = true;
+                            Some(copy_ptr)
+                        } else {
+                            Some(val)
+                        }
+                    } else {
+                        value
+                    };
 
                     // Bind to pattern and register as local
                     if value.is_none() {
@@ -4165,7 +4272,46 @@ impl<'a> HirToMirContext<'a> {
                 self.temp_heap_values.clear();
                 let rhs_is_value_type = self.expr_is_value_type_expr(rhs) && op.is_none();
 
+                // @:derive(Copy) — check if RHS is a variable with Copy type
+                let assign_copy_class = if op.is_none() {
+                    if let HirExprKind::Variable { .. } = &rhs.kind {
+                        self.get_copy_class_symbol(rhs.ty)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 let rhs_value = self.lower_expression(rhs);
+
+                // If Copy type, emit shallow copy
+                let (rhs_value, rhs_was_copied) =
+                    if let (Some(class_sym), Some(val)) = (assign_copy_class, rhs_value) {
+                        // Guard against self-assignment (a = a)
+                        let is_self_assign = if let (
+                            Some(lhs_sym),
+                            HirExprKind::Variable {
+                                symbol: rhs_sym, ..
+                            },
+                        ) = (lhs_symbol, &rhs.kind)
+                        {
+                            lhs_sym == *rhs_sym
+                        } else {
+                            false
+                        };
+                        if !is_self_assign {
+                            if let Some(copy_ptr) = self.emit_shallow_copy(val, class_sym) {
+                                (Some(copy_ptr), true)
+                            } else {
+                                (Some(val), false)
+                            }
+                        } else {
+                            (Some(val), false)
+                        }
+                    } else {
+                        (rhs_value, false)
+                    };
 
                 if let Some(rhs_reg) = rhs_value {
                     // Handle compound assignment if present
@@ -4277,10 +4423,11 @@ impl<'a> HirToMirContext<'a> {
                         // Only track when the RHS actually creates a NEW allocation (New or Call).
                         // Field access and variable reads produce borrowed references that must
                         // NOT be freed — they point into existing objects.
-                        let rhs_is_owned_allocation = matches!(
-                            &rhs.kind,
-                            HirExprKind::New { .. } | HirExprKind::Call { .. }
-                        );
+                        let rhs_is_owned_allocation = rhs_was_copied
+                            || matches!(
+                                &rhs.kind,
+                                HirExprKind::New { .. } | HirExprKind::Call { .. }
+                            );
 
                         // When assigning to a Field/ArrayIndex lvalue, the RHS value escapes
                         // to another object. If the RHS is a variable that we're tracking as
@@ -9094,6 +9241,20 @@ impl<'a> HirToMirContext<'a> {
                                         Some(func_id),
                                         param_idx,
                                     );
+                                    // @:derive(Copy): copy variable args at call boundary
+                                    let reg =
+                                        if let HirExprKind::Variable { .. } = &arg.kind {
+                                            if let Some(class_sym) =
+                                                self.get_copy_class_symbol(arg.ty)
+                                            {
+                                                self.emit_shallow_copy(reg, class_sym)
+                                                    .unwrap_or(reg)
+                                            } else {
+                                                reg
+                                            }
+                                        } else {
+                                            reg
+                                        };
                                     if callee_is_user_defined {
                                         let is_heap_intermediate = matches!(
                                             &arg.kind,
@@ -14756,6 +14917,23 @@ impl<'a> HirToMirContext<'a> {
                                             arg_regs.push(reg);
                                         }
                                     } else {
+                                        // @:derive(Copy): copy variable args at call boundary
+                                        let reg = if i > 0 {
+                                            if let HirExprKind::Variable { .. } = &arg.kind {
+                                                if let Some(class_sym) =
+                                                    self.get_copy_class_symbol(arg.ty)
+                                                {
+                                                    self.emit_shallow_copy(reg, class_sym)
+                                                        .unwrap_or(reg)
+                                                } else {
+                                                    reg
+                                                }
+                                            } else {
+                                                reg
+                                            }
+                                        } else {
+                                            reg
+                                        };
                                         if i > 0 && callee_is_user_defined {
                                             let is_heap_intermediate = matches!(
                                                 &arg.kind,
@@ -15006,6 +15184,20 @@ impl<'a> HirToMirContext<'a> {
                                         Some(func_id),
                                         param_idx,
                                     );
+                                    // @:derive(Copy): copy variable args at call boundary
+                                    let reg =
+                                        if let HirExprKind::Variable { .. } = &arg.kind {
+                                            if let Some(class_sym) =
+                                                self.get_copy_class_symbol(arg.ty)
+                                            {
+                                                self.emit_shallow_copy(reg, class_sym)
+                                                    .unwrap_or(reg)
+                                            } else {
+                                                reg
+                                            }
+                                        } else {
+                                            reg
+                                        };
                                     if callee_is_user_defined {
                                         let is_heap_intermediate = matches!(
                                             &arg.kind,
@@ -24320,6 +24512,159 @@ impl<'a> HirToMirContext<'a> {
         Some(new_ptr)
     }
 
+    /// Check if a type is a @:derive(Copy) class, returning its SymbolId.
+    fn get_copy_class_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
+        let (kind_class_sym, generic_base) = {
+            let type_table = self.type_table.borrow();
+            let type_ref = type_table.get(type_id)?;
+            match &type_ref.kind {
+                TypeKind::Class { symbol_id, .. } => (Some(*symbol_id), None),
+                TypeKind::GenericInstance { base_type, .. } => (None, Some(*base_type)),
+                _ => (None, None),
+            }
+        };
+        if let Some(sym) = kind_class_sym {
+            if self.derive_copy_classes.contains(&sym) {
+                return Some(sym);
+            }
+        }
+        if let Some(base) = generic_base {
+            return self.get_copy_class_symbol(base);
+        }
+        None
+    }
+
+    /// @:derive(Copy) — emit a shallow (bitwise) copy of a class instance.
+    /// All fields must be primitives (enforced at validation time).
+    fn emit_shallow_copy(
+        &mut self,
+        src_reg: IrId,
+        class_sym: SymbolId,
+    ) -> Option<IrId> {
+        let fields = self.class_instance_fields.get(&class_sym)?.clone();
+
+        // Allocate: (num_fields + 1) * 8  (slot 0 = type_id header)
+        let alloc_size = ((fields.len() as u64 + 1) * 8).max(16);
+        let new_ptr = self.build_heap_alloc(alloc_size)?;
+
+        // Copy type_id header (GEP index 0)
+        let zero = self.builder.build_const(IrValue::I32(0))?;
+        let header_ptr = self.builder.build_gep(src_reg, vec![zero], IrType::I64)?;
+        let header_val = self.builder.build_load(header_ptr, IrType::I64)?;
+        let zero2 = self.builder.build_const(IrValue::I32(0))?;
+        let new_header_ptr = self.builder.build_gep(new_ptr, vec![zero2], IrType::I64)?;
+        self.builder.build_store(new_header_ptr, header_val)?;
+
+        // Copy each field (all primitives — bitwise copy)
+        for &(_field_sym, field_type_id, gep_idx) in &fields {
+            let field_ir_type = self.convert_type(field_type_id);
+            let idx_const = self.builder.build_const(IrValue::I32(gep_idx as i32))?;
+            let src_field_ptr =
+                self.builder
+                    .build_gep(src_reg, vec![idx_const], field_ir_type.clone())?;
+            let field_val = self
+                .builder
+                .build_load(src_field_ptr, field_ir_type.clone())?;
+            let dst_idx = self.builder.build_const(IrValue::I32(gep_idx as i32))?;
+            let dst_field_ptr = self
+                .builder
+                .build_gep(new_ptr, vec![dst_idx], field_ir_type)?;
+            self.builder.build_store(dst_field_ptr, field_val)?;
+        }
+
+        // Set class hint for field access on copied value
+        if let Some(sym) = self.symbol_table.get_symbol(class_sym) {
+            let name = self.string_interner.get(sym.name).unwrap_or("").to_string();
+            if !name.is_empty() {
+                self.register_class_hints.insert(new_ptr, name);
+            }
+        }
+
+        Some(new_ptr)
+    }
+
+    /// @:derive(Copy) — copy any Copy-typed variable arguments at call boundaries.
+    /// Returns new arg_regs with copies substituted for Copy-type variables.
+    fn maybe_copy_call_args(
+        &mut self,
+        args: &[HirExpr],
+        arg_regs: Vec<IrId>,
+    ) -> Vec<IrId> {
+        if self.derive_copy_classes.is_empty() {
+            return arg_regs;
+        }
+        args.iter()
+            .zip(arg_regs)
+            .map(|(arg_expr, reg)| {
+                if let HirExprKind::Variable { .. } = &arg_expr.kind {
+                    if let Some(class_sym) = self.get_copy_class_symbol(arg_expr.ty) {
+                        if let Some(copy_ptr) = self.emit_shallow_copy(reg, class_sym) {
+                            return copy_ptr;
+                        }
+                    }
+                }
+                reg
+            })
+            .collect()
+    }
+
+    /// @:derive(Drop) — get the class SymbolId for an IrId if it's a Drop class.
+    /// Uses register_class_hints to map IrId → class name, then resolves to SymbolId.
+    fn get_drop_class_for_ir(&self, ir_id: IrId) -> Option<SymbolId> {
+        if self.derive_drop_classes.is_empty() {
+            return None;
+        }
+        // First check the direct mapping
+        if let Some(&class_sym) = self.ir_to_drop_class.get(&ir_id) {
+            return Some(class_sym);
+        }
+        // Fallback: use register_class_hints to find the class name, then resolve
+        let class_name = self.register_class_hints.get(&ir_id)?;
+        for &class_sym in &self.derive_drop_classes {
+            if let Some(symbol) = self.symbol_table.get_symbol(class_sym) {
+                let sym_name = self.string_interner.get(symbol.name);
+                if sym_name == Some(class_name.as_str()) {
+                    return Some(class_sym);
+                }
+            }
+        }
+        None
+    }
+
+    /// @:derive(Drop) — emit a call to the user's drop() method on the given object.
+    /// Called before Free at scope exit, reassignment, and early return.
+    fn emit_drop_call(&mut self, obj_reg: IrId, class_sym: SymbolId) {
+        let drop_name = self.string_interner.intern("drop");
+        // Look up the drop() method
+        let method_sym = match self.resolve_class_method_symbol(class_sym, drop_name) {
+            Some(sym) => sym,
+            None => {
+                trace!("Drop: Could not find drop() method for class {:?}", class_sym);
+                return;
+            }
+        };
+        let func_id = match self.get_function_id(&method_sym) {
+            Some(id) => id,
+            None => {
+                trace!("Drop: Could not find IrFunctionId for drop() method {:?}", method_sym);
+                return;
+            }
+        };
+        // Call drop(this) — the object pointer is passed as the receiver
+        self.builder.build_call_direct(func_id, vec![obj_reg], IrType::Void);
+    }
+
+    /// @:derive(Drop) — conditionally emit drop() call before Free for an IrId.
+    /// Returns true if a drop call was emitted.
+    fn maybe_emit_drop_call(&mut self, ir_id: IrId) -> bool {
+        if let Some(class_sym) = self.get_drop_class_for_ir(ir_id) {
+            self.emit_drop_call(ir_id, class_sym);
+            true
+        } else {
+            false
+        }
+    }
+
     /// @:derive(Debug) — generate toString() returning "ClassName { field1: val1, field2: val2 }"
     fn lower_derived_to_string(&mut self, object: &HirExpr, class_sym: SymbolId) -> Option<IrId> {
         let fields = self.class_instance_fields.get(&class_sym)?.clone();
@@ -31307,6 +31652,12 @@ impl<'a> HirToMirContext<'a> {
                     DerivedTrait::Clone => {
                         self.derive_clone_classes.insert(class.symbol_id);
                     }
+                    DerivedTrait::Copy => {
+                        self.derive_copy_classes.insert(class.symbol_id);
+                    }
+                    DerivedTrait::Drop => {
+                        self.derive_drop_classes.insert(class.symbol_id);
+                    }
                     DerivedTrait::Debug => {
                         self.derive_debug_classes.insert(class.symbol_id);
                         // Check for @:debugFormat("pattern") on the class
@@ -31327,6 +31678,7 @@ impl<'a> HirToMirContext<'a> {
                 || self.derive_partial_ord_classes.contains(&class.symbol_id)
                 || self.derive_hash_classes.contains(&class.symbol_id)
                 || self.derive_clone_classes.contains(&class.symbol_id)
+                || self.derive_copy_classes.contains(&class.symbol_id)
                 || self.derive_debug_classes.contains(&class.symbol_id)
                 || self.derive_default_classes.contains(&class.symbol_id);
 
