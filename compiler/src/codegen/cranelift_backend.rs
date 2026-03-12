@@ -551,7 +551,8 @@ impl CraneliftBackend {
         // Second pass: compile function bodies (skip extern functions with empty CFGs)
         // Track failed function IDs so we can also skip functions that call them
         // (calling a trap stub with mismatched args would panic cranelift).
-        let mut failed_funcs: std::collections::HashSet<IrFunctionId> = std::collections::HashSet::new();
+        let mut failed_funcs: std::collections::HashSet<IrFunctionId> =
+            std::collections::HashSet::new();
         // Also skip unmonomorphized generic templates
         for (func_id, function) in &mir_module.functions {
             if !function.signature.type_params.is_empty() {
@@ -573,7 +574,10 @@ impl CraneliftBackend {
             // Skip functions that call any failed function (avoids cranelift ABI panics)
             let calls_failed = function.cfg.blocks.values().any(|block| {
                 block.instructions.iter().any(|inst| {
-                    if let crate::ir::IrInstruction::CallDirect { func_id: callee, .. } = inst {
+                    if let crate::ir::IrInstruction::CallDirect {
+                        func_id: callee, ..
+                    } = inst
+                    {
                         failed_funcs.contains(callee)
                     } else {
                         false
@@ -581,7 +585,10 @@ impl CraneliftBackend {
                 })
             });
             if calls_failed {
-                debug!("Skipping function '{}' (calls a failed function)", function.name);
+                debug!(
+                    "Skipping function '{}' (calls a failed function)",
+                    function.name
+                );
                 failed_funcs.insert(*func_id);
                 if let Err(_) = self.define_trap_stub(*func_id, function) {}
                 continue;
@@ -723,7 +730,8 @@ impl CraneliftBackend {
 
         // Second pass: compile function bodies (skip extern functions with empty CFGs)
         // Track failed functions to skip callers (prevents cranelift ABI panics)
-        let mut failed_funcs: std::collections::HashSet<IrFunctionId> = std::collections::HashSet::new();
+        let mut failed_funcs: std::collections::HashSet<IrFunctionId> =
+            std::collections::HashSet::new();
         for (func_id, function) in &mir_module.functions {
             if !function.signature.type_params.is_empty() {
                 failed_funcs.insert(*func_id);
@@ -742,7 +750,10 @@ impl CraneliftBackend {
             // Skip functions that call any failed function
             let calls_failed = function.cfg.blocks.values().any(|block| {
                 block.instructions.iter().any(|inst| {
-                    if let crate::ir::IrInstruction::CallDirect { func_id: callee, .. } = inst {
+                    if let crate::ir::IrInstruction::CallDirect {
+                        func_id: callee, ..
+                    } = inst
+                    {
                         failed_funcs.contains(callee)
                     } else {
                         false
@@ -750,7 +761,10 @@ impl CraneliftBackend {
                 })
             });
             if calls_failed {
-                debug!("Skipping function '{}' (calls a failed function)", function.name);
+                debug!(
+                    "Skipping function '{}' (calls a failed function)",
+                    function.name
+                );
                 failed_funcs.insert(*func_id);
                 if let Err(_) = self.define_trap_stub(*func_id, function) {}
                 continue;

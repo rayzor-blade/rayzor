@@ -429,9 +429,9 @@ impl CraneliftBackend {
         left: IrId,
         right: IrId,
     ) -> Result<Value, String> {
-        let lhs = *value_map.get(&left).ok_or_else(|| {
-            format!("Left operand {:?} not found in value_map", left)
-        })?;
+        let lhs = *value_map
+            .get(&left)
+            .ok_or_else(|| format!("Left operand {:?} not found in value_map", left))?;
         let rhs = *value_map
             .get(&right)
             .ok_or_else(|| format!("Right operand {:?} not found in value_map", right))?;
@@ -696,9 +696,9 @@ impl CraneliftBackend {
         left: IrId,
         right: IrId,
     ) -> Result<Value, String> {
-        let lhs = *value_map.get(&left).ok_or_else(|| {
-            format!("Left operand {:?} not found in value_map", left)
-        })?;
+        let lhs = *value_map
+            .get(&left)
+            .ok_or_else(|| format!("Left operand {:?} not found in value_map", left))?;
         let rhs = *value_map
             .get(&right)
             .ok_or_else(|| format!("Right operand {:?} not found in value_map", right))?;
