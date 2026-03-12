@@ -24814,7 +24814,7 @@ impl<'a> HirToMirContext<'a> {
                         if let Some(nested_fields) =
                             self.class_instance_fields.get(&nested_sym).cloned()
                         {
-                            self.emit_debug_to_string_for_ptr(
+                            self.emit_debug_to_string_for_ptr_depth(
                                 field_val,
                                 nested_sym,
                                 &nested_fields,
@@ -24823,6 +24823,7 @@ impl<'a> HirToMirContext<'a> {
                                 box_int_fn,
                                 box_float_fn,
                                 &string_ptr_ty,
+                                1,
                             )?
                         } else {
                             self.builder.build_string("<object>".to_string())?
@@ -24992,6 +24993,30 @@ impl<'a> HirToMirContext<'a> {
         box_float_fn: IrFunctionId,
         string_ptr_ty: &IrType,
     ) -> Option<IrId> {
+        self.emit_debug_to_string_for_ptr_depth(
+            obj_reg, class_sym, fields, concat_fn, std_string_fn,
+            box_int_fn, box_float_fn, string_ptr_ty, 0,
+        )
+    }
+
+    fn emit_debug_to_string_for_ptr_depth(
+        &mut self,
+        obj_reg: IrId,
+        class_sym: SymbolId,
+        fields: &[(SymbolId, TypeId, u32)],
+        concat_fn: IrFunctionId,
+        std_string_fn: IrFunctionId,
+        box_int_fn: IrFunctionId,
+        box_float_fn: IrFunctionId,
+        string_ptr_ty: &IrType,
+        depth: u32,
+    ) -> Option<IrId> {
+        // Depth limit to prevent infinite recursion for self-referential types
+        const MAX_DEBUG_DEPTH: u32 = 4;
+        if depth >= MAX_DEBUG_DEPTH {
+            return self.builder.build_string("<...>".to_string());
+        }
+
         let class_name = self
             .symbol_table
             .get_symbol(class_sym)
