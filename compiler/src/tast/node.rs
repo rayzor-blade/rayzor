@@ -1504,6 +1504,9 @@ pub struct TypedClass {
 
     /// Derived traits from @:derive([Clone, Copy, ...])
     pub derived_traits: Vec<DerivedTrait>,
+
+    /// Custom debug format string from @:debugFormat("pattern")
+    pub debug_format: Option<String>,
 }
 
 impl TypedClass {
@@ -1690,6 +1693,9 @@ pub struct TypedField {
 
     /// Property accessor info (Some for properties, None for regular fields)
     pub property_access: Option<PropertyAccessInfo>,
+
+    /// @:default(value) metadata — custom default for @:derive(Default)
+    pub metadata_default: Option<TypedExpression>,
 
     /// Source location
     pub source_location: SourceLocation,

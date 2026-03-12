@@ -116,6 +116,7 @@ class Simple {
         source_location: SourceLocation::unknown(),
         derived_traits: Vec::new(),
         memory_annotations: Vec::new(),
+        debug_format: None,
     };
 
     typed_file.classes.push(test_class);

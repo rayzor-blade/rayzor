@@ -559,7 +559,7 @@ Thread.spawn(() -> {
 **Tasks:**
 - [x] Generate `createDefault()` static method — `lower_derived_default()` in hir_to_mir.rs
 - [x] Validate all fields have defaults — primitives zero-init, nested classes recursively default
-- [ ] Support custom default values via `@:default(value)` metadata
+- [x] Support custom default values via `@:default(value)` metadata — `field_default_exprs` map populated from `metadata_default` on TypedField
 - [x] Integrate with constructors — fields zero-initialized before constructor body runs
 
 ### 4.6 Debug Trait
@@ -569,8 +569,9 @@ Thread.spawn(() -> {
 **Tasks:**
 - [x] Generate `toString()` method — `lower_derived_to_string()` formats as `"ClassName { field1: val1, ... }"`
 - [x] Format nested structures — handles String, Bool, Int, Float, objects
+- [x] Recursive nested Debug formatting — `emit_debug_to_string_for_ptr()` recursively calls toString on nested `@:derive(Debug)` class fields
 - [ ] Handle circular references
-- [ ] Customizable formatting via metadata
+- [x] Customizable formatting via `@:debugFormat("pattern")` metadata — `emit_custom_debug_format()` parses `{fieldName}` placeholders
 
 ### 4.7 Remaining Codegen Gaps
 
@@ -996,7 +997,7 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 ### 9.1 Completed
 
 - [x] **600/600 unit tests passing** (100% pass rate as of 2026-01-28)
-- [x] **108/108 haxe test files passing** (100% pass rate as of 2026-03-12)
+- [x] **111/111 haxe test files passing** (100% pass rate as of 2026-03-12)
 - [x] **9/9 e2e tests passing** (100% pass rate as of 2026-02-17, including arc_mutex_integration)
 - [x] **Docker stress test environment** (`ci/bench-test/`) for reproducible amd64 testing
 - [x] **SIGSEGV signal handler** for crash diagnosis with stack traces
@@ -2338,7 +2339,33 @@ trace("The point is: " + p);    // ✅ (calls toString())
 - **Async state machines** build on generics and memory safety
 - Implementation should follow dependency order to avoid rework
 
-**Last Updated:** 2026-03-12 (Transitive monomorphization extension, Placeholder type resolution, failed function tracking, 108/108 tests)
+**Last Updated:** 2026-03-12 (Derive trait enhancements, @:default metadata, @:debugFormat, recursive Debug, 111/111 tests)
+
+## Recent Progress (Session 2026-03-12 - Derive Trait Enhancements)
+
+**@:derive(Default) with @:default(value) metadata:** ✅ Complete
+
+- ✅ **Custom field defaults** — `@:default(8080)`, `@:default(60.0)`, `@:default(true)` metadata on fields populates `field_default_exprs` map via `metadata_default` on TypedField
+- ✅ **Pipeline propagation** — parser → `TypedField.metadata_default` → `HirClassField.metadata_default` → `field_default_exprs` in MIR context
+- ✅ **Constructor integration** — fields with `@:default` use custom values instead of zero-init
+
+**@:derive(Debug) recursive nested formatting:** ✅ Complete
+
+- ✅ **Nested @:derive(Debug) classes** — `emit_debug_to_string_for_ptr()` recursively calls toString on class-typed fields that have Debug derived
+- ✅ **Recursive output** — `Rect { topLeft: Point { x: 0, y: 0 }, bottomRight: Point { x: 10, y: 20 }, label: box }`
+
+**@:debugFormat custom format strings:** ✅ Complete
+
+- ✅ **Metadata pipeline** — `@:debugFormat("({x}, {y})")` flows through `TypedClass.debug_format` → `HirClass.debug_format` → `debug_format_strings` map
+- ✅ **Placeholder parsing** — `emit_custom_debug_format()` parses `{fieldName}` placeholders and emits field value conversions
+- ✅ **Test verified** — `(3, 7)` and `[Player #42]` output correctly
+
+**Test Suite:**
+
+- ✅ **111/111 Haxe test files passing** (100% pass rate, up from 108/108)
+- New tests: `test_derive_default_custom.hx`, `test_derive_debug_nested.hx`, `test_derive_debug_format.hx`
+
+---
 
 ## Recent Progress (Session 2026-03-12 - Monomorphization, Placeholder Resolution & Codegen Hardening)
 
