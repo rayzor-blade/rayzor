@@ -1191,10 +1191,11 @@ impl CompilationUnit {
         for tp_name in &enum_info.type_params {
             let tp_interned = self.string_interner.intern(tp_name);
             let tp_symbol = self.symbol_table.create_type_parameter(tp_interned, vec![]);
-            let tp_type = self
-                .type_table
-                .borrow_mut()
-                .create_type_parameter(tp_symbol, vec![], crate::tast::core::Variance::Invariant);
+            let tp_type = self.type_table.borrow_mut().create_type_parameter(
+                tp_symbol,
+                vec![],
+                crate::tast::core::Variance::Invariant,
+            );
             type_param_ids.push(tp_type);
             type_param_map.insert(tp_name.clone(), tp_type);
         }
