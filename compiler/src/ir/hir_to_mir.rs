@@ -5292,9 +5292,50 @@ impl<'a> HirToMirContext<'a> {
             // Return None to let the caller's fallback chain handle resolution.
             // The caller has context-specific handlers (Dynamic method handler, function_map, etc.)
             // that work better than brute-force stdlib search for these cases.
+            TypeKind::Placeholder { name: placeholder_name } => {
+                // Use the Placeholder name to derive the class for stdlib lookup.
+                // e.g., "rayzor.Bytes" → try "rayzor_Bytes", "Bytes"
+                let ph_name = self.string_interner.get(*placeholder_name).map(|s| s.to_string());
+                drop(type_table);
+                if let Some(ref ph) = ph_name {
+                    let underscore_name = ph.replace(".", "_");
+                    let bare_name = ph.rsplit('.').next().unwrap_or(ph);
+                    // Try qualified underscore name (e.g., "rayzor_Bytes")
+                    if let Some(count) = param_count {
+                        if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(&underscore_name, method_name, count) {
+                            return Some((sig.class, sig.method, mapping));
+                        }
+                        if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(bare_name, method_name, count) {
+                            return Some((sig.class, sig.method, mapping));
+                        }
+                    }
+                    if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(&underscore_name, method_name) {
+                        return Some((sig.class, sig.method, mapping));
+                    }
+                    if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(bare_name, method_name) {
+                        return Some((sig.class, sig.method, mapping));
+                    }
+                }
+                // Fall through to qualified_name and hint lookups
+                if let Some(qname) = qualified_name {
+                    let parts: Vec<&str> = qname.split('.').collect();
+                    if parts.len() >= 2 {
+                        let class_parts = &parts[..parts.len() - 1];
+                        let underscore_class = class_parts.join("_");
+                        if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(&underscore_class, method_name) {
+                            return Some((sig.class, sig.method, mapping));
+                        }
+                    }
+                }
+                if let Some(hint) = receiver_class_hint {
+                    if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(hint, method_name) {
+                        return Some((sig.class, sig.method, mapping));
+                    }
+                }
+                return None;
+            }
             TypeKind::TypeParameter { .. }
             | TypeKind::Dynamic
-            | TypeKind::Placeholder { .. }
             | TypeKind::Unknown => {
                 drop(type_table);
                 // Try qualified_name if available (e.g., for user-class methods like "test.Counter.increment")
@@ -22493,16 +22534,25 @@ impl<'a> HirToMirContext<'a> {
         // Without this guard, brute-force fallback in get_stdlib_runtime_info can match
         // user fields to unrelated stdlib methods with the same bare name (e.g.,
         // ArrayIterator.current matched to Thread.current → sys_thread_current).
-        let is_known_user_field = self.field_index_map.contains_key(&field)
-            || self
-                .resolve_field_index_by_name(
-                    self.symbol_table
-                        .get_symbol(field)
-                        .map(|s| s.name)
-                        .unwrap_or_default(),
-                    receiver_ty,
-                )
-                .is_some();
+        // When receiver type is Placeholder (unresolved extern class like rayzor.Bytes),
+        // never consider it a known user field — it must go through stdlib dispatch.
+        let receiver_is_placeholder = {
+            let type_table = self.type_table.borrow();
+            type_table
+                .get(receiver_ty)
+                .map_or(false, |t| matches!(t.kind, TypeKind::Placeholder { .. }))
+        };
+        let is_known_user_field = !receiver_is_placeholder
+            && (self.field_index_map.contains_key(&field)
+                || self
+                    .resolve_field_index_by_name(
+                        self.symbol_table
+                            .get_symbol(field)
+                            .map(|s| s.name)
+                            .unwrap_or_default(),
+                        receiver_ty,
+                    )
+                    .is_some());
 
         let field_name_debug = self
             .symbol_table
@@ -23138,10 +23188,11 @@ impl<'a> HirToMirContext<'a> {
         // Strategy 1: Resolve receiver_ty through TypeAlias/GenericInstance chains to find
         // the underlying class TypeId, then match directly against candidates' class_ty.
         {
+            // Resolve receiver_ty through TypeAlias/GenericInstance/Placeholder chains
+            // to find the underlying Class type and its symbol_id
+            let mut resolved = self.resolve_through_aliases(receiver_ty);
             let type_table = self.type_table.borrow();
-            // Resolve receiver_ty through TypeAlias/GenericInstance chains to find
-            // the underlying Class type and its symbol_id
-            let mut resolved = receiver_ty;
+            // Also follow GenericInstance to base type
             let mut visited = HashSet::new();
             loop {
                 if !visited.insert(resolved) {
@@ -23149,7 +23200,6 @@ impl<'a> HirToMirContext<'a> {
                 }
                 if let Some(ti) = type_table.get(resolved) {
                     match &ti.kind {
-                        TypeKind::TypeAlias { target_type, .. } => resolved = *target_type,
                         TypeKind::GenericInstance { base_type, .. } => resolved = *base_type,
                         _ => break,
                     }
@@ -29552,6 +29602,38 @@ impl<'a> HirToMirContext<'a> {
             }
             match type_table.get(current).map(|t| &t.kind) {
                 Some(TypeKind::TypeAlias { target_type, .. }) => current = *target_type,
+                Some(TypeKind::Placeholder { name }) => {
+                    // Try to resolve Placeholder by searching for a class with matching name
+                    if let Some(name_str) = self.string_interner.get(*name) {
+                        // Search for "rayzor.Bytes" → match class "Bytes" with qualified "rayzor.Bytes"
+                        // Also try bare name: "rayzor.Bytes" → "Bytes"
+                        let bare_name = name_str.rsplit('.').next().unwrap_or(name_str);
+                        let mut found = None;
+                        for (tid, ti) in type_table.iter() {
+                            if let TypeKind::Class { symbol_id, .. } = &ti.kind {
+                                if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
+                                    let sym_name = self.string_interner.get(sym.name).unwrap_or("");
+                                    let sym_qname = sym.qualified_name.and_then(|qn| self.string_interner.get(qn));
+                                    let matches = sym_qname.map_or(false, |qn| qn == name_str)
+                                        || sym_name == name_str
+                                        || sym_name == bare_name
+                                        || sym_qname.map_or(false, |qn| qn == bare_name);
+                                    if matches {
+                                        found = Some(tid);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if let Some(resolved_tid) = found {
+                            current = resolved_tid;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
                 _ => break,
             }
         }
