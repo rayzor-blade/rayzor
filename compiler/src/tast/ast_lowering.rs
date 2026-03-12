@@ -13607,14 +13607,17 @@ impl<'a> AstLowering<'a> {
             "String" => Ok(self.context.type_table.borrow().string_type()),
             "Dynamic" => Ok(self.context.type_table.borrow().dynamic_type()),
             _ => {
-                // Try to resolve as a class/interface name
+                // Try to resolve as a class/interface/enum name using scope hierarchy
                 let interned_name = self.context.intern_string(type_name);
-                if let Some(symbol) = self
-                    .context
-                    .symbol_table
-                    .lookup_symbol(self.context.current_scope, interned_name)
-                {
-                    Ok(symbol.type_id)
+                if let Some(symbol_id) = self.resolve_symbol_in_scope_hierarchy(interned_name) {
+                    if let Some(symbol) = self.context.symbol_table.get_symbol(symbol_id) {
+                        Ok(symbol.type_id)
+                    } else {
+                        Err(LoweringError::UnresolvedType {
+                            type_name: type_name.to_string(),
+                            location: SourceLocation::unknown(),
+                        })
+                    }
                 } else {
                     Err(LoweringError::UnresolvedType {
                         type_name: type_name.to_string(),

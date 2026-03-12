@@ -7085,11 +7085,10 @@ impl<'a> HirToMirContext<'a> {
     /// Runtime `haxe_type_typeof` returns an ordinal (`i32`). When the call
     /// result is used as `ValueType`, we build the actual enum value through
     /// `haxe_type_typeof_value`.
-    fn lower_type_typeof_call(&mut self, args: &[HirExpr], result_type: IrType) -> Option<IrId> {
+    fn lower_type_typeof_call(&mut self, args: &[HirExpr], _result_type: IrType) -> Option<IrId> {
         if args.len() != 1 {
             return None;
         }
-
         let value_reg = self.lower_expression(&args[0])?;
         let actual_ty = self
             .builder
@@ -7102,24 +7101,22 @@ impl<'a> HirToMirContext<'a> {
             self.box_value_for_dynamic(value_reg, args[0].ty)?
         };
 
-        if result_type == IrType::I32 {
-            let ordinal_fn = self.get_or_register_extern_function(
-                "haxe_type_typeof",
-                vec![dynamic_ptr_ty],
-                IrType::I32,
-            );
-            return self
-                .builder
-                .build_call_direct(ordinal_fn, vec![value_dyn], IrType::I32);
-        }
-
+        // Always use the boxed ValueType path (haxe_type_typeof_value) so that
+        // parameterized variants like TClass(c) and TEnum(e) carry their type_id
+        // payload. The I32 ordinal path loses this information, causing pattern
+        // matching like `case TEnum(_):` to fail.
         let value_fn = self.get_or_register_extern_function(
             "haxe_type_typeof_value",
-            vec![dynamic_ptr_ty],
+            vec![dynamic_ptr_ty.clone()],
             IrType::I64,
         );
-        self.builder
-            .build_call_direct(value_fn, vec![value_dyn], IrType::I64)
+        let result = self
+            .builder
+            .build_call_direct(value_fn, vec![value_dyn], IrType::I64)?;
+        // The I64 return is actually a pointer to a heap-allocated boxed enum.
+        // Cast to Ptr(U8) so pattern matching treats it as a boxed enum pointer
+        // rather than a plain integer (which would skip the tag-load path).
+        self.builder.build_cast(result, IrType::I64, dynamic_ptr_ty)
     }
 
     fn is_type_typeof_symbol(&self, symbol_id: SymbolId) -> bool {
@@ -8563,8 +8560,27 @@ impl<'a> HirToMirContext<'a> {
                         };
 
                         if let Some((class_name, method_name, runtime_call)) = stdlib_info {
-                            let runtime_func = runtime_call.runtime_name;
+                            let runtime_func_owned = runtime_call.runtime_name.to_string();
                             let is_mir_wrapper = runtime_call.is_mir_wrapper;
+                            let raw_value_params = runtime_call.raw_value_params;
+                            let extend_to_i64_params = runtime_call.extend_to_i64_params;
+                            let returns_raw_value = runtime_call.returns_raw_value;
+                            let has_return = runtime_call.has_return;
+                            let explicit_return_type =
+                                runtime_call.return_type.map(|rt| rt.to_ir_type());
+                            let has_self_param = runtime_call.has_self_param;
+                            let runtime_func: &str = &runtime_func_owned;
+
+                            // Try special runtime calls that need custom MIR lowering
+                            // (e.g., Type.typeof needs to return boxed ValueType enum)
+                            if let Some(special_result) = self.try_lower_special_runtime_call(
+                                runtime_func,
+                                args,
+                                result_type.clone(),
+                                expr.source_location,
+                            ) {
+                                return special_result;
+                            }
                             // Method redirected via runtime mapping
 
                             // Reflect.compare: redirect to haxe_reflect_compare_typed with type tag
@@ -8638,10 +8654,9 @@ impl<'a> HirToMirContext<'a> {
                                         // Check raw_value_params bitmask: bit (i+1) means param i+1
                                         // (bit 0 is self, bit 1 is first user arg, etc.)
                                         let param_bit = 1u32 << (i + 1);
-                                        if runtime_call.raw_value_params & param_bit != 0 {
+                                        if raw_value_params & param_bit != 0 {
                                             params.push(IrType::U64);
-                                        } else if runtime_call.extend_to_i64_params & param_bit != 0
-                                        {
+                                        } else if extend_to_i64_params & param_bit != 0 {
                                             params.push(IrType::I64);
                                         } else {
                                             params.push(self.convert_type(arg.ty));
@@ -8649,11 +8664,11 @@ impl<'a> HirToMirContext<'a> {
                                     }
                                     // Use explicit return type from types: descriptor when available,
                                     // otherwise fall back to legacy inference
-                                    let ret_type = if let Some(ref rt) = runtime_call.return_type {
-                                        rt.to_ir_type()
-                                    } else if runtime_call.returns_raw_value {
+                                    let ret_type = if let Some(ref rt) = explicit_return_type {
+                                        rt.clone()
+                                    } else if returns_raw_value {
                                         IrType::U64
-                                    } else if runtime_call.has_return {
+                                    } else if has_return {
                                         result_type.clone()
                                     } else {
                                         IrType::Void
@@ -8669,7 +8684,7 @@ impl<'a> HirToMirContext<'a> {
                             // the object is a class reference, NOT an instance receiver.
                             // The args already include the real receiver (first arg from `using` desugaring).
                             // Don't prepend the class reference as 'this'.
-                            let is_static_stdlib = !runtime_call.has_self_param;
+                            let is_static_stdlib = !has_self_param;
 
                             let mut arg_regs = if is_static_stdlib {
                                 Vec::new()
@@ -27995,7 +28010,6 @@ impl<'a> HirToMirContext<'a> {
     fn lower_pattern_test(&mut self, scrutinee: IrId, pattern: &HirPattern) -> Option<IrId> {
         // Test if scrutinee matches pattern
         // Returns a boolean IrId indicating match success
-
         match pattern {
             HirPattern::Variable { name, symbol } => {
                 // Variable pattern always matches. Don't bind here — binding happens
@@ -28035,13 +28049,14 @@ impl<'a> HirToMirContext<'a> {
                 let enum_symbol = self.resolve_enum_symbol(*enum_type);
                 let mut is_boxed = enum_symbol.map_or(false, |s| self.enum_is_boxed(s));
 
-                // If scrutinee is a scalar integer (I32/I64), force unboxed path.
-                // This handles cases like Type.typeof() which returns a plain ordinal
-                // even though ValueType has parameterized variants (TClass/TEnum).
-                // Treating a scalar as a pointer would SIGSEGV.
+                // Override boxed/unboxed based on scrutinee register type:
+                // - I32 scalar: force unboxed (plain discriminant, pointer would SIGSEGV)
+                // - Ptr: force boxed (e.g., Type.typeof() returns heap-allocated ValueType)
                 let scrut_type = self.builder.get_register_type(scrutinee);
-                if matches!(scrut_type, Some(IrType::I32) | Some(IrType::I64)) {
+                if matches!(scrut_type, Some(IrType::I32)) {
                     is_boxed = false;
+                } else if matches!(scrut_type, Some(IrType::Ptr(_))) {
+                    is_boxed = true;
                 }
 
                 let variant_discriminant = self
