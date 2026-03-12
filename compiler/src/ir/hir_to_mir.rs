@@ -993,7 +993,10 @@ impl<'a> HirToMirContext<'a> {
 
     /// Check if a type needs drop (convenience wrapper for get_drop_behavior)
     fn type_needs_drop(&self, type_id: TypeId) -> bool {
-        matches!(self.get_drop_behavior(type_id), DropBehavior::AutoDrop | DropBehavior::AutoDropWithDtor)
+        matches!(
+            self.get_drop_behavior(type_id),
+            DropBehavior::AutoDrop | DropBehavior::AutoDropWithDtor
+        )
     }
 
     /// Detect reflective Type allocation calls that return fresh class instances.
@@ -9250,19 +9253,16 @@ impl<'a> HirToMirContext<'a> {
                                         param_idx,
                                     );
                                     // @:derive(Copy): copy variable args at call boundary
-                                    let reg =
-                                        if let HirExprKind::Variable { .. } = &arg.kind {
-                                            if let Some(class_sym) =
-                                                self.get_copy_class_symbol(arg.ty)
-                                            {
-                                                self.emit_shallow_copy(reg, class_sym)
-                                                    .unwrap_or(reg)
-                                            } else {
-                                                reg
-                                            }
+                                    let reg = if let HirExprKind::Variable { .. } = &arg.kind {
+                                        if let Some(class_sym) = self.get_copy_class_symbol(arg.ty)
+                                        {
+                                            self.emit_shallow_copy(reg, class_sym).unwrap_or(reg)
                                         } else {
                                             reg
-                                        };
+                                        }
+                                    } else {
+                                        reg
+                                    };
                                     if callee_is_user_defined {
                                         let is_heap_intermediate = matches!(
                                             &arg.kind,
@@ -15193,19 +15193,16 @@ impl<'a> HirToMirContext<'a> {
                                         param_idx,
                                     );
                                     // @:derive(Copy): copy variable args at call boundary
-                                    let reg =
-                                        if let HirExprKind::Variable { .. } = &arg.kind {
-                                            if let Some(class_sym) =
-                                                self.get_copy_class_symbol(arg.ty)
-                                            {
-                                                self.emit_shallow_copy(reg, class_sym)
-                                                    .unwrap_or(reg)
-                                            } else {
-                                                reg
-                                            }
+                                    let reg = if let HirExprKind::Variable { .. } = &arg.kind {
+                                        if let Some(class_sym) = self.get_copy_class_symbol(arg.ty)
+                                        {
+                                            self.emit_shallow_copy(reg, class_sym).unwrap_or(reg)
                                         } else {
                                             reg
-                                        };
+                                        }
+                                    } else {
+                                        reg
+                                    };
                                     if callee_is_user_defined {
                                         let is_heap_intermediate = matches!(
                                             &arg.kind,
@@ -24544,11 +24541,7 @@ impl<'a> HirToMirContext<'a> {
 
     /// @:derive(Copy) — emit a shallow (bitwise) copy of a class instance.
     /// All fields must be primitives (enforced at validation time).
-    fn emit_shallow_copy(
-        &mut self,
-        src_reg: IrId,
-        class_sym: SymbolId,
-    ) -> Option<IrId> {
+    fn emit_shallow_copy(&mut self, src_reg: IrId, class_sym: SymbolId) -> Option<IrId> {
         let fields = self.class_instance_fields.get(&class_sym)?.clone();
 
         // Allocate: (num_fields + 1) * 8  (slot 0 = type_id header)
@@ -24593,11 +24586,7 @@ impl<'a> HirToMirContext<'a> {
 
     /// @:derive(Copy) — copy any Copy-typed variable arguments at call boundaries.
     /// Returns new arg_regs with copies substituted for Copy-type variables.
-    fn maybe_copy_call_args(
-        &mut self,
-        args: &[HirExpr],
-        arg_regs: Vec<IrId>,
-    ) -> Vec<IrId> {
+    fn maybe_copy_call_args(&mut self, args: &[HirExpr], arg_regs: Vec<IrId>) -> Vec<IrId> {
         if self.derive_copy_classes.is_empty() {
             return arg_regs;
         }
@@ -24647,19 +24636,26 @@ impl<'a> HirToMirContext<'a> {
         let method_sym = match self.resolve_class_method_symbol(class_sym, drop_name) {
             Some(sym) => sym,
             None => {
-                trace!("Drop: Could not find drop() method for class {:?}", class_sym);
+                trace!(
+                    "Drop: Could not find drop() method for class {:?}",
+                    class_sym
+                );
                 return;
             }
         };
         let func_id = match self.get_function_id(&method_sym) {
             Some(id) => id,
             None => {
-                trace!("Drop: Could not find IrFunctionId for drop() method {:?}", method_sym);
+                trace!(
+                    "Drop: Could not find IrFunctionId for drop() method {:?}",
+                    method_sym
+                );
                 return;
             }
         };
         // Call drop(this) — the object pointer is passed as the receiver
-        self.builder.build_call_direct(func_id, vec![obj_reg], IrType::Void);
+        self.builder
+            .build_call_direct(func_id, vec![obj_reg], IrType::Void);
     }
 
     /// @:derive(Drop) — conditionally emit drop() call before Free for an IrId.
