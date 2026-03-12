@@ -11,10 +11,15 @@
       name="description"
       content="A next-generation Haxe compiler with 5-tier JIT, ownership-based memory, and LLVM-powered native code generation. Built with Rust."
     />
+    <meta name="keywords" content="Haxe compiler, JIT compilation, LLVM, native code, Rust, programming language, ownership memory, AOT compiler, cross-platform" />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
+    <meta name="theme-color" content="#f97316" />
+    <link rel="canonical" href="https://rayzor-blade.com/" />
 
     <!-- Facebook Meta Tags -->
     <meta property="og:url" content="https://rayzor-blade.com/" />
     <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="Rayzor" />
     <meta
       property="og:title"
       content="Rayzor — High Performance Haxe Compiler"
@@ -24,6 +29,9 @@
       content="A next-generation Haxe compiler with 5-tier JIT, ownership-based memory, and LLVM-powered native code generation."
     />
     <meta property="og:image" content="https://rayzor-blade.com/ograph-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:type" content="image/png" />
 
     <!-- Twitter Meta Tags -->
     <meta name="twitter:card" content="summary_large_image" />
@@ -38,13 +46,52 @@
       content="A next-generation Haxe compiler with 5-tier JIT, ownership-based memory, and LLVM-powered native code generation."
     />
     <meta name="twitter:image" content="https://rayzor-blade.com/ograph-image.png" />
+    <meta name="twitter:image:width" content="1200" />
+    <meta name="twitter:image:height" content="630" />
 
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="dns-prefetch" href="https://cdn.simpleicons.org" />
     <link
       href="https://fonts.googleapis.com/css2?family=Geom:ital,wght@0,300..900;1,300..900&family=JetBrains+Mono:wght@300;400;500&display=swap"
       rel="stylesheet"
     />
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "SoftwareApplication",
+      "name": "Rayzor",
+      "description": "A next-generation Haxe compiler with 5-tier JIT, ownership-based memory, and LLVM-powered native code generation. Built with Rust.",
+      "url": "https://rayzor-blade.com/",
+      "applicationCategory": "DeveloperApplication",
+      "operatingSystem": "Windows, macOS, Linux",
+      "license": "https://opensource.org/licenses/Apache-2.0",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "USD"
+      },
+      "author": {
+        "@type": "Organization",
+        "name": "Rayzor",
+        "url": "https://rayzor-blade.com/"
+      },
+      "downloadUrl": "https://github.com/rayzor-blade/rayzor",
+      "softwareRequirements": "Rust toolchain"
+    }
+    </script>
+    <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "Organization",
+      "name": "Rayzor",
+      "url": "https://rayzor-blade.com/",
+      "logo": "https://rayzor-blade.com/favicon.svg",
+      "sameAs": [
+        "https://github.com/rayzor-blade/rayzor"
+      ]
+    }
+    </script>
     <script>
       // Prevent flash of wrong theme on load
       (function(){
@@ -2021,6 +2068,7 @@
     </style>
   </head>
   <body>
+    <a href="#main-content" class="skip-link" style="position:absolute;top:-40px;left:0;background:#f97316;color:#fff;padding:8px 16px;z-index:10000;font-size:14px;transition:top .2s;" onfocus="this.style.top='0'" onblur="this.style.top='-40px'">Skip to main content</a>
     <!-- NAV -->
     <nav class="nav" id="nav">
       <a href="#" class="nav-brand">
@@ -2035,9 +2083,9 @@
         <span>Rayzor</span>
       </a>
       <div class="nav-links">
-        <a href="https://github.com/rayzor-blade/rayzor" target="_blank">GitHub</a>
-        <a href="/benchmarks/" target="_blank">Benchmarks</a>
-        <a href="https://github.com/rayzor-blade/rayzor/blob/main/README.md" target="_blank">Docs</a>
+        <a href="https://github.com/rayzor-blade/rayzor" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a href="/benchmarks/" target="_blank" rel="noopener noreferrer">Benchmarks</a>
+        <a href="https://github.com/rayzor-blade/rayzor/blob/main/README.md" target="_blank" rel="noopener noreferrer">Docs</a>
         <button class="theme-toggle" id="themeToggle" aria-label="Toggle theme" title="Toggle theme">
           <svg class="theme-icon-sun" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
           <svg class="theme-icon-moon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
@@ -2052,9 +2100,9 @@
     </nav>
 
     <div class="nav-mobile" id="mobileMenu">
-      <a href="https://github.com/rayzor-blade/rayzor" target="_blank">GitHub</a>
-      <a href="/benchmarks/" target="_blank">Benchmarks</a>
-      <a href="https://github.com/rayzor-blade/rayzor/blob/main/README.md" target="_blank">Docs</a>
+      <a href="https://github.com/rayzor-blade/rayzor" target="_blank" rel="noopener noreferrer">GitHub</a>
+      <a href="/benchmarks/" target="_blank" rel="noopener noreferrer">Benchmarks</a>
+      <a href="https://github.com/rayzor-blade/rayzor/blob/main/README.md" target="_blank" rel="noopener noreferrer">Docs</a>
       <a href="#getting-started">Get Started</a>
       <button class="theme-toggle" id="themeToggleMobile" aria-label="Toggle theme" title="Toggle theme">
         <svg class="theme-icon-sun" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="5"/><line x1="12" y1="1" x2="12" y2="3"/><line x1="12" y1="21" x2="12" y2="23"/><line x1="4.22" y1="4.22" x2="5.64" y2="5.64"/><line x1="18.36" y1="18.36" x2="19.78" y2="19.78"/><line x1="1" y1="12" x2="3" y2="12"/><line x1="21" y1="12" x2="23" y2="12"/><line x1="4.22" y1="19.78" x2="5.64" y2="18.36"/><line x1="18.36" y1="5.64" x2="19.78" y2="4.22"/></svg>
@@ -2062,7 +2110,7 @@
       </button>
     </div>
 
-    <main>
+    <main id="main-content">
       <!-- HERO -->
       <div class="hero-backdrop">
         <div class="blob blob-1"></div>
@@ -2110,8 +2158,8 @@
 
         <div class="hero-badges">
           <span class="badge"><svg class="badge-icon" style="opacity:1" viewBox="44 97 710 500" fill="none" xmlns="http://www.w3.org/2000/svg"><path d="M117 197C117 165.519 142.519 140 174 140H563C594.481 140 620 165.519 620 197C620 228.481 594.481 254 563 254H334C316.327 254 302 268.327 302 286V314C302 331.673 316.327 346 334 346H681C712.481 346 738 371.519 738 403C738 434.481 712.481 460 681 460H334C316.327 460 302 474.327 302 492V520C302 551.481 276.481 577 245 577C213.519 577 188 551.481 188 520V492C188 474.327 173.673 460 156 460H144C112.519 460 87 434.481 87 403C87 371.519 112.519 346 144 346H466C483.673 346 498 331.673 498 314V286C498 268.327 483.673 254 466 254H174C142.519 254 117 228.481 117 197Z" fill="#000"/><circle cx="682" cy="177" r="37" fill="#000"/><circle cx="153" cy="540" r="43" fill="#000"/><rect x="618" y="492" width="120" height="85" rx="42.5" fill="#000"/></svg> Cranelift</span>
-          <span class="badge"><img class="badge-icon" src="https://cdn.simpleicons.org/llvm/000000" style="opacity:1" alt="LLVM"> LLVM</span>
-          <span class="badge"><img class="badge-icon" src="https://cdn.simpleicons.org/apache/D22128" alt="Apache"> Apache 2.0</span>
+          <span class="badge"><img class="badge-icon" src="https://cdn.simpleicons.org/llvm/000000" style="opacity:1" alt="LLVM" loading="lazy"> LLVM</span>
+          <span class="badge"><img class="badge-icon" src="https://cdn.simpleicons.org/apache/D22128" alt="Apache 2.0 License" loading="lazy"> Apache 2.0</span>
         </div>
 
         <div class="hero-ctas">
@@ -2119,7 +2167,7 @@
           <a
             href="https://github.com/darmie/rayzor"
             class="btn btn-secondary"
-            target="_blank"
+            target="_blank" rel="noopener noreferrer"
           >
             <svg viewBox="0 0 24 24" fill="currentColor">
               <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z" />
@@ -2771,7 +2819,7 @@ rayzor bundle main.hx <span class="cf">--output</span> app.rzb</pre>
               with Cargo, and start compiling Haxe files with native performance.
             </p>
             <div class="gs-links">
-              <a href="https://github.com/rayzor-blade/rayzor/blob/main/README.md" target="_blank" class="gs-link">
+              <a href="https://github.com/rayzor-blade/rayzor/blob/main/README.md" target="_blank" rel="noopener noreferrer" class="gs-link">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
                   <polyline points="14 2 14 8 20 8"></polyline>
@@ -2780,7 +2828,7 @@ rayzor bundle main.hx <span class="cf">--output</span> app.rzb</pre>
                 </svg>
                 Read the Documentation
               </a>
-              <a href="/benchmarks/" target="_blank" class="gs-link">
+              <a href="/benchmarks/" target="_blank" rel="noopener noreferrer" class="gs-link">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <line x1="18" y1="20" x2="18" y2="10"></line>
                   <line x1="12" y1="20" x2="12" y2="4"></line>
@@ -2788,7 +2836,7 @@ rayzor bundle main.hx <span class="cf">--output</span> app.rzb</pre>
                 </svg>
                 View Benchmarks
               </a>
-              <a href="https://github.com/rayzor-blade/rayzor/tree/main/compiler/examples" target="_blank" class="gs-link">
+              <a href="https://github.com/rayzor-blade/rayzor/tree/main/compiler/examples" target="_blank" rel="noopener noreferrer" class="gs-link">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <polyline points="16 18 22 12 16 6"></polyline>
                   <polyline points="8 6 2 12 8 18"></polyline>
@@ -2806,6 +2854,7 @@ rayzor bundle main.hx <span class="cf">--output</span> app.rzb</pre>
         <h2 class="section-title fade-in">Rayzor vs. Official Haxe Compiler</h2>
         <div class="table-wrap fade-in">
           <table class="comparison-table">
+            <caption style="caption-side:top;text-align:left;font-size:0.85rem;color:var(--text-muted);margin-bottom:0.5rem;">Feature comparison between Rayzor and the official Haxe compiler</caption>
             <thead>
               <tr>
                 <th>Feature</th>
@@ -2878,12 +2927,12 @@ rayzor bundle main.hx <span class="cf">--output</span> app.rzb</pre>
     <!-- FOOTER -->
     <footer class="footer">
       <div class="footer-links">
-        <a href="https://github.com/rayzor-blade/rayzor" target="_blank">GitHub</a>
-        <a href="/benchmarks/" target="_blank">Benchmarks</a>
-        <a href="https://github.com/rayzor-blade/rayzor/blob/main/README.md" target="_blank">Documentation</a>
-        <a href="https://github.com/rayzor-blade/rayzor/blob/main/LICENSE" target="_blank">License</a>
-        <a href="https://github.com/rayzor-blade/rayzor/issues" target="_blank">Issues</a>
-        <a href="https://github.com/rayzor-blade/rayzor/discussions" target="_blank">Discussions</a>
+        <a href="https://github.com/rayzor-blade/rayzor" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <a href="/benchmarks/" target="_blank" rel="noopener noreferrer">Benchmarks</a>
+        <a href="https://github.com/rayzor-blade/rayzor/blob/main/README.md" target="_blank" rel="noopener noreferrer">Documentation</a>
+        <a href="https://github.com/rayzor-blade/rayzor/blob/main/LICENSE" target="_blank" rel="noopener noreferrer">License</a>
+        <a href="https://github.com/rayzor-blade/rayzor/issues" target="_blank" rel="noopener noreferrer">Issues</a>
+        <a href="https://github.com/rayzor-blade/rayzor/discussions" target="_blank" rel="noopener noreferrer">Discussions</a>
       </div>
       <p class="footer-copy">Apache License 2.0 — Built with Rust</p>
     </footer>
