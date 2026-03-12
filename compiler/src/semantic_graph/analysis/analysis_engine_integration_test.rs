@@ -619,8 +619,10 @@ mod integration_tests {
             MoveType::Explicit,
         );
 
-        // Add a use of the moved variable after the move (violation)
-        // This would be detected by checking for uses after move edges
+        // Record a use of the moved variable after the move (violation)
+        graphs
+            .ownership_graph
+            .record_use(moved_var, SourceLocation::new(0, 2, 1, 0));
 
         graphs
     }
