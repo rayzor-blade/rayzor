@@ -1999,11 +1999,47 @@ impl HaxeCompilationPipeline {
                                 MoveType::Explicit,
                             );
                         }
+                        // Also check for nested uses/moves in the initializer
+                        self.check_expression_for_use(ownership_graph, init_expr);
                     }
                 }
                 TypedStatement::Expression { expression, .. } => {
-                    // Check for member access that might use moved variables
                     self.check_expression_for_use(ownership_graph, expression);
+                }
+                TypedStatement::Return { value, .. } => {
+                    if let Some(ret_expr) = value {
+                        self.check_expression_for_use(ownership_graph, ret_expr);
+                    }
+                }
+                TypedStatement::If {
+                    condition,
+                    then_branch,
+                    else_branch,
+                    ..
+                } => {
+                    self.check_expression_for_use(ownership_graph, condition);
+                    self.populate_ownership_from_statements(
+                        ownership_graph,
+                        std::slice::from_ref(then_branch.as_ref()),
+                    );
+                    if let Some(else_stmt) = else_branch {
+                        self.populate_ownership_from_statements(
+                            ownership_graph,
+                            std::slice::from_ref(else_stmt.as_ref()),
+                        );
+                    }
+                }
+                TypedStatement::While {
+                    condition, body, ..
+                } => {
+                    self.check_expression_for_use(ownership_graph, condition);
+                    self.populate_ownership_from_statements(
+                        ownership_graph,
+                        std::slice::from_ref(body.as_ref()),
+                    );
+                }
+                TypedStatement::Block { statements, .. } => {
+                    self.populate_ownership_from_statements(ownership_graph, statements);
                 }
                 _ => {}
             }
@@ -2021,8 +2057,8 @@ impl HaxeCompilationPipeline {
 
         match &expr.kind {
             TypedExpressionKind::Variable { symbol_id } => {
-                // This is a use of a variable - check if it's been moved
-                // The ownership analyzer will detect use-after-move violations later
+                // Record this as a use site for the variable
+                ownership_graph.record_use(*symbol_id, expr.source_location);
             }
             TypedExpressionKind::FieldAccess { object, .. } => {
                 self.check_expression_for_use(ownership_graph, object);
@@ -2034,6 +2070,46 @@ impl HaxeCompilationPipeline {
             } => {
                 self.check_expression_for_use(ownership_graph, function);
                 for arg in arguments {
+                    // If a variable is passed as a function argument, record it as a move
+                    if let TypedExpressionKind::Variable { symbol_id } = &arg.kind {
+                        ownership_graph.add_move(
+                            *symbol_id,
+                            None,
+                            arg.source_location,
+                            MoveType::FunctionCall,
+                        );
+                    }
+                    self.check_expression_for_use(ownership_graph, arg);
+                }
+            }
+            TypedExpressionKind::MethodCall {
+                receiver,
+                arguments,
+                ..
+            } => {
+                self.check_expression_for_use(ownership_graph, receiver);
+                for arg in arguments {
+                    if let TypedExpressionKind::Variable { symbol_id } = &arg.kind {
+                        ownership_graph.add_move(
+                            *symbol_id,
+                            None,
+                            arg.source_location,
+                            MoveType::FunctionCall,
+                        );
+                    }
+                    self.check_expression_for_use(ownership_graph, arg);
+                }
+            }
+            TypedExpressionKind::StaticMethodCall { arguments, .. } => {
+                for arg in arguments {
+                    if let TypedExpressionKind::Variable { symbol_id } = &arg.kind {
+                        ownership_graph.add_move(
+                            *symbol_id,
+                            None,
+                            arg.source_location,
+                            MoveType::FunctionCall,
+                        );
+                    }
                     self.check_expression_for_use(ownership_graph, arg);
                 }
             }
@@ -2107,6 +2183,11 @@ impl HaxeCompilationPipeline {
             } => {
                 self.check_expression_for_use(ownership_graph, condition);
                 self.check_statement_for_use(ownership_graph, body);
+            }
+            TypedStatement::Block { statements, .. } => {
+                for s in statements {
+                    self.check_statement_for_use(ownership_graph, s);
+                }
             }
             _ => {}
         }
@@ -2575,25 +2656,28 @@ impl HaxeCompilationPipeline {
                 let (message, location, suggestion) = match violation {
                     crate::semantic_graph::OwnershipViolation::UseAfterMove {
                         variable,
+                        use_location,
                         move_location,
-                        move_type,
+                        ..
                     } => {
                         let var_name = self.get_variable_name(variable, symbol_table, typed_file);
 
-                        // Provide Haxe-specific suggestions
                         let suggestion = format!(
                             "To fix this use-after-move error, you can:\n\
                              1. Clone the value before moving: `var y = {0}.clone();`\n\
                              2. Use a borrow instead: Add `@:borrow` annotation to the parameter\n\
                              3. Use the value after the move instead of before\n\
                              4. For shared ownership, use `@:rc` or `@:arc` on the class\n\
-                             Note: Haxe variables are mutable by default (var). Use 'final' for immutable bindings.",
-                            var_name
+                             Note: Variable was moved at line {1}, then used at line {2}.",
+                            var_name, move_location.line, use_location.line
                         );
 
                         (
-                            format!("Use after move: variable '{}' was moved", var_name),
-                            move_location,
+                            format!(
+                                "Use after move: variable '{}' was moved at line {} and used at line {}",
+                                var_name, move_location.line, use_location.line
+                            ),
+                            use_location,
                             suggestion,
                         )
                     }
