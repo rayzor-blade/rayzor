@@ -5292,27 +5292,45 @@ impl<'a> HirToMirContext<'a> {
             // Return None to let the caller's fallback chain handle resolution.
             // The caller has context-specific handlers (Dynamic method handler, function_map, etc.)
             // that work better than brute-force stdlib search for these cases.
-            TypeKind::Placeholder { name: placeholder_name } => {
+            TypeKind::Placeholder {
+                name: placeholder_name,
+            } => {
                 // Use the Placeholder name to derive the class for stdlib lookup.
                 // e.g., "rayzor.Bytes" → try "rayzor_Bytes", "Bytes"
-                let ph_name = self.string_interner.get(*placeholder_name).map(|s| s.to_string());
+                let ph_name = self
+                    .string_interner
+                    .get(*placeholder_name)
+                    .map(|s| s.to_string());
                 drop(type_table);
                 if let Some(ref ph) = ph_name {
                     let underscore_name = ph.replace(".", "_");
                     let bare_name = ph.rsplit('.').next().unwrap_or(ph);
                     // Try qualified underscore name (e.g., "rayzor_Bytes")
                     if let Some(count) = param_count {
-                        if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(&underscore_name, method_name, count) {
+                        if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(
+                            &underscore_name,
+                            method_name,
+                            count,
+                        ) {
                             return Some((sig.class, sig.method, mapping));
                         }
-                        if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(bare_name, method_name, count) {
+                        if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name_and_params(
+                            bare_name,
+                            method_name,
+                            count,
+                        ) {
                             return Some((sig.class, sig.method, mapping));
                         }
                     }
-                    if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(&underscore_name, method_name) {
+                    if let Some((sig, mapping)) = self
+                        .stdlib_mapping
+                        .find_by_name(&underscore_name, method_name)
+                    {
                         return Some((sig.class, sig.method, mapping));
                     }
-                    if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(bare_name, method_name) {
+                    if let Some((sig, mapping)) =
+                        self.stdlib_mapping.find_by_name(bare_name, method_name)
+                    {
                         return Some((sig.class, sig.method, mapping));
                     }
                 }
@@ -5322,21 +5340,24 @@ impl<'a> HirToMirContext<'a> {
                     if parts.len() >= 2 {
                         let class_parts = &parts[..parts.len() - 1];
                         let underscore_class = class_parts.join("_");
-                        if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(&underscore_class, method_name) {
+                        if let Some((sig, mapping)) = self
+                            .stdlib_mapping
+                            .find_by_name(&underscore_class, method_name)
+                        {
                             return Some((sig.class, sig.method, mapping));
                         }
                     }
                 }
                 if let Some(hint) = receiver_class_hint {
-                    if let Some((sig, mapping)) = self.stdlib_mapping.find_by_name(hint, method_name) {
+                    if let Some((sig, mapping)) =
+                        self.stdlib_mapping.find_by_name(hint, method_name)
+                    {
                         return Some((sig.class, sig.method, mapping));
                     }
                 }
                 return None;
             }
-            TypeKind::TypeParameter { .. }
-            | TypeKind::Dynamic
-            | TypeKind::Unknown => {
+            TypeKind::TypeParameter { .. } | TypeKind::Dynamic | TypeKind::Unknown => {
                 drop(type_table);
                 // Try qualified_name if available (e.g., for user-class methods like "test.Counter.increment")
                 if let Some(qname) = qualified_name {
@@ -29613,7 +29634,9 @@ impl<'a> HirToMirContext<'a> {
                             if let TypeKind::Class { symbol_id, .. } = &ti.kind {
                                 if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
                                     let sym_name = self.string_interner.get(sym.name).unwrap_or("");
-                                    let sym_qname = sym.qualified_name.and_then(|qn| self.string_interner.get(qn));
+                                    let sym_qname = sym
+                                        .qualified_name
+                                        .and_then(|qn| self.string_interner.get(qn));
                                     let matches = sym_qname.map_or(false, |qn| qn == name_str)
                                         || sym_name == name_str
                                         || sym_name == bare_name
