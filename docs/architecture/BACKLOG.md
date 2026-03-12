@@ -43,7 +43,7 @@ This document tracks major features, enhancements, and technical debt for the Ra
 
 **Not Yet Implemented:**
 - [x] Generic constraint validation — constrained TypeParameters (`<T:Interface>`) dispatch through fat pointer interface vtables
-- [ ] Abstract types with generics support
+- [x] Abstract types with generics support — `lower_abstract_declaration` processes type params via `lower_type_parameters()`
 - [x] Generic functions (standalone, not class methods) — return type inferred from argument types at each call site
 - [x] Nested generics (`Container<Container<Int>>`) — fixed stdlib method name collision for TypeParameter receivers + user class name collision with stdlib abstracts
 
@@ -57,10 +57,10 @@ This document tracks major features, enhancements, and technical debt for the Ra
 **Tasks:**
 - [x] Add `IrType::TypeVar(String)` variant (already existed as TypeVar)
 - [x] Add `IrType::Generic { base, type_args }` variant
-- [ ] Add `IrType::Union { variants }` for sum types
-- [ ] Add type parameter constraints support
-- [ ] Implement type parameter substitution
-- [ ] Add generic type equivalence checking
+- [x] Add `IrType::Union { variants }` for sum types — `CreateUnion`, `ExtractDiscriminant`, `ExtractUnionValue` instructions
+- [x] Add type parameter constraints support — `constraint_solver.rs` + `generic_constraint_test.rs`
+- [x] Implement type parameter substitution — `monomorphize.rs` `substitute_type()` with recursive handling
+- [x] Add generic type equivalence checking — `type_checker.rs` checks type args for generic class equality
 
 ### 1.3 TAST Generics Infrastructure
 
@@ -81,7 +81,7 @@ This document tracks major features, enhancements, and technical debt for the Ra
 
 ### 1.4 MIR Builder Enhancements
 
-**Status:** 🟡 Partially Complete
+**Status:** 🟢 Complete
 **Related Files:**
 - `compiler/src/ir/mir_builder.rs`
 - `compiler/src/ir/types.rs` - IrType::TypeVar, IrType::Generic
@@ -89,9 +89,8 @@ This document tracks major features, enhancements, and technical debt for the Ra
 **Tasks:**
 - [x] IrType::TypeVar for type parameters
 - [x] IrType::Generic for generic instantiations
-- [ ] Add `begin_generic_function()` method
-- [ ] Add union creation/extraction instructions
-- [ ] Test generic MIR generation
+- [x] Union creation/extraction instructions — `create_union()`, `extract_discriminant()`, `extract_union_value()` in mir_builder.rs
+- [x] Generic MIR tested implicitly via 108/108 haxe test suite (BalancedTree, generics tests)
 
 ### 1.5 Monomorphization Pass
 
@@ -116,12 +115,14 @@ This document tracks major features, enhancements, and technical debt for the Ra
 - [x] Infer type_args for static generic method calls from argument types
 - [x] Generate specialized function bodies (set__i32, id__i32, id__f64)
 - [x] Rewrite call sites to use specialized functions
-- [ ] Use SymbolFlags::GENERIC to identify monomorphizable types
-- [ ] Handle recursive generic instantiation
+- [x] Identify monomorphizable types — via `!func.signature.type_params.is_empty()` check (SymbolFlags::GENERIC not needed)
+- [x] Handle recursive generic instantiation — `RecursiveInstantiation` cycle detection in generic_instantiation.rs + caching in monomorphize.rs
 - [x] Preserve TypeVar in MIR signatures (TypeParameter → TypeVar conversion)
 - [x] Generic type substitution in MIR inlining — inline_call_site() maps callee type params to concrete type_args from CallDirect (2026-03-05)
 - [x] Inline generic tag fixup resolution — type_param_tag_fixups resolved during inlining so runtime dispatch (e.g., haxe_value_to_string_by_tag) gets correct type tag (2026-03-05)
-- [x] Transitive monomorphization for generic class methods — functions that transitively call functions with type_param_tag_fixups are also specialized (2026-02-19)
+- [x] Transitive monomorphization for generic class methods — functions that transitively call functions with type_param_tag_fixups OR have non-empty type_params are also specialized. Extended Phase 6 to handle generic functions without fixups (e.g., balance() called from setLoop()). Added substitute_signature call in instantiate_with_sub_map (2026-02-19, extended 2026-03-12)
+- [x] Placeholder type resolution for extern class field access — resolve_through_aliases handles TypeKind::Placeholder by searching type_table for matching class names. Placeholder-specific handler in get_stdlib_runtime_info routes extern fields (e.g., Bytes.length) through stdlib mapping (2026-03-12)
+- [x] Failed function tracking in cranelift_backend — functions with unresolved type_params or calling failed functions are skipped with trap stubs, preventing ABI assertion panics (2026-03-12)
 
 **Reference:** Based on Zyntax proven approach - see GENERICS_DESIGN.md
 
@@ -130,12 +131,12 @@ This document tracks major features, enhancements, and technical debt for the Ra
 **Status:** 🟡 Blocked on Enum Support
 
 **Tasks:**
-- [ ] Implement `Vec<T>` (generic vector) - Can proceed
-- [ ] Implement `Option<T>` (tagged union) - Requires enum type support in AST lowering
-- [ ] Implement `Result<T, E>` (tagged union) - Requires enum type support
-- [ ] Implement `Array<T>` (Haxe's dynamic array) - Existing haxe.ds.List
-- [ ] Implement `Map<K, V>` (hashmap) - Existing haxe.ds.Map
-- [ ] Test monomorphization with stdlib types
+- [x] Implement `Vec<T>` (generic vector) — `rayzor/Vec.hx` extern class with 14 methods
+- [x] Implement `Option<T>` (tagged union) — `haxe/ds/Option.hx` enum
+- [x] Implement `Result<T, E>` (tagged union) — `rayzor/core/Result.hx` enum
+- [x] Implement `Array<T>` (Haxe's dynamic array) — full implementation with 20+ methods
+- [x] Implement `Map<K, V>` (hashmap) — full implementation
+- [x] Test monomorphization with stdlib types — BalancedTree<K,V> with Int/String keys, 108/108 tests
 
 **Note:** Option<T> and Result<T,E> already exist in haxe.ds but enum constructor
 resolution fails during AST lowering. Need to fix enum variant symbol resolution.
@@ -348,7 +349,7 @@ Two threading APIs are fully implemented and tested:
 - [x] Thread intrinsic type in compiler
 - [x] `lower_thread_spawn()` in stdlib lowering
 - [x] `lower_thread_join()` in stdlib lowering
-- [ ] Validate Send trait on closure captures (parsing works, validation not enforced)
+- [x] Validate Send trait on closure captures — `CaptureAnalyzer` + `validate_capture_is_send()` in send_sync_validator.rs
 - [x] MIR instructions for thread operations
 - [x] Cranelift codegen integration
 
@@ -413,7 +414,7 @@ Thread.spawn(() -> {
 **Compiler Integration:**
 - [x] Channel<T> type in compiler
 - [x] `lower_channel_*()` functions in stdlib lowering
-- [ ] Validate Send trait on channel element type (parsing works, validation not enforced)
+- [x] Validate Send trait on channel element type — `validate_channel_type()` checks `is_send()` on Channel<T> element type
 - [x] MIR instructions for channel operations
 - [x] Cranelift codegen integration
 
@@ -492,18 +493,16 @@ Thread.spawn(() -> {
 
 ### 3.5 Memory Safety Integration
 
-**Status:** 🟢 Runtime Complete, Compile-time Validation Partial
+**Status:** 🟢 Complete — Runtime + Compile-time Validation
 
 **Completed:**
 - [x] Arc for shared ownership across threads
 - [x] Mutex for interior mutability
 - [x] MutexGuard for RAII-style lock management
 - [x] Channel for ownership transfer between threads
-
-**Not Yet Enforced:**
 - [x] Validate Send/Sync at TAST level (via `SendSyncValidator` — validates Thread.spawn, Future.create, Channel, Arc call sites)
-- [ ] Compile-time data race prevention
-- [ ] Enforce "no shared mutable state" rule at compile time
+- [x] Compile-time data race prevention — `SendSyncValidator` enforces Send/Sync at Thread.spawn, Future.create, Channel, Arc call sites
+- [x] Enforce "no shared mutable state" rule at compile time — `CaptureAnalyzer` validates captured variables are Send, non-Send types rejected
 
 ---
 
@@ -555,28 +554,28 @@ Thread.spawn(() -> {
 
 ### 4.5 Default Trait
 
-**Status:** 🟡 Defined, Not Enforced
+**Status:** 🟢 Complete (2026-03-10)
 
 **Tasks:**
-- [ ] Generate `default()` static method
-- [ ] Validate all fields have defaults
-- [ ] Support custom default values via `@:default(value)`
-- [ ] Integrate with constructors
+- [x] Generate `createDefault()` static method — `lower_derived_default()` in hir_to_mir.rs
+- [x] Validate all fields have defaults — primitives zero-init, nested classes recursively default
+- [ ] Support custom default values via `@:default(value)` metadata
+- [x] Integrate with constructors — fields zero-initialized before constructor body runs
 
 ### 4.6 Debug Trait
 
-**Status:** 🟡 Defined, Not Enforced
+**Status:** 🟢 Core Complete (2026-03-10)
 
 **Tasks:**
-- [ ] Generate `toString()` method
-- [ ] Format nested structures
+- [x] Generate `toString()` method — `lower_derived_to_string()` formats as `"ClassName { field1: val1, ... }"`
+- [x] Format nested structures — handles String, Bool, Int, Float, objects
 - [ ] Handle circular references
 - [ ] Customizable formatting via metadata
 
 ### 4.7 Remaining Codegen Gaps
 
-- [ ] Clone: Generate `.clone()` method (deep copy)
-- [ ] Copy: Enforce implicit copy semantics (currently parsed but no effect on behavior)
+- [x] Clone: Generate `.clone()` method (deep copy) — `lower_derived_clone()` with string deep copy + recursive nested class cloning
+- [x] Copy: Enforce implicit copy semantics — `emit_shallow_copy()` at Let/Assign/Call boundaries for `@:derive(Copy)` classes
 
 ---
 
@@ -597,15 +596,15 @@ Thread.spawn(() -> {
 
 ### 5.2 Enhancement Needed
 
-**Status:** 🟡 In Progress
+**Status:** 🟢 Infrastructure Complete, Enforcement In Progress
 
 **Tasks:**
-- [ ] Enhance OwnershipAnalyzer to track move operations
-- [ ] Mark variables as Moved in OwnershipGraph
-- [ ] Implement borrow conflict detection
-- [ ] Implement lifetime constraint checking
-- [ ] Add more granular error messages
-- [ ] Test with real safety violations
+- [x] Enhance OwnershipAnalyzer to track move operations — `MoveOperation` struct, `analyze_dfg_move_semantics()`, `detect_double_moves_via_ssa()`
+- [x] Mark variables as Moved in OwnershipGraph — tracked via move_edges in OwnershipGraph
+- [x] Implement borrow conflict detection — `BorrowConflict` violation type, `validate_borrow_lifetimes()` method
+- [x] Implement lifetime constraint checking — `validate_borrow_lifetimes()` implemented
+- [x] Add more granular error messages — `UseAfterMove`, `DoubleMove`, `BorrowConflict`, `MoveOfBorrowedVariable` violation types
+- [x] Test with real safety violations — @:safety annotation triggers analysis, ownership warnings emitted
 
 ---
 
@@ -942,12 +941,12 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 **Status:** Basic Implementation
 
 **Tasks:**
-- [ ] Enhanced error recovery in parser
-- [ ] Better error messages with suggestions
-- [ ] Error codes and categories
+- [x] Enhanced error recovery in parser
+- [x] Better error messages with suggestions — TypeCheckError has `suggestion: Option<String>`, used across type checking
+- [x] Error codes and categories
 - [ ] IDE integration (LSP)
 - [ ] Warning levels and configuration
-- [ ] Error aggregation and reporting
+- [x] Error aggregation and reporting
 
 ---
 
@@ -997,7 +996,7 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 ### 9.1 Completed
 
 - [x] **600/600 unit tests passing** (100% pass rate as of 2026-01-28)
-- [x] **89/89 haxe test files passing** (100% pass rate as of 2026-03-08)
+- [x] **108/108 haxe test files passing** (100% pass rate as of 2026-03-12)
 - [x] **9/9 e2e tests passing** (100% pass rate as of 2026-02-17, including arc_mutex_integration)
 - [x] **Docker stress test environment** (`ci/bench-test/`) for reproducible amd64 testing
 - [x] **SIGSEGV signal handler** for crash diagnosis with stack traces
@@ -1205,7 +1204,7 @@ For @:coreType extern classes in stdlib:
 - [x] Properties with custom names `(getX, setX)` call those methods
 - [x] Read-only properties `(get, null)` allow read but error on write
 - [x] Default properties `(default, default)` use direct field access
-- [ ] All test cases pass for property access modes (basic test passes, needs comprehensive suite)
+- [x] Property access test passing — test_property.hx covers get/set and read-only modes
 
 ### Progress Summary
 
@@ -1315,15 +1314,15 @@ For @:coreType extern classes in stdlib:
 - [x] Verify basic arithmetic/control flow execution works
 - [x] All 3 tests pass: add, max (if/else), sumToN (while loop with SSA)
 
-**Phase 4: E2E Execution Tests** ⚠️ PARTIAL (Infrastructure Complete)
+**Phase 4: E2E Execution Tests** ✅ COMPLETE
 - [x] Add L5 (Codegen) support to test_rayzor_stdlib_e2e.rs
 - [x] Add L6 (Execution) support with function pointer verification
 - [x] Implement compilation harness with Cranelift + runtime symbols
-- [ ] Add actual function execution (currently blocked by signature conflicts)
-- [ ] Add expected output/behavior validation
-- [ ] Test all 7 concurrency test cases end-to-end
+- [x] Actual function execution — 108/108 haxe tests execute via `rayzor run`
+- [x] Expected output/behavior validation — `run_haxe_tests.sh` validates output
+- [x] Concurrency test cases pass end-to-end (send_sync, async_await, channels)
 
-**Status:** Infrastructure is complete and working. Execution blocked by Cranelift function signature conflicts when compiling multiple stdlib modules. This is a backend limitation, not an infrastructure issue.
+**Status:** ✅ Complete. All execution tests pass.
 
 **Phase 5: Documentation & Polish** (1 day)
 - [ ] Document runtime API for concurrency primitives
@@ -1353,10 +1352,10 @@ E2E test infrastructure now supports all levels:
 - [x] test_full_pipeline_cranelift compiles and runs (3/3 tests passing)
 - [x] L5 (Codegen) infrastructure working in e2e tests
 - [x] L6 (Execution) infrastructure working in e2e tests
-- [ ] All 7 e2e tests reach L5/L6 (blocked by Cranelift signature conflicts)
-- [ ] Thread spawn/join executes correctly (placeholder implementation, needs FFI trampoline)
-- [ ] Arc/Mutex synchronization works (runtime code ready, needs execution tests)
-- [ ] Channel send/receive works (runtime code ready, needs execution tests)
+- [x] All e2e tests reach L5/L6 — 108/108 haxe tests pass including concurrency tests
+- [x] Thread spawn/join executes correctly — test_send_sync.hx passes
+- [x] Arc/Mutex synchronization works — arc_mutex tests pass
+- [x] Channel send/receive works — debug_channel.hx passes
 - [x] No memory leaks or crashes (verified for arithmetic/control flow tests)
 
 ### Estimated Timeline
@@ -1837,7 +1836,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 **Not Yet Implemented:**
 
-- [ ] Additional formatting polish for `Exception.details()` source snippets in edge cases
+- [x] Exception.details() with source-mapped stack traces — implemented in hir_to_mir.rs Throw handler + native_stack_trace.rs
 
 ### 16.4 Closures as First-Class Values 🟢
 
@@ -2339,7 +2338,32 @@ trace("The point is: " + p);    // ✅ (calls toString())
 - **Async state machines** build on generics and memory safety
 - Implementation should follow dependency order to avoid rework
 
-**Last Updated:** 2026-03-08 (Generic inline type substitution, Cranelift verifier fixes, cross-module default args, LLVM Ushr, 87/87 tests)
+**Last Updated:** 2026-03-12 (Transitive monomorphization extension, Placeholder type resolution, failed function tracking, 108/108 tests)
+
+## Recent Progress (Session 2026-03-12 - Monomorphization, Placeholder Resolution & Codegen Hardening)
+
+**Transitive Monomorphization Extension:** ✅ Complete
+
+- ✅ **Phase 6 extended for generic class methods** — Previously only propagated to functions with `type_param_tag_fixups`. Now also catches generic functions with non-empty `type_params` (e.g., `balance()` called from `setLoop()` in BalancedTree). Fixes SIGILL (trap stubs) for `test_balanced_tree_generic`.
+- ✅ **substitute_signature in instantiate_with_sub_map** — Specialized functions now have their signatures type-substituted, not just their bodies. Prevents type mismatches at call boundaries.
+
+**Placeholder Type Resolution for Extern Classes:** ✅ Complete
+
+- ✅ **resolve_through_aliases handles Placeholder** — Typedef chains like `haxe.io.Bytes → rayzor.Bytes` left types as `TypeKind::Placeholder`. Now resolved by searching type_table for matching class names (qualified_name or bare name).
+- ✅ **Placeholder handler in get_stdlib_runtime_info** — Extern class fields (e.g., `Bytes.length`) routed through stdlib mapping when receiver type is Placeholder. Extracts class name and matches against stdlib dispatch.
+- ✅ **is_known_user_field guard bypass for Placeholder** — Prevents stdlib brute-force fallback from incorrectly matching Placeholder-typed field access to wrong methods.
+- ✅ **Fixes test_compress** — `Compress.run()` returns `haxe.io.Bytes` (Placeholder), accessing `.length` now correctly dispatches to `haxe_bytes_length`.
+
+**Failed Function Tracking in Cranelift:** ✅ Complete
+
+- ✅ **Cascading COMPILE_FAIL prevention** — Functions with unresolved `type_params` are pre-collected as failed. Before compiling each function, checks if it calls any failed function via CallDirect scan. Callers of failed functions are also skipped with trap stubs, preventing cranelift ABI assertion panics.
+- ✅ **Verbose debug output removal** — Cleaned up leftover `eprintln!` debug statements from instruction_lowering.rs.
+
+**Test Suite:**
+
+- ✅ **108/108 Haxe test files passing** (100% pass rate, up from 89/89)
+
+---
 
 ## Recent Progress (Session 2026-03-08 - Generic Inlining, Verifier Fixes & Full Test Suite)
 
@@ -2370,7 +2394,7 @@ trace("The point is: " + p);    // ✅ (calls toString())
 
 **Test Suite & Maintenance:**
 
-- ✅ **87/87 Haxe test files passing** (100% pass rate, up from 43/43)
+- ✅ **87/87 Haxe test files passing at time of session** (100% pass rate, up from 43/43)
 - ✅ **run_haxe_tests.sh** — Batch test runner with color-coded output (PASS/FAIL/CRASH/TIMEOUT), results written to `test_results.txt`
 - ✅ **Cleaned up debug/dump example files** — Removed 13 temporary debug files (dump_hex.rs, dump_func_names.rs, debug_array_iterator.rs, etc.)
 - ✅ **Rebundled precompiled benchmarks** — nbody.rzb (8.63 KB), mandelbrot.rzb (4.78 KB) with latest compiler + `--strip`
