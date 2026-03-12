@@ -577,6 +577,8 @@ Thread.spawn(() -> {
 
 - [x] Clone: Generate `.clone()` method (deep copy) — `lower_derived_clone()` with string deep copy + recursive nested class cloning
 - [x] Copy: Enforce implicit copy semantics — `emit_shallow_copy()` at Let/Assign/Call boundaries for `@:derive(Copy)` classes
+- [x] Drop: User-defined destructors — `emit_drop_call()` before `Free` at scope exit, reassignment, and early return for `@:derive(Drop)` classes
+- [x] ManualDrop: `@:manualDrop` metadata — compiler does NOT auto-free, user calls `drop()` explicitly
 
 ---
 
@@ -997,7 +999,7 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 ### 9.1 Completed
 
 - [x] **600/600 unit tests passing** (100% pass rate as of 2026-01-28)
-- [x] **111/111 haxe test files passing** (100% pass rate as of 2026-03-12)
+- [x] **115/115 haxe test files passing** (100% pass rate as of 2026-03-12)
 - [x] **9/9 e2e tests passing** (100% pass rate as of 2026-02-17, including arc_mutex_integration)
 - [x] **Docker stress test environment** (`ci/bench-test/`) for reproducible amd64 testing
 - [x] **SIGSEGV signal handler** for crash diagnosis with stack traces
@@ -2339,7 +2341,42 @@ trace("The point is: " + p);    // ✅ (calls toString())
 - **Async state machines** build on generics and memory safety
 - Implementation should follow dependency order to avoid rework
 
-**Last Updated:** 2026-03-12 (Derive trait enhancements, @:default metadata, @:debugFormat, recursive Debug, 111/111 tests)
+**Last Updated:** 2026-03-12 (Copy/Drop/ManualDrop traits, 115/115 tests)
+
+## Recent Progress (Session 2026-03-12 - Copy, Drop, ManualDrop Traits)
+
+**@:derive(Copy) implicit shallow copy:** ✅ Complete
+
+- ✅ **emit_shallow_copy()** — malloc new object, copy type_id header + all fields bitwise
+- ✅ **Let handler** — `var b = a` produces independent copy for Copy classes
+- ✅ **Assign handler** — `a = b` with self-assignment guard
+- ✅ **Call boundaries** — 3 call paths (method, static, field-callee) copy args to protect caller
+- ✅ **Tests** — `test_copy.hx`, `test_copy_clone_identity.hx`
+
+**@:derive(Drop) user-defined destructors:** ✅ Complete
+
+- ✅ **emit_drop_call()** — resolves `drop()` method via `class_method_by_name` and emits `CallDirect` before `Free`
+- ✅ **Scope exit** — `exit_drop_scope()` calls `drop()` before `build_free` for Drop classes
+- ✅ **Reassignment** — `register_owned_value()` calls `drop()` on old value before freeing
+- ✅ **Early return** — `cleanup_all_scopes()` calls `drop()` for all owned Drop values
+- ✅ **Implicit function end** — `cleanup_drop_classes_only()` handles void functions without explicit return
+- ✅ **Test** — `test_drop.hx` verifies drop on reassignment and scope exit
+
+**@:manualDrop metadata:** ✅ Complete
+
+- ✅ **DropBehavior::ManualDrop** — `type_needs_drop()` returns false, no auto-free
+- ✅ **Test** — `test_manual_drop.hx` verifies no auto-free at scope exit
+
+**Bug fixes:**
+
+- ✅ **cleanup_all_scopes for reassigned vars** — was skipping entirely; now frees current value from `owned_heap_values` (fixed 4 pre-existing SIGABRT crashes in test_derive_traits, test_derive_string_fields, test_default_params2, test_dynamic_class)
+
+**Test Suite:**
+
+- ✅ **115/115 Haxe test files passing** (100% pass rate, up from 111/111)
+- New tests: `test_copy.hx`, `test_copy_clone_identity.hx`, `test_drop.hx`, `test_manual_drop.hx`
+
+---
 
 ## Recent Progress (Session 2026-03-12 - Derive Trait Enhancements)
 
@@ -2362,7 +2399,7 @@ trace("The point is: " + p);    // ✅ (calls toString())
 
 **Test Suite:**
 
-- ✅ **111/111 Haxe test files passing** (100% pass rate, up from 108/108)
+- ✅ **111/111 Haxe test files passing** (100% pass rate, up from 108/108) → now 115/115
 - New tests: `test_derive_default_custom.hx`, `test_derive_debug_nested.hx`, `test_derive_debug_format.hx`
 
 ---
