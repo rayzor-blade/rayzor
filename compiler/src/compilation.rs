@@ -1185,11 +1185,25 @@ impl CompilationUnit {
             }
         }
 
-        // Create enum type
+        // Create type parameters for generic enums (e.g., Option<T>, Result<T, E>)
+        let mut type_param_ids = Vec::new();
+        let mut type_param_map: HashMap<String, TypeId> = HashMap::new();
+        for tp_name in &enum_info.type_params {
+            let tp_interned = self.string_interner.intern(tp_name);
+            let tp_symbol = self.symbol_table.create_type_parameter(tp_interned, vec![]);
+            let tp_type = self
+                .type_table
+                .borrow_mut()
+                .create_type_parameter(tp_symbol, vec![], crate::tast::core::Variance::Invariant);
+            type_param_ids.push(tp_type);
+            type_param_map.insert(tp_name.clone(), tp_type);
+        }
+
+        // Create enum type with type parameters
         let enum_type = self
             .type_table
             .borrow_mut()
-            .create_enum_type(symbol_id, vec![]);
+            .create_enum_type(symbol_id, type_param_ids);
 
         // Update symbol with type
         self.symbol_table.update_symbol_type(symbol_id, enum_type);
@@ -1211,6 +1225,34 @@ impl CompilationUnit {
                 ScopeId::first(),
                 symbol_id,
             );
+
+            // For generic enum variants whose params reference type parameters,
+            // create a Function type with proper TypeParameter TypeIds so
+            // resolve_field_type() can substitute them (e.g., T → Int).
+            // Only set this for variants where ALL params resolve to known type params;
+            // non-generic variants (like TClass(c:Class<Dynamic>)) must NOT get a
+            // Function type with invalid params, as that corrupts field type resolution.
+            if !variant.params.is_empty() && !type_param_map.is_empty() {
+                let param_type_ids: Vec<_> = variant
+                    .params
+                    .iter()
+                    .map(|p| {
+                        type_param_map
+                            .get(&p.param_type)
+                            .copied()
+                            .unwrap_or(TypeId::invalid())
+                    })
+                    .collect();
+                // Only set if all params resolved to valid type parameter TypeIds
+                if param_type_ids.iter().all(|id| id.is_valid()) {
+                    let fn_type = self
+                        .type_table
+                        .borrow_mut()
+                        .create_function_type(param_type_ids, enum_type);
+                    self.symbol_table
+                        .update_symbol_type(variant_symbol, fn_type);
+                }
+            }
 
             // Add variant to root scope for global resolution
             self.scope_tree
