@@ -1863,6 +1863,7 @@
           <div class="code-block">
             <div class="code-tabs">
               <button class="code-tab active" data-tab="generics">Generics</button>
+              <button class="code-tab" data-tab="lazy_futures">Lazy Futures</button>
               <button class="code-tab" data-tab="ownership">Ownership</button>
               <button class="code-tab" data-tab="concurrency">Concurrency</button>
               <button class="code-tab" data-tab="channels">Channels</button>
@@ -1891,6 +1892,36 @@
 <span class="cc">// Compiles to Container__i32, Container__String</span>
 <span class="ck">var</span> nums = <span class="ck">new</span> <span class="ct">Container</span>&lt;<span class="ct">Int</span>&gt;(<span class="cn">42</span>);
 <span class="ck">var</span> text = <span class="ck">new</span> <span class="ct">Container</span>&lt;<span class="ct">String</span>&gt;(<span class="cs">"hello"</span>);</pre>
+            </div>
+            <div class="code-panel" id="tab-lazy_futures">
+              <pre><span class="cc">// Lazy async futures — doesn't execute until awaited</span>
+
+<span class="ck">import</span> <span class="ct">rayzor.concurrent.Future</span>;
+
+<span class="ck">class</span> <span class="ct">Main</span> {
+    <span class="ck">@:async</span>
+    <span class="ck">static function</span> <span class="cfn">compute</span>(x: <span class="ct">Int</span>): <span class="ct">Int</span> {
+        <span class="ck">return</span> x * <span class="cn">2</span>;
+    }
+
+    <span class="ck">static function</span> <span class="cfn">main</span>() {
+        <span class="cc">// Basic @:async + await</span>
+        <span class="ck">var</span> f = <span class="cfn">compute</span>(<span class="cn">21</span>);
+        <span class="cfn">trace</span>(f.<span class="cfn">await</span>());  <span class="cc">// 42</span>
+
+        <span class="cc">// Lazy — doesn't execute until await</span>
+        <span class="ck">var</span> f2 = <span class="cfn">compute</span>(<span class="cn">100</span>);
+        <span class="cfn">trace</span>(<span class="cs">"not blocked"</span>);
+        <span class="cfn">trace</span>(f2.<span class="cfn">await</span>());  <span class="cc">// 200</span>
+
+        <span class="cc">// Multiple concurrent</span>
+        <span class="ck">var</span> a = <span class="cfn">compute</span>(<span class="cn">10</span>);
+        <span class="ck">var</span> b = <span class="cfn">compute</span>(<span class="cn">20</span>);
+        <span class="cfn">trace</span>(a.<span class="cfn">await</span>() + b.<span class="cfn">await</span>());  <span class="cc">// 60</span>
+
+        <span class="cfn">trace</span>(<span class="cs">"done"</span>);
+    }
+}</pre>
             </div>
             <div class="code-panel" id="tab-ownership">
               <pre><span class="cc">// Ownership-based memory — no GC for static types</span>
