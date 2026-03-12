@@ -392,6 +392,9 @@ pub struct HirToMirContext<'a> {
     /// Maps IrId (allocation register) → class SymbolId for Drop dispatch
     ir_to_drop_class: BTreeMap<IrId, SymbolId>,
 
+    /// @:manualDrop classes — compiler does NOT auto-free
+    manual_drop_classes: BTreeSet<SymbolId>,
+
     /// Classes that derive Debug — enables synthetic toString() method
     derive_debug_classes: BTreeSet<SymbolId>,
 
@@ -615,6 +618,7 @@ impl<'a> HirToMirContext<'a> {
             derive_copy_classes: BTreeSet::new(),
             derive_drop_classes: BTreeSet::new(),
             ir_to_drop_class: BTreeMap::new(),
+            manual_drop_classes: BTreeSet::new(),
             derive_debug_classes: BTreeSet::new(),
             derive_default_classes: BTreeSet::new(),
             class_instance_fields: BTreeMap::new(),
@@ -947,6 +951,10 @@ impl<'a> HirToMirContext<'a> {
                     // Check for @:derive(Drop) — user-defined destructor
                     if self.derive_drop_classes.contains(symbol_id) {
                         return DropBehavior::AutoDropWithDtor;
+                    }
+                    // Check for @:manualDrop — user manages lifetime
+                    if self.manual_drop_classes.contains(symbol_id) {
+                        return DropBehavior::ManualDrop;
                     }
                     // User-defined (non-extern) classes need AutoDrop
                     DropBehavior::AutoDrop
@@ -31670,6 +31678,15 @@ impl<'a> HirToMirContext<'a> {
                         self.derive_default_classes.insert(class.symbol_id);
                     }
                     _ => {}
+                }
+            }
+
+            // Check for @:manualDrop metadata
+            for attr in &class.metadata {
+                if let Some(attr_name) = self.string_interner.get(attr.name) {
+                    if attr_name == "manualDrop" {
+                        self.manual_drop_classes.insert(class.symbol_id);
+                    }
                 }
             }
 

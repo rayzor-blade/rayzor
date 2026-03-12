@@ -368,6 +368,10 @@ pub enum MemoryAnnotation {
     /// @:rc - Type is heap-allocated with shared ownership via reference counting (non-atomic)
     /// Can be used with or without @:safety
     Rc,
+
+    /// @:manualDrop - Compiler does NOT auto-free this type.
+    /// User is responsible for calling drop() explicitly.
+    ManualDrop,
 }
 
 impl MemoryAnnotation {
@@ -387,6 +391,7 @@ impl MemoryAnnotation {
             "arc" => Some(MemoryAnnotation::Arc),
             "atomic" => Some(MemoryAnnotation::Atomic),
             "rc" => Some(MemoryAnnotation::Rc),
+            "manualDrop" => Some(MemoryAnnotation::ManualDrop),
             _ => None,
         }
     }
