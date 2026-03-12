@@ -138,8 +138,9 @@ This document tracks major features, enhancements, and technical debt for the Ra
 - [x] Implement `Map<K, V>` (hashmap) — full implementation
 - [x] Test monomorphization with stdlib types — BalancedTree<K,V> with Int/String keys, 108/108 tests
 
-**Note:** Option<T> and Result<T,E> already exist in haxe.ds but enum constructor
-resolution fails during AST lowering. Need to fix enum variant symbol resolution.
+**Note:** Option<T>, Result<T,E>, and Either<L,R> generic enums fully working (2026-03-12).
+Cross-file BLADE cache type parameter registration, enum variant name collision fix
+(Result.Error vs haxe.io.Error), and cold/warm start parity verified.
 
 ---
 
@@ -570,7 +571,7 @@ Thread.spawn(() -> {
 - [x] Generate `toString()` method — `lower_derived_to_string()` formats as `"ClassName { field1: val1, ... }"`
 - [x] Format nested structures — handles String, Bool, Int, Float, objects
 - [x] Recursive nested Debug formatting — `emit_debug_to_string_for_ptr()` recursively calls toString on nested `@:derive(Debug)` class fields
-- [ ] Handle circular references
+- [x] Handle circular references — depth-limited recursion (`depth >= 16` → `<...>`), compile-time warning for self-referential types (2026-03-12)
 - [x] Customizable formatting via `@:debugFormat("pattern")` metadata — `emit_custom_debug_format()` parses `{fieldName}` placeholders
 
 ### 4.7 Remaining Codegen Gaps
@@ -608,6 +609,8 @@ Thread.spawn(() -> {
 - [x] Implement lifetime constraint checking — `validate_borrow_lifetimes()` implemented
 - [x] Add more granular error messages — `UseAfterMove`, `DoubleMove`, `BorrowConflict`, `MoveOfBorrowedVariable` violation types
 - [x] Test with real safety violations — @:safety annotation triggers analysis, ownership warnings emitted
+- [x] Use-after-move detection with diagnostics — function call arguments recorded as moves, use-sites tracked, location-aware violation reporting (2026-03-12)
+- [x] `--safety-warnings=on/off` CLI flag — ownership warnings on by default, gated for test harness (2026-03-12)
 
 ---
 
@@ -1772,6 +1775,8 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - Or-patterns (`case A | B:`)
 - Multiple patterns per case
 - Bitcast i64→Ptr for boxed enum scrutinee in pattern tests
+- Cross-file generic enum support (Option<T>, Result<T,E>, Either<L,R>) with BLADE cache type parameter registration (2026-03-12)
+- Enum variant name collision fix — `lower_enum_variant` verifies parent enum before reusing symbols; call-site fallback via qualified name matching against imports (2026-03-12)
 
 **Not Yet Implemented:**
 
@@ -2179,6 +2184,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 
 - [x] `Type.typeof(value)` language-level parity returns boxed `ValueType` when required via compiler special-lowering to `haxe_type_typeof_value`
 - [x] `trace(Type.typeof(x))` parity output fixed (e.g. `TFunction` instead of raw pointer/int)
+- [x] Fixed cold-start SIGSEGV in `Type.typeof` pattern matching — scalar I32 scrutinee forced to unboxed path when `enum_is_boxed` incorrectly returned true for ValueType (2026-03-12)
 
 **Implemented (2026-02-21 — Tier-A):**
 
