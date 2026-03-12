@@ -4191,13 +4191,39 @@ impl<'a> AstLowering<'a> {
         enum_symbol: SymbolId,
     ) -> LoweringResult<TypedEnumVariant> {
         let variant_name = self.context.intern_string(&variant.name);
-        // Reuse pre-registered variant symbol if it exists, otherwise create a new one
+        // Reuse pre-registered variant symbol if it exists AND belongs to the same
+        // parent enum. Without this check, name collisions (e.g., Result.Error vs
+        // haxe.io.Error enum type) cause the wrong symbol to be reused.
         let variant_symbol = if let Some(existing) = self
             .context
             .symbol_table
             .lookup_symbol(ScopeId::first(), variant_name)
         {
-            existing.id
+            if existing.kind == crate::tast::symbols::SymbolKind::EnumVariant {
+                // Verify it belongs to the same parent enum
+                let is_same_parent = self
+                    .context
+                    .symbol_table
+                    .find_parent_enum_for_constructor(existing.id)
+                    .map(|p| p == enum_symbol)
+                    .unwrap_or(false);
+                if is_same_parent {
+                    existing.id
+                } else {
+                    self.context.symbol_table.create_enum_variant_in_scope(
+                        variant_name,
+                        ScopeId::first(),
+                        enum_symbol,
+                    )
+                }
+            } else {
+                // Name collision with non-variant symbol (e.g., enum type) — create fresh variant
+                self.context.symbol_table.create_enum_variant_in_scope(
+                    variant_name,
+                    ScopeId::first(),
+                    enum_symbol,
+                )
+            }
         } else {
             self.context.symbol_table.create_enum_variant_in_scope(
                 variant_name,
@@ -8350,10 +8376,99 @@ impl<'a> AstLowering<'a> {
                 // Check if this is an enum constructor call and instantiate its type
                 if let TypedExpressionKind::Variable { symbol_id } = &func_expr.kind {
                     if let Some(symbol) = self.context.symbol_table.get_symbol(*symbol_id) {
-                        if symbol.kind == crate::tast::symbols::SymbolKind::EnumVariant {
+                        let mut resolved_id = *symbol_id;
+                        let mut is_variant =
+                            symbol.kind == crate::tast::symbols::SymbolKind::EnumVariant;
+
+                        // Name collision fix: if we resolved to an Enum type but this is
+                        // a call with args (e.g., Error("oops")), search for an EnumVariant
+                        // with the same name whose parent enum's qualified name matches
+                        // a user import. This handles cases like Result.Error colliding
+                        // with haxe.io.Error enum type in the global scope.
+                        if !is_variant
+                            && symbol.kind == crate::tast::symbols::SymbolKind::Enum
+                            && !arg_exprs.is_empty()
+                        {
+                            let name = symbol.name;
+                            // Collect candidate variant symbols with matching name
+                            let candidates: Vec<_> = self
+                                .context
+                                .symbol_table
+                                .all_symbols()
+                                .filter(|s| {
+                                    s.name == name
+                                        && s.kind == crate::tast::symbols::SymbolKind::EnumVariant
+                                })
+                                .map(|s| s.id)
+                                .collect();
+
+                            // Build set of imported qualified names from user imports
+                            let mut imported_qnames = std::collections::HashSet::new();
+                            for scope_id in [self.context.current_scope, ScopeId::first()] {
+                                for entry in self.context.import_resolver.get_imports(scope_id) {
+                                    let qn: String = entry
+                                        .package_path
+                                        .package
+                                        .iter()
+                                        .filter_map(|s| self.context.string_interner.get(*s))
+                                        .chain(std::iter::once(
+                                            self.context
+                                                .string_interner
+                                                .get(entry.package_path.name)
+                                                .unwrap_or(""),
+                                        ))
+                                        .collect::<Vec<_>>()
+                                        .join(".");
+                                    imported_qnames.insert(qn);
+                                }
+                            }
+
+                            // Pick the candidate whose parent enum's qualified name is imported
+                            for candidate_id in candidates {
+                                if let Some(parent_enum) = self
+                                    .context
+                                    .symbol_table
+                                    .find_parent_enum_for_constructor(candidate_id)
+                                {
+                                    if let Some(parent_sym) =
+                                        self.context.symbol_table.get_symbol(parent_enum)
+                                    {
+                                        if let Some(qn) = parent_sym.qualified_name {
+                                            let qn_str =
+                                                self.context.string_interner.get(qn).unwrap_or("");
+                                            if imported_qnames.contains(qn_str) {
+                                                if let Some(variant_sym) = self
+                                                    .context
+                                                    .symbol_table
+                                                    .get_symbol(candidate_id)
+                                                {
+                                                    resolved_id = candidate_id;
+                                                    is_variant = true;
+                                                    func_expr = TypedExpression {
+                                                        kind: TypedExpressionKind::Variable {
+                                                            symbol_id: resolved_id,
+                                                        },
+                                                        expr_type: variant_sym.type_id,
+                                                        usage: func_expr.usage.clone(),
+                                                        lifetime_id: func_expr.lifetime_id,
+                                                        source_location: func_expr.source_location,
+                                                        metadata: func_expr.metadata.clone(),
+                                                    };
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        if is_variant {
                             // This is an enum constructor - instantiate its function type
                             func_expr = self.instantiate_enum_constructor_type(
-                                *symbol_id, &arg_exprs, func_expr,
+                                resolved_id,
+                                &arg_exprs,
+                                func_expr,
                             )?;
                         }
                     }
