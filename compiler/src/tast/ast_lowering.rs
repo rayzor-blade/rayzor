@@ -5572,6 +5572,26 @@ impl<'a> AstLowering<'a> {
                 }
             }
         }
+
+        // Validate Drop: class must have a public drop():Void method
+        let has_drop = derived_traits.contains(&DerivedTrait::Drop);
+        if has_drop {
+            let has_drop_method = typed_class.methods.iter().any(|m| {
+                let method_name = self.context.string_interner.get(m.name).unwrap_or("");
+                method_name == "drop"
+                    && m.parameters.is_empty()
+                    && matches!(m.visibility, crate::tast::Visibility::Public)
+            });
+
+            if !has_drop_method {
+                eprintln!(
+                    "ERROR: Class '{}' derives Drop but has no public `drop():Void` method",
+                    class_name
+                );
+                eprintln!("  @:derive(Drop) requires: public function drop():Void {{ ... }}");
+                derived_traits.retain(|t| *t != DerivedTrait::Drop);
+            }
+        }
     }
 
     /// Check if a type implements Clone

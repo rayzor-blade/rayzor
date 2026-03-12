@@ -488,6 +488,11 @@ pub enum DerivedTrait {
     /// Generates hash() method for use in HashMap
     Hash,
 
+    /// @:derive(Drop) - Type has a custom destructor
+    /// User must implement a public `drop():Void` method.
+    /// Compiler calls `drop()` automatically before freeing at scope exit/reassignment.
+    Drop,
+
     /// @:derive(Send) - Type can be transferred between threads
     /// Required for Thread.spawn() captures and Channel<T> element types
     /// Auto-derived if all fields are Send
@@ -512,6 +517,7 @@ impl DerivedTrait {
             "partialord" => Some(DerivedTrait::PartialOrd),
             "ord" => Some(DerivedTrait::Ord),
             "hash" => Some(DerivedTrait::Hash),
+            "drop" => Some(DerivedTrait::Drop),
             "send" => Some(DerivedTrait::Send),
             "sync" => Some(DerivedTrait::Sync),
             _ => None,
@@ -530,6 +536,7 @@ impl DerivedTrait {
             DerivedTrait::PartialOrd => "PartialOrd",
             DerivedTrait::Ord => "Ord",
             DerivedTrait::Hash => "Hash",
+            DerivedTrait::Drop => "Drop",
             DerivedTrait::Send => "Send",
             DerivedTrait::Sync => "Sync",
         }
