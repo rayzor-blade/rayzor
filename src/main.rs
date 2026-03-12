@@ -79,6 +79,10 @@ enum Commands {
         #[arg(long = "rpkg", value_name = "FILE")]
         rpkg_files: Vec<PathBuf>,
 
+        /// Enable or disable safety warnings (use-after-move, etc.)
+        #[arg(long, default_value = "on")]
+        safety_warnings: String,
+
         /// Arguments to pass to the Haxe program (after --)
         #[arg(last = true)]
         program_args: Vec<String>,
@@ -449,6 +453,7 @@ fn main() {
             release,
             compute,
             rpkg_files,
+            safety_warnings,
             program_args,
         } => run_file(
             file,
@@ -462,6 +467,7 @@ fn main() {
             release,
             compute,
             rpkg_files,
+            safety_warnings != "off",
             program_args,
         ),
         Commands::Jit {
@@ -587,12 +593,14 @@ fn compile_haxe_to_mir(
     filename: &str,
     plugins: Vec<Box<dyn compiler::compiler_plugin::CompilerPlugin>>,
     extra_source_dirs: &[PathBuf],
+    safety_warnings: bool,
 ) -> Result<compiler::ir::IrModule, String> {
     use compiler::compilation::{CompilationConfig, CompilationUnit};
 
     // Create compilation unit with stdlib support
     let config = CompilationConfig {
         load_stdlib: true, // Enable stdlib for full Haxe compatibility
+        emit_safety_warnings: safety_warnings,
         ..Default::default()
     };
 
@@ -794,6 +802,7 @@ fn run_file(
     release: bool,
     compute: bool,
     rpkg_files: Vec<PathBuf>,
+    safety_warnings: bool,
     program_args: Vec<String>,
 ) -> Result<(), String> {
     use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
@@ -914,6 +923,7 @@ fn run_file(
         file.to_str().unwrap_or("unknown"),
         compiler_plugins,
         &rpkg_source_dirs,
+        safety_warnings,
     )?;
 
     // Run O0 pass manager to expand Haxe `inline` functions and apply SRA
@@ -1200,8 +1210,13 @@ fn build_from_manifest(
             // Compile via the standard pipeline
             let source = std::fs::read_to_string(&entry)
                 .map_err(|e| format!("Failed to read {}: {}", entry.display(), e))?;
-            let mir_module =
-                compile_haxe_to_mir(&source, entry.to_str().unwrap_or("unknown"), vec![], &[])?;
+            let mir_module = compile_haxe_to_mir(
+                &source,
+                entry.to_str().unwrap_or("unknown"),
+                vec![],
+                &[],
+                true,
+            )?;
 
             println!("  Compiled {} functions", mir_module.functions.len());
 
@@ -1389,13 +1404,24 @@ fn compile_file(
             cached
         } else {
             println!("  cache    miss, compiling...");
-            let module =
-                compile_haxe_to_mir(&source, file.to_str().unwrap_or("unknown"), vec![], &[])?;
+            let module = compile_haxe_to_mir(
+                &source,
+                file.to_str().unwrap_or("unknown"),
+                vec![],
+                &[],
+                true,
+            )?;
             unit.save_to_cache(&file, &module)?;
             module
         }
     } else {
-        compile_haxe_to_mir(&source, file.to_str().unwrap_or("unknown"), vec![], &[])?
+        compile_haxe_to_mir(
+            &source,
+            file.to_str().unwrap_or("unknown"),
+            vec![],
+            &[],
+            true,
+        )?
     };
 
     println!("  mir      {} functions", mir_module.functions.len());

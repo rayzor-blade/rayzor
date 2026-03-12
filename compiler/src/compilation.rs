@@ -177,6 +177,9 @@ pub struct CompilationConfig {
 
     /// Directories to search for .hdll files (referenced by @:hlNative metadata)
     pub hdll_search_paths: Vec<PathBuf>,
+
+    /// Whether to emit safety warnings (use-after-move, etc.)
+    pub emit_safety_warnings: bool,
 }
 
 impl Default for CompilationConfig {
@@ -207,6 +210,7 @@ impl Default for CompilationConfig {
             lazy_stdlib: false, // Default to eager loading for compatibility
             pipeline_config: PipelineConfig::default(),
             hdll_search_paths: vec![PathBuf::from(".")],
+            emit_safety_warnings: true,
         }
     }
 }
@@ -3504,7 +3508,7 @@ impl CompilationUnit {
         } // end if !is_stdlib
 
         // Ownership analysis: use-after-move detection (user files only)
-        if !is_stdlib {
+        if !is_stdlib && self.config.emit_safety_warnings {
             let ownership_diagnostics = self.check_ownership_violations(&typed_file);
             if !ownership_diagnostics.is_empty() {
                 self.print_mir_diagnostics(&ownership_diagnostics);

@@ -45,7 +45,12 @@ for hx_file in "$TESTS_DIR"/*.hx; do
 
     output=""
     exit_code=0
-    output=$(timeout 30 "$RAYZOR" run "$hx_file" 2>&1) || exit_code=$?
+    # Keep safety warnings on for tests that validate them
+    safety_flag="--safety-warnings=off"
+    case "$test_name" in
+        test_safety_*) safety_flag="--safety-warnings=on" ;;
+    esac
+    output=$(timeout 30 "$RAYZOR" run $safety_flag "$hx_file" 2>&1) || exit_code=$?
 
     if [ $exit_code -eq 0 ]; then
         status="PASS"

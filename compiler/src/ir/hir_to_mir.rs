@@ -24994,8 +24994,15 @@ impl<'a> HirToMirContext<'a> {
         string_ptr_ty: &IrType,
     ) -> Option<IrId> {
         self.emit_debug_to_string_for_ptr_depth(
-            obj_reg, class_sym, fields, concat_fn, std_string_fn,
-            box_int_fn, box_float_fn, string_ptr_ty, 0,
+            obj_reg,
+            class_sym,
+            fields,
+            concat_fn,
+            std_string_fn,
+            box_int_fn,
+            box_float_fn,
+            string_ptr_ty,
+            0,
         )
     }
 
