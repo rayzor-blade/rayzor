@@ -45,6 +45,10 @@ pub enum DropBehavior {
     /// Used for @:derive(Drop) classes with a custom destructor.
     AutoDropWithDtor,
 
+    /// @:manualDrop — compiler does NOT auto-free.
+    /// User is responsible for calling drop() explicitly.
+    ManualDrop,
+
     /// Runtime manages the lifetime, no Free instruction generated.
     /// Used for stdlib types like Thread, Channel, Arc, Mutex.
     /// These types have their own reference counting or cleanup mechanisms.
