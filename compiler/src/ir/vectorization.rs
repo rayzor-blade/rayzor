@@ -8,6 +8,7 @@
 
 use super::loop_analysis::{DominatorTree, LoopNestInfo, NaturalLoop, TripCount};
 use super::optimization::{OptimizationPass, OptimizationResult};
+use super::blocks::IrTerminator;
 use super::{
     BinaryOp, CompareOp, IrBlockId, IrControlFlowGraph, IrFunction, IrFunctionId, IrId,
     IrInstruction, IrModule, IrType, IrValue,
@@ -730,7 +731,7 @@ impl LoopVectorizationPass {
         self.update_induction_stride(function, loop_info, induction_var, vf);
 
         // Update loop bound comparison (divide by VF)
-        self.update_loop_bound(function, loop_info, vector_iterations);
+        self.update_loop_bound(function, loop_info, vector_iterations, vf);
 
         // Create epilogue loop for remainder iterations if needed
         if remainder > 0 {
@@ -796,7 +797,10 @@ impl LoopVectorizationPass {
         }
     }
 
-    /// Update the induction variable's stride from 1 to VF
+    /// Update the induction variable's stride from 1 to VF.
+    ///
+    /// Finds `iv_next = iv + 1` and rewrites to `iv_next = iv + VF` by inserting
+    /// a new constant register and updating the BinOp operand.
     fn update_induction_stride(
         &self,
         function: &mut IrFunction,
@@ -804,62 +808,115 @@ impl LoopVectorizationPass {
         induction_var: IrId,
         vf: usize,
     ) {
-        // Find and update the increment instruction for the induction variable
+        // Allocate a fresh register for the VF constant
+        let vf_reg = IrId::new(function.next_reg_id);
+        function.next_reg_id += 1;
+        function.register_types.insert(vf_reg, IrType::I32);
+
         for block_id in &loop_info.blocks {
             if let Some(block) = function.cfg.blocks.get_mut(block_id) {
-                for inst in &mut block.instructions {
-                    // Look for: dest = induction_var + 1, change to: dest = induction_var + VF
+                let mut insert_const_before = None;
+
+                for (idx, inst) in block.instructions.iter_mut().enumerate() {
                     if let IrInstruction::BinOp {
-                        dest: _,
                         op: BinaryOp::Add,
                         left,
-                        right: _,
+                        right,
+                        ..
                     } = inst
                     {
-                        if *left == induction_var {
-                            // Replace the constant 1 with VF
-                            // This requires creating a new constant instruction
-                            // For now, we modify the stride in the instruction
-                            if let IrInstruction::BinOp { right, .. } = inst {
-                                // The right operand should be updated to VF
-                                // This is a placeholder - full impl needs constant propagation
-                                let _ = (right, vf); // Mark as intentionally unused for now
+                        if *left == induction_var || *right == induction_var {
+                            // Replace the stride operand with VF
+                            if *left == induction_var {
+                                *right = vf_reg;
+                            } else {
+                                *left = vf_reg;
                             }
+                            insert_const_before = Some(idx);
+                            break;
                         }
                     }
+                }
+
+                // Insert the VF constant before the updated BinOp
+                if let Some(idx) = insert_const_before {
+                    block.instructions.insert(
+                        idx,
+                        IrInstruction::Const {
+                            dest: vf_reg,
+                            value: IrValue::I32(vf as i32),
+                        },
+                    );
+                    return; // Done — one IV increment per loop
                 }
             }
         }
     }
 
-    /// Update the loop bound for vector iterations
+    /// Update the loop bound for vector iterations.
+    ///
+    /// The original `i < N` becomes `i < vector_iterations * VF` so the vector
+    /// loop exits before the remainder (handled by the epilogue).
     fn update_loop_bound(
         &self,
         function: &mut IrFunction,
         loop_info: &NaturalLoop,
         vector_iterations: u64,
+        vf: usize,
     ) {
-        // Find and update the loop bound comparison
-        // The comparison `i < N` becomes `i < N/VF` (for the vector loop)
-        for block_id in &loop_info.blocks {
-            if let Some(block) = function.cfg.blocks.get_mut(block_id) {
-                for inst in &mut block.instructions {
+        let adjusted_bound = (vector_iterations * vf as u64) as i32;
+
+        // Allocate a fresh register for the adjusted bound constant
+        let bound_reg = IrId::new(function.next_reg_id);
+        function.next_reg_id += 1;
+        function.register_types.insert(bound_reg, IrType::I32);
+
+        // Find the comparison instruction in the header or latch block
+        // Typically the Cmp is in the header block (condition check)
+        let header = loop_info.header;
+        let blocks_to_check: Vec<IrBlockId> =
+            std::iter::once(header).chain(loop_info.blocks.iter().copied()).collect();
+
+        for block_id in blocks_to_check {
+            if let Some(block) = function.cfg.blocks.get_mut(&block_id) {
+                let mut insert_const_before = None;
+
+                for (idx, inst) in block.instructions.iter_mut().enumerate() {
                     if let IrInstruction::Cmp {
-                        dest: _,
                         op: CompareOp::Lt | CompareOp::Le,
-                        left: _,
-                        right: _,
+                        right,
+                        ..
                     } = inst
                     {
-                        // Update the bound - placeholder for now
-                        let _ = vector_iterations;
+                        // Replace the bound operand
+                        *right = bound_reg;
+                        insert_const_before = Some(idx);
+                        break;
                     }
+                }
+
+                if let Some(idx) = insert_const_before {
+                    block.instructions.insert(
+                        idx,
+                        IrInstruction::Const {
+                            dest: bound_reg,
+                            value: IrValue::I32(adjusted_bound),
+                        },
+                    );
+                    return;
                 }
             }
         }
     }
 
-    /// Create an epilogue loop for remainder iterations
+    /// Create an epilogue for remainder iterations after the vector loop.
+    ///
+    /// For constant trip counts the remainder is known at compile time.
+    /// We collect the original scalar body instructions (pre-vectorization is too
+    /// late — they've been rewritten), so instead we emit scalar copies of the
+    /// vectorized ops by reversing the vector→scalar mapping.  For simplicity we
+    /// unroll small remainders (≤ VF, which is always the case for constant trip
+    /// counts with 128-bit vectors) into the exit block.
     fn create_epilogue_loop(
         &self,
         function: &mut IrFunction,
@@ -867,16 +924,207 @@ impl LoopVectorizationPass {
         remainder: usize,
         scalar_type: &IrType,
     ) {
-        // For small remainders, we can unroll completely
-        // For larger remainders, create a scalar cleanup loop
-        if remainder <= 4 {
-            // Full unroll for small remainders - each iteration is independent
-            // Clone the original scalar loop body `remainder` times
-            let _ = (function, loop_info, scalar_type); // Placeholder
-        } else {
-            // Create a scalar cleanup loop
-            // This requires creating new blocks and connecting them
-            let _ = remainder; // Placeholder
+        // The exit block is where the epilogue goes
+        let exit_block_id = match loop_info.exit_blocks.first() {
+            Some(id) => *id,
+            None => return,
+        };
+
+        // Collect scalar instructions from the loop body blocks (excluding the
+        // header, which contains phi/cmp/branch — not data work).  We reverse
+        // vector instructions back to scalar form.
+        let mut scalar_body: Vec<IrInstruction> = Vec::new();
+        for block_id in &loop_info.blocks {
+            if *block_id == loop_info.header {
+                continue;
+            }
+            if let Some(block) = function.cfg.blocks.get(block_id) {
+                for inst in &block.instructions {
+                    if let Some(scalar_inst) = self.devectorize_instruction(inst, scalar_type) {
+                        scalar_body.push(scalar_inst);
+                    }
+                }
+            }
+        }
+
+        if scalar_body.is_empty() {
+            return;
+        }
+
+        // Unroll remainder iterations into a new epilogue block
+        let epilogue_block_id = function.cfg.create_block();
+        let mut epilogue_instructions = Vec::new();
+        let mut reg_id = function.next_reg_id;
+
+        for iteration in 0..remainder {
+            let mut reg_map: HashMap<IrId, IrId> = HashMap::new();
+
+            for inst in &scalar_body {
+                let new_inst =
+                    self.remap_epilogue_instruction(inst, &mut reg_map, &mut reg_id, function);
+                epilogue_instructions.push(new_inst);
+            }
+
+            let _ = iteration; // Each iteration is independent for contiguous access
+        }
+
+        function.next_reg_id = reg_id;
+
+        // Wire epilogue: vector loop exit → epilogue → original exit target
+        // The vector loop's exit block currently branches to the original exit.
+        // We intercept: exit block → epilogue block → original successor.
+        if let Some(epilogue_block) = function.cfg.blocks.get_mut(&epilogue_block_id) {
+            epilogue_block.instructions = epilogue_instructions;
+            // Branch to the original exit block
+            epilogue_block.terminator = IrTerminator::Branch {
+                target: exit_block_id,
+            };
+            epilogue_block.predecessors = vec![loop_info.header];
+        }
+
+        // Re-route: the loop exit (header's false branch) now goes to epilogue
+        // instead of directly to the exit block.
+        if let Some(header_block) = function.cfg.blocks.get_mut(&loop_info.header) {
+            Self::replace_terminator_target(
+                &mut header_block.terminator,
+                exit_block_id,
+                epilogue_block_id,
+            );
+        }
+
+        // Update exit block predecessors
+        if let Some(exit_block) = function.cfg.blocks.get_mut(&exit_block_id) {
+            for pred in &mut exit_block.predecessors {
+                if *pred == loop_info.header {
+                    *pred = epilogue_block_id;
+                }
+            }
+        }
+    }
+
+    /// Convert a vector instruction back to its scalar equivalent for epilogue.
+    fn devectorize_instruction(
+        &self,
+        inst: &IrInstruction,
+        scalar_type: &IrType,
+    ) -> Option<IrInstruction> {
+        match inst {
+            IrInstruction::VectorLoad { dest, ptr, .. } => Some(IrInstruction::Load {
+                dest: *dest,
+                ptr: *ptr,
+                ty: scalar_type.clone(),
+            }),
+            IrInstruction::VectorStore { ptr, value, .. } => Some(IrInstruction::Store {
+                ptr: *ptr,
+                value: *value,
+            }),
+            IrInstruction::VectorBinOp {
+                dest,
+                op,
+                left,
+                right,
+                ..
+            } => Some(IrInstruction::BinOp {
+                dest: *dest,
+                op: *op,
+                left: *left,
+                right: *right,
+            }),
+            // Skip non-data instructions (consts, GEPs for IV, etc.)
+            IrInstruction::Const { .. }
+            | IrInstruction::BinOp { .. }
+            | IrInstruction::GetElementPtr { .. } => Some(inst.clone()),
+            _ => None,
+        }
+    }
+
+    /// Clone an instruction with fresh registers for epilogue unrolling.
+    fn remap_epilogue_instruction(
+        &self,
+        inst: &IrInstruction,
+        reg_map: &mut HashMap<IrId, IrId>,
+        next_reg: &mut u32,
+        function: &mut IrFunction,
+    ) -> IrInstruction {
+        let map_use = |r: IrId, map: &HashMap<IrId, IrId>| -> IrId {
+            map.get(&r).copied().unwrap_or(r)
+        };
+        let alloc_new = |old: IrId, next: &mut u32, map: &mut HashMap<IrId, IrId>, func: &mut IrFunction| -> IrId {
+            if let Some(&existing) = map.get(&old) {
+                return existing;
+            }
+            let new = IrId::new(*next);
+            *next += 1;
+            map.insert(old, new);
+            if let Some(ty) = func.register_types.get(&old).cloned() {
+                func.register_types.insert(new, ty);
+            }
+            new
+        };
+
+        match inst {
+            IrInstruction::Const { dest, value } => IrInstruction::Const {
+                dest: alloc_new(*dest, next_reg, reg_map, function),
+                value: value.clone(),
+            },
+            IrInstruction::Load { dest, ptr, ty } => IrInstruction::Load {
+                dest: alloc_new(*dest, next_reg, reg_map, function),
+                ptr: map_use(*ptr, reg_map),
+                ty: ty.clone(),
+            },
+            IrInstruction::Store { ptr, value } => IrInstruction::Store {
+                ptr: map_use(*ptr, reg_map),
+                value: map_use(*value, reg_map),
+            },
+            IrInstruction::BinOp {
+                dest,
+                op,
+                left,
+                right,
+            } => IrInstruction::BinOp {
+                dest: alloc_new(*dest, next_reg, reg_map, function),
+                op: *op,
+                left: map_use(*left, reg_map),
+                right: map_use(*right, reg_map),
+            },
+            IrInstruction::GetElementPtr {
+                dest,
+                ptr,
+                indices,
+                ty,
+            } => IrInstruction::GetElementPtr {
+                dest: alloc_new(*dest, next_reg, reg_map, function),
+                ptr: map_use(*ptr, reg_map),
+                indices: indices.iter().map(|i| map_use(*i, reg_map)).collect(),
+                ty: ty.clone(),
+            },
+            other => other.clone(),
+        }
+    }
+
+    /// Replace a specific target in a block terminator.
+    fn replace_terminator_target(
+        terminator: &mut IrTerminator,
+        old_target: IrBlockId,
+        new_target: IrBlockId,
+    ) {
+        match terminator {
+            IrTerminator::Branch { target } if *target == old_target => {
+                *target = new_target;
+            }
+            IrTerminator::CondBranch {
+                true_target,
+                false_target,
+                ..
+            } => {
+                if *true_target == old_target {
+                    *true_target = new_target;
+                }
+                if *false_target == old_target {
+                    *false_target = new_target;
+                }
+            }
+            _ => {}
         }
     }
 
@@ -972,6 +1220,44 @@ impl OptimizationPass for LoopVectorizationPass {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ir::blocks::IrTerminator;
+    use crate::ir::functions::IrFunctionSignature;
+    use crate::tast::SymbolId;
+
+    fn make_test_function() -> IrFunction {
+        IrFunction::new(
+            IrFunctionId(0),
+            SymbolId::from_raw(0),
+            "test".to_string(),
+            IrFunctionSignature {
+                parameters: vec![],
+                return_type: IrType::Void,
+                calling_convention: crate::ir::CallingConvention::Haxe,
+                can_throw: false,
+                type_params: vec![],
+                uses_sret: false,
+            },
+        )
+    }
+
+    fn make_loop_info(
+        header: IrBlockId,
+        body: IrBlockId,
+        exit: IrBlockId,
+        trip_count: u64,
+    ) -> NaturalLoop {
+        NaturalLoop {
+            header,
+            back_edge_source: body,
+            blocks: [header, body].into_iter().collect(),
+            exit_blocks: vec![exit],
+            preheader: None,
+            trip_count: Some(TripCount::Constant(trip_count)),
+            nesting_depth: 0,
+            parent: None,
+            children: vec![],
+        }
+    }
 
     #[test]
     fn test_vector_types() {
@@ -989,5 +1275,270 @@ mod tests {
             Some(VectorType::V2F64)
         );
         assert_eq!(VectorType::for_scalar(&IrType::Bool), None);
+    }
+
+    #[test]
+    fn test_update_induction_stride() {
+        // Build a minimal loop: header has phi + cmp, body has iv + 1
+        let mut function = make_test_function();
+
+        let header = function.cfg.entry_block;
+        let body = function.cfg.create_block();
+        let exit = function.cfg.create_block();
+
+        let iv = IrId::new(0); // induction variable
+        let iv_init = IrId::new(1); // init value (from preheader)
+        let iv_next = IrId::new(2); // updated IV
+        let one = IrId::new(3); // constant 1
+        let cmp_result = IrId::new(4);
+        let bound = IrId::new(5);
+        let ptr = IrId::new(6);
+        let loaded = IrId::new(7);
+        function.next_reg_id = 8;
+
+        // Header: phi(iv) + cmp + condbranch
+        if let Some(hdr) = function.cfg.blocks.get_mut(&header) {
+            hdr.instructions = vec![
+                IrInstruction::Phi {
+                    dest: iv,
+                    incoming: vec![
+                        (iv_init, IrId::new(99)), // from "preheader" (fake)
+                        (iv_next, IrId::new(body.as_u32())),
+                    ],
+                },
+                IrInstruction::Cmp {
+                    dest: cmp_result,
+                    op: CompareOp::Lt,
+                    left: iv,
+                    right: bound,
+                },
+            ];
+            hdr.terminator = IrTerminator::CondBranch {
+                condition: cmp_result,
+                true_target: body,
+                false_target: exit,
+            };
+        }
+
+        // Body: load + iv+1 + branch back
+        if let Some(b) = function.cfg.blocks.get_mut(&body) {
+            b.instructions = vec![
+                IrInstruction::Load {
+                    dest: loaded,
+                    ptr,
+                    ty: IrType::F32,
+                },
+                IrInstruction::Const {
+                    dest: one,
+                    value: IrValue::I32(1),
+                },
+                IrInstruction::BinOp {
+                    dest: iv_next,
+                    op: BinaryOp::Add,
+                    left: iv,
+                    right: one,
+                },
+            ];
+            b.terminator = IrTerminator::Branch { target: header };
+        }
+
+        // Exit: return
+        if let Some(e) = function.cfg.blocks.get_mut(&exit) {
+            e.terminator = IrTerminator::Return { value: None };
+        }
+
+        let loop_info = make_loop_info(header, body, exit, 16);
+
+        let pass = LoopVectorizationPass::new();
+        pass.update_induction_stride(&mut function, &loop_info, iv, 4);
+
+        // The body should now have a new Const(4) and the BinOp should use it
+        let body_block = function.cfg.blocks.get(&body).unwrap();
+        let mut found_vf_const = false;
+        let mut stride_updated = false;
+
+        for inst in &body_block.instructions {
+            if let IrInstruction::Const {
+                value: IrValue::I32(4),
+                ..
+            } = inst
+            {
+                found_vf_const = true;
+            }
+            if let IrInstruction::BinOp {
+                op: BinaryOp::Add,
+                left,
+                right,
+                ..
+            } = inst
+            {
+                // The stride operand should no longer be `one` (IrId(3))
+                if *left == iv && *right != one {
+                    stride_updated = true;
+                }
+            }
+        }
+
+        assert!(found_vf_const, "Should insert Const(VF=4)");
+        assert!(stride_updated, "Should update stride from 1 to VF");
+    }
+
+    #[test]
+    fn test_update_loop_bound() {
+        let mut function = make_test_function();
+
+        let header = function.cfg.entry_block;
+        let body = function.cfg.create_block();
+        let exit = function.cfg.create_block();
+
+        let iv = IrId::new(0);
+        let cmp_result = IrId::new(1);
+        let old_bound = IrId::new(2);
+        function.next_reg_id = 3;
+
+        if let Some(hdr) = function.cfg.blocks.get_mut(&header) {
+            hdr.instructions = vec![IrInstruction::Cmp {
+                dest: cmp_result,
+                op: CompareOp::Lt,
+                left: iv,
+                right: old_bound,
+            }];
+            hdr.terminator = IrTerminator::CondBranch {
+                condition: cmp_result,
+                true_target: body,
+                false_target: exit,
+            };
+        }
+
+        let loop_info = make_loop_info(header, body, exit, 16);
+
+        let pass = LoopVectorizationPass::new();
+        // 4 vector iterations * VF=4 = adjusted bound of 16
+        pass.update_loop_bound(&mut function, &loop_info, 4, 4);
+
+        let hdr = function.cfg.blocks.get(&header).unwrap();
+        // Should have a new Const(16) inserted before Cmp, and Cmp.right updated
+        let mut found_bound_const = false;
+        for inst in &hdr.instructions {
+            if let IrInstruction::Const {
+                value: IrValue::I32(16),
+                ..
+            } = inst
+            {
+                found_bound_const = true;
+            }
+        }
+        assert!(found_bound_const, "Should insert adjusted bound constant");
+
+        // Cmp should now reference the new bound register, not old_bound
+        let cmp_inst = hdr
+            .instructions
+            .iter()
+            .find(|i| matches!(i, IrInstruction::Cmp { .. }));
+        if let Some(IrInstruction::Cmp { right, .. }) = cmp_inst {
+            assert_ne!(*right, old_bound, "Cmp bound should be updated");
+        } else {
+            panic!("Cmp instruction not found");
+        }
+    }
+
+    #[test]
+    fn test_is_vectorizable_binop() {
+        assert!(LoopVectorizationPass::is_vectorizable_binop(BinaryOp::FAdd));
+        assert!(LoopVectorizationPass::is_vectorizable_binop(BinaryOp::Mul));
+        assert!(!LoopVectorizationPass::is_vectorizable_binop(
+            BinaryOp::Shl
+        ));
+    }
+
+    #[test]
+    fn test_vectorize_instruction_load() {
+        let pass = LoopVectorizationPass::new();
+        let ptr = IrId::new(0);
+        let dest = IrId::new(1);
+        let iv = IrId::new(2);
+
+        let accesses = vec![MemoryAccess {
+            instruction_id: 0,
+            base: ptr,
+            stride: 1,
+            is_load: true,
+            element_type: IrType::F32,
+        }];
+
+        let inst = IrInstruction::Load {
+            dest,
+            ptr,
+            ty: IrType::F32,
+        };
+
+        let vec_type = VectorType::V4F32;
+        let result = pass.vectorize_instruction(&inst, &accesses, &vec_type, iv, 4);
+
+        match result {
+            IrInstruction::VectorLoad { dest: d, ptr: p, .. } => {
+                assert_eq!(d, dest);
+                assert_eq!(p, ptr);
+            }
+            other => panic!("Expected VectorLoad, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_epilogue_creation() {
+        let mut function = make_test_function();
+
+        let header = function.cfg.entry_block;
+        let body = function.cfg.create_block();
+        let exit = function.cfg.create_block();
+        function.next_reg_id = 10;
+
+        // Header with condbranch
+        if let Some(hdr) = function.cfg.blocks.get_mut(&header) {
+            hdr.terminator = IrTerminator::CondBranch {
+                condition: IrId::new(0),
+                true_target: body,
+                false_target: exit,
+            };
+        }
+
+        // Body with a vectorized load
+        let ptr = IrId::new(5);
+        let loaded = IrId::new(6);
+        if let Some(b) = function.cfg.blocks.get_mut(&body) {
+            b.instructions = vec![IrInstruction::VectorLoad {
+                dest: loaded,
+                ptr,
+                vec_ty: VectorType::V4F32.to_ir_type(),
+            }];
+            b.terminator = IrTerminator::Branch { target: header };
+        }
+
+        if let Some(e) = function.cfg.blocks.get_mut(&exit) {
+            e.terminator = IrTerminator::Return { value: None };
+            e.predecessors = vec![header];
+        }
+
+        let loop_info = make_loop_info(header, body, exit, 18);
+
+        let pass = LoopVectorizationPass::new();
+        let block_count_before = function.cfg.blocks.len();
+        pass.create_epilogue_loop(&mut function, &loop_info, 2, &IrType::F32);
+
+        // Should have created a new epilogue block
+        assert_eq!(
+            function.cfg.blocks.len(),
+            block_count_before + 1,
+            "Epilogue block should be created"
+        );
+
+        // Header's false branch should now point to epilogue, not exit
+        let hdr = function.cfg.blocks.get(&header).unwrap();
+        if let IrTerminator::CondBranch { false_target, .. } = &hdr.terminator {
+            assert_ne!(
+                *false_target, exit,
+                "Header should branch to epilogue, not exit"
+            );
+        }
     }
 }
