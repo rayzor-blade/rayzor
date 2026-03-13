@@ -128,7 +128,7 @@ This document tracks major features, enhancements, and technical debt for the Ra
 
 ### 1.6 Standard Library Generics
 
-**Status:** 🟡 Blocked on Enum Support
+**Status:** 🟢 Complete
 
 **Tasks:**
 - [x] Implement `Vec<T>` (generic vector) — `rayzor/Vec.hx` extern class with 14 methods
@@ -991,7 +991,7 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 
 - [x] Devirtualization (2026-03-08) — store-to-load forwarding resolves CallIndirect → CallDirect when function pointer origin is known
 - [x] Loop unrolling (2026-03-08) — full unrolling for constant-trip-count loops (≤16 iterations, ≤32 body instructions)
-- [ ] Full loop auto-vectorization (framework exists, transformation logic is limited)
+- [x] Full loop auto-vectorization (2026-03-13) — IV stride update, loop bound adjustment, scalar epilogue generation for remainders, devectorization for epilogue unrolling. 6 unit tests.
 
 ---
 
@@ -2185,6 +2185,7 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 - [x] `Type.typeof(value)` language-level parity returns boxed `ValueType` when required via compiler special-lowering to `haxe_type_typeof_value`
 - [x] `trace(Type.typeof(x))` parity output fixed (e.g. `TFunction` instead of raw pointer/int)
 - [x] Fixed cold-start SIGSEGV in `Type.typeof` pattern matching — scalar I32 scrutinee forced to unboxed path when `enum_is_boxed` incorrectly returned true for ValueType (2026-03-12)
+- [x] Fixed `Type.typeof` switch/pattern matching regression — `resolve_type_by_name("ValueType")` only checked current scope, missing root-scope enum from BLADE cache; scope hierarchy traversal + always-boxed typeof path + Ptr scrutinee force-boxed (2026-03-12)
 
 **Implemented (2026-02-21 — Tier-A):**
 
