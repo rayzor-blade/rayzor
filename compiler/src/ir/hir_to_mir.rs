@@ -744,7 +744,6 @@ impl<'a> HirToMirContext<'a> {
 
                 // Free this value if not terminated
                 if !self.is_terminated() {
-                    // @:derive(Drop) — call drop() before Free
                     self.maybe_emit_drop_call(current_ir_id);
                     self.builder.build_free(current_ir_id);
                 }
