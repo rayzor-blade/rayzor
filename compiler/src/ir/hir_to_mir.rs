@@ -4197,33 +4197,38 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
 
-                        // Safe cast ownership transfer: when `var c2 = cast(c, Cat)`,
-                        // the result is an alias of `c`'s heap memory. Transfer ownership
-                        // from the source variable to the new variable so the drop analysis
-                        // doesn't free the source while the alias is still in use.
-                        if let HirExprKind::Cast {
-                            expr: cast_expr,
-                            is_safe: true,
-                            ..
-                        } = &init_expr.kind
+                        // Ownership transfer: when `var current = n1`, the heap-allocated
+                        // value is aliased. Transfer ownership from source to destination
+                        // so the drop analysis doesn't free the source while the alias lives.
+                        // Skip if interface wrapping already handled the transfer.
+                        if !wrapped_for_interface {
+                        if let HirPattern::Variable {
+                            symbol: dst_symbol, ..
+                        } = pattern
                         {
-                            if let HirExprKind::Variable {
-                                symbol: src_symbol, ..
-                            } = &cast_expr.kind
-                            {
-                                if let Some(src_ir_id) = self.owned_heap_values.remove(src_symbol) {
-                                    if let HirPattern::Variable {
-                                        symbol: dst_symbol, ..
-                                    } = pattern
-                                    {
-                                        // Transfer: remove source from drop tracking,
-                                        // register destination as the new owner
-                                        self.reassigned_in_scope.insert(*src_symbol);
-                                        self.register_owned_value(*dst_symbol, src_ir_id);
+                            let src_symbol = match &init_expr.kind {
+                                HirExprKind::Variable { symbol, .. } => Some(*symbol),
+                                HirExprKind::Cast {
+                                    expr: cast_expr,
+                                    is_safe: true,
+                                    ..
+                                } => {
+                                    if let HirExprKind::Variable { symbol, .. } = &cast_expr.kind {
+                                        Some(*symbol)
+                                    } else {
+                                        None
                                     }
+                                }
+                                _ => None,
+                            };
+                            if let Some(src_sym) = src_symbol {
+                                if let Some(src_ir_id) = self.owned_heap_values.remove(&src_sym) {
+                                    self.reassigned_in_scope.insert(src_sym);
+                                    self.register_owned_value(*dst_symbol, src_ir_id);
                                 }
                             }
                         }
+                    }
                     }
                 }
             }
@@ -18696,7 +18701,6 @@ impl<'a> HirToMirContext<'a> {
 
         // Create phi nodes for all loop variables
         let mut phi_nodes: BTreeMap<SymbolId, IrId> = BTreeMap::new();
-        // debug!("Creating phi nodes for {} variables", loop_var_initial_values.len());
         for (symbol_id, (initial_reg, var_type)) in &loop_var_initial_values {
             // debug!("Creating phi for symbol {:?}, initial reg {:?}", symbol_id, initial_reg);
             if let Some(phi_reg) = self.builder.build_phi(cond_block, var_type.clone()) {
@@ -31715,6 +31719,11 @@ impl<'a> HirToMirContext<'a> {
             }
 
             // Store field index mapping for field access lowering (instance fields only)
+            {
+                let fn_str = self.string_interner.get(field.name).unwrap_or("?");
+                let cn_str = self.string_interner.get(class.name).unwrap_or("?");
+                eprintln!("[FIELD-IDX] class={} field={} sym={:?} index={}", cn_str, fn_str, field.symbol_id, field_index);
+            }
             self.field_index_map
                 .insert(field.symbol_id, (type_id, field_index));
 
