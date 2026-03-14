@@ -379,7 +379,7 @@ pub unsafe extern "C" fn rayzor_global_store(global_id: i64, value: i64) {
 /// The stored value, or 0 if not found
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_global_load(global_id: i64) -> i64 {
-    GLOBAL_STORE.with(|store| {
+    let val = GLOBAL_STORE.with(|store| {
         let s = store.borrow();
         let idx = global_id as usize;
         if idx < s.len() {
@@ -387,7 +387,8 @@ pub unsafe extern "C" fn rayzor_global_load(global_id: i64) -> i64 {
         } else {
             0
         }
-    })
+    });
+    val
 }
 
 #[cfg(test)]

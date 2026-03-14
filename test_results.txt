@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Thu Mar 12 12:07:19 GMT 2026
+  Sat Mar 14 19:00:10 GMT 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -89,7 +89,7 @@ Direct comparison: arr[2] == 30 -> false
 static inline var SHIFT_16 = 1 << 16: 65536
 static inline var SHIFT_8 = 1 << 8: 256
 static inline var CONST_65536 = 65536: 65536
-static var SHIFT_16_VAR = 1 << 16: 65536
+static var SHIFT_16_VAR = 1 << 16: null
 var local = 1 << 16: 65536
 Direct 1 << 16: 65536
 Direct 1 << 8: 256
@@ -132,14 +132,6 @@ Full Checksum: 112798515
 
 --- debug_division [PASS] ---
 🚀 Running compiler/tests/haxe/debug_division.hx [debug] [preset: Application]...
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `i`[0m
-  [96m-->[0m compiler/tests/haxe/debug_division.hx:31:23
-   [96m|[0m
-[96m31[0m [96m|[0m         var result5 = i / 1000;
-   [96m|[0m                       [31m^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/debug_division.hx:25:24: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = i.clone();`[0m
 i = 4
 MaxIterations = 1000
 i / MaxIterations = 0.004
@@ -179,31 +171,31 @@ arr[9] = 90
 
 --- debug_static_div [PASS] ---
 🚀 Running compiler/tests/haxe/debug_static_div.hx [debug] [preset: Application]...
-MAX = 1000
+MAX = 0
 INLINE_MAX = 1000
-localMax = 1000
+localMax = 0
 localInline = 1000
-4 / MAX = 0.004
-4 / localMax = 0.004
+4 / MAX = inf
+4 / localMax = inf
 4 / INLINE_MAX = 0.004
 4 / localInline = 0.004
-4.0 / MAX = 0.004
-4.0 / localMax = 0.004
+4.0 / MAX = inf
+4.0 / localMax = inf
 4 / 1000 = 0.004
-f / MAX = 0.004
-f / localMax = 0.004
+f / MAX = inf
+f / localMax = inf
 f / 1000 = 0.004
 ✓ Complete
 
 --- debug_static_inline [PASS] ---
 🚀 Running compiler/tests/haxe/debug_static_inline.hx [debug] [preset: Application]...
 INLINE_1000 = 1000
-STATIC_1000 = 1000
+STATIC_1000 = 0
 INLINE_EXPR (35*25) = 875
 var a = INLINE_1000: 1000
-var b = STATIC_1000: 1000
+var b = STATIC_1000: 0
 4 / INLINE_1000 = 0.004
-4 / STATIC_1000 = 0.004
+4 / STATIC_1000 = inf
 Dynamic INLINE_1000 = 1000
 ✓ Complete
 
@@ -269,14 +261,6 @@ Checksum: 4511136
 
 --- test_anon_object [PASS] ---
 🚀 Running compiler/tests/haxe/test_anon_object.hx [debug] [preset: Application]...
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `a`[0m
-  [96m-->[0m compiler/tests/haxe/test_anon_object.hx:20:15
-   [96m|[0m
-[96m20[0m [96m|[0m         trace(a.x);    // 1
-   [96m|[0m               [31m^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_anon_object.hx:19:17: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = a.clone();`[0m
 10
 20
 3.14
@@ -414,14 +398,6 @@ Expected: 65536
 
 --- test_compress [PASS] ---
 🚀 Running compiler/tests/haxe/test_compress.hx [debug] [preset: Application]...
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `input`[0m
-  [96m-->[0m compiler/tests/haxe/test_compress.hx:11:35
-   [96m|[0m
-[96m11[0m [96m|[0m         trace(compressed.length < input.length);  // true — repetitive data compresses well
-   [96m|[0m                                   [31m^^^^^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_compress.hx:8:48: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = input.clone();`[0m
 55
 true
 true
@@ -440,14 +416,6 @@ done
 
 --- test_copy [PASS] ---
 🚀 Running compiler/tests/haxe/test_copy.hx [debug] [preset: Application]...
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `a`[0m
-  [96m-->[0m compiler/tests/haxe/test_copy.hx:21:15
-   [96m|[0m
-[96m21[0m [96m|[0m         trace(a.x);            // should still be 3
-   [96m|[0m               [31m^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_copy.hx:20:16: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = a.clone();`[0m
 3
 42
 3
@@ -457,14 +425,6 @@ done
 
 --- test_copy_clone_identity [PASS] ---
 🚀 Running compiler/tests/haxe/test_copy_clone_identity.hx [debug] [preset: Application]...
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `a`[0m
-  [96m-->[0m compiler/tests/haxe/test_copy_clone_identity.hx:24:15
-   [96m|[0m
-[96m24[0m [96m|[0m         trace(a.x);         // 10
-   [96m|[0m               [31m^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_copy_clone_identity.hx:22:17: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = a.clone();`[0m
 10
 99
 100
@@ -648,38 +608,6 @@ done
 
 --- test_enum_abstract_methods [PASS] ---
 🚀 Running compiler/tests/haxe/test_enum_abstract_methods.hx [debug] [preset: Application]...
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `c2`[0m
-  [96m-->[0m compiler/tests/haxe/test_enum_abstract_methods.hx:71:15
-   [96m|[0m
-[96m71[0m [96m|[0m         trace(c2.doubled());  // 2
-   [96m|[0m               [31m^^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_enum_abstract_methods.hx:68:15: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = c2.clone();`[0m
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `r`[0m
-  [96m-->[0m compiler/tests/haxe/test_enum_abstract_methods.hx:57:15
-   [96m|[0m
-[96m57[0m [96m|[0m         trace(r.doubled());  // 0
-   [96m|[0m               [31m^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_enum_abstract_methods.hx:52:15: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = r.clone();`[0m
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `b`[0m
-  [96m-->[0m compiler/tests/haxe/test_enum_abstract_methods.hx:59:15
-   [96m|[0m
-[96m59[0m [96m|[0m         trace(b.doubled());  // 4
-   [96m|[0m               [31m^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_enum_abstract_methods.hx:54:15: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = b.clone();`[0m
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `g`[0m
-  [96m-->[0m compiler/tests/haxe/test_enum_abstract_methods.hx:58:15
-   [96m|[0m
-[96m58[0m [96m|[0m         trace(g.doubled());  // 2
-   [96m|[0m               [31m^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_enum_abstract_methods.hx:53:15: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = g.clone();`[0m
 0
 1
 2
@@ -755,15 +683,9 @@ done
 🚀 Running compiler/tests/haxe/test_exception_method_parity.hx [debug] [preset: Application]...
 message=boom
 toString=boom
-details=Exception: "boom"
-Called from Main.thrower (test_exception_method_parity.hx:5:15)
-   5 |         throw new Exception("boom");
-     |               ^
-Called from Main.main (test_exception_method_parity.hx:10:13)
-  10 |             thrower();
-     |             ^
+details=boom
 hasMessage=true
-hasStack=true
+hasStack=false
 ✓ Complete
 
 --- test_exhaustive_switch [PASS] ---
@@ -811,11 +733,11 @@ done
 0
 1
 2
-world
 hello
-20
-30
+world
 10
+30
+20
 done
 ✓ Complete
 
@@ -846,14 +768,6 @@ done
 
 --- test_generic_tree [PASS] ---
 🚀 Running compiler/tests/haxe/test_generic_tree.hx [debug] [preset: Application]...
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `c`[0m
-  [96m-->[0m compiler/tests/haxe/test_generic_tree.hx:20:17
-   [96m|[0m
-[96m20[0m [96m|[0m             if (c == 0)
-   [96m|[0m                 [31m^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_generic_tree.hx:19:19: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = c.clone();`[0m
 0
 -1
 0
@@ -936,22 +850,6 @@ done
 
 --- test_interface_lifetime [PASS] ---
 🚀 Running compiler/tests/haxe/test_interface_lifetime.hx [debug] [preset: Application]...
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `c2`[0m
-  [96m-->[0m compiler/tests/haxe/test_interface_lifetime.hx:30:15
-   [96m|[0m
-[96m30[0m [96m|[0m         trace(c2.value()); // 3
-   [96m|[0m               [31m^^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_interface_lifetime.hx:28:19: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = c2.clone();`[0m
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `c`[0m
-  [96m-->[0m compiler/tests/haxe/test_interface_lifetime.hx:22:13
-   [96m|[0m
-[96m22[0m [96m|[0m             c = new C(2);
-   [96m|[0m             [31m^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_interface_lifetime.hx:21:23: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = c.clone();`[0m
 1
 2
 3
@@ -960,14 +858,6 @@ done
 
 --- test_interface_wrapper_copy [PASS] ---
 🚀 Running compiler/tests/haxe/test_interface_wrapper_copy.hx [debug] [preset: Application]...
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `i`[0m
-  [96m-->[0m compiler/tests/haxe/test_interface_wrapper_copy.hx:28:9
-   [96m|[0m
-[96m28[0m [96m|[0m         i = new ValueBox(30);
-   [96m|[0m         [31m^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_interface_wrapper_copy.hx:27:24: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = i.clone();`[0m
 10
 20
 20
@@ -1032,42 +922,18 @@ done
 
 --- test_map_literal [PASS] ---
 🚀 Running compiler/tests/haxe/test_map_literal.hx [debug] [preset: Application]...
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `m`[0m
-  [96m-->[0m compiler/tests/haxe/test_map_literal.hx:8:19
-  [96m|[0m
-[96m8[0m [96m|[0m         var val = m.get("hello");
-  [96m|[0m                   [31m^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_map_literal.hx:7:15: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = m.clone();`[0m
 {hello => 42}
 42
 ✓ Complete
 
 --- test_map_literal2 [PASS] ---
 🚀 Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]...
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `m`[0m
-  [96m-->[0m compiler/tests/haxe/test_map_literal2.hx:11:15
-   [96m|[0m
-[96m11[0m [96m|[0m         trace(m.get("hello"));
-   [96m|[0m               [31m^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_map_literal2.hx:10:15: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = m.clone();`[0m
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `im`[0m
-  [96m-->[0m compiler/tests/haxe/test_map_literal2.hx:21:15
-   [96m|[0m
-[96m21[0m [96m|[0m         trace(im.get(1));
-   [96m|[0m               [31m^^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_map_literal2.hx:20:15: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = im.clone();`[0m
 {hello => 42, world => 99}
 42
 99
 true
 false
-{2 => 200, 1 => 100}
+{1 => 100, 2 => 200}
 100
 200
 true
@@ -1111,22 +977,6 @@ done
 
 --- test_null_t [PASS] ---
 🚀 Running compiler/tests/haxe/test_null_t.hx [debug] [preset: Application]...
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `y`[0m
-  [96m-->[0m compiler/tests/haxe/test_null_t.hx:14:17
-   [96m|[0m
-[96m14[0m [96m|[0m         var w = y ?? -1;
-   [96m|[0m                 [31m^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_null_t.hx:8:15: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = y.clone();`[0m
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `x`[0m
-  [96m-->[0m compiler/tests/haxe/test_null_t.hx:11:17
-   [96m|[0m
-[96m11[0m [96m|[0m         var z = x ?? 0;
-   [96m|[0m                 [31m^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_null_t.hx:5:15: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = x.clone();`[0m
 42
 null
 42
@@ -1144,6 +994,12 @@ true
 false
 30
 done
+✓ Complete
+
+--- test_option_enum [PASS] ---
+🚀 Running compiler/tests/haxe/test_option_enum.hx [debug] [preset: Application]...
+42
+none
 ✓ Complete
 
 --- test_optional_chain [PASS] ---
@@ -1337,14 +1193,6 @@ hi...
 
 --- test_structural [PASS] ---
 🚀 Running compiler/tests/haxe/test_structural.hx [debug] [preset: Application]...
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `pt`[0m
-  [96m-->[0m compiler/tests/haxe/test_structural.hx:32:9
-   [96m|[0m
-[96m32[0m [96m|[0m         pt.x = 42;
-   [96m|[0m         [31m^^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_structural.hx:26:17: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = pt.clone();`[0m
 10
 20
 3
@@ -1420,15 +1268,15 @@ Alice
 TFunction
 TClass(String)
 TEnum(Color)
-TClass
-TClass
-TInt
-TClass
-TClass
-TInt
-TClass
-TClass
-TInt
+TFunction
+TClass(String)
+TEnum(Color)
+TFunction
+TClass(String)
+TEnum(Color)
+TFunction
+TClass(String)
+TEnum(Color)
 ✓ Complete
 
 --- test_typeof_parity [PASS] ---
@@ -1436,7 +1284,7 @@ TInt
 fn-ok
 int-ok
 string-class-ok
-enum-bad
+enum-ok
 ✓ Complete
 
 --- test_uncaught_exception_parity [PASS] ---
@@ -1448,36 +1296,12 @@ done
 
 --- test_virtual_dispatch [PASS] ---
 🚀 Running compiler/tests/haxe/test_virtual_dispatch.hx [debug] [preset: Application]...
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `base`[0m
-  [96m-->[0m compiler/tests/haxe/test_virtual_dispatch.hx:58:15
-   [96m|[0m
-[96m58[0m [96m|[0m         trace(base.getValue());   // 1
-   [96m|[0m               [31m^^^^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_virtual_dispatch.hx:53:25: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = base.clone();`[0m
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `grand`[0m
-  [96m-->[0m compiler/tests/haxe/test_virtual_dispatch.hx:60:15
-   [96m|[0m
-[96m60[0m [96m|[0m         trace(grand.getValue());  // 3
-   [96m|[0m               [31m^^^^^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_virtual_dispatch.hx:55:25: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = grand.clone();`[0m
-
-[33mwarning[E0382][0m: [1;97muse of moved value: `child`[0m
-  [96m-->[0m compiler/tests/haxe/test_virtual_dispatch.hx:59:15
-   [96m|[0m
-[96m59[0m [96m|[0m         trace(child.getValue());  // 2
-   [96m|[0m               [31m^^^^^[0m [1;4;31mvalue used here after move[0m
-  [96m-->[0m compiler/tests/haxe/test_virtual_dispatch.hx:54:25: value moved here
-     [32mhelp[0m: [33mConsider cloning: `var copy = child.clone();`[0m
 Base
 Child
 GrandChild
 Base
-Base
-Base
+Child
+GrandChild
 1
 2
 3
@@ -1494,8 +1318,8 @@ Done
 
 
 =========================================
-  TOTAL:        117
-  PASSED:       117
+  TOTAL:        118
+  PASSED:       118
   FAILED:       0
   CRASHED:      0
 =========================================

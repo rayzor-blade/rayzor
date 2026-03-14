@@ -185,12 +185,29 @@ impl<'a> TastToHirContext<'a> {
     /// where PI is also a static inline var
     fn evaluate_inline_static_vars(&mut self, file: &TypedFile) {
         // Collect all static fields that need evaluation (from classes and abstracts)
+        // Only inline fields marked `inline` or `final`. Mutable (var) static fields
+        // without `inline` must NOT be inlined — they can be mutated at runtime.
+        let symbol_table = &self.symbol_table;
+        let is_inline_field = |field: &&crate::tast::node::TypedField| -> bool {
+            // Check symbol flags for INLINE
+            if let Some(sym) = symbol_table.get_symbol(field.symbol_id) {
+                if sym.is_inline() {
+                    return true;
+                }
+            }
+            // Also inline final (immutable) fields
+            field.mutability != crate::tast::symbols::Mutability::Mutable
+        };
         let static_fields: Vec<_> = file
             .classes
             .iter()
             .flat_map(|class| class.fields.iter())
-            .chain(file.abstracts.iter().flat_map(|abs| abs.fields.iter()))
-            .filter(|field| field.is_static && field.initializer.is_some())
+            .filter(|field| field.is_static && field.initializer.is_some() && is_inline_field(field))
+            .chain(
+                // Abstract fields are always inline constants (enum abstract values)
+                file.abstracts.iter().flat_map(|abs| abs.fields.iter())
+                    .filter(|field| field.is_static && field.initializer.is_some())
+            )
             .map(|field| (field.symbol_id, field.initializer.as_ref().unwrap().clone()))
             .collect();
 
@@ -868,17 +885,22 @@ impl<'a> TastToHirContext<'a> {
                 }
             }
         }
-        if let Some(first_stmt) = stmts_to_scan.first() {
-            if let HirStatement::Expr(expr) = first_stmt {
+        // Scan all statements for super() call — it may not be the first
+        // statement if the constructor has code before super()
+        let mut super_call_idx = None;
+        for (idx, stmt) in stmts_to_scan.iter().enumerate() {
+            if let HirStatement::Expr(expr) = stmt {
                 if let HirExprKind::Call { callee, args, .. } = &expr.kind {
                     if matches!(callee.kind, HirExprKind::Super) {
                         super_call = Some(HirSuperCall { args: args.clone() });
+                        super_call_idx = Some(idx);
+                        break;
                     }
                 }
             }
         }
-        if super_call.is_some() {
-            body.statements.remove(0);
+        if let Some(idx) = super_call_idx {
+            body.statements.remove(idx);
         }
 
         HirConstructor {
@@ -1290,13 +1312,17 @@ impl<'a> TastToHirContext<'a> {
                     for class in &file.classes {
                         for field in &class.fields {
                             if field.symbol_id == *symbol_id && field.is_static {
-                                // Found a static field - try to inline its constant value
-                                if let Some(ref init_expr) = field.initializer {
-                                    if let TypedExpressionKind::Literal { value } = &init_expr.kind
-                                    {
-                                        // Inline the constant value from the static field
-                                        let lowered = self.lower_literal(value);
-                                        inlined_static = Some(HirExprKind::Literal(lowered));
+                                // Only inline fields with `inline` modifier or `final` (immutable)
+                                let should_inline = self.symbol_table.get_symbol(*symbol_id)
+                                    .map_or(false, |s| s.is_inline())
+                                    || field.mutability != crate::tast::symbols::Mutability::Mutable;
+                                if should_inline {
+                                    if let Some(ref init_expr) = field.initializer {
+                                        if let TypedExpressionKind::Literal { value } = &init_expr.kind
+                                        {
+                                            let lowered = self.lower_literal(value);
+                                            inlined_static = Some(HirExprKind::Literal(lowered));
+                                        }
                                     }
                                 }
                                 break;
@@ -1459,10 +1485,15 @@ impl<'a> TastToHirContext<'a> {
 
                     for field in field_iter {
                         if field.symbol_id == *field_symbol && field.is_static {
-                            if let Some(ref init_expr) = field.initializer {
-                                if let TypedExpressionKind::Literal { value } = &init_expr.kind {
-                                    inlined_value =
-                                        Some(HirExprKind::Literal(self.lower_literal(value)));
+                            let should_inline = self.symbol_table.get_symbol(*field_symbol)
+                                .map_or(false, |s| s.is_inline())
+                                || field.mutability != crate::tast::symbols::Mutability::Mutable;
+                            if should_inline {
+                                if let Some(ref init_expr) = field.initializer {
+                                    if let TypedExpressionKind::Literal { value } = &init_expr.kind {
+                                        inlined_value =
+                                            Some(HirExprKind::Literal(self.lower_literal(value)));
+                                    }
                                 }
                             }
                             break;
@@ -2727,6 +2758,11 @@ impl<'a> TastToHirContext<'a> {
                 object: Box::new(self.lower_expression(array)),
                 index: Box::new(self.lower_expression(index)),
             },
+            TypedExpressionKind::StaticFieldAccess { field_symbol, .. } => {
+                // Static field assignment: treat as Variable so MIR lowering
+                // stores to the global via global_symbol_map lookup.
+                HirLValue::Variable(*field_symbol)
+            }
             _ => {
                 self.add_error("Invalid assignment target", expr.source_location);
                 // Return invalid symbol - this will be caught during validation

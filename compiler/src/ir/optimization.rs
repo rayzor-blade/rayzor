@@ -854,6 +854,9 @@ impl InstructionExt for IrInstruction {
             // Move/Clone instructions
             IrInstruction::Move { src, .. } => replace(src),
             IrInstruction::Clone { src, .. } => replace(src),
+            // Global variable instructions
+            IrInstruction::StoreGlobal { value, .. } => replace(value),
+            IrInstruction::LoadGlobal { .. } => {} // LoadGlobal has no register uses (only dest)
             // Instructions with no uses to replace
             IrInstruction::Const { .. }
             | IrInstruction::Jump { .. }
@@ -1797,7 +1800,6 @@ impl PassManager {
             }
             OptimizationLevel::O1 => {
                 // Fast, low-overhead optimizations
-                // Always inline Haxe `inline`-marked functions + cost-model inlining
                 manager.add_pass(super::inlining::InliningPass::new());
                 // manager.add_pass(GlobalLoadCachingPass::new()); // BUG: causes invalid IR
                 manager.add_pass(DeadCodeEliminationPass::new());

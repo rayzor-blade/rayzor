@@ -758,10 +758,23 @@ impl<'a> HirToMirContext<'a> {
     /// Cleanup all scopes - used for early return from functions
     /// Frees all heap values in all active scopes (innermost to outermost)
     fn cleanup_all_scopes(&mut self) {
+        self.cleanup_all_scopes_except_symbol(None);
+    }
+
+    fn cleanup_all_scopes_except_symbol(&mut self, skip_symbol: Option<SymbolId>) {
         // Collect IrIds to free first (to avoid borrow conflict with maybe_emit_drop_call)
         let mut to_free = Vec::new();
         for scope in self.drop_scope_stack.iter().rev() {
             for (symbol, ir_id) in scope {
+                // Skip the returned variable — its value escapes the function
+                if skip_symbol == Some(*symbol) {
+                    trace!(
+                        "Drop: Skipping {:?} ({:?}) in cleanup (returned value)",
+                        symbol,
+                        ir_id
+                    );
+                    continue;
+                }
                 // Skip lambda captures
                 if let Some(drop_points) = &self.current_drop_points {
                     if drop_points.lambda_captures.contains(symbol) {
@@ -887,14 +900,12 @@ impl<'a> HirToMirContext<'a> {
     /// This is for intermediate results like `new Complex(...).mul(...)`
     fn register_temp_value(&mut self, ir_id: IrId) {
         self.temp_heap_values.push(ir_id);
-        trace!("Drop: Registered temp {:?}", ir_id);
     }
 
     /// Free all temporary values (called after expression completes)
     fn drop_temps(&mut self) {
         for ir_id in std::mem::take(&mut self.temp_heap_values) {
             self.builder.build_free(ir_id);
-            trace!("Drop: Freed temp {:?}", ir_id);
         }
     }
 
@@ -2979,17 +2990,6 @@ impl<'a> HirToMirContext<'a> {
             self.ensure_terminator();
         }
 
-        // Finish
-        // debug!("===== FINISHING FUNCTION =====");
-        // if let Some(func) = self.builder.current_function() {
-        //     eprintln!(
-        //         "DEBUG   Function '{}' entry block terminator: {:?}",
-        //         func.name,
-        //         func.cfg
-        //             .get_block(func.entry_block())
-        //             .map(|b| &b.terminator)
-        //     );
-        // }
         self.builder.finish_function();
         // debug!("  Function finished, context cleared");
 
@@ -4430,6 +4430,13 @@ impl<'a> HirToMirContext<'a> {
 
                         self.lower_lvalue_write(lhs, value);
 
+                        // If the LHS is a global variable, the value escapes to global storage
+                        // and must NOT be tracked for drop/free. Skip all drop tracking.
+                        let lhs_is_global = match lhs {
+                            HirLValue::Variable(sym) => self.global_symbol_map.contains_key(sym),
+                            _ => false,
+                        };
+
                         // Register heap-allocated value for drop tracking.
                         // Only track when the RHS actually creates a NEW allocation (New or Call).
                         // Field access and variable reads produce borrowed references that must
@@ -4475,27 +4482,29 @@ impl<'a> HirToMirContext<'a> {
                             }
                         }
 
-                        if lhs_was_tracked {
-                            if let Some(symbol) = lhs_symbol {
-                                if rhs_needs_tracking {
-                                    // RHS creates a new allocation → free old, track new
-                                    self.register_owned_value(symbol, value);
-                                } else {
-                                    // RHS is a borrowed reference (field access, variable, etc.)
-                                    // → free old owned value, STOP tracking
-                                    if let Some(old_ir_id) = self.owned_heap_values.remove(&symbol)
-                                    {
-                                        if !self.is_terminated() {
-                                            self.builder.build_free(old_ir_id);
+                        if !lhs_is_global {
+                            if lhs_was_tracked {
+                                if let Some(symbol) = lhs_symbol {
+                                    if rhs_needs_tracking {
+                                        // RHS creates a new allocation → free old, track new
+                                        self.register_owned_value(symbol, value);
+                                    } else {
+                                        // RHS is a borrowed reference (field access, variable, etc.)
+                                        // → free old owned value, STOP tracking
+                                        if let Some(old_ir_id) = self.owned_heap_values.remove(&symbol)
+                                        {
+                                            if !self.is_terminated() {
+                                                self.builder.build_free(old_ir_id);
+                                            }
                                         }
+                                        self.reassigned_in_scope.insert(symbol);
                                     }
-                                    self.reassigned_in_scope.insert(symbol);
                                 }
-                            }
-                        } else if rhs_needs_tracking {
-                            // New allocation assigned to previously-untracked variable
-                            if let Some(symbol) = lhs_symbol {
-                                self.register_owned_value(symbol, value);
+                            } else if rhs_needs_tracking {
+                                // New allocation assigned to previously-untracked variable
+                                if let Some(symbol) = lhs_symbol {
+                                    self.register_owned_value(symbol, value);
+                                }
                             }
                         }
 
@@ -4519,6 +4528,14 @@ impl<'a> HirToMirContext<'a> {
 
             HirStatement::Return(value) => {
                 debug!("[Return]: has_value: {}", value.is_some());
+                // Identify the returned symbol (if returning a variable) so we can
+                // skip freeing its allocation in cleanup
+                let returned_symbol = value.as_ref().and_then(|e| {
+                    match &e.kind {
+                        HirExprKind::Variable { symbol, .. } => Some(*symbol),
+                        _ => None,
+                    }
+                });
                 let ret_value = value.as_ref().and_then(|e| {
                     debug!(
                         "[Return]: Lowering return expression, expr kind: {:?}",
@@ -4542,7 +4559,8 @@ impl<'a> HirToMirContext<'a> {
                     result
                 });
                 // Cleanup all scopes before returning - free all owned heap values
-                self.cleanup_all_scopes();
+                // BUT skip the returned value (it escapes the function)
+                self.cleanup_all_scopes_except_symbol(returned_symbol);
                 debug!(
                     "[Return]: Building return instruction with value: {:?}",
                     ret_value
@@ -7523,7 +7541,25 @@ impl<'a> HirToMirContext<'a> {
                     *symbol
                 };
 
+                // Check direct SymbolId match against global_symbol_map first
+                if let Some(&gid) = self.global_symbol_map.get(&lookup_symbol) {
+                    let global_type = self
+                        .builder
+                        .module
+                        .globals
+                        .get(&gid)
+                        .map(|g| g.ty.clone())
+                        .unwrap_or(IrType::Any);
+                    return self.builder.build_load_global(gid, global_type);
+                }
+
                 if let Some(&reg) = self.symbol_map.get(&lookup_symbol) {
+                    {
+                        let _n = self.symbol_table.get_symbol(lookup_symbol).and_then(|s| self.string_interner.get(s.name));
+                        if _n == Some("counter") {
+                            eprintln!("[COUNTER_SYMBOL_MAP] counter {:?} found in symbol_map as reg {:?}", lookup_symbol, reg);
+                        }
+                    }
                     // Check if we need to convert the type
                     // This handles cases where captured variables are stored as i64 in closure environment
                     // but need to be used as their original type (e.g., i32)
@@ -7714,6 +7750,32 @@ impl<'a> HirToMirContext<'a> {
                         .symbol_table
                         .get_symbol(*symbol)
                         .and_then(|s| self.string_interner.get(s.name));
+                    // Try name-based global lookup as fallback (SymbolIds may differ)
+                    eprintln!("[UNRESOLVED] {:?} name={:?} global_map_size={}", symbol, sym_name, self.global_symbol_map.len());
+                    if let Some(name_str) = sym_name {
+                        for (&gsym, &gid) in &self.global_symbol_map {
+                            if let Some(gsym_info) = self.symbol_table.get_symbol(gsym) {
+                                if let Some(gname) = self.string_interner.get(gsym_info.name) {
+                                    if gname == name_str {
+                                        let global_type = self
+                                            .builder
+                                            .module
+                                            .globals
+                                            .get(&gid)
+                                            .map(|g| g.ty.clone())
+                                            .unwrap_or(IrType::Any);
+                                        return self.builder.build_load_global(gid, global_type);
+                                    }
+                                }
+                            }
+                        }
+                        // Also try searching globals by name suffix
+                        for global in self.builder.module.globals.values() {
+                            if global.name.ends_with(&format!(".{}", name_str)) || global.name == name_str {
+                                return self.builder.build_load_global(global.id, global.ty.clone());
+                            }
+                        }
+                    }
                     debug!(
                         "[UNRESOLVED_VAR] Could not resolve variable {:?} (name={:?})",
                         symbol, sym_name
@@ -7780,9 +7842,13 @@ impl<'a> HirToMirContext<'a> {
                 ) && self.get_drop_behavior(object.ty)
                     == DropBehavior::AutoDrop;
 
-                if is_owned_heap_value {
+                // Only register NEW expressions as temporaries, not method Call results.
+                // Method calls (getObj(), input(), etc.) often return references to existing
+                // objects — freeing these would corrupt the heap. Only `new Foo(...)` creates
+                // a genuinely owned temporary that must be freed after the field access chain.
+                let is_new_expr = matches!(&object.kind, HirExprKind::New { .. });
+                if is_owned_heap_value && is_new_expr {
                     self.temp_heap_values.push(obj_reg);
-                    trace!("Drop: Registered intermediate {:?} as temp", obj_reg);
                 }
 
                 let receiver_ty = object.ty; // The type of the object being accessed
@@ -8799,7 +8865,19 @@ impl<'a> HirToMirContext<'a> {
                             // for MIR wrapper calls to avoid spurious dereferences
                             // (e.g., Host.localhost() returns a raw string pointer, not a boxed value).
                             let final_result = if is_mir_wrapper {
-                                Some(call_result)
+                                // MIR wrappers like array_pop/array_shift return raw I64.
+                                // When the element type is a class pointer, cast I64→Ptr(Void).
+                                if actual_return_type == IrType::I64
+                                    && matches!(&resolved_expected, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void))
+                                {
+                                    self.builder.build_cast(
+                                        call_result,
+                                        IrType::I64,
+                                        IrType::Ptr(Box::new(IrType::Void)),
+                                    )
+                                } else {
+                                    Some(call_result)
+                                }
                             } else {
                                 self.maybe_unbox_for_extern_return(
                                     call_result,
@@ -8930,7 +9008,35 @@ impl<'a> HirToMirContext<'a> {
 
                         // Check for virtual dispatch: if the method is in a class hierarchy
                         // with overrides, dispatch through the vtable instead of calling directly.
-                        if let Some(&(slot_index, _)) = self.virtual_dispatch_info.get(field) {
+                        let vtable_lookup = self.virtual_dispatch_info.get(field).copied()
+                            .or_else(|| {
+                                let method_name = self.symbol_table.get_symbol(*field).map(|s| s.name);
+                                if let Some(method_name) = method_name {
+                                    let receiver_class_sym = {
+                                        let type_table = self.type_table.borrow();
+                                        type_table.get(object.ty).and_then(|t| {
+                                            match &t.kind {
+                                                TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                                                _ => None,
+                                            }
+                                        })
+                                    };
+                                    if let Some(class_sym) = receiver_class_sym {
+                                        if let Some(&method_sym) = self.class_method_by_name.get(&(class_sym, method_name)) {
+                                            return self.virtual_dispatch_info.get(&method_sym).copied();
+                                        }
+                                        let mut current = class_sym;
+                                        while let Some(&parent) = self.class_parent_map.get(&current) {
+                                            if let Some(&method_sym) = self.class_method_by_name.get(&(parent, method_name)) {
+                                                return self.virtual_dispatch_info.get(&method_sym).copied();
+                                            }
+                                            current = parent;
+                                        }
+                                    }
+                                }
+                                None
+                            });
+                        if let Some((slot_index, _)) = vtable_lookup {
                             let obj_reg = self.lower_expression(object)?;
 
                             // If Dynamic-typed, unbox to get raw object pointer
@@ -9340,14 +9446,10 @@ impl<'a> HirToMirContext<'a> {
                             }
                         };
 
-                        // Track object as temp if it's a heap-allocated intermediate
-                        // (e.g., z.mul(z) in z.mul(z).add(c) returns a new Complex)
-                        let is_owned_heap_value = matches!(
-                            &object.kind,
-                            HirExprKind::New { .. } | HirExprKind::Call { .. }
-                        ) && self.get_drop_behavior(object.ty)
-                            == DropBehavior::AutoDrop;
-                        if is_owned_heap_value {
+                        // Track NEW expressions as temps (not Call results — they may be references)
+                        let is_new_temp = matches!(&object.kind, HirExprKind::New { .. })
+                            && self.get_drop_behavior(object.ty) == DropBehavior::AutoDrop;
+                        if is_new_temp {
                             self.temp_heap_values.push(obj_reg);
                         }
 
@@ -10396,6 +10498,67 @@ impl<'a> HirToMirContext<'a> {
 
                 // Check if callee is a direct function reference
                 if let HirExprKind::Variable { symbol, .. } = &callee.kind {
+                    // Virtual dispatch for instance method calls (is_method=true):
+                    if *is_method && !args.is_empty() {
+                        let vtable_slot = self.virtual_dispatch_info.get(symbol).copied()
+                            .or_else(|| {
+                                let method_name = self.symbol_table.get_symbol(*symbol).map(|s| s.name)?;
+                                let receiver_type = self.resolve_through_aliases(args[0].ty);
+                                let type_table = self.type_table.borrow();
+                                let class_sym = match &type_table.get(receiver_type)?.kind {
+                                    TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                                    _ => None,
+                                }?;
+                                drop(type_table);
+                                let mut current = Some(class_sym);
+                                while let Some(cls) = current {
+                                    if let Some(&method_sym) = self.class_method_by_name.get(&(cls, method_name)) {
+                                        if let Some(info) = self.virtual_dispatch_info.get(&method_sym) {
+                                            return Some(*info);
+                                        }
+                                    }
+                                    current = self.class_parent_map.get(&cls).copied();
+                                }
+                                None
+                            });
+
+                        if let Some((slot_index, _defining_class)) = vtable_slot {
+                            let obj_reg = self.lower_expression(&args[0])?;
+                            let mut call_args = vec![obj_reg];
+                            for arg in args.iter().skip(1) {
+                                if let Some(reg) = self.lower_expression(arg) {
+                                    call_args.push(reg);
+                                }
+                            }
+                            let lookup_fn = self.get_or_register_extern_function(
+                                "haxe_vtable_lookup",
+                                vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32],
+                                IrType::I64,
+                            );
+                            let slot_reg = self.builder.build_const(IrValue::I32(slot_index as i32))?;
+                            let fn_ptr = self.builder.build_call_direct(
+                                lookup_fn,
+                                vec![obj_reg, slot_reg],
+                                IrType::I64,
+                            )?;
+                            let mut param_types = vec![IrType::Ptr(Box::new(IrType::Void))];
+                            for arg in args.iter().skip(1) {
+                                param_types.push(self.convert_type(arg.ty));
+                            }
+                            let return_type = Box::new(self.convert_type(expr.ty));
+                            let func_signature = IrType::Function {
+                                params: param_types,
+                                return_type,
+                                varargs: false,
+                            };
+                            return self.builder.build_call_indirect(
+                                fn_ptr,
+                                call_args,
+                                func_signature,
+                            );
+                        }
+                    }
+
                     let symbol_name = self
                         .symbol_table
                         .get_symbol(*symbol)
@@ -16273,10 +16436,10 @@ impl<'a> HirToMirContext<'a> {
                 drop(type_table);
 
                 if is_array {
-                    // Allocate HaxeArray struct on stack and zero-initialize it
-                    // The runtime functions (push, etc.) will handle initialization on first use
-                    let class_mir_type = self.convert_type(*class_type);
-                    let array_ptr = self.builder.build_alloc(class_mir_type.clone(), None)?;
+                    // Allocate HaxeArray struct on heap (32 bytes = 4 x 8 for ptr, len, cap, elem_size)
+                    // Must be heap-allocated because array pointers can escape the creating function
+                    // (e.g., stored in class fields, returned from functions)
+                    let array_ptr = self.build_heap_alloc(32)?;
 
                     // Zero-initialize the HaxeArray struct (ptr=null, len=0, cap=0, elem_size=8)
                     // This represents an empty uninitialized array
@@ -21951,12 +22114,32 @@ impl<'a> HirToMirContext<'a> {
         match lvalue {
             HirLValue::Variable(symbol) => {
                 // Check if this is a global variable first
-                if let Some(&global_id) = self.global_symbol_map.get(symbol) {
-                    debug!(
-                        "[GLOBAL STORE] Storing to global {:?} -> {:?}",
-                        symbol, global_id
-                    );
+                let global_id = self.global_symbol_map.get(symbol).copied()
+                    .or_else(|| {
+                        // Name-based fallback: SymbolIds may differ between contexts
+                        let sym_name = self.symbol_table.get_symbol(*symbol)
+                            .and_then(|s| self.string_interner.get(s.name))?;
+                        for (&gsym, &gid) in &self.global_symbol_map {
+                            if let Some(gsym_info) = self.symbol_table.get_symbol(gsym) {
+                                if let Some(gname) = self.string_interner.get(gsym_info.name) {
+                                    if gname == sym_name {
+                                        return Some(gid);
+                                    }
+                                }
+                            }
+                        }
+                        // Also search module globals by name suffix
+                        for global in self.builder.module.globals.values() {
+                            if global.name.ends_with(&format!(".{}", sym_name)) || global.name == sym_name {
+                                return Some(global.id);
+                            }
+                        }
+                        None
+                    });
+                if let Some(global_id) = global_id {
                     self.builder.build_store_global(global_id, value);
+                    // Untrack from drop system — value escapes to global storage
+                    self.owned_heap_values.remove(symbol);
                     return;
                 }
 
@@ -22480,6 +22663,22 @@ impl<'a> HirToMirContext<'a> {
                                 }
                                 return;
                             }
+                        }
+                        // Check if this is a static field that should be written as a global
+                        let field_name_str = self
+                            .symbol_table
+                            .get_symbol(*field)
+                            .and_then(|s| self.string_interner.get(s.name))
+                            .unwrap_or("<unknown>");
+                        let global_lookup = self.global_symbol_map.get(field).copied()
+                            .or_else(|| {
+                                self.builder.module.globals.values()
+                                    .find(|g| g.name.ends_with(&format!(".{}", field_name_str)))
+                                    .map(|g| g.id)
+                            });
+                        if let Some(global_id) = global_lookup {
+                            self.builder.build_store_global(global_id, value);
+                            return;
                         }
                         let field_name = self
                             .symbol_table
@@ -23213,6 +23412,24 @@ impl<'a> HirToMirContext<'a> {
                                     field_idx,
                                     actual_field_ty,
                                 )?);
+                            }
+
+                            // Check if this is actually a static field accessed as instance field
+                            let global_lookup = self.global_symbol_map.get(&field).copied()
+                                .or_else(|| {
+                                    self.builder.module.globals.values()
+                                        .find(|g| g.name.ends_with(&format!(".{}", field_name_str)))
+                                        .map(|g| g.id)
+                                });
+                            if let Some(global_id) = global_lookup {
+                                let global_type = self
+                                    .builder
+                                    .module
+                                    .globals
+                                    .get(&global_id)
+                                    .map(|g| g.ty.clone())
+                                    .unwrap_or(IrType::Any);
+                                return self.builder.build_load_global(global_id, global_type);
                             }
 
                             self.add_error(
@@ -31056,6 +31273,19 @@ impl<'a> HirToMirContext<'a> {
             while let Some(&parent) = self.class_parent_map.get(&current) {
                 classes_to_process.insert(parent);
                 current = parent;
+            }
+        }
+        // Include ALL subclasses of classes with vtables — leaf classes that
+        // inherit (but don't override) virtual methods still need vtable entries
+        // so that haxe_vtable_lookup finds them by type_id at runtime.
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (child, parent) in self.class_parent_map.clone() {
+                if classes_to_process.contains(&parent) && !classes_to_process.contains(&child) {
+                    classes_to_process.insert(child);
+                    changed = true;
+                }
             }
         }
 
