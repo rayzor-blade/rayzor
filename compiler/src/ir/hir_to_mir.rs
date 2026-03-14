@@ -1093,11 +1093,6 @@ impl<'a> HirToMirContext<'a> {
         // Emit Free for each variable at its last use
         for (symbol, ir_id) in to_drop {
             self.builder.build_free(ir_id);
-            trace!(
-                "Drop: Freed {:?} at last use (stmt {})",
-                symbol,
-                current_idx
-            );
             // Remove from owned_heap_values since it's been freed
             self.owned_heap_values.remove(&symbol);
         }
@@ -4446,11 +4441,13 @@ impl<'a> HirToMirContext<'a> {
                         // Only track when the RHS actually creates a NEW allocation (New or Call).
                         // Field access and variable reads produce borrowed references that must
                         // NOT be freed — they point into existing objects.
+                        // Only `new Foo(...)` creates guaranteed owned allocations.
+                        // Call results (method returns) are ambiguous — they may return
+                        // references to existing objects (e.g., satisfy() returns an existing
+                        // constraint). Treating Call as owned causes use-after-free in while
+                        // loops where exit_drop_scope frees the value before the back edge.
                         let rhs_is_owned_allocation = rhs_was_copied
-                            || matches!(
-                                &rhs.kind,
-                                HirExprKind::New { .. } | HirExprKind::Call { .. }
-                            );
+                            || matches!(&rhs.kind, HirExprKind::New { .. });
 
                         // When assigning to a Field/ArrayIndex lvalue, the RHS value escapes
                         // to another object. If the RHS is a variable that we're tracking as
