@@ -1643,7 +1643,6 @@ impl CraneliftBackend {
             debug!("{}", self.ctx.func.display());
             trace!("=== End Cranelift IR ===\n");
         }
-
         // Verify the function before defining (debug builds only)
         // This catches IR errors early but adds compilation overhead
         #[cfg(debug_assertions)]
@@ -3074,7 +3073,7 @@ impl CraneliftBackend {
                 // Get Element Pointer - compute address of field within struct
                 // This is similar to LLVM's GEP instruction
 
-                // debug!("Cranelift: GetElementPtr - ptr={:?}, indices={:?}, ty={:?}", ptr, indices, ty);
+                // debug!("Cranelift: GetElementPtr [{}] ptr={:?}, indices={:?}, ty={:?}", function.name, ptr, indices, ty);
 
                 let ptr_val = *value_map
                     .get(ptr)
@@ -3649,7 +3648,6 @@ impl CraneliftBackend {
                     func_id
                 } else {
                     // Function not pre-declared, can't call it
-                    tracing::warn!("[CRANELIFT] rayzor_global_load not found in runtime_functions");
                     let placeholder = builder.ins().iconst(cranelift_codegen::ir::types::I64, 0);
                     value_map.insert(*dest, placeholder);
                     return Ok(());
@@ -4261,6 +4259,31 @@ impl CraneliftBackend {
 
         // Get the function pointer
         let func_ptr = self.get_function_ptr(main_func.id)?;
+
+        // TEMP: Dump post-finalization machine code for all non-extern user functions
+        for (_, f) in &module.functions {
+            if !f.cfg.blocks.is_empty() && !f.name.contains("::") && !f.name.contains("__") {
+                match self.get_function_ptr(f.id) {
+                    Ok(ptr) => {
+                        unsafe {
+                            let code = std::slice::from_raw_parts(ptr as *const u8, 64.min(f.cfg.blocks.len() * 48 + 16));
+                            eprintln!("\n=== POST-FINALIZE code for '{}' (MIR id={:?}) at {:p} ===", f.name, f.id, ptr as *const u8);
+                            for (i, chunk) in code.chunks(4).enumerate() {
+                                if chunk.len() == 4 {
+                                    let inst = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                                    eprintln!("  {:4}: {:08x}", i * 4, inst);
+                                }
+                                if i >= 15 { break; } // limit output
+                            }
+                            eprintln!("=== End post-finalize ===");
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[POST-FINALIZE] Failed to get ptr for '{}': {}", f.name, e);
+                    }
+                }
+            }
+        }
 
         debug!("  🚀 Executing {}()...", main_func.name);
 

@@ -489,7 +489,7 @@ pub extern "C" fn haxe_string_index_of_ptr(
         } else {
             start_index as usize
         };
-        if start >= s_ref.len {
+        if start >= s_ref.len || needle_ref.len > s_ref.len {
             return -1;
         }
 

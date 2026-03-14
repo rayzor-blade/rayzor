@@ -2907,7 +2907,11 @@ impl<'a> AstLowering<'a> {
                 // Add to class_methods for forward reference resolution in lower_call_expression
                 if func.name != "new" {
                     if let Some(methods_list) = self.class_methods.get_mut(&class_symbol) {
-                        if !methods_list.iter().any(|(name, _, _)| *name == method_name) {
+                        if let Some(existing_idx) = methods_list.iter().position(|(name, _, _)| *name == method_name) {
+                            // Override parent method entry with child's symbol
+                            // (critical for constructor bodies that call overridden methods)
+                            methods_list[existing_idx] = (method_name, method_symbol, is_static);
+                        } else {
                             methods_list.push((method_name, method_symbol, is_static));
                         }
                     }
@@ -11109,6 +11113,14 @@ impl<'a> AstLowering<'a> {
                     }
                 } else {
                     Ok(type_table.dynamic_type())
+                }
+            }
+            TypedExpressionKind::StaticFieldAccess { field_symbol, .. } => {
+                // Look up the field symbol's type from the symbol table
+                if let Some(sym) = self.context.symbol_table.get_symbol(*field_symbol) {
+                    Ok(sym.type_id)
+                } else {
+                    Ok(self.context.type_table.borrow().dynamic_type())
                 }
             }
             _ => {

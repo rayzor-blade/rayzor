@@ -27,20 +27,22 @@ use crate::haxe_parser_expr3::{
 
 /// Parse any expression
 pub fn expression<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
-    ternary_expr(full, input)
+    assignment_expr(full, input)
 }
 
 /// Parse ternary expression: `cond ? then : else`
+/// Ternary has higher precedence than assignment but lower than null coalescing.
 fn ternary_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
     use nom::error::context;
     let start = position(full, input);
-    let (input, cond) = assignment_expr(full, input)?;
+    let (input, cond) = null_coalescing_expr(full, input)?;
 
     // Check for ternary
     if let Ok((input, _)) = symbol("?")(input) {
-        let (input, then_expr) = context("[E0050] expected expression after '?' in ternary operator | help: provide the expression to return when condition is true", |i| ternary_expr(full, i)).parse(input)?;
+        // Then/else branches allow assignment expressions (e.g. `a ? b = c : d`)
+        let (input, then_expr) = context("[E0050] expected expression after '?' in ternary operator | help: provide the expression to return when condition is true", |i| assignment_expr(full, i)).parse(input)?;
         let (input, _) = context("[E0051] expected ':' after then expression in ternary operator | help: ternary operator requires ':' to separate then and else branches", symbol(":")).parse(input)?;
-        let (input, else_expr) = context("[E0052] expected expression after ':' in ternary operator | help: provide the expression to return when condition is false", |i| ternary_expr(full, i)).parse(input)?;
+        let (input, else_expr) = context("[E0052] expected expression after ':' in ternary operator | help: provide the expression to return when condition is false", |i| assignment_expr(full, i)).parse(input)?;
         let end = position(full, input);
 
         Ok((
@@ -88,7 +90,7 @@ pub fn assignment_expr<'a>(full: &'a str, input: &'a str) -> PResult<'a, Expr> {
         }
     }
 
-    let (input, left) = null_coalescing_expr(full, input)?;
+    let (input, left) = ternary_expr(full, input)?;
 
     // Check for assignment operators
     let assign_ops = [
