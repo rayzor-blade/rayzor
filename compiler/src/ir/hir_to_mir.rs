@@ -8866,11 +8866,11 @@ impl<'a> HirToMirContext<'a> {
                             // for MIR wrapper calls to avoid spurious dereferences
                             // (e.g., Host.localhost() returns a raw string pointer, not a boxed value).
                             let final_result = if is_mir_wrapper {
-                                // MIR wrappers like array_pop/array_shift return raw I64.
-                                // When the element type is a class pointer, cast I64→Ptr(Void).
-                                if actual_return_type == IrType::I64
-                                    && matches!(&resolved_expected, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void))
-                                {
+                                // MIR wrappers return values in their declared type directly.
+                                // array_pop returns raw I64 — cast to Ptr(Void) for class types.
+                                let expects_class_ptr = matches!(&resolved_expected, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void));
+                                if actual_return_type == IrType::I64 && expects_class_ptr {
+                                    // Raw I64 → Ptr(Void) cast
                                     self.builder.build_cast(
                                         call_result,
                                         IrType::I64,
@@ -9009,7 +9009,9 @@ impl<'a> HirToMirContext<'a> {
 
                         // Check for virtual dispatch: if the method is in a class hierarchy
                         // with overrides, dispatch through the vtable instead of calling directly.
-                        let vtable_lookup = self.virtual_dispatch_info.get(field).copied()
+                        // Skip vtable for super.method() — must call parent directly.
+                        let object_is_super = matches!(object.kind, HirExprKind::Super);
+                        let vtable_lookup = if object_is_super { None } else { self.virtual_dispatch_info.get(field).copied()
                             .or_else(|| {
                                 let method_name = self.symbol_table.get_symbol(*field).map(|s| s.name);
                                 if let Some(method_name) = method_name {
@@ -9036,7 +9038,8 @@ impl<'a> HirToMirContext<'a> {
                                     }
                                 }
                                 None
-                            });
+                            })
+                        };
                         if let Some((slot_index, _)) = vtable_lookup {
                             let obj_reg = self.lower_expression(object)?;
 
@@ -9105,6 +9108,36 @@ impl<'a> HirToMirContext<'a> {
                                 call_args,
                                 func_signature,
                             );
+                        }
+
+                        // super.method() — resolve to parent class method directly
+                        if object_is_super {
+                            if let Some(method_name_i) = method_name_interned {
+                                // Try resolving the field symbol directly first — if it's the
+                                // parent's method symbol (not the child's override), it works.
+                                let direct_id = self.resolve_function_id_with_qualified_fallback(*field);
+                                // Also find via name lookup in parent classes
+                                let parent_method_func_id = direct_id.or_else(|| {
+                                    self.class_parent_map.iter()
+                                        .filter_map(|(&_child, &parent)| {
+                                            self.class_method_by_name.get(&(parent, method_name_i))
+                                                .and_then(|&sym| self.resolve_function_id_with_qualified_fallback(sym))
+                                        })
+                                        .next()
+                                });
+                                let mname = self.string_interner.get(method_name_i).unwrap_or("?");
+                                if let Some(func_id) = parent_method_func_id {
+                                    let obj_reg = self.lower_expression(object)?;
+                                    let mut call_args = vec![obj_reg];
+                                    for arg in args {
+                                        if let Some(reg) = self.lower_expression(arg) {
+                                            call_args.push(reg);
+                                        }
+                                    }
+                                    let ret = self.convert_type(expr.ty);
+                                    return self.builder.build_call_direct(func_id, call_args, ret);
+                                }
+                            }
                         }
 
                         // Regular method call (not extern or no runtime mapping)
@@ -10500,7 +10533,41 @@ impl<'a> HirToMirContext<'a> {
                 // Check if callee is a direct function reference
                 if let HirExprKind::Variable { symbol, .. } = &callee.kind {
                     // Virtual dispatch for instance method calls (is_method=true):
-                    if *is_method && !args.is_empty() {
+                    // Skip vtable dispatch for super.method() calls — these must call
+                    // the parent's implementation directly, not the overridden version.
+                    let receiver_is_super = !args.is_empty()
+                        && matches!(args[0].kind, HirExprKind::Super);
+                    // super.method() — bypass vtable AND resolve to parent's implementation
+                    if receiver_is_super {
+                        let method_name = self.symbol_table.get_symbol(*symbol).map(|s| s.name);
+                        if let Some(method_name) = method_name {
+                            // Find the parent class: search class_parent_map for any class
+                            // that has a method with this name. The parent class is the one
+                            // the current class inherits from.
+                            let parent_sym: Option<SymbolId> = self.class_parent_map.values()
+                                .find(|&&parent| self.class_method_by_name.contains_key(&(parent, method_name)))
+                                .copied();
+                            if let Some(parent_class) = parent_sym {
+                                let has_method = self.class_method_by_name.contains_key(&(parent_class, method_name));
+                                // Find the parent's method by name
+                                if let Some(&parent_method_sym) = self.class_method_by_name.get(&(parent_class, method_name)) {
+                                    let func_id = self.resolve_function_id_with_qualified_fallback(parent_method_sym);
+                                    if let Some(func_id) = func_id {
+                                        let obj_reg = self.lower_expression(&args[0])?;
+                                        let mut call_args = vec![obj_reg];
+                                        for arg in args.iter().skip(1) {
+                                            if let Some(reg) = self.lower_expression(arg) {
+                                                call_args.push(reg);
+                                            }
+                                        }
+                                        let ret_type = self.convert_type(expr.ty);
+                                        return self.builder.build_call_direct(func_id, call_args, ret_type);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if *is_method && !args.is_empty() && !receiver_is_super {
                         let vtable_slot = self.virtual_dispatch_info.get(symbol).copied()
                             .or_else(|| {
                                 let method_name = self.symbol_table.get_symbol(*symbol).map(|s| s.name)?;

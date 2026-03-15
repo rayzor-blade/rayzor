@@ -73,6 +73,15 @@ fn declare_array_externs(builder: &mut MirBuilder) {
         .build();
     builder.mark_as_extern(func_id);
 
+    // haxe_array_pop_i64(arr: *mut HaxeArray) -> i64
+    let func_id = builder
+        .begin_function("haxe_array_pop_i64")
+        .param("arr", ptr_void.clone())
+        .returns(IrType::I64)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
     // haxe_array_length(arr: *const HaxeArray) -> usize
     let func_id = builder
         .begin_function("haxe_array_length")
@@ -386,11 +395,10 @@ fn build_array_push(builder: &mut MirBuilder) {
 /// Removes and returns the last element from the array
 fn build_array_pop(builder: &mut MirBuilder) {
     let ptr_void = IrType::Ptr(Box::new(IrType::Void));
-    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
     let func_id = builder
         .begin_function("array_pop")
         .param("arr", IrType::Any)
-        .returns(ptr_u8.clone())
+        .returns(IrType::I64)
         .calling_convention(CallingConvention::C)
         .build();
 
@@ -404,16 +412,18 @@ fn build_array_pop(builder: &mut MirBuilder) {
     // Cast arr from Any (i64) to ptr for extern call
     let arr_ptr = builder.cast(arr, IrType::Any, ptr_void.clone());
 
-    // Call runtime function haxe_array_pop_ptr(arr: *HaxeArray) -> *mut u8 (DynamicValue*)
+    // Call haxe_array_pop_i64 which returns the raw i64 value (no boxing).
+    // For class-typed arrays, the i64 IS the raw class pointer.
+    // The hir_to_mir.rs code casts I64→Ptr(Void) when needed.
     let extern_func = builder
-        .get_function_by_name("haxe_array_pop_ptr")
-        .expect("haxe_array_pop_ptr extern not found");
+        .get_function_by_name("haxe_array_pop_i64")
+        .expect("haxe_array_pop_i64 extern not found");
 
     if let Some(result) = builder.call(extern_func, vec![arr_ptr]) {
         builder.ret(Some(result));
     } else {
-        let null_val = builder.const_value(crate::ir::IrValue::Null);
-        builder.ret(Some(null_val));
+        let zero_val = builder.const_value(crate::ir::IrValue::I64(0));
+        builder.ret(Some(zero_val));
     }
 }
 

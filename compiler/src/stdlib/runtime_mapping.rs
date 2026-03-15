@@ -1474,7 +1474,7 @@ impl StdlibMapping {
             // push and pop use MIR wrappers that handle Any type parameters internally
             map_method!(instance "Array", "push" => "array_push", params: 1, returns: void),
             map_method!(instance "Array", "pop" => "array_pop", params: 0, mir_wrapper,
-                types: &[PtrU8] => PtrU8),
+                types: &[PtrU8] => I64),
             map_method!(instance "Array", "reverse" => "haxe_array_reverse", params: 0, returns: void),
             // insert(pos:Int, x:T): arg[0]=array, arg[1]=pos (no conversion), arg[2]=value (needs ptr conversion)
             // Bitmask: 0b100 = bit 2 set (param index 2)
