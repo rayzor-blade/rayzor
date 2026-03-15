@@ -31797,7 +31797,6 @@ impl<'a> HirToMirContext<'a> {
             {
                 let fn_str = self.string_interner.get(field.name).unwrap_or("?");
                 let cn_str = self.string_interner.get(class.name).unwrap_or("?");
-                eprintln!("[FIELD-IDX] class={} field={} sym={:?} index={}", cn_str, fn_str, field.symbol_id, field_index);
             }
             self.field_index_map
                 .insert(field.symbol_id, (type_id, field_index));
