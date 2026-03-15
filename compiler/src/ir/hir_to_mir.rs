@@ -9113,19 +9113,23 @@ impl<'a> HirToMirContext<'a> {
                         // super.method() — resolve to parent class method directly
                         if object_is_super {
                             if let Some(method_name_i) = method_name_interned {
-                                // Try resolving the field symbol directly first — if it's the
-                                // parent's method symbol (not the child's override), it works.
-                                let direct_id = self.resolve_function_id_with_qualified_fallback(*field);
-                                // Also find via name lookup in parent classes
-                                let parent_method_func_id = direct_id.or_else(|| {
-                                    self.class_parent_map.iter()
-                                        .filter_map(|(&_child, &parent)| {
-                                            self.class_method_by_name.get(&(parent, method_name_i))
-                                                .and_then(|&sym| self.resolve_function_id_with_qualified_fallback(sym))
-                                        })
-                                        .next()
+                                // Find current class → parent via class_parent_map
+                                let current_class = self.builder.current_function()
+                                    .and_then(|f| {
+                                        self.class_method_by_name.iter()
+                                            .find(|(_, &method_sym)| {
+                                                self.function_map.get(&method_sym) == Some(&f.id)
+                                            })
+                                            .map(|((class_sym, _), _)| *class_sym)
+                                    });
+                                let parent_class = current_class
+                                    .and_then(|cls| self.class_parent_map.get(&cls).copied());
+                                let parent_method_func_id = parent_class.and_then(|pc| {
+                                    self.class_method_by_name.get(&(pc, method_name_i))
+                                        .and_then(|&sym| self.resolve_function_id_with_qualified_fallback(sym))
+                                }).or_else(|| {
+                                    self.resolve_function_id_with_qualified_fallback(*field)
                                 });
-                                let mname = self.string_interner.get(method_name_i).unwrap_or("?");
                                 if let Some(func_id) = parent_method_func_id {
                                     let obj_reg = self.lower_expression(object)?;
                                     let mut call_args = vec![obj_reg];
@@ -10537,33 +10541,41 @@ impl<'a> HirToMirContext<'a> {
                     // the parent's implementation directly, not the overridden version.
                     let receiver_is_super = !args.is_empty()
                         && matches!(args[0].kind, HirExprKind::Super);
-                    // super.method() — bypass vtable AND resolve to parent's implementation
+                    // super.method() — bypass vtable AND resolve to parent's implementation.
                     if receiver_is_super {
                         let method_name = self.symbol_table.get_symbol(*symbol).map(|s| s.name);
                         if let Some(method_name) = method_name {
-                            // Find the parent class: search class_parent_map for any class
-                            // that has a method with this name. The parent class is the one
-                            // the current class inherits from.
-                            let parent_sym: Option<SymbolId> = self.class_parent_map.values()
-                                .find(|&&parent| self.class_method_by_name.contains_key(&(parent, method_name)))
-                                .copied();
-                            if let Some(parent_class) = parent_sym {
-                                let has_method = self.class_method_by_name.contains_key(&(parent_class, method_name));
-                                // Find the parent's method by name
-                                if let Some(&parent_method_sym) = self.class_method_by_name.get(&(parent_class, method_name)) {
-                                    let func_id = self.resolve_function_id_with_qualified_fallback(parent_method_sym);
-                                    if let Some(func_id) = func_id {
-                                        let obj_reg = self.lower_expression(&args[0])?;
-                                        let mut call_args = vec![obj_reg];
-                                        for arg in args.iter().skip(1) {
-                                            if let Some(reg) = self.lower_expression(arg) {
-                                                call_args.push(reg);
-                                            }
-                                        }
-                                        let ret_type = self.convert_type(expr.ty);
-                                        return self.builder.build_call_direct(func_id, call_args, ret_type);
+                            // Find parent class: determine which class the current function
+                            // belongs to, then look up its parent via class_parent_map.
+                            let current_class = self.builder.current_function()
+                                .and_then(|f| {
+                                    // Find the class this function is a method of
+                                    self.class_method_by_name.iter()
+                                        .find(|(_, &method_sym)| {
+                                            self.function_map.get(&method_sym) == Some(&f.id)
+                                        })
+                                        .map(|((class_sym, _), _)| *class_sym)
+                                });
+                            let parent_class = current_class
+                                .and_then(|cls| self.class_parent_map.get(&cls).copied());
+                            // Resolve parent's method by name
+                            let super_func_id = parent_class.and_then(|pc| {
+                                self.class_method_by_name.get(&(pc, method_name))
+                                    .and_then(|&sym| self.resolve_function_id_with_qualified_fallback(sym))
+                            }).or_else(|| {
+                                // Fallback: direct symbol resolution
+                                self.resolve_function_id_with_qualified_fallback(*symbol)
+                            });
+                            if let Some(func_id) = super_func_id {
+                                let obj_reg = self.lower_expression(&args[0])?;
+                                let mut call_args = vec![obj_reg];
+                                for arg in args.iter().skip(1) {
+                                    if let Some(reg) = self.lower_expression(arg) {
+                                        call_args.push(reg);
                                     }
                                 }
+                                let ret_type = self.convert_type(expr.ty);
+                                return self.builder.build_call_direct(func_id, call_args, ret_type);
                             }
                         }
                     }
