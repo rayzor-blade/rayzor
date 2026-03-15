@@ -251,7 +251,8 @@ class BinaryConstraint extends Constraint {
     override public function isSatisfied():Bool { return direction != NONE; }
 
     override public function markInputs(mark:Int):Void {
-        input().mark = mark;
+        var inp = input();
+        inp.mark = mark;
     }
 
     public function input():Variable {
@@ -337,7 +338,9 @@ class EqualityConstraint extends BinaryConstraint {
     }
 
     override public function execute():Void {
-        output().value = input().value;
+        var out = output();
+        var inp = input();
+        out.value = inp.value;
     }
 }
 @:safety(false)
