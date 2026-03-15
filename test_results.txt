@@ -1,10 +1,19 @@
 ============================================
   Rayzor Haxe Test Results
-  Sat Mar 14 19:00:10 GMT 2026
+  Sat Mar 14 23:00:27 GMT 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
 🚀 Running compiler/tests/haxe/DebugChecksum.hx [debug] [preset: Application]...
+[FIELD-IDX] class=ArrayKeyValueIterator field=current sym=SymbolId(185) index=1
+[FIELD-IDX] class=ArrayKeyValueIterator field=array sym=SymbolId(186) index=2
+[FIELD-IDX] class=ArrayIterator field=array sym=SymbolId(258) index=1
+[FIELD-IDX] class=ArrayIterator field=current sym=SymbolId(259) index=2
+[FIELD-IDX] class=RGB field=r sym=SymbolId(341) index=1
+[FIELD-IDX] class=RGB field=g sym=SymbolId(342) index=2
+[FIELD-IDX] class=RGB field=b sym=SymbolId(343) index=3
+[FIELD-IDX] class=Complex field=i sym=SymbolId(351) index=1
+[FIELD-IDX] class=Complex field=j sym=SymbolId(352) index=2
 === Palette Debug ===
 Palette[0]: r=0 g=255 b=0 (abs=0.5)
 Palette[500]: r=127 g=127 b=255 (abs=0)
@@ -104,6 +113,11 @@ done
 
 --- debug_checksum [PASS] ---
 🚀 Running compiler/tests/haxe/debug_checksum.hx [debug] [preset: Application]...
+[FIELD-IDX] class=RGB field=r sym=SymbolId(319) index=1
+[FIELD-IDX] class=RGB field=g sym=SymbolId(320) index=2
+[FIELD-IDX] class=RGB field=b sym=SymbolId(321) index=3
+[FIELD-IDX] class=Complex field=i sym=SymbolId(329) index=1
+[FIELD-IDX] class=Complex field=j sym=SymbolId(330) index=2
 === Palette Debug ===
 Palette[0]: r=0 g=255 b=0 (abs=0.5)
 Palette[500]: r=127 g=127 b=255 (abs=0)
@@ -145,6 +159,9 @@ i / 1000.0 = 0.004
 
 --- debug_palette [PASS] ---
 🚀 Running compiler/tests/haxe/debug_palette.hx [debug] [preset: Application]...
+[FIELD-IDX] class=RGB field=r sym=SymbolId(312) index=1
+[FIELD-IDX] class=RGB field=g sym=SymbolId(313) index=2
+[FIELD-IDX] class=RGB field=b sym=SymbolId(314) index=3
 Creating palette...
 palette[0]: frac=0 r=0 g=255 b=0
 palette[1]: frac=0.001 r=0 g=254 b=0
@@ -235,6 +252,11 @@ Final iteration = 4
 
 --- mandelbrot_small [PASS] ---
 🚀 Running compiler/tests/haxe/mandelbrot_small.hx [debug] [preset: Application]...
+[FIELD-IDX] class=RGB field=r sym=SymbolId(319) index=1
+[FIELD-IDX] class=RGB field=g sym=SymbolId(320) index=2
+[FIELD-IDX] class=RGB field=b sym=SymbolId(321) index=3
+[FIELD-IDX] class=Complex field=i sym=SymbolId(329) index=1
+[FIELD-IDX] class=Complex field=j sym=SymbolId(330) index=2
 Creating palette...
 Palette created: 1001 entries
 Creating image array...
@@ -343,6 +365,12 @@ done
 
 --- test_balanced_tree [PASS] ---
 🚀 Running compiler/tests/haxe/test_balanced_tree.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Node field=left sym=SymbolId(73) index=1
+[FIELD-IDX] class=Node field=right sym=SymbolId(74) index=2
+[FIELD-IDX] class=Node field=key sym=SymbolId(75) index=3
+[FIELD-IDX] class=Node field=value sym=SymbolId(76) index=4
+[FIELD-IDX] class=Node field=height sym=SymbolId(77) index=5
+[FIELD-IDX] class=SimpleTree field=root sym=SymbolId(95) index=1
 10
 20
 30
@@ -351,6 +379,18 @@ done
 
 --- test_balanced_tree_generic [PASS] ---
 🚀 Running compiler/tests/haxe/test_balanced_tree_generic.hx [debug] [preset: Application]...
+[FIELD-IDX] class=TreeNode field=left sym=SymbolId(127) index=1
+[FIELD-IDX] class=TreeNode field=right sym=SymbolId(128) index=2
+[FIELD-IDX] class=TreeNode field=key sym=SymbolId(129) index=3
+[FIELD-IDX] class=TreeNode field=value sym=SymbolId(130) index=4
+[FIELD-IDX] class=TreeNode field=_height sym=SymbolId(131) index=5
+[FIELD-IDX] class=BalancedTree field=root sym=SymbolId(168) index=1
+[FIELD-IDX] class=TreeNode field=left sym=SymbolId(338) index=1
+[FIELD-IDX] class=TreeNode field=right sym=SymbolId(339) index=2
+[FIELD-IDX] class=TreeNode field=key sym=SymbolId(340) index=3
+[FIELD-IDX] class=TreeNode field=value sym=SymbolId(341) index=4
+[FIELD-IDX] class=TreeNode field=height sym=SymbolId(342) index=5
+[FIELD-IDX] class=BalancedTree field=root sym=SymbolId(365) index=1
 10
 20
 30
@@ -416,6 +456,8 @@ done
 
 --- test_copy [PASS] ---
 🚀 Running compiler/tests/haxe/test_copy.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Point field=x sym=SymbolId(68) index=1
+[FIELD-IDX] class=Point field=y sym=SymbolId(69) index=2
 3
 42
 3
@@ -425,6 +467,10 @@ done
 
 --- test_copy_clone_identity [PASS] ---
 🚀 Running compiler/tests/haxe/test_copy_clone_identity.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Point field=x sym=SymbolId(161) index=1
+[FIELD-IDX] class=Point field=y sym=SymbolId(162) index=2
+[FIELD-IDX] class=Named field=name sym=SymbolId(166) index=1
+[FIELD-IDX] class=Named field=val sym=SymbolId(167) index=2
 10
 99
 100
@@ -443,11 +489,16 @@ done
 
 --- test_debug_circular [PASS] ---
 🚀 Running compiler/tests/haxe/test_debug_circular.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Node field=value sym=SymbolId(68) index=1
+[FIELD-IDX] class=Node field=next sym=SymbolId(69) index=2
 Node { value: 1, next: Node { value: 2, next: <object> } }
 ✓ Complete
 
 --- test_default_params [PASS] ---
 🚀 Running compiler/tests/haxe/test_default_params.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Pair field=x sym=SymbolId(159) index=1
+[FIELD-IDX] class=Pair field=y sym=SymbolId(160) index=2
+[FIELD-IDX] class=Pair field=label sym=SymbolId(161) index=3
 1
 2
 full
@@ -466,6 +517,10 @@ done
 
 --- test_default_params2 [PASS] ---
 🚀 Running compiler/tests/haxe/test_default_params2.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Node field=left sym=SymbolId(70) index=1
+[FIELD-IDX] class=Node field=right sym=SymbolId(71) index=2
+[FIELD-IDX] class=Node field=key sym=SymbolId(72) index=3
+[FIELD-IDX] class=Node field=height sym=SymbolId(73) index=4
 1
 1
 2
@@ -477,6 +532,8 @@ done
 
 --- test_derive_clone [PASS] ---
 🚀 Running compiler/tests/haxe/test_derive_clone.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Point field=x sym=SymbolId(68) index=1
+[FIELD-IDX] class=Point field=y sym=SymbolId(69) index=2
 3
 7
 3
@@ -485,11 +542,18 @@ done
 
 --- test_derive_debug [PASS] ---
 🚀 Running compiler/tests/haxe/test_derive_debug.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Point field=x sym=SymbolId(68) index=1
+[FIELD-IDX] class=Point field=y sym=SymbolId(69) index=2
 Point { x: 3, y: 7 }
 ✓ Complete
 
 --- test_derive_debug_format [PASS] ---
 🚀 Running compiler/tests/haxe/test_derive_debug_format.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Point field=x sym=SymbolId(162) index=1
+[FIELD-IDX] class=Point field=y sym=SymbolId(163) index=2
+[FIELD-IDX] class=Entity field=name sym=SymbolId(167) index=1
+[FIELD-IDX] class=Entity field=id sym=SymbolId(168) index=2
+[FIELD-IDX] class=Entity field=active sym=SymbolId(169) index=3
 (3, 7)
 [Player #42]
 done
@@ -497,6 +561,11 @@ done
 
 --- test_derive_debug_nested [PASS] ---
 🚀 Running compiler/tests/haxe/test_derive_debug_nested.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Point field=x sym=SymbolId(162) index=1
+[FIELD-IDX] class=Point field=y sym=SymbolId(163) index=2
+[FIELD-IDX] class=Rect field=topLeft sym=SymbolId(167) index=1
+[FIELD-IDX] class=Rect field=bottomRight sym=SymbolId(168) index=2
+[FIELD-IDX] class=Rect field=label sym=SymbolId(169) index=3
 Point { x: 3, y: 7 }
 Rect { topLeft: Point { x: 0, y: 0 }, bottomRight: Point { x: 10, y: 20 }, label: box }
 done
@@ -504,6 +573,10 @@ done
 
 --- test_derive_default [PASS] ---
 🚀 Running compiler/tests/haxe/test_derive_default.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Config field=width sym=SymbolId(70) index=1
+[FIELD-IDX] class=Config field=height sym=SymbolId(71) index=2
+[FIELD-IDX] class=Config field=scale sym=SymbolId(72) index=3
+[FIELD-IDX] class=Config field=enabled sym=SymbolId(73) index=4
 0
 0
 0
@@ -512,6 +585,10 @@ false
 
 --- test_derive_default_custom [PASS] ---
 🚀 Running compiler/tests/haxe/test_derive_default_custom.hx [debug] [preset: Application]...
+[FIELD-IDX] class=ServerConfig field=port sym=SymbolId(70) index=1
+[FIELD-IDX] class=ServerConfig field=timeout sym=SymbolId(71) index=2
+[FIELD-IDX] class=ServerConfig field=verbose sym=SymbolId(72) index=3
+[FIELD-IDX] class=ServerConfig field=retries sym=SymbolId(73) index=4
 8080
 60
 0
@@ -521,6 +598,15 @@ done
 
 --- test_derive_default_nested [PASS] ---
 🚀 Running compiler/tests/haxe/test_derive_default_nested.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Size field=width sym=SymbolId(168) index=1
+[FIELD-IDX] class=Size field=height sym=SymbolId(169) index=2
+[FIELD-IDX] class=Config field=name sym=SymbolId(171) index=1
+[FIELD-IDX] class=Config field=size sym=SymbolId(172) index=2
+[FIELD-IDX] class=Config field=scale sym=SymbolId(173) index=3
+[FIELD-IDX] class=Logger field=level sym=SymbolId(175) index=1
+[FIELD-IDX] class=App field=config sym=SymbolId(177) index=1
+[FIELD-IDX] class=App field=logger sym=SymbolId(178) index=2
+[FIELD-IDX] class=App field=enabled sym=SymbolId(179) index=3
 0
 
 0
@@ -531,6 +617,8 @@ false
 
 --- test_derive_string_fields [PASS] ---
 🚀 Running compiler/tests/haxe/test_derive_string_fields.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Person field=name sym=SymbolId(158) index=1
+[FIELD-IDX] class=Person field=age sym=SymbolId(159) index=2
 true
 false
 true
@@ -542,6 +630,8 @@ true
 
 --- test_derive_traits [PASS] ---
 🚀 Running compiler/tests/haxe/test_derive_traits.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Point field=x sym=SymbolId(68) index=1
+[FIELD-IDX] class=Point field=y sym=SymbolId(69) index=2
 true
 false
 true
@@ -560,6 +650,7 @@ true
 
 --- test_drop [PASS] ---
 🚀 Running compiler/tests/haxe/test_drop.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Connection field=id sym=SymbolId(68) index=1
 1
 drop 1
 2
@@ -582,6 +673,8 @@ done
 
 --- test_dynamic_class [PASS] ---
 🚀 Running compiler/tests/haxe/test_dynamic_class.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Point field=x sym=SymbolId(68) index=1
+[FIELD-IDX] class=Point field=y sym=SymbolId(69) index=2
 10
 20
 3
@@ -591,6 +684,8 @@ done
 
 --- test_dynamic_methods [PASS] ---
 🚀 Running compiler/tests/haxe/test_dynamic_methods.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Point field=x sym=SymbolId(70) index=1
+[FIELD-IDX] class=Point field=y sym=SymbolId(71) index=2
 3
 7
 10
@@ -638,6 +733,9 @@ other
 
 --- test_ereg [PASS] ---
 🚀 Running compiler/tests/haxe/test_ereg.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Exception field=message sym=SymbolId(154) index=1
+[FIELD-IDX] class=Exception field=previous sym=SymbolId(155) index=2
+[FIELD-IDX] class=Exception field=stack sym=SymbolId(156) index=3
 match1: true
 world
 hello 
@@ -733,11 +831,11 @@ done
 0
 1
 2
-hello
 world
-10
-30
+hello
 20
+30
+10
 done
 ✓ Complete
 
@@ -768,6 +866,9 @@ done
 
 --- test_generic_tree [PASS] ---
 🚀 Running compiler/tests/haxe/test_generic_tree.hx [debug] [preset: Application]...
+[FIELD-IDX] class=GenericTree field=root_key sym=SymbolId(226) index=1
+[FIELD-IDX] class=GenericTree field=root_value sym=SymbolId(227) index=2
+[FIELD-IDX] class=GenericTree field=has_root sym=SymbolId(228) index=3
 0
 -1
 0
@@ -777,6 +878,9 @@ done
 
 --- test_generics [PASS] ---
 🚀 Running compiler/tests/haxe/test_generics.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Container field=value sym=SymbolId(163) index=1
+[FIELD-IDX] class=Pair field=first sym=SymbolId(170) index=1
+[FIELD-IDX] class=Pair field=second sym=SymbolId(171) index=2
 42
 42
 hello
@@ -788,6 +892,7 @@ done
 
 --- test_generics_simple [PASS] ---
 🚀 Running compiler/tests/haxe/test_generics_simple.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Container field=value sym=SymbolId(69) index=1
 42
 done
 ✓ Complete
@@ -824,6 +929,7 @@ square
 
 --- test_interface_cast [PASS] ---
 🚀 Running compiler/tests/haxe/test_interface_cast.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Widget field=name sym=SymbolId(163) index=1
 draw:box
 null
 click:submit
@@ -850,6 +956,7 @@ done
 
 --- test_interface_lifetime [PASS] ---
 🚀 Running compiler/tests/haxe/test_interface_lifetime.hx [debug] [preset: Application]...
+[FIELD-IDX] class=C field=x sym=SymbolId(70) index=1
 1
 2
 3
@@ -858,6 +965,7 @@ done
 
 --- test_interface_wrapper_copy [PASS] ---
 🚀 Running compiler/tests/haxe/test_interface_wrapper_copy.hx [debug] [preset: Application]...
+[FIELD-IDX] class=ValueBox field=x sym=SymbolId(70) index=1
 10
 20
 20
@@ -866,6 +974,8 @@ done
 
 --- test_iterator [PASS] ---
 🚀 Running compiler/tests/haxe/test_iterator.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Range field=current sym=SymbolId(71) index=1
+[FIELD-IDX] class=Range field=end sym=SymbolId(72) index=2
 15
 33
 done
@@ -888,6 +998,8 @@ done
 
 --- test_macro [PASS] ---
 🚀 Running compiler/tests/haxe/test_macro.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Error field=pos sym=SymbolId(442) index=4
+[FIELD-IDX] class=Error field=childErrors sym=SymbolId(443) index=5
 300
 42
 done
@@ -907,6 +1019,7 @@ done
 
 --- test_manual_drop [PASS] ---
 🚀 Running compiler/tests/haxe/test_manual_drop.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Handle field=fd sym=SymbolId(68) index=1
 42
 Released handle 42
 done
@@ -928,12 +1041,12 @@ done
 
 --- test_map_literal2 [PASS] ---
 🚀 Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]...
-{hello => 42, world => 99}
+{world => 99, hello => 42}
 42
 99
 true
 false
-{1 => 100, 2 => 200}
+{2 => 200, 1 => 100}
 100
 200
 true
@@ -986,6 +1099,8 @@ done
 
 --- test_objectmap [PASS] ---
 🚀 Running compiler/tests/haxe/test_objectmap.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Point field=x sym=SymbolId(194) index=1
+[FIELD-IDX] class=Point field=y sym=SymbolId(195) index=2
 10
 20
 true
@@ -1004,6 +1119,8 @@ none
 
 --- test_optional_chain [PASS] ---
 🚀 Running compiler/tests/haxe/test_optional_chain.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Node field=value sym=SymbolId(69) index=1
+[FIELD-IDX] class=Node field=next sym=SymbolId(70) index=2
 42
 null
 42
@@ -1016,6 +1133,8 @@ done
 
 --- test_property [PASS] ---
 🚀 Running compiler/tests/haxe/test_property.hx [debug] [preset: Application]...
+[FIELD-IDX] class=WithGetSet field=_x sym=SymbolId(163) index=1
+[FIELD-IDX] class=WithReadOnly field=_name sym=SymbolId(172) index=1
 10
 42
 hello
@@ -1024,6 +1143,8 @@ done
 
 --- test_recursive_class [PASS] ---
 🚀 Running compiler/tests/haxe/test_recursive_class.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Node field=next sym=SymbolId(68) index=1
+[FIELD-IDX] class=Node field=value sym=SymbolId(69) index=2
 1
 2
 done
@@ -1031,6 +1152,9 @@ done
 
 --- test_recursive_ctor [PASS] ---
 🚀 Running compiler/tests/haxe/test_recursive_ctor.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Node field=left sym=SymbolId(69) index=1
+[FIELD-IDX] class=Node field=key sym=SymbolId(70) index=2
+[FIELD-IDX] class=Node field=height sym=SymbolId(71) index=3
 1
 1
 2
@@ -1066,6 +1190,8 @@ false
 
 --- test_rtti [PASS] ---
 🚀 Running compiler/tests/haxe/test_rtti.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Animal field=name sym=SymbolId(190) index=1
+[FIELD-IDX] class=Dog field=breed sym=SymbolId(194) index=2
 true
 true
 true
@@ -1085,6 +1211,8 @@ done
 
 --- test_safe_cast [PASS] ---
 🚀 Running compiler/tests/haxe/test_safe_cast.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Animal field=name sym=SymbolId(160) index=1
+[FIELD-IDX] class=Dog field=breed sym=SymbolId(164) index=2
 Shepherd
 null
 Whiskers
@@ -1101,12 +1229,16 @@ done
    [96m|[0m               [31m^[0m [1;4;31mvalue used here after move[0m
   [96m-->[0m compiler/tests/haxe/test_safety_use_after_move.hx:15:17: value moved here
      [32mhelp[0m: [33mConsider cloning: `var copy = r.clone();`[0m
+[FIELD-IDX] class=Resource field=data sym=SymbolId(261) index=1
 42
 42
 ✓ Complete
 
 --- test_send_sync [PASS] ---
 🚀 Running compiler/tests/haxe/test_send_sync.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Counter field=value sym=SymbolId(185) index=1
+[FIELD-IDX] class=SharedConfig field=threshold sym=SymbolId(188) index=1
+[FIELD-IDX] class=SharedConfig field=name sym=SymbolId(189) index=2
 84
 15
 100
@@ -1169,6 +1301,19 @@ true
 
 --- test_stringbuf_stringtools [PASS] ---
 🚀 Running compiler/tests/haxe/test_stringbuf_stringtools.hx [debug] [preset: Application]...
+[FIELD-IDX] class=StringBuf field=b sym=SymbolId(155) index=1
+[FIELD-IDX] class=StringIterator field=offset sym=SymbolId(177) index=1
+[FIELD-IDX] class=StringIterator field=s sym=SymbolId(178) index=2
+[FIELD-IDX] class=StringKeyValueIterator field=offset sym=SymbolId(190) index=1
+[FIELD-IDX] class=StringKeyValueIterator field=s sym=SymbolId(191) index=2
+[FIELD-IDX] class=StringIteratorUnicode field=offset sym=SymbolId(317) index=1
+[FIELD-IDX] class=StringIteratorUnicode field=s sym=SymbolId(318) index=2
+[FIELD-IDX] class=StringIterator field=offset sym=SymbolId(331) index=1
+[FIELD-IDX] class=StringIterator field=s sym=SymbolId(332) index=2
+[FIELD-IDX] class=StringKeyValueIterator field=offset sym=SymbolId(344) index=1
+[FIELD-IDX] class=StringKeyValueIterator field=s sym=SymbolId(345) index=2
+[FIELD-IDX] class=StringIteratorUnicode field=offset sym=SymbolId(465) index=1
+[FIELD-IDX] class=StringIteratorUnicode field=s sym=SymbolId(466) index=2
 Hello World
 11
 Hello World!
@@ -1193,6 +1338,8 @@ hi...
 
 --- test_structural [PASS] ---
 🚀 Running compiler/tests/haxe/test_structural.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Point field=x sym=SymbolId(68) index=1
+[FIELD-IDX] class=Point field=y sym=SymbolId(69) index=2
 10
 20
 3
@@ -1216,6 +1363,7 @@ ok
 
 --- test_type_api [PASS] ---
 🚀 Running compiler/tests/haxe/test_type_api.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Animal field=name sym=SymbolId(190) index=1
 Animal
 Dog
 Dog
@@ -1223,6 +1371,8 @@ Dog
 
 --- test_type_create_empty_instance [PASS] ---
 🚀 Running compiler/tests/haxe/test_type_create_empty_instance.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Box field=x sym=SymbolId(190) index=1
+[FIELD-IDX] class=Box field=y sym=SymbolId(191) index=2
 0
 true
 7
@@ -1231,6 +1381,8 @@ ctor
 
 --- test_type_create_instance [PASS] ---
 🚀 Running compiler/tests/haxe/test_type_create_instance.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Point field=x sym=SymbolId(190) index=1
+[FIELD-IDX] class=Point field=y sym=SymbolId(191) index=2
 3
 4
 ✓ Complete
@@ -1249,6 +1401,7 @@ false
 
 --- test_typed_catch [PASS] ---
 🚀 Running compiler/tests/haxe/test_typed_catch.hx [debug] [preset: Application]...
+[FIELD-IDX] class=MyError field=msg sym=SymbolId(157) index=1
 42
 hello
 99
@@ -1296,6 +1449,7 @@ done
 
 --- test_virtual_dispatch [PASS] ---
 🚀 Running compiler/tests/haxe/test_virtual_dispatch.hx [debug] [preset: Application]...
+[FIELD-IDX] class=Base field=value sym=SymbolId(161) index=1
 Base
 Child
 GrandChild
