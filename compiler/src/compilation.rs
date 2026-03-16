@@ -3551,7 +3551,9 @@ impl CompilationUnit {
         } // end if !is_stdlib
 
         // Ownership analysis: use-after-move detection (user files only)
-        if !is_stdlib && self.config.emit_safety_warnings {
+        // Skip if any class has @:safety annotation — opted out of ownership tracking
+        let has_safety_opt_out = typed_file.classes.iter().any(|c| c.has_safety_annotation());
+        if !is_stdlib && self.config.emit_safety_warnings && !has_safety_opt_out {
             let ownership_diagnostics = self.check_ownership_violations(&typed_file);
             if !ownership_diagnostics.is_empty() {
                 self.print_mir_diagnostics(&ownership_diagnostics);

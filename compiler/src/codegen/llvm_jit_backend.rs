@@ -2503,7 +2503,17 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 is_tail_call: _,
             } => {
                 // func_ptr is a pointer to a closure struct: { fn_ptr: i64, env_ptr: i64 }
-                let closure_ptr = self.get_value(*func_ptr)?.into_pointer_value();
+                // It may be a PointerValue (from FunctionRef) or IntValue (from haxe_vtable_lookup returning i64).
+                let raw_val = self.get_value(*func_ptr)?;
+                let closure_ptr = if raw_val.is_pointer_value() {
+                    raw_val.into_pointer_value()
+                } else {
+                    // i64 from vtable_lookup — convert to pointer via inttoptr
+                    let int_val = raw_val.into_int_value();
+                    self.builder
+                        .build_int_to_ptr(int_val, self.context.ptr_type(AddressSpace::default()), "vtable_closure_ptr")
+                        .map_err(|e| format!("Failed to inttoptr vtable closure: {}", e))?
+                };
                 let i64_type = self.context.i64_type();
                 let ptr_type = self.context.ptr_type(AddressSpace::default());
 

@@ -1526,6 +1526,29 @@ impl MirInterpreter {
                             self.call_ffi_ptr_simple(ptr, &arg_values)?
                         }
                     }
+                    InterpValue::I64(raw_ptr) if raw_ptr != 0 => {
+                        // Raw integer from haxe_vtable_lookup — treat as closure struct pointer.
+                        // Closure layout: {fn_ptr: i64, env_ptr: i64}
+                        // Load fn_ptr, prepend env_ptr to args, then call via FFI.
+                        unsafe {
+                            let closure_ptr = raw_ptr as *const i64;
+                            let fn_ptr = *closure_ptr as usize;
+                            let env_ptr = *closure_ptr.add(1);
+                            // Prepend env_ptr as first argument
+                            let mut full_args = vec![InterpValue::I64(env_ptr)];
+                            full_args.extend(arg_values);
+                            if let IrType::Function { params, return_type, .. } = signature {
+                                self.call_ffi_ptr_with_types(
+                                    fn_ptr,
+                                    &full_args,
+                                    params,
+                                    return_type,
+                                )?
+                            } else {
+                                self.call_ffi_ptr_simple(fn_ptr, &full_args)?
+                            }
+                        }
+                    }
                     _ => {
                         return Err(InterpError::TypeError(format!(
                             "Cannot call non-function value: {:?}",
