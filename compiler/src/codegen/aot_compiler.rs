@@ -201,6 +201,7 @@ impl AotCompiler {
 
         // Find the LLVM function name for the entry point
         let entry_llvm_name = find_entry_llvm_name(&backend, &modules, &entry_function_name)?;
+        let startup_llvm_names = find_startup_llvm_names(&backend, &modules);
 
         // --- Phase 6: AOT-specific emit via llvm_aot_backend ---
         let module = backend.get_module();
@@ -258,7 +259,11 @@ impl AotCompiler {
                 llvm_aot_backend::optimize_module(module, target_triple_str, llvm_opt)?;
                 // Generate main() wrapper after inkwell optimization
                 if self.output_format == OutputFormat::Executable {
-                    llvm_aot_backend::generate_main_wrapper(module, &entry_llvm_name)?;
+                    llvm_aot_backend::generate_main_wrapper(
+                        module,
+                        &entry_llvm_name,
+                        &startup_llvm_names,
+                    )?;
                 }
                 llvm_aot_backend::compile_to_object_file(
                     module,
@@ -275,7 +280,12 @@ impl AotCompiler {
                 }
                 // When using system tools, link a C main() wrapper separately
                 if used_system {
-                    self.link_executable_with_entry(&obj_path, output_path, &entry_llvm_name)?;
+                    self.link_executable_with_entry(
+                        &obj_path,
+                        output_path,
+                        &entry_llvm_name,
+                        &startup_llvm_names,
+                    )?;
                 } else {
                     self.link_executable(&obj_path, output_path)?;
                 }
@@ -286,7 +296,11 @@ impl AotCompiler {
             llvm_aot_backend::optimize_module(module, target_triple_str, llvm_opt)?;
 
             if self.output_format == OutputFormat::Executable {
-                llvm_aot_backend::generate_main_wrapper(module, &entry_llvm_name)?;
+                llvm_aot_backend::generate_main_wrapper(
+                    module,
+                    &entry_llvm_name,
+                    &startup_llvm_names,
+                )?;
             }
 
             match self.output_format {
@@ -425,6 +439,7 @@ impl AotCompiler {
         obj_path: &Path,
         output_path: &Path,
         entry_func_name: &str,
+        startup_func_names: &[String],
     ) -> Result<(), String> {
         // Write a tiny C main() that calls the Haxe entry point.
         // If the entry was "main", it was renamed to "_haxe_main" in the IR.
@@ -434,10 +449,17 @@ impl AotCompiler {
             entry_func_name
         };
         let main_c_path = output_path.with_extension("_main.c");
-        let main_c = format!(
-            "extern void rayzor_init_args_from_argv(int, char**);\nextern void {}(long);\nint main(int argc, char** argv) {{ rayzor_init_args_from_argv(argc, argv); {}(0); return 0; }}\n",
-            actual_entry, actual_entry
-        );
+        let mut main_c = String::from("extern void rayzor_init_args_from_argv(int, char**);\n");
+        for startup in startup_func_names {
+            main_c.push_str(&format!("extern void {}(long);\n", startup));
+        }
+        main_c.push_str(&format!("extern void {}(long);\n", actual_entry));
+        main_c
+            .push_str("int main(int argc, char** argv) { rayzor_init_args_from_argv(argc, argv);");
+        for startup in startup_func_names {
+            main_c.push_str(&format!(" {}(0);", startup));
+        }
+        main_c.push_str(&format!(" {}(0); return 0; }}\n", actual_entry));
         std::fs::write(&main_c_path, &main_c)
             .map_err(|e| format!("Failed to write main wrapper: {}", e))?;
 
@@ -621,6 +643,37 @@ fn find_entry_llvm_name(
         "Entry function '{}' not found in compiled LLVM module",
         entry_function_name
     ))
+}
+
+#[cfg(feature = "llvm-backend")]
+fn find_startup_llvm_names(
+    backend: &crate::codegen::llvm_jit_backend::LLVMJitBackend,
+    modules: &[crate::ir::IrModule],
+) -> Vec<String> {
+    use std::collections::HashSet;
+
+    let symbols = backend.get_function_symbols();
+    let mut startup_names = Vec::new();
+    let mut seen = HashSet::new();
+
+    for module in modules {
+        for hook_name in ["__vtable_init__", "__init__"] {
+            let Some((func_id, _)) = module.functions.iter().find(|(_, f)| f.name == hook_name)
+            else {
+                continue;
+            };
+
+            let Some(symbol_name) = symbols.get(func_id) else {
+                continue;
+            };
+
+            if seen.insert(symbol_name.clone()) {
+                startup_names.push(symbol_name.clone());
+            }
+        }
+    }
+
+    startup_names
 }
 
 fn format_command(cmd: &Command) -> String {

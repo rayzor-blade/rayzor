@@ -17,6 +17,10 @@ fn is_keep_function(func: &crate::ir::functions::IrFunction) -> bool {
         .unwrap_or(false)
 }
 
+fn is_startup_function(func: &crate::ir::functions::IrFunction) -> bool {
+    matches!(func.name.as_str(), "__vtable_init__" | "__init__")
+}
+
 /// Statistics from tree-shaking.
 #[derive(Debug, Default)]
 pub struct TreeShakeStats {
@@ -60,10 +64,12 @@ pub fn tree_shake_bundle(
     // Seed with entry function
     worklist.push((entry_mod_idx, entry_func_id));
 
-    // Seed with @:keep functions across all modules
+    // Seed with @:keep functions and startup hooks across all modules.
+    // Startup hooks are invoked externally by backends/wrappers, so they must
+    // survive tree-shaking even if nothing in MIR calls them directly.
     for (mod_idx, module) in modules.iter().enumerate() {
         for (func_id, func) in &module.functions {
-            if is_keep_function(func) {
+            if is_keep_function(func) || is_startup_function(func) {
                 worklist.push((mod_idx, *func_id));
             }
         }

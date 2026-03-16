@@ -2641,6 +2641,9 @@ pub extern "C" fn haxe_vtable_set_slot(type_id: i32, slot_index: i32, closure_pt
 #[no_mangle]
 pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64 {
     if obj_ptr.is_null() {
+        if std::env::var_os("RAYZOR_VTABLE_DEBUG").is_some() {
+            eprintln!("[vtable] null receiver for slot {}", slot_index);
+        }
         return 0;
     }
     let type_id = unsafe { *(obj_ptr as *const i64) } as u32;
@@ -2648,9 +2651,22 @@ pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64
     if let Some(map) = registry.as_ref() {
         if let Some(vtable) = map.get(&type_id) {
             if (slot_index as usize) < vtable.len() {
-                return vtable[slot_index as usize];
+                let closure = vtable[slot_index as usize];
+                if closure == 0 && std::env::var_os("RAYZOR_VTABLE_DEBUG").is_some() {
+                    eprintln!(
+                        "[vtable] missing closure for type_id={} slot={} obj_ptr={:p}",
+                        type_id, slot_index, obj_ptr
+                    );
+                }
+                return closure;
             }
         }
+    }
+    if std::env::var_os("RAYZOR_VTABLE_DEBUG").is_some() {
+        eprintln!(
+            "[vtable] missing table for type_id={} slot={} obj_ptr={:p}",
+            type_id, slot_index, obj_ptr
+        );
     }
     0
 }

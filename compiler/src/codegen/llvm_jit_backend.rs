@@ -1286,6 +1286,38 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         // Finalize if needed
         self.finalize()?;
 
+        let engine = self
+            .execution_engine
+            .as_ref()
+            .ok_or("Execution engine not initialized")?;
+        let trace_startup = std::env::var_os("RAYZOR_LLVM_TRACE_STARTUP").is_some();
+
+        for init_name in ["__vtable_init__", "__init__"] {
+            if let Some(init_func) = module.functions.values().find(|f| f.name == init_name) {
+                let func_name = Self::mangle_function_name(&init_func.name);
+                let fn_ptr = engine.get_function_address(&func_name).map_err(|e| {
+                    format!("Failed to get {} function '{}': {}", init_name, func_name, e)
+                })?;
+
+                if trace_startup {
+                    eprintln!(
+                        "[rayzor-llvm] calling {} for module {}",
+                        init_name, module.name
+                    );
+                }
+                unsafe {
+                    let init_fn: extern "C" fn(i64) = std::mem::transmute(fn_ptr);
+                    init_fn(0);
+                }
+                if trace_startup {
+                    eprintln!(
+                        "[rayzor-llvm] finished {} for module {}",
+                        init_name, module.name
+                    );
+                }
+            }
+        }
+
         // Find main function by name since IDs may not match between modules
         let main_func = module
             .functions
@@ -1296,21 +1328,28 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
         // Get function pointer by name (MCJIT compilation already happened in finalize)
         let func_name = Self::mangle_function_name(&main_func.name);
-        let engine = self
-            .execution_engine
-            .as_ref()
-            .ok_or("Execution engine not initialized")?;
-
         let fn_ptr = engine
             .get_function_address(&func_name)
             .map_err(|e| format!("Failed to get main function '{}': {}", func_name, e))?;
 
+        if trace_startup {
+            eprintln!(
+                "[rayzor-llvm] calling main {} in module {}",
+                main_func.name, module.name
+            );
+        }
         unsafe {
             // Haxe functions have a hidden environment parameter (i64) that must be passed
             // even if not used. Pass null (0) for the environment pointer.
             // This matches the Cranelift backend's calling convention.
             let main_fn: extern "C" fn(i64) = std::mem::transmute(fn_ptr);
             main_fn(0); // null environment pointer
+        }
+        if trace_startup {
+            eprintln!(
+                "[rayzor-llvm] finished main {} in module {}",
+                main_func.name, module.name
+            );
         }
 
         Ok(())
@@ -2361,15 +2400,19 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     ));
                 };
 
-                // Calculate element size from the pointer type.
-                // MIR GEP can use either field indices (multiplied by 8) or byte offsets
-                // (for Ptr(I8) types where index is already a byte offset).
-                // We extract the pointee type and compute its size.
+                // Match Cranelift/interpreter GEP semantics:
+                // - byte pointers use 1-byte addressing
+                // - all object/reference fields are addressed in 8-byte slots
+                // Using the pointee size here is wrong for Ptr(Void), which would collapse
+                // multiple pointer fields onto offset 0 and corrupt object headers.
                 let elem_size: u64 = match ty {
                     crate::ir::IrType::Ptr(inner) | crate::ir::IrType::Ref(inner) => {
-                        Self::ir_type_size(inner)
+                        match inner.as_ref() {
+                            crate::ir::IrType::U8 | crate::ir::IrType::I8 => 1,
+                            _ => 8,
+                        }
                     }
-                    _ => 8, // Default to 8-byte fields for non-pointer types
+                    _ => 8,
                 };
 
                 let mut index_vals = Vec::new();
@@ -3277,8 +3320,54 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             IrInstruction::FunctionRef { dest, func_id } => {
                 // All functions should be declared before bodies are compiled
                 if let Some(llvm_func) = self.function_map.get(func_id) {
-                    let ptr = llvm_func.as_global_value().as_pointer_value();
-                    self.value_map.insert(*dest, ptr.into());
+                    let ptr_type = self.context.ptr_type(AddressSpace::default());
+                    let i64_type = self.context.i64_type();
+
+                    // Function references must use the same closure layout as CallIndirect:
+                    // { fn_ptr: i64, env_ptr: i64 }. Virtual dispatch and other indirect-call
+                    // sites load both slots, so returning a raw code pointer here will crash.
+                    let malloc_fn = match self.module.get_function("malloc") {
+                        Some(f) => f,
+                        None => {
+                            let malloc_fn_type = ptr_type.fn_type(&[i64_type.into()], false);
+                            self.module.add_function("malloc", malloc_fn_type, None)
+                        }
+                    };
+
+                    let closure_size = i64_type.const_int(16, false);
+                    let closure_ptr = self
+                        .builder
+                        .build_call(malloc_fn, &[closure_size.into()], "fnref_closure_malloc")
+                        .map_err(|e| format!("Failed to malloc function ref closure: {}", e))?
+                        .try_as_basic_value()
+                        .left()
+                        .ok_or("malloc did not return a value")?
+                        .into_pointer_value();
+
+                    let func_ptr = llvm_func.as_global_value().as_pointer_value();
+                    let func_as_i64 = self
+                        .builder
+                        .build_ptr_to_int(func_ptr, i64_type, "fnref_func_as_i64")
+                        .map_err(|e| format!("Failed to ptrtoint function ref: {}", e))?;
+                    self.builder
+                        .build_store(closure_ptr, func_as_i64)
+                        .map_err(|e| format!("Failed to store function ref fn_ptr: {}", e))?;
+
+                    let env_slot = unsafe {
+                        self.builder
+                            .build_gep(
+                                self.context.i8_type(),
+                                closure_ptr,
+                                &[i64_type.const_int(8, false)],
+                                "fnref_env_slot",
+                            )
+                            .map_err(|e| format!("Failed to GEP function ref env slot: {}", e))?
+                    };
+                    self.builder
+                        .build_store(env_slot, i64_type.const_zero())
+                        .map_err(|e| format!("Failed to store null env for function ref: {}", e))?;
+
+                    self.value_map.insert(*dest, closure_ptr.into());
                 } else {
                     return Err(format!("Function {:?} not found in function_map for FunctionRef. Ensure all modules are compiled in declare-first order.", func_id));
                 }
@@ -4752,11 +4841,32 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 } else {
                     operand.into_int_value()
                 };
-                let result = self
-                    .builder
-                    .build_not(int_val, &name)
-                    .map_err(|e| format!("Failed to build not: {}", e))?;
-                Ok(result.into())
+                if matches!(result_ty, Some(IrType::Bool)) {
+                    let is_zero = self
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::EQ,
+                            int_val,
+                            int_val.get_type().const_zero(),
+                            &format!("{}_is_zero", name),
+                        )
+                        .map_err(|e| format!("Failed to build bool not compare: {}", e))?;
+                    let result = self
+                        .builder
+                        .build_int_z_extend(
+                            is_zero,
+                            self.context.i8_type(),
+                            &format!("{}_bool", name),
+                        )
+                        .map_err(|e| format!("Failed to build bool not zext: {}", e))?;
+                    Ok(result.into())
+                } else {
+                    let result = self
+                        .builder
+                        .build_not(int_val, &name)
+                        .map_err(|e| format!("Failed to build not: {}", e))?;
+                    Ok(result.into())
+                }
             }
             UnaryOp::FNeg => {
                 let result = self

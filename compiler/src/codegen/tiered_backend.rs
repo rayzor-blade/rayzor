@@ -970,56 +970,98 @@ impl TieredBackend {
         CraneliftBackend::register_enum_rtti_from_modules(&module_refs);
         CraneliftBackend::register_class_rtti_from_modules(&module_refs);
 
-        let mut interp = self.interpreter.lock().unwrap();
-        for module in &modules_to_init {
-            if let Some(vtable_init) = module.functions.values().find(|f| f.name == "__vtable_init__")
-            {
-                interp
-                    .execute(module, vtable_init.id, vec![])
-                    .map_err(|e| format!("Interpreter error in __vtable_init__: {}", e))?;
-            }
-
-            if let Some(init) = module.functions.values().find(|f| f.name == "__init__") {
-                interp
-                    .execute(module, init.id, vec![])
-                    .map_err(|e| format!("Interpreter error in __init__: {}", e))?;
-            }
-        }
-        drop(interp);
+        self.run_startup_hooks_interpreter(&modules_to_init)?;
 
         *self.initialized_module_count.lock().unwrap() = start_idx + modules_to_init.len();
         Ok(())
     }
 
-    /// Re-run `__vtable_init__` after compiling to native code.
-    ///
-    /// The interpreter registers `FunctionRef` values as tagged tokens, while native tiers
-    /// materialize real closure pointers. If we switch from interpreter startup to JIT
-    /// execution without refreshing the runtime registries, later virtual dispatch and
-    /// constructor calls will read interpreter-only tokens as native closure pointers.
-    fn rerun_loaded_modules_vtable_init_jit(&self) -> Result<(), String> {
-        let modules = self.modules.read().unwrap();
+    fn run_startup_hooks_interpreter(&self, modules: &[IrModule]) -> Result<(), String> {
+        let normal_max_iterations = if self.config.max_tier_promotions == 0 {
+            u64::MAX
+        } else {
+            self.config.bailout_strategy.threshold()
+        };
+
+        let mut interp = self.interpreter.lock().unwrap();
+        // Module startup hooks should not trip hot-loop bailout. They are required
+        // initialization work, not benchmark hot paths, and can legitimately exceed
+        // the low iteration thresholds used by the Benchmark preset.
+        interp.reset_iteration_count();
+        interp.set_max_iterations(u64::MAX);
+        for module in modules {
+            for init_name in ["__vtable_init__", "__init__"] {
+                let Some(init) = module.functions.values().find(|f| f.name == init_name) else {
+                    continue;
+                };
+                interp
+                    .execute(module, init.id, vec![])
+                    .map_err(|e| format!("Interpreter error in {}: {}", init_name, e))?;
+            }
+        }
+        interp.reset_iteration_count();
+        interp.set_max_iterations(normal_max_iterations);
+        Ok(())
+    }
+
+    fn run_startup_hooks_native(&self, modules: &[IrModule]) -> Result<(), String> {
         let function_pointers = self.function_pointers.read().unwrap();
 
-        for module in modules.iter() {
-            let Some(vtable_init) = module.functions.values().find(|f| f.name == "__vtable_init__")
-            else {
-                continue;
-            };
+        for module in modules {
+            for init_name in ["__vtable_init__", "__init__"] {
+                let Some(init) = module.functions.values().find(|f| f.name == init_name) else {
+                    continue;
+                };
 
-            let Some(&func_ptr) = function_pointers.get(&vtable_init.id) else {
-                return Err(format!(
-                    "JIT-compiled __vtable_init__ {:?} not found in function_pointers",
-                    vtable_init.id
-                ));
-            };
+                let Some(&func_ptr) = function_pointers.get(&init.id) else {
+                    return Err(format!(
+                        "JIT-compiled {} {:?} not found in function_pointers",
+                        init_name, init.id
+                    ));
+                };
 
-            unsafe {
-                let init_fn: extern "C" fn(i64) = std::mem::transmute(func_ptr as *const u8);
-                init_fn(0);
+                unsafe {
+                    let init_fn: extern "C" fn(i64) = std::mem::transmute(func_ptr as *const u8);
+                    init_fn(0);
+                }
             }
         }
 
+        Ok(())
+    }
+
+    fn rerun_loaded_modules_startup_native(&self) -> Result<(), String> {
+        let modules = self.modules.read().unwrap();
+        self.run_startup_hooks_native(&modules)
+    }
+
+    /// Reset loaded module startup state for the next top-level program run.
+    ///
+    /// Benchmarks reuse the same backend across warmups and measured iterations, so
+    /// globals and runtime dispatch tables must be reinitialized before each run.
+    pub fn reset_loaded_modules_for_run(&mut self) -> Result<(), String> {
+        let loaded_module_count = self.modules.read().unwrap().len();
+        let initialized_module_count = *self.initialized_module_count.lock().unwrap();
+        if initialized_module_count < loaded_module_count {
+            return self.ensure_loaded_modules_initialized();
+        }
+
+        let modules = self.modules.read().unwrap();
+        if self.function_pointers.read().unwrap().is_empty() {
+            self.run_startup_hooks_interpreter(&modules)
+        } else {
+            self.run_startup_hooks_native(&modules)
+        }
+    }
+
+    /// Re-run startup hooks after compiling to native code.
+    ///
+    /// The interpreter maintains its own global state, while native tiers read/write
+    /// backend storage and runtime registries. After switching execution tiers, we
+    /// must replay startup so globals, vtables, and constructor thunks point at the
+    /// newly active backend representation.
+    fn rerun_loaded_modules_startup_jit(&self) -> Result<(), String> {
+        self.rerun_loaded_modules_startup_native()?;
         Ok(())
     }
 
@@ -1311,18 +1353,20 @@ impl TieredBackend {
                 // Re-register source info at new LLVM addresses
                 self.register_source_info_for_pointers(&all_pointers);
 
-                let mut fp_lock = self.function_pointers.write().unwrap();
-                let mut ft_lock = self.function_tiers.write().unwrap();
-
                 let count = all_pointers.len();
-                for (func_id, ptr) in all_pointers {
-                    fp_lock.insert(func_id, ptr);
-                    ft_lock.insert(func_id, OptimizationTier::Maximum);
+                {
+                    let mut fp_lock = self.function_pointers.write().unwrap();
+                    let mut ft_lock = self.function_tiers.write().unwrap();
+                    for (func_id, ptr) in all_pointers {
+                        fp_lock.insert(func_id, ptr);
+                        ft_lock.insert(func_id, OptimizationTier::Maximum);
+                    }
                 }
 
                 if self.config.verbosity >= 1 {
                     debug!("[TieredBackend] Upgraded {} functions to LLVM", count);
                 }
+                self.rerun_loaded_modules_startup_jit()?;
                 Ok(())
             }
             Err(e) => {
@@ -1649,9 +1693,8 @@ impl TieredBackend {
         // Keep the backend alive by storing it (replace the old baseline_backend)
         *self.baseline_backend.lock().unwrap() = backend;
 
-        // Refresh backend-dependent closure registries (vtables, constructor thunks, etc.)
-        // now that compiled function pointers exist.
-        self.rerun_loaded_modules_vtable_init_jit()?;
+        // Refresh backend-dependent startup state now that compiled function pointers exist.
+        self.rerun_loaded_modules_startup_jit()?;
 
         if self.config.verbosity >= 1 {
             debug!("[TieredBackend] JIT compilation complete");
