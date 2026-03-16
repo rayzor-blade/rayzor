@@ -2544,12 +2544,44 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     .build_load(i64_type, env_slot, "cl_env_ptr")
                     .map_err(|e| format!("Failed to load closure env_ptr: {}", e))?;
 
-                // Build argument list: env_ptr first, then user args
+                // Get expected param types from signature
+                let sig_params = if let IrType::Function { params, .. } = signature {
+                    params.clone()
+                } else {
+                    vec![]
+                };
+
+                // Build argument list: env_ptr first, then user args (with type coercion)
                 let mut call_args: Vec<BasicMetadataValueEnum> = Vec::new();
                 call_args.push(env_ptr_i64.into());
-                for &arg_id in args.iter() {
+                for (i, &arg_id) in args.iter().enumerate() {
                     let arg_val = self.get_value(arg_id)?;
-                    call_args.push(arg_val.into());
+                    // Coerce argument type to match signature if needed
+                    let coerced = if i < sig_params.len() {
+                        let expected_ty = self.translate_type(&sig_params[i])?;
+                        if arg_val.get_type() != expected_ty {
+                            if arg_val.is_int_value() && expected_ty.is_pointer_type() {
+                                self.builder.build_int_to_ptr(
+                                    arg_val.into_int_value(),
+                                    expected_ty.into_pointer_type(),
+                                    &format!("ci_arg_{}", i),
+                                ).map_err(|e| format!("inttoptr arg: {}", e))?.into()
+                            } else if arg_val.is_pointer_value() && expected_ty.is_int_type() {
+                                self.builder.build_ptr_to_int(
+                                    arg_val.into_pointer_value(),
+                                    expected_ty.into_int_type(),
+                                    &format!("ci_arg_{}", i),
+                                ).map_err(|e| format!("ptrtoint arg: {}", e))?.into()
+                            } else {
+                                arg_val
+                            }
+                        } else {
+                            arg_val
+                        }
+                    } else {
+                        arg_val
+                    };
+                    call_args.push(coerced.into());
                 }
 
                 // Build function type with env_ptr prepended
@@ -3987,6 +4019,41 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                                     )
                                     .map_err(|e| format!("Failed to cast return: {}", e))?
                                     .into()
+                            } else if return_val.is_int_value() && expected.is_int_type() {
+                                // Int to different-width int (e.g., i64 -> i32)
+                                let int_val = return_val.into_int_value();
+                                let expected_int = expected.into_int_type();
+                                if int_val.get_type().get_bit_width() > expected_int.get_bit_width() {
+                                    self.builder
+                                        .build_int_truncate(int_val, expected_int, &cast_name)
+                                        .map_err(|e| format!("Failed to truncate return: {}", e))?
+                                        .into()
+                                } else {
+                                    self.builder
+                                        .build_int_s_extend(int_val, expected_int, &cast_name)
+                                        .map_err(|e| format!("Failed to extend return: {}", e))?
+                                        .into()
+                                }
+                            } else if return_val.is_int_value() && expected.is_pointer_type() {
+                                // i64 -> ptr (class pointer from array_pop_i64)
+                                self.builder
+                                    .build_int_to_ptr(
+                                        return_val.into_int_value(),
+                                        expected.into_pointer_type(),
+                                        &cast_name,
+                                    )
+                                    .map_err(|e| format!("Failed to inttoptr return: {}", e))?
+                                    .into()
+                            } else if return_val.is_pointer_value() && expected.is_int_type() {
+                                // ptr -> i64
+                                self.builder
+                                    .build_ptr_to_int(
+                                        return_val.into_pointer_value(),
+                                        expected.into_int_type(),
+                                        &cast_name,
+                                    )
+                                    .map_err(|e| format!("Failed to ptrtoint return: {}", e))?
+                                    .into()
                             } else {
                                 // Use as-is, let LLVM report the error
                                 return_val
@@ -4219,6 +4286,27 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         result_ty: Option<&IrType>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let name = format!("binop_{}", dest.as_u32());
+
+        // Coerce integer operands to the same bit width (LLVM requires matching types)
+        let (left, right) = if left.is_int_value() && right.is_int_value() {
+            let li = left.into_int_value();
+            let ri = right.into_int_value();
+            let lw = li.get_type().get_bit_width();
+            let rw = ri.get_type().get_bit_width();
+            if lw < rw {
+                let ext = self.builder.build_int_s_extend(li, ri.get_type(), &format!("{}_ext_l", name))
+                    .map_err(|e| format!("sext: {}", e))?;
+                (ext.into(), right)
+            } else if rw < lw {
+                let ext = self.builder.build_int_s_extend(ri, li.get_type(), &format!("{}_ext_r", name))
+                    .map_err(|e| format!("sext: {}", e))?;
+                (left, ext.into())
+            } else {
+                (left, right)
+            }
+        } else {
+            (left, right)
+        };
 
         // Determine if this is a float operation
         // Primary: use MIR type if available
@@ -4692,6 +4780,48 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         operand_ty: Option<&IrType>,
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let name = format!("cmp_{}", dest.as_u32());
+
+        // Handle pointer comparisons (e.g., class instance equality: obj1 != obj2)
+        if left.is_pointer_value() || right.is_pointer_value() {
+            let l_ptr = if left.is_pointer_value() {
+                left.into_pointer_value()
+            } else {
+                self.builder.build_int_to_ptr(
+                    left.into_int_value(),
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                    "cmp_to_ptr_l",
+                ).map_err(|e| format!("ptr conv: {}", e))?
+            };
+            let r_ptr = if right.is_pointer_value() {
+                right.into_pointer_value()
+            } else {
+                self.builder.build_int_to_ptr(
+                    right.into_int_value(),
+                    self.context.ptr_type(inkwell::AddressSpace::default()),
+                    "cmp_to_ptr_r",
+                ).map_err(|e| format!("ptr conv: {}", e))?
+            };
+            // Convert pointers to integers for comparison
+            let i64_type = self.context.i64_type();
+            let l_int = self.builder.build_ptr_to_int(l_ptr, i64_type, "ptr_to_int_l")
+                .map_err(|e| format!("ptrtoint: {}", e))?;
+            let r_int = self.builder.build_ptr_to_int(r_ptr, i64_type, "ptr_to_int_r")
+                .map_err(|e| format!("ptrtoint: {}", e))?;
+            let pred = match op {
+                CompareOp::Eq => inkwell::IntPredicate::EQ,
+                CompareOp::Ne => inkwell::IntPredicate::NE,
+                CompareOp::Lt | CompareOp::ULt => inkwell::IntPredicate::SLT,
+                CompareOp::Le | CompareOp::ULe => inkwell::IntPredicate::SLE,
+                CompareOp::Gt | CompareOp::UGt => inkwell::IntPredicate::SGT,
+                CompareOp::Ge | CompareOp::UGe => inkwell::IntPredicate::SGE,
+                _ => inkwell::IntPredicate::EQ, // fallback for other ops
+            };
+            let cmp = self.builder.build_int_compare(pred, l_int, r_int, &name)
+                .map_err(|e| format!("ptr cmp: {}", e))?;
+            let ext = self.builder.build_int_z_extend(cmp, self.context.i8_type(), &format!("{}_ext", name))
+                .map_err(|e| format!("zext: {}", e))?;
+            return Ok(ext.into());
+        }
 
         // Determine if operands are float
         // Primary: use MIR type if available

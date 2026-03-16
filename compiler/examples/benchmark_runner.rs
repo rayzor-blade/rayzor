@@ -406,6 +406,13 @@ fn run_benchmark_interpreter(
     let mut backend =
         TieredBackend::with_symbols(config, symbols).map_err(|e| format!("backend: {}", e))?;
 
+    // Load all modules so interpreter mode sees the same code graph as JIT modes.
+    for module in &mir_modules {
+        backend
+            .compile_module((**module).clone())
+            .map_err(|e| format!("load: {}", e))?;
+    }
+
     // Find main module
     let main_module = mir_modules
         .iter()
@@ -423,10 +430,6 @@ fn run_benchmark_interpreter(
         .find(|(_, f)| f.name.ends_with("_main") || f.name == "main")
         .map(|(id, _)| *id)
         .ok_or("No main function")?;
-
-    backend
-        .compile_module((**main_module).clone())
-        .map_err(|e| format!("load: {}", e))?;
 
     let compile_time = compile_start.elapsed();
 

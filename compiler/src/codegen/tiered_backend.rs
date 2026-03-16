@@ -356,6 +356,9 @@ pub struct TieredBackend {
     /// Used to skip redundant recompilations when multiple functions
     /// cross thresholds at the same tier level
     current_compiled_tier: Arc<AtomicU8>,
+
+    /// Number of loaded MIR modules that have already run startup hooks.
+    initialized_module_count: Arc<Mutex<usize>>,
 }
 
 /// Optimization tier level (5-tier system with interpreter)
@@ -860,7 +863,12 @@ impl TieredBackend {
 
         // Create interpreter with configured bailout threshold
         let mut interp = MirInterpreter::new();
-        interp.set_max_iterations(config.bailout_strategy.threshold());
+        let max_iterations = if config.max_tier_promotions == 0 {
+            u64::MAX
+        } else {
+            config.bailout_strategy.threshold()
+        };
+        interp.set_max_iterations(max_iterations);
 
         Ok(Self {
             interpreter: Arc::new(Mutex::new(interp)),
@@ -882,6 +890,7 @@ impl TieredBackend {
             promotion_barrier: Arc::new(PromotionBarrier::new()),
             promotion_count: Arc::new(AtomicU64::new(0)),
             current_compiled_tier: Arc::new(AtomicU8::new(0)),
+            initialized_module_count: Arc::new(Mutex::new(0)),
         })
     }
 
@@ -909,7 +918,12 @@ impl TieredBackend {
 
         // Create interpreter with configured bailout threshold and register symbols
         let mut interp = MirInterpreter::new();
-        interp.set_max_iterations(config.bailout_strategy.threshold());
+        let max_iterations = if config.max_tier_promotions == 0 {
+            u64::MAX
+        } else {
+            config.bailout_strategy.threshold()
+        };
+        interp.set_max_iterations(max_iterations);
         for (name, ptr) in symbols {
             interp.register_symbol(name, *ptr);
         }
@@ -934,7 +948,79 @@ impl TieredBackend {
             promotion_barrier: Arc::new(PromotionBarrier::new()),
             promotion_count: Arc::new(AtomicU64::new(0)),
             current_compiled_tier: Arc::new(AtomicU8::new(0)),
+            initialized_module_count: Arc::new(Mutex::new(0)),
         })
+    }
+
+    fn ensure_loaded_modules_initialized(&mut self) -> Result<(), String> {
+        let start_idx = *self.initialized_module_count.lock().unwrap();
+        let modules_to_init: Vec<IrModule> = {
+            let modules = self.modules.read().unwrap();
+            if start_idx >= modules.len() {
+                return Ok(());
+            }
+            modules[start_idx..].to_vec()
+        };
+
+        if modules_to_init.is_empty() {
+            return Ok(());
+        }
+
+        let module_refs: Vec<_> = modules_to_init.iter().cloned().map(Arc::new).collect();
+        CraneliftBackend::register_enum_rtti_from_modules(&module_refs);
+        CraneliftBackend::register_class_rtti_from_modules(&module_refs);
+
+        let mut interp = self.interpreter.lock().unwrap();
+        for module in &modules_to_init {
+            if let Some(vtable_init) = module.functions.values().find(|f| f.name == "__vtable_init__")
+            {
+                interp
+                    .execute(module, vtable_init.id, vec![])
+                    .map_err(|e| format!("Interpreter error in __vtable_init__: {}", e))?;
+            }
+
+            if let Some(init) = module.functions.values().find(|f| f.name == "__init__") {
+                interp
+                    .execute(module, init.id, vec![])
+                    .map_err(|e| format!("Interpreter error in __init__: {}", e))?;
+            }
+        }
+        drop(interp);
+
+        *self.initialized_module_count.lock().unwrap() = start_idx + modules_to_init.len();
+        Ok(())
+    }
+
+    /// Re-run `__vtable_init__` after compiling to native code.
+    ///
+    /// The interpreter registers `FunctionRef` values as tagged tokens, while native tiers
+    /// materialize real closure pointers. If we switch from interpreter startup to JIT
+    /// execution without refreshing the runtime registries, later virtual dispatch and
+    /// constructor calls will read interpreter-only tokens as native closure pointers.
+    fn rerun_loaded_modules_vtable_init_jit(&self) -> Result<(), String> {
+        let modules = self.modules.read().unwrap();
+        let function_pointers = self.function_pointers.read().unwrap();
+
+        for module in modules.iter() {
+            let Some(vtable_init) = module.functions.values().find(|f| f.name == "__vtable_init__")
+            else {
+                continue;
+            };
+
+            let Some(&func_ptr) = function_pointers.get(&vtable_init.id) else {
+                return Err(format!(
+                    "JIT-compiled __vtable_init__ {:?} not found in function_pointers",
+                    vtable_init.id
+                ));
+            };
+
+            unsafe {
+                let init_fn: extern "C" fn(i64) = std::mem::transmute(func_ptr as *const u8);
+                init_fn(0);
+            }
+        }
+
+        Ok(())
     }
 
     /// Check if a function uses SIMD/vector instructions.
@@ -1032,6 +1118,8 @@ impl TieredBackend {
         func_id: IrFunctionId,
         args: Vec<InterpValue>,
     ) -> Result<InterpValue, String> {
+        self.ensure_loaded_modules_initialized()?;
+
         // Record the call for profiling
         self.record_call(func_id);
 
@@ -1560,6 +1648,10 @@ impl TieredBackend {
 
         // Keep the backend alive by storing it (replace the old baseline_backend)
         *self.baseline_backend.lock().unwrap() = backend;
+
+        // Refresh backend-dependent closure registries (vtables, constructor thunks, etc.)
+        // now that compiled function pointers exist.
+        self.rerun_loaded_modules_vtable_init_jit()?;
 
         if self.config.verbosity >= 1 {
             debug!("[TieredBackend] JIT compilation complete");

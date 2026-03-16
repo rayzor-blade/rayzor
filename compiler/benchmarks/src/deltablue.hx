@@ -10,13 +10,13 @@ package benchmarks;
 
 @:safety(false)
 class Strength {
-    public static var REQUIRED:Strength;
-    public static var STRONG_PREFERRED:Strength;
-    public static var PREFERRED:Strength;
-    public static var STRONG_DEFAULT:Strength;
-    public static var NORMAL:Strength;
-    public static var WEAK_DEFAULT:Strength;
-    public static var WEAKEST:Strength;
+    public static var REQUIRED = new Strength(0, "required");
+    public static var STRONG_PREFERRED = new Strength(1, "strongPreferred");
+    public static var PREFERRED = new Strength(2, "preferred");
+    public static var STRONG_DEFAULT = new Strength(3, "strongDefault");
+    public static var NORMAL = new Strength(4, "normal");
+    public static var WEAK_DEFAULT = new Strength(5, "weakDefault");
+    public static var WEAKEST = new Strength(6, "weakest");
 
     public var value:Int;
     public var name:String;
@@ -24,16 +24,6 @@ class Strength {
     public function new(v:Int, n:String) {
         value = v;
         name = n;
-    }
-
-    public static function init():Void {
-        REQUIRED = new Strength(0, "required");
-        STRONG_PREFERRED = new Strength(1, "strongPreferred");
-        PREFERRED = new Strength(2, "preferred");
-        STRONG_DEFAULT = new Strength(3, "strongDefault");
-        NORMAL = new Strength(4, "normal");
-        WEAK_DEFAULT = new Strength(5, "weakDefault");
-        WEAKEST = new Strength(6, "weakest");
     }
 
     public function nextWeaker():Strength {
@@ -552,7 +542,6 @@ class DeltaBlue {
     }
 
     public static function main():Void {
-        Strength.init();
         for (i in 0...40) {
             chainTest(100);
             projectionTest(100);

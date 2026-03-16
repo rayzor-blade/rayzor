@@ -732,6 +732,14 @@ impl InterpValue {
         }
     }
 
+    /// Encode a function reference the same way NaN-boxed registers store it.
+    fn to_function_bits(&self) -> Option<i64> {
+        match self {
+            InterpValue::Function(id) => Some(NanBoxedValue::from_func_id(id.0).0 as i64),
+            _ => None,
+        }
+    }
+
     /// Convert to f64 (for floating point operations)
     pub fn to_f64(&self) -> Result<f64, InterpError> {
         match self {
@@ -1011,6 +1019,19 @@ unsafe impl Send for MirInterpreter {}
 unsafe impl Sync for MirInterpreter {}
 
 impl MirInterpreter {
+    fn widen_value_for_object_slot(&self, val: InterpValue) -> InterpValue {
+        match val {
+            InterpValue::Bool(_)
+            | InterpValue::I8(_)
+            | InterpValue::I16(_)
+            | InterpValue::I32(_)
+            | InterpValue::U8(_)
+            | InterpValue::U16(_)
+            | InterpValue::U32(_) => InterpValue::I64(val.to_i64().unwrap_or(0)),
+            other => other,
+        }
+    }
+
     /// Create a new interpreter
     pub fn new() -> Self {
         Self {
@@ -1342,7 +1363,19 @@ impl MirInterpreter {
                 let ptr_val = self.current_frame().registers.get(*ptr);
                 let val = self.current_frame().registers.get(*value);
                 let ptr_interp = InterpValue::from_nan_boxed(ptr_val, &self.object_heap);
-                let val_interp = InterpValue::from_nan_boxed(val, &self.object_heap);
+                let mut val_interp = InterpValue::from_nan_boxed(val, &self.object_heap);
+                let store_to_object_slot = function
+                    .register_types
+                    .get(ptr)
+                    .and_then(|ty| match ty {
+                        IrType::Ptr(inner) => Some(!matches!(inner.as_ref(), IrType::U8 | IrType::I8)),
+                        _ => None,
+                    })
+                    .unwrap_or(false);
+
+                if store_to_object_slot {
+                    val_interp = self.widen_value_for_object_slot(val_interp);
+                }
                 self.store_to_ptr(ptr_interp, val_interp)?;
             }
 
@@ -1387,6 +1420,13 @@ impl MirInterpreter {
                     InterpValue::from_nan_boxed(ptr_val, &self.object_heap).to_usize()?
                 };
                 let mut offset = 0usize;
+                let elem_size = match ty {
+                    IrType::Ptr(inner) => match inner.as_ref() {
+                        IrType::U8 | IrType::I8 => 1,
+                        _ => 8,
+                    },
+                    _ => 8,
+                };
 
                 // Calculate offset based on indices and type
                 for idx in indices {
@@ -1396,7 +1436,7 @@ impl MirInterpreter {
                     } else {
                         InterpValue::from_nan_boxed(idx_val, &self.object_heap).to_i64()? as usize
                     };
-                    offset += idx_int * ty.size();
+                    offset += idx_int * elem_size;
                 }
 
                 self.current_frame_mut()
@@ -1422,7 +1462,10 @@ impl MirInterpreter {
                 } else {
                     InterpValue::from_nan_boxed(offset_val, &self.object_heap).to_i64()? as usize
                 };
-                let elem_size = ty.size();
+                let elem_size = match ty {
+                    IrType::Ptr(inner) => inner.size(),
+                    _ => ty.size(),
+                };
                 self.current_frame_mut().registers.set(
                     *dest,
                     NanBoxedValue::from_ptr(base_ptr + offset_int * elem_size),
@@ -1487,7 +1530,6 @@ impl MirInterpreter {
                 ..
             } => {
                 let ptr_val = self.current_frame().registers.get(*func_ptr);
-                let ptr_interp = InterpValue::from_nan_boxed(ptr_val, &self.object_heap);
 
                 // Collect argument values - convert from NanBoxedValue to InterpValue
                 let arg_values: Vec<InterpValue> = args
@@ -1500,60 +1542,86 @@ impl MirInterpreter {
                     })
                     .collect();
 
-                let result = match ptr_interp {
-                    InterpValue::Function(func_id) => {
-                        // Check if it's a user function or extern
-                        if module.functions.contains_key(&func_id) {
-                            self.execute(module, func_id, arg_values)?
-                        } else if let Some(extern_fn) = module.extern_functions.get(&func_id) {
-                            self.call_extern_with_signature(extern_fn, &arg_values)?
-                        } else {
-                            return Err(InterpError::FunctionNotFound(func_id));
-                        }
-                    }
-                    InterpValue::Ptr(ptr) => {
-                        // Call through function pointer with signature info
-                        if let IrType::Function {
-                            params,
-                            return_type,
-                            ..
-                        } = signature
-                        {
-                            // We have full signature info - use it for proper FFI
-                            self.call_ffi_ptr_with_types(ptr, &arg_values, params, return_type)?
-                        } else {
-                            // Fallback to simple FFI without type info
-                            self.call_ffi_ptr_simple(ptr, &arg_values)?
-                        }
-                    }
-                    InterpValue::I64(raw_ptr) if raw_ptr != 0 => {
-                        // Raw integer from haxe_vtable_lookup — treat as closure struct pointer.
-                        // Closure layout: {fn_ptr: i64, env_ptr: i64}
-                        // Load fn_ptr, prepend env_ptr to args, then call via FFI.
-                        unsafe {
-                            let closure_ptr = raw_ptr as *const i64;
-                            let fn_ptr = *closure_ptr as usize;
-                            let env_ptr = *closure_ptr.add(1);
-                            // Prepend env_ptr as first argument
-                            let mut full_args = vec![InterpValue::I64(env_ptr)];
-                            full_args.extend(arg_values);
-                            if let IrType::Function { params, return_type, .. } = signature {
-                                self.call_ffi_ptr_with_types(
-                                    fn_ptr,
-                                    &full_args,
-                                    params,
-                                    return_type,
-                                )?
+                let result = if ptr_val.is_heap() {
+                    let idx = ptr_val.as_heap_index();
+                    match self.object_heap.get(idx) {
+                        Some(HeapObject::Struct(fields)) if !fields.is_empty() => {
+                            let func_interp =
+                                InterpValue::from_nan_boxed(fields[0], &self.object_heap);
+                            if let InterpValue::Function(func_id) = func_interp {
+                                let env_idx =
+                                    self.object_heap.alloc(HeapObject::Struct(fields[1..].to_vec()));
+                                let mut full_args = vec![InterpValue::Ptr(env_idx as usize)];
+                                full_args.extend(arg_values);
+
+                                if module.functions.contains_key(&func_id) {
+                                    self.execute(module, func_id, full_args)?
+                                } else if let Some(extern_fn) = module.extern_functions.get(&func_id)
+                                {
+                                    self.call_extern_with_signature(extern_fn, &full_args)?
+                                } else {
+                                    return Err(InterpError::FunctionNotFound(func_id));
+                                }
                             } else {
-                                self.call_ffi_ptr_simple(fn_ptr, &full_args)?
+                                return Err(InterpError::TypeError(format!(
+                                    "Closure first field is not a function: {:?}",
+                                    func_interp
+                                )));
                             }
                         }
+                        Some(HeapObject::I64(raw_val)) => {
+                            self.call_indirect_raw_i64(module, *raw_val, &arg_values, signature)?
+                        }
+                        Some(HeapObject::U64(raw_val)) if *raw_val != 0 => {
+                            self.call_indirect_raw_i64(
+                                module,
+                                *raw_val as i64,
+                                &arg_values,
+                                signature,
+                            )?
+                        }
+                        _ => {
+                            return Err(InterpError::TypeError(format!(
+                                "Cannot call non-closure heap value: {:?}",
+                                InterpValue::from_nan_boxed(ptr_val, &self.object_heap)
+                            )));
+                        }
                     }
-                    _ => {
-                        return Err(InterpError::TypeError(format!(
-                            "Cannot call non-function value: {:?}",
-                            ptr_interp
-                        )));
+                } else if !ptr_val.is_f64()
+                    && (ptr_val.0 & NanBoxedValue::TAG_MASK) == NanBoxedValue::TAG_FUNC
+                {
+                    let func_id = IrFunctionId(ptr_val.as_func_id());
+                    if module.functions.contains_key(&func_id) {
+                        self.execute(module, func_id, arg_values)?
+                    } else if let Some(extern_fn) = module.extern_functions.get(&func_id) {
+                        self.call_extern_with_signature(extern_fn, &arg_values)?
+                    } else {
+                        return Err(InterpError::FunctionNotFound(func_id));
+                    }
+                } else if ptr_val.is_ptr() {
+                    let ptr = ptr_val.as_ptr();
+                    if let IrType::Function {
+                        params,
+                        return_type,
+                        ..
+                    } = signature
+                    {
+                        self.call_ffi_ptr_with_types(ptr, &arg_values, params, return_type)?
+                    } else {
+                        self.call_ffi_ptr_simple(ptr, &arg_values)?
+                    }
+                } else {
+                    let ptr_interp = InterpValue::from_nan_boxed(ptr_val, &self.object_heap);
+                    match ptr_interp {
+                        InterpValue::I64(raw_val) if raw_val != 0 => {
+                            self.call_indirect_raw_i64(module, raw_val, &arg_values, signature)?
+                        }
+                        _ => {
+                            return Err(InterpError::TypeError(format!(
+                                "Cannot call non-function value: {:?}",
+                                ptr_interp
+                            )));
+                        }
                     }
                 };
 
@@ -2558,6 +2626,9 @@ impl MirInterpreter {
                 InterpValue::Ptr(p) => {
                     *(addr as *mut usize) = p;
                 }
+                InterpValue::Function(id) => {
+                    *(addr as *mut i64) = NanBoxedValue::from_func_id(id.0).0 as i64;
+                }
                 _ => {}
             }
         }
@@ -2706,48 +2777,50 @@ impl MirInterpreter {
             "haxe_trace_string_struct" => {
                 if let Some(arg) = args.first() {
                     match arg {
-                        InterpValue::String(s) => println!("{}", s),
+                        InterpValue::String(s) => {
+                            rayzor_runtime::haxe_sys::haxe_trace_string(s.as_ptr(), s.len());
+                        }
                         InterpValue::Struct(fields) => {
-                            // The struct typically has (ptr, len) or (ptr, len, capacity)
-                            // Try to extract and print the string
+                            // The struct typically has (ptr, len, cap). Accept any integer-like
+                            // length representation so interpreted string traces match native backends.
                             if let Some(first) = fields.first() {
                                 match first {
-                                    InterpValue::String(s) => println!("{}", s),
+                                    InterpValue::String(s) => {
+                                        rayzor_runtime::haxe_sys::haxe_trace_string(
+                                            s.as_ptr(),
+                                            s.len(),
+                                        );
+                                    }
                                     InterpValue::Ptr(ptr) => {
-                                        // Try to read string from pointer with length from second field
-                                        if let Some(InterpValue::I64(len)) = fields.get(1) {
-                                            if *ptr != 0 && *len > 0 {
-                                                unsafe {
-                                                    let slice = std::slice::from_raw_parts(
-                                                        *ptr as *const u8,
-                                                        *len as usize,
-                                                    );
-                                                    if let Ok(s) = std::str::from_utf8(slice) {
-                                                        println!("{}", s);
-                                                    } else {
-                                                        println!("<non-utf8 string>");
-                                                    }
-                                                }
-                                            } else {
-                                                println!("");
-                                            }
+                                        let len = fields
+                                            .get(1)
+                                            .and_then(|v| v.to_usize().ok())
+                                            .unwrap_or(0);
+                                        if *ptr != 0 && len > 0 {
+                                            rayzor_runtime::haxe_sys::haxe_trace_string(
+                                                *ptr as *const u8,
+                                                len,
+                                            );
                                         } else {
-                                            println!("<ptr:{:#x}>", ptr);
+                                            rayzor_runtime::haxe_sys::haxe_trace_string(
+                                                std::ptr::null(),
+                                                0,
+                                            );
                                         }
                                     }
                                     _ => println!("{:?}", first),
                                 }
                             } else {
-                                println!("");
+                                rayzor_runtime::haxe_sys::haxe_trace_string(std::ptr::null(), 0);
                             }
                         }
                         InterpValue::Ptr(ptr) => {
-                            // It might be a pointer to the string struct - try to read it
                             if *ptr != 0 {
-                                // In production, we'd dereference the struct. For now, just show address.
-                                println!("<string at {:#x}>", ptr);
+                                rayzor_runtime::haxe_sys::haxe_trace_string_struct(
+                                    *ptr as *const rayzor_runtime::haxe_string::HaxeString,
+                                );
                             } else {
-                                println!("null");
+                                rayzor_runtime::haxe_sys::haxe_trace_string(std::ptr::null(), 0);
                             }
                         }
                         other => println!("{:?}", other),
@@ -2759,14 +2832,14 @@ impl MirInterpreter {
             "haxe_trace_int" => {
                 if let Some(arg) = args.first() {
                     match arg {
-                        InterpValue::I32(n) => println!("{}", n),
-                        InterpValue::I64(n) => println!("{}", n),
-                        InterpValue::I8(n) => println!("{}", n),
-                        InterpValue::I16(n) => println!("{}", n),
-                        InterpValue::U8(n) => println!("{}", n),
-                        InterpValue::U16(n) => println!("{}", n),
-                        InterpValue::U32(n) => println!("{}", n),
-                        InterpValue::U64(n) => println!("{}", n),
+                        InterpValue::I32(n) => rayzor_runtime::haxe_sys::haxe_trace_int(*n as i64),
+                        InterpValue::I64(n) => rayzor_runtime::haxe_sys::haxe_trace_int(*n),
+                        InterpValue::I8(n) => rayzor_runtime::haxe_sys::haxe_trace_int(*n as i64),
+                        InterpValue::I16(n) => rayzor_runtime::haxe_sys::haxe_trace_int(*n as i64),
+                        InterpValue::U8(n) => rayzor_runtime::haxe_sys::haxe_trace_int(*n as i64),
+                        InterpValue::U16(n) => rayzor_runtime::haxe_sys::haxe_trace_int(*n as i64),
+                        InterpValue::U32(n) => rayzor_runtime::haxe_sys::haxe_trace_int(*n as i64),
+                        InterpValue::U64(n) => rayzor_runtime::haxe_sys::haxe_trace_int(*n as i64),
                         other => println!("{:?}", other),
                     }
                 }
@@ -2786,6 +2859,31 @@ impl MirInterpreter {
                     }
                 }
                 Ok(InterpValue::String(String::new()))
+            }
+            "haxe_std_int" => {
+                let x = args.first().map(|arg| arg.to_f64()).transpose()?.unwrap_or(0.0);
+                let truncated = if x.is_nan() {
+                    0
+                } else if x.is_infinite() {
+                    if x.is_sign_positive() {
+                        i64::MAX
+                    } else {
+                        i64::MIN
+                    }
+                } else {
+                    x.trunc() as i64
+                };
+                Ok(InterpValue::I64(truncated))
+            }
+            "malloc" => {
+                let size = args.first().map(|arg| arg.to_usize()).transpose()?.unwrap_or(0);
+                Ok(InterpValue::Ptr(self.alloc_heap(size)?))
+            }
+            "free" => {
+                if let Some(ptr) = args.first() {
+                    self.free_heap(ptr.to_usize()?);
+                }
+                Ok(InterpValue::Void)
             }
             _ => {
                 // Check if we have a registered symbol (call without signature info)
@@ -2923,6 +3021,58 @@ impl MirInterpreter {
         self.native_to_interp(result, return_type)
     }
 
+    fn call_indirect_raw_i64(
+        &mut self,
+        module: &IrModule,
+        raw_val: i64,
+        arg_values: &[InterpValue],
+        signature: &IrType,
+    ) -> Result<InterpValue, InterpError> {
+        let nan_boxed = NanBoxedValue(raw_val as u64);
+        let interp_val = InterpValue::from_nan_boxed(nan_boxed, &self.object_heap);
+
+        match interp_val {
+            InterpValue::Function(func_id) => {
+                if module.functions.contains_key(&func_id) {
+                    self.execute(module, func_id, arg_values.to_vec())
+                } else if let Some(extern_fn) = module.extern_functions.get(&func_id) {
+                    self.call_extern_with_signature(extern_fn, arg_values)
+                } else {
+                    Err(InterpError::FunctionNotFound(func_id))
+                }
+            }
+            InterpValue::Ptr(heap_idx) => {
+                if let Some(HeapObject::Struct(fields)) = self.object_heap.get(heap_idx as u32) {
+                    let func_nan = fields[0];
+                    let func_interp = InterpValue::from_nan_boxed(func_nan, &self.object_heap);
+                    if let InterpValue::Function(func_id) = func_interp {
+                        if module.functions.contains_key(&func_id) {
+                            self.execute(module, func_id, arg_values.to_vec())
+                        } else if let Some(extern_fn) = module.extern_functions.get(&func_id) {
+                            self.call_extern_with_signature(extern_fn, arg_values)
+                        } else {
+                            Err(InterpError::FunctionNotFound(func_id))
+                        }
+                    } else {
+                        Err(InterpError::TypeError(format!(
+                            "Closure first field is not a function: {:?}",
+                            func_interp
+                        )))
+                    }
+                } else {
+                    Err(InterpError::TypeError(format!(
+                        "Raw indirect target decoded to pointer-like value without closure backing: 0x{:x}",
+                        raw_val as u64
+                    )))
+                }
+            }
+            _ => Err(InterpError::TypeError(format!(
+                "Raw indirect target is not callable: 0x{:x}",
+                raw_val as u64
+            ))),
+        }
+    }
+
     /// Convert InterpValue to native representation for FFI
     fn interp_to_native(&self, val: &InterpValue, ty: &IrType) -> Result<NativeValue, InterpError> {
         match ty {
@@ -2931,11 +3081,15 @@ impl MirInterpreter {
             IrType::I8 => Ok(NativeValue::I8(val.to_i64()? as i8)),
             IrType::I16 => Ok(NativeValue::I16(val.to_i64()? as i16)),
             IrType::I32 => Ok(NativeValue::I32(val.to_i64()? as i32)),
-            IrType::I64 => Ok(NativeValue::I64(val.to_i64()?)),
+            IrType::I64 => Ok(NativeValue::I64(
+                val.to_function_bits().unwrap_or(val.to_i64()?),
+            )),
             IrType::U8 => Ok(NativeValue::U8(val.to_i64()? as u8)),
             IrType::U16 => Ok(NativeValue::U16(val.to_i64()? as u16)),
             IrType::U32 => Ok(NativeValue::U32(val.to_i64()? as u32)),
-            IrType::U64 => Ok(NativeValue::U64(val.to_i64()? as u64)),
+            IrType::U64 => Ok(NativeValue::U64(
+                val.to_function_bits().unwrap_or(val.to_i64()?) as u64,
+            )),
             IrType::F32 => Ok(NativeValue::F32(val.to_f64()? as f32)),
             IrType::F64 => Ok(NativeValue::F64(val.to_f64()?)),
             IrType::Ptr(_) | IrType::Ref(_) => Ok(NativeValue::Ptr(val.to_usize()?)),
@@ -2972,7 +3126,10 @@ impl MirInterpreter {
             InterpValue::Ptr(p) => Ok(NativeValue::Ptr(*p)),
             InterpValue::Null => Ok(NativeValue::Ptr(0)),
             InterpValue::String(s) => Ok(NativeValue::Ptr(s.as_ptr() as usize)),
-            InterpValue::Array(_) | InterpValue::Struct(_) | InterpValue::Function(_) => {
+            InterpValue::Function(id) => Ok(NativeValue::I64(
+                NanBoxedValue::from_func_id(id.0).0 as i64,
+            )),
+            InterpValue::Array(_) | InterpValue::Struct(_) => {
                 // Pass these as pointers (though this is a fallback)
                 Ok(NativeValue::Ptr(0))
             }
@@ -3555,6 +3712,27 @@ mod tests {
         match result {
             InterpValue::F64(n) => assert!((n - 4.0).abs() < 0.001),
             _ => panic!("Expected F64 result, got {:?}", result),
+        }
+    }
+
+    #[test]
+    fn test_builtin_haxe_std_int() {
+        let mut interp = MirInterpreter::new();
+
+        let positive = interp
+            .call_extern("haxe_std_int", &[InterpValue::F64(5.9)])
+            .expect("positive std int");
+        match positive {
+            InterpValue::I64(n) => assert_eq!(n, 5),
+            other => panic!("Expected I64 result, got {:?}", other),
+        }
+
+        let negative = interp
+            .call_extern("haxe_std_int", &[InterpValue::F64(-5.9)])
+            .expect("negative std int");
+        match negative {
+            InterpValue::I64(n) => assert_eq!(n, -5),
+            other => panic!("Expected I64 result, got {:?}", other),
         }
     }
 
