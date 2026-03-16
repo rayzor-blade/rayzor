@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Mon Mar 16 13:55:35 GMT 2026
+  Mon Mar 16 21:17:12 GMT 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -89,7 +89,7 @@ Direct comparison: arr[2] == 30 -> false
 static inline var SHIFT_16 = 1 << 16: 65536
 static inline var SHIFT_8 = 1 << 8: 256
 static inline var CONST_65536 = 65536: 65536
-static var SHIFT_16_VAR = 1 << 16: null
+static var SHIFT_16_VAR = 1 << 16: 65536
 var local = 1 << 16: 65536
 Direct 1 << 16: 65536
 Direct 1 << 8: 256
@@ -171,31 +171,31 @@ arr[9] = 90
 
 --- debug_static_div [PASS] ---
 🚀 Running compiler/tests/haxe/debug_static_div.hx [debug] [preset: Application]...
-MAX = 0
+MAX = 1000
 INLINE_MAX = 1000
-localMax = 0
+localMax = 1000
 localInline = 1000
-4 / MAX = inf
-4 / localMax = inf
+4 / MAX = 0.004
+4 / localMax = 0.004
 4 / INLINE_MAX = 0.004
 4 / localInline = 0.004
-4.0 / MAX = inf
-4.0 / localMax = inf
+4.0 / MAX = 0.004
+4.0 / localMax = 0.004
 4 / 1000 = 0.004
-f / MAX = inf
-f / localMax = inf
+f / MAX = 0.004
+f / localMax = 0.004
 f / 1000 = 0.004
 ✓ Complete
 
 --- debug_static_inline [PASS] ---
 🚀 Running compiler/tests/haxe/debug_static_inline.hx [debug] [preset: Application]...
 INLINE_1000 = 1000
-STATIC_1000 = 0
+STATIC_1000 = 1000
 INLINE_EXPR (35*25) = 875
 var a = INLINE_1000: 1000
-var b = STATIC_1000: 0
+var b = STATIC_1000: 1000
 4 / INLINE_1000 = 0.004
-4 / STATIC_1000 = inf
+4 / STATIC_1000 = 0.004
 Dynamic INLINE_1000 = 1000
 ✓ Complete
 
@@ -736,8 +736,8 @@ done
 world
 hello
 10
-20
 30
+20
 done
 ✓ Complete
 
