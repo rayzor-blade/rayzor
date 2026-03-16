@@ -899,9 +899,15 @@ impl<'a> TastToHirContext<'a> {
                 }
             }
         }
-        if let Some(idx) = super_call_idx {
-            body.statements.remove(idx);
-        }
+        // Split statements: those before super() go into pre_super_stmts,
+        // the rest (after super is removed) go into body
+        let pre_super_stmts = if let Some(idx) = super_call_idx {
+            let pre = body.statements.drain(..idx).collect::<Vec<_>>();
+            body.statements.remove(0); // remove the super call itself (now at index 0)
+            pre
+        } else {
+            Vec::new()
+        };
 
         HirConstructor {
             params: method
@@ -911,6 +917,7 @@ impl<'a> TastToHirContext<'a> {
                 .collect(),
             super_call,
             field_inits: Vec::new(),
+            pre_super_stmts,
             body,
         }
     }

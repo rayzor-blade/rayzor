@@ -174,6 +174,9 @@ pub struct HirConstructor {
     pub params: Vec<HirParam>,
     pub super_call: Option<HirSuperCall>,
     pub field_inits: Vec<HirFieldInit>,
+    /// Statements that must execute BEFORE the super() call (e.g., field assignments
+    /// that the super constructor's virtual methods depend on)
+    pub pre_super_stmts: Vec<HirStatement>,
     pub body: HirBlock,
 }
 
