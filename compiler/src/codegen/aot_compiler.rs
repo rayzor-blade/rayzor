@@ -563,18 +563,33 @@ impl AotCompiler {
             }
         }
 
-        // 3. Check relative to cargo workspace (target/release and target/debug)
-        for profile in &["release", "debug"] {
-            let path = PathBuf::from(format!("target/{}/librayzor_runtime.a", profile));
-            if path.exists() {
-                return Ok(path);
+        // 3. Check relative to executable location first so release binaries prefer
+        // the matching release runtime archive in Cargo's deps output.
+        if let Ok(exe_path) = std::env::current_exe() {
+            if let Some(exe_dir) = exe_path.parent() {
+                let mut candidates = vec![
+                    exe_dir.join("librayzor_runtime.a"),
+                    exe_dir.join("deps").join("librayzor_runtime.a"),
+                ];
+                if let Some(parent) = exe_dir.parent() {
+                    candidates.push(parent.join("librayzor_runtime.a"));
+                    candidates.push(parent.join("deps").join("librayzor_runtime.a"));
+                }
+                for path in candidates {
+                    if path.exists() {
+                        return Ok(path);
+                    }
+                }
             }
         }
 
-        // 4. Check relative to executable location
-        if let Ok(exe_path) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_path.parent() {
-                let path = exe_dir.join("librayzor_runtime.a");
+        // 4. Check relative to cargo workspace (release first, then debug; deps
+        // before root to match Cargo's normal staticlib layout).
+        for profile in &["release", "debug"] {
+            for path in [
+                PathBuf::from(format!("target/{}/deps/librayzor_runtime.a", profile)),
+                PathBuf::from(format!("target/{}/librayzor_runtime.a", profile)),
+            ] {
                 if path.exists() {
                     return Ok(path);
                 }
