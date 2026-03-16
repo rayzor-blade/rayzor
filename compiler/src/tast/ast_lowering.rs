@@ -2907,7 +2907,10 @@ impl<'a> AstLowering<'a> {
                 // Add to class_methods for forward reference resolution in lower_call_expression
                 if func.name != "new" {
                     if let Some(methods_list) = self.class_methods.get_mut(&class_symbol) {
-                        if let Some(existing_idx) = methods_list.iter().position(|(name, _, _)| *name == method_name) {
+                        if let Some(existing_idx) = methods_list
+                            .iter()
+                            .position(|(name, _, _)| *name == method_name)
+                        {
                             // Override parent method entry with child's symbol
                             // (critical for constructor bodies that call overridden methods)
                             methods_list[existing_idx] = (method_name, method_symbol, is_static);

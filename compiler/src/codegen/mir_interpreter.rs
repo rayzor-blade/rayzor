@@ -1368,7 +1368,9 @@ impl MirInterpreter {
                     .register_types
                     .get(ptr)
                     .and_then(|ty| match ty {
-                        IrType::Ptr(inner) => Some(!matches!(inner.as_ref(), IrType::U8 | IrType::I8)),
+                        IrType::Ptr(inner) => {
+                            Some(!matches!(inner.as_ref(), IrType::U8 | IrType::I8))
+                        }
                         _ => None,
                     })
                     .unwrap_or(false);
@@ -1549,14 +1551,16 @@ impl MirInterpreter {
                             let func_interp =
                                 InterpValue::from_nan_boxed(fields[0], &self.object_heap);
                             if let InterpValue::Function(func_id) = func_interp {
-                                let env_idx =
-                                    self.object_heap.alloc(HeapObject::Struct(fields[1..].to_vec()));
+                                let env_idx = self
+                                    .object_heap
+                                    .alloc(HeapObject::Struct(fields[1..].to_vec()));
                                 let mut full_args = vec![InterpValue::Ptr(env_idx as usize)];
                                 full_args.extend(arg_values);
 
                                 if module.functions.contains_key(&func_id) {
                                     self.execute(module, func_id, full_args)?
-                                } else if let Some(extern_fn) = module.extern_functions.get(&func_id)
+                                } else if let Some(extern_fn) =
+                                    module.extern_functions.get(&func_id)
                                 {
                                     self.call_extern_with_signature(extern_fn, &full_args)?
                                 } else {
@@ -1572,14 +1576,13 @@ impl MirInterpreter {
                         Some(HeapObject::I64(raw_val)) => {
                             self.call_indirect_raw_i64(module, *raw_val, &arg_values, signature)?
                         }
-                        Some(HeapObject::U64(raw_val)) if *raw_val != 0 => {
-                            self.call_indirect_raw_i64(
+                        Some(HeapObject::U64(raw_val)) if *raw_val != 0 => self
+                            .call_indirect_raw_i64(
                                 module,
                                 *raw_val as i64,
                                 &arg_values,
                                 signature,
-                            )?
-                        }
+                            )?,
                         _ => {
                             return Err(InterpError::TypeError(format!(
                                 "Cannot call non-closure heap value: {:?}",
@@ -2752,14 +2755,12 @@ impl MirInterpreter {
                 if *ptr == 0 {
                     return Ok(Some("null".to_string()));
                 }
-                let haxe_string = unsafe {
-                    &*(*ptr as *const rayzor_runtime::haxe_string::HaxeString)
-                };
+                let haxe_string =
+                    unsafe { &*(*ptr as *const rayzor_runtime::haxe_string::HaxeString) };
                 if haxe_string.ptr.is_null() {
                     return Ok(Some(String::new()));
                 }
-                let bytes =
-                    unsafe { std::slice::from_raw_parts(haxe_string.ptr, haxe_string.len) };
+                let bytes = unsafe { std::slice::from_raw_parts(haxe_string.ptr, haxe_string.len) };
                 Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
             }
             InterpValue::Struct(fields) => {
@@ -2768,10 +2769,7 @@ impl MirInterpreter {
                         return Ok(Some(s));
                     }
                     if let InterpValue::Ptr(ptr) = first {
-                        let len = fields
-                            .get(1)
-                            .and_then(|v| v.to_usize().ok())
-                            .unwrap_or(0);
+                        let len = fields.get(1).and_then(|v| v.to_usize().ok()).unwrap_or(0);
                         if *ptr == 0 {
                             return Ok(Some("null".to_string()));
                         }
@@ -2877,11 +2875,19 @@ impl MirInterpreter {
                 Ok(InterpValue::Void)
             }
             "haxe_string_from_int" => {
-                let value = args.first().map(|arg| arg.to_i64()).transpose()?.unwrap_or(0);
+                let value = args
+                    .first()
+                    .map(|arg| arg.to_i64())
+                    .transpose()?
+                    .unwrap_or(0);
                 Ok(InterpValue::String(value.to_string()))
             }
             "haxe_string_from_float" => {
-                let value = args.first().map(|arg| arg.to_f64()).transpose()?.unwrap_or(0.0);
+                let value = args
+                    .first()
+                    .map(|arg| arg.to_f64())
+                    .transpose()?
+                    .unwrap_or(0.0);
                 Ok(InterpValue::String(value.to_string()))
             }
             "haxe_string_from_bool" => {
@@ -2890,7 +2896,9 @@ impl MirInterpreter {
                     .map(|arg| arg.to_bool())
                     .transpose()?
                     .unwrap_or(false);
-                Ok(InterpValue::String(if value { "true" } else { "false" }.to_string()))
+                Ok(InterpValue::String(
+                    if value { "true" } else { "false" }.to_string(),
+                ))
             }
             // Handle haxe_trace_int for tracing integers
             "haxe_trace_int" => {
@@ -2932,7 +2940,11 @@ impl MirInterpreter {
                 Ok(InterpValue::String(String::new()))
             }
             "haxe_std_int" => {
-                let x = args.first().map(|arg| arg.to_f64()).transpose()?.unwrap_or(0.0);
+                let x = args
+                    .first()
+                    .map(|arg| arg.to_f64())
+                    .transpose()?
+                    .unwrap_or(0.0);
                 let truncated = if x.is_nan() {
                     0
                 } else if x.is_infinite() {
@@ -2947,7 +2959,11 @@ impl MirInterpreter {
                 Ok(InterpValue::I64(truncated))
             }
             "malloc" => {
-                let size = args.first().map(|arg| arg.to_usize()).transpose()?.unwrap_or(0);
+                let size = args
+                    .first()
+                    .map(|arg| arg.to_usize())
+                    .transpose()?
+                    .unwrap_or(0);
                 Ok(InterpValue::Ptr(self.alloc_heap(size)?))
             }
             "free" => {
@@ -3197,9 +3213,9 @@ impl MirInterpreter {
             InterpValue::Ptr(p) => Ok(NativeValue::Ptr(*p)),
             InterpValue::Null => Ok(NativeValue::Ptr(0)),
             InterpValue::String(s) => Ok(NativeValue::Ptr(s.as_ptr() as usize)),
-            InterpValue::Function(id) => Ok(NativeValue::I64(
-                NanBoxedValue::from_func_id(id.0).0 as i64,
-            )),
+            InterpValue::Function(id) => {
+                Ok(NativeValue::I64(NanBoxedValue::from_func_id(id.0).0 as i64))
+            }
             InterpValue::Array(_) | InterpValue::Struct(_) => {
                 // Pass these as pointers (though this is a fallback)
                 Ok(NativeValue::Ptr(0))

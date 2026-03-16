@@ -4203,33 +4203,36 @@ impl<'a> HirToMirContext<'a> {
                         // so the drop analysis doesn't free the source while the alias lives.
                         // Skip if interface wrapping already handled the transfer.
                         if !wrapped_for_interface {
-                        if let HirPattern::Variable {
-                            symbol: dst_symbol, ..
-                        } = pattern
-                        {
-                            let src_symbol = match &init_expr.kind {
-                                HirExprKind::Variable { symbol, .. } => Some(*symbol),
-                                HirExprKind::Cast {
-                                    expr: cast_expr,
-                                    is_safe: true,
-                                    ..
-                                } => {
-                                    if let HirExprKind::Variable { symbol, .. } = &cast_expr.kind {
-                                        Some(*symbol)
-                                    } else {
-                                        None
+                            if let HirPattern::Variable {
+                                symbol: dst_symbol, ..
+                            } = pattern
+                            {
+                                let src_symbol = match &init_expr.kind {
+                                    HirExprKind::Variable { symbol, .. } => Some(*symbol),
+                                    HirExprKind::Cast {
+                                        expr: cast_expr,
+                                        is_safe: true,
+                                        ..
+                                    } => {
+                                        if let HirExprKind::Variable { symbol, .. } =
+                                            &cast_expr.kind
+                                        {
+                                            Some(*symbol)
+                                        } else {
+                                            None
+                                        }
                                     }
-                                }
-                                _ => None,
-                            };
-                            if let Some(src_sym) = src_symbol {
-                                if let Some(src_ir_id) = self.owned_heap_values.remove(&src_sym) {
-                                    self.reassigned_in_scope.insert(src_sym);
-                                    self.register_owned_value(*dst_symbol, src_ir_id);
+                                    _ => None,
+                                };
+                                if let Some(src_sym) = src_symbol {
+                                    if let Some(src_ir_id) = self.owned_heap_values.remove(&src_sym)
+                                    {
+                                        self.reassigned_in_scope.insert(src_sym);
+                                        self.register_owned_value(*dst_symbol, src_ir_id);
+                                    }
                                 }
                             }
                         }
-                    }
                     }
                 }
             }
@@ -4452,8 +4455,8 @@ impl<'a> HirToMirContext<'a> {
                         // references to existing objects (e.g., satisfy() returns an existing
                         // constraint). Treating Call as owned causes use-after-free in while
                         // loops where exit_drop_scope frees the value before the back edge.
-                        let rhs_is_owned_allocation = rhs_was_copied
-                            || matches!(&rhs.kind, HirExprKind::New { .. });
+                        let rhs_is_owned_allocation =
+                            rhs_was_copied || matches!(&rhs.kind, HirExprKind::New { .. });
 
                         // When assigning to a Field/ArrayIndex lvalue, the RHS value escapes
                         // to another object. If the RHS is a variable that we're tracking as
@@ -4499,7 +4502,8 @@ impl<'a> HirToMirContext<'a> {
                                     } else {
                                         // RHS is a borrowed reference (field access, variable, etc.)
                                         // → free old owned value, STOP tracking
-                                        if let Some(old_ir_id) = self.owned_heap_values.remove(&symbol)
+                                        if let Some(old_ir_id) =
+                                            self.owned_heap_values.remove(&symbol)
                                         {
                                             if !self.is_terminated() {
                                                 self.builder.build_free(old_ir_id);
@@ -4538,11 +4542,9 @@ impl<'a> HirToMirContext<'a> {
                 debug!("[Return]: has_value: {}", value.is_some());
                 // Identify the returned symbol (if returning a variable) so we can
                 // skip freeing its allocation in cleanup
-                let returned_symbol = value.as_ref().and_then(|e| {
-                    match &e.kind {
-                        HirExprKind::Variable { symbol, .. } => Some(*symbol),
-                        _ => None,
-                    }
+                let returned_symbol = value.as_ref().and_then(|e| match &e.kind {
+                    HirExprKind::Variable { symbol, .. } => Some(*symbol),
+                    _ => None,
                 });
                 let ret_value = value.as_ref().and_then(|e| {
                     debug!(
@@ -7563,9 +7565,15 @@ impl<'a> HirToMirContext<'a> {
 
                 if let Some(&reg) = self.symbol_map.get(&lookup_symbol) {
                     {
-                        let _n = self.symbol_table.get_symbol(lookup_symbol).and_then(|s| self.string_interner.get(s.name));
+                        let _n = self
+                            .symbol_table
+                            .get_symbol(lookup_symbol)
+                            .and_then(|s| self.string_interner.get(s.name));
                         if _n == Some("counter") {
-                            eprintln!("[COUNTER_SYMBOL_MAP] counter {:?} found in symbol_map as reg {:?}", lookup_symbol, reg);
+                            eprintln!(
+                                "[COUNTER_SYMBOL_MAP] counter {:?} found in symbol_map as reg {:?}",
+                                lookup_symbol, reg
+                            );
                         }
                     }
                     // Check if we need to convert the type
@@ -7759,7 +7767,12 @@ impl<'a> HirToMirContext<'a> {
                         .get_symbol(*symbol)
                         .and_then(|s| self.string_interner.get(s.name));
                     // Try name-based global lookup as fallback (SymbolIds may differ)
-                    eprintln!("[UNRESOLVED] {:?} name={:?} global_map_size={}", symbol, sym_name, self.global_symbol_map.len());
+                    eprintln!(
+                        "[UNRESOLVED] {:?} name={:?} global_map_size={}",
+                        symbol,
+                        sym_name,
+                        self.global_symbol_map.len()
+                    );
                     if let Some(name_str) = sym_name {
                         for (&gsym, &gid) in &self.global_symbol_map {
                             if let Some(gsym_info) = self.symbol_table.get_symbol(gsym) {
@@ -7779,8 +7792,12 @@ impl<'a> HirToMirContext<'a> {
                         }
                         // Also try searching globals by name suffix
                         for global in self.builder.module.globals.values() {
-                            if global.name.ends_with(&format!(".{}", name_str)) || global.name == name_str {
-                                return self.builder.build_load_global(global.id, global.ty.clone());
+                            if global.name.ends_with(&format!(".{}", name_str))
+                                || global.name == name_str
+                            {
+                                return self
+                                    .builder
+                                    .build_load_global(global.id, global.ty.clone());
                             }
                         }
                     }
@@ -9018,27 +9035,41 @@ impl<'a> HirToMirContext<'a> {
                         // with overrides, dispatch through the vtable instead of calling directly.
                         // Skip vtable for super.method() — must call parent directly.
                         let object_is_super = matches!(object.kind, HirExprKind::Super);
-                        let vtable_lookup = if object_is_super { None } else { self.virtual_dispatch_info.get(field).copied()
-                            .or_else(|| {
-                                let method_name = self.symbol_table.get_symbol(*field).map(|s| s.name);
+                        let vtable_lookup = if object_is_super {
+                            None
+                        } else {
+                            self.virtual_dispatch_info.get(field).copied().or_else(|| {
+                                let method_name =
+                                    self.symbol_table.get_symbol(*field).map(|s| s.name);
                                 if let Some(method_name) = method_name {
                                     let receiver_class_sym = {
                                         let type_table = self.type_table.borrow();
-                                        type_table.get(object.ty).and_then(|t| {
-                                            match &t.kind {
-                                                TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
-                                                _ => None,
-                                            }
+                                        type_table.get(object.ty).and_then(|t| match &t.kind {
+                                            TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                                            _ => None,
                                         })
                                     };
                                     if let Some(class_sym) = receiver_class_sym {
-                                        if let Some(&method_sym) = self.class_method_by_name.get(&(class_sym, method_name)) {
-                                            return self.virtual_dispatch_info.get(&method_sym).copied();
+                                        if let Some(&method_sym) =
+                                            self.class_method_by_name.get(&(class_sym, method_name))
+                                        {
+                                            return self
+                                                .virtual_dispatch_info
+                                                .get(&method_sym)
+                                                .copied();
                                         }
                                         let mut current = class_sym;
-                                        while let Some(&parent) = self.class_parent_map.get(&current) {
-                                            if let Some(&method_sym) = self.class_method_by_name.get(&(parent, method_name)) {
-                                                return self.virtual_dispatch_info.get(&method_sym).copied();
+                                        while let Some(&parent) =
+                                            self.class_parent_map.get(&current)
+                                        {
+                                            if let Some(&method_sym) = self
+                                                .class_method_by_name
+                                                .get(&(parent, method_name))
+                                            {
+                                                return self
+                                                    .virtual_dispatch_info
+                                                    .get(&method_sym)
+                                                    .copied();
                                             }
                                             current = parent;
                                         }
@@ -9121,22 +9152,29 @@ impl<'a> HirToMirContext<'a> {
                         if object_is_super {
                             if let Some(method_name_i) = method_name_interned {
                                 // Find current class → parent via class_parent_map
-                                let current_class = self.builder.current_function()
-                                    .and_then(|f| {
-                                        self.class_method_by_name.iter()
-                                            .find(|(_, &method_sym)| {
-                                                self.function_map.get(&method_sym) == Some(&f.id)
-                                            })
-                                            .map(|((class_sym, _), _)| *class_sym)
-                                    });
+                                let current_class = self.builder.current_function().and_then(|f| {
+                                    self.class_method_by_name
+                                        .iter()
+                                        .find(|(_, &method_sym)| {
+                                            self.function_map.get(&method_sym) == Some(&f.id)
+                                        })
+                                        .map(|((class_sym, _), _)| *class_sym)
+                                });
                                 let parent_class = current_class
                                     .and_then(|cls| self.class_parent_map.get(&cls).copied());
-                                let parent_method_func_id = parent_class.and_then(|pc| {
-                                    self.class_method_by_name.get(&(pc, method_name_i))
-                                        .and_then(|&sym| self.resolve_function_id_with_qualified_fallback(sym))
-                                }).or_else(|| {
-                                    self.resolve_function_id_with_qualified_fallback(*field)
-                                });
+                                let parent_method_func_id = parent_class
+                                    .and_then(|pc| {
+                                        self.class_method_by_name
+                                            .get(&(pc, method_name_i))
+                                            .and_then(|&sym| {
+                                                self.resolve_function_id_with_qualified_fallback(
+                                                    sym,
+                                                )
+                                            })
+                                    })
+                                    .or_else(|| {
+                                        self.resolve_function_id_with_qualified_fallback(*field)
+                                    });
                                 if let Some(func_id) = parent_method_func_id {
                                     let obj_reg = self.lower_expression(object)?;
                                     let mut call_args = vec![obj_reg];
@@ -10546,33 +10584,38 @@ impl<'a> HirToMirContext<'a> {
                     // Virtual dispatch for instance method calls (is_method=true):
                     // Skip vtable dispatch for super.method() calls — these must call
                     // the parent's implementation directly, not the overridden version.
-                    let receiver_is_super = !args.is_empty()
-                        && matches!(args[0].kind, HirExprKind::Super);
+                    let receiver_is_super =
+                        !args.is_empty() && matches!(args[0].kind, HirExprKind::Super);
                     // super.method() — bypass vtable AND resolve to parent's implementation.
                     if receiver_is_super {
                         let method_name = self.symbol_table.get_symbol(*symbol).map(|s| s.name);
                         if let Some(method_name) = method_name {
                             // Find parent class: determine which class the current function
                             // belongs to, then look up its parent via class_parent_map.
-                            let current_class = self.builder.current_function()
-                                .and_then(|f| {
-                                    // Find the class this function is a method of
-                                    self.class_method_by_name.iter()
-                                        .find(|(_, &method_sym)| {
-                                            self.function_map.get(&method_sym) == Some(&f.id)
-                                        })
-                                        .map(|((class_sym, _), _)| *class_sym)
-                                });
+                            let current_class = self.builder.current_function().and_then(|f| {
+                                // Find the class this function is a method of
+                                self.class_method_by_name
+                                    .iter()
+                                    .find(|(_, &method_sym)| {
+                                        self.function_map.get(&method_sym) == Some(&f.id)
+                                    })
+                                    .map(|((class_sym, _), _)| *class_sym)
+                            });
                             let parent_class = current_class
                                 .and_then(|cls| self.class_parent_map.get(&cls).copied());
                             // Resolve parent's method by name
-                            let super_func_id = parent_class.and_then(|pc| {
-                                self.class_method_by_name.get(&(pc, method_name))
-                                    .and_then(|&sym| self.resolve_function_id_with_qualified_fallback(sym))
-                            }).or_else(|| {
-                                // Fallback: direct symbol resolution
-                                self.resolve_function_id_with_qualified_fallback(*symbol)
-                            });
+                            let super_func_id = parent_class
+                                .and_then(|pc| {
+                                    self.class_method_by_name.get(&(pc, method_name)).and_then(
+                                        |&sym| {
+                                            self.resolve_function_id_with_qualified_fallback(sym)
+                                        },
+                                    )
+                                })
+                                .or_else(|| {
+                                    // Fallback: direct symbol resolution
+                                    self.resolve_function_id_with_qualified_fallback(*symbol)
+                                });
                             if let Some(func_id) = super_func_id {
                                 let obj_reg = self.lower_expression(&args[0])?;
                                 let mut call_args = vec![obj_reg];
@@ -10582,14 +10625,17 @@ impl<'a> HirToMirContext<'a> {
                                     }
                                 }
                                 let ret_type = self.convert_type(expr.ty);
-                                return self.builder.build_call_direct(func_id, call_args, ret_type);
+                                return self
+                                    .builder
+                                    .build_call_direct(func_id, call_args, ret_type);
                             }
                         }
                     }
                     if *is_method && !args.is_empty() && !receiver_is_super {
-                        let vtable_slot = self.virtual_dispatch_info.get(symbol).copied()
-                            .or_else(|| {
-                                let method_name = self.symbol_table.get_symbol(*symbol).map(|s| s.name)?;
+                        let vtable_slot =
+                            self.virtual_dispatch_info.get(symbol).copied().or_else(|| {
+                                let method_name =
+                                    self.symbol_table.get_symbol(*symbol).map(|s| s.name)?;
                                 let receiver_type = self.resolve_through_aliases(args[0].ty);
                                 let type_table = self.type_table.borrow();
                                 let class_sym = match &type_table.get(receiver_type)?.kind {
@@ -10599,8 +10645,12 @@ impl<'a> HirToMirContext<'a> {
                                 drop(type_table);
                                 let mut current = Some(class_sym);
                                 while let Some(cls) = current {
-                                    if let Some(&method_sym) = self.class_method_by_name.get(&(cls, method_name)) {
-                                        if let Some(info) = self.virtual_dispatch_info.get(&method_sym) {
+                                    if let Some(&method_sym) =
+                                        self.class_method_by_name.get(&(cls, method_name))
+                                    {
+                                        if let Some(info) =
+                                            self.virtual_dispatch_info.get(&method_sym)
+                                        {
                                             return Some(*info);
                                         }
                                     }
@@ -10622,7 +10672,8 @@ impl<'a> HirToMirContext<'a> {
                                 vec![IrType::Ptr(Box::new(IrType::U8)), IrType::I32],
                                 IrType::I64,
                             );
-                            let slot_reg = self.builder.build_const(IrValue::I32(slot_index as i32))?;
+                            let slot_reg =
+                                self.builder.build_const(IrValue::I32(slot_index as i32))?;
                             let fn_ptr = self.builder.build_call_direct(
                                 lookup_fn,
                                 vec![obj_reg, slot_reg],
@@ -16725,9 +16776,14 @@ impl<'a> HirToMirContext<'a> {
                     })
                     .unwrap_or_else(|| ((args.len() as u64 + 1) * 8).max(16));
                 {
-                    let cn = actual_symbol_id.and_then(|sid| self.symbol_table.get_symbol(sid).and_then(|sym| self.string_interner.get(sym.name))).unwrap_or("?");
-                    if cn.contains("Scale") {
-                    }
+                    let cn = actual_symbol_id
+                        .and_then(|sid| {
+                            self.symbol_table
+                                .get_symbol(sid)
+                                .and_then(|sym| self.string_interner.get(sym.name))
+                        })
+                        .unwrap_or("?");
+                    if cn.contains("Scale") {}
                 }
                 // Use heap allocation (malloc) for class instances
                 let obj_ptr = self.build_heap_alloc(obj_size);
@@ -22205,28 +22261,31 @@ impl<'a> HirToMirContext<'a> {
         match lvalue {
             HirLValue::Variable(symbol) => {
                 // Check if this is a global variable first
-                let global_id = self.global_symbol_map.get(symbol).copied()
-                    .or_else(|| {
-                        // Name-based fallback: SymbolIds may differ between contexts
-                        let sym_name = self.symbol_table.get_symbol(*symbol)
-                            .and_then(|s| self.string_interner.get(s.name))?;
-                        for (&gsym, &gid) in &self.global_symbol_map {
-                            if let Some(gsym_info) = self.symbol_table.get_symbol(gsym) {
-                                if let Some(gname) = self.string_interner.get(gsym_info.name) {
-                                    if gname == sym_name {
-                                        return Some(gid);
-                                    }
+                let global_id = self.global_symbol_map.get(symbol).copied().or_else(|| {
+                    // Name-based fallback: SymbolIds may differ between contexts
+                    let sym_name = self
+                        .symbol_table
+                        .get_symbol(*symbol)
+                        .and_then(|s| self.string_interner.get(s.name))?;
+                    for (&gsym, &gid) in &self.global_symbol_map {
+                        if let Some(gsym_info) = self.symbol_table.get_symbol(gsym) {
+                            if let Some(gname) = self.string_interner.get(gsym_info.name) {
+                                if gname == sym_name {
+                                    return Some(gid);
                                 }
                             }
                         }
-                        // Also search module globals by name suffix
-                        for global in self.builder.module.globals.values() {
-                            if global.name.ends_with(&format!(".{}", sym_name)) || global.name == sym_name {
-                                return Some(global.id);
-                            }
+                    }
+                    // Also search module globals by name suffix
+                    for global in self.builder.module.globals.values() {
+                        if global.name.ends_with(&format!(".{}", sym_name))
+                            || global.name == sym_name
+                        {
+                            return Some(global.id);
                         }
-                        None
-                    });
+                    }
+                    None
+                });
                 if let Some(global_id) = global_id {
                     self.builder.build_store_global(global_id, value);
                     // Untrack from drop system — value escapes to global storage
@@ -22761,9 +22820,12 @@ impl<'a> HirToMirContext<'a> {
                             .get_symbol(*field)
                             .and_then(|s| self.string_interner.get(s.name))
                             .unwrap_or("<unknown>");
-                        let global_lookup = self.global_symbol_map.get(field).copied()
-                            .or_else(|| {
-                                self.builder.module.globals.values()
+                        let global_lookup =
+                            self.global_symbol_map.get(field).copied().or_else(|| {
+                                self.builder
+                                    .module
+                                    .globals
+                                    .values()
                                     .find(|g| g.name.ends_with(&format!(".{}", field_name_str)))
                                     .map(|g| g.id)
                             });
@@ -23506,9 +23568,12 @@ impl<'a> HirToMirContext<'a> {
                             }
 
                             // Check if this is actually a static field accessed as instance field
-                            let global_lookup = self.global_symbol_map.get(&field).copied()
-                                .or_else(|| {
-                                    self.builder.module.globals.values()
+                            let global_lookup =
+                                self.global_symbol_map.get(&field).copied().or_else(|| {
+                                    self.builder
+                                        .module
+                                        .globals
+                                        .values()
                                         .find(|g| g.name.ends_with(&format!(".{}", field_name_str)))
                                         .map(|g| g.id)
                                 });
@@ -31354,8 +31419,13 @@ impl<'a> HirToMirContext<'a> {
         }
     }
 
-    fn refine_global_type_from_initializer(&self, ty: IrType, initializer: Option<&IrValue>) -> IrType {
-        let is_placeholder_ptr = matches!(&ty, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void));
+    fn refine_global_type_from_initializer(
+        &self,
+        ty: IrType,
+        initializer: Option<&IrValue>,
+    ) -> IrType {
+        let is_placeholder_ptr =
+            matches!(&ty, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void));
         if !(is_placeholder_ptr || ty == IrType::Any) {
             return ty;
         }
@@ -31837,15 +31907,18 @@ impl<'a> HirToMirContext<'a> {
                     if constant_init.is_none() {
                         // Non-constant static field initializers must run through __init__
                         // so Haxe-style `static var x = new Foo()` works without manual setup.
-                        self.dynamic_globals.push((field.symbol_id, init_expr.clone()));
+                        self.dynamic_globals
+                            .push((field.symbol_id, init_expr.clone()));
                     }
                     constant_init
                 } else {
                     None
                 };
 
-                let global_ty =
-                    self.refine_global_type_from_initializer(self.convert_type(field.ty), initializer.as_ref());
+                let global_ty = self.refine_global_type_from_initializer(
+                    self.convert_type(field.ty),
+                    initializer.as_ref(),
+                );
 
                 let ir_global = IrGlobal {
                     id: global_id,
@@ -31896,8 +31969,10 @@ impl<'a> HirToMirContext<'a> {
             {
                 let fn_str = self.string_interner.get(field.name).unwrap_or("?");
                 let cn_str = self.string_interner.get(class.name).unwrap_or("?");
-                if cn_str.contains("Constraint") || cn_str.contains("Scale") || cn_str.contains("Binary") {
-                }
+                if cn_str.contains("Constraint")
+                    || cn_str.contains("Scale")
+                    || cn_str.contains("Binary")
+                {}
             }
             self.field_index_map
                 .insert(field.symbol_id, (type_id, field_index));
@@ -32809,16 +32884,20 @@ impl<'a> HirToMirContext<'a> {
             // Try constant folding first for simple expressions
             let const_val = self.try_evaluate_constant_init(init_expr);
 
-            let global_id = self.global_symbol_map.get(symbol).copied()
-                .or_else(|| {
-                    let sym_name = self.symbol_table.get_symbol(*symbol)
-                        .and_then(|s| self.string_interner.get(s.name));
-                    sym_name.and_then(|name| {
-                        self.builder.module.globals.values()
-                            .find(|g| g.name.ends_with(&format!(".{}", name)) || g.name == name)
-                            .map(|g| g.id)
-                    })
-                });
+            let global_id = self.global_symbol_map.get(symbol).copied().or_else(|| {
+                let sym_name = self
+                    .symbol_table
+                    .get_symbol(*symbol)
+                    .and_then(|s| self.string_interner.get(s.name));
+                sym_name.and_then(|name| {
+                    self.builder
+                        .module
+                        .globals
+                        .values()
+                        .find(|g| g.name.ends_with(&format!(".{}", name)) || g.name == name)
+                        .map(|g| g.id)
+                })
+            });
 
             if let Some(gid) = global_id {
                 if let Some(cv) = const_val {
@@ -32829,10 +32908,15 @@ impl<'a> HirToMirContext<'a> {
                         let store_val = if let Some(ref gty) = global_ty {
                             let val_ty = self.builder.get_register_type(val_reg);
                             if val_ty.as_ref() != Some(gty) && val_ty.is_some() {
-                                self.builder.build_cast(val_reg, val_ty.unwrap(), gty.clone())
+                                self.builder
+                                    .build_cast(val_reg, val_ty.unwrap(), gty.clone())
                                     .unwrap_or(val_reg)
-                            } else { val_reg }
-                        } else { val_reg };
+                            } else {
+                                val_reg
+                            }
+                        } else {
+                            val_reg
+                        };
                         self.builder.build_store_global(gid, store_val);
                     }
                 } else if let Some(init_value) = self.lower_expression(init_expr) {

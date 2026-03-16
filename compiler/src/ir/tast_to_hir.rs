@@ -202,11 +202,15 @@ impl<'a> TastToHirContext<'a> {
             .classes
             .iter()
             .flat_map(|class| class.fields.iter())
-            .filter(|field| field.is_static && field.initializer.is_some() && is_inline_field(field))
+            .filter(|field| {
+                field.is_static && field.initializer.is_some() && is_inline_field(field)
+            })
             .chain(
                 // Abstract fields are always inline constants (enum abstract values)
-                file.abstracts.iter().flat_map(|abs| abs.fields.iter())
-                    .filter(|field| field.is_static && field.initializer.is_some())
+                file.abstracts
+                    .iter()
+                    .flat_map(|abs| abs.fields.iter())
+                    .filter(|field| field.is_static && field.initializer.is_some()),
             )
             .map(|field| (field.symbol_id, field.initializer.as_ref().unwrap().clone()))
             .collect();
@@ -1320,12 +1324,16 @@ impl<'a> TastToHirContext<'a> {
                         for field in &class.fields {
                             if field.symbol_id == *symbol_id && field.is_static {
                                 // Only inline fields with `inline` modifier or `final` (immutable)
-                                let should_inline = self.symbol_table.get_symbol(*symbol_id)
+                                let should_inline = self
+                                    .symbol_table
+                                    .get_symbol(*symbol_id)
                                     .map_or(false, |s| s.is_inline())
-                                    || field.mutability != crate::tast::symbols::Mutability::Mutable;
+                                    || field.mutability
+                                        != crate::tast::symbols::Mutability::Mutable;
                                 if should_inline {
                                     if let Some(ref init_expr) = field.initializer {
-                                        if let TypedExpressionKind::Literal { value } = &init_expr.kind
+                                        if let TypedExpressionKind::Literal { value } =
+                                            &init_expr.kind
                                         {
                                             let lowered = self.lower_literal(value);
                                             inlined_static = Some(HirExprKind::Literal(lowered));
@@ -1492,12 +1500,15 @@ impl<'a> TastToHirContext<'a> {
 
                     for field in field_iter {
                         if field.symbol_id == *field_symbol && field.is_static {
-                            let should_inline = self.symbol_table.get_symbol(*field_symbol)
+                            let should_inline = self
+                                .symbol_table
+                                .get_symbol(*field_symbol)
                                 .map_or(false, |s| s.is_inline())
                                 || field.mutability != crate::tast::symbols::Mutability::Mutable;
                             if should_inline {
                                 if let Some(ref init_expr) = field.initializer {
-                                    if let TypedExpressionKind::Literal { value } = &init_expr.kind {
+                                    if let TypedExpressionKind::Literal { value } = &init_expr.kind
+                                    {
                                         inlined_value =
                                             Some(HirExprKind::Literal(self.lower_literal(value)));
                                     }

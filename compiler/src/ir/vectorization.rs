@@ -6,9 +6,9 @@
 //!
 //! Vectorization targets common SIMD widths (128-bit SSE/NEON, 256-bit AVX).
 
+use super::blocks::IrTerminator;
 use super::loop_analysis::{DominatorTree, LoopNestInfo, NaturalLoop, TripCount};
 use super::optimization::{OptimizationPass, OptimizationResult};
-use super::blocks::IrTerminator;
 use super::{
     BinaryOp, CompareOp, IrBlockId, IrControlFlowGraph, IrFunction, IrFunctionId, IrId,
     IrInstruction, IrModule, IrType, IrValue,
@@ -874,8 +874,9 @@ impl LoopVectorizationPass {
         // Find the comparison instruction in the header or latch block
         // Typically the Cmp is in the header block (condition check)
         let header = loop_info.header;
-        let blocks_to_check: Vec<IrBlockId> =
-            std::iter::once(header).chain(loop_info.blocks.iter().copied()).collect();
+        let blocks_to_check: Vec<IrBlockId> = std::iter::once(header)
+            .chain(loop_info.blocks.iter().copied())
+            .collect();
 
         for block_id in blocks_to_check {
             if let Some(block) = function.cfg.blocks.get_mut(&block_id) {
@@ -1046,10 +1047,13 @@ impl LoopVectorizationPass {
         next_reg: &mut u32,
         function: &mut IrFunction,
     ) -> IrInstruction {
-        let map_use = |r: IrId, map: &HashMap<IrId, IrId>| -> IrId {
-            map.get(&r).copied().unwrap_or(r)
-        };
-        let alloc_new = |old: IrId, next: &mut u32, map: &mut HashMap<IrId, IrId>, func: &mut IrFunction| -> IrId {
+        let map_use =
+            |r: IrId, map: &HashMap<IrId, IrId>| -> IrId { map.get(&r).copied().unwrap_or(r) };
+        let alloc_new = |old: IrId,
+                         next: &mut u32,
+                         map: &mut HashMap<IrId, IrId>,
+                         func: &mut IrFunction|
+         -> IrId {
             if let Some(&existing) = map.get(&old) {
                 return existing;
             }
@@ -1446,9 +1450,7 @@ mod tests {
     fn test_is_vectorizable_binop() {
         assert!(LoopVectorizationPass::is_vectorizable_binop(BinaryOp::FAdd));
         assert!(LoopVectorizationPass::is_vectorizable_binop(BinaryOp::Mul));
-        assert!(!LoopVectorizationPass::is_vectorizable_binop(
-            BinaryOp::Shl
-        ));
+        assert!(!LoopVectorizationPass::is_vectorizable_binop(BinaryOp::Shl));
     }
 
     #[test]
@@ -1476,7 +1478,9 @@ mod tests {
         let result = pass.vectorize_instruction(&inst, &accesses, &vec_type, iv, 4);
 
         match result {
-            IrInstruction::VectorLoad { dest: d, ptr: p, .. } => {
+            IrInstruction::VectorLoad {
+                dest: d, ptr: p, ..
+            } => {
                 assert_eq!(d, dest);
                 assert_eq!(p, ptr);
             }
