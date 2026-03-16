@@ -2479,8 +2479,9 @@ impl<'a> HirToMirContext<'a> {
             self.generate_vtable_init_function();
         }
 
-        // Generate __init__ function for dynamic global initialization
-        if !self.dynamic_globals.is_empty() {
+        // Generate __init__ whenever the module has globals so repeated executions
+        // can restore static state even if every initializer is constant/defaulted.
+        if !self.dynamic_globals.is_empty() || !self.builder.module.globals.is_empty() {
             self.generate_module_init_function();
         }
 
@@ -31303,8 +31304,47 @@ impl<'a> HirToMirContext<'a> {
                     HirLiteral::Regex { .. } => None,
                 }
             }
-            // For non-constant expressions, return None
-            // The actual initialization will happen at runtime
+            // Constant-fold binary ops on literal operands (e.g., 1 << 16)
+            HirExprKind::Binary { op, lhs, rhs } => {
+                let l = self.try_evaluate_constant_init(lhs)?;
+                let r = self.try_evaluate_constant_init(rhs)?;
+                let (li, ri) = match (&l, &r) {
+                    (IrValue::I64(a), IrValue::I64(b)) => (*a, *b),
+                    (IrValue::I32(a), IrValue::I32(b)) => (*a as i64, *b as i64),
+                    (IrValue::I64(a), IrValue::I32(b)) => (*a, *b as i64),
+                    (IrValue::I32(a), IrValue::I64(b)) => (*a as i64, *b),
+                    _ => return None,
+                };
+                let result = match op {
+                    HirBinaryOp::Add => li.wrapping_add(ri),
+                    HirBinaryOp::Sub => li.wrapping_sub(ri),
+                    HirBinaryOp::Mul => li.wrapping_mul(ri),
+                    HirBinaryOp::Div if ri != 0 => li / ri,
+                    HirBinaryOp::Mod if ri != 0 => li % ri,
+                    HirBinaryOp::Shl => li.wrapping_shl(ri as u32),
+                    HirBinaryOp::Shr => li.wrapping_shr(ri as u32),
+                    HirBinaryOp::BitAnd => li & ri,
+                    HirBinaryOp::BitOr => li | ri,
+                    HirBinaryOp::BitXor => li ^ ri,
+                    _ => return None,
+                };
+                // Return I32 for values that fit, matching Haxe Int type
+                if result >= i32::MIN as i64 && result <= i32::MAX as i64 {
+                    Some(IrValue::I32(result as i32))
+                } else {
+                    Some(IrValue::I64(result))
+                }
+            }
+            HirExprKind::Unary { op, operand } => {
+                let v = self.try_evaluate_constant_init(operand)?;
+                match (op, &v) {
+                    (HirUnaryOp::Neg, IrValue::I64(i)) => Some(IrValue::I64(-i)),
+                    (HirUnaryOp::Neg, IrValue::F64(f)) => Some(IrValue::F64(-f)),
+                    (HirUnaryOp::BitNot, IrValue::I64(i)) => Some(IrValue::I64(!i)),
+                    (HirUnaryOp::Not, IrValue::Bool(b)) => Some(IrValue::Bool(!b)),
+                    _ => None,
+                }
+            }
             _ => None,
         }
     }
@@ -31766,7 +31806,13 @@ impl<'a> HirToMirContext<'a> {
                 // Get initializer value if it's a constant
                 let initializer = if let Some(ref init_expr) = field.init {
                     // Try to evaluate as constant
-                    self.try_evaluate_constant_init(init_expr)
+                    let constant_init = self.try_evaluate_constant_init(init_expr);
+                    if constant_init.is_none() {
+                        // Non-constant static field initializers must run through __init__
+                        // so Haxe-style `static var x = new Foo()` works without manual setup.
+                        self.dynamic_globals.push((field.symbol_id, init_expr.clone()));
+                    }
+                    constant_init
                 } else {
                     None
                 };
@@ -32654,6 +32700,27 @@ impl<'a> HirToMirContext<'a> {
         self.symbol_map = saved_symbol_map;
     }
 
+    fn reset_value_for_global(&self, global: &IrGlobal) -> IrValue {
+        match global.initializer.as_ref() {
+            Some(IrValue::Undef) | None => match &global.ty {
+                IrType::Void => IrValue::Void,
+                IrType::Bool => IrValue::Bool(false),
+                IrType::I8 => IrValue::I8(0),
+                IrType::I16 => IrValue::I16(0),
+                IrType::I32 => IrValue::I32(0),
+                IrType::I64 => IrValue::I64(0),
+                IrType::U8 => IrValue::U8(0),
+                IrType::U16 => IrValue::U16(0),
+                IrType::U32 => IrValue::U32(0),
+                IrType::U64 => IrValue::U64(0),
+                IrType::F32 => IrValue::F32(0.0),
+                IrType::F64 => IrValue::F64(0.0),
+                _ => IrValue::Null,
+            },
+            Some(init) => init.clone(),
+        }
+    }
+
     fn generate_module_init_function(&mut self) {
         // Generate __init__ function that initializes dynamic globals
         // This function is called once at module load time
@@ -32675,19 +32742,46 @@ impl<'a> HirToMirContext<'a> {
         let saved_symbol_map = self.symbol_map.clone();
         self.symbol_map.clear();
 
-        // Lower each dynamic global initialization
-        for (_symbol, init_expr) in &self.dynamic_globals.clone() {
-            // Evaluate the initialization expression
-            let Some(_init_value) = self.lower_expression(init_expr) else {
-                continue;
-            };
+        // NOTE: Constant-initialized globals are set via the data segment at compile time.
+        // For re-entrancy (benchmark runner calling main multiple times), the caller
+        // should reset the data segment before re-invoking __init__ + main.
 
-            // TODO: Store the result to the global variable
-            // This requires accessing the global by symbol ID
-            // For now, we just evaluate the expression (side effects occur)
-            // In a full implementation, we'd:
-            // 1. Get the global's address
-            // 2. Store init_value to that address
+        // Initialize dynamic globals (non-constant initializers).
+        for (symbol, init_expr) in &self.dynamic_globals.clone() {
+            // Try constant folding first for simple expressions
+            let const_val = self.try_evaluate_constant_init(init_expr);
+
+            let global_id = self.global_symbol_map.get(symbol).copied()
+                .or_else(|| {
+                    let sym_name = self.symbol_table.get_symbol(*symbol)
+                        .and_then(|s| self.string_interner.get(s.name));
+                    sym_name.and_then(|name| {
+                        self.builder.module.globals.values()
+                            .find(|g| g.name.ends_with(&format!(".{}", name)) || g.name == name)
+                            .map(|g| g.id)
+                    })
+                });
+
+            if let Some(gid) = global_id {
+                if let Some(cv) = const_val {
+                    // Constant-folded: emit as const + store
+                    if let Some(val_reg) = self.builder.build_const(cv) {
+                        // Coerce to global type
+                        let global_ty = self.builder.module.globals.get(&gid).map(|g| g.ty.clone());
+                        let store_val = if let Some(ref gty) = global_ty {
+                            let val_ty = self.builder.get_register_type(val_reg);
+                            if val_ty.as_ref() != Some(gty) && val_ty.is_some() {
+                                self.builder.build_cast(val_reg, val_ty.unwrap(), gty.clone())
+                                    .unwrap_or(val_reg)
+                            } else { val_reg }
+                        } else { val_reg };
+                        self.builder.build_store_global(gid, store_val);
+                    }
+                } else if let Some(init_value) = self.lower_expression(init_expr) {
+                    // Non-constant: lower expression and store
+                    self.builder.build_store_global(gid, init_value);
+                }
+            }
         }
 
         // Return void
