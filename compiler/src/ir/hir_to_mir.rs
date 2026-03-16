@@ -3292,6 +3292,12 @@ impl<'a> HirToMirContext<'a> {
         // Enter function-level scope for tracking heap allocations
         self.enter_drop_scope();
 
+        // Execute pre-super statements (e.g., field assignments that come before
+        // super() in the source code and are needed by virtual methods called from super)
+        for stmt in &constructor.pre_super_stmts {
+            self.lower_statement(stmt);
+        }
+
         // Handle super() call if present
         if let Some(super_call) = &constructor.super_call {
             if let Some(parent_type_id) = parent_type {
@@ -16719,7 +16725,7 @@ impl<'a> HirToMirContext<'a> {
                     .unwrap_or_else(|| ((args.len() as u64 + 1) * 8).max(16));
                 {
                     let cn = actual_symbol_id.and_then(|sid| self.symbol_table.get_symbol(sid).and_then(|sym| self.string_interner.get(sym.name))).unwrap_or("?");
-                    if cn.contains("Constraint") || cn.contains("Scale") || cn.contains("Variable") {
+                    if cn.contains("Scale") {
                     }
                 }
                 // Use heap allocation (malloc) for class instances
