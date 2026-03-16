@@ -16717,6 +16717,11 @@ impl<'a> HirToMirContext<'a> {
                         self.class_alloc_sizes_by_name.get(class_name).copied()
                     })
                     .unwrap_or_else(|| ((args.len() as u64 + 1) * 8).max(16));
+                {
+                    let cn = actual_symbol_id.and_then(|sid| self.symbol_table.get_symbol(sid).and_then(|sym| self.string_interner.get(sym.name))).unwrap_or("?");
+                    if cn.contains("Constraint") || cn.contains("Scale") || cn.contains("Variable") {
+                    }
+                }
                 // Use heap allocation (malloc) for class instances
                 let obj_ptr = self.build_heap_alloc(obj_size);
                 let obj_ptr = obj_ptr?;
@@ -31690,6 +31695,18 @@ impl<'a> HirToMirContext<'a> {
             .unwrap_or("<unknown>")
             .to_string();
         for parent_field in &parent_class.fields {
+            // Skip static fields — they're globals, not instance fields
+            if parent_field.is_static {
+                continue;
+            }
+
+            // Skip property fields with non-Default getters (no backing storage)
+            if let Some(ref prop) = parent_field.property_access {
+                if !matches!(prop.getter, crate::tast::PropertyAccessor::Default) {
+                    continue;
+                }
+            }
+
             // Map parent field symbol to child class's type with the correct index
             self.field_index_map
                 .insert(parent_field.symbol_id, (child_type, *field_index));
@@ -31797,6 +31814,8 @@ impl<'a> HirToMirContext<'a> {
             {
                 let fn_str = self.string_interner.get(field.name).unwrap_or("?");
                 let cn_str = self.string_interner.get(class.name).unwrap_or("?");
+                if cn_str.contains("Constraint") || cn_str.contains("Scale") || cn_str.contains("Binary") {
+                }
             }
             self.field_index_map
                 .insert(field.symbol_id, (type_id, field_index));
