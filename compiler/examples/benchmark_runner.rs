@@ -312,6 +312,10 @@ fn run_precompiled_tiered_iteration(
     let exec_start = Instant::now();
     state
         .backend
+        .reset_loaded_modules_for_run()
+        .map_err(|e| format!("startup: {}", e))?;
+    state
+        .backend
         .execute_function(state.main_id, vec![])
         .map_err(|e| format!("exec: {}", e))?;
     Ok(exec_start.elapsed())
