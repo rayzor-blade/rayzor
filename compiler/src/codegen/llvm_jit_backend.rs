@@ -1296,7 +1296,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             if let Some(init_func) = module.functions.values().find(|f| f.name == init_name) {
                 let func_name = Self::mangle_function_name(&init_func.name);
                 let fn_ptr = engine.get_function_address(&func_name).map_err(|e| {
-                    format!("Failed to get {} function '{}': {}", init_name, func_name, e)
+                    format!(
+                        "Failed to get {} function '{}': {}",
+                        init_name, func_name, e
+                    )
                 })?;
 
                 if trace_startup {
@@ -2554,7 +2557,11 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     // i64 from vtable_lookup — convert to pointer via inttoptr
                     let int_val = raw_val.into_int_value();
                     self.builder
-                        .build_int_to_ptr(int_val, self.context.ptr_type(AddressSpace::default()), "vtable_closure_ptr")
+                        .build_int_to_ptr(
+                            int_val,
+                            self.context.ptr_type(AddressSpace::default()),
+                            "vtable_closure_ptr",
+                        )
                         .map_err(|e| format!("Failed to inttoptr vtable closure: {}", e))?
                 };
                 let i64_type = self.context.i64_type();
@@ -2604,17 +2611,23 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                         let expected_ty = self.translate_type(&sig_params[i])?;
                         if arg_val.get_type() != expected_ty {
                             if arg_val.is_int_value() && expected_ty.is_pointer_type() {
-                                self.builder.build_int_to_ptr(
-                                    arg_val.into_int_value(),
-                                    expected_ty.into_pointer_type(),
-                                    &format!("ci_arg_{}", i),
-                                ).map_err(|e| format!("inttoptr arg: {}", e))?.into()
+                                self.builder
+                                    .build_int_to_ptr(
+                                        arg_val.into_int_value(),
+                                        expected_ty.into_pointer_type(),
+                                        &format!("ci_arg_{}", i),
+                                    )
+                                    .map_err(|e| format!("inttoptr arg: {}", e))?
+                                    .into()
                             } else if arg_val.is_pointer_value() && expected_ty.is_int_type() {
-                                self.builder.build_ptr_to_int(
-                                    arg_val.into_pointer_value(),
-                                    expected_ty.into_int_type(),
-                                    &format!("ci_arg_{}", i),
-                                ).map_err(|e| format!("ptrtoint arg: {}", e))?.into()
+                                self.builder
+                                    .build_ptr_to_int(
+                                        arg_val.into_pointer_value(),
+                                        expected_ty.into_int_type(),
+                                        &format!("ci_arg_{}", i),
+                                    )
+                                    .map_err(|e| format!("ptrtoint arg: {}", e))?
+                                    .into()
                             } else {
                                 arg_val
                             }
@@ -4112,7 +4125,8 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                                 // Int to different-width int (e.g., i64 -> i32)
                                 let int_val = return_val.into_int_value();
                                 let expected_int = expected.into_int_type();
-                                if int_val.get_type().get_bit_width() > expected_int.get_bit_width() {
+                                if int_val.get_type().get_bit_width() > expected_int.get_bit_width()
+                                {
                                     self.builder
                                         .build_int_truncate(int_val, expected_int, &cast_name)
                                         .map_err(|e| format!("Failed to truncate return: {}", e))?
@@ -4383,11 +4397,15 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             let lw = li.get_type().get_bit_width();
             let rw = ri.get_type().get_bit_width();
             if lw < rw {
-                let ext = self.builder.build_int_s_extend(li, ri.get_type(), &format!("{}_ext_l", name))
+                let ext = self
+                    .builder
+                    .build_int_s_extend(li, ri.get_type(), &format!("{}_ext_l", name))
                     .map_err(|e| format!("sext: {}", e))?;
                 (ext.into(), right)
             } else if rw < lw {
-                let ext = self.builder.build_int_s_extend(ri, li.get_type(), &format!("{}_ext_r", name))
+                let ext = self
+                    .builder
+                    .build_int_s_extend(ri, li.get_type(), &format!("{}_ext_r", name))
                     .map_err(|e| format!("sext: {}", e))?;
                 (left, ext.into())
             } else {
@@ -4896,26 +4914,34 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             let l_ptr = if left.is_pointer_value() {
                 left.into_pointer_value()
             } else {
-                self.builder.build_int_to_ptr(
-                    left.into_int_value(),
-                    self.context.ptr_type(inkwell::AddressSpace::default()),
-                    "cmp_to_ptr_l",
-                ).map_err(|e| format!("ptr conv: {}", e))?
+                self.builder
+                    .build_int_to_ptr(
+                        left.into_int_value(),
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "cmp_to_ptr_l",
+                    )
+                    .map_err(|e| format!("ptr conv: {}", e))?
             };
             let r_ptr = if right.is_pointer_value() {
                 right.into_pointer_value()
             } else {
-                self.builder.build_int_to_ptr(
-                    right.into_int_value(),
-                    self.context.ptr_type(inkwell::AddressSpace::default()),
-                    "cmp_to_ptr_r",
-                ).map_err(|e| format!("ptr conv: {}", e))?
+                self.builder
+                    .build_int_to_ptr(
+                        right.into_int_value(),
+                        self.context.ptr_type(inkwell::AddressSpace::default()),
+                        "cmp_to_ptr_r",
+                    )
+                    .map_err(|e| format!("ptr conv: {}", e))?
             };
             // Convert pointers to integers for comparison
             let i64_type = self.context.i64_type();
-            let l_int = self.builder.build_ptr_to_int(l_ptr, i64_type, "ptr_to_int_l")
+            let l_int = self
+                .builder
+                .build_ptr_to_int(l_ptr, i64_type, "ptr_to_int_l")
                 .map_err(|e| format!("ptrtoint: {}", e))?;
-            let r_int = self.builder.build_ptr_to_int(r_ptr, i64_type, "ptr_to_int_r")
+            let r_int = self
+                .builder
+                .build_ptr_to_int(r_ptr, i64_type, "ptr_to_int_r")
                 .map_err(|e| format!("ptrtoint: {}", e))?;
             let pred = match op {
                 CompareOp::Eq => inkwell::IntPredicate::EQ,
@@ -4926,9 +4952,13 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 CompareOp::Ge | CompareOp::UGe => inkwell::IntPredicate::SGE,
                 _ => inkwell::IntPredicate::EQ, // fallback for other ops
             };
-            let cmp = self.builder.build_int_compare(pred, l_int, r_int, &name)
+            let cmp = self
+                .builder
+                .build_int_compare(pred, l_int, r_int, &name)
                 .map_err(|e| format!("ptr cmp: {}", e))?;
-            let ext = self.builder.build_int_z_extend(cmp, self.context.i8_type(), &format!("{}_ext", name))
+            let ext = self
+                .builder
+                .build_int_z_extend(cmp, self.context.i8_type(), &format!("{}_ext", name))
                 .map_err(|e| format!("zext: {}", e))?;
             return Ok(ext.into());
         }

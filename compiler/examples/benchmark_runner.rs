@@ -693,6 +693,7 @@ fn run_benchmark_llvm(
 /// Map benchmark name to the Haxe-native source file and main class
 fn get_haxe_source(bench_name: &str) -> Option<(&'static str, &'static str)> {
     match bench_name {
+        "deltablue" => Some(("BMDeltaBlueCode.hx", "BMDeltaBlueCode")),
         "nbody" => Some(("BMNBodyCode.hx", "BMNBodyCode")),
         "mandelbrot" => Some(("BMMandelbrotCode.hx", "BMMandelbrotCode")),
         _ => None,
