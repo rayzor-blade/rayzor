@@ -31255,11 +31255,14 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
                 _ => {
-                    // Non-constant initialization - needs runtime evaluation
-                    // Collect for __init__ function generation
-                    self.dynamic_globals.push((symbol, init_expr.clone()));
-                    // Use Undef as placeholder - will be initialized at runtime
-                    Some(IrValue::Undef)
+                    // Try constant folding for expressions like 1 << 16
+                    if let Some(folded) = self.try_evaluate_constant_init(init_expr) {
+                        Some(folded)
+                    } else {
+                        // Non-constant initialization - needs runtime evaluation
+                        self.dynamic_globals.push((symbol, init_expr.clone()));
+                        Some(IrValue::Undef)
+                    }
                 }
             }
         } else {
@@ -31269,11 +31272,13 @@ impl<'a> HirToMirContext<'a> {
 
         // Create the global variable
         // Note: Using placeholder name based on symbol ID since HirGlobal doesn't store name
+        let global_ty = self.refine_global_type_from_initializer(IrType::Any, initializer.as_ref());
+
         let ir_global = IrGlobal {
             id: global_id,
             name: format!("global_{}", symbol.as_raw()),
             symbol_id: symbol,
-            ty: IrType::Any, // TODO: Convert TypeId to IrType properly
+            ty: global_ty, // TODO: Convert TypeId to IrType properly
             initializer,
             mutable: !global.is_const,
             linkage: Linkage::Internal, // TODO: Determine linkage from visibility
@@ -31346,6 +31351,28 @@ impl<'a> HirToMirContext<'a> {
                 }
             }
             _ => None,
+        }
+    }
+
+    fn refine_global_type_from_initializer(&self, ty: IrType, initializer: Option<&IrValue>) -> IrType {
+        let is_placeholder_ptr = matches!(&ty, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void));
+        if !(is_placeholder_ptr || ty == IrType::Any) {
+            return ty;
+        }
+
+        match initializer {
+            Some(IrValue::Bool(_)) => IrType::Bool,
+            Some(IrValue::I8(_)) => IrType::I8,
+            Some(IrValue::I16(_)) => IrType::I16,
+            Some(IrValue::I32(_)) => IrType::I32,
+            Some(IrValue::I64(_)) => IrType::I64,
+            Some(IrValue::U8(_)) => IrType::U8,
+            Some(IrValue::U16(_)) => IrType::U16,
+            Some(IrValue::U32(_)) => IrType::U32,
+            Some(IrValue::U64(_)) => IrType::U64,
+            Some(IrValue::F32(_)) => IrType::F32,
+            Some(IrValue::F64(_)) => IrType::F64,
+            _ => ty,
         }
     }
 
@@ -31817,11 +31844,14 @@ impl<'a> HirToMirContext<'a> {
                     None
                 };
 
+                let global_ty =
+                    self.refine_global_type_from_initializer(self.convert_type(field.ty), initializer.as_ref());
+
                 let ir_global = IrGlobal {
                     id: global_id,
                     name: format!("{}.{}", class_name, field_name),
                     symbol_id: field.symbol_id,
-                    ty: self.convert_type(field.ty),
+                    ty: global_ty,
                     initializer,
                     mutable: !field.is_final,
                     linkage: Linkage::Internal,
@@ -32722,11 +32752,13 @@ impl<'a> HirToMirContext<'a> {
     }
 
     fn generate_module_init_function(&mut self) {
-        // Generate __init__ function that initializes dynamic globals
-        // This function is called once at module load time
+        // Generate __init__ function that materializes globals into backend storage.
+        // This function is called once at module load time and before repeated benchmark
+        // runs so statics behave like standard Haxe and do not retain stale values.
         //
         // Function signature: fn __init__() -> void
-        // Body: Initialize each dynamic global in order
+        // Body: Reset every global to its declared initializer/default, then evaluate
+        //       dynamic initializers in source order.
 
         let init_sig = FunctionSignatureBuilder::new()
             .returns(IrType::Void)
@@ -32742,9 +32774,35 @@ impl<'a> HirToMirContext<'a> {
         let saved_symbol_map = self.symbol_map.clone();
         self.symbol_map.clear();
 
-        // NOTE: Constant-initialized globals are set via the data segment at compile time.
-        // For re-entrancy (benchmark runner calling main multiple times), the caller
-        // should reset the data segment before re-invoking __init__ + main.
+        // Materialize every global into runtime/backend storage. Some backends load globals
+        // via an out-of-line store rather than the object-file data segment, so constant
+        // initializers must still be explicitly written here.
+        let globals_to_reset: Vec<(IrGlobalId, IrType, IrValue)> = self
+            .builder
+            .module
+            .globals
+            .values()
+            .map(|global| {
+                (
+                    global.id,
+                    global.ty.clone(),
+                    self.reset_value_for_global(global),
+                )
+            })
+            .collect();
+
+        for (global_id, global_ty, reset_value) in globals_to_reset {
+            if let Some(val_reg) = self.builder.build_const(reset_value) {
+                let store_val = match self.builder.get_register_type(val_reg) {
+                    Some(val_ty) if val_ty != global_ty => self
+                        .builder
+                        .build_cast(val_reg, val_ty, global_ty.clone())
+                        .unwrap_or(val_reg),
+                    _ => val_reg,
+                };
+                self.builder.build_store_global(global_id, store_val);
+            }
+        }
 
         // Initialize dynamic globals (non-constant initializers).
         for (symbol, init_expr) in &self.dynamic_globals.clone() {

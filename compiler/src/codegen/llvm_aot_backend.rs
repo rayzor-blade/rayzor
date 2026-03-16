@@ -382,10 +382,14 @@ pub fn emit_assembly(
 
 /// Generate a C main() wrapper that calls the Haxe entry point.
 ///
-/// Creates: `int main(int argc, char** argv) { rayzor_init_args_from_argv(argc, argv); <entry>(0); return 0; }`
-/// If entry is named "main", renames it to "_haxe_main" first.
+/// Creates a `main()` wrapper that initializes args, runs startup hooks, and then
+/// calls the Haxe entry point. If entry is named "main", renames it to "_haxe_main" first.
 #[cfg(feature = "llvm-backend")]
-pub fn generate_main_wrapper(module: &Module, entry_func_name: &str) -> Result<(), String> {
+pub fn generate_main_wrapper(
+    module: &Module,
+    entry_func_name: &str,
+    startup_func_names: &[String],
+) -> Result<(), String> {
     let entry_func = module.get_function(entry_func_name).ok_or_else(|| {
         format!(
             "Entry function '{}' not found in LLVM module",
@@ -436,12 +440,21 @@ pub fn generate_main_wrapper(module: &Module, entry_func_name: &str) -> Result<(
         .build_call(init_args_fn, &[argc_val.into(), argv_val.into()], "")
         .map_err(|e| format!("Failed to build call to rayzor_init_args_from_argv: {}", e))?;
 
+    let zero = i64_type.const_int(0, false);
+
+    for startup_name in startup_func_names {
+        let startup_fn = module
+            .get_function(startup_name)
+            .ok_or_else(|| format!("Startup function '{}' not found", startup_name))?;
+        builder
+            .build_call(startup_fn, &[zero.into()], "")
+            .map_err(|e| format!("Failed to build call to {}: {}", startup_name, e))?;
+    }
+
     // Call the Haxe entry point
     let haxe_entry = module
         .get_function(actual_name)
         .ok_or_else(|| format!("Renamed entry function '{}' not found", actual_name))?;
-
-    let zero = i64_type.const_int(0, false);
     builder
         .build_call(haxe_entry, &[zero.into()], "")
         .map_err(|e| format!("Failed to build call to entry: {}", e))?;

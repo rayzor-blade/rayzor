@@ -523,6 +523,10 @@ fn run_tiered_iteration(state: &mut TieredBenchmarkState) -> Result<Duration, St
     let exec_start = Instant::now();
     state
         .backend
+        .reset_loaded_modules_for_run()
+        .map_err(|e| format!("startup: {}", e))?;
+    state
+        .backend
         .execute_function(state.main_id, vec![])
         .map_err(|e| format!("exec: {}", e))?;
     Ok(exec_start.elapsed())
@@ -578,6 +582,9 @@ fn run_benchmark_tiered(
 
     // Execute
     let exec_start = Instant::now();
+    backend
+        .reset_loaded_modules_for_run()
+        .map_err(|e| format!("startup: {}", e))?;
     backend
         .execute_function(main_id, vec![])
         .map_err(|e| format!("exec: {}", e))?;

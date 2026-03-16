@@ -2741,6 +2741,50 @@ impl MirInterpreter {
         Ok(())
     }
 
+    fn interp_value_to_haxe_string(
+        &self,
+        value: &InterpValue,
+    ) -> Result<Option<String>, InterpError> {
+        match value {
+            InterpValue::String(s) => Ok(Some(s.clone())),
+            InterpValue::Null => Ok(Some("null".to_string())),
+            InterpValue::Ptr(ptr) => {
+                if *ptr == 0 {
+                    return Ok(Some("null".to_string()));
+                }
+                let haxe_string = unsafe {
+                    &*(*ptr as *const rayzor_runtime::haxe_string::HaxeString)
+                };
+                if haxe_string.ptr.is_null() {
+                    return Ok(Some(String::new()));
+                }
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(haxe_string.ptr, haxe_string.len) };
+                Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
+            }
+            InterpValue::Struct(fields) => {
+                if let Some(first) = fields.first() {
+                    if let Some(s) = self.interp_value_to_haxe_string(first)? {
+                        return Ok(Some(s));
+                    }
+                    if let InterpValue::Ptr(ptr) = first {
+                        let len = fields
+                            .get(1)
+                            .and_then(|v| v.to_usize().ok())
+                            .unwrap_or(0);
+                        if *ptr == 0 {
+                            return Ok(Some("null".to_string()));
+                        }
+                        let bytes = unsafe { std::slice::from_raw_parts(*ptr as *const u8, len) };
+                        return Ok(Some(String::from_utf8_lossy(bytes).into_owned()));
+                    }
+                }
+                Ok(None)
+            }
+            _ => Ok(None),
+        }
+    }
+
     /// Call an extern function by name (without signature - uses built-in handlers)
     fn call_extern(
         &mut self,
@@ -2776,6 +2820,10 @@ impl MirInterpreter {
             // Handle haxe_trace_string_struct which takes a struct containing the string
             "haxe_trace_string_struct" => {
                 if let Some(arg) = args.first() {
+                    if let Some(text) = self.interp_value_to_haxe_string(arg)? {
+                        rayzor_runtime::haxe_sys::haxe_trace_string(text.as_ptr(), text.len());
+                        return Ok(InterpValue::Void);
+                    }
                     match arg {
                         InterpValue::String(s) => {
                             rayzor_runtime::haxe_sys::haxe_trace_string(s.as_ptr(), s.len());
@@ -2828,6 +2876,22 @@ impl MirInterpreter {
                 }
                 Ok(InterpValue::Void)
             }
+            "haxe_string_from_int" => {
+                let value = args.first().map(|arg| arg.to_i64()).transpose()?.unwrap_or(0);
+                Ok(InterpValue::String(value.to_string()))
+            }
+            "haxe_string_from_float" => {
+                let value = args.first().map(|arg| arg.to_f64()).transpose()?.unwrap_or(0.0);
+                Ok(InterpValue::String(value.to_string()))
+            }
+            "haxe_string_from_bool" => {
+                let value = args
+                    .first()
+                    .map(|arg| arg.to_bool())
+                    .transpose()?
+                    .unwrap_or(false);
+                Ok(InterpValue::String(if value { "true" } else { "false" }.to_string()))
+            }
             // Handle haxe_trace_int for tracing integers
             "haxe_trace_int" => {
                 if let Some(arg) = args.first() {
@@ -2846,17 +2910,24 @@ impl MirInterpreter {
                 Ok(InterpValue::Void)
             }
             "haxe_string_length" => {
-                if let Some(InterpValue::String(s)) = args.first() {
-                    Ok(InterpValue::I32(s.len() as i32))
-                } else {
-                    Ok(InterpValue::I32(0))
-                }
+                let len = args
+                    .first()
+                    .map(|arg| self.interp_value_to_haxe_string(arg))
+                    .transpose()?
+                    .flatten()
+                    .map(|s| s.len() as i32)
+                    .unwrap_or(0);
+                Ok(InterpValue::I32(len))
             }
             "haxe_string_concat" => {
                 if args.len() >= 2 {
-                    if let (InterpValue::String(a), InterpValue::String(b)) = (&args[0], &args[1]) {
-                        return Ok(InterpValue::String(format!("{}{}", a, b)));
-                    }
+                    let left = self
+                        .interp_value_to_haxe_string(&args[0])?
+                        .unwrap_or_else(|| format!("{:?}", &args[0]));
+                    let right = self
+                        .interp_value_to_haxe_string(&args[1])?
+                        .unwrap_or_else(|| format!("{:?}", &args[1]));
+                    return Ok(InterpValue::String(format!("{}{}", left, right)));
                 }
                 Ok(InterpValue::String(String::new()))
             }

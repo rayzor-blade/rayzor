@@ -3492,11 +3492,11 @@ impl CompilationUnit {
         // Skip pre-registration if requested (types already registered by CompilationUnit)
         lowering.set_skip_pre_registration(skip_pre_registration);
 
-        // Skip stdlib loading during lowering if BLADE cache is enabled
-        // (methods and types were already registered from the BLADE manifest)
-        if self.config.enable_cache {
-            lowering.set_skip_stdlib_loading(true);
-        }
+        // CompilationUnit manages stdlib loading itself via load_stdlib() and the
+        // later stdlib MIR merge. Re-loading the stdlib inside AstLowering causes
+        // the uncached path to pull in a different symbol/method set than the
+        // cached path, which changes bundle contents and breaks DeltaBlue parity.
+        lowering.set_skip_stdlib_loading(true);
 
         lowering.initialize_span_converter_with_filename(
             file_id.as_usize() as u32,
