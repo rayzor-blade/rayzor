@@ -553,8 +553,10 @@ class DeltaBlue {
 
     public static function main():Void {
         Strength.init();
-        chainTest(100);
-        projectionTest(100);
+        for (i in 0...40) {
+            chainTest(100);
+            projectionTest(100);
+        }
         trace("total: " + total);
     }
 }
