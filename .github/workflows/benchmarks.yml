@@ -45,6 +45,7 @@ jobs:
       - name: Generate precompiled bundles
         run: |
           ./target/release/rayzor bundle compiler/benchmarks/src/deltablue.hx -o compiler/benchmarks/precompiled/deltablue.rzb --strip
+          ./target/release/rayzor bundle compiler/benchmarks/src/fibonacci.hx -o compiler/benchmarks/precompiled/fibonacci.rzb --strip
           ./target/release/rayzor bundle compiler/benchmarks/src/mandelbrot.hx -o compiler/benchmarks/precompiled/mandelbrot.rzb --strip
           ./target/release/rayzor bundle compiler/benchmarks/src/nbody.hx -o compiler/benchmarks/precompiled/nbody.rzb --strip
 
@@ -135,6 +136,9 @@ jobs:
 
       - name: Run nbody benchmark
         run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- nbody --json
+
+      - name: Run fibonacci benchmark
+        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- fibonacci --json
 
       - name: Run deltablue benchmark
         run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- deltablue --json

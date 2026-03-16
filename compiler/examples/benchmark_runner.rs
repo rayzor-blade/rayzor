@@ -694,6 +694,7 @@ fn run_benchmark_llvm(
 fn get_haxe_source(bench_name: &str) -> Option<(&'static str, &'static str)> {
     match bench_name {
         "deltablue" => Some(("BMDeltaBlueCode.hx", "BMDeltaBlueCode")),
+        "fibonacci" => Some(("BMFibonacciCode.hx", "BMFibonacciCode")),
         "nbody" => Some(("BMNBodyCode.hx", "BMNBodyCode")),
         "mandelbrot" => Some(("BMMandelbrotCode.hx", "BMMandelbrotCode")),
         _ => None,
