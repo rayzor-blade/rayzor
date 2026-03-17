@@ -799,14 +799,16 @@ fn batch_matmul_dispatch(
             let result_inner =
                 WgpuBuffer::allocate(wgpu_ctx, batch * m * n * elem_size).ok_or("alloc failed")?;
             let dims: [u32; 4] = [m as u32, k as u32, n as u32, batch as u32];
-            let dims_buf = WgpuBuffer::from_value(wgpu_ctx, &dims).ok_or("dims alloc failed")?;
+            let dims_buf =
+                unsafe { WgpuBuffer::from_data(wgpu_ctx, dims.as_ptr() as *const u8, 16) }
+                    .ok_or("dims alloc failed")?;
 
             let tg = 16usize;
             dispatch::dispatch_workgroups(
                 wgpu_ctx,
                 kernel,
                 &[a_wgpu, b_wgpu, &result_inner, &dims_buf],
-                [n.div_ceil(tg) as u32, m.div_ceil(tg) as u32, batch as u32],
+                (n.div_ceil(tg), m.div_ceil(tg), batch),
             )?;
 
             Ok(NativeBuffer::Wgpu(result_inner))
