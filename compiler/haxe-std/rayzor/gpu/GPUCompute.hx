@@ -99,6 +99,22 @@ extern class GPUCompute {
     @:native("gpu_compute_relu")
     public function relu(a:GpuBuffer):GpuBuffer;
 
+    /** GPU-accelerated elementwise sigmoid: 1 / (1 + exp(-x)). */
+    @:native("gpu_compute_sigmoid")
+    public function sigmoid(a:GpuBuffer):GpuBuffer;
+
+    /** GPU-accelerated elementwise tanh. */
+    @:native("gpu_compute_tanh")
+    public function tanh(a:GpuBuffer):GpuBuffer;
+
+    /** GPU-accelerated elementwise GELU activation. */
+    @:native("gpu_compute_gelu")
+    public function gelu(a:GpuBuffer):GpuBuffer;
+
+    /** GPU-accelerated elementwise SiLU (Swish): x * sigmoid(x). */
+    @:native("gpu_compute_silu")
+    public function silu(a:GpuBuffer):GpuBuffer;
+
     // -- Reductions: buffer -> scalar ----------------------------------------
 
     /** Sum all elements in a GPU buffer. */
