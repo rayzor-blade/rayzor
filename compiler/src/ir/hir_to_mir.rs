@@ -23171,7 +23171,7 @@ impl<'a> HirToMirContext<'a> {
 
                     // Map TAST primitive types to IR types correctly
                     match field_kind {
-                        Some(crate::tast::TypeKind::Int) => IrType::I64,
+                        Some(crate::tast::TypeKind::Int) => IrType::I32,
                         Some(crate::tast::TypeKind::Float) => IrType::F64,
                         Some(crate::tast::TypeKind::Bool) => IrType::Bool,
                         _ => {
