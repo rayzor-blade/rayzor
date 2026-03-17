@@ -1,17 +1,24 @@
 //! MSL code generation for matrix multiplication.
 //!
-//! Generates a naive matmul kernel: C[row,col] = sum_k(A[row,k] * B[k,col]).
-//! Dispatched as a 2D grid of (N, M) threads. Dimensions (M, K, N) are passed
-//! via a constant buffer at runtime, so the kernel is cached by dtype only.
+//! Tiled 16×16 shared-memory matmul: C[M×N] = A[M×K] × B[K×N].
+//! Each threadgroup loads a 16×16 tile of A and B into shared memory,
+//! computes partial sums, then moves to the next tile along K.
+//! This reduces global memory accesses from O(K) per thread to O(K/16).
+//!
+//! Dispatched as a 2D grid with 16×16 threads per threadgroup.
+//! Dimensions (M, K, N) are passed via a constant buffer.
 
 use super::msl::dtype_to_msl;
 
-/// Generate MSL source for matrix multiplication.
+const TILE_SIZE: usize = 16;
+
+/// Generate MSL source for tiled matrix multiplication.
 ///
 /// Buffers: A (M×K), B (K×N), C (M×N), dims (uint4: M, K, N, 0)
 pub fn emit_matmul(dtype: u8) -> String {
     let msl_type = dtype_to_msl(dtype);
     let fn_name = format!("rayzor_matmul_{}", msl_type);
+    let ts = TILE_SIZE;
 
     format!(
         r#"#include <metal_stdlib>
@@ -22,22 +29,60 @@ kernel void {fn_name}(
     device const {msl_type}* B [[buffer(1)]],
     device {msl_type}* C [[buffer(2)]],
     constant uint4& dims [[buffer(3)]],
-    uint2 gid [[thread_position_in_grid]]
+    uint2 gid [[thread_position_in_grid]],
+    uint2 tid [[thread_position_in_threadgroup]],
+    uint2 tgid [[threadgroup_position_in_grid]]
 ) {{
+    const uint TILE = {ts};
     uint M = dims.x;
     uint K = dims.y;
     uint N = dims.z;
 
-    uint row = gid.y;
-    uint col = gid.x;
+    // Global row/col this thread computes
+    uint row = tgid.y * TILE + tid.y;
+    uint col = tgid.x * TILE + tid.x;
 
-    if (row >= M || col >= N) return;
+    // Shared memory tiles
+    threadgroup {msl_type} As[{ts}][{ts}];
+    threadgroup {msl_type} Bs[{ts}][{ts}];
 
     {msl_type} sum = 0;
-    for (uint i = 0; i < K; i++) {{
-        sum = fma(A[row * K + i], B[i * N + col], sum);
+
+    // Slide the tile window along K dimension
+    uint numTiles = (K + TILE - 1) / TILE;
+    for (uint t = 0; t < numTiles; t++) {{
+        // Load A tile: A[row, t*TILE + tid.x]
+        uint a_col = t * TILE + tid.x;
+        if (row < M && a_col < K) {{
+            As[tid.y][tid.x] = A[row * K + a_col];
+        }} else {{
+            As[tid.y][tid.x] = 0;
+        }}
+
+        // Load B tile: B[t*TILE + tid.y, col]
+        uint b_row = t * TILE + tid.y;
+        if (b_row < K && col < N) {{
+            Bs[tid.y][tid.x] = B[b_row * N + col];
+        }} else {{
+            Bs[tid.y][tid.x] = 0;
+        }}
+
+        // Sync to ensure tile is fully loaded
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Accumulate dot product of row from As and col from Bs
+        for (uint i = 0; i < TILE; i++) {{
+            sum = fma(As[tid.y][i], Bs[i][tid.x], sum);
+        }}
+
+        // Sync before loading next tile
+        threadgroup_barrier(mem_flags::mem_threadgroup);
     }}
-    C[row * N + col] = sum;
+
+    // Write result
+    if (row < M && col < N) {{
+        C[row * N + col] = sum;
+    }}
 }}
 "#
     )
@@ -60,7 +105,9 @@ mod tests {
         assert!(src.contains("device const float* B"));
         assert!(src.contains("device float* C"));
         assert!(src.contains("constant uint4& dims"));
-        assert!(src.contains("uint2 gid"));
+        assert!(src.contains("threadgroup float As[16][16]"));
+        assert!(src.contains("threadgroup float Bs[16][16]"));
+        assert!(src.contains("threadgroup_barrier"));
         assert!(src.contains("fma("));
     }
 }
