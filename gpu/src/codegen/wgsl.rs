@@ -26,6 +26,9 @@ pub fn kernel_fn_name(op: KernelOp, dtype: u8) -> String {
     if op == KernelOp::Matmul {
         return super::wgsl_matmul::matmul_fn_name(dtype);
     }
+    if op == KernelOp::BatchMatmul {
+        return super::wgsl_matmul::batch_matmul_fn_name(dtype);
+    }
     format!("rayzor_{}_{}", op.name(), dtype_to_wgsl(dtype))
 }
 
@@ -33,7 +36,7 @@ pub fn kernel_fn_name(op: KernelOp, dtype: u8) -> String {
 pub fn kernel_num_buffers(op: KernelOp) -> usize {
     if op.is_reduction() {
         3 // input, output, numel uniform
-    } else if op == KernelOp::Matmul {
+    } else if matches!(op, KernelOp::Matmul | KernelOp::BatchMatmul) {
         4 // A, B, C, dims uniform
     } else {
         op.input_count() + 1 // inputs + result
@@ -106,6 +109,9 @@ pub fn emit_kernel(op: KernelOp, dtype: u8) -> String {
     }
     if op == KernelOp::Matmul {
         return super::wgsl_matmul::emit_matmul(dtype);
+    }
+    if op == KernelOp::BatchMatmul {
+        return super::wgsl_matmul::emit_batch_matmul(dtype);
     }
     match op.input_count() {
         2 => emit_binary_elementwise(op, dtype),

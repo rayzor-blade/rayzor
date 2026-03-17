@@ -27,6 +27,8 @@ pub enum KernelOp {
 
     // Linear algebra
     Matmul,
+    /// Batched matmul: C[b,m,n] = A[b,m,k] × B[b,k,n] for b in 0..B
+    BatchMatmul,
 }
 
 impl KernelOp {
@@ -36,7 +38,7 @@ impl KernelOp {
             Self::Add | Self::Sub | Self::Mul | Self::Div => 2,
             Self::Neg | Self::Abs | Self::Sqrt | Self::Exp | Self::Log | Self::Relu => 1,
             Self::ReduceSum | Self::ReduceMax | Self::ReduceMin => 1,
-            Self::Matmul => 2,
+            Self::Matmul | Self::BatchMatmul => 2,
         }
     }
 
@@ -57,6 +59,7 @@ impl KernelOp {
             Self::ReduceMax => "reduce_max",
             Self::ReduceMin => "reduce_min",
             Self::Matmul => "matmul",
+            Self::BatchMatmul => "batch_matmul",
         }
     }
 
