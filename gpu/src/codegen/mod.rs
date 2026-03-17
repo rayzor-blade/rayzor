@@ -20,3 +20,11 @@ pub mod wgsl_fused;
 pub mod wgsl_matmul;
 #[cfg(feature = "webgpu-backend")]
 pub mod wgsl_reduction;
+
+// CUDA codegen is always compiled (no feature gate) — used for:
+// - NVRTC runtime compilation on NVIDIA GPUs (cuda-backend feature)
+// - TCC-based CPU simulation for testing on any platform
+pub mod cuda;
+pub mod cuda_fused;
+pub mod cuda_matmul;
+pub mod cuda_reduction;
