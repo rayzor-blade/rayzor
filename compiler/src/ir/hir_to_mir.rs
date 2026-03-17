@@ -8900,10 +8900,13 @@ impl<'a> HirToMirContext<'a> {
                                         IrType::I64,
                                         IrType::Ptr(Box::new(IrType::Void)),
                                     )
-                                } else if actual_return_type == IrType::I64 && result_type == IrType::I32 {
+                                } else if actual_return_type == IrType::I64
+                                    && result_type == IrType::I32
+                                {
                                     // Truncate I64 → I32 for Int-returning methods
                                     // (stdlib returns usize/i64 but Haxe Int is i32)
-                                    self.builder.build_cast(call_result, IrType::I64, IrType::I32)
+                                    self.builder
+                                        .build_cast(call_result, IrType::I64, IrType::I32)
                                 } else {
                                     Some(call_result)
                                 }
