@@ -135,16 +135,16 @@ jobs:
         run: cargo build --release --package compiler --features all-backends
 
       - name: Run nbody benchmark
-        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- nbody --json
+        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- nbody --json --disable-trace
 
       - name: Run fibonacci benchmark
-        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- fibonacci --json
+        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- fibonacci --json --disable-trace
 
       - name: Run deltablue benchmark
-        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- deltablue --json
+        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- deltablue --json --disable-trace
 
       - name: Run mandelbrot benchmark
-        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- mandelbrot --json
+        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- mandelbrot --json --disable-trace
 
       - name: Upload benchmark results
         if: always()
