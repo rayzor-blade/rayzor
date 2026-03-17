@@ -19,6 +19,15 @@ class Main {
         }
     }
 
+    static function checkInt(name:String, got:Int, expected:Int):Void {
+        if (got == expected) {
+            passed = passed + 1;
+        } else {
+            trace("FAIL: " + name + " — expected " + expected + ", got " + got);
+            failed = failed + 1;
+        }
+    }
+
     static function main() {
         var available = GPUCompute.isAvailable();
         if (!available) {
@@ -31,8 +40,7 @@ class Main {
         // --- Buffer lifecycle ---
         var t = Tensor.ones([1024], F32);
         var buf = gpu.createBuffer(t);
-        var n = buf.numel();
-        if (n == 1024) { passed = passed + 1; } else { trace("FAIL: numel expected 1024 got " + n); failed = failed + 1; }
+        checkInt("numel", buf.numel(), 1024);
         var readback = gpu.toTensor(buf);
         check("readback_sum", readback.sum(), 1024.0);
 

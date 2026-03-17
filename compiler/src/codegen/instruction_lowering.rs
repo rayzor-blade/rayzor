@@ -708,7 +708,6 @@ impl CraneliftBackend {
         let rhs_cl_ty = builder.func.dfg.value_type(rhs);
 
         // Use actual Cranelift types to determine comparison mode (not MIR type)
-        // This handles cases where intrinsics return different types than MIR expects
         let use_float_cmp = lhs_cl_ty.is_float() && rhs_cl_ty.is_float();
 
         // Float comparison operators need float values - convert if needed
