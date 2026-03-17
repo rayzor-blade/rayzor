@@ -16,6 +16,9 @@ use crate::wgpu_backend::{
     buffer_ops::WgpuBuffer, compile::WgpuCompiledKernel, device_init::WgpuContext,
 };
 
+#[cfg(feature = "cuda-backend")]
+use crate::cuda::{buffer_ops::CudaBuffer, compile::CudaCompiledKernel, device_init::CudaContext};
+
 // ---------------------------------------------------------------------------
 // NativeContext
 // ---------------------------------------------------------------------------
@@ -25,6 +28,8 @@ pub enum NativeContext {
     Metal(MetalContext),
     #[cfg(feature = "webgpu-backend")]
     Wgpu(WgpuContext),
+    #[cfg(feature = "cuda-backend")]
+    Cuda(CudaContext),
     /// Placeholder when no backend is enabled — never constructed at runtime.
     #[allow(dead_code)]
     Unavailable,
@@ -46,6 +51,12 @@ impl NativeContext {
                 return Some(NativeContext::Wgpu(ctx));
             }
         }
+        #[cfg(feature = "cuda-backend")]
+        {
+            if let Some(ctx) = CudaContext::new() {
+                return Some(NativeContext::Cuda(ctx));
+            }
+        }
         None
     }
 
@@ -63,6 +74,12 @@ impl NativeContext {
                 return true;
             }
         }
+        #[cfg(feature = "cuda-backend")]
+        {
+            if CudaContext::is_available() {
+                return true;
+            }
+        }
         false
     }
 
@@ -76,6 +93,10 @@ impl NativeContext {
             #[cfg(feature = "webgpu-backend")]
             NativeContext::Wgpu(ctx) => {
                 WgpuBuffer::allocate(ctx, byte_size).map(NativeBuffer::Wgpu)
+            }
+            #[cfg(feature = "cuda-backend")]
+            NativeContext::Cuda(ctx) => {
+                CudaBuffer::allocate(ctx, byte_size).map(NativeBuffer::Cuda)
             }
             NativeContext::Unavailable => None,
         }
@@ -99,6 +120,10 @@ impl NativeContext {
             NativeContext::Wgpu(ctx) => {
                 WgpuBuffer::from_data(ctx, data, byte_size).map(NativeBuffer::Wgpu)
             }
+            #[cfg(feature = "cuda-backend")]
+            NativeContext::Cuda(ctx) => {
+                CudaBuffer::from_data(ctx, data, byte_size).map(NativeBuffer::Cuda)
+            }
             NativeContext::Unavailable => None,
         }
     }
@@ -120,6 +145,8 @@ pub enum NativeBuffer {
     Metal(MetalBuffer),
     #[cfg(feature = "webgpu-backend")]
     Wgpu(WgpuBuffer),
+    #[cfg(feature = "cuda-backend")]
+    Cuda(CudaBuffer),
     #[allow(dead_code)]
     Unavailable,
 }
@@ -143,18 +170,22 @@ impl NativeBuffer {
             }
             #[cfg(feature = "webgpu-backend")]
             NativeBuffer::Wgpu(buf) => buf.read_to_vec(byte_size),
+            #[cfg(feature = "cuda-backend")]
+            NativeBuffer::Cuda(buf) => buf.read_to_vec(byte_size),
             NativeBuffer::Unavailable => None,
         }
     }
 
     /// Get a raw CPU-accessible pointer to the buffer contents (Metal only).
-    /// For wgpu, this is not directly supported — use `read_bytes()` instead.
+    /// For wgpu/CUDA, this is not directly supported — use `read_bytes()` instead.
     pub fn contents_ptr(&self) -> *mut u8 {
         match self {
             #[cfg(feature = "metal-backend")]
             NativeBuffer::Metal(buf) => buf.contents(),
             #[cfg(feature = "webgpu-backend")]
             NativeBuffer::Wgpu(_) => std::ptr::null_mut(),
+            #[cfg(feature = "cuda-backend")]
+            NativeBuffer::Cuda(_) => std::ptr::null_mut(),
             NativeBuffer::Unavailable => std::ptr::null_mut(),
         }
     }
@@ -166,6 +197,8 @@ impl NativeBuffer {
             NativeBuffer::Metal(buf) => buf.byte_size(),
             #[cfg(feature = "webgpu-backend")]
             NativeBuffer::Wgpu(buf) => buf.byte_size(),
+            #[cfg(feature = "cuda-backend")]
+            NativeBuffer::Cuda(buf) => buf.byte_size(),
             NativeBuffer::Unavailable => 0,
         }
     }
@@ -180,6 +213,8 @@ pub enum NativeCompiledKernel {
     Metal(CompiledKernel),
     #[cfg(feature = "webgpu-backend")]
     Wgpu(WgpuCompiledKernel),
+    #[cfg(feature = "cuda-backend")]
+    Cuda(CudaCompiledKernel),
     #[allow(dead_code)]
     Unavailable,
 }

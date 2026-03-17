@@ -365,6 +365,54 @@ fn reduce_dispatch(
                 _ => 0.0,
             })
         }
+        #[cfg(feature = "cuda-backend")]
+        (NativeContext::Cuda(cuda_ctx), NativeCompiledKernel::Cuda(kernel)) => {
+            use crate::cuda::{buffer_ops::CudaBuffer, dispatch};
+
+            let input_cuda = match input_buf.as_ref() {
+                NativeBuffer::Cuda(cb) => cb,
+                _ => return Err("input not CUDA".into()),
+            };
+
+            let partial_buf = CudaBuffer::allocate(cuda_ctx, num_tgs * elem_size)
+                .ok_or("failed to alloc partial buf")?;
+
+            dispatch::dispatch_reduction(
+                cuda_ctx,
+                kernel,
+                input_cuda,
+                &partial_buf,
+                numel,
+                tg_size,
+            )?;
+
+            let result_buf = if num_tgs > 1 {
+                let final_buf =
+                    CudaBuffer::allocate(cuda_ctx, elem_size).ok_or("failed to alloc final buf")?;
+                dispatch::dispatch_reduction(
+                    cuda_ctx,
+                    kernel,
+                    &partial_buf,
+                    &final_buf,
+                    num_tgs,
+                    next_power_of_2(num_tgs),
+                )?;
+                final_buf
+            } else {
+                partial_buf
+            };
+
+            let data = result_buf
+                .read_to_vec(elem_size)
+                .ok_or("failed to read back reduction result")?;
+            Ok(match dtype {
+                buffer::DTYPE_F32 => unsafe { *(data.as_ptr() as *const f32) as f64 },
+                buffer::DTYPE_F64 => unsafe { *(data.as_ptr() as *const f64) },
+                buffer::DTYPE_I32 => unsafe { *(data.as_ptr() as *const i32) as f64 },
+                buffer::DTYPE_I64 => unsafe { *(data.as_ptr() as *const i64) as f64 },
+                _ => 0.0,
+            })
+        }
         _ => Err("backend mismatch".into()),
     }
 }
@@ -502,6 +550,39 @@ fn matmul_dispatch(
 
             Ok(NativeBuffer::Wgpu(result_inner))
         }
+        #[cfg(feature = "cuda-backend")]
+        (NativeContext::Cuda(cuda_ctx), NativeCompiledKernel::Cuda(kernel)) => {
+            use crate::cuda::{buffer_ops::CudaBuffer, dispatch};
+
+            let a_cuda = match a_buf.as_ref() {
+                NativeBuffer::Cuda(cb) => cb,
+                _ => return Err("a not CUDA".into()),
+            };
+            let b_cuda = match b_buf.as_ref() {
+                NativeBuffer::Cuda(cb) => cb,
+                _ => return Err("b not CUDA".into()),
+            };
+
+            let result_inner = CudaBuffer::allocate(cuda_ctx, m * n * elem_size)
+                .ok_or("failed to alloc result")?;
+
+            let tile_size = 16u32;
+            dispatch::dispatch_grid(
+                cuda_ctx,
+                kernel,
+                &[a_cuda, b_cuda, &result_inner],
+                &[m as u32, k as u32, n as u32],
+                (
+                    (n as u32).div_ceil(tile_size),
+                    (m as u32).div_ceil(tile_size),
+                    1,
+                ),
+                (tile_size, tile_size, 1),
+                tile_size * tile_size * 4 * 2, // shared memory for A_tile + B_tile
+            )?;
+
+            Ok(NativeBuffer::Cuda(result_inner))
+        }
         _ => Err("backend mismatch".into()),
     }
 }
@@ -583,7 +664,15 @@ pub unsafe extern "C" fn rayzor_gpu_compute_batch_matmul(
     k: i64,
     n: i64,
 ) -> i64 {
-    batch_matmul_impl(ctx, a, b, batch as usize, m as usize, k as usize, n as usize)
+    batch_matmul_impl(
+        ctx,
+        a,
+        b,
+        batch as usize,
+        m as usize,
+        k as usize,
+        n as usize,
+    )
 }
 
 unsafe fn batch_matmul_impl(
@@ -610,13 +699,14 @@ unsafe fn batch_matmul_impl(
     }
 
     let dtype = a_buf.dtype;
-    let cached = match gpu_ctx
-        .kernel_cache
-        .get_or_compile(&gpu_ctx.inner, KernelOp::BatchMatmul, dtype)
-    {
-        Ok(k) => k,
-        Err(_) => return 0,
-    };
+    let cached =
+        match gpu_ctx
+            .kernel_cache
+            .get_or_compile(&gpu_ctx.inner, KernelOp::BatchMatmul, dtype)
+        {
+            Ok(k) => k,
+            Err(_) => return 0,
+        };
 
     let elem_size = buffer::dtype_byte_size(dtype);
 
@@ -720,6 +810,39 @@ fn batch_matmul_dispatch(
             )?;
 
             Ok(NativeBuffer::Wgpu(result_inner))
+        }
+        #[cfg(feature = "cuda-backend")]
+        (NativeContext::Cuda(cuda_ctx), NativeCompiledKernel::Cuda(kernel)) => {
+            use crate::cuda::{buffer_ops::CudaBuffer, dispatch};
+
+            let a_cuda = match a_buf.as_ref() {
+                NativeBuffer::Cuda(cb) => cb,
+                _ => return Err("a not CUDA".into()),
+            };
+            let b_cuda = match b_buf.as_ref() {
+                NativeBuffer::Cuda(cb) => cb,
+                _ => return Err("b not CUDA".into()),
+            };
+
+            let result_inner = CudaBuffer::allocate(cuda_ctx, batch * m * n * elem_size)
+                .ok_or("failed to alloc result")?;
+
+            let tile_size = 16u32;
+            dispatch::dispatch_grid(
+                cuda_ctx,
+                kernel,
+                &[a_cuda, b_cuda, &result_inner],
+                &[m as u32, k as u32, n as u32, batch as u32],
+                (
+                    (n as u32).div_ceil(tile_size),
+                    (m as u32).div_ceil(tile_size),
+                    batch as u32,
+                ),
+                (tile_size, tile_size, 1),
+                tile_size * tile_size * 4 * 2,
+            )?;
+
+            Ok(NativeBuffer::Cuda(result_inner))
         }
         _ => Err("no matching backend for batch matmul".into()),
     }

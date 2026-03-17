@@ -159,6 +159,14 @@ fn compile_fused_kernel(
             )?;
             Ok(NativeCompiledKernel::Wgpu(compiled))
         }
+        #[cfg(feature = "cuda-backend")]
+        NativeContext::Cuda(cuda_ctx) => {
+            use crate::codegen::cuda_fused;
+            use crate::cuda::compile;
+            let fused = cuda_fused::emit_fused_kernel(op, dtype, ptr_to_idx, num_inputs);
+            let compiled = compile::compile_cuda(cuda_ctx, &fused.source, &fused.fn_name)?;
+            Ok(NativeCompiledKernel::Cuda(compiled))
+        }
         NativeContext::Unavailable => Err("no GPU backend available".to_string()),
     }
 }
@@ -211,6 +219,24 @@ fn dispatch_fused(
             let mut all_bufs: Vec<&WgpuBuffer> = input_wgpu;
             all_bufs.push(result_wgpu);
             dispatch::dispatch(wgpu_ctx, kernel, &all_bufs, numel)
+        }
+        #[cfg(feature = "cuda-backend")]
+        (NativeContext::Cuda(cuda_ctx), NativeCompiledKernel::Cuda(kernel)) => {
+            use crate::cuda::{buffer_ops::CudaBuffer, dispatch};
+            let input_cuda: Vec<&CudaBuffer> = input_bufs
+                .iter()
+                .filter_map(|nb| match nb.as_ref() {
+                    NativeBuffer::Cuda(cb) => Some(cb),
+                    _ => None,
+                })
+                .collect();
+            let result_cuda = match result_buf {
+                NativeBuffer::Cuda(cb) => cb,
+                _ => return Err("result buffer is not CUDA".to_string()),
+            };
+            let mut all_bufs: Vec<&CudaBuffer> = input_cuda;
+            all_bufs.push(result_cuda);
+            dispatch::dispatch(cuda_ctx, kernel, &all_bufs, numel)
         }
         _ => Err("backend mismatch between context and compiled kernel".to_string()),
     }

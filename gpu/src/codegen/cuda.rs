@@ -30,7 +30,11 @@ pub fn kernel_fn_name(op: KernelOp, dtype: u8) -> String {
     if op == KernelOp::BatchMatmul {
         return super::cuda_matmul::batch_matmul_fn_name(dtype);
     }
-    format!("rayzor_{}_{}", op.name(), dtype_to_cuda(dtype).replace(' ', "_"))
+    format!(
+        "rayzor_{}_{}",
+        op.name(),
+        dtype_to_cuda(dtype).replace(' ', "_")
+    )
 }
 
 /// Number of buffers a CUDA kernel needs.
@@ -230,10 +234,20 @@ mod tests {
     #[test]
     fn test_all_ops_generate() {
         for op in [
-            KernelOp::Add, KernelOp::Sub, KernelOp::Mul, KernelOp::Div,
-            KernelOp::Neg, KernelOp::Abs, KernelOp::Sqrt, KernelOp::Exp,
-            KernelOp::Log, KernelOp::Relu, KernelOp::Sigmoid, KernelOp::Tanh,
-            KernelOp::Gelu, KernelOp::Silu,
+            KernelOp::Add,
+            KernelOp::Sub,
+            KernelOp::Mul,
+            KernelOp::Div,
+            KernelOp::Neg,
+            KernelOp::Abs,
+            KernelOp::Sqrt,
+            KernelOp::Exp,
+            KernelOp::Log,
+            KernelOp::Relu,
+            KernelOp::Sigmoid,
+            KernelOp::Tanh,
+            KernelOp::Gelu,
+            KernelOp::Silu,
         ] {
             let src = emit_kernel(op, buffer::DTYPE_F32);
             assert!(!src.is_empty(), "empty source for {:?}", op);

@@ -214,8 +214,18 @@ fn test_cuda_mul_f32_via_cc() {
 #[test]
 fn test_cuda_neg_exp_log_sqrt_via_cc() {
     let ops = [
-        (KernelOp::Neg, "neg", vec![1.0f32, -2.0, 3.0], vec![-1.0f32, 2.0, -3.0]),
-        (KernelOp::Sqrt, "sqrt", vec![4.0, 9.0, 16.0], vec![2.0, 3.0, 4.0]),
+        (
+            KernelOp::Neg,
+            "neg",
+            vec![1.0f32, -2.0, 3.0],
+            vec![-1.0f32, 2.0, -3.0],
+        ),
+        (
+            KernelOp::Sqrt,
+            "sqrt",
+            vec![4.0, 9.0, 16.0],
+            vec![2.0, 3.0, 4.0],
+        ),
     ];
 
     for (op, name, input, expected) in &ops {
@@ -264,7 +274,8 @@ fn test_cuda_neg_exp_log_sqrt_via_cc() {
 fn test_cuda_reduction_sum_via_cc() {
     // Reduction needs a different wrapper — single block, check output[0]
     let src = rayzor_gpu::codegen::cuda_reduction::emit_reduction(KernelOp::ReduceSum, DTYPE_F32);
-    let fn_name = rayzor_gpu::codegen::cuda_reduction::reduction_fn_name(KernelOp::ReduceSum, DTYPE_F32);
+    let fn_name =
+        rayzor_gpu::codegen::cuda_reduction::reduction_fn_name(KernelOp::ReduceSum, DTYPE_F32);
 
     let wrapped = cuda::wrap_for_tcc(&src, &fn_name, 1);
 

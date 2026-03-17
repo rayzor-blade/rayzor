@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 default = []
 metal-backend = ["dep:objc2", "dep:objc2-metal", "dep:objc2-foundation"]
 webgpu-backend = ["dep:wgpu", "dep:pollster"]
+cuda-backend = []
 
 [dependencies]
 rayzor-plugin = { path = "../plugin" }

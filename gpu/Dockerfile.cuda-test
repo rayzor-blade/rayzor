@@ -1,0 +1,43 @@
+# CUDA integration test environment for rayzor-gpu
+#
+# Builds and runs the CUDA backend tests using NVRTC on real NVIDIA hardware.
+# Requires: nvidia-docker runtime (--gpus all)
+#
+# Build:
+#   docker build -f gpu/Dockerfile.cuda-test -t rayzor-cuda-test .
+#
+# Run:
+#   docker run --gpus all rayzor-cuda-test
+#
+# Run specific test:
+#   docker run --gpus all rayzor-cuda-test cargo test -p rayzor-gpu --features cuda-backend test_cuda_device_creation
+
+FROM nvidia/cuda:12.6.3-devel-ubuntu24.04
+
+# Install Rust toolchain
+RUN apt-get update && apt-get install -y \
+    curl \
+    build-essential \
+    pkg-config \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# CUDA libraries are at /usr/local/cuda/lib64
+ENV LD_LIBRARY_PATH="/usr/local/cuda/lib64:${LD_LIBRARY_PATH}"
+ENV LIBRARY_PATH="/usr/local/cuda/lib64:${LIBRARY_PATH}"
+
+WORKDIR /rayzor
+
+# Copy workspace files needed for build
+COPY Cargo.toml Cargo.lock ./
+COPY gpu/ gpu/
+COPY plugin/ plugin/
+COPY runtime/ runtime/
+
+# Build with cuda-backend feature
+RUN cargo build -p rayzor-gpu --features cuda-backend
+
+# Default: run all CUDA backend tests
+CMD ["cargo", "test", "-p", "rayzor-gpu", "--features", "cuda-backend", "--", "--nocapture"]

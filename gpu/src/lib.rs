@@ -29,6 +29,9 @@ pub mod metal;
 #[cfg(feature = "webgpu-backend")]
 pub mod wgpu_backend;
 
+#[cfg(feature = "cuda-backend")]
+pub mod cuda;
+
 use rayzor_plugin::{declare_native_methods, NativeMethodDesc};
 use std::ffi::c_void;
 

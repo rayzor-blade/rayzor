@@ -99,6 +99,15 @@ fn compile_for_backend(
             )?;
             Ok(NativeCompiledKernel::Wgpu(compiled))
         }
+        #[cfg(feature = "cuda-backend")]
+        NativeContext::Cuda(cuda_ctx) => {
+            use crate::codegen::cuda;
+            use crate::cuda::compile;
+            let source = cuda::emit_kernel(op, dtype);
+            let fn_name = cuda::kernel_fn_name(op, dtype);
+            let compiled = compile::compile_cuda(cuda_ctx, &source, &fn_name)?;
+            Ok(NativeCompiledKernel::Cuda(compiled))
+        }
         NativeContext::Unavailable => Err("no GPU backend available".to_string()),
     }
 }

@@ -4,9 +4,8 @@
 //! Pass 1: Each block reduces a chunk → partial results
 //! Pass 2: Single block reduces partials → final scalar
 
-use crate::buffer;
-use crate::kernel_ir::KernelOp;
 use super::cuda::dtype_to_cuda;
+use crate::kernel_ir::KernelOp;
 
 const BLOCK_SIZE: usize = 256;
 
@@ -18,18 +17,20 @@ pub fn emit_reduction(op: KernelOp, dtype: u8) -> String {
     let (identity, accumulate, combine) = match op {
         KernelOp::ReduceSum => (
             format!("({cuda_type})0"),
-            format!("acc + input[i]"),
-            format!("shared_data[tid] + shared_data[tid + s]"),
+            "acc + input[i]".to_string(),
+            "shared_data[tid] + shared_data[tid + s]".to_string(),
         ),
         KernelOp::ReduceMax => (
-            format!("-1e30f"),
-            format!("acc > input[i] ? acc : input[i]"),
-            format!("shared_data[tid] > shared_data[tid + s] ? shared_data[tid] : shared_data[tid + s]"),
+            "-1e30f".to_string(),
+            "acc > input[i] ? acc : input[i]".to_string(),
+            "shared_data[tid] > shared_data[tid + s] ? shared_data[tid] : shared_data[tid + s]"
+                .to_string(),
         ),
         KernelOp::ReduceMin => (
-            format!("1e30f"),
-            format!("acc < input[i] ? acc : input[i]"),
-            format!("shared_data[tid] < shared_data[tid + s] ? shared_data[tid] : shared_data[tid + s]"),
+            "1e30f".to_string(),
+            "acc < input[i] ? acc : input[i]".to_string(),
+            "shared_data[tid] < shared_data[tid + s] ? shared_data[tid] : shared_data[tid + s]"
+                .to_string(),
         ),
         _ => unreachable!("not a reduction op"),
     };
@@ -78,6 +79,7 @@ pub fn reduction_fn_name(op: KernelOp, dtype: u8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer;
 
     #[test]
     fn test_reduce_sum_f32() {

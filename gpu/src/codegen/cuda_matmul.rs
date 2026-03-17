@@ -3,7 +3,6 @@
 //! Tiled 16×16 shared-memory matmul, same algorithm as MSL/WGSL versions.
 
 use super::cuda::dtype_to_cuda;
-use crate::buffer;
 
 const TILE_SIZE: usize = 16;
 
@@ -121,12 +120,16 @@ pub fn matmul_fn_name(dtype: u8) -> String {
 }
 
 pub fn batch_matmul_fn_name(dtype: u8) -> String {
-    format!("rayzor_batch_matmul_{}", dtype_to_cuda(dtype).replace(' ', "_"))
+    format!(
+        "rayzor_batch_matmul_{}",
+        dtype_to_cuda(dtype).replace(' ', "_")
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer;
 
     #[test]
     fn test_matmul_f32() {
