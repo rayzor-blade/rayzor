@@ -5,9 +5,16 @@
 use log::debug;
 use std::cell::RefCell;
 use std::io::{self, Write};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 // Use the canonical HaxeString definition from haxe_string module
 use crate::haxe_string::HaxeString;
+
+const TRACE_STATE_UNINITIALIZED: u8 = 0;
+const TRACE_STATE_ENABLED: u8 = 1;
+const TRACE_STATE_DISABLED: u8 = 2;
+
+static TRACE_STATE: AtomicU8 = AtomicU8::new(TRACE_STATE_UNINITIALIZED);
 
 // Thread-local trace prefix for identifying which backend owns the output
 thread_local! {
@@ -34,7 +41,59 @@ pub fn set_trace_prefix(prefix: &str) {
     TRACE_PREFIX.with(|p| *p.borrow_mut() = prefix.to_string());
 }
 
+fn trace_state_value(enabled: bool) -> u8 {
+    if enabled {
+        TRACE_STATE_ENABLED
+    } else {
+        TRACE_STATE_DISABLED
+    }
+}
+
+fn trace_disabled_value(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    !normalized.is_empty()
+        && normalized != "0"
+        && normalized != "false"
+        && normalized != "no"
+        && normalized != "off"
+}
+
+fn env_disables_trace() -> bool {
+    std::env::var("RAYZOR_DISABLE_TRACE")
+        .ok()
+        .map(|value| trace_disabled_value(&value))
+        .unwrap_or(false)
+}
+
+/// Enable or disable Haxe trace output for the current process.
+pub fn set_trace_enabled(enabled: bool) {
+    TRACE_STATE.store(trace_state_value(enabled), Ordering::Release);
+}
+
+/// Extern entry point for toggling trace output from generated/native code.
+#[no_mangle]
+pub extern "C" fn rayzor_set_trace_enabled(enabled: bool) {
+    set_trace_enabled(enabled);
+}
+
+/// Returns whether trace output is currently enabled.
+pub fn trace_enabled() -> bool {
+    match TRACE_STATE.load(Ordering::Acquire) {
+        TRACE_STATE_ENABLED => true,
+        TRACE_STATE_DISABLED => false,
+        _ => {
+            let enabled = !env_disables_trace();
+            TRACE_STATE.store(trace_state_value(enabled), Ordering::Release);
+            enabled
+        }
+    }
+}
+
 fn print_with_prefix(msg: &str) {
+    if !trace_enabled() {
+        return;
+    }
+
     TRACE_PREFIX.with(|p| {
         let prefix = p.borrow();
         if prefix.is_empty() {
@@ -119,7 +178,7 @@ pub extern "C" fn haxe_trace_string(ptr: *const u8, len: usize) {
 #[no_mangle]
 pub extern "C" fn haxe_trace_string_struct(s_ptr: *const HaxeString) {
     if s_ptr.is_null() {
-        println!("null");
+        print_with_prefix("null");
         return;
     }
     unsafe {
@@ -209,6 +268,32 @@ pub extern "C" fn haxe_trace_array(arr_ptr: *mut u8) {
         }
         result.push(']');
         print_with_prefix(&result);
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::items_after_test_module)]
+mod tests {
+    use super::trace_disabled_value;
+
+    #[test]
+    fn trace_env_parser_treats_common_falsey_values_as_enabled() {
+        for value in ["", "0", "false", "False", "no", "off"] {
+            assert!(
+                !trace_disabled_value(value),
+                "value {value:?} should not disable trace"
+            );
+        }
+    }
+
+    #[test]
+    fn trace_env_parser_disables_trace_for_truthy_values() {
+        for value in ["1", "true", "yes", "on"] {
+            assert!(
+                trace_disabled_value(value),
+                "value {value:?} should disable trace"
+            );
+        }
     }
 }
 
@@ -916,7 +1001,7 @@ static PROGRAM_ARGS: std::sync::OnceLock<ArgsStorage> = std::sync::OnceLock::new
 /// Returns a heap-allocated HaxeArray pointer.
 fn build_args_array(args: &[&str]) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{Layout, alloc};
 
     let count = args.len();
     let elem_size = 8; // size of pointer (i64)
@@ -1634,7 +1719,7 @@ pub extern "C" fn haxe_filesystem_is_file(path: *const HaxeString) -> bool {
 pub extern "C" fn haxe_filesystem_read_directory(
     path: *const HaxeString,
 ) -> *mut crate::haxe_array::HaxeArray {
-    use crate::haxe_array::{haxe_array_new, haxe_array_push, HaxeArray};
+    use crate::haxe_array::{HaxeArray, haxe_array_new, haxe_array_push};
 
     unsafe {
         let path_str = match haxe_string_to_rust(path) {
@@ -3215,7 +3300,7 @@ pub extern "C" fn haxe_stringmap_keys_to_array(
     map_ptr: *mut HaxeStringMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{Layout, alloc};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
@@ -3241,7 +3326,7 @@ pub extern "C" fn haxe_intmap_keys_to_array(
     map_ptr: *mut HaxeIntMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{Layout, alloc};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
@@ -3265,7 +3350,7 @@ pub extern "C" fn haxe_stringmap_values_to_array(
     map_ptr: *mut HaxeStringMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{Layout, alloc};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
@@ -3289,7 +3374,7 @@ pub extern "C" fn haxe_intmap_values_to_array(
     map_ptr: *mut HaxeIntMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{Layout, alloc};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
@@ -3407,7 +3492,7 @@ pub extern "C" fn haxe_objectmap_keys_to_array(
     map_ptr: *mut HaxeObjectMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{Layout, alloc};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
@@ -3430,7 +3515,7 @@ pub extern "C" fn haxe_objectmap_values_to_array(
     map_ptr: *mut HaxeObjectMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{alloc, Layout};
+    use std::alloc::{Layout, alloc};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;

@@ -41,20 +41,21 @@
 //!   cargo run --release --package compiler --example benchmark_runner
 //!   cargo run --release --package compiler --example benchmark_runner -- mandelbrot
 //!   cargo run --release --package compiler --example benchmark_runner -- --json
+//!   cargo run --release --package compiler --example benchmark_runner -- fibonacci --disable-trace
 
-use compiler::codegen::tiered_backend::{TierPreset, TieredBackend, TieredConfig};
 use compiler::codegen::CraneliftBackend;
 use compiler::codegen::InterpValue;
+use compiler::codegen::tiered_backend::{TierPreset, TieredBackend, TieredConfig};
 use compiler::compilation::{CompilationConfig, CompilationUnit};
-use compiler::ir::optimization::{strip_stack_trace_updates, OptimizationLevel, PassManager};
-use compiler::ir::{load_bundle, IrFunctionId, IrModule, RayzorBundle};
+use compiler::ir::optimization::{OptimizationLevel, PassManager, strip_stack_trace_updates};
+use compiler::ir::{IrFunctionId, IrModule, RayzorBundle, load_bundle};
 
+#[cfg(feature = "llvm-backend")]
+use compiler::codegen::LLVMJitBackend;
 #[cfg(feature = "llvm-backend")]
 use compiler::codegen::init_llvm_once;
 #[cfg(feature = "llvm-backend")]
 use compiler::codegen::reset_llvm_global_state;
-#[cfg(feature = "llvm-backend")]
-use compiler::codegen::LLVMJitBackend;
 #[cfg(feature = "llvm-backend")]
 use inkwell::context::Context;
 use serde::{Deserialize, Serialize};
@@ -1567,6 +1568,7 @@ fn main() {
 
     // Parse arguments
     let json_output = args.iter().any(|a| a == "--json");
+    let disable_trace = args.iter().any(|a| a == "--disable-trace");
     let specific_target = args
         .iter()
         .position(|a| a == "--target")
@@ -1581,6 +1583,11 @@ fn main() {
             }
         })
         .cloned();
+
+    if disable_trace {
+        rayzor_runtime::haxe_sys::set_trace_enabled(false);
+        std::env::set_var("RAYZOR_DISABLE_TRACE", "1");
+    }
 
     // Get available benchmarks
     let available = list_benchmarks();
@@ -1674,6 +1681,9 @@ fn main() {
         "Warmup: {} runs, Benchmark: {} runs",
         WARMUP_RUNS, BENCH_RUNS
     );
+    if disable_trace {
+        println!("Trace output disabled for Rayzor targets");
+    }
     println!();
 
     let sys_info = get_system_info();
