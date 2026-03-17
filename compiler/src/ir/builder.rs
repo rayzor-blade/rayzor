@@ -356,7 +356,14 @@ impl IrBuilder {
         let mut final_args = args;
         for (i, arg_id) in final_args.iter_mut().enumerate() {
             if let Some(param_ty) = param_types.get(i) {
-                if let Some(arg_ty) = self.get_register_type(*arg_id) {
+                // Use register type if available, fall back to function locals
+                let arg_ty_opt = self.get_register_type(*arg_id)
+                    .or_else(|| {
+                        self.current_function()
+                            .and_then(|f| f.locals.get(arg_id))
+                            .map(|l| l.ty.clone())
+                    });
+                if let Some(arg_ty) = arg_ty_opt {
                     let needs_cast = matches!(
                         (&arg_ty, param_ty),
                         (IrType::I32 | IrType::I64, IrType::F64 | IrType::F32)
@@ -365,11 +372,15 @@ impl IrBuilder {
                             | (IrType::Ptr(_), IrType::I64)
                     );
                     if needs_cast {
-                        // F64↔I64: use bitcast (bit-preserving) for type erasure boundaries
-                        // Other cases: use cast (value conversion)
+                        // I32→F64/F32: value conversion (Haxe Int→Float coercion).
+                        // I64↔F64: bitcast (generic type erasure, bit-preserving).
+                        // Ptr↔I64: bitcast (pointer reinterpretation).
                         let use_bitcast = matches!(
                             (&arg_ty, param_ty),
-                            (IrType::F64, IrType::I64) | (IrType::I64, IrType::F64)
+                            (IrType::F64, IrType::I64)
+                                | (IrType::I64, IrType::F64)
+                                | (IrType::I64, IrType::Ptr(_))
+                                | (IrType::Ptr(_), IrType::I64)
                         );
                         let cast_id = if use_bitcast {
                             self.build_bitcast(*arg_id, param_ty.clone())
