@@ -83,6 +83,12 @@ pub fn emit_unary_elementwise(op: KernelOp, dtype: u8) -> String {
         KernelOp::Exp => "exp(a[id])".to_string(),
         KernelOp::Log => "log(a[id])".to_string(),
         KernelOp::Relu => format!("max({wgsl_type}(0), a[id])"),
+        KernelOp::Sigmoid => format!("1.0 / (1.0 + exp(-a[id]))"),
+        KernelOp::Tanh => "tanh(a[id])".to_string(),
+        KernelOp::Gelu => {
+            format!("a[id] * 0.5 * (1.0 + tanh(0.7978845608 * (a[id] + 0.044715 * a[id] * a[id] * a[id])))")
+        }
+        KernelOp::Silu => format!("a[id] / (1.0 + exp(-a[id]))"),
         _ => unreachable!("not a unary op"),
     };
 

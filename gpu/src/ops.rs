@@ -132,6 +132,26 @@ pub unsafe extern "C" fn rayzor_gpu_compute_relu(_ctx: i64, a: i64) -> i64 {
     unary_lazy(a, KernelOp::Relu)
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_compute_sigmoid(_ctx: i64, a: i64) -> i64 {
+    unary_lazy(a, KernelOp::Sigmoid)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_compute_tanh(_ctx: i64, a: i64) -> i64 {
+    unary_lazy(a, KernelOp::Tanh)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_compute_gelu(_ctx: i64, a: i64) -> i64 {
+    unary_lazy(a, KernelOp::Gelu)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_compute_silu(_ctx: i64, a: i64) -> i64 {
+    unary_lazy(a, KernelOp::Silu)
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers — Reductions
 // ---------------------------------------------------------------------------

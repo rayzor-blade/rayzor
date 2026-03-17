@@ -19,6 +19,14 @@ pub enum KernelOp {
     Exp,
     Log,
     Relu,
+    /// Sigmoid: 1 / (1 + exp(-x))
+    Sigmoid,
+    /// Tanh: (exp(x) - exp(-x)) / (exp(x) + exp(-x))
+    Tanh,
+    /// GELU: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
+    Gelu,
+    /// SiLU (Swish): x * sigmoid(x)
+    Silu,
 
     // Reductions: input[0..numel] -> single value per threadgroup
     ReduceSum,
@@ -36,7 +44,8 @@ impl KernelOp {
     pub fn input_count(self) -> usize {
         match self {
             Self::Add | Self::Sub | Self::Mul | Self::Div => 2,
-            Self::Neg | Self::Abs | Self::Sqrt | Self::Exp | Self::Log | Self::Relu => 1,
+            Self::Neg | Self::Abs | Self::Sqrt | Self::Exp | Self::Log
+            | Self::Relu | Self::Sigmoid | Self::Tanh | Self::Gelu | Self::Silu => 1,
             Self::ReduceSum | Self::ReduceMax | Self::ReduceMin => 1,
             Self::Matmul | Self::BatchMatmul => 2,
         }
@@ -55,6 +64,10 @@ impl KernelOp {
             Self::Exp => "exp",
             Self::Log => "log",
             Self::Relu => "relu",
+            Self::Sigmoid => "sigmoid",
+            Self::Tanh => "tanh",
+            Self::Gelu => "gelu",
+            Self::Silu => "silu",
             Self::ReduceSum => "reduce_sum",
             Self::ReduceMax => "reduce_max",
             Self::ReduceMin => "reduce_min",

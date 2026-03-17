@@ -59,6 +59,10 @@ declare_native_methods! {
     "rayzor_gpu_GPUCompute", "exp",          instance, "rayzor_gpu_compute_exp",           [Ptr, Ptr]      => Ptr;
     "rayzor_gpu_GPUCompute", "log",          instance, "rayzor_gpu_compute_log",           [Ptr, Ptr]      => Ptr;
     "rayzor_gpu_GPUCompute", "relu",         instance, "rayzor_gpu_compute_relu",          [Ptr, Ptr]      => Ptr;
+    "rayzor_gpu_GPUCompute", "sigmoid",      instance, "rayzor_gpu_compute_sigmoid",       [Ptr, Ptr]      => Ptr;
+    "rayzor_gpu_GPUCompute", "tanh",         instance, "rayzor_gpu_compute_tanh",          [Ptr, Ptr]      => Ptr;
+    "rayzor_gpu_GPUCompute", "gelu",         instance, "rayzor_gpu_compute_gelu",          [Ptr, Ptr]      => Ptr;
+    "rayzor_gpu_GPUCompute", "silu",         instance, "rayzor_gpu_compute_silu",          [Ptr, Ptr]      => Ptr;
     // Reductions: (self, buf) -> f64
     "rayzor_gpu_GPUCompute", "sum",          instance, "rayzor_gpu_compute_sum",           [Ptr, Ptr]      => F64;
     "rayzor_gpu_GPUCompute", "mean",         instance, "rayzor_gpu_compute_mean",          [Ptr, Ptr]      => F64;
@@ -205,6 +209,22 @@ pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
         (
             "rayzor_gpu_compute_relu",
             ops::rayzor_gpu_compute_relu as *const u8,
+        ),
+        (
+            "rayzor_gpu_compute_sigmoid",
+            ops::rayzor_gpu_compute_sigmoid as *const u8,
+        ),
+        (
+            "rayzor_gpu_compute_tanh",
+            ops::rayzor_gpu_compute_tanh as *const u8,
+        ),
+        (
+            "rayzor_gpu_compute_gelu",
+            ops::rayzor_gpu_compute_gelu as *const u8,
+        ),
+        (
+            "rayzor_gpu_compute_silu",
+            ops::rayzor_gpu_compute_silu as *const u8,
         ),
         // Reductions
         (

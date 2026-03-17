@@ -94,6 +94,10 @@ fn emit_op(
                 KernelOp::Exp => format!("exp({input_expr})"),
                 KernelOp::Log => format!("log({input_expr})"),
                 KernelOp::Relu => format!("max(({msl_type})0, {input_expr})"),
+                KernelOp::Sigmoid => format!("1.0 / (1.0 + exp(-{input_expr}))"),
+                KernelOp::Tanh => format!("tanh({input_expr})"),
+                KernelOp::Gelu => format!("{input_expr} * 0.5 * (1.0 + tanh(0.7978845608 * ({input_expr} + 0.044715 * {input_expr} * {input_expr} * {input_expr})))"),
+                KernelOp::Silu => format!("{input_expr} / (1.0 + exp(-{input_expr}))"),
                 _ => unreachable!("not a unary op: {:?}", kernel_op),
             };
 
