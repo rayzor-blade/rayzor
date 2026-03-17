@@ -8163,13 +8163,13 @@ impl<'a> HirToMirContext<'a> {
                                                         .build_const(IrValue::String(full));
                                                 }
                                                 "gpuSize" => {
-                                                    return self.builder.build_const(IrValue::I64(
-                                                        layout.total_size as i64,
+                                                    return self.builder.build_const(IrValue::I32(
+                                                        layout.total_size as i32,
                                                     ));
                                                 }
                                                 "gpuAlignment" => {
-                                                    return self.builder.build_const(IrValue::I64(
-                                                        layout.alignment as i64,
+                                                    return self.builder.build_const(IrValue::I32(
+                                                        layout.alignment as i32,
                                                     ));
                                                 }
                                                 _ => {}
@@ -8474,12 +8474,12 @@ impl<'a> HirToMirContext<'a> {
                                 "gpuSize" => {
                                     return self
                                         .builder
-                                        .build_const(IrValue::I64(layout.total_size as i64));
+                                        .build_const(IrValue::I32(layout.total_size as i32));
                                 }
                                 "gpuAlignment" => {
                                     return self
                                         .builder
-                                        .build_const(IrValue::I64(layout.alignment as i64));
+                                        .build_const(IrValue::I32(layout.alignment as i32));
                                 }
                                 _ => {}
                             }
