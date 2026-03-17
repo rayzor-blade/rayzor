@@ -60,6 +60,20 @@ class Main {
         var bigR = gpu.matmul(big, big, 4, 4, 4);
         check("4x4_ones", gpu.sum(bigR), 64.0);  // each element = 4, 16 elements → 64
 
+        // --- Batch matmul: 2 batches of [2x2] * [2x2] ---
+        // Batch 0: A=[[1,2],[3,4]] B=[[5,6],[7,8]] → C=[[19,22],[43,50]] sum=134
+        // Batch 1: A=[[1,0],[0,1]] B=[[2,3],[4,5]] → C=[[2,3],[4,5]]   sum=14
+        var batchA = gpu.createBuffer(Tensor.fromArray([
+            1.0, 2.0, 3.0, 4.0,  // batch 0
+            1.0, 0.0, 0.0, 1.0   // batch 1 (identity)
+        ], F32));
+        var batchB = gpu.createBuffer(Tensor.fromArray([
+            5.0, 6.0, 7.0, 8.0,  // batch 0
+            2.0, 3.0, 4.0, 5.0   // batch 1
+        ], F32));
+        var batchC = gpu.batchMatmul(batchA, batchB, 2, 2, 2, 2);
+        check("batch_matmul_sum", gpu.sum(batchC), 148.0);  // 134 + 14
+
         // Cleanup
         gpu.freeBuffer(a);
         gpu.freeBuffer(b);

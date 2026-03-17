@@ -33,6 +33,9 @@ pub fn kernel_fn_name(op: KernelOp, dtype: u8) -> String {
     if op == KernelOp::Matmul {
         return super::msl_matmul::matmul_fn_name(dtype);
     }
+    if op == KernelOp::BatchMatmul {
+        return super::msl_matmul::batch_matmul_fn_name(dtype);
+    }
     format!("rayzor_{}_{}", op.name(), dtype_to_msl(dtype))
 }
 
@@ -104,6 +107,9 @@ pub fn emit_kernel(op: KernelOp, dtype: u8) -> String {
     }
     if op == KernelOp::Matmul {
         return super::msl_matmul::emit_matmul(dtype);
+    }
+    if op == KernelOp::BatchMatmul {
+        return super::msl_matmul::emit_batch_matmul(dtype);
     }
     match op.input_count() {
         2 => emit_binary_elementwise(op, dtype),

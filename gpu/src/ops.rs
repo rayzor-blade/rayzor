@@ -550,6 +550,162 @@ pub unsafe extern "C" fn rayzor_gpu_compute_matmul(
 }
 
 // ---------------------------------------------------------------------------
+// Extern C API — Batch Matmul: (ctx, a, b, batch, m, k, n) -> GpuBuffer handle
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_compute_batch_matmul(
+    ctx: i64,
+    a: i64,
+    b: i64,
+    batch: i64,
+    m: i64,
+    k: i64,
+    n: i64,
+) -> i64 {
+    batch_matmul_impl(ctx, a, b, batch as usize, m as usize, k as usize, n as usize)
+}
+
+unsafe fn batch_matmul_impl(
+    ctx: i64,
+    a: i64,
+    b: i64,
+    batch: usize,
+    m: usize,
+    k: usize,
+    n: usize,
+) -> i64 {
+    if ctx == 0 || a == 0 || b == 0 || batch == 0 || m == 0 || k == 0 || n == 0 {
+        return 0;
+    }
+
+    let gpu_ctx = &mut *(ctx as *mut GpuContext);
+    let a_buf = &mut *(a as *mut GpuBuffer);
+    let b_buf = &mut *(b as *mut GpuBuffer);
+    if a_buf.ensure_materialized(gpu_ctx).is_err() {
+        return 0;
+    }
+    if b_buf.ensure_materialized(gpu_ctx).is_err() {
+        return 0;
+    }
+
+    let dtype = a_buf.dtype;
+    let cached = match gpu_ctx
+        .kernel_cache
+        .get_or_compile(&gpu_ctx.inner, KernelOp::BatchMatmul, dtype)
+    {
+        Ok(k) => k,
+        Err(_) => return 0,
+    };
+
+    let elem_size = buffer::dtype_byte_size(dtype);
+
+    match batch_matmul_dispatch(
+        &gpu_ctx.inner,
+        &cached.compiled,
+        a_buf.native_buffer(),
+        b_buf.native_buffer(),
+        batch,
+        m,
+        k,
+        n,
+        elem_size,
+    ) {
+        Ok(result_native) => {
+            let result = GpuBuffer::materialized(result_native, batch * m * n, dtype);
+            Box::into_raw(Box::new(result)) as i64
+        }
+        Err(_) => 0,
+    }
+}
+
+/// Backend-dispatch for batch matmul.
+#[allow(unused_variables, clippy::too_many_arguments)]
+fn batch_matmul_dispatch(
+    ctx: &NativeContext,
+    compiled: &NativeCompiledKernel,
+    a_buf: &Rc<NativeBuffer>,
+    b_buf: &Rc<NativeBuffer>,
+    batch: usize,
+    m: usize,
+    k: usize,
+    n: usize,
+    elem_size: usize,
+) -> Result<NativeBuffer, String> {
+    match (ctx, compiled) {
+        #[cfg(feature = "metal-backend")]
+        (NativeContext::Metal(metal_ctx), NativeCompiledKernel::Metal(kernel)) => {
+            use crate::metal::{buffer_ops::MetalBuffer, dispatch};
+            use objc2_metal::MTLSize;
+
+            let a_metal = match a_buf.as_ref() {
+                NativeBuffer::Metal(mb) => mb,
+                _ => return Err("a not Metal".into()),
+            };
+            let b_metal = match b_buf.as_ref() {
+                NativeBuffer::Metal(mb) => mb,
+                _ => return Err("b not Metal".into()),
+            };
+
+            let result_inner = MetalBuffer::allocate(metal_ctx, batch * m * n * elem_size)
+                .ok_or("failed to alloc result")?;
+            // dims = (M, K, N, B) — B in w component
+            let dims: [u32; 4] = [m as u32, k as u32, n as u32, batch as u32];
+            let dims_buf =
+                MetalBuffer::from_value(metal_ctx, &dims).ok_or("failed to alloc dims")?;
+
+            let threads_per_tg = 16usize;
+            dispatch::dispatch_threadgroups(
+                metal_ctx,
+                kernel,
+                &[a_metal, b_metal, &result_inner, &dims_buf],
+                MTLSize {
+                    width: n.div_ceil(threads_per_tg),
+                    height: m.div_ceil(threads_per_tg),
+                    depth: batch,
+                },
+                MTLSize {
+                    width: threads_per_tg,
+                    height: threads_per_tg,
+                    depth: 1,
+                },
+            )?;
+
+            Ok(NativeBuffer::Metal(result_inner))
+        }
+        #[cfg(feature = "webgpu-backend")]
+        (NativeContext::Wgpu(wgpu_ctx), NativeCompiledKernel::Wgpu(kernel)) => {
+            use crate::wgpu_backend::{buffer_ops::WgpuBuffer, dispatch};
+
+            let a_wgpu = match a_buf.as_ref() {
+                NativeBuffer::Wgpu(wb) => wb,
+                _ => return Err("a not wgpu".into()),
+            };
+            let b_wgpu = match b_buf.as_ref() {
+                NativeBuffer::Wgpu(wb) => wb,
+                _ => return Err("b not wgpu".into()),
+            };
+
+            let result_inner =
+                WgpuBuffer::allocate(wgpu_ctx, batch * m * n * elem_size).ok_or("alloc failed")?;
+            let dims: [u32; 4] = [m as u32, k as u32, n as u32, batch as u32];
+            let dims_buf = WgpuBuffer::from_value(wgpu_ctx, &dims).ok_or("dims alloc failed")?;
+
+            let tg = 16usize;
+            dispatch::dispatch_workgroups(
+                wgpu_ctx,
+                kernel,
+                &[a_wgpu, b_wgpu, &result_inner, &dims_buf],
+                [n.div_ceil(tg) as u32, m.div_ceil(tg) as u32, batch as u32],
+            )?;
+
+            Ok(NativeBuffer::Wgpu(result_inner))
+        }
+        _ => Err("no matching backend for batch matmul".into()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

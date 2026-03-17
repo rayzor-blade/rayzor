@@ -127,6 +127,10 @@ extern class GPUCompute {
     @:native("gpu_compute_matmul")
     public function matmul(a:GpuBuffer, b:GpuBuffer, m:Int, k:Int, n:Int):GpuBuffer;
 
+    /** Batched matrix multiplication: C[b](M×N) = A[b](M×K) × B[b](K×N) for b in 0..batch. */
+    @:native("gpu_compute_batchMatmul")
+    public function batchMatmul(a:GpuBuffer, b:GpuBuffer, batch:Int, m:Int, k:Int, n:Int):GpuBuffer;
+
     // -- Structured buffer ops (@:gpuStruct) -----------------------------------
 
     /** Create a GPU buffer from an array of @:gpuStruct instances. */
