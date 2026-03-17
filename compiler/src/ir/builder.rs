@@ -258,12 +258,12 @@ impl IrBuilder {
         let right_ty = self.get_register_type(right);
         let (left, right) = match (&left_ty, &right_ty) {
             (Some(l), Some(r)) if l.is_integer() && r.is_float() => {
-                let cast = self.build_cast(left, l.clone(), r.clone())
-                    .unwrap_or(left);
+                let cast = self.build_cast(left, l.clone(), r.clone()).unwrap_or(left);
                 (cast, right)
             }
             (Some(l), Some(r)) if l.is_float() && r.is_integer() => {
-                let cast = self.build_cast(right, r.clone(), l.clone())
+                let cast = self
+                    .build_cast(right, r.clone(), l.clone())
                     .unwrap_or(right);
                 (left, cast)
             }
@@ -357,12 +357,11 @@ impl IrBuilder {
         for (i, arg_id) in final_args.iter_mut().enumerate() {
             if let Some(param_ty) = param_types.get(i) {
                 // Use register type if available, fall back to function locals
-                let arg_ty_opt = self.get_register_type(*arg_id)
-                    .or_else(|| {
-                        self.current_function()
-                            .and_then(|f| f.locals.get(arg_id))
-                            .map(|l| l.ty.clone())
-                    });
+                let arg_ty_opt = self.get_register_type(*arg_id).or_else(|| {
+                    self.current_function()
+                        .and_then(|f| f.locals.get(arg_id))
+                        .map(|l| l.ty.clone())
+                });
                 if let Some(arg_ty) = arg_ty_opt {
                     let needs_cast = matches!(
                         (&arg_ty, param_ty),
