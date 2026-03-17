@@ -73,7 +73,10 @@ fn emit_op(
             let idx = ptr_to_idx[&ptr];
             format!("in{idx}[id]")
         }
-        LazyOp::Unary { op: kernel_op, input } => {
+        LazyOp::Unary {
+            op: kernel_op,
+            input,
+        } => {
             let input_expr = emit_op(input, cuda_type, ptr_to_idx, counter, lines);
             let var = format!("v{counter}");
             *counter += 1;
@@ -95,7 +98,11 @@ fn emit_op(
             lines.push(format!("    {cuda_type} {var} = {expr};"));
             var
         }
-        LazyOp::Binary { op: kernel_op, lhs, rhs } => {
+        LazyOp::Binary {
+            op: kernel_op,
+            lhs,
+            rhs,
+        } => {
             let lhs_expr = emit_op(lhs, cuda_type, ptr_to_idx, counter, lines);
             let rhs_expr = emit_op(rhs, cuda_type, ptr_to_idx, counter, lines);
             let var = format!("v{counter}");
@@ -109,7 +116,9 @@ fn emit_op(
                 _ => unreachable!("not a binary op: {:?}", kernel_op),
             };
 
-            lines.push(format!("    {cuda_type} {var} = {lhs_expr} {op_str} {rhs_expr};"));
+            lines.push(format!(
+                "    {cuda_type} {var} = {lhs_expr} {op_str} {rhs_expr};"
+            ));
             var
         }
     }
@@ -118,8 +127,8 @@ fn emit_op(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::DTYPE_F32;
     use crate::backend::NativeBuffer;
+    use crate::buffer::DTYPE_F32;
 
     #[test]
     fn test_fused_add_relu() {

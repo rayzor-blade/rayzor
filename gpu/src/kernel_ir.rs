@@ -44,8 +44,16 @@ impl KernelOp {
     pub fn input_count(self) -> usize {
         match self {
             Self::Add | Self::Sub | Self::Mul | Self::Div => 2,
-            Self::Neg | Self::Abs | Self::Sqrt | Self::Exp | Self::Log
-            | Self::Relu | Self::Sigmoid | Self::Tanh | Self::Gelu | Self::Silu => 1,
+            Self::Neg
+            | Self::Abs
+            | Self::Sqrt
+            | Self::Exp
+            | Self::Log
+            | Self::Relu
+            | Self::Sigmoid
+            | Self::Tanh
+            | Self::Gelu
+            | Self::Silu => 1,
             Self::ReduceSum | Self::ReduceMax | Self::ReduceMin => 1,
             Self::Matmul | Self::BatchMatmul => 2,
         }
