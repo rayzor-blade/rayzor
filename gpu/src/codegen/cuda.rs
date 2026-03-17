@@ -164,15 +164,13 @@ pub fn wrap_for_tcc(kernel_source: &str, fn_name: &str, num_inputs: usize) -> St
     runner_params.push("unsigned int numel".to_string());
     kernel_args.push("numel".to_string());
 
+    // Strip extern "C" linkage (C++ syntax, invalid in C)
+    let c_source = kernel_source.replace("extern \"C\" ", "");
+
     format!(
         r#"{stubs}
 
-// Strip extern "C" for TCC
-#define extern
-
-{kernel_source}
-
-#undef extern
+{c_source}
 
 // Runner: simulates grid launch by iterating threads
 void run_{fn_name}({params}, unsigned int block_size) {{
