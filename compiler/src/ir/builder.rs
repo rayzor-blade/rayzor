@@ -252,6 +252,24 @@ impl IrBuilder {
 
     /// Build a comparison operation
     pub fn build_cmp(&mut self, op: CompareOp, left: IrId, right: IrId) -> Option<IrId> {
+        // Coerce mixed int/float operands: promote int → float for correct comparison.
+        // e.g., `arr.length == 3.0` where length is I32 and 3.0 is F64.
+        let left_ty = self.get_register_type(left);
+        let right_ty = self.get_register_type(right);
+        let (left, right) = match (&left_ty, &right_ty) {
+            (Some(l), Some(r)) if l.is_integer() && r.is_float() => {
+                let cast = self.build_cast(left, l.clone(), r.clone())
+                    .unwrap_or(left);
+                (cast, right)
+            }
+            (Some(l), Some(r)) if l.is_float() && r.is_integer() => {
+                let cast = self.build_cast(right, r.clone(), l.clone())
+                    .unwrap_or(right);
+                (left, cast)
+            }
+            _ => (left, right),
+        };
+
         let dest = self.alloc_reg()?;
         // Comparisons always return Bool
         self.set_register_type(dest, IrType::Bool);
