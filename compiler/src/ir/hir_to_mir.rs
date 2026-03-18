@@ -24248,7 +24248,7 @@ impl<'a> HirToMirContext<'a> {
         // Look up the field index from our field_index_map
         // Also get the actual field type from the symbol table, NOT from the passed-in field_ty
         // which may be Dynamic due to unresolved type parameters
-        let (_, field_index, actual_field_type) = match self.field_index_map.get(&field) {
+        let (resolved_class_ty, field_index, actual_field_type) = match self.field_index_map.get(&field) {
             Some(&(class_ty, idx)) => {
                 // Get the actual field type from the symbol table
                 let sym_type = self
@@ -24313,31 +24313,19 @@ impl<'a> HirToMirContext<'a> {
         let field_ir_ty = self.convert_type(actual_field_type);
 
         // Build struct context for typed field access in backends.
-        // Try direct SymbolId lookup first; fall back to name-based search
-        // (SymbolIds may differ across compilation contexts).
-        let struct_ctx = self
-            .field_class_names
-            .get(&field)
-            .cloned()
-            .or_else(|| {
-                // Fallback: find by matching field name in field_class_names
-                let target_name = self.symbol_table.get_symbol(field).map(|s| s.name)?;
-                self.field_class_names.iter().find_map(|(sym_id, class_name)| {
-                    let sym = self.symbol_table.get_symbol(*sym_id)?;
-                    if sym.name == target_name {
-                        Some(class_name.clone())
-                    } else {
-                        None
-                    }
-                })
+        // Use resolved_class_ty from the field_index_map lookup (already resolved above).
+        let struct_ctx = {
+            let class_sym = self.class_type_to_symbol.get(&resolved_class_ty);
+            let class_name = class_sym
+                .and_then(|sym_id| self.symbol_table.get_symbol(*sym_id))
+                .and_then(|sym| self.string_interner.get(sym.name))
+                .map(|s| s.to_string());
+            class_name.map(|cn| crate::ir::instructions::StructFieldRef {
+                struct_name: cn,
+                field_name: field_name.to_string(),
+                field_index: field_index as u32,
             })
-            .map(|class_name| {
-                crate::ir::instructions::StructFieldRef {
-                    struct_name: class_name,
-                    field_name: field_name.to_string(),
-                    field_index: field_index as u32,
-                }
-            });
+        };
 
         // Use GetElementPtr to get pointer to the field
         let field_ptr = self
