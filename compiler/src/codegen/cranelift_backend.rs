@@ -2114,20 +2114,14 @@ impl CraneliftBackend {
                 value_map.insert(*dest, value);
             }
 
-            IrInstruction::Store { ptr, value, .. } => {
-                // Widen narrow integer values when storing to wide struct field slots.
-                // All Rayzor object fields are 8-byte slots (elem_size = 8). When an
-                // i32 value is stored to a GEP-derived pointer (struct field), only 4
-                // bytes are written, leaving upper bytes uninitialized. This causes
-                // corruption when the field is later loaded as i64 (generic type params).
-                // We detect GEP targets via register_types: GEP results have Ptr(elem_ty).
-                // Widen i32/i16/i8 stores to ALL struct field pointers (any Ptr type except Ptr(U8)/Ptr(I8)).
-                // All Rayzor object field slots are 8 bytes, so we must store 8 bytes to avoid
-                // leaving upper bytes uninitialized, which causes garbage reads when loaded as i32
-                // from unzeroed malloc memory with adjacent pointer fields.
-                let needs_widen = if let Some(ptr_ty) = function.register_types.get(ptr) {
+            IrInstruction::Store { ptr, value, store_ty, .. } => {
+                // Determine if this is a struct field store that needs widening.
+                // All Rayzor object fields are 8-byte slots. Narrow integer stores
+                // (i32/i16/i8) must be widened to i64 to avoid leaving upper bytes
+                // uninitialized. But f64 stores are already 8 bytes — they should
+                // NOT be widened through i64, keeping values in XMM registers.
+                let is_struct_field = if let Some(ptr_ty) = function.register_types.get(ptr) {
                     if let IrType::Ptr(inner) = ptr_ty {
-                        // Don't widen for byte-pointer stores (Ptr(U8)/Ptr(I8)) which are byte-addressed
                         !matches!(inner.as_ref(), IrType::U8 | IrType::I8)
                     } else {
                         false
@@ -2135,13 +2129,22 @@ impl CraneliftBackend {
                 } else {
                     false
                 };
-                if needs_widen {
+                if is_struct_field {
                     let val = *value_map.get(value).ok_or("Store: value not found")?;
                     let ptr_val = *value_map.get(ptr).ok_or("Store: ptr not found")?;
                     let val_ty = builder.func.dfg.value_type(val);
-                    let val = if val_ty.bits() < 64 && val_ty.is_int() {
+
+                    // Check if the store type is known to be f64 — keep in XMM register
+                    let is_float_field = matches!(
+                        store_ty,
+                        Some(IrType::F64) | Some(IrType::F32)
+                    ) || val_ty.is_float();
+
+                    let val = if val_ty.bits() < 64 && val_ty.is_int() && !is_float_field {
+                        // Widen narrow integers to fill 8-byte slot
                         builder.ins().sextend(types::I64, val)
                     } else {
+                        // f64/f32 are already correct width — store directly
                         val
                     };
                     let flags = MemFlags::new().with_aligned().with_notrap();

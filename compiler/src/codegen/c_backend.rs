@@ -29,6 +29,8 @@ pub struct CBackend {
     emitted_functions: HashSet<IrFunctionId>,
     /// Global variable declarations needed.
     used_globals: BTreeSet<IrGlobalId>,
+    /// Struct definitions that have been emitted (struct_name → field names).
+    emitted_structs: HashMap<String, Vec<String>>,
 }
 
 impl CBackend {
@@ -40,6 +42,7 @@ impl CBackend {
             declared_externs: HashSet::new(),
             emitted_functions: HashSet::new(),
             used_globals: BTreeSet::new(),
+            emitted_structs: HashMap::new(),
         }
     }
 
@@ -63,6 +66,9 @@ impl CBackend {
 
         // Phase 3: Emit extern declarations for runtime functions
         backend.emit_extern_declarations(modules);
+
+        // Phase 3b: Emit C struct definitions from IrTypeDef
+        backend.emit_struct_definitions(modules);
 
         // Phase 4: Emit forward declarations for all internal functions
         backend.emit_forward_declarations(modules);
@@ -329,6 +335,82 @@ impl CBackend {
         }
 
         self.emit_line("");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 3b: Struct definitions from IrTypeDef
+    // -----------------------------------------------------------------------
+
+    fn emit_struct_definitions(&mut self, modules: &[IrModule]) {
+        use crate::ir::modules::IrTypeDefinition;
+
+        self.emit_line("/* Struct definitions */");
+
+        for module in modules {
+            for typedef in module.types.values() {
+                if let IrTypeDefinition::Struct { fields, .. } = &typedef.definition {
+                    let name = Self::sanitize_name(&typedef.name);
+                    if self.emitted_structs.contains_key(&name) || fields.is_empty() {
+                        continue;
+                    }
+
+                    // All fields are 8-byte slots in Rayzor's object model.
+                    // Emit each field as its native C type, padded to 8 bytes via union.
+                    self.emit_line(&format!("typedef struct {} {{", name));
+                    self.indent += 1;
+
+                    let mut field_names = Vec::new();
+                    for (i, field) in fields.iter().enumerate() {
+                        let field_name = if field.name.is_empty() {
+                            format!("_f{}", i)
+                        } else {
+                            Self::sanitize_name(&field.name)
+                        };
+                        let c_type = Self::struct_field_c_type(&field.ty);
+                        // Use union to ensure 8-byte alignment for narrow types
+                        if matches!(field.ty, IrType::F64 | IrType::I64 | IrType::U64)
+                            || matches!(&field.ty, IrType::Ptr(_) | IrType::String | IrType::Any)
+                        {
+                            self.emit_line(&format!("{} {};", c_type, field_name));
+                        } else {
+                            // Narrow types: use union for 8-byte slot
+                            self.emit_line(&format!(
+                                "union {{ {} {}; i64 _{}_pad; }};",
+                                c_type, field_name, field_name
+                            ));
+                        }
+                        field_names.push(field_name);
+                    }
+
+                    self.indent -= 1;
+                    self.emit_line(&format!("}} {};", name));
+                    self.emit_line("");
+
+                    self.emitted_structs.insert(name, field_names);
+                }
+            }
+        }
+        self.emit_line("");
+    }
+
+    /// Map IrType to C type for struct field declarations.
+    fn struct_field_c_type(ty: &IrType) -> &'static str {
+        match ty {
+            IrType::Bool => "i8",
+            IrType::I8 => "i8",
+            IrType::I16 => "i16",
+            IrType::I32 => "i32",
+            IrType::I64 => "i64",
+            IrType::U8 => "u8",
+            IrType::U16 => "u16",
+            IrType::U32 => "u32",
+            IrType::U64 => "u64",
+            IrType::F32 => "float",
+            IrType::F64 => "double",
+            IrType::Ptr(_) | IrType::Ref(_) | IrType::String | IrType::Function { .. } => "void*",
+            IrType::Any => "i64",
+            _ => "i64",
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -689,9 +771,31 @@ impl CBackend {
                 ptr,
                 indices,
                 ty,
-                ..
+                struct_context,
             } => {
-                // Determine element size: 8 for struct fields, 1 for byte pointers
+                // If we have struct context AND the struct is emitted, use typed field access
+                let used_struct_access = if let Some(ctx) = struct_context {
+                    if self.emitted_structs.contains_key(&ctx.struct_name) {
+                        let field_name = Self::sanitize_name(&ctx.field_name);
+                        self.emit_line(&format!(
+                            "r{} = (void*)&(({} *)r{})->{};",
+                            dest.as_u32(),
+                            ctx.struct_name,
+                            ptr.as_u32(),
+                            field_name
+                        ));
+                        true
+                    } else {
+                        false
+                    }
+                } else {
+                    false
+                };
+
+                if used_struct_access {
+                    // Already emitted typed field access
+                } else {
+                // Fallback: generic pointer arithmetic
                 let elem_size = match ty {
                     IrType::Ptr(inner) => match inner.as_ref() {
                         IrType::U8 | IrType::I8 => 1,
@@ -705,14 +809,7 @@ impl CBackend {
                         .get(dest)
                         .map(|t| Self::type_to_c(t))
                         .unwrap_or_else(|| "void*".to_string());
-                    let idx_cast = if matches!(
-                        function.register_types.get(idx),
-                        Some(IrType::I32 | IrType::U32)
-                    ) {
-                        format!("(intptr_t)r{}", idx.as_u32())
-                    } else {
-                        format!("(intptr_t)r{}", idx.as_u32())
-                    };
+                    let idx_cast = format!("(intptr_t)r{}", idx.as_u32());
                     if elem_size == 1 {
                         self.emit_line(&format!(
                             "r{} = ({})((char*)r{} + {});",
@@ -732,6 +829,7 @@ impl CBackend {
                         ));
                     }
                 }
+                } // close else { fallback }
             }
 
             IrInstruction::PtrAdd {

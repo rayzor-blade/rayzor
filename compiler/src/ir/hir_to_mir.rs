@@ -24312,14 +24312,32 @@ impl<'a> HirToMirContext<'a> {
         // Get the type of the field from the actual field symbol, NOT the Dynamic-typed field_ty
         let field_ir_ty = self.convert_type(actual_field_type);
 
-        // Build struct context for typed field access in backends
-        let struct_ctx = self.field_class_names.get(&field).map(|class_name| {
-            crate::ir::instructions::StructFieldRef {
-                struct_name: class_name.clone(),
-                field_name: field_name.to_string(),
-                field_index: field_index as u32,
-            }
-        });
+        // Build struct context for typed field access in backends.
+        // Try direct SymbolId lookup first; fall back to name-based search
+        // (SymbolIds may differ across compilation contexts).
+        let struct_ctx = self
+            .field_class_names
+            .get(&field)
+            .cloned()
+            .or_else(|| {
+                // Fallback: find by matching field name in field_class_names
+                let target_name = self.symbol_table.get_symbol(field).map(|s| s.name)?;
+                self.field_class_names.iter().find_map(|(sym_id, class_name)| {
+                    let sym = self.symbol_table.get_symbol(*sym_id)?;
+                    if sym.name == target_name {
+                        Some(class_name.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .map(|class_name| {
+                crate::ir::instructions::StructFieldRef {
+                    struct_name: class_name,
+                    field_name: field_name.to_string(),
+                    field_index: field_index as u32,
+                }
+            });
 
         // Use GetElementPtr to get pointer to the field
         let field_ptr = self
