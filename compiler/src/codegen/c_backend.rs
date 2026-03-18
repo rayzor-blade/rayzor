@@ -804,20 +804,21 @@ impl CBackend {
                     args.iter().map(|a| format!("r{}", a.as_u32())).collect();
 
                 if let Some(d) = dest {
-                    // Determine destination type for proper cast
                     let dest_ty = function.register_types.get(d);
                     let dest_c = dest_ty
                         .map(|t| Self::type_to_c(t))
                         .unwrap_or_else(|| "i64".to_string());
-                    // Cast the return value to the destination type
-                    // This handles void*→i64, int→void*, etc.
-                    self.emit_line(&format!(
-                        "r{} = ({}){}({});",
-                        d.as_u32(),
-                        dest_c,
-                        c_name,
-                        args_str.join(", ")
-                    ));
+                    if dest_c == "void" {
+                        self.emit_line(&format!("{}({});", c_name, args_str.join(", ")));
+                    } else {
+                        self.emit_line(&format!(
+                            "r{} = ({}){}({});",
+                            d.as_u32(),
+                            dest_c,
+                            c_name,
+                            args_str.join(", ")
+                        ));
+                    }
                 } else {
                     self.emit_line(&format!("{}({});", c_name, args_str.join(", ")));
                 }
@@ -864,12 +865,17 @@ impl CBackend {
                     func_ptr.as_u32()
                 );
                 if let Some(d) = dest {
-                    self.emit_line(&format!(
-                        "r{} = {}({});",
-                        d.as_u32(),
-                        fptr_cast,
-                        args_str.join(", ")
-                    ));
+                    if ret_type == "void" {
+                        // Void return — don't assign
+                        self.emit_line(&format!("{}({});", fptr_cast, args_str.join(", ")));
+                    } else {
+                        self.emit_line(&format!(
+                            "r{} = {}({});",
+                            d.as_u32(),
+                            fptr_cast,
+                            args_str.join(", ")
+                        ));
+                    }
                 } else {
                     self.emit_line(&format!("{}({});", fptr_cast, args_str.join(", ")));
                 }
