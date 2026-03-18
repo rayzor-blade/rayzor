@@ -628,8 +628,6 @@ fn replace_with_inline_access(function: &mut IrFunction, site: &ArrayGetCallSite
 
     // Allocate intermediate registers
     let data_ptr_reg = function.alloc_reg();
-    let off24_reg = function.alloc_reg();
-    let es_ptr_reg = function.alloc_reg();
     let elem_size_reg = function.alloc_reg();
     let idx_i64_reg = function.alloc_reg();
     let byte_off_reg = function.alloc_reg();
@@ -637,13 +635,15 @@ fn replace_with_inline_access(function: &mut IrFunction, site: &ArrayGetCallSite
 
     // Register types for all new registers so backends can look them up
     function.register_types.insert(data_ptr_reg, IrType::I64);
-    function.register_types.insert(off24_reg, IrType::I64);
-    function.register_types.insert(es_ptr_reg, IrType::I64);
     function.register_types.insert(elem_size_reg, IrType::I64);
     function.register_types.insert(idx_i64_reg, IrType::I64);
     function.register_types.insert(byte_off_reg, IrType::I64);
     function.register_types.insert(dest, IrType::I64);
 
+    // All Haxe array elements are 8 bytes (i64/f64/pointer slots).
+    // Hardcode elem_size = 8 instead of loading it from the array struct
+    // at runtime. This eliminates 2 instructions (GEP + Load for offset 24)
+    // and lets LICM hoist just the data_ptr load out of the loop.
     let replacement = vec![
         // $data_ptr = Load($arr, I64)  — arr.ptr is at offset 0, loaded as integer
         IrInstruction::Load {
@@ -651,24 +651,10 @@ fn replace_with_inline_access(function: &mut IrFunction, site: &ArrayGetCallSite
             ptr: arr,
             ty: IrType::I64,
         },
-        // $off24 = Const(I64(24))
+        // $elem_size = Const(8)  — all Haxe array elements are 8-byte slots
         IrInstruction::Const {
-            dest: off24_reg,
-            value: IrValue::I64(24),
-        },
-        // $es_ptr = GEP($arr, [$off24], Ptr<U8>)  — byte-addressed GEP for arr + 24
-        IrInstruction::GetElementPtr {
-            dest: es_ptr_reg,
-            ptr: arr,
-            indices: vec![off24_reg],
-            ty: IrType::Ptr(Box::new(IrType::U8)),
-            struct_context: None,
-        },
-        // $elem_size = Load($es_ptr, I64)  — arr.elem_size at offset 24
-        IrInstruction::Load {
             dest: elem_size_reg,
-            ptr: es_ptr_reg,
-            ty: IrType::I64,
+            value: IrValue::I64(8),
         },
         // $idx_i64 = Cast($idx, I32 → I64)  — ensure index is i64 (phi may be i32)
         IrInstruction::Cast {
