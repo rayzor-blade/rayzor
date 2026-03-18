@@ -2,7 +2,7 @@ name: Benchmarks
 
 on:
   push:
-    branches: [main, explore/tinycc-tiered-aot]
+    branches: [main, explore/tinycc-tiered-aot, perf/fastcall-x64-fib-ci]
   workflow_dispatch:
 
 env:
