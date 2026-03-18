@@ -2,7 +2,7 @@
 
 use super::buffer_ops::CudaBuffer;
 use super::compile::CudaCompiledKernel;
-use super::device_init::{CUDA_SUCCESS, CUresult, CudaContext};
+use super::device_init::{CUresult, CudaContext, CUDA_SUCCESS};
 
 type CUstream = *mut std::ffi::c_void;
 

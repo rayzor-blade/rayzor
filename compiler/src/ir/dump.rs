@@ -182,7 +182,7 @@ pub fn dump_instruction(inst: &IrInstruction) -> String {
         IrInstruction::Load { dest, ptr, ty } => {
             format!("{} = load {} {}", dest, dump_type(ty), ptr)
         }
-        IrInstruction::Store { ptr, value } => {
+        IrInstruction::Store { ptr, value, .. } => {
             format!("store {}, {}", ptr, value)
         }
         IrInstruction::Alloc { dest, ty, count } => {
@@ -200,6 +200,7 @@ pub fn dump_instruction(inst: &IrInstruction) -> String {
             ptr,
             indices,
             ty,
+            ..
         } => {
             let idx_str: Vec<String> = indices.iter().map(|i| format!("{}", i)).collect();
             format!(

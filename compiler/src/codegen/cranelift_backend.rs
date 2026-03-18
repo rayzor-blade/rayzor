@@ -2114,7 +2114,7 @@ impl CraneliftBackend {
                 value_map.insert(*dest, value);
             }
 
-            IrInstruction::Store { ptr, value } => {
+            IrInstruction::Store { ptr, value, .. } => {
                 // Widen narrow integer values when storing to wide struct field slots.
                 // All Rayzor object fields are 8-byte slots (elem_size = 8). When an
                 // i32 value is stored to a GEP-derived pointer (struct field), only 4
@@ -3069,6 +3069,7 @@ impl CraneliftBackend {
                 ptr,
                 indices,
                 ty,
+                ..
             } => {
                 // Get Element Pointer - compute address of field within struct
                 // This is similar to LLVM's GEP instruction

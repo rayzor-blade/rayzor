@@ -662,6 +662,7 @@ fn replace_with_inline_access(function: &mut IrFunction, site: &ArrayGetCallSite
             ptr: arr,
             indices: vec![off24_reg],
             ty: IrType::Ptr(Box::new(IrType::U8)),
+            struct_context: None,
         },
         // $elem_size = Load($es_ptr, I64)  — arr.elem_size at offset 24
         IrInstruction::Load {

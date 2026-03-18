@@ -2153,7 +2153,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 }
             }
 
-            IrInstruction::Store { ptr, value } => {
+            IrInstruction::Store { ptr, value, .. } => {
                 let ptr_raw = self.get_value(*ptr)?;
                 // Handle case where pointer is stored as integer (from array element access)
                 let ptr_val = if ptr_raw.is_pointer_value() {

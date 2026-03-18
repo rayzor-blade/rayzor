@@ -199,7 +199,7 @@ impl IrBuilder {
 
     /// Build a store instruction
     pub fn build_store(&mut self, ptr: IrId, value: IrId) -> Option<()> {
-        self.add_instruction(IrInstruction::Store { ptr, value })
+        self.add_instruction(IrInstruction::Store { ptr, value, store_ty: None })
     }
 
     /// Build a load from global variable
@@ -679,6 +679,7 @@ impl IrBuilder {
             ptr,
             indices,
             ty,
+            struct_context: None,
         })?;
         Some(dest)
     }
