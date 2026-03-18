@@ -10,6 +10,7 @@ use super::{
     IrFunctionId, IrFunctionSignature, IrId, IrInstruction, IrLocal, IrModule, IrParameter,
     IrPhiNode, IrSourceLocation, IrTerminator, IrType, IrTypeParam, IrValue, UnaryOp,
 };
+use super::instructions::StructFieldRef;
 use crate::tast::SymbolId;
 use std::collections::HashMap;
 
@@ -197,9 +198,14 @@ impl IrBuilder {
         Some(dest)
     }
 
-    /// Build a store instruction
+    /// Build a store instruction. Infers store type from the value's register type.
     pub fn build_store(&mut self, ptr: IrId, value: IrId) -> Option<()> {
-        self.add_instruction(IrInstruction::Store { ptr, value, store_ty: None })
+        let store_ty = self.get_register_type(value);
+        self.add_instruction(IrInstruction::Store {
+            ptr,
+            value,
+            store_ty,
+        })
     }
 
     /// Build a load from global variable
@@ -670,6 +676,17 @@ impl IrBuilder {
 
     /// Build a GEP (get element pointer) instruction
     pub fn build_gep(&mut self, ptr: IrId, indices: Vec<IrId>, ty: IrType) -> Option<IrId> {
+        self.build_gep_with_context(ptr, indices, ty, None)
+    }
+
+    /// Build a GEP with struct field context for typed access in backends.
+    pub fn build_gep_with_context(
+        &mut self,
+        ptr: IrId,
+        indices: Vec<IrId>,
+        ty: IrType,
+        struct_context: Option<StructFieldRef>,
+    ) -> Option<IrId> {
         let dest = self.alloc_reg()?;
         // Track GEP result type as Ptr(element_type) so downstream Store handlers
         // can widen narrow values to match the slot width (e.g., i32 → i64 for generic fields).
@@ -679,7 +696,7 @@ impl IrBuilder {
             ptr,
             indices,
             ty,
-            struct_context: None,
+            struct_context,
         })?;
         Some(dest)
     }

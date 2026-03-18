@@ -22698,10 +22698,20 @@ impl<'a> HirToMirContext<'a> {
                                     IrType::I32
                                 });
 
+                            // Build struct context for typed field access
+                            let store_struct_ctx = self.field_class_names.get(field).map(|cn| {
+                                crate::ir::instructions::StructFieldRef {
+                                    struct_name: cn.clone(),
+                                    field_name: self.symbol_table.get_symbol(*field)
+                                        .and_then(|s| self.string_interner.get(s.name))
+                                        .unwrap_or("<unknown>").to_string(),
+                                    field_index: field_index as u32,
+                                }
+                            });
                             // Use GEP to get field pointer, then store
                             if let Some(field_ptr) =
                                 self.builder
-                                    .build_gep(obj_reg, vec![index_const], field_ty.clone())
+                                    .build_gep_with_context(obj_reg, vec![index_const], field_ty.clone(), store_struct_ctx)
                             {
                                 // Type erasure coercion: if field is I64 (erased type param)
                                 // but value is a concrete type, coerce before storing
@@ -24302,10 +24312,19 @@ impl<'a> HirToMirContext<'a> {
         // Get the type of the field from the actual field symbol, NOT the Dynamic-typed field_ty
         let field_ir_ty = self.convert_type(actual_field_type);
 
+        // Build struct context for typed field access in backends
+        let struct_ctx = self.field_class_names.get(&field).map(|class_name| {
+            crate::ir::instructions::StructFieldRef {
+                struct_name: class_name.clone(),
+                field_name: field_name.to_string(),
+                field_index: field_index as u32,
+            }
+        });
+
         // Use GetElementPtr to get pointer to the field
         let field_ptr = self
             .builder
-            .build_gep(obj, vec![index_const], field_ir_ty.clone())?;
+            .build_gep_with_context(obj, vec![index_const], field_ir_ty.clone(), struct_ctx)?;
 
         // Load the value from the field pointer
         let field_value = self.builder.build_load(field_ptr, field_ir_ty.clone())?;
