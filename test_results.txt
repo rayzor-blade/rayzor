@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Wed Mar 18 12:46:41 GMT 2026
+  Wed Mar 18 17:19:14 GMT 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -733,11 +733,11 @@ done
 0
 1
 2
-world
 hello
+world
 30
-20
 10
+20
 done
 ✓ Complete
 
@@ -933,7 +933,7 @@ done
 99
 true
 false
-{2 => 200, 1 => 100}
+{1 => 100, 2 => 200}
 100
 200
 true
