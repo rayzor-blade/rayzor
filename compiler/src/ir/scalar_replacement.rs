@@ -408,6 +408,7 @@ fn try_build_phi_candidate(
                     ptr,
                     indices,
                     ty,
+                    ..
                 } = inst
                 {
                     if all_tracked.contains(dest) {
@@ -523,7 +524,7 @@ fn try_build_phi_candidate(
 
         for (inst_idx, inst) in block.instructions.iter().enumerate() {
             match inst {
-                IrInstruction::Store { ptr, value } => {
+                IrInstruction::Store { ptr, value, .. } => {
                     // Check if storing to a tracked GEP
                     if all_tracked.contains(ptr) {
                         if all_tracked.contains(value) {
@@ -870,7 +871,7 @@ fn apply_phi_sra(function: &mut IrFunction, candidate: &PhiSraCandidate) -> usiz
                     continue; // skip blocks outside the loop
                 }
                 for inst in &block.instructions {
-                    if let IrInstruction::Store { ptr, value } = inst {
+                    if let IrInstruction::Store { ptr, value, .. } = inst {
                         if phi_geps_for_field.contains(ptr) {
                             back_edge_values.insert(field_idx, *value);
                         }
@@ -1404,6 +1405,7 @@ fn try_build_candidate_function_wide(
                         ptr,
                         indices,
                         ty,
+                        ..
                     } if tracked.contains(ptr) && !tracked.contains(dest) => {
                         if let Some(field_idx) = resolve_gep_field_index(indices, constants) {
                             // Track ALL field indices including index 0 (__type_id header).
@@ -1502,7 +1504,7 @@ fn try_build_candidate_function_wide(
 
         for (inst_idx, inst) in block.instructions.iter().enumerate() {
             match inst {
-                IrInstruction::Store { ptr, value } => {
+                IrInstruction::Store { ptr, value, .. } => {
                     if tracked.contains(ptr) {
                         // Store to a tracked GEP field — OK only if value is NOT tracked
                         if tracked.contains(value) {
@@ -1753,7 +1755,7 @@ fn apply_sra(function: &mut IrFunction, candidate: &SraCandidate) -> usize {
         for (inst_idx, inst) in block.instructions.iter().enumerate() {
             match inst {
                 // Replace Store via GEP → Copy to field register
-                IrInstruction::Store { ptr, value } if candidate.gep_map.contains_key(ptr) => {
+                IrInstruction::Store { ptr, value, .. } if candidate.gep_map.contains_key(ptr) => {
                     let field_idx = candidate.gep_map[ptr];
                     if field_idx < candidate.num_fields {
                         let new_reg = IrId::new(function.next_reg_id);

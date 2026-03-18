@@ -487,7 +487,7 @@ impl LoopVectorizationPass {
                                 element_type: ty.clone(),
                             });
                         }
-                        IrInstruction::Store { ptr, value: _ } => {
+                        IrInstruction::Store { ptr, .. } => {
                             // Need to determine the type from context
                             accesses.push(MemoryAccess {
                                 instruction_id: inst_idx,
@@ -768,7 +768,7 @@ impl LoopVectorizationPass {
             }
 
             // Transform contiguous stores to vector stores
-            IrInstruction::Store { ptr, value }
+            IrInstruction::Store { ptr, value, .. }
                 if self.is_vectorizable_access(*ptr, vectorizable_accesses) =>
             {
                 IrInstruction::VectorStore {
@@ -1018,6 +1018,7 @@ impl LoopVectorizationPass {
             IrInstruction::VectorStore { ptr, value, .. } => Some(IrInstruction::Store {
                 ptr: *ptr,
                 value: *value,
+                store_ty: None,
             }),
             IrInstruction::VectorBinOp {
                 dest,
@@ -1076,9 +1077,10 @@ impl LoopVectorizationPass {
                 ptr: map_use(*ptr, reg_map),
                 ty: ty.clone(),
             },
-            IrInstruction::Store { ptr, value } => IrInstruction::Store {
+            IrInstruction::Store { ptr, value, store_ty, .. } => IrInstruction::Store {
                 ptr: map_use(*ptr, reg_map),
                 value: map_use(*value, reg_map),
+                store_ty: store_ty.clone(),
             },
             IrInstruction::BinOp {
                 dest,
@@ -1096,11 +1098,13 @@ impl LoopVectorizationPass {
                 ptr,
                 indices,
                 ty,
+                struct_context,
             } => IrInstruction::GetElementPtr {
                 dest: alloc_new(*dest, next_reg, reg_map, function),
                 ptr: map_use(*ptr, reg_map),
                 indices: indices.iter().map(|i| map_use(*i, reg_map)).collect(),
                 ty: ty.clone(),
+                struct_context: struct_context.clone(),
             },
             other => other.clone(),
         }

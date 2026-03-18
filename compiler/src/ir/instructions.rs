@@ -6,6 +6,18 @@
 use super::{IrFunctionId, IrGlobalId, IrId, IrSourceLocation, IrType, IrValue};
 use serde::{Deserialize, Serialize};
 
+/// Reference to a specific field within a struct type.
+/// Attached to GEP instructions for typed field access in backends.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StructFieldRef {
+    /// Name of the struct/class type (e.g., "Body", "Constraint")
+    pub struct_name: String,
+    /// Name of the field (e.g., "x", "mass")
+    pub field_name: String,
+    /// Field index in the struct layout (0-based, index 0 = __type_id header)
+    pub field_index: u32,
+}
+
 /// Ownership transfer semantics for values
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OwnershipMode {
@@ -72,7 +84,14 @@ pub enum IrInstruction {
     Load { dest: IrId, ptr: IrId, ty: IrType },
 
     /// Store value to memory
-    Store { ptr: IrId, value: IrId },
+    Store {
+        ptr: IrId,
+        value: IrId,
+        /// Optional store type (inferred from value's register type).
+        /// Enables backends to emit correctly-typed stores (f64 stays in XMM).
+        #[serde(default)]
+        store_ty: Option<IrType>,
+    },
 
     /// Load value from a global variable
     LoadGlobal {
@@ -173,6 +192,11 @@ pub enum IrInstruction {
         ptr: IrId,
         indices: Vec<IrId>,
         ty: IrType,
+        /// Optional struct context for typed field access.
+        /// Enables C backend to emit `body->x` instead of pointer arithmetic,
+        /// and LLVM backend to add TBAA metadata.
+        #[serde(default)]
+        struct_context: Option<StructFieldRef>,
     },
 
     /// Memory copy
@@ -588,7 +612,7 @@ impl IrInstruction {
         match self {
             IrInstruction::Copy { src, .. } => vec![*src],
             IrInstruction::Load { ptr, .. } => vec![*ptr],
-            IrInstruction::Store { ptr, value } => vec![*ptr, *value],
+            IrInstruction::Store { ptr, value, .. } => vec![*ptr, *value],
             IrInstruction::BinOp { left, right, .. } => vec![*left, *right],
             IrInstruction::UnOp { operand, .. } => vec![*operand],
             IrInstruction::Cmp { left, right, .. } => vec![*left, *right],

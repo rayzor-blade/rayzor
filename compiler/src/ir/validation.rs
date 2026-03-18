@@ -459,7 +459,7 @@ fn validate_instruction(ctx: &mut ValidationContext, inst: &IrInstruction) {
             ctx.define_register(*dest, ty.clone());
         }
 
-        Store { ptr, value } => {
+        Store { ptr, value, .. } => {
             let ptr_ty = ctx.use_register(*ptr).cloned();
             let val_ty = ctx.use_register(*value).cloned();
             if let (Some(ptr_ty), Some(val_ty)) = (ptr_ty, val_ty) {
@@ -848,7 +848,7 @@ impl<'a> MirSafetyValidator<'a> {
             }
 
             // Store operations: check both source and destination
-            Store { ptr, value } => {
+            Store { ptr, value, .. } => {
                 if let Some(&symbol_id) = self.register_to_symbol.get(value) {
                     self.check_not_moved(symbol_id, *value);
                 }

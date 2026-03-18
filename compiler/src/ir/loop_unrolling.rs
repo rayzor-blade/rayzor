@@ -618,9 +618,10 @@ fn remap_instruction(
             ptr: map_use(*ptr, reg_map),
             ty: ty.clone(),
         },
-        IrInstruction::Store { ptr, value } => IrInstruction::Store {
+        IrInstruction::Store { ptr, value, store_ty, .. } => IrInstruction::Store {
             ptr: map_use(*ptr, reg_map),
             value: map_use(*value, reg_map),
+            store_ty: store_ty.clone(),
         },
         IrInstruction::CallDirect {
             dest,
@@ -657,11 +658,13 @@ fn remap_instruction(
             ptr,
             indices,
             ty,
+            struct_context,
         } => IrInstruction::GetElementPtr {
             dest: alloc_new(*dest, next_reg, reg_map, register_types),
             ptr: map_use(*ptr, reg_map),
             indices: indices.iter().map(|i| map_use(*i, reg_map)).collect(),
             ty: ty.clone(),
+            struct_context: struct_context.clone(),
         },
         IrInstruction::Cast {
             dest,

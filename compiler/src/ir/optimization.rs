@@ -731,7 +731,7 @@ impl InstructionExt for IrInstruction {
         match self {
             IrInstruction::Copy { src, .. } => replace(src),
             IrInstruction::Load { ptr, .. } => replace(ptr),
-            IrInstruction::Store { ptr, value } => {
+            IrInstruction::Store { ptr, value, .. } => {
                 replace(ptr);
                 replace(value);
             }

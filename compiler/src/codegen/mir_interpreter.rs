@@ -1359,7 +1359,7 @@ impl MirInterpreter {
                 self.current_frame_mut().registers.set(*dest, boxed);
             }
 
-            IrInstruction::Store { ptr, value } => {
+            IrInstruction::Store { ptr, value, .. } => {
                 let ptr_val = self.current_frame().registers.get(*ptr);
                 let val = self.current_frame().registers.get(*value);
                 let ptr_interp = InterpValue::from_nan_boxed(ptr_val, &self.object_heap);
@@ -1414,6 +1414,7 @@ impl MirInterpreter {
                 ptr,
                 indices,
                 ty,
+                ..
             } => {
                 let ptr_val = self.current_frame().registers.get(*ptr);
                 let base_ptr = if ptr_val.is_ptr() {

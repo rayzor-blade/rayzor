@@ -592,7 +592,7 @@ impl CBackend {
                 }
             }
 
-            IrInstruction::Store { ptr, value } => {
+            IrInstruction::Store { ptr, value, .. } => {
                 let val_ty = function
                     .register_types
                     .get(value)
@@ -689,6 +689,7 @@ impl CBackend {
                 ptr,
                 indices,
                 ty,
+                ..
             } => {
                 // Determine element size: 8 for struct fields, 1 for byte pointers
                 let elem_size = match ty {
