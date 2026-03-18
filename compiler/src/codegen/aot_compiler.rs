@@ -734,9 +734,11 @@ impl AotCompiler {
             .map_err(|e| format!("Failed to write temp C source: {}", e))?;
 
         let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
-        // Cap at -O2 for large files to avoid gcc OOM on complex SSA-to-C output.
-        // gcc -O3 can use 4GB+ RAM on files with 1000+ line functions.
-        let opt_flag = if c_source.len() > 100_000 && self.opt_level == OptimizationLevel::O3 {
+        // Cap optimization for large C files to avoid gcc OOM.
+        // gcc -O2/-O3 can use 4GB+ RAM on files with 1000+ line functions.
+        let opt_flag = if c_source.len() > 150_000 {
+            "-O1" // Very large files: cap at O1 to prevent OOM
+        } else if c_source.len() > 100_000 && self.opt_level == OptimizationLevel::O3 {
             "-O2"
         } else {
             match self.opt_level {
