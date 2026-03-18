@@ -160,6 +160,10 @@ pub struct LLVMJitBackend<'ctx> {
     /// hidden environment parameter on known direct calls.
     direct_function_map: HashMap<IrFunctionId, FunctionValue<'ctx>>,
 
+    /// Functions that were declared without the hidden env parameter (AOT mode).
+    /// These functions are compiled and called without the env argument.
+    no_env_functions: std::collections::HashSet<IrFunctionId>,
+
     /// Maps MIR block IDs to LLVM basic blocks
     block_map: HashMap<IrBlockId, BasicBlock<'ctx>>,
 
@@ -256,6 +260,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             value_map: HashMap::new(),
             function_map: HashMap::new(),
             direct_function_map: HashMap::new(),
+            no_env_functions: std::collections::HashSet::new(),
             block_map: HashMap::new(),
             phi_map: HashMap::new(),
             function_pointers: HashMap::new(),
@@ -454,12 +459,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 self.compile_direct_wrapper(function, wrapper_func, direct_func)?;
             }
         } else {
-            self.compile_function_body(
-                func_id,
-                function,
-                wrapper_func,
-                !self.extern_function_ids.contains(&func_id),
-            )?;
+            let expects_env = !self.extern_function_ids.contains(&func_id)
+                && !self.no_env_functions.contains(&func_id);
+            self.compile_function_body(func_id, function, wrapper_func, expects_env)?;
         }
 
         // Create execution engine if not exists
@@ -1038,11 +1040,13 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     continue;
                 }
 
+                let expects_env = !self.extern_function_ids.contains(func_id)
+                    && !self.no_env_functions.contains(func_id);
                 self.compile_function_body(
                     *func_id,
                     function,
                     wrapper_func,
-                    !self.extern_function_ids.contains(func_id),
+                    expects_env,
                 )
                 .map_err(|e| {
                     format!(
@@ -1793,14 +1797,20 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         // Check if this function was already declared (from a previous module)
         // Reuse if it has basic blocks (was already compiled) AND signatures match
         if let Some(existing_func) = self.module.get_function(&func_name) {
-            let expected_type = self.build_function_type(function, true)?;
+            let include_env = !(self.aot_mode && Self::should_use_direct_entry(function));
+            let expected_type = self.build_function_type(function, include_env)?;
             let signatures_match =
                 format!("{:?}", expected_type) == format!("{:?}", existing_func.get_type());
 
             if signatures_match {
                 // Signatures match, safe to reuse
                 self.function_map.insert(func_id, existing_func);
-                self.ensure_direct_function(func_id, function, &func_name)?;
+                if !include_env {
+                    self.no_env_functions.insert(func_id);
+                }
+                if !self.aot_mode {
+                    self.ensure_direct_function(func_id, function, &func_name)?;
+                }
                 return Ok(existing_func);
             } else {
                 // Signature mismatch - this is a different function with same name
@@ -1808,7 +1818,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 let unique_name = format!("{}_{}", func_name, func_id.0);
                 if let Some(unique_func) = self.module.get_function(&unique_name) {
                     self.function_map.insert(func_id, unique_func);
-                    self.ensure_direct_function(func_id, function, &unique_name)?;
+                    if !self.aot_mode {
+                        self.ensure_direct_function(func_id, function, &unique_name)?;
+                    }
                     return Ok(unique_func);
                 }
                 // Fall through to create new function with unique name
@@ -1816,10 +1828,21 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             }
         }
 
-        let fn_type = self.build_function_type(function, true)?;
+        // In AOT mode, eligible functions are declared WITHOUT the hidden env
+        // parameter. All call sites are known at compile time so the wrapper is
+        // unnecessary and system opt can't undo it.
+        let needs_env = if self.aot_mode && Self::should_use_direct_entry(function) {
+            self.no_env_functions.insert(func_id);
+            false
+        } else {
+            true
+        };
+        let fn_type = self.build_function_type(function, needs_env)?;
         let llvm_func = self.module.add_function(&func_name, fn_type, None);
         self.function_map.insert(func_id, llvm_func);
-        self.ensure_direct_function(func_id, function, &func_name)?;
+        if !self.aot_mode {
+            self.ensure_direct_function(func_id, function, &func_name)?;
+        }
         Ok(llvm_func)
     }
 
@@ -1840,11 +1863,19 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         function: &IrFunction,
         func_name: &str,
     ) -> Result<FunctionValue<'ctx>, String> {
-        let fn_type = self.build_function_type(function, true)?;
+        let needs_env = if self.aot_mode && Self::should_use_direct_entry(function) {
+            self.no_env_functions.insert(func_id);
+            false
+        } else {
+            true
+        };
+        let fn_type = self.build_function_type(function, needs_env)?;
 
         let llvm_func = self.module.add_function(func_name, fn_type, None);
         self.function_map.insert(func_id, llvm_func);
-        self.ensure_direct_function(func_id, function, func_name)?;
+        if !self.aot_mode {
+            self.ensure_direct_function(func_id, function, func_name)?;
+        }
         Ok(llvm_func)
     }
 
