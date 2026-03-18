@@ -43,19 +43,19 @@
 //!   cargo run --release --package compiler --example benchmark_runner -- --json
 //!   cargo run --release --package compiler --example benchmark_runner -- fibonacci --disable-trace
 
+use compiler::codegen::tiered_backend::{TierPreset, TieredBackend, TieredConfig};
 use compiler::codegen::CraneliftBackend;
 use compiler::codegen::InterpValue;
-use compiler::codegen::tiered_backend::{TierPreset, TieredBackend, TieredConfig};
 use compiler::compilation::{CompilationConfig, CompilationUnit};
-use compiler::ir::optimization::{OptimizationLevel, PassManager, strip_stack_trace_updates};
-use compiler::ir::{IrFunctionId, IrModule, RayzorBundle, load_bundle};
+use compiler::ir::optimization::{strip_stack_trace_updates, OptimizationLevel, PassManager};
+use compiler::ir::{load_bundle, IrFunctionId, IrModule, RayzorBundle};
 
-#[cfg(feature = "llvm-backend")]
-use compiler::codegen::LLVMJitBackend;
 #[cfg(feature = "llvm-backend")]
 use compiler::codegen::init_llvm_once;
 #[cfg(feature = "llvm-backend")]
 use compiler::codegen::reset_llvm_global_state;
+#[cfg(feature = "llvm-backend")]
+use compiler::codegen::LLVMJitBackend;
 #[cfg(feature = "llvm-backend")]
 use inkwell::context::Context;
 use serde::{Deserialize, Serialize};
@@ -169,6 +169,16 @@ impl Target {
                 | Target::HaxeCpp
                 | Target::HaxeJvm
         )
+    }
+
+    fn warmup_runs(&self) -> usize {
+        match self {
+            // Tiered targets need persistent warmup to trigger tier promotion before
+            // the measured runs. The other targets either compile fresh each time or
+            // already run at their final tier, so warmup would only preheat the CPU.
+            Target::RayzorTiered | Target::RayzorPrecompiledTiered => WARMUP_RUNS,
+            _ => 0,
+        }
     }
 }
 
@@ -1003,6 +1013,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
     let symbols = get_runtime_symbols();
     let mut compile_times = Vec::new();
     let mut exec_times = Vec::new();
+    let warmup_runs = target.warmup_runs();
 
     // Set trace prefix so output lines are tagged with the target name
     rayzor_runtime::haxe_sys::set_trace_prefix(&format!("[{}] ", target.name()));
@@ -1014,7 +1025,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             let compile_time = state.compile_time;
 
             // Warmup - runs accumulate, triggering tier promotion
-            for _ in 0..WARMUP_RUNS {
+            for _ in 0..warmup_runs {
                 let _ = run_tiered_iteration(&mut state);
             }
 
@@ -1056,7 +1067,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             let compile_time = state.compile_time;
 
             // Warmup runs
-            for _ in 0..WARMUP_RUNS {
+            for _ in 0..warmup_runs {
                 let _ = run_llvm_iteration(&mut state);
             }
 
@@ -1078,7 +1089,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             let load_time = state.load_time;
 
             // Warmup runs (same compiled code, warm caches)
-            for _ in 0..WARMUP_RUNS {
+            for _ in 0..warmup_runs {
                 let _ = run_precompiled_iteration(&mut state);
             }
 
@@ -1100,7 +1111,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             let load_time = state.load_time;
 
             // Warmup - runs accumulate, triggering tier promotion
-            for _ in 0..WARMUP_RUNS {
+            for _ in 0..warmup_runs {
                 let _ = run_precompiled_tiered_iteration(&mut state);
             }
 
@@ -1178,7 +1189,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             let compile_time = compile_start.elapsed();
 
             // Warmup runs
-            for _ in 0..WARMUP_RUNS {
+            for _ in 0..warmup_runs {
                 let _ = Command::new(&binary_path).output();
             }
 
@@ -1202,7 +1213,7 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
 
         // Cranelift and Interpreter: each iteration is independent
         Target::RayzorCranelift | Target::RayzorInterpreter => {
-            for _ in 0..WARMUP_RUNS {
+            for _ in 0..warmup_runs {
                 let _ = match target {
                     Target::RayzorCranelift => run_benchmark_cranelift(bench, &symbols),
                     Target::RayzorInterpreter => run_benchmark_interpreter(bench, &symbols),
@@ -1459,8 +1470,8 @@ fn generate_chart_html(suite: &BenchmarkSuite) -> Result<(), String> {
     </div>
     <div class="summary">
         <h3>Methodology</h3>
-        <p>Each benchmark is run <strong>15 warmup iterations</strong> followed by <strong>10 measured iterations</strong>.
-        Compile time and execution time are measured separately. Results show the <strong>mean</strong> of measured iterations.</p>
+        <p>Tiered Rayzor targets use <strong>15 warmup iterations</strong> before <strong>10 measured iterations</strong> to trigger promotion.
+        Non-tiered targets run only the <strong>10 measured iterations</strong>. Compile time and execution time are measured separately. Results show the <strong>median</strong> of measured iterations.</p>
         <ul>
             <li><strong>rayzor-cranelift</strong> &mdash; Source &rarr; MIR (O2) &rarr; Cranelift JIT. Compile includes parsing, type-checking, MIR lowering, optimization, and JIT compilation.</li>
             <li><strong>rayzor-llvm</strong> &mdash; Source &rarr; MIR (O2) &rarr; LLVM MCJIT. Same frontend pipeline, LLVM backend for peak throughput.</li>
@@ -1678,7 +1689,7 @@ fn main() {
         all_targets.len()
     );
     println!(
-        "Warmup: {} runs, Benchmark: {} runs",
+        "Warmup: tiered targets use {} runs, non-tiered use 0; Benchmark: {} runs",
         WARMUP_RUNS, BENCH_RUNS
     );
     if disable_trace {
