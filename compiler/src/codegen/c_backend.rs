@@ -176,7 +176,7 @@ impl CBackend {
         self.emit_line("static inline i32 _bitcast_f32_to_i32(float v) { union { i32 i; float f; } u; u.f = v; return u.i; }");
         self.emit_line("");
         // Common runtime declarations used by emitted code
-        self.emit_line("extern i64 haxe_string_literal(i64 ptr, i64 len);");
+        self.emit_line("extern void* haxe_string_literal(void* ptr, i64 len);");
         self.emit_line("extern void* rayzor_malloc(i64 size);");
         self.emit_line("extern void rayzor_tracked_free(void* ptr);");
         self.emit_line("extern void rayzor_throw(i64 exc);");
@@ -557,32 +557,52 @@ impl CBackend {
             }
 
             IrInstruction::Load { dest, ptr, ty } => {
-                let c_type = Self::type_to_c(ty);
-                let cast = if c_type == "void" {
-                    "i64".to_string()
+                let dest_c = function
+                    .register_types
+                    .get(dest)
+                    .map(|t| Self::type_to_c(t))
+                    .unwrap_or_else(|| "i64".to_string());
+                let load_type = Self::type_to_c(ty);
+                let load_cast = if load_type == "void" || load_type == "void*" {
+                    // Loading a pointer-sized value
+                    if dest_c == "void*" {
+                        "void*"
+                    } else {
+                        "i64"
+                    }
                 } else {
-                    c_type
+                    &load_type
                 };
-                self.emit_line(&format!(
-                    "r{} = *({}*)(void*)r{};",
-                    dest.as_u32(),
-                    cast,
-                    ptr.as_u32()
-                ));
+                // Cast loaded value to dest type if they differ
+                if dest_c == load_cast || (dest_c == "void*" && load_cast == "void*") {
+                    self.emit_line(&format!(
+                        "r{} = *({}*)r{};",
+                        dest.as_u32(),
+                        load_cast,
+                        ptr.as_u32()
+                    ));
+                } else {
+                    self.emit_line(&format!(
+                        "r{} = ({})*({}*)r{};",
+                        dest.as_u32(),
+                        dest_c,
+                        load_cast,
+                        ptr.as_u32()
+                    ));
+                }
             }
 
             IrInstruction::Store { ptr, value } => {
-                // Determine type from register_types of value
                 let val_ty = function
                     .register_types
                     .get(value)
                     .cloned()
                     .unwrap_or(IrType::I64);
                 let c_type = Self::type_to_c(&val_ty);
-                let cast = if c_type == "void" { "i64" } else { &c_type };
+                let store_type = if c_type == "void" { "i64" } else { &c_type };
                 self.emit_line(&format!(
-                    "*({}*)(void*)r{} = r{};",
-                    cast,
+                    "*({}*)r{} = r{};",
+                    store_type,
                     ptr.as_u32(),
                     value.as_u32()
                 ));
@@ -591,9 +611,15 @@ impl CBackend {
             IrInstruction::LoadGlobal {
                 dest, global_id, ..
             } => {
+                let dest_c = function
+                    .register_types
+                    .get(dest)
+                    .map(|t| Self::type_to_c(t))
+                    .unwrap_or_else(|| "i64".to_string());
                 self.emit_line(&format!(
-                    "r{} = rayzor_global_load({});",
+                    "r{} = ({})rayzor_global_load({});",
                     dest.as_u32(),
+                    dest_c,
                     global_id.0
                 ));
             }
@@ -640,14 +666,14 @@ impl CBackend {
                 let elem_size = Self::type_size(ty);
                 if let Some(count_reg) = count {
                     self.emit_line(&format!(
-                        "r{} = (i64)(intptr_t)rayzor_malloc((i64)(r{} * {}));",
+                        "r{} = rayzor_malloc((i64)r{} * {});",
                         dest.as_u32(),
                         count_reg.as_u32(),
                         elem_size
                     ));
                 } else {
                     self.emit_line(&format!(
-                        "r{} = (i64)(intptr_t)rayzor_malloc({});",
+                        "r{} = rayzor_malloc({});",
                         dest.as_u32(),
                         elem_size
                     ));
@@ -655,10 +681,7 @@ impl CBackend {
             }
 
             IrInstruction::Free { ptr } => {
-                self.emit_line(&format!(
-                    "rayzor_tracked_free((void*)(intptr_t)r{});",
-                    ptr.as_u32()
-                ));
+                self.emit_line(&format!("rayzor_tracked_free((void*)r{});", ptr.as_u32()));
             }
 
             IrInstruction::GetElementPtr {
@@ -676,19 +699,34 @@ impl CBackend {
                     _ => 8,
                 };
                 if let Some(idx) = indices.first() {
+                    let dest_ty = function
+                        .register_types
+                        .get(dest)
+                        .map(|t| Self::type_to_c(t))
+                        .unwrap_or_else(|| "void*".to_string());
+                    let idx_cast = if matches!(
+                        function.register_types.get(idx),
+                        Some(IrType::I32 | IrType::U32)
+                    ) {
+                        format!("(intptr_t)r{}", idx.as_u32())
+                    } else {
+                        format!("(intptr_t)r{}", idx.as_u32())
+                    };
                     if elem_size == 1 {
                         self.emit_line(&format!(
-                            "r{} = (i64)((char*)(intptr_t)r{} + (i64)r{});",
+                            "r{} = ({})((char*)r{} + {});",
                             dest.as_u32(),
+                            dest_ty,
                             ptr.as_u32(),
-                            idx.as_u32()
+                            idx_cast
                         ));
                     } else {
                         self.emit_line(&format!(
-                            "r{} = (i64)((char*)(intptr_t)r{} + (i64)r{} * {});",
+                            "r{} = ({})((char*)r{} + {} * {});",
                             dest.as_u32(),
+                            dest_ty,
                             ptr.as_u32(),
-                            idx.as_u32(),
+                            idx_cast,
                             elem_size
                         ));
                     }
@@ -698,9 +736,15 @@ impl CBackend {
             IrInstruction::PtrAdd {
                 dest, ptr, offset, ..
             } => {
+                let dest_c = function
+                    .register_types
+                    .get(dest)
+                    .map(|t| Self::type_to_c(t))
+                    .unwrap_or_else(|| "void*".to_string());
                 self.emit_line(&format!(
-                    "r{} = (i64)((char*)(intptr_t)r{} + (i64)r{});",
+                    "r{} = ({})((char*)r{} + (intptr_t)r{});",
                     dest.as_u32(),
+                    dest_c,
                     ptr.as_u32(),
                     offset.as_u32()
                 ));
@@ -708,7 +752,7 @@ impl CBackend {
 
             IrInstruction::MemCopy { dest, src, size } => {
                 self.emit_line(&format!(
-                    "memcpy((void*)(intptr_t)r{}, (void*)(intptr_t)r{}, (size_t)r{});",
+                    "memcpy((void*)r{}, (void*)r{}, (size_t)r{});",
                     dest.as_u32(),
                     src.as_u32(),
                     size.as_u32()
@@ -717,7 +761,7 @@ impl CBackend {
 
             IrInstruction::MemSet { dest, value, size } => {
                 self.emit_line(&format!(
-                    "memset((void*)(intptr_t)r{}, (int)r{}, (size_t)r{});",
+                    "memset((void*)r{}, (int)r{}, (size_t)r{});",
                     dest.as_u32(),
                     value.as_u32(),
                     size.as_u32()
@@ -760,25 +804,20 @@ impl CBackend {
                     args.iter().map(|a| format!("r{}", a.as_u32())).collect();
 
                 if let Some(d) = dest {
-                    // Functions returning void* (malloc, etc.) need cast to i64
+                    // Determine destination type for proper cast
                     let dest_ty = function.register_types.get(d);
-                    let needs_cast = matches!(c_name.as_str(), "malloc" | "realloc" | "calloc")
-                        || matches!(dest_ty, Some(IrType::I64) | Some(IrType::Ptr(_)));
-                    if needs_cast {
-                        self.emit_line(&format!(
-                            "r{} = (i64)(intptr_t){}({});",
-                            d.as_u32(),
-                            c_name,
-                            args_str.join(", ")
-                        ));
-                    } else {
-                        self.emit_line(&format!(
-                            "r{} = {}({});",
-                            d.as_u32(),
-                            c_name,
-                            args_str.join(", ")
-                        ));
-                    }
+                    let dest_c = dest_ty
+                        .map(|t| Self::type_to_c(t))
+                        .unwrap_or_else(|| "i64".to_string());
+                    // Cast the return value to the destination type
+                    // This handles void*→i64, int→void*, etc.
+                    self.emit_line(&format!(
+                        "r{} = ({}){}({});",
+                        d.as_u32(),
+                        dest_c,
+                        c_name,
+                        args_str.join(", ")
+                    ));
                 } else {
                     self.emit_line(&format!("{}({});", c_name, args_str.join(", ")));
                 }
@@ -817,9 +856,9 @@ impl CBackend {
                 let args_str: Vec<String> =
                     args.iter().map(|a| format!("r{}", a.as_u32())).collect();
 
-                // Cast i64 → function pointer: ((ret(*)(params))(void*)(intptr_t)r_ptr)(args)
+                // Cast i64 → function pointer: ((ret(*)(params))(void*)r_ptr)(args)
                 let fptr_cast = format!(
-                    "(({}(*)({}))(void*)(intptr_t)r{})",
+                    "(({}(*)({}))(void*)r{})",
                     ret_type,
                     params_str,
                     func_ptr.as_u32()
@@ -842,11 +881,8 @@ impl CBackend {
                 func_id,
                 captured_values,
             } => {
-                // Allocate 16-byte closure struct: [fn_ptr: i64, env_ptr: i64]
-                self.emit_line(&format!(
-                    "r{} = (i64)(intptr_t)rayzor_malloc(16);",
-                    dest.as_u32()
-                ));
+                // Allocate 16-byte closure struct: [fn_ptr: void*, env_ptr: void*]
+                self.emit_line(&format!("r{} = rayzor_malloc(16);", dest.as_u32()));
                 // Store function pointer at offset 0
                 let fn_name = self
                     .function_names
@@ -854,7 +890,7 @@ impl CBackend {
                     .cloned()
                     .unwrap_or_else(|| format!("fn_{}", func_id.0));
                 self.emit_line(&format!(
-                    "*(i64*)(intptr_t)r{} = (i64)(intptr_t)&{};",
+                    "*(void**)r{} = (void*)&{};",
                     dest.as_u32(),
                     fn_name
                 ));
@@ -866,20 +902,17 @@ impl CBackend {
                         self.emit_line(&format!("  ((i64*)_env)[{}] = (i64)r{};", i, cap.as_u32()));
                     }
                     self.emit_line(&format!(
-                        "  *(i64*)((char*)(intptr_t)r{} + 8) = (i64)(intptr_t)_env; }}",
+                        "  *(void**)((char*)r{} + 8) = _env; }}",
                         dest.as_u32()
                     ));
                 } else {
-                    self.emit_line(&format!(
-                        "*(i64*)((char*)(intptr_t)r{} + 8) = 0;",
-                        dest.as_u32()
-                    ));
+                    self.emit_line(&format!("*(i64*)((char*)r{} + 8) = 0;", dest.as_u32()));
                 }
             }
 
             IrInstruction::ClosureFunc { dest, closure } => {
                 self.emit_line(&format!(
-                    "r{} = *(i64*)(intptr_t)r{};",
+                    "r{} = *(i64*)r{};",
                     dest.as_u32(),
                     closure.as_u32()
                 ));
@@ -887,7 +920,7 @@ impl CBackend {
 
             IrInstruction::ClosureEnv { dest, closure } => {
                 self.emit_line(&format!(
-                    "r{} = *(i64*)((char*)(intptr_t)r{} + 8);",
+                    "r{} = *(i64*)((char*)r{} + 8);",
                     dest.as_u32(),
                     closure.as_u32()
                 ));
@@ -917,7 +950,7 @@ impl CBackend {
             } => {
                 if let Some(&idx) = indices.first() {
                     self.emit_line(&format!(
-                        "r{} = ((i64*)(intptr_t)r{})[{}];",
+                        "r{} = ((i64*)r{})[{}];",
                         dest.as_u32(),
                         aggregate.as_u32(),
                         idx
@@ -935,7 +968,7 @@ impl CBackend {
                 self.emit_line(&format!("r{} = r{};", dest.as_u32(), aggregate.as_u32()));
                 if let Some(&idx) = indices.first() {
                     self.emit_line(&format!(
-                        "((i64*)(intptr_t)r{})[{}] = (i64)r{};",
+                        "((i64*)r{})[{}] = (i64)r{};",
                         dest.as_u32(),
                         idx,
                         value.as_u32()
@@ -951,17 +984,10 @@ impl CBackend {
                 ..
             } => {
                 // Allocate tag + value (16 bytes minimum)
+                self.emit_line(&format!("r{} = rayzor_malloc(16);", dest.as_u32()));
+                self.emit_line(&format!("*(i64*)r{} = {};", dest.as_u32(), discriminant));
                 self.emit_line(&format!(
-                    "r{} = (i64)(intptr_t)rayzor_malloc(16);",
-                    dest.as_u32()
-                ));
-                self.emit_line(&format!(
-                    "*(i64*)(intptr_t)r{} = {};",
-                    dest.as_u32(),
-                    discriminant
-                ));
-                self.emit_line(&format!(
-                    "*(i64*)((char*)(intptr_t)r{} + 8) = (i64)r{};",
+                    "*(i64*)((char*)r{} + 8) = (i64)r{};",
                     dest.as_u32(),
                     value.as_u32()
                 ));
@@ -969,7 +995,7 @@ impl CBackend {
 
             IrInstruction::ExtractDiscriminant { dest, union_val } => {
                 self.emit_line(&format!(
-                    "r{} = *(i64*)(intptr_t)r{};",
+                    "r{} = *(i64*)r{};",
                     dest.as_u32(),
                     union_val.as_u32()
                 ));
@@ -979,7 +1005,7 @@ impl CBackend {
                 dest, union_val, ..
             } => {
                 self.emit_line(&format!(
-                    "r{} = *(i64*)((char*)(intptr_t)r{} + 8);",
+                    "r{} = *(i64*)((char*)r{} + 8);",
                     dest.as_u32(),
                     union_val.as_u32()
                 ));
@@ -989,13 +1015,13 @@ impl CBackend {
             IrInstruction::CreateStruct { dest, fields, .. } => {
                 let size = fields.len() * 8;
                 self.emit_line(&format!(
-                    "r{} = (i64)(intptr_t)rayzor_malloc({});",
+                    "r{} = rayzor_malloc({});",
                     dest.as_u32(),
                     size.max(8)
                 ));
                 for (i, f) in fields.iter().enumerate() {
                     self.emit_line(&format!(
-                        "((i64*)(intptr_t)r{})[{}] = (i64)r{};",
+                        "((i64*)r{})[{}] = (i64)r{};",
                         dest.as_u32(),
                         i,
                         f.as_u32()
@@ -1014,11 +1040,7 @@ impl CBackend {
                     .get(func_id)
                     .cloned()
                     .unwrap_or_else(|| format!("fn_{}", func_id.0));
-                self.emit_line(&format!(
-                    "r{} = (i64)(intptr_t)&{};",
-                    dest.as_u32(),
-                    fn_name
-                ));
+                self.emit_line(&format!("r{} = (void*)&{};", dest.as_u32(), fn_name));
             }
 
             IrInstruction::Panic { message } => {
@@ -1074,7 +1096,7 @@ impl CBackend {
                 let count = Self::vector_count(vec_ty);
                 let elem_size = Self::vector_elem_size(vec_ty);
                 self.emit_line(&format!(
-                    "memcpy(&r{}, (void*)(intptr_t)r{}, {});",
+                    "memcpy(&r{}, (void*)r{}, {});",
                     dest.as_u32(),
                     ptr.as_u32(),
                     count * elem_size
@@ -1085,7 +1107,7 @@ impl CBackend {
                 let count = Self::vector_count(vec_ty);
                 let elem_size = Self::vector_elem_size(vec_ty);
                 self.emit_line(&format!(
-                    "memcpy((void*)(intptr_t)r{}, &r{}, {});",
+                    "memcpy((void*)r{}, &r{}, {});",
                     ptr.as_u32(),
                     value.as_u32(),
                     count * elem_size
@@ -1372,18 +1394,18 @@ impl CBackend {
             IrType::U64 => "u64".to_string(),
             IrType::F32 => "float".to_string(),
             IrType::F64 => "double".to_string(),
-            IrType::Ptr(_) | IrType::Ref(_) => "i64".to_string(), // pointers as i64
-            IrType::String => "i64".to_string(),
+            IrType::Ptr(_) | IrType::Ref(_) => "void*".to_string(),
+            IrType::String => "void*".to_string(),
             IrType::Any => "i64".to_string(),
-            IrType::Function { .. } => "i64".to_string(), // fn ptrs as i64
-            IrType::Array(_, _) => "i64".to_string(),
-            IrType::Slice(_) => "i64".to_string(),
-            IrType::Struct { .. } => "i64".to_string(),
-            IrType::Union { .. } => "i64".to_string(),
+            IrType::Function { .. } => "void*".to_string(),
+            IrType::Array(_, _) => "void*".to_string(),
+            IrType::Slice(_) => "void*".to_string(),
+            IrType::Struct { .. } => "void*".to_string(),
+            IrType::Union { .. } => "void*".to_string(),
             IrType::Vector { .. } => "i64".to_string(), // scalar fallback
             IrType::TypeVar(_) => "i64".to_string(),
             IrType::Generic { .. } => "i64".to_string(),
-            IrType::Opaque { .. } => "i64".to_string(),
+            IrType::Opaque { .. } => "void*".to_string(),
         }
     }
 
@@ -1447,10 +1469,7 @@ impl CBackend {
                     .replace('"', "\\\"")
                     .replace('\n', "\\n");
                 let len = s.len();
-                format!(
-                    "(i64)haxe_string_literal((i64)(intptr_t)\"{}\", {}LL)",
-                    escaped, len
-                )
+                format!("haxe_string_literal((void*)\"{}\", {}LL)", escaped, len)
             }
             IrValue::Array(elems) => {
                 // Not common in practice; emit 0
@@ -1459,7 +1478,7 @@ impl CBackend {
             IrValue::Struct(fields) => {
                 format!("0 /* struct({}) */", fields.len())
             }
-            IrValue::Function(id) => format!("(i64)(intptr_t)0 /* fn_{} */", id.0),
+            IrValue::Function(id) => format!("(void*)0 /* fn_{} */", id.0),
             IrValue::Closure { .. } => "0 /* closure */".to_string(),
         }
     }
@@ -1513,17 +1532,29 @@ impl CBackend {
 
     fn emit_cast(&mut self, dest: IrId, src: IrId, from_ty: &IrType, to_ty: &IrType) {
         let target_c = Self::type_to_c(to_ty);
-        // Handle pointer ↔ integer conversions
         match (from_ty, to_ty) {
-            (IrType::Ptr(_) | IrType::Ref(_), IrType::I64 | IrType::U64) => {
+            // Pointer → integer: need intptr_t
+            (
+                IrType::Ptr(_) | IrType::Ref(_) | IrType::String,
+                IrType::I64 | IrType::U64 | IrType::I32 | IrType::U32,
+            ) => {
                 self.emit_line(&format!(
-                    "r{} = (i64)(intptr_t)r{};",
+                    "r{} = ({})(intptr_t)r{};",
                     dest.as_u32(),
+                    target_c,
                     src.as_u32()
                 ));
             }
-            (IrType::I64 | IrType::U64, IrType::Ptr(_) | IrType::Ref(_)) => {
-                self.emit_line(&format!("r{} = (i64)r{};", dest.as_u32(), src.as_u32()));
+            // Integer → pointer: need intptr_t
+            (
+                IrType::I64 | IrType::U64 | IrType::I32 | IrType::U32,
+                IrType::Ptr(_) | IrType::Ref(_) | IrType::String,
+            ) => {
+                self.emit_line(&format!(
+                    "r{} = (void*)(intptr_t)r{};",
+                    dest.as_u32(),
+                    src.as_u32()
+                ));
             }
             _ => {
                 self.emit_line(&format!(

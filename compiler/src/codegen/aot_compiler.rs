@@ -749,6 +749,9 @@ impl AotCompiler {
         cmd.arg(&c_path);
         cmd.arg(&runtime_lib);
         cmd.arg(opt_flag);
+        cmd.arg("-ffp-contract=on");
+        cmd.arg("-Wno-int-conversion");
+        cmd.arg("-Wno-incompatible-pointer-types");
         cmd.arg("-lm");
 
         // Platform-specific flags
