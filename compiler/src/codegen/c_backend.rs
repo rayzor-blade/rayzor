@@ -95,12 +95,20 @@ impl CBackend {
         let mut name_counts: HashMap<String, usize> = HashMap::new();
 
         for module in modules {
+            // Register names for all functions
             for (func_id, function) in &module.functions {
                 let mut base_name = Self::sanitize_name(&function.name);
-                // Rename "main" to "_haxe_main" to avoid conflict with C main()
                 if base_name == "main" {
                     base_name = "_haxe_main".to_string();
                 }
+
+                // Empty-body functions (externs/stubs) always use their base name
+                // — they're the SAME runtime function even across modules
+                if function.cfg.blocks.is_empty() {
+                    self.function_names.insert(*func_id, base_name);
+                    continue;
+                }
+
                 let count = name_counts.entry(base_name.clone()).or_insert(0);
                 let c_name = if *count == 0 {
                     base_name.clone()
@@ -109,6 +117,22 @@ impl CBackend {
                 };
                 *count += 1;
                 self.function_names.insert(*func_id, c_name);
+            }
+
+            // Register names for extern_functions too
+            for (func_id, ext) in &module.extern_functions {
+                if self.function_names.contains_key(func_id) {
+                    continue;
+                }
+                self.function_names.insert(*func_id, ext.name.clone());
+            }
+
+            // Register names from external_function_names (cross-module refs)
+            for (func_id, name) in &module.external_function_names {
+                if self.function_names.contains_key(func_id) {
+                    continue;
+                }
+                self.function_names.insert(*func_id, name.clone());
             }
         }
     }
@@ -168,10 +192,19 @@ impl CBackend {
     fn emit_extern_declarations(&mut self, modules: &[IrModule]) {
         self.emit_line("/* Runtime extern declarations */");
 
+        let c_stdlib_skip: HashSet<&str> = [
+            "malloc", "realloc", "free", "calloc", "abort", "exit",
+            "memcpy", "memset", "memmove", "strlen", "strcmp",
+            "printf", "fprintf", "snprintf", "sprintf", "puts",
+        ].into_iter().collect();
+
         // 1. Declare all explicit extern functions from modules
         for module in modules {
             for (_func_id, ext) in &module.extern_functions {
                 if self.declared_externs.contains(&ext.name) {
+                    continue;
+                }
+                if c_stdlib_skip.contains(ext.name.as_str()) {
                     continue;
                 }
                 self.declared_externs.insert(ext.name.clone());
@@ -195,6 +228,13 @@ impl CBackend {
         }
 
         // 2. Declare functions with empty bodies (extern/forward declarations from stdlib)
+        let c_stdlib_names: HashSet<&str> = [
+            "malloc", "realloc", "free", "calloc", "abort", "exit",
+            "memcpy", "memset", "memmove", "strlen", "strcmp",
+            "printf", "fprintf", "snprintf", "sprintf", "puts",
+            "fopen", "fclose", "fread", "fwrite", "fgets",
+        ].into_iter().collect();
+
         for module in modules {
             for (func_id, function) in &module.functions {
                 if !function.cfg.blocks.is_empty() {
@@ -204,6 +244,10 @@ impl CBackend {
                     Some(n) => n.clone(),
                     None => continue,
                 };
+                // Skip C stdlib functions — they come from system headers
+                if c_stdlib_names.contains(c_name.as_str()) {
+                    continue;
+                }
                 if self.declared_externs.contains(&c_name) {
                     continue;
                 }
@@ -723,12 +767,25 @@ impl CBackend {
                     args.iter().map(|a| format!("r{}", a.as_u32())).collect();
 
                 if let Some(d) = dest {
-                    self.emit_line(&format!(
-                        "r{} = {}({});",
-                        d.as_u32(),
-                        c_name,
-                        args_str.join(", ")
-                    ));
+                    // Functions returning void* (malloc, etc.) need cast to i64
+                    let dest_ty = function.register_types.get(d);
+                    let needs_cast = matches!(c_name.as_str(), "malloc" | "realloc" | "calloc")
+                        || matches!(dest_ty, Some(IrType::I64) | Some(IrType::Ptr(_)));
+                    if needs_cast {
+                        self.emit_line(&format!(
+                            "r{} = (i64)(intptr_t){}({});",
+                            d.as_u32(),
+                            c_name,
+                            args_str.join(", ")
+                        ));
+                    } else {
+                        self.emit_line(&format!(
+                            "r{} = {}({});",
+                            d.as_u32(),
+                            c_name,
+                            args_str.join(", ")
+                        ));
+                    }
                 } else {
                     self.emit_line(&format!("{}({});", c_name, args_str.join(", ")));
                 }
@@ -768,16 +825,20 @@ impl CBackend {
                 let args_str: Vec<String> =
                     args.iter().map(|a| format!("r{}", a.as_u32())).collect();
 
-                let cast = format!("({}(*)({}))r{}", ret_type, params_str, func_ptr.as_u32());
+                // Cast i64 → function pointer: ((ret(*)(params))(void*)(intptr_t)r_ptr)(args)
+                let fptr_cast = format!(
+                    "(({}(*)({}))(void*)(intptr_t)r{})",
+                    ret_type, params_str, func_ptr.as_u32()
+                );
                 if let Some(d) = dest {
                     self.emit_line(&format!(
                         "r{} = {}({});",
                         d.as_u32(),
-                        cast,
+                        fptr_cast,
                         args_str.join(", ")
                     ));
                 } else {
-                    self.emit_line(&format!("{}({});", cast, args_str.join(", ")));
+                    self.emit_line(&format!("{}({});", fptr_cast, args_str.join(", ")));
                 }
             }
 
