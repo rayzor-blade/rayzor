@@ -82,6 +82,7 @@ pub fn run_aot(config: AotConfig) -> Result<(), String> {
             OutputFormat::LlvmIr => PathBuf::from(format!("{}.ll", base)),
             OutputFormat::LlvmBitcode => PathBuf::from(format!("{}.bc", base)),
             OutputFormat::Assembly => PathBuf::from(format!("{}.s", base)),
+            OutputFormat::CSource => PathBuf::from(format!("{}.c", base)),
         }
     });
 
@@ -107,7 +108,12 @@ pub fn run_aot(config: AotConfig) -> Result<(), String> {
         }
     }
 
-    match compiler.compile(&config.source_files, &output) {
+    let compile_result = if compiler.output_format == OutputFormat::CSource {
+        compiler.compile_c(&config.source_files, &output)
+    } else {
+        compiler.compile(&config.source_files, &output)
+    };
+    match compile_result {
         Ok(result) => {
             println!(
                 "  aot      {} ({} bytes, {})",

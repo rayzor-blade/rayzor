@@ -7,6 +7,7 @@
 /// - LLVM (maximum optimization, Phase 4)
 /// - WebAssembly (cross-platform AOT - future)
 pub mod aot_compiler;
+pub mod c_backend;
 pub mod cranelift_backend;
 mod instruction_lowering;
 pub mod llvm_aot_backend;

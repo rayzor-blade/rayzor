@@ -27,6 +27,8 @@ pub enum OutputFormat {
     LlvmBitcode,
     /// Native assembly (.s)
     Assembly,
+    /// C source code compiled with gcc/g++ (no LLVM dependency)
+    CSource,
 }
 
 /// Result of AOT compilation
@@ -611,6 +613,181 @@ impl AotCompiler {
         Err("AOT compilation requires the llvm-backend feature. \
              Rebuild with: cargo build --features llvm-backend"
             .to_string())
+    }
+    /// Compile Haxe source files to C, then compile with gcc/g++.
+    /// Does NOT require the LLVM backend.
+    pub fn compile_c(
+        &self,
+        source_files: &[String],
+        output_path: &Path,
+    ) -> Result<AotOutput, String> {
+        use crate::codegen::c_backend::CBackend;
+        use std::process::Command;
+        use std::time::Instant;
+
+        let t0 = Instant::now();
+
+        // --- Phase 1: Parse and compile to MIR ---
+        if self.verbose {
+            println!("  Parsing and lowering to MIR...");
+        }
+
+        let mut unit = CompilationUnit::new(CompilationConfig::default());
+        unit.load_stdlib()
+            .map_err(|e| format!("Failed to load stdlib: {}", e))?;
+
+        for source_file in source_files {
+            let source = std::fs::read_to_string(source_file)
+                .map_err(|e| format!("Failed to read {}: {}", source_file, e))?;
+            unit.add_file(&source, source_file)
+                .map_err(|e| format!("Failed to add {}: {}", source_file, e))?;
+        }
+
+        unit.lower_to_tast()
+            .map_err(|errors| format!("Compilation failed: {:?}", errors))?;
+
+        let mir_modules = unit.get_mir_modules();
+        if mir_modules.is_empty() {
+            return Err("No MIR modules generated".to_string());
+        }
+
+        let mut modules: Vec<_> = mir_modules.iter().map(|m| (**m).clone()).collect();
+
+        // --- Phase 2: MIR optimizations ---
+        if self.opt_level != OptimizationLevel::O0 {
+            if self.verbose {
+                println!("  Applying MIR optimizations ({:?})...", self.opt_level);
+            }
+            let mut pass_manager = PassManager::for_level(self.opt_level);
+            for module in &mut modules {
+                let _ = pass_manager.run(module);
+                let _ = strip_stack_trace_updates(module);
+            }
+        }
+
+        // --- Phase 3: Find entry point ---
+        let (_entry_module_name, entry_function_name) = find_entry_point(&modules)?;
+        if self.verbose {
+            println!("  Entry point: {}", entry_function_name);
+        }
+
+        // --- Phase 4: Tree-shake ---
+        if self.strip {
+            if self.verbose {
+                println!("  Tree-shaking...");
+            }
+            let stats = tree_shake::tree_shake_bundle(
+                &mut modules,
+                &_entry_module_name,
+                &entry_function_name,
+            );
+            if self.verbose {
+                println!(
+                    "    Removed: {} functions, {} externs",
+                    stats.functions_removed, stats.extern_functions_removed
+                );
+            }
+        }
+
+        // --- Phase 5: Emit C source ---
+        if self.verbose {
+            println!("  Emitting C source...");
+        }
+
+        // Find startup functions
+        let startup_funcs: Vec<String> = modules
+            .iter()
+            .flat_map(|m| {
+                m.functions.values().filter_map(|f| {
+                    if f.name == "__vtable_init__" || f.name == "__init__" {
+                        Some(f.name.clone())
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+
+        let c_source = CBackend::emit_modules(&modules, &entry_function_name, &startup_funcs)?;
+
+        // If output format is CSource, just write the .c file
+        if self.output_format == OutputFormat::CSource {
+            let c_path = output_path.with_extension("c");
+            std::fs::write(&c_path, &c_source)
+                .map_err(|e| format!("Failed to write C source: {}", e))?;
+            let code_size = c_source.len() as u64;
+            return Ok(AotOutput {
+                path: c_path,
+                format: OutputFormat::CSource,
+                target_triple: "native".to_string(),
+                code_size,
+            });
+        }
+
+        // --- Phase 6: Compile C with gcc ---
+        if self.verbose {
+            println!("  Compiling with gcc...");
+        }
+
+        let c_path = std::env::temp_dir().join("rayzor_aot_c.c");
+        std::fs::write(&c_path, &c_source)
+            .map_err(|e| format!("Failed to write temp C source: {}", e))?;
+
+        let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+        let opt_flag = match self.opt_level {
+            OptimizationLevel::O0 => "-O0",
+            OptimizationLevel::O1 => "-O1",
+            OptimizationLevel::O2 => "-O2",
+            OptimizationLevel::O3 => "-O3",
+        };
+
+        // Find runtime library
+        let runtime_lib = self.find_runtime()?;
+
+        let mut cmd = Command::new(&cc);
+        cmd.arg("-o").arg(output_path);
+        cmd.arg(&c_path);
+        cmd.arg(&runtime_lib);
+        cmd.arg(opt_flag);
+        cmd.arg("-lm");
+
+        // Platform-specific flags
+        #[cfg(target_os = "linux")]
+        {
+            cmd.arg("-lpthread").arg("-ldl");
+        }
+        #[cfg(target_os = "macos")]
+        {
+            cmd.arg("-framework").arg("CoreFoundation");
+            cmd.arg("-framework").arg("Security");
+        }
+
+        let compile_out = cmd
+            .output()
+            .map_err(|e| format!("Failed to run {}: {}", cc, e))?;
+
+        // Clean up temp file
+        let _ = std::fs::remove_file(&c_path);
+
+        if !compile_out.status.success() {
+            let stderr = String::from_utf8_lossy(&compile_out.stderr);
+            return Err(format!("C compilation failed:\n{}", stderr));
+        }
+
+        let code_size = std::fs::metadata(output_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        if self.verbose {
+            println!("  Done in {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
+        }
+
+        Ok(AotOutput {
+            path: output_path.to_path_buf(),
+            format: OutputFormat::Executable,
+            target_triple: "native".to_string(),
+            code_size,
+        })
     }
 }
 

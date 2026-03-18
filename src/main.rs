@@ -1638,6 +1638,53 @@ fn cmd_aot(
     _cache_dir: Option<PathBuf>,
     verbose: bool,
 ) -> Result<(), String> {
+    // C backend does not require LLVM
+    if emit == "c" || emit == "gcc" {
+        use compiler::codegen::aot_compiler::{AotCompiler, OutputFormat};
+        use compiler::ir::optimization::OptimizationLevel;
+
+        let opt = match opt_level {
+            0 => OptimizationLevel::O0,
+            1 => OptimizationLevel::O1,
+            3 => OptimizationLevel::O3,
+            _ => OptimizationLevel::O2,
+        };
+        let source_files: Vec<String> = files
+            .iter()
+            .map(|f| f.to_string_lossy().to_string())
+            .collect();
+
+        let output_path = output.unwrap_or_else(|| {
+            let base = std::path::PathBuf::from(&source_files[0])
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
+            std::path::PathBuf::from(format!("{}.c", base))
+        });
+
+        let mut compiler = AotCompiler::default();
+        compiler.opt_level = opt;
+        compiler.output_format = OutputFormat::CSource;
+        compiler.verbose = verbose;
+        compiler.runtime_dir = runtime_dir.clone();
+        compiler.strip = strip;
+
+        println!("Rayzor C Backend");
+        match compiler.compile_c(&source_files, &output_path) {
+            Ok(result) => {
+                println!(
+                    "  emit     {} ({} bytes)",
+                    result.path.display(),
+                    result.code_size
+                );
+                println!("✓ Build succeeded");
+                return Ok(());
+            }
+            Err(e) => return Err(format!("C compilation failed: {}", e)),
+        }
+    }
+
     #[cfg(not(feature = "llvm-backend"))]
     {
         let _ = (
@@ -1661,19 +1708,16 @@ fn cmd_aot(
 
     #[cfg(feature = "llvm-backend")]
     {
-        use compiler::codegen::aot_compiler::OutputFormat;
-        use compiler::ir::optimization::OptimizationLevel;
-        use compiler::tools::aot_build::{run_aot, AotConfig};
-
         let output_format = match emit.as_str() {
             "exe" => OutputFormat::Executable,
             "obj" => OutputFormat::ObjectFile,
             "llvm-ir" => OutputFormat::LlvmIr,
             "llvm-bc" => OutputFormat::LlvmBitcode,
             "asm" => OutputFormat::Assembly,
+            "c" | "gcc" => OutputFormat::CSource,
             other => {
                 return Err(format!(
-                    "Unknown emit format: {}. Use: exe, obj, llvm-ir, llvm-bc, asm",
+                    "Unknown emit format: {}. Use: exe, obj, llvm-ir, llvm-bc, asm, c, gcc",
                     other
                 ))
             }
