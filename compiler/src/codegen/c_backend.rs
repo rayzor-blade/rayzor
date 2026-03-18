@@ -193,10 +193,11 @@ impl CBackend {
         self.emit_line("/* Runtime extern declarations */");
 
         let c_stdlib_skip: HashSet<&str> = [
-            "malloc", "realloc", "free", "calloc", "abort", "exit",
-            "memcpy", "memset", "memmove", "strlen", "strcmp",
-            "printf", "fprintf", "snprintf", "sprintf", "puts",
-        ].into_iter().collect();
+            "malloc", "realloc", "free", "calloc", "abort", "exit", "memcpy", "memset", "memmove",
+            "strlen", "strcmp", "printf", "fprintf", "snprintf", "sprintf", "puts",
+        ]
+        .into_iter()
+        .collect();
 
         // 1. Declare all explicit extern functions from modules
         for module in modules {
@@ -229,11 +230,12 @@ impl CBackend {
 
         // 2. Declare functions with empty bodies (extern/forward declarations from stdlib)
         let c_stdlib_names: HashSet<&str> = [
-            "malloc", "realloc", "free", "calloc", "abort", "exit",
-            "memcpy", "memset", "memmove", "strlen", "strcmp",
-            "printf", "fprintf", "snprintf", "sprintf", "puts",
-            "fopen", "fclose", "fread", "fwrite", "fgets",
-        ].into_iter().collect();
+            "malloc", "realloc", "free", "calloc", "abort", "exit", "memcpy", "memset", "memmove",
+            "strlen", "strcmp", "printf", "fprintf", "snprintf", "sprintf", "puts", "fopen",
+            "fclose", "fread", "fwrite", "fgets",
+        ]
+        .into_iter()
+        .collect();
 
         for module in modules {
             for (func_id, function) in &module.functions {
@@ -288,12 +290,10 @@ impl CBackend {
                         if let IrInstruction::CallDirect { func_id, args, .. } = inst {
                             if !self.function_names.contains_key(func_id) {
                                 // Look up the name from extern_functions or external_function_names
-                                let name = extern_names
-                                    .get(func_id)
-                                    .map(|s| s.to_string())
-                                    .or_else(|| {
-                                        module.external_function_names.get(func_id).cloned()
-                                    });
+                                let name =
+                                    extern_names.get(func_id).map(|s| s.to_string()).or_else(
+                                        || module.external_function_names.get(func_id).cloned(),
+                                    );
                                 if let Some(name) = name {
                                     if !self.declared_externs.contains(&name) {
                                         missing_externs
@@ -453,11 +453,7 @@ impl CBackend {
     }
 
     /// Build C function signature string.
-    fn build_c_signature(
-        &self,
-        function: &crate::ir::IrFunction,
-        c_name: &str,
-    ) -> String {
+    fn build_c_signature(&self, function: &crate::ir::IrFunction, c_name: &str) -> String {
         let ret_ty = Self::type_to_c(&function.signature.return_type);
         let params: Vec<String> = function
             .signature
@@ -479,19 +475,22 @@ impl CBackend {
     // -----------------------------------------------------------------------
 
     /// Collect phi copies: for each (predecessor, target_block), what assignments to make.
+    /// Each copy includes (dest, src, type_string) for correct temp variable declarations.
     fn collect_phi_copies(
         &self,
         function: &crate::ir::IrFunction,
-    ) -> HashMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId)>> {
-        let mut copies: HashMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId)>> = HashMap::new();
+    ) -> HashMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId, String)>> {
+        let mut copies: HashMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId, String)>> = HashMap::new();
 
         for (block_id, block) in &function.cfg.blocks {
             for phi in &block.phi_nodes {
+                let ty_str = Self::type_to_c(&phi.ty);
                 for (pred_block, value) in &phi.incoming {
-                    copies
-                        .entry((*pred_block, *block_id))
-                        .or_default()
-                        .push((phi.dest, *value));
+                    copies.entry((*pred_block, *block_id)).or_default().push((
+                        phi.dest,
+                        *value,
+                        ty_str.clone(),
+                    ));
                 }
             }
         }
@@ -504,27 +503,23 @@ impl CBackend {
         &mut self,
         pred_block: IrBlockId,
         target_block: IrBlockId,
-        phi_info: &HashMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId)>>,
+        phi_info: &HashMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId, String)>>,
     ) {
         if let Some(copies) = phi_info.get(&(pred_block, target_block)) {
             if copies.len() == 1 {
                 // Single phi — no parallel copy issue
-                let (dest, src) = copies[0];
+                let (dest, src, _) = &copies[0];
                 self.emit_line(&format!("r{} = r{};", dest.as_u32(), src.as_u32()));
             } else if copies.len() > 1 {
                 // Multiple phis — use temp variables for parallel copy
                 self.emit_line("{");
                 self.indent += 1;
-                // First, capture all source values into temps
-                for (i, (_dest, src)) in copies.iter().enumerate() {
-                    self.emit_line(&format!(
-                        "i64 _phi_t{} = (i64)r{};",
-                        i,
-                        src.as_u32()
-                    ));
+                // First, capture all source values into temps (using correct types)
+                for (i, (_dest, src, ty_str)) in copies.iter().enumerate() {
+                    self.emit_line(&format!("{} _phi_t{} = r{};", ty_str, i, src.as_u32()));
                 }
                 // Then assign all destinations
-                for (i, (dest, _src)) in copies.iter().enumerate() {
+                for (i, (dest, _src, _)) in copies.iter().enumerate() {
                     self.emit_line(&format!("r{} = _phi_t{};", dest.as_u32(), i));
                 }
                 self.indent -= 1;
@@ -593,7 +588,9 @@ impl CBackend {
                 ));
             }
 
-            IrInstruction::LoadGlobal { dest, global_id, .. } => {
+            IrInstruction::LoadGlobal {
+                dest, global_id, ..
+            } => {
                 self.emit_line(&format!(
                     "r{} = rayzor_global_load({});",
                     dest.as_u32(),
@@ -617,11 +614,7 @@ impl CBackend {
                 right,
             } => {
                 let op_str = Self::binop_to_c(*op, left, right, function);
-                self.emit_line(&format!(
-                    "r{} = {};",
-                    dest.as_u32(),
-                    op_str
-                ));
+                self.emit_line(&format!("r{} = {};", dest.as_u32(), op_str));
             }
 
             IrInstruction::UnOp { dest, op, operand } => {
@@ -812,8 +805,7 @@ impl CBackend {
                     }
                     _ => {
                         // Fallback: assume i64 return, i64 params
-                        let params: Vec<String> =
-                            args.iter().map(|_| "i64".to_string()).collect();
+                        let params: Vec<String> = args.iter().map(|_| "i64".to_string()).collect();
                         ("i64".to_string(), params)
                     }
                 };
@@ -828,7 +820,9 @@ impl CBackend {
                 // Cast i64 → function pointer: ((ret(*)(params))(void*)(intptr_t)r_ptr)(args)
                 let fptr_cast = format!(
                     "(({}(*)({}))(void*)(intptr_t)r{})",
-                    ret_type, params_str, func_ptr.as_u32()
+                    ret_type,
+                    params_str,
+                    func_ptr.as_u32()
                 );
                 if let Some(d) = dest {
                     self.emit_line(&format!(
@@ -867,16 +861,9 @@ impl CBackend {
                 // Allocate and populate environment
                 if !captured_values.is_empty() {
                     let env_size = captured_values.len() * 8;
-                    self.emit_line(&format!(
-                        "{{ void* _env = rayzor_malloc({}); ",
-                        env_size
-                    ));
+                    self.emit_line(&format!("{{ void* _env = rayzor_malloc({}); ", env_size));
                     for (i, cap) in captured_values.iter().enumerate() {
-                        self.emit_line(&format!(
-                            "  ((i64*)_env)[{}] = (i64)r{};",
-                            i,
-                            cap.as_u32()
-                        ));
+                        self.emit_line(&format!("  ((i64*)_env)[{}] = (i64)r{};", i, cap.as_u32()));
                     }
                     self.emit_line(&format!(
                         "  *(i64*)((char*)(intptr_t)r{} + 8) = (i64)(intptr_t)_env; }}",
@@ -945,11 +932,7 @@ impl CBackend {
                 indices,
             } => {
                 // Copy aggregate then set field
-                self.emit_line(&format!(
-                    "r{} = r{};",
-                    dest.as_u32(),
-                    aggregate.as_u32()
-                ));
+                self.emit_line(&format!("r{} = r{};", dest.as_u32(), aggregate.as_u32()));
                 if let Some(&idx) = indices.first() {
                     self.emit_line(&format!(
                         "((i64*)(intptr_t)r{})[{}] = (i64)r{};",
@@ -1052,10 +1035,7 @@ impl CBackend {
 
             // === Exception Handling ===
             IrInstruction::Throw { exception } => {
-                self.emit_line(&format!(
-                    "rayzor_throw((i64)r{});",
-                    exception.as_u32()
-                ));
+                self.emit_line(&format!("rayzor_throw((i64)r{});", exception.as_u32()));
             }
 
             IrInstruction::LandingPad { dest, .. } => {
@@ -1112,7 +1092,13 @@ impl CBackend {
                 ));
             }
 
-            IrInstruction::VectorBinOp { dest, op, left, right, vec_ty } => {
+            IrInstruction::VectorBinOp {
+                dest,
+                op,
+                left,
+                right,
+                vec_ty,
+            } => {
                 let count = Self::vector_count(vec_ty);
                 let elem_type = Self::vector_elem_c_type(vec_ty);
                 let op_char = Self::simple_binop_char(*op);
@@ -1122,16 +1108,26 @@ impl CBackend {
                 ));
             }
 
-            IrInstruction::VectorSplat { dest, scalar, vec_ty } => {
+            IrInstruction::VectorSplat {
+                dest,
+                scalar,
+                vec_ty,
+            } => {
                 let count = Self::vector_count(vec_ty);
                 let elem_type = Self::vector_elem_c_type(vec_ty);
                 self.emit_line(&format!(
                     "for (int _vi=0; _vi<{}; _vi++) (({elem_type}*)&r{})[_vi] = ({elem_type})r{};",
-                    count, dest.as_u32(), scalar.as_u32()
+                    count,
+                    dest.as_u32(),
+                    scalar.as_u32()
                 ));
             }
 
-            IrInstruction::VectorExtract { dest, vector, index } => {
+            IrInstruction::VectorExtract {
+                dest,
+                vector,
+                index,
+            } => {
                 self.emit_line(&format!(
                     "r{} = ((i64*)&r{})[{}];",
                     dest.as_u32(),
@@ -1140,7 +1136,12 @@ impl CBackend {
                 ));
             }
 
-            IrInstruction::VectorInsert { dest, vector, scalar, index } => {
+            IrInstruction::VectorInsert {
+                dest,
+                vector,
+                scalar,
+                index,
+            } => {
                 self.emit_line(&format!("r{} = r{};", dest.as_u32(), vector.as_u32()));
                 self.emit_line(&format!(
                     "((i64*)&r{})[{}] = (i64)r{};",
@@ -1159,7 +1160,12 @@ impl CBackend {
                 ));
             }
 
-            IrInstruction::VectorUnaryOp { dest, op, operand, vec_ty } => {
+            IrInstruction::VectorUnaryOp {
+                dest,
+                op,
+                operand,
+                vec_ty,
+            } => {
                 let count = Self::vector_count(vec_ty);
                 let elem_type = Self::vector_elem_c_type(vec_ty);
                 let fn_name = match op {
@@ -1184,7 +1190,13 @@ impl CBackend {
                 }
             }
 
-            IrInstruction::VectorMinMax { dest, op, left, right, vec_ty } => {
+            IrInstruction::VectorMinMax {
+                dest,
+                op,
+                left,
+                right,
+                vec_ty,
+            } => {
                 let count = Self::vector_count(vec_ty);
                 let elem_type = Self::vector_elem_c_type(vec_ty);
                 let cmp = match op {
@@ -1209,7 +1221,7 @@ impl CBackend {
         &mut self,
         term: &IrTerminator,
         current_block: IrBlockId,
-        phi_info: &HashMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId)>>,
+        phi_info: &HashMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId, String)>>,
     ) -> Result<(), String> {
         match term {
             IrTerminator::Branch { target } => {
@@ -1223,10 +1235,8 @@ impl CBackend {
                 false_target,
             } => {
                 // Emit phi copies for true branch
-                let has_true_phis =
-                    phi_info.contains_key(&(current_block, *true_target));
-                let has_false_phis =
-                    phi_info.contains_key(&(current_block, *false_target));
+                let has_true_phis = phi_info.contains_key(&(current_block, *true_target));
+                let has_false_phis = phi_info.contains_key(&(current_block, *false_target));
 
                 if !has_true_phis && !has_false_phis {
                     self.emit_line(&format!(
@@ -1324,10 +1334,7 @@ impl CBackend {
             Self::sanitize_name(entry_func)
         };
         // Find the actual C name in our map
-        let found = self
-            .function_names
-            .values()
-            .find(|n| **n == entry_c_name);
+        let found = self.function_names.values().find(|n| **n == entry_c_name);
         if let Some(c_name) = found {
             self.emit_line(&format!("{}();", c_name));
         } else {
@@ -1402,7 +1409,7 @@ impl CBackend {
             IrValue::Bool(b) => if *b { "1" } else { "0" }.to_string(),
             IrValue::I8(v) => format!("(i8){}", v),
             IrValue::I16(v) => format!("(i16){}", v),
-            IrValue::I32(v) => format!("{}",  v),
+            IrValue::I32(v) => format!("{}", v),
             IrValue::I64(v) => format!("{}LL", v),
             IrValue::U8(v) => format!("(u8){}", v),
             IrValue::U16(v) => format!("(u16){}", v),
@@ -1412,7 +1419,11 @@ impl CBackend {
                 if v.is_nan() {
                     "(float)(0.0/0.0)".to_string()
                 } else if v.is_infinite() {
-                    if *v > 0.0 { "(float)(1.0/0.0)".to_string() } else { "(float)(-1.0/0.0)".to_string() }
+                    if *v > 0.0 {
+                        "(float)(1.0/0.0)".to_string()
+                    } else {
+                        "(float)(-1.0/0.0)".to_string()
+                    }
                 } else {
                     format!("{}f", v)
                 }
@@ -1421,15 +1432,25 @@ impl CBackend {
                 if v.is_nan() {
                     "(0.0/0.0)".to_string()
                 } else if v.is_infinite() {
-                    if *v > 0.0 { "(1.0/0.0)".to_string() } else { "(-1.0/0.0)".to_string() }
+                    if *v > 0.0 {
+                        "(1.0/0.0)".to_string()
+                    } else {
+                        "(-1.0/0.0)".to_string()
+                    }
                 } else {
                     format!("{}", v)
                 }
             }
             IrValue::String(s) => {
-                let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+                let escaped = s
+                    .replace('\\', "\\\\")
+                    .replace('"', "\\\"")
+                    .replace('\n', "\\n");
                 let len = s.len();
-                format!("(i64)haxe_string_literal((i64)(intptr_t)\"{}\", {}LL)", escaped, len)
+                format!(
+                    "(i64)haxe_string_literal((i64)(intptr_t)\"{}\", {}LL)",
+                    escaped, len
+                )
             }
             IrValue::Array(elems) => {
                 // Not common in practice; emit 0
@@ -1502,11 +1523,7 @@ impl CBackend {
                 ));
             }
             (IrType::I64 | IrType::U64, IrType::Ptr(_) | IrType::Ref(_)) => {
-                self.emit_line(&format!(
-                    "r{} = (i64)r{};",
-                    dest.as_u32(),
-                    src.as_u32()
-                ));
+                self.emit_line(&format!("r{} = (i64)r{};", dest.as_u32(), src.as_u32()));
             }
             _ => {
                 self.emit_line(&format!(

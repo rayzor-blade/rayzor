@@ -119,6 +119,7 @@ enum Target {
     HaxeJvm,       // haxe -java → JVM bytecode
     #[cfg(feature = "llvm-backend")]
     RayzorAOT, // AOT compile via LLVM → native executable
+    RayzorGCC,     // AOT compile via C backend → gcc → native executable
 }
 
 impl Target {
@@ -138,6 +139,7 @@ impl Target {
             Target::HaxeJvm => "haxe-jvm",
             #[cfg(feature = "llvm-backend")]
             Target::RayzorAOT => "rayzor-aot",
+            Target::RayzorGCC => "rayzor-gcc",
         }
     }
 
@@ -157,6 +159,7 @@ impl Target {
             Target::HaxeJvm => "Haxe JVM (java bytecode)",
             #[cfg(feature = "llvm-backend")]
             Target::RayzorAOT => "Rayzor AOT (LLVM native executable)",
+            Target::RayzorGCC => "Rayzor GCC (C backend → gcc native)",
         }
     }
 
@@ -1200,6 +1203,54 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             }
         }
 
+        // GCC: compile to C, then compile with system gcc/cc
+        Target::RayzorGCC => {
+            use compiler::codegen::aot_compiler::AotCompiler;
+            use compiler::ir::optimization::OptimizationLevel as MirOpt;
+
+            let tmp = std::env::temp_dir().join(format!("rayzor_gcc_{}", bench.name));
+            std::fs::create_dir_all(&tmp).ok();
+            let binary_path = tmp.join("bench_gcc");
+
+            let src_path = tmp.join(format!("{}.hx", bench.name));
+            std::fs::write(&src_path, &bench.source).map_err(|e| format!("write source: {}", e))?;
+
+            // Compile once (C backend → gcc)
+            let compile_start = Instant::now();
+            let compiler = AotCompiler {
+                opt_level: MirOpt::O3,
+                strip: true,
+                verbose: false,
+                ..Default::default()
+            };
+            compiler
+                .compile_c(&[src_path.to_string_lossy().to_string()], &binary_path)
+                .map_err(|e| format!("GCC compile: {}", e))?;
+            let compile_time = compile_start.elapsed();
+
+            // Warmup runs
+            for _ in 0..WARMUP_RUNS {
+                let _ = Command::new(&binary_path).output();
+            }
+
+            // Benchmark runs
+            for _ in 0..BENCH_RUNS {
+                let exec_start = Instant::now();
+                let output = Command::new(&binary_path)
+                    .output()
+                    .map_err(|e| format!("GCC exec: {}", e))?;
+                let exec_time = exec_start.elapsed();
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Err(format!("GCC execution failed: {}", stderr));
+                }
+
+                compile_times.push(compile_time);
+                exec_times.push(exec_time);
+            }
+        }
+
         // Cranelift and Interpreter: each iteration is independent
         Target::RayzorCranelift | Target::RayzorInterpreter => {
             for _ in 0..WARMUP_RUNS {
@@ -1628,6 +1679,8 @@ fn main() {
 
     #[cfg(feature = "llvm-backend")]
     all_targets_list.push(Target::RayzorAOT);
+
+    all_targets_list.push(Target::RayzorGCC);
 
     // Add Haxe targets if haxe CLI is available
     if haxe_available() {

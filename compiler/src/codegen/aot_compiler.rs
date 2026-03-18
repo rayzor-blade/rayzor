@@ -774,9 +774,7 @@ impl AotCompiler {
             return Err(format!("C compilation failed:\n{}", stderr));
         }
 
-        let code_size = std::fs::metadata(output_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let code_size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
 
         if self.verbose {
             println!("  Done in {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
