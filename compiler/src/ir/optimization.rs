@@ -1276,7 +1276,17 @@ impl CSEPass {
             IrInstruction::LoadGlobal { global_id, .. } => {
                 Some(format!("loadglobal:{}", global_id.0))
             }
-            // Loads are not CSE-safe without alias analysis
+            IrInstruction::Const { value, .. } => {
+                Some(format!("const:{:?}", value))
+            }
+            IrInstruction::GetElementPtr {
+                ptr, indices, ty, ..
+            } => {
+                let idx_str: Vec<String> = indices.iter().map(|i| i.as_u32().to_string()).collect();
+                Some(format!("gep:{}:[{}]:{:?}", ptr.as_u32(), idx_str.join(","), ty))
+            }
+            // Loads are not CSE-safe without alias analysis in general,
+            // but cross-block CSE uses dominator analysis for safety.
             // Calls have side effects
             _ => None,
         }
@@ -1306,36 +1316,85 @@ impl OptimizationPass for CSEPass {
         let mut result = OptimizationResult::unchanged();
 
         for function in module.functions.values_mut() {
-            // Local CSE within each block
-            for block in function.cfg.blocks.values_mut() {
-                let mut available: HashMap<String, IrId> = HashMap::new();
-                // Use BTreeMap for deterministic iteration order
-                let mut replacements: BTreeMap<IrId, IrId> = BTreeMap::new();
+            // Phase 1: Dominator-based CSE across blocks
+            // Walk blocks in dominator order; expressions from dominating blocks
+            // are available in dominated blocks.
+            let domtree = super::loop_analysis::DominatorTree::compute(function);
 
-                for inst in &block.instructions {
-                    if let Some(key) = Self::instruction_key(inst) {
-                        if let Some(&existing) = available.get(&key) {
-                            // Found common subexpression
-                            if let Some(dest) = inst.dest() {
-                                replacements.insert(dest, existing);
-                                result.modified = true;
-                                *result
-                                    .stats
-                                    .entry("cse_eliminated".to_string())
-                                    .or_insert(0) += 1;
+            // Build dominator-order traversal (BFS from entry following dom tree)
+            let entry = function.cfg.entry_block;
+            let mut dom_order: Vec<IrBlockId> = Vec::new();
+            let mut queue = std::collections::VecDeque::new();
+            queue.push_back(entry);
+            let mut visited: HashSet<IrBlockId> = HashSet::new();
+            visited.insert(entry);
+            while let Some(block_id) = queue.pop_front() {
+                dom_order.push(block_id);
+                // Find blocks immediately dominated by this one
+                for &other in function.cfg.blocks.keys() {
+                    if !visited.contains(&other) && domtree.idom(other) == Some(block_id) {
+                        visited.insert(other);
+                        queue.push_back(other);
+                    }
+                }
+            }
+
+            // Walk in dom order, accumulating available expressions
+            let mut global_available: HashMap<String, IrId> = HashMap::new();
+            let mut all_replacements: BTreeMap<IrId, IrId> = BTreeMap::new();
+
+            for &block_id in &dom_order {
+                if let Some(block) = function.cfg.blocks.get(&block_id) {
+                    // Local available = global (from dominators) + local
+                    let mut local_available = global_available.clone();
+
+                    for inst in &block.instructions {
+                        if let Some(key) = Self::instruction_key(inst) {
+                            if let Some(&existing) = local_available.get(&key) {
+                                if let Some(dest) = inst.dest() {
+                                    all_replacements.insert(dest, existing);
+                                    result.modified = true;
+                                    *result
+                                        .stats
+                                        .entry("cse_eliminated".to_string())
+                                        .or_insert(0) += 1;
+                                }
+                            } else if let Some(dest) = inst.dest() {
+                                local_available.insert(key.clone(), dest);
                             }
-                        } else if let Some(dest) = inst.dest() {
-                            available.insert(key, dest);
+                        }
+                    }
+
+                    // Propagate expressions to dominated blocks
+                    // Only propagate pure expressions (not loads which may alias)
+                    for (key, id) in &local_available {
+                        if key.starts_with("const:")
+                            || key.starts_with("gep:")
+                            || key.starts_with("binop:")
+                            || key.starts_with("unop:")
+                            || key.starts_with("cast:")
+                            || key.starts_with("cmp:")
+                        {
+                            global_available.insert(key.clone(), *id);
                         }
                     }
                 }
+            }
 
-                // Apply replacements
-                if !replacements.is_empty() {
+            // Apply all replacements across all blocks
+            if !all_replacements.is_empty() {
+                for block in function.cfg.blocks.values_mut() {
                     for inst in &mut block.instructions {
-                        inst.replace_uses(&replacements);
+                        inst.replace_uses(&all_replacements);
                     }
-                    replace_terminator_uses(&mut block.terminator, &replacements);
+                    replace_terminator_uses(&mut block.terminator, &all_replacements);
+                    for phi in &mut block.phi_nodes {
+                        for (_, val) in &mut phi.incoming {
+                            if let Some(&replacement) = all_replacements.get(val) {
+                                *val = replacement;
+                            }
+                        }
+                    }
                 }
             }
         }
