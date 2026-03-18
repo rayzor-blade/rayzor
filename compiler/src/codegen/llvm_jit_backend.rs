@@ -2381,6 +2381,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 ptr,
                 indices,
                 ty,
+                ..
             } => {
                 // Get the pointer value - may be an actual pointer or an integer (from array element load)
                 let raw_val = self.get_value(*ptr)?;
