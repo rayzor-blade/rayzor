@@ -1717,6 +1717,10 @@ fn cmd_aot(
 
     #[cfg(feature = "llvm-backend")]
     {
+        use compiler::codegen::aot_compiler::OutputFormat;
+        use compiler::ir::optimization::OptimizationLevel;
+        use compiler::tools::aot_build::{run_aot, AotConfig};
+
         let output_format = match emit.as_str() {
             "exe" => OutputFormat::Executable,
             "obj" => OutputFormat::ObjectFile,
