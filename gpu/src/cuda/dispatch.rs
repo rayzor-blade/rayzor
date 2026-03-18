@@ -2,7 +2,7 @@
 
 use super::buffer_ops::CudaBuffer;
 use super::compile::CudaCompiledKernel;
-use super::device_init::{CUresult, CudaContext, CUDA_SUCCESS};
+use super::device_init::{CUDA_SUCCESS, CUresult, CudaContext};
 
 type CUstream = *mut std::ffi::c_void;
 
@@ -224,8 +224,10 @@ mod tests {
         let b_data: Vec<f32> = (0..n).map(|i| (i * 2) as f32).collect();
         let byte_size = n * std::mem::size_of::<f32>();
 
-        let a_buf = CudaBuffer::from_data(&ctx, a_data.as_ptr() as *const u8, byte_size).unwrap();
-        let b_buf = CudaBuffer::from_data(&ctx, b_data.as_ptr() as *const u8, byte_size).unwrap();
+        let a_buf = unsafe { CudaBuffer::from_data(&ctx, a_data.as_ptr() as *const u8, byte_size) }
+            .unwrap();
+        let b_buf = unsafe { CudaBuffer::from_data(&ctx, b_data.as_ptr() as *const u8, byte_size) }
+            .unwrap();
         let result_buf = CudaBuffer::allocate(&ctx, byte_size).unwrap();
 
         dispatch(&ctx, &kernel, &[&a_buf, &b_buf, &result_buf], n).unwrap();
@@ -234,12 +236,12 @@ mod tests {
         let result: &[f32] =
             unsafe { std::slice::from_raw_parts(readback.as_ptr() as *const f32, n) };
 
-        for i in 0..n {
+        for (i, value) in result.iter().enumerate().take(n) {
             let expected = (i + i * 2) as f32;
             assert!(
-                (result[i] - expected).abs() < 1e-6,
+                (*value - expected).abs() < 1e-6,
                 "mismatch at {i}: expected {expected}, got {}",
-                result[i]
+                value
             );
         }
     }

@@ -1001,7 +1001,7 @@ static PROGRAM_ARGS: std::sync::OnceLock<ArgsStorage> = std::sync::OnceLock::new
 /// Returns a heap-allocated HaxeArray pointer.
 fn build_args_array(args: &[&str]) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{Layout, alloc};
+    use std::alloc::{alloc, Layout};
 
     let count = args.len();
     let elem_size = 8; // size of pointer (i64)
@@ -1719,7 +1719,7 @@ pub extern "C" fn haxe_filesystem_is_file(path: *const HaxeString) -> bool {
 pub extern "C" fn haxe_filesystem_read_directory(
     path: *const HaxeString,
 ) -> *mut crate::haxe_array::HaxeArray {
-    use crate::haxe_array::{HaxeArray, haxe_array_new, haxe_array_push};
+    use crate::haxe_array::{haxe_array_new, haxe_array_push, HaxeArray};
 
     unsafe {
         let path_str = match haxe_string_to_rust(path) {
@@ -3300,7 +3300,7 @@ pub extern "C" fn haxe_stringmap_keys_to_array(
     map_ptr: *mut HaxeStringMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{Layout, alloc};
+    use std::alloc::{alloc, Layout};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
@@ -3326,7 +3326,7 @@ pub extern "C" fn haxe_intmap_keys_to_array(
     map_ptr: *mut HaxeIntMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{Layout, alloc};
+    use std::alloc::{alloc, Layout};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
@@ -3350,7 +3350,7 @@ pub extern "C" fn haxe_stringmap_values_to_array(
     map_ptr: *mut HaxeStringMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{Layout, alloc};
+    use std::alloc::{alloc, Layout};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
@@ -3374,7 +3374,7 @@ pub extern "C" fn haxe_intmap_values_to_array(
     map_ptr: *mut HaxeIntMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{Layout, alloc};
+    use std::alloc::{alloc, Layout};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
@@ -3492,7 +3492,7 @@ pub extern "C" fn haxe_objectmap_keys_to_array(
     map_ptr: *mut HaxeObjectMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{Layout, alloc};
+    use std::alloc::{alloc, Layout};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
@@ -3515,7 +3515,7 @@ pub extern "C" fn haxe_objectmap_values_to_array(
     map_ptr: *mut HaxeObjectMap,
 ) -> *mut crate::haxe_array::HaxeArray {
     use crate::haxe_array::HaxeArray;
-    use std::alloc::{Layout, alloc};
+    use std::alloc::{alloc, Layout};
 
     unsafe {
         let arr = alloc(Layout::new::<HaxeArray>()) as *mut HaxeArray;
