@@ -1654,18 +1654,27 @@ fn cmd_aot(
             .map(|f| f.to_string_lossy().to_string())
             .collect();
 
+        let is_exe = emit == "gcc";
         let output_path = output.unwrap_or_else(|| {
             let base = std::path::PathBuf::from(&source_files[0])
                 .file_stem()
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string();
-            std::path::PathBuf::from(format!("{}.c", base))
+            if is_exe {
+                std::path::PathBuf::from(&base)
+            } else {
+                std::path::PathBuf::from(format!("{}.c", base))
+            }
         });
 
         let mut compiler = AotCompiler::default();
         compiler.opt_level = opt;
-        compiler.output_format = OutputFormat::CSource;
+        compiler.output_format = if is_exe {
+            OutputFormat::Executable
+        } else {
+            OutputFormat::CSource
+        };
         compiler.verbose = verbose;
         compiler.runtime_dir = runtime_dir.clone();
         compiler.strip = strip;
