@@ -151,6 +151,14 @@ impl CBackend {
         self.emit_line("static inline float _bitcast_i32_to_f32(i32 v) { union { i32 i; float f; } u; u.i = v; return u.f; }");
         self.emit_line("static inline i32 _bitcast_f32_to_i32(float v) { union { i32 i; float f; } u; u.f = v; return u.i; }");
         self.emit_line("");
+        // Common runtime declarations used by emitted code
+        self.emit_line("extern i64 haxe_string_literal(i64 ptr, i64 len);");
+        self.emit_line("extern void* rayzor_malloc(i64 size);");
+        self.emit_line("extern void rayzor_tracked_free(void* ptr);");
+        self.emit_line("extern void rayzor_throw(i64 exc);");
+        self.emit_line("extern void rayzor_global_store(i64 id, i64 value);");
+        self.emit_line("extern i64 rayzor_global_load(i64 id);");
+        self.emit_line("");
     }
 
     // -----------------------------------------------------------------------
@@ -160,6 +168,7 @@ impl CBackend {
     fn emit_extern_declarations(&mut self, modules: &[IrModule]) {
         self.emit_line("/* Runtime extern declarations */");
 
+        // 1. Declare all explicit extern functions from modules
         for module in modules {
             for (_func_id, ext) in &module.extern_functions {
                 if self.declared_externs.contains(&ext.name) {
@@ -184,6 +193,97 @@ impl CBackend {
                 self.emit_line(&format!("extern {} {}({});", ret_ty, ext.name, params_str));
             }
         }
+
+        // 2. Declare functions with empty bodies (extern/forward declarations from stdlib)
+        for module in modules {
+            for (func_id, function) in &module.functions {
+                if !function.cfg.blocks.is_empty() {
+                    continue; // has body — will be emitted as a definition
+                }
+                let c_name = match self.function_names.get(func_id) {
+                    Some(n) => n.clone(),
+                    None => continue,
+                };
+                if self.declared_externs.contains(&c_name) {
+                    continue;
+                }
+                self.declared_externs.insert(c_name.clone());
+
+                let ret_ty = Self::type_to_c(&function.signature.return_type);
+                let params: Vec<String> = function
+                    .signature
+                    .parameters
+                    .iter()
+                    .filter(|p| p.ty != IrType::Void)
+                    .map(|p| Self::type_to_c(&p.ty))
+                    .collect();
+                let params_str = if params.is_empty() {
+                    "void".to_string()
+                } else {
+                    params.join(", ")
+                };
+                self.emit_line(&format!("extern {} {}({});", ret_ty, c_name, params_str));
+            }
+        }
+
+        // 3. Scan all CallDirect instructions for function IDs not in our
+        //    internal function map — these are runtime/stdlib calls that need
+        //    extern declarations. Build signatures from the call site context.
+        let mut missing_externs: BTreeMap<IrFunctionId, (String, usize)> = BTreeMap::new();
+        for module in modules {
+            // Build a lookup of extern function names by ID
+            let extern_names: HashMap<IrFunctionId, &str> = module
+                .extern_functions
+                .iter()
+                .map(|(id, ext)| (*id, ext.name.as_str()))
+                .collect();
+
+            for function in module.functions.values() {
+                for block in function.cfg.blocks.values() {
+                    for inst in &block.instructions {
+                        if let IrInstruction::CallDirect { func_id, args, .. } = inst {
+                            if !self.function_names.contains_key(func_id) {
+                                // Look up the name from extern_functions or external_function_names
+                                let name = extern_names
+                                    .get(func_id)
+                                    .map(|s| s.to_string())
+                                    .or_else(|| {
+                                        module.external_function_names.get(func_id).cloned()
+                                    });
+                                if let Some(name) = name {
+                                    if !self.declared_externs.contains(&name) {
+                                        missing_externs
+                                            .entry(*func_id)
+                                            .or_insert((name, args.len()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Emit catch-all declarations for missing externs
+        // Since we don't have full signatures, use i64 for all params and return
+        for (_func_id, (name, arg_count)) in &missing_externs {
+            if self.declared_externs.contains(name) {
+                continue;
+            }
+            self.declared_externs.insert(name.clone());
+            let params_str = if *arg_count == 0 {
+                "void".to_string()
+            } else {
+                (0..*arg_count)
+                    .map(|_| "i64".to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            self.emit_line(&format!("extern i64 {}({});", name, params_str));
+            // Also store the name so CallDirect can find it
+            self.function_names.insert(*_func_id, name.clone());
+        }
+
         self.emit_line("");
     }
 
@@ -1267,7 +1367,8 @@ impl CBackend {
             }
             IrValue::String(s) => {
                 let escaped = s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
-                format!("(i64)(intptr_t)\"{}\"", escaped)
+                let len = s.len();
+                format!("(i64)haxe_string_literal((i64)(intptr_t)\"{}\", {}LL)", escaped, len)
             }
             IrValue::Array(elems) => {
                 // Not common in practice; emit 0
