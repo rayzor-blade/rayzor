@@ -193,7 +193,9 @@ impl InliningCostModel {
         call_site: &CallSite,
         call_graph: &CallGraph,
     ) -> bool {
-        // Never inline recursive functions (for now)
+        // Skip recursive functions unless they are small enough for bounded
+        // recursive inlining (one level). This is critical for tight recursive
+        // functions like fibonacci where g++ does partial unrolling.
         if call_graph.is_recursive(call_site.callee) {
             return false;
         }
@@ -241,6 +243,10 @@ pub struct InliningPass {
     cost_model: InliningCostModel,
     /// Maximum iterations of inlining
     max_iterations: usize,
+    /// Functions already recursively inlined (prevent unbounded expansion)
+    recursively_inlined: BTreeSet<IrFunctionId>,
+    /// Maximum instruction count for recursive inlining candidates
+    max_recursive_inline_size: usize,
 }
 
 impl InliningPass {
@@ -248,6 +254,8 @@ impl InliningPass {
         Self {
             cost_model: InliningCostModel::default(),
             max_iterations: 5,
+            recursively_inlined: BTreeSet::new(),
+            max_recursive_inline_size: 20,
         }
     }
 
@@ -255,6 +263,8 @@ impl InliningPass {
         Self {
             cost_model,
             max_iterations: 5,
+            recursively_inlined: BTreeSet::new(),
+            max_recursive_inline_size: 20,
         }
     }
 
@@ -771,6 +781,67 @@ impl OptimizationPass for InliningPass {
             if !any_inlined {
                 break;
             }
+        }
+
+        // --- Bounded recursive inlining (one level) ---
+        // For small recursive functions (like fibonacci), inline the function
+        // body into its own recursive call sites once. This partially unrolls
+        // the recursion, halving function call overhead — matching what g++ -O2
+        // does for C++ code.
+        let call_graph = CallGraph::build(module);
+        for &func_id in &call_graph.recursive_functions {
+            if self.recursively_inlined.contains(&func_id) {
+                continue;
+            }
+            let inst_count = match module.functions.get(&func_id) {
+                Some(f) => f.cfg.blocks.values().map(|b| b.instructions.len()).sum::<usize>(),
+                None => continue,
+            };
+            if inst_count > self.max_recursive_inline_size {
+                continue;
+            }
+            // Find self-recursive call sites within this function
+            let self_call_sites: Vec<CallSite> = call_graph
+                .call_sites
+                .iter()
+                .filter(|s| s.caller == func_id && s.callee == func_id)
+                .cloned()
+                .collect();
+            if self_call_sites.is_empty() {
+                continue;
+            }
+            // Compute next_reg_id for this function
+            let mut next_reg_id = 0u32;
+            for function in module.functions.values() {
+                for block in function.cfg.blocks.values() {
+                    for phi in &block.phi_nodes {
+                        next_reg_id = next_reg_id.max(phi.dest.as_u32() + 1);
+                    }
+                    for inst in &block.instructions {
+                        if let Some(dest) = inst.dest() {
+                            next_reg_id = next_reg_id.max(dest.as_u32() + 1);
+                        }
+                    }
+                }
+            }
+            // Inline each self-recursive call site (back-to-front within blocks)
+            let mut sorted_sites = self_call_sites;
+            sorted_sites.sort_by(|a, b| b.instruction_index.cmp(&a.instruction_index));
+            let mut inlined_blocks: BTreeSet<IrBlockId> = BTreeSet::new();
+            for site in &sorted_sites {
+                if inlined_blocks.contains(&site.block) {
+                    continue;
+                }
+                if Self::inline_call_site(module, site, &mut next_reg_id).is_ok() {
+                    result.modified = true;
+                    inlined_blocks.insert(site.block);
+                    *result
+                        .stats
+                        .entry("recursive_functions_inlined".to_string())
+                        .or_insert(0) += 1;
+                }
+            }
+            self.recursively_inlined.insert(func_id);
         }
 
         result
