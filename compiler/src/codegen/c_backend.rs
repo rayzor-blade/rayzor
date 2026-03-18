@@ -773,24 +773,12 @@ impl CBackend {
                 ty,
                 struct_context,
             } => {
-                // If we have struct context AND the struct is emitted, use typed field access
-                let used_struct_access = if let Some(ctx) = struct_context {
-                    if self.emitted_structs.contains_key(&ctx.struct_name) {
-                        let field_name = Self::sanitize_name(&ctx.field_name);
-                        self.emit_line(&format!(
-                            "r{} = (void*)&(({} *)r{})->{};",
-                            dest.as_u32(),
-                            ctx.struct_name,
-                            ptr.as_u32(),
-                            field_name
-                        ));
-                        true
-                    } else {
-                        false
-                    }
-                } else {
-                    false
-                };
+                // Try to emit typed struct field access:
+                // 1. From explicit struct_context (set by MIR lowering)
+                // 2. By matching the GEP index against known struct field layouts
+                let used_struct_access = self.try_emit_struct_gep(
+                    *dest, *ptr, indices, ty, struct_context.as_ref(), function,
+                );
 
                 if used_struct_access {
                     // Already emitted typed field access
@@ -1476,6 +1464,83 @@ impl CBackend {
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
+
+    /// Try to emit a typed struct field access for a GEP instruction.
+    /// Returns true if typed access was emitted, false for fallback.
+    fn try_emit_struct_gep(
+        &mut self,
+        dest: IrId,
+        ptr: IrId,
+        indices: &[IrId],
+        ty: &IrType,
+        struct_context: Option<&crate::ir::instructions::StructFieldRef>,
+        function: &crate::ir::IrFunction,
+    ) -> bool {
+        // Only for struct field GEPs (elem_size = 8, not byte pointers)
+        let is_struct_gep = !matches!(ty, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::U8 | IrType::I8));
+        if !is_struct_gep {
+            return false;
+        }
+
+        let idx = match indices.first() {
+            Some(idx) => *idx,
+            None => return false,
+        };
+
+        // 1. Try explicit struct_context first
+        if let Some(ctx) = struct_context {
+            if self.emitted_structs.contains_key(&ctx.struct_name) {
+                let field_name = Self::sanitize_name(&ctx.field_name);
+                self.emit_line(&format!(
+                    "r{} = (void*)&(({} *)r{})->{};",
+                    dest.as_u32(), ctx.struct_name, ptr.as_u32(), field_name
+                ));
+                return true;
+            }
+        }
+
+        // 2. Try to resolve the index to a constant by scanning the block
+        let const_index = self.resolve_const_i32(idx, function);
+        let field_index = match const_index {
+            Some(i) => i as usize,
+            None => return false,
+        };
+
+        // 3. Find matching struct(s) by field index + element type
+        let mut matches: Vec<(&str, &str)> = Vec::new();
+        for (struct_name, fields) in &self.emitted_structs {
+            if field_index < fields.len() {
+                matches.push((struct_name.as_str(), fields[field_index].as_str()));
+            }
+        }
+
+        // Only emit typed access if exactly one struct matches
+        // (ambiguous matches fall back to pointer arithmetic)
+        if matches.len() == 1 {
+            let (struct_name, field_name) = matches[0];
+            self.emit_line(&format!(
+                "r{} = (void*)&(({} *)r{})->{};",
+                dest.as_u32(), struct_name, ptr.as_u32(), field_name
+            ));
+            return true;
+        }
+
+        false
+    }
+
+    /// Try to resolve an IrId to a constant i32 by scanning the function's instructions.
+    fn resolve_const_i32(&self, id: IrId, function: &crate::ir::IrFunction) -> Option<i32> {
+        for block in function.cfg.blocks.values() {
+            for inst in &block.instructions {
+                if let IrInstruction::Const { dest, value: IrValue::I32(v) } = inst {
+                    if *dest == id {
+                        return Some(*v);
+                    }
+                }
+            }
+        }
+        None
+    }
 
     fn emit_line(&mut self, line: &str) {
         for _ in 0..self.indent {
