@@ -734,11 +734,17 @@ impl AotCompiler {
             .map_err(|e| format!("Failed to write temp C source: {}", e))?;
 
         let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
-        let opt_flag = match self.opt_level {
-            OptimizationLevel::O0 => "-O0",
-            OptimizationLevel::O1 => "-O1",
-            OptimizationLevel::O2 => "-O2",
-            OptimizationLevel::O3 => "-O3",
+        // Cap at -O2 for large files to avoid gcc OOM on complex SSA-to-C output.
+        // gcc -O3 can use 4GB+ RAM on files with 1000+ line functions.
+        let opt_flag = if c_source.len() > 100_000 && self.opt_level == OptimizationLevel::O3 {
+            "-O2"
+        } else {
+            match self.opt_level {
+                OptimizationLevel::O0 => "-O0",
+                OptimizationLevel::O1 => "-O1",
+                OptimizationLevel::O2 => "-O2",
+                OptimizationLevel::O3 => "-O3",
+            }
         };
 
         // Find runtime library
