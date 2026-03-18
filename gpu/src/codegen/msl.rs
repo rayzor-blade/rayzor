@@ -86,7 +86,8 @@ pub fn emit_unary_elementwise(op: KernelOp, dtype: u8) -> String {
         KernelOp::Tanh => "tanh(a[id])".to_string(),
         KernelOp::Gelu => {
             // GELU approximation: x * 0.5 * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-            "a[id] * 0.5 * (1.0 + tanh(0.7978845608 * (a[id] + 0.044715 * a[id] * a[id] * a[id])))".to_string()
+            "a[id] * 0.5 * (1.0 + tanh(0.7978845608 * (a[id] + 0.044715 * a[id] * a[id] * a[id])))"
+                .to_string()
         }
         KernelOp::Silu => "a[id] / (1.0 + exp(-a[id]))".to_string(),
         _ => unreachable!("not a unary op"),

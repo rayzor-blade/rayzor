@@ -134,7 +134,7 @@ mod tests {
         // Upload data
         let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0];
         let byte_size = data.len() * std::mem::size_of::<f32>();
-        let buf = CudaBuffer::from_data(&ctx, data.as_ptr() as *const u8, byte_size)
+        let buf = unsafe { CudaBuffer::from_data(&ctx, data.as_ptr() as *const u8, byte_size) }
             .expect("failed to create buffer");
 
         assert_eq!(buf.byte_size(), byte_size);
