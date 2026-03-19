@@ -777,46 +777,51 @@ impl CBackend {
                 // 1. From explicit struct_context (set by MIR lowering)
                 // 2. By matching the GEP index against known struct field layouts
                 let used_struct_access = self.try_emit_struct_gep(
-                    *dest, *ptr, indices, ty, struct_context.as_ref(), function,
+                    *dest,
+                    *ptr,
+                    indices,
+                    ty,
+                    struct_context.as_ref(),
+                    function,
                 );
 
                 if used_struct_access {
                     // Already emitted typed field access
                 } else {
-                // Fallback: generic pointer arithmetic
-                let elem_size = match ty {
-                    IrType::Ptr(inner) => match inner.as_ref() {
-                        IrType::U8 | IrType::I8 => 1,
+                    // Fallback: generic pointer arithmetic
+                    let elem_size = match ty {
+                        IrType::Ptr(inner) => match inner.as_ref() {
+                            IrType::U8 | IrType::I8 => 1,
+                            _ => 8,
+                        },
                         _ => 8,
-                    },
-                    _ => 8,
-                };
-                if let Some(idx) = indices.first() {
-                    let dest_ty = function
-                        .register_types
-                        .get(dest)
-                        .map(|t| Self::type_to_c(t))
-                        .unwrap_or_else(|| "void*".to_string());
-                    let idx_cast = format!("(intptr_t)r{}", idx.as_u32());
-                    if elem_size == 1 {
-                        self.emit_line(&format!(
-                            "r{} = ({})((char*)r{} + {});",
-                            dest.as_u32(),
-                            dest_ty,
-                            ptr.as_u32(),
-                            idx_cast
-                        ));
-                    } else {
-                        self.emit_line(&format!(
-                            "r{} = ({})((char*)r{} + {} * {});",
-                            dest.as_u32(),
-                            dest_ty,
-                            ptr.as_u32(),
-                            idx_cast,
-                            elem_size
-                        ));
+                    };
+                    if let Some(idx) = indices.first() {
+                        let dest_ty = function
+                            .register_types
+                            .get(dest)
+                            .map(|t| Self::type_to_c(t))
+                            .unwrap_or_else(|| "void*".to_string());
+                        let idx_cast = format!("(intptr_t)r{}", idx.as_u32());
+                        if elem_size == 1 {
+                            self.emit_line(&format!(
+                                "r{} = ({})((char*)r{} + {});",
+                                dest.as_u32(),
+                                dest_ty,
+                                ptr.as_u32(),
+                                idx_cast
+                            ));
+                        } else {
+                            self.emit_line(&format!(
+                                "r{} = ({})((char*)r{} + {} * {});",
+                                dest.as_u32(),
+                                dest_ty,
+                                ptr.as_u32(),
+                                idx_cast,
+                                elem_size
+                            ));
+                        }
                     }
-                }
                 } // close else { fallback }
             }
 
@@ -1477,7 +1482,8 @@ impl CBackend {
         function: &crate::ir::IrFunction,
     ) -> bool {
         // Only for struct field GEPs (elem_size = 8, not byte pointers)
-        let is_struct_gep = !matches!(ty, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::U8 | IrType::I8));
+        let is_struct_gep =
+            !matches!(ty, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::U8 | IrType::I8));
         if !is_struct_gep {
             return false;
         }
@@ -1493,7 +1499,10 @@ impl CBackend {
                 let field_name = Self::sanitize_name(&ctx.field_name);
                 self.emit_line(&format!(
                     "r{} = (void*)&(({} *)r{})->{};",
-                    dest.as_u32(), ctx.struct_name, ptr.as_u32(), field_name
+                    dest.as_u32(),
+                    ctx.struct_name,
+                    ptr.as_u32(),
+                    field_name
                 ));
                 return true;
             }
@@ -1520,7 +1529,10 @@ impl CBackend {
             let (struct_name, field_name) = matches[0];
             self.emit_line(&format!(
                 "r{} = (void*)&(({} *)r{})->{};",
-                dest.as_u32(), struct_name, ptr.as_u32(), field_name
+                dest.as_u32(),
+                struct_name,
+                ptr.as_u32(),
+                field_name
             ));
             return true;
         }
@@ -1532,7 +1544,11 @@ impl CBackend {
     fn resolve_const_i32(&self, id: IrId, function: &crate::ir::IrFunction) -> Option<i32> {
         for block in function.cfg.blocks.values() {
             for inst in &block.instructions {
-                if let IrInstruction::Const { dest, value: IrValue::I32(v) } = inst {
+                if let IrInstruction::Const {
+                    dest,
+                    value: IrValue::I32(v),
+                } = inst
+                {
                     if *dest == id {
                         return Some(*v);
                     }

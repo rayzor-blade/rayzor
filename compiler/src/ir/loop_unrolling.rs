@@ -618,7 +618,12 @@ fn remap_instruction(
             ptr: map_use(*ptr, reg_map),
             ty: ty.clone(),
         },
-        IrInstruction::Store { ptr, value, store_ty, .. } => IrInstruction::Store {
+        IrInstruction::Store {
+            ptr,
+            value,
+            store_ty,
+            ..
+        } => IrInstruction::Store {
             ptr: map_use(*ptr, reg_map),
             value: map_use(*value, reg_map),
             store_ty: store_ty.clone(),

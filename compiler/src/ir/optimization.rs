@@ -1277,14 +1277,17 @@ impl CSEPass {
                 Some(format!("loadglobal:{}", global_id.0))
             }
             // Constants and GEPs for cross-block CSE
-            IrInstruction::Const { value, .. } => {
-                Some(format!("const:{:?}", value))
-            }
+            IrInstruction::Const { value, .. } => Some(format!("const:{:?}", value)),
             IrInstruction::GetElementPtr {
                 ptr, indices, ty, ..
             } => {
                 let idx_str: Vec<String> = indices.iter().map(|i| i.as_u32().to_string()).collect();
-                Some(format!("gep:{}:[{}]:{:?}", ptr.as_u32(), idx_str.join(","), ty))
+                Some(format!(
+                    "gep:{}:[{}]:{:?}",
+                    ptr.as_u32(),
+                    idx_str.join(","),
+                    ty
+                ))
             }
             // Loads are not CSE-safe without alias analysis
             // Calls have side effects
@@ -1325,9 +1328,9 @@ impl OptimizationPass for CSEPass {
                 for inst in &block.instructions {
                     if let Some(key) = Self::instruction_key(inst) {
                         // Only record the FIRST definition (earliest in dom order)
-                        available_expr.entry(key).or_insert_with(|| {
-                            (inst.dest().unwrap_or(IrId::new(0)), block_id)
-                        });
+                        available_expr
+                            .entry(key)
+                            .or_insert_with(|| (inst.dest().unwrap_or(IrId::new(0)), block_id));
                     }
                 }
             }
@@ -1342,9 +1345,7 @@ impl OptimizationPass for CSEPass {
                                 // Only replace if:
                                 // 1. Different register (not self)
                                 // 2. Defining block dominates this block
-                                if existing_reg != dest
-                                    && domtree.dominates(def_block, block_id)
-                                {
+                                if existing_reg != dest && domtree.dominates(def_block, block_id) {
                                     replacements.insert(dest, existing_reg);
                                     result.modified = true;
                                     *result
