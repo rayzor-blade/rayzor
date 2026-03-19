@@ -1276,6 +1276,16 @@ impl CSEPass {
             IrInstruction::LoadGlobal { global_id, .. } => {
                 Some(format!("loadglobal:{}", global_id.0))
             }
+            // Constants and GEPs for cross-block CSE
+            IrInstruction::Const { value, .. } => {
+                Some(format!("const:{:?}", value))
+            }
+            IrInstruction::GetElementPtr {
+                ptr, indices, ty, ..
+            } => {
+                let idx_str: Vec<String> = indices.iter().map(|i| i.as_u32().to_string()).collect();
+                Some(format!("gep:{}:[{}]:{:?}", ptr.as_u32(), idx_str.join(","), ty))
+            }
             // Loads are not CSE-safe without alias analysis
             // Calls have side effects
             _ => None,
@@ -1306,36 +1316,58 @@ impl OptimizationPass for CSEPass {
         let mut result = OptimizationResult::unchanged();
 
         for function in module.functions.values_mut() {
-            // Local CSE within each block
-            for block in function.cfg.blocks.values_mut() {
-                let mut available: HashMap<String, IrId> = HashMap::new();
-                // Use BTreeMap for deterministic iteration order
-                let mut replacements: BTreeMap<IrId, IrId> = BTreeMap::new();
+            let domtree = super::loop_analysis::DominatorTree::compute(function);
 
+            // Phase 1: Collect all available expressions with their defining block
+            // available_expr: key → (defining_register, defining_block)
+            let mut available_expr: HashMap<String, (IrId, IrBlockId)> = HashMap::new();
+            for (&block_id, block) in &function.cfg.blocks {
                 for inst in &block.instructions {
                     if let Some(key) = Self::instruction_key(inst) {
-                        if let Some(&existing) = available.get(&key) {
-                            // Found common subexpression
-                            if let Some(dest) = inst.dest() {
-                                replacements.insert(dest, existing);
-                                result.modified = true;
-                                *result
-                                    .stats
-                                    .entry("cse_eliminated".to_string())
-                                    .or_insert(0) += 1;
+                        // Only record the FIRST definition (earliest in dom order)
+                        available_expr.entry(key).or_insert_with(|| {
+                            (inst.dest().unwrap_or(IrId::new(0)), block_id)
+                        });
+                    }
+                }
+            }
+
+            // Phase 2: Find replacements — only when the defining block dominates
+            let mut replacements: BTreeMap<IrId, IrId> = BTreeMap::new();
+            for (&block_id, block) in &function.cfg.blocks {
+                for inst in &block.instructions {
+                    if let Some(key) = Self::instruction_key(inst) {
+                        if let Some(dest) = inst.dest() {
+                            if let Some(&(existing_reg, def_block)) = available_expr.get(&key) {
+                                // Only replace if:
+                                // 1. Different register (not self)
+                                // 2. Defining block dominates this block
+                                if existing_reg != dest
+                                    && domtree.dominates(def_block, block_id)
+                                {
+                                    replacements.insert(dest, existing_reg);
+                                    result.modified = true;
+                                    *result
+                                        .stats
+                                        .entry("cse_eliminated".to_string())
+                                        .or_insert(0) += 1;
+                                }
                             }
-                        } else if let Some(dest) = inst.dest() {
-                            available.insert(key, dest);
                         }
                     }
                 }
+            }
 
-                // Apply replacements
-                if !replacements.is_empty() {
+            // Phase 3: Apply replacements to instructions and terminators
+            // Do NOT replace phi node incoming values — they may reference
+            // registers from non-dominating predecessor blocks.
+            if !replacements.is_empty() {
+                for block in function.cfg.blocks.values_mut() {
                     for inst in &mut block.instructions {
                         inst.replace_uses(&replacements);
                     }
                     replace_terminator_uses(&mut block.terminator, &replacements);
+                    // Phi nodes: intentionally NOT modified
                 }
             }
         }
