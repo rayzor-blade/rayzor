@@ -2114,7 +2114,12 @@ impl CraneliftBackend {
                 value_map.insert(*dest, value);
             }
 
-            IrInstruction::Store { ptr, value, store_ty, .. } => {
+            IrInstruction::Store {
+                ptr,
+                value,
+                store_ty,
+                ..
+            } => {
                 // Determine if this is a struct field store that needs widening.
                 // All Rayzor object fields are 8-byte slots. Narrow integer stores
                 // (i32/i16/i8) must be widened to i64 to avoid leaving upper bytes
@@ -2135,10 +2140,8 @@ impl CraneliftBackend {
                     let val_ty = builder.func.dfg.value_type(val);
 
                     // Check if the store type is known to be f64 — keep in XMM register
-                    let is_float_field = matches!(
-                        store_ty,
-                        Some(IrType::F64) | Some(IrType::F32)
-                    ) || val_ty.is_float();
+                    let is_float_field = matches!(store_ty, Some(IrType::F64) | Some(IrType::F32))
+                        || val_ty.is_float();
 
                     let val = if val_ty.bits() < 64 && val_ty.is_int() && !is_float_field {
                         // Widen narrow integers to fill 8-byte slot

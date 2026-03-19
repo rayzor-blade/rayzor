@@ -22702,17 +22702,22 @@ impl<'a> HirToMirContext<'a> {
                             let store_struct_ctx = self.field_class_names.get(field).map(|cn| {
                                 crate::ir::instructions::StructFieldRef {
                                     struct_name: cn.clone(),
-                                    field_name: self.symbol_table.get_symbol(*field)
+                                    field_name: self
+                                        .symbol_table
+                                        .get_symbol(*field)
                                         .and_then(|s| self.string_interner.get(s.name))
-                                        .unwrap_or("<unknown>").to_string(),
+                                        .unwrap_or("<unknown>")
+                                        .to_string(),
                                     field_index: field_index as u32,
                                 }
                             });
                             // Use GEP to get field pointer, then store
-                            if let Some(field_ptr) =
-                                self.builder
-                                    .build_gep_with_context(obj_reg, vec![index_const], field_ty.clone(), store_struct_ctx)
-                            {
+                            if let Some(field_ptr) = self.builder.build_gep_with_context(
+                                obj_reg,
+                                vec![index_const],
+                                field_ty.clone(),
+                                store_struct_ctx,
+                            ) {
                                 // Type erasure coercion: if field is I64 (erased type param)
                                 // but value is a concrete type, coerce before storing
                                 let store_value = if field_ty == IrType::I64 {
@@ -24248,7 +24253,10 @@ impl<'a> HirToMirContext<'a> {
         // Look up the field index from our field_index_map
         // Also get the actual field type from the symbol table, NOT from the passed-in field_ty
         // which may be Dynamic due to unresolved type parameters
-        let (resolved_class_ty, field_index, actual_field_type) = match self.field_index_map.get(&field) {
+        let (resolved_class_ty, field_index, actual_field_type) = match self
+            .field_index_map
+            .get(&field)
+        {
             Some(&(class_ty, idx)) => {
                 // Get the actual field type from the symbol table
                 let sym_type = self
@@ -24328,9 +24336,12 @@ impl<'a> HirToMirContext<'a> {
         };
 
         // Use GetElementPtr to get pointer to the field
-        let field_ptr = self
-            .builder
-            .build_gep_with_context(obj, vec![index_const], field_ir_ty.clone(), struct_ctx)?;
+        let field_ptr = self.builder.build_gep_with_context(
+            obj,
+            vec![index_const],
+            field_ir_ty.clone(),
+            struct_ctx,
+        )?;
 
         // Load the value from the field pointer
         let field_value = self.builder.build_load(field_ptr, field_ir_ty.clone())?;

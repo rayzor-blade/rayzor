@@ -281,7 +281,11 @@ impl MirBuilder {
 
     /// Store to memory
     pub fn store(&mut self, ptr: IrId, value: IrId) {
-        self.insert_inst(IrInstruction::Store { ptr, value, store_ty: None });
+        self.insert_inst(IrInstruction::Store {
+            ptr,
+            value,
+            store_ty: None,
+        });
     }
 
     /// Binary operation

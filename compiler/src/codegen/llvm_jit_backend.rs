@@ -1042,18 +1042,13 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
                 let expects_env = !self.extern_function_ids.contains(func_id)
                     && !self.no_env_functions.contains(func_id);
-                self.compile_function_body(
-                    *func_id,
-                    function,
-                    wrapper_func,
-                    expects_env,
-                )
-                .map_err(|e| {
-                    format!(
-                        "Error in function '{}' ({:?}): {}",
-                        function.name, func_id, e
-                    )
-                })?;
+                self.compile_function_body(*func_id, function, wrapper_func, expects_env)
+                    .map_err(|e| {
+                        format!(
+                            "Error in function '{}' ({:?}): {}",
+                            function.name, func_id, e
+                        )
+                    })?;
 
                 if !wrapper_func.verify(true) {
                     return Err(format!(

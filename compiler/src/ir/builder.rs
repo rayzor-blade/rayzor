@@ -5,12 +5,12 @@
 
 use tracing::debug;
 
+use super::instructions::StructFieldRef;
 use super::{
     AllocationHint, BinaryOp, CallingConvention, CompareOp, IrBasicBlock, IrBlockId, IrFunction,
     IrFunctionId, IrFunctionSignature, IrId, IrInstruction, IrLocal, IrModule, IrParameter,
     IrPhiNode, IrSourceLocation, IrTerminator, IrType, IrTypeParam, IrValue, UnaryOp,
 };
-use super::instructions::StructFieldRef;
 use crate::tast::SymbolId;
 use std::collections::HashMap;
 
