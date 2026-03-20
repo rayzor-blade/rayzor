@@ -829,6 +829,7 @@ mod tests {
                     IrInstruction::Store {
                         ptr: r[4],
                         value: r[5],
+                        store_ty: None,
                     },
                 ],
                 terminator: IrTerminator::Branch { target: bb1 },
@@ -913,6 +914,7 @@ mod tests {
                     IrInstruction::Store {
                         ptr: r[4],
                         value: r[13],
+                        store_ty: None,
                     },
                 ],
                 terminator: IrTerminator::Branch { target: bb1 },
