@@ -2957,13 +2957,15 @@ impl<'a> HirToMirContext<'a> {
                 body.statements.len(),
                 body.expr.is_some()
             );
-            for (i, stmt) in body.statements.iter().enumerate() {
-                debug!(
-                    "[lower_function_body]: {} - stmt[{}] = {:?}",
-                    func_name,
-                    i,
-                    std::mem::discriminant(stmt)
-                );
+            if log::log_enabled!(log::Level::Debug) {
+                for (i, stmt) in body.statements.iter().enumerate() {
+                    debug!(
+                        "[lower_function_body]: {} - stmt[{}] = {:?}",
+                        func_name,
+                        i,
+                        std::mem::discriminant(stmt)
+                    );
+                }
             }
             // Enter function-level scope for variables declared at function level
             // This ensures they're freed on function exit via cleanup_all_scopes()
@@ -3682,13 +3684,15 @@ impl<'a> HirToMirContext<'a> {
                 func.name,
                 func.cfg.blocks.len()
             );
-            for (block_id, block) in &func.cfg.blocks {
-                debug!(
-                    "  Block {:?}: {} instructions, terminator: {:?}",
-                    block_id,
-                    block.instructions.len(),
-                    block.terminator
-                );
+            if log::log_enabled!(log::Level::Debug) {
+                for (block_id, block) in &func.cfg.blocks {
+                    debug!(
+                        "  Block {:?}: {} instructions, terminator: {:?}",
+                        block_id,
+                        block.instructions.len(),
+                        block.terminator
+                    );
+                }
             }
         }
 
@@ -7569,12 +7573,7 @@ impl<'a> HirToMirContext<'a> {
                             .symbol_table
                             .get_symbol(lookup_symbol)
                             .and_then(|s| self.string_interner.get(s.name));
-                        if _n == Some("counter") {
-                            eprintln!(
-                                "[COUNTER_SYMBOL_MAP] counter {:?} found in symbol_map as reg {:?}",
-                                lookup_symbol, reg
-                            );
-                        }
+                        let _ = _n; // symbol name used for debugging
                     }
                     // Check if we need to convert the type
                     // This handles cases where captured variables are stored as i64 in closure environment
@@ -7767,12 +7766,6 @@ impl<'a> HirToMirContext<'a> {
                         .get_symbol(*symbol)
                         .and_then(|s| self.string_interner.get(s.name));
                     // Try name-based global lookup as fallback (SymbolIds may differ)
-                    eprintln!(
-                        "[UNRESOLVED] {:?} name={:?} global_map_size={}",
-                        symbol,
-                        sym_name,
-                        self.global_symbol_map.len()
-                    );
                     if let Some(name_str) = sym_name {
                         for (&gsym, &gid) in &self.global_symbol_map {
                             if let Some(gsym_info) = self.symbol_table.get_symbol(gsym) {
@@ -14374,15 +14367,6 @@ impl<'a> HirToMirContext<'a> {
                                                         param_types.push(self.convert_type(arg.ty));
                                                     }
                                                 }
-                                                if mir_func_name == "Thread_sleep" {
-                                                    eprintln!(
-                                                        "[DBG STATIC MIR Thread_sleep] args_len={} static_args_len={} actual_args_len={}",
-                                                        args.len(),
-                                                        static_args.len(),
-                                                        actual_args.len()
-                                                    );
-                                                }
-
                                                 // Register forward reference - will be provided by merged stdlib module
                                                 // We infer the signature from the call site arguments
                                                 let mir_func_id = self
@@ -14543,14 +14527,6 @@ impl<'a> HirToMirContext<'a> {
                                                 final_arg_regs,
                                                 expected_return_type,
                                             );
-                                            if runtime_func == "Thread_sleep" {
-                                                eprintln!(
-                                                    "[DBG STATIC RUNTIME Thread_sleep] args_len={} static_args_len={} final_args={}",
-                                                    args.len(),
-                                                    static_args.len(),
-                                                    result.as_ref().map(|_| 0).unwrap_or(0)
-                                                );
-                                            }
                                             debug!(
                                                 "[STATIC METHOD] Generated call, result: {:?}",
                                                 result
@@ -15161,24 +15137,6 @@ impl<'a> HirToMirContext<'a> {
                                 .unwrap_or(false);
                         let treat_as_static_call =
                             has_synthetic_static_receiver || has_arity_static_receiver;
-                        if self
-                            .builder
-                            .module
-                            .functions
-                            .get(&func_id)
-                            .map(|f| f.name == "Thread_sleep")
-                            .unwrap_or(false)
-                        {
-                            eprintln!(
-                                "[DBG Thread_sleep] is_method={} has_synth={} has_arity={} treat_static={} args_len={} param_count={:?}",
-                                is_method,
-                                has_synthetic_static_receiver,
-                                has_arity_static_receiver,
-                                treat_as_static_call,
-                                args.len(),
-                                function_param_count
-                            );
-                        }
                         if has_arity_static_receiver {
                             debug!(
                                 "[STATIC-RECEIVER ARITY] Treating method call as static: symbol={:?}, func_id={:?}, args={}, params={:?}",
@@ -15489,21 +15447,6 @@ impl<'a> HirToMirContext<'a> {
                                         call_args = &args[1..];
                                     }
                                 }
-                            }
-                            if self
-                                .builder
-                                .module
-                                .functions
-                                .get(&func_id)
-                                .map(|f| f.name == "Thread_sleep")
-                                .unwrap_or(false)
-                            {
-                                eprintln!(
-                                    "[DBG Thread_sleep direct] args_len={} call_args_len={} param_count={:?}",
-                                    args.len(),
-                                    call_args.len(),
-                                    function_param_count
-                                );
                             }
                             let mut arg_regs = Vec::new();
                             for (param_idx, arg) in call_args.iter().enumerate() {
