@@ -1823,7 +1823,9 @@ impl PassManager {
                 // BCE: eliminate redundant bounds checks in for-in loops
                 manager
                     .add_pass(super::bounds_check_elimination::BoundsCheckEliminationPass::new());
-                // CSE and LICM may contribute to non-determinism, keeping them for now
+                // GVN eliminates redundant computations across dominator tree
+                // (cross-block value numbering for array/field loads in nested loops)
+                manager.add_pass(GVNPass::new());
                 manager.add_pass(CSEPass::new());
                 manager.add_pass(LICMPass::new());
                 // Loop unrolling after LICM (invariants hoisted, trip counts visible)
