@@ -2219,8 +2219,10 @@ impl CraneliftBackend {
                         extern_func.signature.calling_convention,
                         extern_func.signature.parameters.len()
                     );
-                    for (i, p) in extern_func.signature.parameters.iter().enumerate() {
-                        debug!("[extern_func]   param[{}] '{}': {:?}", i, p.name, p.ty);
+                    if log::log_enabled!(log::Level::Debug) {
+                        for (i, p) in extern_func.signature.parameters.iter().enumerate() {
+                            debug!("[extern_func]   param[{}] '{}': {:?}", i, p.name, p.ty);
+                        }
                     }
 
                     // Declare the external function if not already declared

@@ -3848,18 +3848,6 @@ impl CompilationUnit {
             //   - Stdlib module: IrFunctionId(2) = "free"
             // Without renumbering, stdlib's "free" would be skipped, causing vec_u8_free to call "indexOf"!
 
-            // DEBUG: Print user functions before merging
-            debug!(
-                "DEBUG: User module has {} functions before merging:",
-                mir_module.functions.len()
-            );
-            let mut user_func_ids: Vec<_> = mir_module.functions.keys().collect();
-            user_func_ids.sort_by_key(|id| id.0);
-            for func_id in user_func_ids.iter().take(5) {
-                let func = &mir_module.functions[func_id];
-                debug!("  - User IrFunctionId({}) = '{}'", func_id.0, func.name);
-            }
-
             // Find the maximum function ID in the user module
             let max_user_func_id = mir_module
                 .functions
@@ -4039,35 +4027,19 @@ impl CompilationUnit {
                 }
             }
 
-            // DEBUG: Print all function IDs in the merged module
-            debug!(
-                "DEBUG: Merged module has {} functions:",
-                mir_module.functions.len()
-            );
-            let mut func_ids: Vec<_> = mir_module.functions.keys().collect();
-            func_ids.sort_by_key(|id| id.0);
-            for func_id in func_ids.iter().take(10) {
-                // Print first 10
-                let func = &mir_module.functions[func_id];
-                debug!(
-                    "  - IrFunctionId({}) = '{}' (extern: {})",
-                    func_id.0,
-                    func.name,
-                    func.cfg.blocks.is_empty()
-                );
-            }
-
             // Verify MIR wrapper forward refs were replaced during merge.
             // A MirWrapper function with an empty CFG means the stdlib merge failed
             // to find the implementation — this would cause wrong values at runtime.
-            for (func_id, func) in &mir_module.functions {
-                if func.cfg.blocks.is_empty()
-                    && !matches!(func.kind, crate::ir::FunctionKind::ExternC)
-                {
-                    eprintln!(
-                        "warning: empty function body after stdlib merge: '{}' (ID {}) kind={:?}",
-                        func.name, func_id.0, func.kind
-                    );
+            if cfg!(debug_assertions) {
+                for (func_id, func) in &mir_module.functions {
+                    if func.cfg.blocks.is_empty()
+                        && !matches!(func.kind, crate::ir::FunctionKind::ExternC)
+                    {
+                        eprintln!(
+                            "warning: empty function body after stdlib merge: '{}' (ID {}) kind={:?}",
+                            func.name, func_id.0, func.kind
+                        );
+                    }
                 }
             }
         } // end if !is_stdlib_file (stdlib merge + renumbering)
