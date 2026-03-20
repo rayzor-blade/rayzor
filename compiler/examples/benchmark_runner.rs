@@ -458,9 +458,12 @@ struct TieredBenchmarkState {
     compile_time: Duration,
 }
 
-/// Heavy benchmarks that should skip interpreter and start at Baseline (Cranelift)
+/// Heavy benchmarks that should skip standalone interpreter target.
+/// fibonacci and deltablue are too slow for interpreter; mandelbrot
+/// and nbody are compute-heavy. Tiered mode still uses the interpreter
+/// for initial warmup before JIT promotion.
 fn is_heavy_benchmark(name: &str) -> bool {
-    matches!(name, "mandelbrot" | "nbody")
+    matches!(name, "mandelbrot" | "nbody" | "fibonacci" | "deltablue")
 }
 
 fn setup_tiered_benchmark(
