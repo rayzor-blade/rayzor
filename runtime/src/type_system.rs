@@ -2609,20 +2609,49 @@ pub extern "C" fn haxe_object_is_instance(obj_ptr: *const u8, target_type_id: i6
 /// Global vtable registry: type_id (as u32) -> Vec of closure pointers (i64).
 /// Each closure pointer points to a `{fn_code_ptr, env_ptr}` struct allocated
 /// by `build_function_ref` in the compiler.
+///
+/// Uses a flat array indexed by type_id for O(1) lock-free lookup.
+/// Init/set_slot run during single-threaded startup (__vtable_init__),
+/// then lookup is read-only during execution — no synchronization needed.
 static VTABLE_REGISTRY: RwLock<Option<HashMap<u32, Vec<i64>>>> = RwLock::new(None);
+
+/// Flat vtable entry: pointer to start of slots array + slot count.
+struct FlatVtable {
+    slots: *const i64,
+    len: usize,
+}
+
+/// Fast flat vtable array indexed by type_id. Populated lazily on first
+/// lookup (after __vtable_init__ completes). Read-only during execution —
+/// no locks on the hot path.
+static mut VTABLE_FLAT: *const Vec<FlatVtable> = std::ptr::null();
+/// Owns the copied slot data so pointers in VTABLE_FLAT remain valid.
+static mut VTABLE_FLAT_SLOTS: *const Vec<Vec<i64>> = std::ptr::null();
 
 /// Initialize a vtable for a class with the given type_id and slot count.
 /// Called at program startup before any user code.
 #[no_mangle]
 pub extern "C" fn haxe_vtable_init(type_id: i32, slot_count: i32) {
+    // Invalidate flat cache — will be rebuilt on next lookup.
+    // Must free slots BEFORE flat table since flat entries point into slots.
+    unsafe {
+        let old_slots = VTABLE_FLAT_SLOTS as *mut Vec<Vec<i64>>;
+        let old_flat = VTABLE_FLAT as *mut Vec<FlatVtable>;
+        VTABLE_FLAT = std::ptr::null();
+        VTABLE_FLAT_SLOTS = std::ptr::null();
+        if !old_flat.is_null() {
+            let _ = Box::from_raw(old_flat);
+        }
+        if !old_slots.is_null() {
+            let _ = Box::from_raw(old_slots);
+        }
+    }
     let mut registry = VTABLE_REGISTRY.write().unwrap();
     let map = registry.get_or_insert_with(HashMap::new);
     map.insert(type_id as u32, vec![0i64; slot_count as usize]);
 }
 
 /// Store a closure pointer at a vtable slot for a class type_id.
-/// The closure_ptr comes from `build_function_ref` — a pointer to
-/// `{fn_code_ptr: i64, env_ptr: i64}`.
 #[no_mangle]
 pub extern "C" fn haxe_vtable_set_slot(type_id: i32, slot_index: i32, closure_ptr: i64) {
     let mut registry = VTABLE_REGISTRY.write().unwrap();
@@ -2635,38 +2664,85 @@ pub extern "C" fn haxe_vtable_set_slot(type_id: i32, slot_index: i32, closure_pt
     }
 }
 
+/// Freeze the vtable registry into a flat array for O(1) lookup.
+/// Copies slot data so the flat table owns everything and survives
+/// registry mutations between benchmark runs.
+fn ensure_flat_vtable() {
+    unsafe {
+        if !VTABLE_FLAT.is_null() {
+            return;
+        }
+        let registry = VTABLE_REGISTRY.read().unwrap();
+        if let Some(map) = registry.as_ref() {
+            let max_id = map.keys().copied().max().unwrap_or(0) as usize;
+            // Copy all slot data so we own it
+            let mut owned_slots: Vec<Vec<i64>> = Vec::with_capacity(max_id + 1);
+            let mut flat: Vec<FlatVtable> = (0..=max_id)
+                .map(|_| FlatVtable {
+                    slots: std::ptr::null(),
+                    len: 0,
+                })
+                .collect();
+            // First pass: copy all vtable data
+            for (&type_id, vtable) in map {
+                owned_slots.push(vtable.clone());
+            }
+            // Store owned slots and build flat table pointing into them
+            let owned_ptr = Box::into_raw(Box::new(owned_slots));
+            let owned_ref = &*owned_ptr;
+            let mut slot_idx = 0;
+            for (&type_id, _vtable) in map {
+                let owned_vec = &owned_ref[slot_idx];
+                flat[type_id as usize] = FlatVtable {
+                    slots: owned_vec.as_ptr(),
+                    len: owned_vec.len(),
+                };
+                slot_idx += 1;
+            }
+            VTABLE_FLAT_SLOTS = owned_ptr as *const Vec<Vec<i64>>;
+            VTABLE_FLAT = Box::into_raw(Box::new(flat));
+        }
+    }
+}
+
 /// Look up a vtable slot for an object. Reads type_id from the object header
 /// (first 8 bytes), then returns the closure pointer for the given slot.
 /// Returns 0 if no vtable or slot is found.
+///
+/// Hot path: two array indexes. No locks, no hash lookups.
 #[no_mangle]
+#[inline(never)]
 pub extern "C" fn haxe_vtable_lookup(obj_ptr: *const u8, slot_index: i32) -> i64 {
     if obj_ptr.is_null() {
-        if std::env::var_os("RAYZOR_VTABLE_DEBUG").is_some() {
-            eprintln!("[vtable] null receiver for slot {}", slot_index);
-        }
         return 0;
     }
-    let type_id = unsafe { *(obj_ptr as *const i64) } as u32;
-    let registry = VTABLE_REGISTRY.read().unwrap();
-    if let Some(map) = registry.as_ref() {
-        if let Some(vtable) = map.get(&type_id) {
-            if (slot_index as usize) < vtable.len() {
-                let closure = vtable[slot_index as usize];
-                if closure == 0 && std::env::var_os("RAYZOR_VTABLE_DEBUG").is_some() {
-                    eprintln!(
-                        "[vtable] missing closure for type_id={} slot={} obj_ptr={:p}",
-                        type_id, slot_index, obj_ptr
-                    );
+    let type_id = unsafe { *(obj_ptr as *const i64) } as usize;
+    let slot = slot_index as usize;
+
+    unsafe {
+        // Lazy freeze on first call
+        if VTABLE_FLAT.is_null() {
+            ensure_flat_vtable();
+        }
+        if !VTABLE_FLAT.is_null() {
+            let flat = &*VTABLE_FLAT;
+            if type_id < flat.len() {
+                let entry = &flat[type_id];
+                if slot < entry.len {
+                    return *entry.slots.add(slot);
                 }
-                return closure;
             }
         }
     }
-    if std::env::var_os("RAYZOR_VTABLE_DEBUG").is_some() {
-        eprintln!(
-            "[vtable] missing table for type_id={} slot={} obj_ptr={:p}",
-            type_id, slot_index, obj_ptr
-        );
+
+    // Slow path fallback
+    let registry = VTABLE_REGISTRY.read().unwrap();
+    if let Some(map) = registry.as_ref() {
+        if let Some(vtable) = map.get(&(type_id as u32)) {
+            if slot < vtable.len() {
+                return vtable[slot];
+            }
+        }
     }
     0
 }
