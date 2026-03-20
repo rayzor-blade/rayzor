@@ -202,6 +202,9 @@ pub struct MethodSignature {
 /// Standard library runtime mapping
 pub struct StdlibMapping {
     mappings: HashMap<MethodSignature, RuntimeFunctionCall>,
+    /// Cached set of instance method names for fast `any_class_has_method` lookups.
+    /// Built eagerly after all mappings are registered.
+    instance_method_names: std::collections::HashSet<String>,
 }
 
 impl StdlibMapping {
@@ -209,6 +212,7 @@ impl StdlibMapping {
     pub fn new() -> Self {
         let mut mapping = StdlibMapping {
             mappings: HashMap::new(),
+            instance_method_names: std::collections::HashSet::new(),
         };
 
         mapping.register_string_methods();
@@ -278,6 +282,13 @@ impl StdlibMapping {
         mapping.register_enum_methods();
         // JSON (haxe.format.JsonParser/JsonPrinter)
         mapping.register_json_methods();
+        // Build cached method name set for O(1) any_class_has_method lookups
+        mapping.instance_method_names = mapping
+            .mappings
+            .keys()
+            .filter(|sig| !sig.is_static && !sig.is_constructor)
+            .map(|sig| sig.method.to_string())
+            .collect();
         mapping
     }
 
@@ -486,12 +497,10 @@ impl StdlibMapping {
         10 + method_count.min(9) as u32
     }
 
-    /// Check if any stdlib class has a method with the given name
-    /// This is used to detect stdlib method calls on Dynamic receivers
+    /// Check if any stdlib class has a method with the given name.
+    /// O(1) lookup via pre-built HashSet (was O(n) linear scan over all mappings).
     pub fn any_class_has_method(&self, method: &str) -> bool {
-        self.mappings
-            .keys()
-            .any(|sig| sig.method == method && !sig.is_static && !sig.is_constructor)
+        self.instance_method_names.contains(method)
     }
 
     /// Get all monomorphized variants of a generic class (e.g., Vec -> VecI32, VecI64, etc.)

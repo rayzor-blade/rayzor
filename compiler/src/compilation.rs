@@ -3659,19 +3659,12 @@ impl CompilationUnit {
 
         let stdlib_mapping = self.compiler_plugin_registry.build_combined_mapping();
 
-        // Build constructor param counts from import MIR modules for fill_default_args fallback
+        // Single pass: build both constructor param counts and function param types
+        // from all import MIR modules (previously two separate O(modules × functions) loops)
+        let constructor_ids: std::collections::HashSet<_> =
+            self.import_constructor_name_map.values().copied().collect();
         let mut constructor_param_counts: BTreeMap<crate::ir::IrFunctionId, usize> =
             BTreeMap::new();
-        for (_, func_id) in &self.import_constructor_name_map {
-            for import_mir in &self.import_mir_modules {
-                if let Some(func) = import_mir.functions.get(func_id) {
-                    constructor_param_counts.insert(*func_id, func.signature.parameters.len());
-                    break;
-                }
-            }
-        }
-
-        // Build function param types from ALL import MIR modules for fill_default_args
         let mut external_function_param_types: BTreeMap<
             crate::ir::IrFunctionId,
             Vec<crate::ir::IrType>,
@@ -3680,12 +3673,13 @@ impl CompilationUnit {
             for (func_id, func) in &import_mir.functions {
                 external_function_param_types.insert(
                     *func_id,
-                    func.signature
-                        .parameters
-                        .iter()
-                        .map(|p| p.ty.clone())
-                        .collect(),
+                    func.signature.parameters.iter().map(|p| p.ty.clone()).collect(),
                 );
+                if constructor_ids.contains(func_id) {
+                    constructor_param_counts
+                        .entry(*func_id)
+                        .or_insert(func.signature.parameters.len());
+                }
             }
         }
 
