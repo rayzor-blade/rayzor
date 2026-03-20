@@ -45,9 +45,6 @@ use crate::ir::{
 use std::collections::HashMap;
 use std::sync::{Mutex, Once};
 
-#[cfg(feature = "llvm-backend")]
-const LLVM_FAST_CALL_CONV: u32 = llvm_sys::LLVMCallConv::LLVMFastCallConv as u32;
-
 /// Static Once for thread-safe LLVM initialization
 #[cfg(feature = "llvm-backend")]
 static LLVM_INIT: Once = Once::new();
@@ -156,14 +153,6 @@ pub struct LLVMJitBackend<'ctx> {
     /// Maps MIR function IDs to LLVM functions
     function_map: HashMap<IrFunctionId, FunctionValue<'ctx>>,
 
-    /// Internal direct-entry variants for Haxe functions that do not need the
-    /// hidden environment parameter on known direct calls.
-    direct_function_map: HashMap<IrFunctionId, FunctionValue<'ctx>>,
-
-    /// Functions that were declared without the hidden env parameter (AOT mode).
-    /// These functions are compiled and called without the env argument.
-    no_env_functions: std::collections::HashSet<IrFunctionId>,
-
     /// Maps MIR block IDs to LLVM basic blocks
     block_map: HashMap<IrBlockId, BasicBlock<'ctx>>,
 
@@ -259,8 +248,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             execution_engine: None,
             value_map: HashMap::new(),
             function_map: HashMap::new(),
-            direct_function_map: HashMap::new(),
-            no_env_functions: std::collections::HashSet::new(),
             block_map: HashMap::new(),
             phi_map: HashMap::new(),
             function_pointers: HashMap::new(),
@@ -449,20 +436,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         function: &IrFunction,
     ) -> Result<(), String> {
         // Declare the function
-        let wrapper_func = self.declare_function(func_id, function)?;
+        let llvm_func = self.declare_function(func_id, function)?;
 
-        if let Some(direct_func) = self.direct_function_map.get(&func_id).copied() {
-            if direct_func.count_basic_blocks() == 0 {
-                self.compile_function_body(func_id, function, direct_func, false)?;
-            }
-            if wrapper_func.count_basic_blocks() == 0 {
-                self.compile_direct_wrapper(function, wrapper_func, direct_func)?;
-            }
-        } else {
-            let expects_env = !self.extern_function_ids.contains(&func_id)
-                && !self.no_env_functions.contains(&func_id);
-            self.compile_function_body(func_id, function, wrapper_func, expects_env)?;
-        }
+        // Compile the function body
+        self.compile_function_body(func_id, function, llvm_func)?;
 
         // Create execution engine if not exists
         if self.execution_engine.is_none() {
@@ -990,72 +967,36 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     /// Compile function bodies for a module (call declare_module for ALL modules first)
     pub fn compile_module_bodies(&mut self, module: &IrModule) -> Result<(), String> {
         for (func_id, function) in &module.functions {
-            let wrapper_func = *self
+            let llvm_func = *self
                 .function_map
                 .get(func_id)
                 .ok_or_else(|| format!("Function {:?} not declared", func_id))?;
-            let direct_func = self.direct_function_map.get(func_id).copied();
+
+            // Skip if already compiled
+            if llvm_func.count_basic_blocks() > 0 {
+                continue;
+            }
 
             // Skip extern functions (no body)
             if function.cfg.blocks.is_empty() {
                 continue;
             }
 
-            if let Some(direct_func) = direct_func {
-                if direct_func.count_basic_blocks() == 0 {
-                    self.compile_function_body(*func_id, function, direct_func, false)
-                        .map_err(|e| {
-                            format!(
-                                "Error in direct entry for function '{}' ({:?}): {}",
-                                function.name, func_id, e
-                            )
-                        })?;
+            self.compile_function_body(*func_id, function, llvm_func)
+                .map_err(|e| {
+                    format!(
+                        "Error in function '{}' ({:?}): {}",
+                        function.name, func_id, e
+                    )
+                })?;
 
-                    if !direct_func.verify(true) {
-                        return Err(format!(
-                            "LLVM verification failed for direct entry '{}' ({:?}). Check stderr for details.",
-                            function.name, func_id,
-                        ));
-                    }
-                }
-
-                if wrapper_func.count_basic_blocks() == 0 {
-                    self.compile_direct_wrapper(function, wrapper_func, direct_func)
-                        .map_err(|e| {
-                            format!(
-                                "Error in wrapper for function '{}' ({:?}): {}",
-                                function.name, func_id, e
-                            )
-                        })?;
-
-                    if !wrapper_func.verify(true) {
-                        return Err(format!(
-                            "LLVM verification failed for wrapper '{}' ({:?}). Check stderr for details.",
-                            function.name, func_id,
-                        ));
-                    }
-                }
-            } else {
-                if wrapper_func.count_basic_blocks() > 0 {
-                    continue;
-                }
-
-                let expects_env = !self.extern_function_ids.contains(func_id)
-                    && !self.no_env_functions.contains(func_id);
-                self.compile_function_body(*func_id, function, wrapper_func, expects_env)
-                    .map_err(|e| {
-                        format!(
-                            "Error in function '{}' ({:?}): {}",
-                            function.name, func_id, e
-                        )
-                    })?;
-
-                if !wrapper_func.verify(true) {
-                    return Err(format!(
-                        "LLVM verification failed for function '{}' ({:?}). Check stderr for details.",
-                        function.name, func_id,
-                    ));
-                }
+            // Per-function verification to catch return type mismatches early
+            if !llvm_func.verify(true) {
+                // verify(true) prints the error to stderr
+                return Err(format!(
+                    "LLVM verification failed for function '{}' ({:?}). Check stderr for details.",
+                    function.name, func_id,
+                ));
             }
         }
         Ok(())
@@ -1340,150 +1281,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         Ok(self.module.add_function(name, fn_type, None))
     }
 
-    fn is_c_abi_function(function: &IrFunction) -> bool {
-        function.kind == crate::ir::functions::FunctionKind::ExternC
-            || function.signature.calling_convention == crate::ir::CallingConvention::C
-    }
-
-    fn function_has_explicit_env(function: &IrFunction) -> bool {
-        matches!(
-            function.signature.parameters.first(),
-            Some(param)
-                if param.name == "env"
-                    && matches!(&param.ty, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void))
-        )
-    }
-
-    fn should_use_direct_entry(function: &IrFunction) -> bool {
-        !function.cfg.blocks.is_empty()
-            && !Self::is_c_abi_function(function)
-            && !Self::function_has_explicit_env(function)
-    }
-
-    fn build_function_param_types(
-        &self,
-        function: &IrFunction,
-        include_hidden_env: bool,
-    ) -> Result<Vec<BasicMetadataTypeEnum<'ctx>>, String> {
-        let mut param_types: Vec<BasicMetadataTypeEnum<'ctx>> = Vec::new();
-
-        if function.signature.uses_sret {
-            param_types.push(
-                self.context
-                    .ptr_type(inkwell::AddressSpace::default())
-                    .into(),
-            );
-        }
-
-        if include_hidden_env {
-            param_types.push(self.context.i64_type().into());
-        }
-
-        for param in &function.signature.parameters {
-            if param.ty != IrType::Void {
-                let ty = self.translate_type(&param.ty)?;
-                param_types.push(ty.into());
-            }
-        }
-
-        Ok(param_types)
-    }
-
-    fn build_function_type(
-        &self,
-        function: &IrFunction,
-        include_hidden_env: bool,
-    ) -> Result<inkwell::types::FunctionType<'ctx>, String> {
-        let param_types = self.build_function_param_types(function, include_hidden_env)?;
-
-        if function.signature.uses_sret || function.signature.return_type == IrType::Void {
-            Ok(self.context.void_type().fn_type(&param_types, false))
-        } else {
-            let return_type = self.translate_type(&function.signature.return_type)?;
-            Ok(return_type.fn_type(&param_types, false))
-        }
-    }
-
-    fn ensure_direct_function(
-        &mut self,
-        func_id: IrFunctionId,
-        function: &IrFunction,
-        wrapper_name: &str,
-    ) -> Result<(), String> {
-        if !Self::should_use_direct_entry(function) {
-            return Ok(());
-        }
-
-        let direct_name = format!("{}__direct_{}", wrapper_name, func_id.0);
-        let direct_func = if let Some(existing) = self.module.get_function(&direct_name) {
-            existing
-        } else {
-            let direct_fn_type = self.build_function_type(function, false)?;
-            let direct_func = self.module.add_function(
-                &direct_name,
-                direct_fn_type,
-                Some(inkwell::module::Linkage::Internal),
-            );
-            direct_func.set_call_conventions(LLVM_FAST_CALL_CONV);
-            direct_func
-        };
-        direct_func.set_call_conventions(LLVM_FAST_CALL_CONV);
-
-        self.direct_function_map.insert(func_id, direct_func);
-        Ok(())
-    }
-
-    fn compile_direct_wrapper(
-        &mut self,
-        function: &IrFunction,
-        wrapper_func: FunctionValue<'ctx>,
-        direct_func: FunctionValue<'ctx>,
-    ) -> Result<(), String> {
-        let entry = self.context.append_basic_block(wrapper_func, "entry");
-        self.builder.position_at_end(entry);
-
-        let params: Vec<BasicMetadataValueEnum<'ctx>> =
-            wrapper_func.get_param_iter().map(Into::into).collect();
-        let mut forwarded_args: Vec<BasicMetadataValueEnum<'ctx>> = Vec::new();
-        let mut next_param = 0usize;
-
-        if function.signature.uses_sret {
-            let sret_param = params
-                .get(next_param)
-                .copied()
-                .ok_or_else(|| format!("sret wrapper missing parameter for '{}'", function.name))?;
-            forwarded_args.push(sret_param);
-            next_param += 1;
-        }
-
-        // The wrapper preserves the public Haxe ABI, but the direct entry does
-        // not need the hidden env argument for known direct calls.
-        next_param += 1;
-
-        forwarded_args.extend(params.into_iter().skip(next_param));
-
-        let call_site = self
-            .builder
-            .build_call(direct_func, &forwarded_args, "direct_call")
-            .map_err(|e| format!("Failed to build direct wrapper call: {}", e))?;
-        call_site.set_call_convention(direct_func.get_call_conventions());
-
-        if function.signature.uses_sret || function.signature.return_type == IrType::Void {
-            self.builder
-                .build_return(None)
-                .map_err(|e| format!("Failed to build wrapper return: {}", e))?;
-        } else {
-            let return_value = call_site.try_as_basic_value().left().ok_or_else(|| {
-                format!("Direct wrapper for '{}' returned no value", function.name)
-            })?;
-            self.builder
-                .build_return(Some(&return_value))
-                .map_err(|e| format!("Failed to build wrapper return value: {}", e))?;
-        }
-
-        Ok(())
-    }
-
     /// Call main function in the module
     pub fn call_main(&mut self, module: &IrModule) -> Result<(), String> {
         // Finalize if needed
@@ -1733,14 +1530,27 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         let func_name = Self::mangle_function_name(&function.name);
 
         // If this function is ExternC or uses C calling convention (no env param), treat it as extern
-        let is_c_abi = Self::is_c_abi_function(function);
-        if function.signature.uses_sret {
-            self.sret_function_ids.insert(func_id);
-        }
+        let is_c_abi = function.kind == crate::ir::functions::FunctionKind::ExternC
+            || function.signature.calling_convention == crate::ir::CallingConvention::C;
         if is_c_abi {
             self.extern_function_ids.insert(func_id);
-            let param_types = self.build_function_param_types(function, false)?;
-            let fn_type = self.build_function_type(function, false)?;
+
+            // Translate parameter types (NO env param for extern C functions)
+            let param_types: Result<Vec<BasicMetadataTypeEnum>, _> = function
+                .signature
+                .parameters
+                .iter()
+                .filter(|param| param.ty != IrType::Void)
+                .map(|param| self.translate_type(&param.ty).map(|t| t.into()))
+                .collect();
+            let param_types = param_types?;
+
+            let fn_type = if function.signature.return_type == IrType::Void {
+                self.context.void_type().fn_type(&param_types, false)
+            } else {
+                let return_type = self.translate_type(&function.signature.return_type)?;
+                return_type.fn_type(&param_types, false)
+            };
 
             // Replace known math runtime functions with LLVM intrinsic wrappers
             // (e.g. haxe_math_sqrt → @llvm.sqrt.f64 → single fsqrt instruction)
@@ -1792,19 +1602,39 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         // Check if this function was already declared (from a previous module)
         // Reuse if it has basic blocks (was already compiled) AND signatures match
         if let Some(existing_func) = self.module.get_function(&func_name) {
-            let include_env = !(self.aot_mode && Self::should_use_direct_entry(function));
-            let expected_type = self.build_function_type(function, include_env)?;
-            let signatures_match =
-                format!("{:?}", expected_type) == format!("{:?}", existing_func.get_type());
+            // Build expected signature to compare
+            let expected_param_types: Result<Vec<BasicMetadataTypeEnum>, _> = function
+                .signature
+                .parameters
+                .iter()
+                .filter(|param| param.ty != IrType::Void)
+                .map(|param| self.translate_type(&param.ty).map(|t| t.into()))
+                .collect();
+            let expected_params = expected_param_types?;
+
+            let existing_type = existing_func.get_type();
+            let existing_params: Vec<BasicMetadataTypeEnum> = existing_type
+                .get_param_types()
+                .iter()
+                .map(|&t| t.into())
+                .collect();
+
+            // Check if signatures match (parameter count and types)
+            let signatures_match = expected_params.len() == existing_params.len()
+                && expected_params
+                    .iter()
+                    .zip(existing_params.iter())
+                    .all(|(e, a)| {
+                        // Compare type kinds - a simple check
+                        format!("{:?}", e) == format!("{:?}", a)
+                    });
 
             if signatures_match {
                 // Signatures match, safe to reuse
                 self.function_map.insert(func_id, existing_func);
-                if !include_env {
-                    self.no_env_functions.insert(func_id);
-                }
-                if !self.aot_mode {
-                    self.ensure_direct_function(func_id, function, &func_name)?;
+                // Still need to track sret for this func_id even when reusing
+                if function.signature.uses_sret {
+                    self.sret_function_ids.insert(func_id);
                 }
                 return Ok(existing_func);
             } else {
@@ -1813,8 +1643,9 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 let unique_name = format!("{}_{}", func_name, func_id.0);
                 if let Some(unique_func) = self.module.get_function(&unique_name) {
                     self.function_map.insert(func_id, unique_func);
-                    if !self.aot_mode {
-                        self.ensure_direct_function(func_id, function, &unique_name)?;
+                    // Track sret for this func_id
+                    if function.signature.uses_sret {
+                        self.sret_function_ids.insert(func_id);
                     }
                     return Ok(unique_func);
                 }
@@ -1823,21 +1654,52 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             }
         }
 
-        // In AOT mode, eligible functions are declared WITHOUT the hidden env
-        // parameter. All call sites are known at compile time so the wrapper is
-        // unnecessary and system opt can't undo it.
-        let needs_env = if self.aot_mode && Self::should_use_direct_entry(function) {
-            self.no_env_functions.insert(func_id);
-            false
-        } else {
-            true
-        };
-        let fn_type = self.build_function_type(function, needs_env)?;
-        let llvm_func = self.module.add_function(&func_name, fn_type, None);
-        self.function_map.insert(func_id, llvm_func);
-        if !self.aot_mode {
-            self.ensure_direct_function(func_id, function, &func_name)?;
+        // Translate parameter types
+        // IMPORTANT: Match Cranelift's calling convention for Haxe functions
+        // Order of hidden parameters:
+        // 1. sret pointer (if uses_sret) - struct return via hidden pointer
+        // 2. env parameter (i64) - environment/closure pointer
+        // 3. actual user parameters
+        let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
+
+        // Check if this function uses sret (struct return by hidden pointer)
+        let uses_sret = function.signature.uses_sret;
+        if uses_sret {
+            // Track this function as using sret
+            self.sret_function_ids.insert(func_id);
+            // Add sret pointer parameter (ptr type) as first hidden param
+            param_types.push(
+                self.context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .into(),
+            );
         }
+
+        // Add hidden env parameter (i64)
+        param_types.push(self.context.i64_type().into());
+
+        // Then add actual IR parameters
+        for param in &function.signature.parameters {
+            if param.ty != IrType::Void {
+                let ty = self.translate_type(&param.ty)?;
+                param_types.push(ty.into());
+            }
+        }
+
+        // Translate return type
+        // If using sret, the function returns void (value written through sret pointer)
+        let fn_type = if uses_sret || function.signature.return_type == IrType::Void {
+            // Void function (sret functions also return void)
+            self.context.void_type().fn_type(&param_types, false)
+        } else {
+            // Function with return value
+            let return_type = self.translate_type(&function.signature.return_type)?;
+            return_type.fn_type(&param_types, false)
+        };
+
+        let llvm_func = self.module.add_function(&func_name, fn_type, None);
+
+        self.function_map.insert(func_id, llvm_func);
         Ok(llvm_func)
     }
 
@@ -1858,19 +1720,44 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         function: &IrFunction,
         func_name: &str,
     ) -> Result<FunctionValue<'ctx>, String> {
-        let needs_env = if self.aot_mode && Self::should_use_direct_entry(function) {
-            self.no_env_functions.insert(func_id);
-            false
+        // Translate parameter types with hidden params first
+        // Order: sret (if needed), env, user params
+        let mut param_types: Vec<BasicMetadataTypeEnum> = Vec::new();
+
+        // Check if this function uses sret (struct return by hidden pointer)
+        let uses_sret = function.signature.uses_sret;
+        if uses_sret {
+            // Track this function as using sret
+            self.sret_function_ids.insert(func_id);
+            // Add sret pointer parameter (ptr type) as first hidden param
+            param_types.push(
+                self.context
+                    .ptr_type(inkwell::AddressSpace::default())
+                    .into(),
+            );
+        }
+
+        // Add hidden env parameter (i64)
+        param_types.push(self.context.i64_type().into());
+
+        // Then add actual IR parameters
+        for param in &function.signature.parameters {
+            if param.ty != IrType::Void {
+                let ty = self.translate_type(&param.ty)?;
+                param_types.push(ty.into());
+            }
+        }
+
+        // Translate return type (void if uses_sret)
+        let fn_type = if uses_sret || function.signature.return_type == IrType::Void {
+            self.context.void_type().fn_type(&param_types, false)
         } else {
-            true
+            let return_type = self.translate_type(&function.signature.return_type)?;
+            return_type.fn_type(&param_types, false)
         };
-        let fn_type = self.build_function_type(function, needs_env)?;
 
         let llvm_func = self.module.add_function(func_name, fn_type, None);
         self.function_map.insert(func_id, llvm_func);
-        if !self.aot_mode {
-            self.ensure_direct_function(func_id, function, func_name)?;
-        }
         Ok(llvm_func)
     }
 
@@ -1880,7 +1767,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         func_id: IrFunctionId,
         function: &IrFunction,
         llvm_func: FunctionValue<'ctx>,
-        expects_hidden_env: bool,
     ) -> Result<(), String> {
         // Clear previous compilation state
         self.value_map.clear();
@@ -1891,6 +1777,8 @@ impl<'ctx> LLVMJitBackend<'ctx> {
 
         // Check if this function uses sret (struct return)
         let uses_sret = self.sret_function_ids.contains(&func_id);
+        // Check if this function uses C calling convention (no hidden env param)
+        let is_c_abi = self.extern_function_ids.contains(&func_id);
 
         // Map function parameters to LLVM values using their actual IrIds
         // Note: we filter out void parameters but need to handle IrIds correctly
@@ -1910,11 +1798,11 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 .map(|p| (p.reg.as_u32(), &p.ty))
                 .collect();
             tracing::debug!(
-                "Function '{}': parameters {:?}, uses_sret: {}, expects_hidden_env: {}",
+                "Function '{}': parameters {:?}, uses_sret: {}, is_c_abi: {}",
                 function.name,
                 param_ids,
                 uses_sret,
-                expects_hidden_env
+                is_c_abi
             );
         }
 
@@ -1928,30 +1816,26 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         }
 
         // Calculate the offset for IR parameters based on hidden params:
-        // - no env: param 0 = sret ptr (if used), params 1+ = IR params
+        // - C ABI (is_c_abi): no hidden params, param_offset = 0
         // - Haxe with sret: param 0 = sret ptr, param 1 = env, params 2+ = IR params
         // - Haxe no sret: param 0 = env, params 1+ = IR params
-        let param_offset = if expects_hidden_env {
-            if uses_sret {
-                2 // sret + env
-            } else {
-                1 // env only
-            }
+        let param_offset = if is_c_abi {
+            0 // C ABI: no hidden parameters
         } else if uses_sret {
-            1 // sret only
+            2 // Haxe with sret: sret + env
         } else {
-            0 // no hidden parameters
+            1 // Haxe: just env
         };
 
         // Then map non-void parameters to their LLVM values
         for (i, llvm_param) in llvm_func.get_param_iter().enumerate() {
-            if uses_sret && i == 0 {
-                // Capture the sret pointer for use in Return terminator.
+            if !is_c_abi && uses_sret && i == 0 {
+                // Capture the sret pointer for use in Return terminator (Haxe ABI only)
                 self.current_sret_ptr = Some(llvm_param.into_pointer_value());
                 continue;
             }
-            if expects_hidden_env && i == (if uses_sret { 1 } else { 0 }) {
-                // Skip the hidden env parameter when present.
+            if !is_c_abi && i == (if uses_sret { 1 } else { 0 }) {
+                // Skip the hidden env parameter (Haxe ABI only)
                 continue;
             }
             let ir_param_idx = i - param_offset;
@@ -5401,17 +5285,10 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         func_id: IrFunctionId,
         args: &[IrId],
     ) -> Result<Option<BasicValueEnum<'ctx>>, String> {
-        let (llvm_func, uses_direct_entry) =
-            if let Some(direct_func) = self.direct_function_map.get(&func_id) {
-                (direct_func, true)
-            } else {
-                (
-                    self.function_map
-                        .get(&func_id)
-                        .ok_or_else(|| format!("Function {:?} not found", func_id))?,
-                    false,
-                )
-            };
+        let llvm_func = self
+            .function_map
+            .get(&func_id)
+            .ok_or_else(|| format!("Function {:?} not found", func_id))?;
 
         // Get expected parameter types from the function
         let expected_params = llvm_func.get_type().get_param_types();
@@ -5443,9 +5320,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .unwrap_or(false);
 
         // Determine convention based on parameter count and signature patterns
-        let (uses_sret, expects_env) = if uses_direct_entry {
-            (self.sret_function_ids.contains(&func_id), false)
-        } else if num_llvm_params == num_ir_args {
+        let (uses_sret, expects_env) = if num_llvm_params == num_ir_args {
             // Exact match - C calling convention (no hidden params)
             (false, false)
         } else if num_llvm_params == num_ir_args + 1 && first_is_i64 {
@@ -5677,9 +5552,6 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             .builder
             .build_call(*llvm_func, &arg_values, "call")
             .map_err(|e| format!("Failed to build call: {}", e))?;
-        if uses_direct_entry {
-            call_site.set_call_convention(llvm_func.get_call_conventions());
-        }
 
         // For sret functions, the return value is in the sret slot, not the call result
         if let Some(sret_ptr) = sret_slot {
