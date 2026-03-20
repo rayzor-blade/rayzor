@@ -21,7 +21,7 @@ const MAX_FULL_UNROLL: u64 = 16;
 /// Factor for partial unrolling
 const PARTIAL_FACTOR: u64 = 4;
 /// Maximum instruction count in a loop body for unrolling
-const MAX_BODY_INSTRUCTIONS: usize = 32;
+const MAX_BODY_INSTRUCTIONS: usize = 64;
 
 pub struct LoopUnrollingPass;
 
