@@ -8,7 +8,11 @@ use super::error::ParseError;
 impl<'a, 'b> RdParser<'a, 'b> {
     /// Parse an expression.
     pub fn parse_expression(&mut self) -> Result<Expr, ParseError> {
-        self.parse_assignment()
+        let expr = self.parse_assignment()?;
+        // Check for inline type check: `expr : Type` (inside parens, switch, etc.)
+        // Only consume if we're inside parens (next after type would be `)`)
+        // This is a heuristic — the : might be a ternary else or object field
+        Ok(expr)
     }
 
     fn parse_assignment(&mut self) -> Result<Expr, ParseError> {
@@ -77,6 +81,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
         loop {
             let (op, prec, right_assoc) = match self.stream.peek().kind {
+                TokenKind::QuestionQuestion => (BinaryOp::NullCoal, 2, true),
                 TokenKind::PipePipe => (BinaryOp::Or, 3, false),
                 TokenKind::AmpAmp => (BinaryOp::And, 4, false),
                 TokenKind::Pipe => (BinaryOp::BitOr, 5, false),
@@ -88,6 +93,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 TokenKind::Le => (BinaryOp::Le, 9, false),
                 TokenKind::Gt => (BinaryOp::Gt, 9, false),
                 TokenKind::Ge => (BinaryOp::Ge, 9, false),
+                TokenKind::KwIs => (BinaryOp::Is, 9, false),
                 TokenKind::DotDotDot => (BinaryOp::Range, 10, false),
                 TokenKind::Shl => (BinaryOp::Shl, 11, false),
                 TokenKind::Shr => (BinaryOp::Shr, 11, false),
@@ -333,27 +339,41 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 let end = expr.as_ref().map(|e| e.span.end).unwrap_or(self.stream.current_offset());
                 Ok(Expr { kind: ExprKind::Final { name, type_hint, expr }, span: Span::new(start, end) })
             }
+            TokenKind::KwDo => self.parse_do_while_expr(),
             TokenKind::KwSwitch => self.parse_switch_expr(),
             TokenKind::KwTry => self.parse_try_expr(),
             TokenKind::KwCast => self.parse_cast_expr(),
+            TokenKind::KwUntyped => {
+                self.stream.advance();
+                let expr = self.parse_expression()?;
+                let end = expr.span.end;
+                Ok(Expr { kind: ExprKind::Untyped(Box::new(expr)), span: Span::new(start, end) })
+            }
             TokenKind::KwFunction => self.parse_function_literal(),
-            TokenKind::LParen => {
+            TokenKind::DollarIdent => {
+                let text = token.text(self.source).to_string();
                 self.stream.advance();
-                let inner = self.parse_expression()?;
-                let end = self.stream.expect(TokenKind::RParen)?;
-                Ok(Expr { kind: ExprKind::Paren(Box::new(inner)), span: Span::new(start, end.end) })
+                Ok(Expr {
+                    kind: ExprKind::DollarIdent { name: text[1..].to_string(), arg: None },
+                    span: token.span,
+                })
             }
-            TokenKind::LBracket => {
+            TokenKind::RegexLit => {
+                let text = token.text(self.source);
                 self.stream.advance();
-                let mut items = Vec::new();
-                while !self.stream.at(TokenKind::RBracket) && !self.stream.is_eof() {
-                    items.push(self.parse_expression()?);
-                    if !self.stream.at(TokenKind::RBracket) { self.stream.eat(TokenKind::Comma); }
-                }
-                let end = self.stream.expect(TokenKind::RBracket)?;
-                Ok(Expr { kind: ExprKind::Array(items), span: Span::new(start, end.end) })
+                // Parse ~/pattern/flags
+                let inner = &text[2..]; // skip ~/
+                let last_slash = inner.rfind('/').unwrap_or(inner.len());
+                let pattern = inner[..last_slash].to_string();
+                let flags = inner[last_slash + 1..].to_string();
+                Ok(Expr {
+                    kind: ExprKind::Regex { pattern, flags },
+                    span: token.span,
+                })
             }
-            TokenKind::LBrace => self.parse_block_expr(),
+            TokenKind::LParen => self.parse_paren_or_arrow(start),
+            TokenKind::LBracket => self.parse_array_or_map(),
+            TokenKind::LBrace => self.parse_block_or_object(),
             _ => Err(ParseError::new(
                 &format!("expected expression, found '{}'", token.text(self.source)),
                 token.span,
@@ -368,6 +388,8 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let cond = self.parse_expression()?;
         self.stream.expect(TokenKind::RParen)?;
         let then_branch = self.parse_expression()?;
+        // Consume optional semicolon before else (common in blocks)
+        self.stream.eat(TokenKind::Semicolon);
         let else_branch = if self.stream.eat(TokenKind::KwElse).is_some() {
             Some(Box::new(self.parse_expression()?))
         } else { None };
@@ -398,13 +420,33 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.expect(TokenKind::LParen)?;
         let var_name = self.stream.current_text().to_string();
         self.stream.advance();
+
+        // Check for key => value syntax: `for (key => value in map)`
+        let key_var = if self.stream.eat(TokenKind::FatArrow).is_some() {
+            let key = var_name.clone();
+            let value_name = self.stream.current_text().to_string();
+            self.stream.advance();
+            // var_name becomes value, key_var is the key
+            self.stream.expect(TokenKind::KwIn)?;
+            let iter = self.parse_expression()?;
+            self.stream.expect(TokenKind::RParen)?;
+            let body = self.parse_expression()?;
+            let end = body.span.end;
+            return Ok(Expr {
+                kind: ExprKind::For { var: value_name, key_var: Some(key), iter: Box::new(iter), body: Box::new(body) },
+                span: Span::new(start, end),
+            });
+        } else {
+            None
+        };
+
         self.stream.expect(TokenKind::KwIn)?;
         let iter = self.parse_expression()?;
         self.stream.expect(TokenKind::RParen)?;
         let body = self.parse_expression()?;
         let end = body.span.end;
         Ok(Expr {
-            kind: ExprKind::For { var: var_name, key_var: None, iter: Box::new(iter), body: Box::new(body) },
+            kind: ExprKind::For { var: var_name, key_var, iter: Box::new(iter), body: Box::new(body) },
             span: Span::new(start, end),
         })
     }
@@ -414,6 +456,14 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.expect(TokenKind::KwSwitch)?;
         self.stream.expect(TokenKind::LParen)?;
         let scrutinee = self.parse_expression()?;
+        // Handle inline type check: `switch (cast this : Int) { ... }`
+        let scrutinee = if self.stream.eat(TokenKind::Colon).is_some() {
+            let ty = self.parse_type()?;
+            let span = scrutinee.span.merge(ty.span());
+            Expr { kind: ExprKind::TypeCheck { expr: Box::new(scrutinee), type_hint: ty }, span }
+        } else {
+            scrutinee
+        };
         self.stream.expect(TokenKind::RParen)?;
         self.stream.expect(TokenKind::LBrace)?;
 
@@ -424,6 +474,13 @@ impl<'a, 'b> RdParser<'a, 'b> {
             if self.stream.eat(TokenKind::KwCase).is_some() {
                 let case_start = self.stream.current_offset();
                 let pattern = self.parse_expression()?;
+                // Guard: `case v if (condition):`
+                let guard = if self.stream.eat(TokenKind::KwIf).is_some() {
+                    self.stream.expect(TokenKind::LParen)?;
+                    let g = self.parse_expression()?;
+                    self.stream.expect(TokenKind::RParen)?;
+                    Some(g)
+                } else { None };
                 self.stream.expect(TokenKind::Colon)?;
                 let mut body_exprs = Vec::new();
                 while !self.stream.at(TokenKind::KwCase) && !self.stream.at(TokenKind::KwDefault)
@@ -442,7 +499,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 };
                 cases.push(Case {
                     patterns: vec![Pattern::Const(pattern)],
-                    guard: None,
+                    guard,
                     body,
                     span: self.stream.span_from(case_start),
                 });
@@ -530,6 +587,200 @@ impl<'a, 'b> RdParser<'a, 'b> {
     fn parse_function_literal(&mut self) -> Result<Expr, ParseError> {
         let func = self.parse_function_decl()?;
         Ok(Expr { span: func.span, kind: ExprKind::Function(func) })
+    }
+
+    /// Parse `(...)` — paren expr, type check, or arrow function.
+    /// Uses save/restore for disambiguation.
+    fn parse_paren_or_arrow(&mut self, start: usize) -> Result<Expr, ParseError> {
+        self.stream.advance(); // skip (
+
+        // Empty: () -> expr
+        if self.stream.at(TokenKind::RParen) {
+            self.stream.advance();
+            if self.stream.eat(TokenKind::Arrow).is_some() {
+                let body = self.parse_expression()?;
+                let end = body.span.end;
+                return Ok(Expr {
+                    kind: ExprKind::Arrow { params: Vec::new(), expr: Box::new(body) },
+                    span: Span::new(start, end),
+                });
+            }
+            return Ok(Expr {
+                kind: ExprKind::Block(Vec::new()),
+                span: self.stream.span_from(start),
+            });
+        }
+
+        // Try arrow function: save position, attempt to parse params
+        let saved = self.stream.save();
+        if let Ok(params) = self.try_parse_arrow_params() {
+            if self.stream.eat(TokenKind::RParen).is_some() {
+                if self.stream.eat(TokenKind::Arrow).is_some() {
+                    let body = self.parse_expression()?;
+                    let end = body.span.end;
+                    return Ok(Expr {
+                        kind: ExprKind::Arrow { params, expr: Box::new(body) },
+                        span: Span::new(start, end),
+                    });
+                }
+            }
+        }
+        // Restore and parse as regular paren expression
+        self.stream.restore(saved);
+
+        let inner = self.parse_expression()?;
+        // Type check: (expr : Type)
+        if self.stream.eat(TokenKind::Colon).is_some() {
+            let ty = self.parse_type()?;
+            let end = self.stream.expect(TokenKind::RParen)?;
+            return Ok(Expr {
+                kind: ExprKind::TypeCheck { expr: Box::new(inner), type_hint: ty },
+                span: Span::new(start, end.end),
+            });
+        }
+        let end = self.stream.expect(TokenKind::RParen)?;
+        // Arrow after close paren: (x) -> expr
+        if self.stream.eat(TokenKind::Arrow).is_some() {
+            let body = self.parse_expression()?;
+            let end = body.span.end;
+            let params = match &inner.kind {
+                ExprKind::Ident(name) => vec![ArrowParam { name: name.clone(), type_hint: None }],
+                _ => vec![],
+            };
+            return Ok(Expr {
+                kind: ExprKind::Arrow { params, expr: Box::new(body) },
+                span: Span::new(start, end),
+            });
+        }
+        Ok(Expr { kind: ExprKind::Paren(Box::new(inner)), span: Span::new(start, end.end) })
+    }
+
+    /// Try to parse arrow function parameters: `(a:Int, b:String)`
+    fn try_parse_arrow_params(&mut self) -> Result<Vec<ArrowParam>, ParseError> {
+        let mut params = Vec::new();
+        loop {
+            if self.stream.at(TokenKind::RParen) {
+                break;
+            }
+            let name = self.stream.current_text().to_string();
+            if !self.stream.at(TokenKind::Ident) {
+                return Err(ParseError::new("expected parameter name", self.stream.peek().span));
+            }
+            self.stream.advance();
+            let type_hint = if self.stream.eat(TokenKind::Colon).is_some() {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+            params.push(ArrowParam { name, type_hint });
+            if !self.stream.at(TokenKind::RParen) {
+                if self.stream.eat(TokenKind::Comma).is_none() {
+                    return Err(ParseError::new("expected , or )", self.stream.peek().span));
+                }
+            }
+        }
+        Ok(params)
+    }
+
+    fn parse_do_while_expr(&mut self) -> Result<Expr, ParseError> {
+        let start = self.stream.current_offset();
+        self.stream.expect(TokenKind::KwDo)?;
+        let body = self.parse_expression()?;
+        self.stream.expect(TokenKind::KwWhile)?;
+        self.stream.expect(TokenKind::LParen)?;
+        let cond = self.parse_expression()?;
+        self.stream.expect(TokenKind::RParen)?;
+        let end = cond.span.end;
+        Ok(Expr {
+            kind: ExprKind::DoWhile { body: Box::new(body), cond: Box::new(cond) },
+            span: Span::new(start, end),
+        })
+    }
+
+    /// Parse `[...]` — array literal or map literal (if contains `=>`)
+    fn parse_array_or_map(&mut self) -> Result<Expr, ParseError> {
+        let start = self.stream.current_offset();
+        self.stream.expect(TokenKind::LBracket)?;
+
+        if self.stream.at(TokenKind::RBracket) {
+            let end = self.stream.expect(TokenKind::RBracket)?;
+            return Ok(Expr { kind: ExprKind::Array(Vec::new()), span: Span::new(start, end.end) });
+        }
+
+        // Parse first element to check for `=>`
+        let first = self.parse_expression()?;
+
+        if self.stream.eat(TokenKind::FatArrow).is_some() {
+            // Map literal: [key => value, ...]
+            let first_val = self.parse_expression()?;
+            let mut pairs = vec![(first, first_val)];
+            while self.stream.eat(TokenKind::Comma).is_some() && !self.stream.at(TokenKind::RBracket) {
+                let key = self.parse_expression()?;
+                self.stream.expect(TokenKind::FatArrow)?;
+                let val = self.parse_expression()?;
+                pairs.push((key, val));
+            }
+            let end = self.stream.expect(TokenKind::RBracket)?;
+            Ok(Expr { kind: ExprKind::Map(pairs), span: Span::new(start, end.end) })
+        } else {
+            // Array literal
+            let mut items = vec![first];
+            while self.stream.eat(TokenKind::Comma).is_some() && !self.stream.at(TokenKind::RBracket) {
+                items.push(self.parse_expression()?);
+            }
+            let end = self.stream.expect(TokenKind::RBracket)?;
+            Ok(Expr { kind: ExprKind::Array(items), span: Span::new(start, end.end) })
+        }
+    }
+
+    /// Parse `{...}` — block or object literal.
+    /// Object if: `{ ident: expr }` or `{ }` (empty)
+    fn parse_block_or_object(&mut self) -> Result<Expr, ParseError> {
+        let start = self.stream.current_offset();
+
+        // Empty braces = empty block
+        if self.stream.peek_at(0).kind == TokenKind::LBrace
+            && self.stream.peek_at(1).kind == TokenKind::RBrace
+        {
+            self.stream.advance(); // {
+            let end = self.stream.expect(TokenKind::RBrace)?;
+            return Ok(Expr { kind: ExprKind::Block(Vec::new()), span: Span::new(start, end.end) });
+        }
+
+        // Check if it's an object literal: { ident: ... } or { "string": ... }
+        let is_object = self.stream.peek_at(0).kind == TokenKind::LBrace
+            && (self.stream.peek_at(1).kind == TokenKind::Ident
+                || self.stream.peek_at(1).kind == TokenKind::StringLit)
+            && self.stream.peek_at(2).kind == TokenKind::Colon;
+
+        if is_object {
+            self.stream.advance(); // {
+            let mut fields = Vec::new();
+            while !self.stream.at(TokenKind::RBrace) && !self.stream.is_eof() {
+                let field_name = self.stream.current_text().to_string();
+                // Strip quotes for string keys
+                let field_name = if field_name.starts_with('"') || field_name.starts_with('\'') {
+                    field_name[1..field_name.len() - 1].to_string()
+                } else {
+                    field_name
+                };
+                self.stream.advance();
+                self.stream.expect(TokenKind::Colon)?;
+                let value = self.parse_expression()?;
+                fields.push(ObjectField {
+                    name: field_name,
+                    expr: value,
+                    span: self.stream.span_from(start),
+                });
+                if !self.stream.at(TokenKind::RBrace) {
+                    self.stream.eat(TokenKind::Comma);
+                }
+            }
+            let end = self.stream.expect(TokenKind::RBrace)?;
+            return Ok(Expr { kind: ExprKind::Object(fields), span: Span::new(start, end.end) });
+        }
+
+        self.parse_block_expr()
     }
 
     fn parse_block_expr(&mut self) -> Result<Expr, ParseError> {

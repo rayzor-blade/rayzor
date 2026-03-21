@@ -176,12 +176,10 @@ fn test_rd_vs_nom_haxe_tests() {
         }
     }
 
-    // Allow up to 30% failure rate during development — tighten to 0% before Phase 6
-    let failure_rate = failed as f64 / files.len() as f64;
-    assert!(
-        failure_rate < 0.30,
-        "RD parser failure rate {:.0}% exceeds 30% threshold ({} of {} files failed)",
-        failure_rate * 100.0,
+    // 100% pass rate required — RD parser must match nom for all files
+    assert_eq!(
+        failed, 0,
+        "RD parser failed on {} of {} files — must be 0 before wiring as default",
         failed,
         files.len()
     );
@@ -374,4 +372,33 @@ class Main {
 "#;
     let result = rd_parse(source, "test.hx");
     assert!(result.is_some(), "failed to parse switch/case");
+}
+
+#[test]
+fn test_rd_debug_failures() {
+    let failing_files = [
+        "test_balanced_tree_generic.hx",
+        "test_enum_abstract_methods.hx",
+        "test_reflect_compare_methods.hx",
+    ];
+    
+    let test_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .join("compiler/tests/haxe");
+
+    for filename in &failing_files {
+        let path = test_dir.join(filename);
+        let source = fs::read_to_string(&path).unwrap();
+        let config = parser::preprocessor::PreprocessorConfig::default();
+        let preprocessed = parser::preprocessor::preprocess(&source, &config);
+        match parser::rd::rd_parse(&preprocessed, filename, false, false) {
+            Ok(file) => eprintln!("  {} OK ({} decls)", filename, file.declarations.len()),
+            Err(errors) => {
+                for e in errors.iter().take(3) {
+                    eprintln!("  {} ERROR at {}..{}: {}", filename, e.span.start, e.span.end, e.message);
+                }
+            }
+        }
+    }
 }
