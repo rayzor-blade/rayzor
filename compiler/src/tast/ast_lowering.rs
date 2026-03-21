@@ -5936,14 +5936,12 @@ impl<'a> AstLowering<'a> {
             // Note: If the parent itself inherits from a grandparent, its class_fields
             // will already contain the grandparent's fields (since we process classes in order)
             if let Some(parent_fields) = self.class_fields.get(&parent_symbol).cloned() {
-                // Clone to avoid borrow conflicts
                 if let Some(child_fields) = self.class_fields.get_mut(&child_symbol) {
-                    // Add parent fields to the beginning of child's field list
-                    // This maintains the correct field order: parent fields first, then child fields
-                    for parent_field in parent_fields.iter().rev() {
-                        // Insert at beginning to maintain order
-                        child_fields.insert(0, *parent_field);
-                    }
+                    // Prepend parent fields: splice at front in one operation
+                    // instead of O(n) insert(0) per field.
+                    let mut merged = parent_fields;
+                    merged.append(child_fields);
+                    *child_fields = merged;
                 }
             }
         }

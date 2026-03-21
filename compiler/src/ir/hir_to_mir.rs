@@ -31401,7 +31401,10 @@ impl<'a> HirToMirContext<'a> {
         // that originally defines the method. Mark that base method as needing a virtual slot.
         let mut base_virtual_methods: BTreeSet<(SymbolId, InternedString)> = BTreeSet::new();
 
-        for (child_sym, method_name) in self.override_methods.clone() {
+        let override_methods_snapshot: Vec<_> = self.override_methods.iter().map(|(s,n)| (*s, *n)).collect();
+        for (child_sym, method_name) in &override_methods_snapshot {
+            let method_name = *method_name;
+            let child_sym = *child_sym;
             // Walk up the parent chain to find the topmost class defining this method
             let mut defining_class = None;
             let mut current = child_sym;
@@ -31435,11 +31438,11 @@ impl<'a> HirToMirContext<'a> {
         for (base_class, _) in &base_virtual_methods {
             classes_to_process.insert(*base_class);
         }
-        for (child_sym, _) in &self.override_methods {
+        for (child_sym, _) in &override_methods_snapshot {
             classes_to_process.insert(*child_sym);
         }
         // Also include intermediate classes in the hierarchy
-        for (child, _) in self.override_methods.clone() {
+        for &(child, _) in &override_methods_snapshot {
             let mut current = child;
             while let Some(&parent) = self.class_parent_map.get(&current) {
                 classes_to_process.insert(parent);
@@ -31449,10 +31452,11 @@ impl<'a> HirToMirContext<'a> {
         // Include ALL subclasses of classes with vtables — leaf classes that
         // inherit (but don't override) virtual methods still need vtable entries
         // so that haxe_vtable_lookup finds them by type_id at runtime.
+        let parent_map_snapshot: Vec<_> = self.class_parent_map.iter().map(|(&c,&p)| (c,p)).collect();
         let mut changed = true;
         while changed {
             changed = false;
-            for (child, parent) in self.class_parent_map.clone() {
+            for &(child, parent) in &parent_map_snapshot {
                 if classes_to_process.contains(&parent) && !classes_to_process.contains(&child) {
                     classes_to_process.insert(child);
                     changed = true;
@@ -31489,12 +31493,13 @@ impl<'a> HirToMirContext<'a> {
         // Step 4: Populate virtual_dispatch_info for call sites.
         // Map ALL method SymbolIds in virtual hierarchies (base + overrides) to their slot.
         // This ensures calls through both base and derived types dispatch through the vtable.
-        for (class_sym, slots) in self.class_virtual_slots.clone() {
-            for (method_name, slot_idx) in &slots {
-                if let Some(&method_sym) = self.class_method_by_name.get(&(class_sym, *method_name))
+        let virtual_slots_snapshot: Vec<_> = self.class_virtual_slots.iter().map(|(&s, v)| (s, v.clone())).collect();
+        for (class_sym, slots) in &virtual_slots_snapshot {
+            for (method_name, slot_idx) in slots {
+                if let Some(&method_sym) = self.class_method_by_name.get(&(*class_sym, *method_name))
                 {
                     self.virtual_dispatch_info
-                        .insert(method_sym, (*slot_idx, class_sym));
+                        .insert(method_sym, (*slot_idx, *class_sym));
                 }
             }
         }
