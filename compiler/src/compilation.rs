@@ -647,6 +647,17 @@ impl CompilationUnit {
             compiler_version: env!("CARGO_PKG_VERSION").to_string(),
         };
 
+        // Compute per-function granular invalidation hashes (§3.2)
+        let cached_maps = cached_maps.map(|mut maps| {
+            for entry in &mut maps.functions {
+                if let Some(func) = mir.functions.values().find(|f| f.name.ends_with(&entry.method_name)) {
+                    entry.signature_hash = crate::ir::blade::compute_signature_hash(func);
+                    entry.body_hash = crate::ir::blade::compute_body_hash(func);
+                }
+            }
+            maps
+        });
+
         match save_blade_with_state(&blade_path, mir, metadata, symbols, cached_maps) {
             Ok(()) => {
                 debug!(
@@ -700,6 +711,8 @@ impl CompilationUnit {
                     method_name,
                     func_id: func_id.0,
                     is_constructor: false,
+                    signature_hash: 0, // computed at save time from MIR
+                    body_hash: 0,
                 });
             }
         }
@@ -711,6 +724,8 @@ impl CompilationUnit {
                 method_name: "new".to_string(),
                 func_id: func_id.0,
                 is_constructor: true,
+                signature_hash: 0,
+                body_hash: 0,
             });
         }
 

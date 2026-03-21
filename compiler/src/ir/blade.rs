@@ -38,7 +38,9 @@
 
 use crate::ir::IrModule;
 use serde::{Deserialize, Serialize};
+use std::collections::hash_map::DefaultHasher;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 /// BLADE file magic number (first 4 bytes)
@@ -100,6 +102,14 @@ pub struct BladeFuncEntry {
     pub func_id: u32,
     /// Whether this is a constructor
     pub is_constructor: bool,
+    /// Signature hash: hash of function name + parameter types + return type.
+    /// If this changes, callers must be recompiled too (§3.2 granular invalidation).
+    #[serde(default)]
+    pub signature_hash: u64,
+    /// Body hash: hash of the function's MIR instruction sequence.
+    /// If only this changes, only this function needs recompilation.
+    #[serde(default)]
+    pub body_hash: u64,
 }
 
 /// A field entry in the cached maps
@@ -285,11 +295,15 @@ pub fn load_blade(
     ),
     BladeError,
 > {
-    // Read file
-    let bytes = fs::read(path)?;
+    // Memory-map the file for zero-copy deserialization (§2.4 of spec).
+    // mmap avoids copying file contents into a heap Vec — the OS pages
+    // the data directly from disk into virtual memory on demand.
+    let file = std::fs::File::open(path.as_ref())?;
+    let mmap = unsafe { memmap2::Mmap::map(&file) }
+        .map_err(|e| BladeError::Io(e))?;
 
-    // Deserialize using postcard
-    let blade: BladeModule = postcard::from_bytes(&bytes)?;
+    // Deserialize using postcard from the mmap'd region
+    let blade: BladeModule = postcard::from_bytes(&mmap)?;
 
     // Validate magic number
     if &blade.magic != BLADE_MAGIC {
@@ -302,6 +316,36 @@ pub fn load_blade(
     }
 
     Ok((blade.mir, blade.metadata, blade.symbols, blade.cached_maps))
+}
+
+// ============================================================================
+// §3.2 Granular Invalidation Hashes
+// ============================================================================
+
+/// Compute signature hash for a MIR function: name + param types + return type.
+/// If this changes, callers must be recompiled.
+pub fn compute_signature_hash(func: &crate::ir::IrFunction) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    func.name.hash(&mut hasher);
+    for param in &func.signature.parameters {
+        format!("{:?}", param.ty).hash(&mut hasher);
+    }
+    format!("{:?}", func.signature.return_type).hash(&mut hasher);
+    hasher.finish()
+}
+
+/// Compute body hash for a MIR function: instruction sequence + control flow.
+/// If only this changes, only this function needs recompilation.
+pub fn compute_body_hash(func: &crate::ir::IrFunction) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for (block_id, block) in &func.cfg.blocks {
+        block_id.as_u32().hash(&mut hasher);
+        for inst in &block.instructions {
+            format!("{:?}", inst).hash(&mut hasher);
+        }
+        format!("{:?}", block.terminator).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 // ============================================================================
@@ -543,8 +587,11 @@ pub fn save_symbol_manifest(
 
 /// Load a symbol manifest from file
 pub fn load_symbol_manifest(path: impl AsRef<Path>) -> Result<BladeSymbolManifest, BladeError> {
-    let bytes = fs::read(path)?;
-    let manifest: BladeSymbolManifest = postcard::from_bytes(&bytes)?;
+    // mmap for zero-copy deserialization of symbol manifest
+    let file = std::fs::File::open(path.as_ref())?;
+    let mmap = unsafe { memmap2::Mmap::map(&file) }
+        .map_err(|e| BladeError::Io(e))?;
+    let manifest: BladeSymbolManifest = postcard::from_bytes(&mmap)?;
 
     if &manifest.magic != SYMBOL_MAGIC {
         return Err(BladeError::InvalidMagic);
