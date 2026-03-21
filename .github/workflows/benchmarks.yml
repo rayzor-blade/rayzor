@@ -48,7 +48,7 @@ jobs:
           ./target/release/rayzor bundle compiler/benchmarks/src/fibonacci.hx -o compiler/benchmarks/precompiled/fibonacci.rzb --strip
           ./target/release/rayzor bundle compiler/benchmarks/src/mandelbrot.hx -o compiler/benchmarks/precompiled/mandelbrot.rzb --strip
           ./target/release/rayzor bundle compiler/benchmarks/src/nbody.hx -o compiler/benchmarks/precompiled/nbody.rzb --strip
-          cargo run --release --bin preblade -- --out .rayzor/blade/stdlib
+          ./target/release/rayzor preblade --out .rayzor/blade/stdlib
 
       - name: Upload precompiled bundles and stdlib cache
         uses: actions/upload-artifact@v4
