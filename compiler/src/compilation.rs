@@ -506,23 +506,24 @@ impl CompilationUnit {
         };
 
         // Load default stdlib imports (Math, Std, Array, String, etc.)
-        // When bsym loaded successfully, skip parsing — symbols are already registered.
-        // The stdlib files will still be needed for TAST lowering via BLADE cache.
-        let default_files = loader.load_default_imports();
+        // When bsym loaded, skip parsing the .hx files — just collect the file entries
+        // for source map and cache path resolution. Symbols already registered from bsym.
         if bsym_loaded {
-            // Just collect file entries without parsing (for source maps / cache paths)
+            // Lightweight load: get file paths without reading/parsing content
+            let default_files = loader.load_default_imports();
             for file in default_files {
                 self.stdlib_files.push(file);
             }
         } else {
+            let default_files = loader.load_default_imports();
             for file in default_files {
                 if let Some(source) = file.input.as_deref() {
                     self.pre_register_and_enums_from_source(&file.filename, source)?;
                 }
                 self.stdlib_files.push(file);
             }
+            debug!("Loaded {} default stdlib imports", self.stdlib_files.len());
         }
-        debug!("Loaded {} default stdlib imports", self.stdlib_files.len());
 
         Ok(())
     }
