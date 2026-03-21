@@ -5,3 +5,4 @@ edition = "2024"
 
 [dependencies]
 source_map = { path = "../source_map" }
+ariadne = "0.4"

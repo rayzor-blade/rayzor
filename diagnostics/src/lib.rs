@@ -317,210 +317,80 @@ impl ErrorFormatter {
     }
 
     pub fn format_diagnostic(&self, diagnostic: &Diagnostic, source_map: &SourceMap) -> String {
-        let mut output = String::new();
+        use ariadne::{Color, Config, Label as ALabel, Report, ReportKind, Source};
 
-        // Add blank line before error for better separation
-        output.push('\n');
+        // Map severity to ariadne ReportKind
+        let kind = match diagnostic.severity {
+            DiagnosticSeverity::Error => ReportKind::Error,
+            DiagnosticSeverity::Warning => ReportKind::Warning,
+            DiagnosticSeverity::Info => ReportKind::Advice,
+            DiagnosticSeverity::Hint => ReportKind::Advice,
+        };
 
-        // Header
-        if self.use_colors {
-            let color = match diagnostic.severity {
-                DiagnosticSeverity::Error => "\x1b[31m",
-                DiagnosticSeverity::Warning => "\x1b[33m",
-                DiagnosticSeverity::Info => "\x1b[36m",
-                DiagnosticSeverity::Hint => "\x1b[32m",
-            };
-            output.push_str(color);
-            output.push_str(&format!("{}", diagnostic.severity));
+        // Get source file info
+        let file_name = source_map
+            .get_file(diagnostic.span.file_id)
+            .map(|f| f.name.as_str())
+            .unwrap_or("<unknown>");
+        let source_content = source_map
+            .get_file(diagnostic.span.file_id)
+            .map(|f| f.content.as_str())
+            .unwrap_or("");
 
-            if let Some(code) = &diagnostic.code {
-                output.push_str(&format!("[{}]", code));
-            }
+        // Build the ariadne report
+        let offset = diagnostic.span.start.byte_offset;
+        let mut builder = Report::<(&str, std::ops::Range<usize>)>::build(
+            kind,
+            file_name,
+            offset,
+        )
+        .with_config(Config::default().with_color(self.use_colors));
 
-            // Use white/bright color for the message to make it stand out
-            output.push_str("\x1b[0m: \x1b[1;97m");
-            output.push_str(&diagnostic.message);
-            output.push_str("\x1b[0m\n");
+        // Add diagnostic code to message
+        let msg = if let Some(code) = &diagnostic.code {
+            format!("[{}] {}", code, diagnostic.message)
         } else {
-            output.push_str(&format!("{}", diagnostic.severity));
+            diagnostic.message.clone()
+        };
+        builder = builder.with_message(&msg);
 
-            if let Some(code) = &diagnostic.code {
-                output.push_str(&format!("[{}]", code));
-            }
-
-            output.push_str(&format!(": {}\n", diagnostic.message));
-        }
-
-        // Source location
-        if let Some(file) = source_map.get_file(diagnostic.span.file_id) {
-            if self.use_colors {
-                output.push_str(&format!(
-                    "  \x1b[96m-->\x1b[0m {}:{}:{}\n",
-                    file.name, diagnostic.span.start.line, diagnostic.span.start.column
-                ));
-            } else {
-                output.push_str(&format!(
-                    "  --> {}:{}:{}\n",
-                    file.name, diagnostic.span.start.line, diagnostic.span.start.column
-                ));
-            }
-
-            // Source snippet
-            let line_num = diagnostic.span.start.line;
-            let line_num_width = line_num.to_string().len();
-
-            // Blank line
-            if self.use_colors {
-                output.push_str(&format!(
-                    "{:width$} \x1b[96m|\x1b[0m\n",
-                    "",
-                    width = line_num_width
-                ));
-            } else {
-                output.push_str(&format!("{:width$} |\n", "", width = line_num_width));
-            }
-
-            // Source line
-            if let Some(line) = source_map.get_line(diagnostic.span.file_id, line_num) {
-                if self.use_colors {
-                    output.push_str(&format!(
-                        "\x1b[96m{}\x1b[0m \x1b[96m|\x1b[0m {}\n",
-                        line_num, line
-                    ));
-                } else {
-                    output.push_str(&format!("{} | {}\n", line_num, line));
-                }
-
-                // Underline
-                let padding = " ".repeat(diagnostic.span.start.column - 1);
-                let mut underline_len = if diagnostic.span.start.line == diagnostic.span.end.line {
-                    diagnostic.span.end.column - diagnostic.span.start.column
-                } else {
-                    // For multi-line spans, underline from start column to end of line
-                    if diagnostic.span.start.column > 0
-                        && line.len() >= diagnostic.span.start.column - 1
-                    {
-                        line.len() - (diagnostic.span.start.column - 1)
-                    } else {
-                        1
-                    }
-                };
-
-                // If underline_len is 0 or 1 (single position), try to detect the token length from source
-                if underline_len <= 1 && diagnostic.span.start.column > 0 {
-                    let start_col = diagnostic.span.start.column - 1; // Convert to 0-based
-                    if start_col < line.len() {
-                        let remaining = &line[start_col..];
-                        // Find the length of the identifier (alphanumeric + underscore)
-                        let detected_len = remaining
-                            .chars()
-                            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
-                            .count();
-                        if detected_len >= 1 {
-                            // Changed from > 1 to >= 1
-                            underline_len = detected_len;
-                        }
-                    }
-                }
-
-                let underline = if self.use_colors {
-                    format!("\x1b[31m{}\x1b[0m", "^".repeat(underline_len.max(1)))
-                } else {
-                    "^".repeat(underline_len.max(1))
-                };
-
-                if self.use_colors {
-                    output.push_str(&format!(
-                        "{:width$} \x1b[96m|\x1b[0m {}{}",
-                        "",
-                        padding,
-                        underline,
-                        width = line_num_width
-                    ));
-                } else {
-                    output.push_str(&format!(
-                        "{:width$} | {}{}",
-                        "",
-                        padding,
-                        underline,
-                        width = line_num_width
-                    ));
-                }
-
-                // Primary label message - underlined and bold for visibility
-                if let Some(label) = diagnostic
-                    .labels
-                    .iter()
-                    .find(|l| l.style == LabelStyle::Primary)
-                {
-                    if self.use_colors {
-                        // Bold + underlined red text for the error message
-                        output.push_str(&format!(" \x1b[1;4;31m{}\x1b[0m", label.message));
-                    } else {
-                        output.push_str(&format!(" {}", label.message));
-                    }
-                }
-                output.push('\n');
-            }
-        }
-
-        // Additional labels
+        // Add labels
         for label in &diagnostic.labels {
-            if label.style == LabelStyle::Secondary
-                && let Some(file) = source_map.get_file(label.span.file_id)
-            {
-                if self.use_colors {
-                    output.push_str(&format!(
-                        "  \x1b[96m-->\x1b[0m {}:{}:{}: {}\n",
-                        file.name, label.span.start.line, label.span.start.column, label.message
-                    ));
-                } else {
-                    output.push_str(&format!(
-                        "  --> {}:{}:{}: {}\n",
-                        file.name, label.span.start.line, label.span.start.column, label.message
-                    ));
-                }
-            }
+            let start = label.span.start.byte_offset;
+            let end = label.span.end.byte_offset.max(start + 1);
+            let color = match label.style {
+                LabelStyle::Primary => Color::Red,
+                LabelStyle::Secondary => Color::Blue,
+            };
+            builder = builder.with_label(
+                ALabel::new((file_name, start..end))
+                    .with_message(&label.message)
+                    .with_color(color),
+            );
         }
 
-        // Suggestions
-        for suggestion in &diagnostic.suggestions {
-            output.push('\n');
-            if self.use_colors {
-                output.push_str("\x1b[38;5;208msuggestion\x1b[0m: ");
-            } else {
-                output.push_str("suggestion: ");
-            }
-            output.push_str(&suggestion.message);
-            output.push('\n');
-        }
-
-        // Help messages - indented for better readability with yellow/golden color
+        // Add help messages
         for help_msg in &diagnostic.help {
-            if self.use_colors {
-                // Green 'help:' label, yellow/golden message text
-                output.push_str("     \x1b[32mhelp\x1b[0m: \x1b[33m");
-                output.push_str(help_msg);
-                output.push_str("\x1b[0m\n");
-            } else {
-                output.push_str("     help: ");
-                output.push_str(help_msg);
-                output.push('\n');
-            }
+            builder = builder.with_help(help_msg);
         }
 
-        // Notes
+        // Add notes
         for note in &diagnostic.notes {
-            if self.use_colors {
-                output.push_str("\x1b[34mnote\x1b[0m: ");
-            } else {
-                output.push_str("note: ");
-            }
-            output.push_str(note);
-            output.push('\n');
+            builder = builder.with_note(note);
         }
 
-        output
+        // Add suggestions as notes
+        for suggestion in &diagnostic.suggestions {
+            builder = builder.with_note(format!("suggestion: {}", suggestion.message));
+        }
+
+        // Render to string
+        let report = builder.finish();
+        let mut buf = Vec::new();
+        report
+            .write((file_name, Source::from(source_content)), &mut buf)
+            .unwrap_or_default();
+        String::from_utf8(buf).unwrap_or_default()
     }
 }
 
