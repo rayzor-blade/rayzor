@@ -368,11 +368,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
         let span = self.stream.span_from(start);
 
-        Ok(Metadata {
-            name,
-            params,
-            span,
-        })
+        Ok(Metadata { name, params, span })
     }
 
     /// Parse access and modifiers: `public static inline`
