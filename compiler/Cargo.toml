@@ -15,6 +15,7 @@ serde_json = "1"
 libloading = "0.8"  # For HDLL dynamic library loading
 libc = "0.2"  # For dlopen flags on Linux
 postcard = { version = "1.0", features = ["alloc"] }
+memmap2 = "0.9"
 fxhash = "0.2.1"
 smallvec = "1.13"  # Stack-allocated Vec for small collections (FFI args)
 log = "0.4"
