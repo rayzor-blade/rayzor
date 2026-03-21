@@ -276,8 +276,16 @@ impl<'a, 'b> RdParser<'a, 'b> {
             TokenKind::StringLit => {
                 let text = token.text(self.source);
                 self.stream.advance();
+                let quote = text.as_bytes()[0];
                 let inner = &text[1..text.len() - 1];
-                Ok(Expr { kind: ExprKind::String(inner.to_string()), span: token.span })
+
+                // Single-quoted strings with $ are interpolated in Haxe
+                if quote == b'\'' && inner.contains('$') {
+                    let parts = self.parse_string_interpolation_parts(inner, token.span.start + 1);
+                    Ok(Expr { kind: ExprKind::StringInterpolation(parts), span: token.span })
+                } else {
+                    Ok(Expr { kind: ExprKind::String(inner.to_string()), span: token.span })
+                }
             }
             TokenKind::KwTrue => { self.stream.advance(); Ok(Expr { kind: ExprKind::Bool(true), span: token.span }) }
             TokenKind::KwFalse => { self.stream.advance(); Ok(Expr { kind: ExprKind::Bool(false), span: token.span }) }
@@ -680,6 +688,92 @@ impl<'a, 'b> RdParser<'a, 'b> {
             }
         }
         Ok(params)
+    }
+
+    /// Parse string interpolation parts from single-quoted string content.
+    /// Handles `$ident` and `${expr}` interpolation.
+    fn parse_string_interpolation_parts(&mut self, inner: &str, base_offset: usize) -> Vec<StringPart> {
+        let mut parts = Vec::new();
+        let mut current = String::new();
+        let bytes = inner.as_bytes();
+        let mut i = 0;
+
+        while i < bytes.len() {
+            if bytes[i] == b'$' && i + 1 < bytes.len() {
+                // Flush literal
+                if !current.is_empty() {
+                    parts.push(StringPart::Literal(std::mem::take(&mut current)));
+                }
+
+                if bytes[i + 1] == b'{' {
+                    // ${expr} — find matching }
+                    i += 2;
+                    let expr_start = i;
+                    let mut depth = 1;
+                    while i < bytes.len() && depth > 0 {
+                        if bytes[i] == b'{' { depth += 1; }
+                        if bytes[i] == b'}' { depth -= 1; }
+                        if depth > 0 { i += 1; }
+                    }
+                    let expr_str = &inner[expr_start..i];
+                    if i < bytes.len() { i += 1; } // skip }
+
+                    // Parse the expression inside ${}
+                    match crate::rd::rd_parse(&format!("class _ {{ static function _() {{ return {}; }} }}", expr_str), "<interp>", false, false) {
+                        Ok(file) => {
+                            if let Some(TypeDeclaration::Class(c)) = file.declarations.first() {
+                                if let Some(ClassFieldKind::Function(f)) = c.fields.first().map(|f| &f.kind) {
+                                    if let Some(body) = &f.body {
+                                        if let ExprKind::Block(elements) = &body.kind {
+                                            if let Some(BlockElement::Expr(Expr { kind: ExprKind::Return(Some(expr)), .. })) = elements.first() {
+                                                parts.push(StringPart::Interpolation(*expr.clone()));
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    }
+                    // Fallback: treat as identifier
+                    parts.push(StringPart::Interpolation(Expr {
+                        kind: ExprKind::Ident(expr_str.to_string()),
+                        span: Span::new(base_offset + expr_start, base_offset + expr_start + expr_str.len()),
+                    }));
+                } else if bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'_' {
+                    // $ident
+                    i += 1;
+                    let ident_start = i;
+                    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                        i += 1;
+                    }
+                    let ident = &inner[ident_start..i];
+                    parts.push(StringPart::Interpolation(Expr {
+                        kind: ExprKind::Ident(ident.to_string()),
+                        span: Span::new(base_offset + ident_start, base_offset + i),
+                    }));
+                } else {
+                    // Just a $ followed by non-ident char
+                    current.push('$');
+                    i += 1;
+                }
+            } else if bytes[i] == b'\\' && i + 1 < bytes.len() {
+                // Escape sequence
+                current.push(bytes[i] as char);
+                current.push(bytes[i + 1] as char);
+                i += 2;
+            } else {
+                current.push(bytes[i] as char);
+                i += 1;
+            }
+        }
+
+        if !current.is_empty() {
+            parts.push(StringPart::Literal(current));
+        }
+
+        parts
     }
 
     /// Parse a switch case pattern.
