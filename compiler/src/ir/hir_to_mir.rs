@@ -151,6 +151,10 @@ pub struct HirToMirContext<'a> {
     /// This allows us to find the index of a field within its class
     field_index_map: BTreeMap<SymbolId, (TypeId, u32)>,
 
+    /// Reverse index: TypeId → Vec<(field_symbol, field_index)>
+    /// Built lazily from field_index_map. Invalidated when field_index_map changes.
+    fields_by_type_cache: Option<HashMap<TypeId, Vec<(SymbolId, u32)>>>,
+
     /// Mapping from (typedef_type_id, field_name) to field_index for anonymous struct fields
     /// This allows field access on typedef'd anonymous structs like FileStat
     /// where field symbols may be created at access sites rather than typedef declaration
@@ -556,6 +560,7 @@ impl<'a> HirToMirContext<'a> {
             type_table,
             closure_environments: BTreeMap::new(),
             field_index_map: BTreeMap::new(),
+            fields_by_type_cache: None,
             typedef_field_map: BTreeMap::new(),
             property_access_map: BTreeMap::new(),
             constructor_map: BTreeMap::new(),
@@ -633,6 +638,32 @@ impl<'a> HirToMirContext<'a> {
         ctx.declare_free();
 
         ctx
+    }
+
+    /// Get all fields for a given TypeId. Uses cached reverse index when available,
+    /// falls back to linear scan of field_index_map otherwise.
+    fn fields_for_type(&self, type_id: TypeId) -> Vec<(SymbolId, u32)> {
+        if let Some(ref cache) = self.fields_by_type_cache {
+            return cache.get(&type_id).cloned().unwrap_or_default();
+        }
+        // Fallback: linear scan (before cache is built)
+        self.field_index_map
+            .iter()
+            .filter(|(_, (class_ty, _))| *class_ty == type_id)
+            .map(|(sym, (_, idx))| (*sym, *idx))
+            .collect()
+    }
+
+    /// Build or rebuild the fields_by_type reverse index from field_index_map.
+    fn rebuild_fields_by_type_cache(&mut self) {
+        let mut cache: HashMap<TypeId, Vec<(SymbolId, u32)>> = HashMap::new();
+        for (field_sym, (class_ty, idx)) in &self.field_index_map {
+            cache
+                .entry(*class_ty)
+                .or_default()
+                .push((*field_sym, *idx));
+        }
+        self.fields_by_type_cache = Some(cache);
     }
 
     /// Declare malloc function so we can call it during lowering for heap allocations
@@ -1519,15 +1550,8 @@ impl<'a> HirToMirContext<'a> {
             (symbol_id, name, no_mangle)
         };
 
-        // Get fields from field_index_map for this type.
-        // Try matching by type_id first, then fall back to matching by class symbol_id
-        // (TypeIds can differ between expression types and registration types)
-        let mut fields_with_index: Vec<(SymbolId, u32)> = Vec::new();
-        for (field_sym, (class_ty, idx)) in &self.field_index_map {
-            if *class_ty == type_id {
-                fields_with_index.push((*field_sym, *idx));
-            }
-        }
+        // Get fields from field_index_map for this type (O(1) via reverse index).
+        let mut fields_with_index = self.fields_for_type(type_id);
         // Fallback: if no fields found by type_id, match fields by name.
         // TypeIds can differ between expression types and registration types,
         // so we find fields whose name matches our class's field names.
@@ -1879,13 +1903,8 @@ impl<'a> HirToMirContext<'a> {
             (symbol_id, name)
         };
 
-        // Get fields from field_index_map (same approach as cstruct)
-        let mut fields_with_index: Vec<(SymbolId, u32)> = Vec::new();
-        for (field_sym, (class_ty, idx)) in &self.field_index_map {
-            if *class_ty == type_id {
-                fields_with_index.push((*field_sym, *idx));
-            }
-        }
+        // Get fields from reverse index (O(1) via cache)
+        let mut fields_with_index = self.fields_for_type(type_id);
         // Fallback: match by class symbol_id via HirTypeDecl
         if fields_with_index.is_empty() {
             let field_class_tys: std::collections::HashSet<TypeId> =
@@ -2218,6 +2237,10 @@ impl<'a> HirToMirContext<'a> {
         for (symbol_id, hir_func) in &hir_module.functions {
             self.register_function_signature(*symbol_id, hir_func, None);
         }
+
+        // Build reverse index for O(1) field-by-type lookups during expression lowering.
+        // field_index_map is fully populated after class registration (Pass 1).
+        self.rebuild_fields_by_type_cache();
 
         // Pass 2: Now lower all function bodies (both class methods and module functions)
         // At this point, function_map is fully populated
@@ -20904,18 +20927,20 @@ impl<'a> HirToMirContext<'a> {
         if let Some(class_symbol) = class_symbol_opt {
             // Source is a class — build name → (gep_index, type) map from field_index_map
             let mut class_field_by_name: BTreeMap<String, (u32, TypeId)> = BTreeMap::new();
-            for (field_sym, (class_ty, idx)) in &self.field_index_map {
-                // Match by class type_id or by class symbol
-                let matches = *class_ty == resolved_source || {
-                    self.class_type_to_symbol
-                        .get(class_ty)
-                        .map_or(false, |s| *s == class_symbol)
-                };
-                if matches {
-                    if let Some(sym) = self.symbol_table.get_symbol(*field_sym) {
-                        if let Some(name) = self.string_interner.get(sym.name) {
-                            class_field_by_name.insert(name.to_string(), (*idx, sym.type_id));
-                        }
+            // Fast path: lookup by TypeId via reverse index
+            let mut fields = self.fields_for_type(resolved_source);
+            // Fallback: also try matching by class symbol_id
+            if fields.is_empty() {
+                for (field_sym, (class_ty, idx)) in &self.field_index_map {
+                    if self.class_type_to_symbol.get(class_ty).map_or(false, |s| *s == class_symbol) {
+                        fields.push((*field_sym, *idx));
+                    }
+                }
+            }
+            for (field_sym, idx) in &fields {
+                if let Some(sym) = self.symbol_table.get_symbol(*field_sym) {
+                    if let Some(name) = self.string_interner.get(sym.name) {
+                        class_field_by_name.insert(name.to_string(), (*idx, sym.type_id));
                     }
                 }
             }
