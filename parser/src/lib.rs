@@ -24,6 +24,11 @@ pub mod error_syntax;
 
 pub mod enhanced_incremental_parser;
 
+// New tokenizer + recursive descent parser infrastructure
+pub mod token;
+pub mod lexer;
+pub mod token_stream;
+
 // TODO: The following module needs refactoring to use diagnostics crate:
 // pub mod position_parser;
 
