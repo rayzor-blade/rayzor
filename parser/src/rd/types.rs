@@ -134,6 +134,9 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
         while !self.stream.at(TokenKind::RBrace) && !self.stream.is_eof() {
             let field_start = self.stream.current_offset();
+            // Skip optional `var` or `final` keyword in struct fields
+            self.stream.eat(TokenKind::KwVar);
+            self.stream.eat(TokenKind::KwFinal);
             let optional = self.stream.eat(TokenKind::Question).is_some();
             let field_name = self.stream.current_text().to_string();
             self.stream.advance();
@@ -148,7 +151,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
             });
 
             if !self.stream.at(TokenKind::RBrace) {
-                self.stream.eat(TokenKind::Comma);
+                // Accept comma or semicolon as field separator
+                if !self.stream.eat(TokenKind::Comma).is_some() {
+                    self.stream.eat(TokenKind::Semicolon);
+                }
             }
         }
 

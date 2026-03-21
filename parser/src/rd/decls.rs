@@ -133,6 +133,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let mut implements = Vec::new();
         while self.stream.eat(TokenKind::KwImplements).is_some() {
             implements.push(self.parse_type()?);
+            // Allow comma-separated: implements A, B
+            while self.stream.eat(TokenKind::Comma).is_some() {
+                implements.push(self.parse_type()?);
+            }
         }
 
         let fields = self.parse_class_body()?;
@@ -161,10 +165,12 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let type_params = self.parse_type_params()?;
 
         let mut extends = Vec::new();
-        while self.stream.eat(TokenKind::KwExtends).is_some() {
+        if self.stream.eat(TokenKind::KwExtends).is_some() {
             extends.push(self.parse_type()?);
-            // Allow comma-separated extends
-            self.stream.eat(TokenKind::Comma);
+            // Allow comma-separated: extends A, B, C
+            while self.stream.eat(TokenKind::Comma).is_some() {
+                extends.push(self.parse_type()?);
+            }
         }
 
         let fields = self.parse_class_body()?;
