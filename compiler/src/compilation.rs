@@ -507,10 +507,10 @@ impl CompilationUnit {
         for file in default_files {
             debug!("Loading default import: {}", file.filename);
             if let Some(source) = file.input.as_deref() {
-                self.pre_register_file_types(&file.filename, source)?;
-                self.register_enums_from_source(&file.filename, source);
+                // Single parse: pre-register types AND enums from one AST.
+                // Previously parsed each file TWICE (once per function).
+                self.pre_register_and_enums_from_source(&file.filename, source)?;
             }
-            // Add the file to the stdlib files for processing during lowering
             self.stdlib_files.push(file);
         }
         debug!("Loaded {} default stdlib imports", self.stdlib_files.len());
@@ -3250,6 +3250,57 @@ impl CompilationUnit {
         }
     }
 
+    /// Combined pre-register types + enum registration from a single parse.
+    /// Eliminates the double-parse that occurred when pre_register_file_types
+    /// and register_enums_from_source were called separately.
+    fn pre_register_and_enums_from_source(
+        &mut self,
+        filename: &str,
+        source: &str,
+    ) -> Result<(), String> {
+        use crate::tast::ast_lowering::AstLowering;
+        use parser::parse_haxe_file_with_diagnostics;
+
+        let parse_result = parse_haxe_file_with_diagnostics(filename, source)
+            .map_err(|e| format!("Parse error in {}: {}", filename, e))?;
+
+        let ast_file = parse_result.file;
+        let dummy_interner_rc = Rc::new(RefCell::new(StringInterner::new()));
+
+        let mut lowering = AstLowering::new(
+            &mut self.string_interner,
+            dummy_interner_rc,
+            &mut self.symbol_table,
+            &self.type_table,
+            &mut self.scope_tree,
+            &mut self.namespace_resolver,
+            &mut self.import_resolver,
+        );
+
+        // Pre-register types (classes, interfaces, enums, abstracts)
+        lowering
+            .pre_register_file(&ast_file)
+            .map_err(|e| format!("Pre-registration error in {}: {:?}", filename, e))?;
+
+        // Also register enums and abstracts from the same parsed AST
+        if let Some(ref pkg) = ast_file.package {
+            lowering.set_package_from_parts(&pkg.path);
+        }
+        for decl in &ast_file.declarations {
+            match decl {
+                parser::TypeDeclaration::Enum(enum_decl) => {
+                    let _ = lowering.lower_enum_declaration_public(enum_decl);
+                }
+                parser::TypeDeclaration::Abstract(_) => {
+                    let _ = lowering.pre_register_declaration(decl);
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
     /// Load global import.hx files
     /// These are processed AFTER stdlib but BEFORE user files
     /// They provide global imports available to all user code
@@ -4114,42 +4165,28 @@ impl CompilationUnit {
         // Step 2: Pre-load stdlib files for explicit imports AND using statements in user files
         // This ensures typedefs like sys.FileStat are available before compilation
         // Also handles root-level imports like "import StringTools;" and "using StringTools;"
+        // Extract imports from already-parsed user file ASTs (no re-parsing needed).
         let (imports_to_load, usings_to_load): (Vec<String>, Vec<String>) = self
             .user_files
             .iter()
-            .filter_map(|file| {
-                file.input
-                    .as_ref()
-                    .map(|source| (file.filename.clone(), source.clone()))
-            })
             .fold(
                 (Vec::new(), Vec::new()),
-                |(mut imports, mut usings), (filename, source)| {
-                    if let Ok(ast) = parser::parse_haxe_file(&filename, &source, false) {
-                        // Collect imports
-                        for import in &ast.imports {
-                            if !import.path.is_empty() {
-                                imports.push(import.path.join("."));
-                            }
+                |(mut imports, mut usings), ast| {
+                    for import in &ast.imports {
+                        if !import.path.is_empty() {
+                            imports.push(import.path.join("."));
                         }
-                        // Collect using statements (static extensions)
-                        for using in &ast.using {
-                            if !using.path.is_empty() {
-                                usings.push(using.path.join("."));
-                            }
-                        }
-                        // Auto-discover qualified type references in the AST
-                        // (e.g., `new haxe.ds.BalancedTree<K,V>()` without explicit import)
-                        let mut discovered = Vec::new();
-                        collect_qualified_type_refs_from_ast(&ast, &mut discovered);
-                        imports.extend(discovered);
-
-                        // Extract full dependencies from user code (new Foo(), type annotations, etc.)
-                        // This ensures pure Haxe stdlib classes like StringBuf, StringTools, List
-                        // get compiled when referenced without explicit import statements.
-                        let user_deps = Self::extract_all_dependencies(&ast);
-                        imports.extend(user_deps);
                     }
+                    for using in &ast.using {
+                        if !using.path.is_empty() {
+                            usings.push(using.path.join("."));
+                        }
+                    }
+                    let mut discovered = Vec::new();
+                    collect_qualified_type_refs_from_ast(ast, &mut discovered);
+                    imports.extend(discovered);
+                    let user_deps = Self::extract_all_dependencies(ast);
+                    imports.extend(user_deps);
                     (imports, usings)
                 },
             );
