@@ -1535,29 +1535,44 @@ impl OptimizationPass for GVNPass {
 
         let mut result = OptimizationResult::unchanged();
 
-        for function in module.functions.values_mut() {
-            let domtree = DominatorTree::compute(function);
+        // Pre-collect function IDs that involve exception handling (setjmp calls).
+        // We need this before the mutable borrow loop.
+        let exception_func_ids: HashSet<IrFunctionId> = module
+            .functions
+            .iter()
+            .filter(|(_, f)| {
+                f.cfg.blocks.values().any(|b| {
+                    b.instructions.iter().any(|inst| {
+                        matches!(inst, IrInstruction::Throw { .. })
+                    }) || matches!(b.terminator, IrTerminator::NoReturn { .. })
+                })
+            })
+            .map(|(&id, _)| id)
+            .collect();
 
-            // Value number table: expression -> canonical register
-            let mut value_numbers: HashMap<String, IrId> = HashMap::new();
-            // Registers to replace (use BTreeMap for deterministic iteration order)
+        let func_ids: Vec<IrFunctionId> = module.functions.keys().copied().collect();
+        for func_id in func_ids {
+            if exception_func_ids.contains(&func_id) {
+                continue;
+            }
+            let function = module.functions.get_mut(&func_id).unwrap();
+            if function.cfg.blocks.is_empty() {
+                continue;
+            }
+
+            let domtree = DominatorTree::compute(function);
             let mut replacements: BTreeMap<IrId, IrId> = BTreeMap::new();
 
-            // Process blocks in dominator tree order (preorder DFS)
-            let mut worklist = vec![function.entry_block()];
-            let mut visited = HashSet::new();
+            // Dominator-tree DFS with per-path value numbering.
+            // Each child gets a CLONE of its parent's map so siblings
+            // don't share values — only dominated blocks inherit.
+            let entry = function.entry_block();
+            let mut stack: Vec<(IrBlockId, HashMap<String, IrId>)> =
+                vec![(entry, HashMap::new())];
 
-            while let Some(block_id) = worklist.pop() {
-                if !visited.insert(block_id) {
-                    continue;
-                }
-
-                // Process this block
+            while let Some((block_id, mut local_values)) = stack.pop() {
                 if let Some(block) = function.cfg.get_block(block_id) {
-                    let mut local_values = value_numbers.clone();
-
                     for inst in &block.instructions {
-                        // First, apply known replacements to this instruction's uses
                         let key = Self::make_key_with_replacements(inst, &replacements);
 
                         if let Some(key) = key {
@@ -1575,20 +1590,27 @@ impl OptimizationPass for GVNPass {
                             }
                         }
                     }
-
-                    // Update global value numbers for dominated blocks
-                    value_numbers = local_values;
                 }
 
-                // Add children in dominator tree
+                // Each dominator-tree child gets a clone of THIS block's
+                // value map — siblings don't contaminate each other.
                 for &child in domtree.children(block_id) {
-                    worklist.push(child);
+                    stack.push((child, local_values.clone()));
                 }
             }
 
-            // Apply all replacements
+            // Apply replacements to instructions, terminators, AND phi nodes.
+            // Without phi node updates, LoopUnrolling can delete blocks that
+            // define the old (replaced) registers, leaving phi nodes dangling.
             if !replacements.is_empty() {
                 for block in function.cfg.blocks.values_mut() {
+                    for phi in &mut block.phi_nodes {
+                        for (_, val) in &mut phi.incoming {
+                            if let Some(&new_val) = replacements.get(val) {
+                                *val = new_val;
+                            }
+                        }
+                    }
                     for inst in &mut block.instructions {
                         inst.replace_uses(&replacements);
                     }
@@ -1823,6 +1845,9 @@ impl PassManager {
                 // BCE: eliminate redundant bounds checks in for-in loops
                 manager
                     .add_pass(super::bounds_check_elimination::BoundsCheckEliminationPass::new());
+                // GVN before CSE: eliminates cross-block redundancies via
+                // dominator-tree value numbering (phi nodes properly updated).
+                manager.add_pass(GVNPass::new());
                 manager.add_pass(CSEPass::new());
                 manager.add_pass(LICMPass::new());
                 // Loop unrolling after LICM (invariants hoisted, trip counts visible)
