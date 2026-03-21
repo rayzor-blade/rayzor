@@ -473,7 +473,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
         while !self.stream.at(TokenKind::RBrace) && !self.stream.is_eof() {
             if self.stream.eat(TokenKind::KwCase).is_some() {
                 let case_start = self.stream.current_offset();
-                let pattern = self.parse_expression()?;
+                let pattern = self.parse_case_pattern()?;
                 // Guard: `case v if (condition):`
                 let guard = if self.stream.eat(TokenKind::KwIf).is_some() {
                     self.stream.expect(TokenKind::LParen)?;
@@ -498,7 +498,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     Expr { kind: ExprKind::Block(elements), span }
                 };
                 cases.push(Case {
-                    patterns: vec![Pattern::Const(pattern)],
+                    patterns: vec![pattern],
                     guard,
                     body,
                     span: self.stream.span_from(case_start),
@@ -680,6 +680,126 @@ impl<'a, 'b> RdParser<'a, 'b> {
             }
         }
         Ok(params)
+    }
+
+    /// Parse a switch case pattern.
+    fn parse_case_pattern(&mut self) -> Result<Pattern, ParseError> {
+        match self.stream.peek().kind {
+            // Underscore wildcard: `case _:`
+            TokenKind::Ident if self.stream.current_text() == "_" => {
+                self.stream.advance();
+                Ok(Pattern::Underscore)
+            }
+            // Null pattern
+            TokenKind::KwNull => {
+                self.stream.advance();
+                Ok(Pattern::Null)
+            }
+            // Literal patterns
+            TokenKind::IntLit => {
+                let expr = self.parse_primary()?;
+                Ok(Pattern::Const(expr))
+            }
+            TokenKind::FloatLit => {
+                let expr = self.parse_primary()?;
+                Ok(Pattern::Const(expr))
+            }
+            TokenKind::StringLit => {
+                let expr = self.parse_primary()?;
+                Ok(Pattern::Const(expr))
+            }
+            TokenKind::KwTrue | TokenKind::KwFalse => {
+                let expr = self.parse_primary()?;
+                Ok(Pattern::Const(expr))
+            }
+            TokenKind::Minus => {
+                // Negative number literal: -42
+                let expr = self.parse_unary()?;
+                Ok(Pattern::Const(expr))
+            }
+            // Array pattern: [a, b, c]
+            TokenKind::LBracket => {
+                self.stream.advance();
+                let mut elements = Vec::new();
+                while !self.stream.at(TokenKind::RBracket) && !self.stream.is_eof() {
+                    elements.push(self.parse_case_pattern()?);
+                    if !self.stream.at(TokenKind::RBracket) {
+                        self.stream.eat(TokenKind::Comma);
+                    }
+                }
+                self.stream.expect(TokenKind::RBracket)?;
+                Ok(Pattern::Array(elements))
+            }
+            // Identifier: variable capture or constructor
+            TokenKind::Ident => {
+                let name = self.stream.current_text().to_string();
+                self.stream.advance();
+
+                // Check for constructor pattern: Name(args) or Name.Variant
+                if self.stream.at(TokenKind::LParen) {
+                    // Constructor: Some(v) or MkPair(a, b)
+                    self.stream.advance();
+                    let mut params = Vec::new();
+                    while !self.stream.at(TokenKind::RParen) && !self.stream.is_eof() {
+                        params.push(self.parse_case_pattern()?);
+                        if !self.stream.at(TokenKind::RParen) {
+                            self.stream.eat(TokenKind::Comma);
+                        }
+                    }
+                    self.stream.expect(TokenKind::RParen)?;
+                    Ok(Pattern::Constructor {
+                        path: TypePath { package: Vec::new(), name, sub: None },
+                        params,
+                    })
+                } else if self.stream.at(TokenKind::Dot) {
+                    // Qualified: Enum.Value or Enum.Value(args)
+                    let mut parts = vec![name];
+                    while self.stream.eat(TokenKind::Dot).is_some() {
+                        parts.push(self.stream.current_text().to_string());
+                        self.stream.advance();
+                    }
+                    let final_name = parts.pop().unwrap();
+                    if self.stream.at(TokenKind::LParen) {
+                        self.stream.advance();
+                        let mut params = Vec::new();
+                        while !self.stream.at(TokenKind::RParen) && !self.stream.is_eof() {
+                            params.push(self.parse_case_pattern()?);
+                            if !self.stream.at(TokenKind::RParen) {
+                                self.stream.eat(TokenKind::Comma);
+                            }
+                        }
+                        self.stream.expect(TokenKind::RParen)?;
+                        Ok(Pattern::Constructor {
+                            path: TypePath { package: parts, name: final_name, sub: None },
+                            params,
+                        })
+                    } else {
+                        // Qualified constant: Enum.Value
+                        let path_str = parts.join(".");
+                        let full = format!("{}.{}", path_str, final_name);
+                        Ok(Pattern::Const(Expr {
+                            kind: ExprKind::Field {
+                                expr: Box::new(Expr {
+                                    kind: ExprKind::Ident(path_str),
+                                    span: Span::default(),
+                                }),
+                                field: final_name,
+                                is_optional: false,
+                            },
+                            span: Span::default(),
+                        }))
+                    }
+                } else {
+                    // Simple identifier — variable capture
+                    Ok(Pattern::Var(name))
+                }
+            }
+            _ => {
+                // Fallback: parse as expression and wrap as Const
+                let expr = self.parse_expression()?;
+                Ok(Pattern::Const(expr))
+            }
+        }
     }
 
     fn parse_do_while_expr(&mut self) -> Result<Expr, ParseError> {
