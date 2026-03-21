@@ -350,10 +350,9 @@ fn run_benchmark_cranelift(
     // Compile
     let compile_start = Instant::now();
 
-    // Use default config with BLADE cache enabled for stdlib.
-    // fast() skips the cache (lazy_stdlib=true), causing stdlib to be
-    // re-parsed from source every iteration — much slower.
-    let mut unit = CompilationUnit::new(CompilationConfig::default());
+    let mut config = CompilationConfig::default();
+    config.pipeline_config = config.pipeline_config.skip_analysis();
+    let mut unit = CompilationUnit::new(config);
     unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
         .map_err(|e| format!("parse: {}", e))?;

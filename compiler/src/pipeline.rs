@@ -535,6 +535,24 @@ impl Default for PipelineConfig {
 }
 
 impl PipelineConfig {
+    /// Disable all analysis passes that don't affect code generation.
+    /// Skips flow analysis, ownership/lifetime/borrow checking, semantic
+    /// analysis, HIR validation, macro expansion, and statistics collection.
+    /// Use `rayzor check` to run analysis separately.
+    pub fn skip_analysis(mut self) -> Self {
+        self.enable_lifetime_analysis = false;
+        self.enable_ownership_analysis = false;
+        self.enable_borrow_checking = false;
+        self.enable_semantic_analysis = false;
+        self.enable_hir_validation = false;
+        self.enable_flow_sensitive_analysis = false;
+        self.enable_enhanced_flow_analysis = false;
+        self.enable_memory_safety_analysis = false;
+        self.enable_macro_expansion = false;
+        self.collect_statistics = false;
+        self
+    }
+
     /// Configuration for development builds with hot reload
     pub fn development() -> Self {
         Self {
