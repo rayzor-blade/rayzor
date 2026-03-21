@@ -921,9 +921,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 None
             };
             params.push(ArrowParam { name, type_hint });
-            if !self.stream.at(TokenKind::RParen)
-                && self.stream.eat(TokenKind::Comma).is_none()
-            {
+            if !self.stream.at(TokenKind::RParen) && self.stream.eat(TokenKind::Comma).is_none() {
                 return Err(ParseError::new("expected , or )", self.stream.peek().span));
             }
         }
