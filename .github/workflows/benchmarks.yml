@@ -42,18 +42,21 @@ jobs:
       - name: Build rayzor CLI
         run: cargo build --release --features llvm-backend
 
-      - name: Generate precompiled bundles
+      - name: Generate precompiled bundles and stdlib symbol cache
         run: |
           ./target/release/rayzor bundle compiler/benchmarks/src/deltablue.hx -o compiler/benchmarks/precompiled/deltablue.rzb --strip
           ./target/release/rayzor bundle compiler/benchmarks/src/fibonacci.hx -o compiler/benchmarks/precompiled/fibonacci.rzb --strip
           ./target/release/rayzor bundle compiler/benchmarks/src/mandelbrot.hx -o compiler/benchmarks/precompiled/mandelbrot.rzb --strip
           ./target/release/rayzor bundle compiler/benchmarks/src/nbody.hx -o compiler/benchmarks/precompiled/nbody.rzb --strip
+          cargo run --release --bin preblade -- --out .rayzor/blade/stdlib
 
-      - name: Upload precompiled bundles
+      - name: Upload precompiled bundles and stdlib cache
         uses: actions/upload-artifact@v4
         with:
           name: precompiled-bundles
-          path: compiler/benchmarks/precompiled/*.rzb
+          path: |
+            compiler/benchmarks/precompiled/*.rzb
+            .rayzor/blade/stdlib/stdlib.bsym
           retention-days: 1
 
       - name: Upload rayzor binaries
@@ -116,11 +119,16 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Download precompiled bundles
+      - name: Download precompiled bundles and stdlib cache
         uses: actions/download-artifact@v4
         with:
           name: precompiled-bundles
-          path: compiler/benchmarks/precompiled
+          path: .
+
+      - name: Verify downloads
+        run: |
+          ls -la compiler/benchmarks/precompiled/*.rzb
+          ls -la .rayzor/blade/stdlib/stdlib.bsym || echo "No bsym found"
 
       - name: Download rayzor binaries
         uses: actions/download-artifact@v4

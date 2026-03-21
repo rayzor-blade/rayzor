@@ -489,29 +489,38 @@ impl CompilationUnit {
 
         // Load pre-compiled symbols from BLADE manifest if caching is enabled
         // Skip if lazy_stdlib is enabled (for faster cold start)
-        if self.config.enable_cache && !self.config.lazy_stdlib {
+        let bsym_loaded = if self.config.enable_cache && !self.config.lazy_stdlib {
             if self.load_stdlib_symbols() {
                 debug!("BLADE symbols loaded, stdlib configured for cached resolution");
+                true
             } else {
                 debug!("No BLADE symbols available, falling back to on-demand loading");
+                false
             }
         } else if self.config.lazy_stdlib {
             debug!("Lazy stdlib enabled - skipping upfront symbol registration for faster startup");
-            // Still register builtin globals like 'trace' which are always needed
             self.register_builtin_globals();
-        }
+            false
+        } else {
+            false
+        };
 
         // Load default stdlib imports (Math, Std, Array, String, etc.)
-        // These are core types that are always needed, even with lazy_stdlib
+        // When bsym loaded successfully, skip parsing — symbols are already registered.
+        // The stdlib files will still be needed for TAST lowering via BLADE cache.
         let default_files = loader.load_default_imports();
-        for file in default_files {
-            debug!("Loading default import: {}", file.filename);
-            if let Some(source) = file.input.as_deref() {
-                // Single parse: pre-register types AND enums from one AST.
-                // Previously parsed each file TWICE (once per function).
-                self.pre_register_and_enums_from_source(&file.filename, source)?;
+        if bsym_loaded {
+            // Just collect file entries without parsing (for source maps / cache paths)
+            for file in default_files {
+                self.stdlib_files.push(file);
             }
-            self.stdlib_files.push(file);
+        } else {
+            for file in default_files {
+                if let Some(source) = file.input.as_deref() {
+                    self.pre_register_and_enums_from_source(&file.filename, source)?;
+                }
+                self.stdlib_files.push(file);
+            }
         }
         debug!("Loaded {} default stdlib imports", self.stdlib_files.len());
 
