@@ -350,8 +350,10 @@ fn run_benchmark_cranelift(
     // Compile
     let compile_start = Instant::now();
 
-    // Use fast() for lazy stdlib - avoids trace resolution issues
-    let mut unit = CompilationUnit::new(CompilationConfig::fast());
+    // Use default config with BLADE cache enabled for stdlib.
+    // fast() skips the cache (lazy_stdlib=true), causing stdlib to be
+    // re-parsed from source every iteration — much slower.
+    let mut unit = CompilationUnit::new(CompilationConfig::default());
     unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
         .map_err(|e| format!("parse: {}", e))?;
@@ -360,10 +362,8 @@ fn run_benchmark_cranelift(
     let mut mir_modules = unit.get_mir_modules();
 
     // Apply MIR optimizations (O2) for fair comparison with tiered backend
-    // Tiered reaches "Optimized" tier which uses O2/O3 MIR opts + Cranelift "speed"
     let mut pass_manager = PassManager::for_level(OptimizationLevel::O2);
     for module in &mut mir_modules {
-        // Get mutable access to the module through Arc::make_mut
         let module_mut = std::sync::Arc::make_mut(module);
         let _ = pass_manager.run(module_mut);
         let _ = strip_stack_trace_updates(module_mut);
@@ -399,7 +399,7 @@ fn run_benchmark_interpreter(
     // Compile (to MIR only)
     let compile_start = Instant::now();
 
-    let mut unit = CompilationUnit::new(CompilationConfig::fast());
+    let mut unit = CompilationUnit::new(CompilationConfig::default());
     unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
         .map_err(|e| format!("parse: {}", e))?;
@@ -473,7 +473,7 @@ fn setup_tiered_benchmark(
     let compile_start = Instant::now();
 
     // Use fast() for lazy stdlib - avoids trace resolution issues
-    let mut unit = CompilationUnit::new(CompilationConfig::fast());
+    let mut unit = CompilationUnit::new(CompilationConfig::default());
     unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
         .map_err(|e| format!("parse: {}", e))?;
@@ -551,7 +551,7 @@ fn run_benchmark_tiered(
     let compile_start = Instant::now();
 
     // Use fast() for lazy stdlib - avoids trace resolution issues
-    let mut unit = CompilationUnit::new(CompilationConfig::fast());
+    let mut unit = CompilationUnit::new(CompilationConfig::default());
     unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
         .map_err(|e| format!("parse: {}", e))?;
@@ -621,7 +621,7 @@ fn setup_llvm_benchmark<'ctx>(
     let compile_start = Instant::now();
 
     // Use fast() for lazy stdlib like interpreter - avoids trace resolution issues
-    let mut unit = CompilationUnit::new(CompilationConfig::fast());
+    let mut unit = CompilationUnit::new(CompilationConfig::default());
     unit.load_stdlib().map_err(|e| format!("stdlib: {}", e))?;
     unit.add_file(&bench.source, &format!("{}.hx", bench.name))
         .map_err(|e| format!("parse: {}", e))?;
