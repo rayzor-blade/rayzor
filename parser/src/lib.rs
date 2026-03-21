@@ -28,6 +28,7 @@ pub mod enhanced_incremental_parser;
 pub mod token;
 pub mod lexer;
 pub mod token_stream;
+pub mod rd;
 
 // TODO: The following module needs refactoring to use diagnostics crate:
 // pub mod position_parser;
