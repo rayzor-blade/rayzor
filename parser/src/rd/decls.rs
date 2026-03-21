@@ -30,7 +30,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
             let alias = self.stream.current_text().to_string();
             self.stream.advance();
             ImportMode::Alias(alias)
-        } else if path.last().map_or(false, |s| s == "*") {
+        } else if path.last().is_some_and(|s| s == "*") {
             ImportMode::Wildcard
         } else {
             ImportMode::Normal

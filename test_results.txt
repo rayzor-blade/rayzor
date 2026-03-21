@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Sat Mar 21 19:59:48 GMT 2026
+  Sat Mar 21 23:20:24 GMT 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -730,10 +730,10 @@ done
 0
 1
 2
-world
 hello
-10
+world
 20
+10
 30
 done
 ✓ Complete
@@ -1275,9 +1275,9 @@ TEnum(Color)
 TFunction
 TClass(String)
 TEnum(Color)
-${vtFn}
-${vtStr}
-${vtEnum}
+TFunction
+TClass(String)
+TEnum(Color)
 ✓ Complete
 
 --- test_typeof_parity [PASS] ---

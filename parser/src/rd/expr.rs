@@ -844,18 +844,18 @@ impl<'a, 'b> RdParser<'a, 'b> {
         // Try arrow function: save position, attempt to parse params
         let saved = self.stream.save();
         if let Ok(params) = self.try_parse_arrow_params() {
-            if self.stream.eat(TokenKind::RParen).is_some() {
-                if self.stream.eat(TokenKind::Arrow).is_some() {
-                    let body = self.parse_expression()?;
-                    let end = body.span.end;
-                    return Ok(Expr {
-                        kind: ExprKind::Arrow {
-                            params,
-                            expr: Box::new(body),
-                        },
-                        span: Span::new(start, end),
-                    });
-                }
+            if self.stream.eat(TokenKind::RParen).is_some()
+                && self.stream.eat(TokenKind::Arrow).is_some()
+            {
+                let body = self.parse_expression()?;
+                let end = body.span.end;
+                return Ok(Expr {
+                    kind: ExprKind::Arrow {
+                        params,
+                        expr: Box::new(body),
+                    },
+                    span: Span::new(start, end),
+                });
             }
         }
         // Restore and parse as regular paren expression
@@ -921,10 +921,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 None
             };
             params.push(ArrowParam { name, type_hint });
-            if !self.stream.at(TokenKind::RParen) {
-                if self.stream.eat(TokenKind::Comma).is_none() {
-                    return Err(ParseError::new("expected , or )", self.stream.peek().span));
-                }
+            if !self.stream.at(TokenKind::RParen)
+                && self.stream.eat(TokenKind::Comma).is_none()
+            {
+                return Err(ParseError::new("expected , or )", self.stream.peek().span));
             }
         }
         Ok(params)
@@ -971,7 +971,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     } // skip }
 
                     // Parse the expression inside ${}
-                    match crate::rd::rd_parse(
+                    if let Ok(file) = crate::rd::rd_parse(
                         &format!(
                             "class _ {{ static function _() {{ return {}; }} }}",
                             expr_str
@@ -980,28 +980,24 @@ impl<'a, 'b> RdParser<'a, 'b> {
                         false,
                         false,
                     ) {
-                        Ok(file) => {
-                            if let Some(TypeDeclaration::Class(c)) = file.declarations.first() {
-                                if let Some(ClassFieldKind::Function(f)) =
-                                    c.fields.first().map(|f| &f.kind)
-                                {
-                                    if let Some(body) = &f.body {
-                                        if let ExprKind::Block(elements) = &body.kind {
-                                            if let Some(BlockElement::Expr(Expr {
-                                                kind: ExprKind::Return(Some(expr)),
-                                                ..
-                                            })) = elements.first()
-                                            {
-                                                parts
-                                                    .push(StringPart::Interpolation(*expr.clone()));
-                                                continue;
-                                            }
+                        if let Some(TypeDeclaration::Class(c)) = file.declarations.first() {
+                            if let Some(ClassFieldKind::Function(f)) =
+                                c.fields.first().map(|f| &f.kind)
+                            {
+                                if let Some(body) = &f.body {
+                                    if let ExprKind::Block(elements) = &body.kind {
+                                        if let Some(BlockElement::Expr(Expr {
+                                            kind: ExprKind::Return(Some(expr)),
+                                            ..
+                                        })) = elements.first()
+                                        {
+                                            parts.push(StringPart::Interpolation(*expr.clone()));
+                                            continue;
                                         }
                                     }
                                 }
                             }
                         }
-                        Err(_) => {}
                     }
                     // Fallback: treat as identifier
                     parts.push(StringPart::Interpolation(Expr {
@@ -1149,7 +1145,6 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     } else {
                         // Qualified constant: Enum.Value
                         let path_str = parts.join(".");
-                        let full = format!("{}.{}", path_str, final_name);
                         Ok(Pattern::Const(Expr {
                             kind: ExprKind::Field {
                                 expr: Box::new(Expr {

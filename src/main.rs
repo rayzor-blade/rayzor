@@ -1668,16 +1668,18 @@ fn cmd_aot(
             }
         });
 
-        let mut compiler = AotCompiler::default();
-        compiler.opt_level = opt;
-        compiler.output_format = if is_exe {
-            OutputFormat::Executable
-        } else {
-            OutputFormat::CSource
+        let compiler = AotCompiler {
+            opt_level: opt,
+            output_format: if is_exe {
+                OutputFormat::Executable
+            } else {
+                OutputFormat::CSource
+            },
+            verbose,
+            runtime_dir: runtime_dir.clone(),
+            strip,
+            ..Default::default()
         };
-        compiler.verbose = verbose;
-        compiler.runtime_dir = runtime_dir.clone();
-        compiler.strip = strip;
 
         println!("Rayzor C Backend");
         match compiler.compile_c(&source_files, &output_path) {

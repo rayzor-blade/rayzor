@@ -71,7 +71,7 @@ impl<'a> TokenStream<'a> {
     pub fn expect(&mut self, kind: TokenKind) -> Result<Span, ParseError> {
         if self.at(kind) {
             let token = self.advance();
-            Ok(token.span.clone())
+            Ok(token.span)
         } else {
             let token = self.peek();
             Err(ParseError {
@@ -81,7 +81,7 @@ impl<'a> TokenStream<'a> {
                     token.kind,
                     token.text(self.source)
                 ),
-                span: token.span.clone(),
+                span: token.span,
             })
         }
     }
