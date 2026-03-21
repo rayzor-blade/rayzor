@@ -69,6 +69,15 @@ pub fn parse_haxe_file_with_debug(
     let preprocessor_config = crate::preprocessor::PreprocessorConfig::default();
     let preprocessed = crate::preprocessor::preprocess(input, &preprocessor_config);
 
+    // Try the recursive descent parser first (15x faster than nom)
+    match crate::rd::rd_parse(&preprocessed, file_name, is_import_file, debug) {
+        Ok(file) => return Ok(file),
+        Err(_rd_errors) => {
+            // RD parser failed — fall back to nom parser for error recovery
+        }
+    }
+
+    // Fallback: nom-based parser
     if recovery {
         parse_haxe_file_with_enhanced_errors(&preprocessed, file_name, is_import_file).map_err(
             |(diagnostics, source_map)| {
@@ -77,13 +86,11 @@ pub fn parse_haxe_file_with_debug(
             },
         )
     } else {
-        // Use enhanced incremental parser with diagnostics for better error reporting
         let incremental_result = crate::incremental_parser_enhanced::parse_incrementally_enhanced(
             file_name,
             &preprocessed,
         );
 
-        // Convert enhanced result to HaxeFile
         convert_enhanced_incremental_to_haxe_file(
             incremental_result,
             file_name,
