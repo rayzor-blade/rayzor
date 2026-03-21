@@ -4175,14 +4175,24 @@ impl CompilationUnit {
 
     pub fn lower_to_tast(&mut self) -> Result<Vec<TypedFile>, Vec<CompilationError>> {
         // Step 0: Discover @:hlNative metadata in user files and load HDLL plugins
-        self.discover_and_load_hdlls();
+        if self.config.pipeline_config.enable_semantic_analysis {
+            self.discover_and_load_hdlls();
+        }
 
         // Step 1: Analyze dependencies for user files
-        let analysis = match self.analyze_dependencies() {
-            Ok(a) => a,
-            Err(errors) => {
-                self.print_compilation_errors(&errors);
-                return Err(errors);
+        // Fast path: single-file compilations don't need dependency analysis
+        let analysis = if self.user_files.len() <= 1 {
+            DependencyAnalysis {
+                compilation_order: (0..self.user_files.len()).collect(),
+                circular_dependencies: Vec::new(),
+            }
+        } else {
+            match self.analyze_dependencies() {
+                Ok(a) => a,
+                Err(errors) => {
+                    self.print_compilation_errors(&errors);
+                    return Err(errors);
+                }
             }
         };
 
