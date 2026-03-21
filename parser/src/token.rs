@@ -36,12 +36,12 @@ pub enum TokenKind {
     // === Literals ===
     IntLit,
     FloatLit,
-    StringLit,          // double-quoted "..." or single-quoted '...'
-    RegexLit,           // ~/pattern/flags
+    StringLit, // double-quoted "..." or single-quoted '...'
+    RegexLit,  // ~/pattern/flags
 
     // === Identifiers ===
     Ident,
-    DollarIdent,        // $ident (macro reification)
+    DollarIdent, // $ident (macro reification)
 
     // === Keywords ===
     KwAbstract,
@@ -92,62 +92,62 @@ pub enum TokenKind {
     KwWhile,
 
     // === Punctuation ===
-    LParen,             // (
-    RParen,             // )
-    LBrace,             // {
-    RBrace,             // }
-    LBracket,           // [
-    RBracket,           // ]
-    Dot,                // .
-    DotDotDot,          // ...
-    Comma,              // ,
-    Semicolon,          // ;
-    Colon,              // :
-    At,                 // @
-    AtColon,            // @:
-    Arrow,              // ->
-    FatArrow,           // =>
-    Question,           // ?
-    QuestionDot,        // ?.
-    QuestionQuestion,   // ??
-    Hash,               // #
+    LParen,           // (
+    RParen,           // )
+    LBrace,           // {
+    RBrace,           // }
+    LBracket,         // [
+    RBracket,         // ]
+    Dot,              // .
+    DotDotDot,        // ...
+    Comma,            // ,
+    Semicolon,        // ;
+    Colon,            // :
+    At,               // @
+    AtColon,          // @:
+    Arrow,            // ->
+    FatArrow,         // =>
+    Question,         // ?
+    QuestionDot,      // ?.
+    QuestionQuestion, // ??
+    Hash,             // #
 
     // === Operators ===
-    Assign,             // =
-    Eq,                 // ==
-    NotEq,              // !=
-    Lt,                 // <
-    Le,                 // <=
-    Gt,                 // >
-    Ge,                 // >=
-    Plus,               // +
-    Minus,              // -
-    Star,               // *
-    Slash,              // /
-    Percent,            // %
-    PlusAssign,         // +=
-    MinusAssign,        // -=
-    StarAssign,         // *=
-    SlashAssign,        // /=
-    PercentAssign,      // %=
-    Amp,                // &
-    Pipe,               // |
-    Caret,              // ^
-    Tilde,              // ~
-    AmpAmp,             // &&
-    PipePipe,           // ||
-    AmpAssign,          // &=
-    PipeAssign,         // |=
-    CaretAssign,        // ^=
-    Shl,                // <<
-    Shr,                // >>
-    Ushr,               // >>>
-    ShlAssign,          // <<=
-    ShrAssign,          // >>=
-    UshrAssign,         // >>>=
-    Bang,               // !
-    PlusPlus,           // ++
-    MinusMinus,         // --
+    Assign,        // =
+    Eq,            // ==
+    NotEq,         // !=
+    Lt,            // <
+    Le,            // <=
+    Gt,            // >
+    Ge,            // >=
+    Plus,          // +
+    Minus,         // -
+    Star,          // *
+    Slash,         // /
+    Percent,       // %
+    PlusAssign,    // +=
+    MinusAssign,   // -=
+    StarAssign,    // *=
+    SlashAssign,   // /=
+    PercentAssign, // %=
+    Amp,           // &
+    Pipe,          // |
+    Caret,         // ^
+    Tilde,         // ~
+    AmpAmp,        // &&
+    PipePipe,      // ||
+    AmpAssign,     // &=
+    PipeAssign,    // |=
+    CaretAssign,   // ^=
+    Shl,           // <<
+    Shr,           // >>
+    Ushr,          // >>>
+    ShlAssign,     // <<=
+    ShrAssign,     // >>=
+    UshrAssign,    // >>>=
+    Bang,          // !
+    PlusPlus,      // ++
+    MinusMinus,    // --
 
     // === Special ===
     Eof,

@@ -658,10 +658,7 @@ impl<'a> HirToMirContext<'a> {
     fn rebuild_fields_by_type_cache(&mut self) {
         let mut cache: HashMap<TypeId, Vec<(SymbolId, u32)>> = HashMap::new();
         for (field_sym, (class_ty, idx)) in &self.field_index_map {
-            cache
-                .entry(*class_ty)
-                .or_default()
-                .push((*field_sym, *idx));
+            cache.entry(*class_ty).or_default().push((*field_sym, *idx));
         }
         self.fields_by_type_cache = Some(cache);
     }
@@ -3345,7 +3342,7 @@ impl<'a> HirToMirContext<'a> {
                                     None
                                 }
                             });
-                    
+
                             if let Some(parent_sym) = parent_symbol {
                                 if let Some(sym_info) = self.symbol_table.get_symbol(parent_sym) {
                                     // Try qualified name first
@@ -3977,7 +3974,7 @@ impl<'a> HirToMirContext<'a> {
                             } else {
                                 false
                             };
-                                                !is_array
+                            !is_array
                         }
                         HirExprKind::Call { callee, args, .. } => {
                             self.type_needs_drop(init_expr.ty)
@@ -5197,7 +5194,7 @@ impl<'a> HirToMirContext<'a> {
 
         // FALLBACK: If receiver_type is invalid (extern classes like Vec), try to detect class from qualified name
         if type_info.is_none() {
-                debug!(
+            debug!(
                 "[get_stdlib_runtime_info] receiver_type {:?} not in type_table, qualified_name={:?}",
                 receiver_type, qualified_name
             );
@@ -5425,7 +5422,7 @@ impl<'a> HirToMirContext<'a> {
                                     .find_by_name(&qualified_name, method_name)
                                 {
                                     // Early return with the mapping
-                                                                return Some((_sig.class, _sig.method, mapping));
+                                    return Some((_sig.class, _sig.method, mapping));
                                 }
                             }
                             (None, None, Vec::new())
@@ -5521,7 +5518,7 @@ impl<'a> HirToMirContext<'a> {
                     .string_interner
                     .get(*placeholder_name)
                     .map(|s| s.to_string());
-                        if let Some(ref ph) = ph_name {
+                if let Some(ref ph) = ph_name {
                     let underscore_name = ph.replace(".", "_");
                     let bare_name = ph.rsplit('.').next().unwrap_or(ph);
                     // Try qualified underscore name (e.g., "rayzor_Bytes")
@@ -5577,7 +5574,7 @@ impl<'a> HirToMirContext<'a> {
                 return None;
             }
             TypeKind::TypeParameter { .. } | TypeKind::Dynamic | TypeKind::Unknown => {
-                        // Try qualified_name if available (e.g., for user-class methods like "test.Counter.increment")
+                // Try qualified_name if available (e.g., for user-class methods like "test.Counter.increment")
                 if let Some(qname) = qualified_name {
                     let parts: Vec<&str> = qname.split('.').collect();
                     if parts.len() >= 2 {
@@ -5660,7 +5657,6 @@ impl<'a> HirToMirContext<'a> {
             } else {
                 None
             };
-
 
         // Use monomorphized name if available, then receiver_class_hint, then base name.
         // receiver_class_hint comes from the New handler (e.g., Vec<Int> -> "VecI32") and is
@@ -5769,7 +5765,7 @@ impl<'a> HirToMirContext<'a> {
                             || method_interned.map_or(false, |n| forward_list.contains(&n));
                         if is_forwarded {
                             let underlying = *underlying_type;
-                                                return self.get_stdlib_runtime_info(
+                            return self.get_stdlib_runtime_info(
                                 method_symbol,
                                 underlying,
                                 param_count,
@@ -6540,7 +6536,7 @@ impl<'a> HirToMirContext<'a> {
                                     if param_sym == symbol_id {
                                         // Found match — substitute with concrete type
                                         if let Some(&concrete_type_id) = concrete_args.get(idx) {
-                                                                                return self.convert_type(concrete_type_id);
+                                            return self.convert_type(concrete_type_id);
                                         }
                                     }
                                 }
@@ -6552,7 +6548,7 @@ impl<'a> HirToMirContext<'a> {
                             let concrete_id = concrete_args[0];
                             if let Some(ci) = type_table.get(concrete_id) {
                                 if !matches!(ci.kind, crate::tast::TypeKind::TypeParameter { .. }) {
-                                                                return self.convert_type(concrete_id);
+                                    return self.convert_type(concrete_id);
                                 }
                             }
                         }
@@ -7020,7 +7016,7 @@ impl<'a> HirToMirContext<'a> {
                 .get(param_type_ids[0])
                 .map(|ti| matches!(ti.kind, crate::tast::TypeKind::Array { .. }))
                 .unwrap_or(false);
-                if takes_array {
+            if takes_array {
                 let arr_arg = self.lower_expression(args_array_expr)?;
                 let call_sig = IrType::Function {
                     params: vec![self.convert_type(param_type_ids[0])],
@@ -9809,7 +9805,7 @@ impl<'a> HirToMirContext<'a> {
                                         let explicit_return_type =
                                             mapping.return_type.map(|rt| rt.to_ir_type());
                                         let mapping_is_static = sig.is_static;
-                                
+
                                         // First, try special runtime calls that need custom MIR lowering
                                         // (e.g., Reflect.callMethod, Reflect.makeVarArgs, Type.typeof)
                                         if let Some(special_result) = self
@@ -10084,7 +10080,7 @@ impl<'a> HirToMirContext<'a> {
                         if let Some(type_info) = type_table.get(object_type) {
                             if matches!(type_info.kind, TypeKind::Dynamic) {
                                 // Dynamic method call - need to resolve method by name
-                        
+
                                 let method_name =
                                     self.symbol_table.get_symbol(*field).map(|s| s.name);
                                 if let Some(name) = method_name {
@@ -10184,7 +10180,6 @@ impl<'a> HirToMirContext<'a> {
                                                 method_name, arg_count, runtime_func
                                             );
 
-                                    
                                             // Lower the object (the String pointer)
                                             let obj_reg = self.lower_expression(object)?;
 
@@ -10393,7 +10388,7 @@ impl<'a> HirToMirContext<'a> {
 
                                         if let Some(runtime_func) = runtime_func_opt {
                                             // println!("✅ Generating runtime call to {} for {}.{}", runtime_func, class_name, method_name);
-                                    
+
                                             // Lower all arguments (don't include object for static methods like spawn)
                                             let arg_regs: Vec<_> = static_args
                                                 .iter()
@@ -10465,7 +10460,7 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
                         }
-                                    }
+                    }
                 }
 
                 // Check if callee is an enum constructor (EnumVariant symbol kind)
@@ -10648,7 +10643,7 @@ impl<'a> HirToMirContext<'a> {
                                     TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
                                     _ => None,
                                 }?;
-                                                        let mut current = Some(class_sym);
+                                let mut current = Some(class_sym);
                                 while let Some(cls) = current {
                                     if let Some(&method_sym) =
                                         self.class_method_by_name.get(&(cls, method_name))
@@ -11444,7 +11439,7 @@ impl<'a> HirToMirContext<'a> {
                         // For enums: for now, fall through to traceAny (enum toString not yet implemented)
                         let type_table = self.type_table;
                         let type_kind = type_table.get(arg.ty).map(|ti| ti.kind.clone());
-                
+
                         debug!(
                             "[TRACE ARG TYPE] arg.ty={:?}, type_kind={:?}",
                             arg.ty, type_kind
@@ -11608,7 +11603,7 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
                         }
-                
+
                         // Handle enum variables - use RTTI-based trace with compile-time type_id
                         // Direct enum variant expressions (Color.Red) are handled above and print variant names
                         if let Some(crate::tast::core::TypeKind::Enum {
@@ -12110,7 +12105,6 @@ impl<'a> HirToMirContext<'a> {
                                         | TypeKind::Placeholder { .. }
                                         | TypeKind::Unknown
                                 ) {
-                            
                                     // First, check if this might be a stdlib method call
                                     // by checking if the receiver expression comes from a stdlib function
                                     // (i.e., its result type would be Ptr(Void) for MIR wrappers)
@@ -12327,8 +12321,7 @@ impl<'a> HirToMirContext<'a> {
                                                         // For concrete primitives (I32, F64, Bool from Channel<Int>),
                                                         // the value must be BOXED, not cast.
                                                         let is_erased_type_param = {
-                                                            let type_table =
-                                                                self.type_table;
+                                                            let type_table = self.type_table;
                                                             type_table
                                                                 .get(arg.ty)
                                                                 .map(|ti| {
@@ -12462,7 +12455,7 @@ impl<'a> HirToMirContext<'a> {
                                                                 None
                                                             }
                                                         });
-                                                                                                        from_receiver
+                                                        from_receiver
                                                             .or(from_optional)
                                                             .unwrap_or_else(|| result_type.clone())
                                                     };
@@ -14908,7 +14901,7 @@ impl<'a> HirToMirContext<'a> {
                                             .and_then(|s| self.string_interner.get(s.name))
                                             .map(|s| s.to_string())
                                     });
-                                                                name
+                                    name
                                 } else {
                                     None
                                 };
@@ -16149,7 +16142,7 @@ impl<'a> HirToMirContext<'a> {
                 } else {
                     (false, None)
                 };
-        
+
                 // SPECIAL CASE: Abstract type constructors
                 // If this is an abstract type, treat this as a simple value wrap (no allocation).
                 if is_abstract {
@@ -16219,7 +16212,7 @@ impl<'a> HirToMirContext<'a> {
                     } else {
                         None
                     };
-                            }
+                }
 
                 // FALLBACK #2: If TypeId lookup failed (e.g., for extern stdlib classes that aren't
                 // pre-registered because Channel.hx is skipped), try getting class name from the
@@ -16295,7 +16288,7 @@ impl<'a> HirToMirContext<'a> {
                         } else {
                             Some("Ptr") // If type not found, default to Ptr variant
                         };
-                                        suffix.map(|s| format!("Vec{}", s))
+                        suffix.map(|s| format!("Vec{}", s))
                     } else {
                         None
                     }
@@ -16518,7 +16511,7 @@ impl<'a> HirToMirContext<'a> {
                 } else {
                     false
                 };
-        
+
                 if is_array {
                     // Allocate HaxeArray struct on heap (32 bytes = 4 x 8 for ptr, len, cap, elem_size)
                     // Must be heap-allocated because array pointers can escape the creating function
@@ -17768,7 +17761,7 @@ impl<'a> HirToMirContext<'a> {
                     let type_table = self.type_table;
                     let src_kind = type_table.get(expr.ty).map(|t| &t.kind).cloned();
                     let tgt_kind = type_table.get(*target).map(|t| &t.kind).cloned();
-                                let needs_runtime_check = matches!(
+                    let needs_runtime_check = matches!(
                         (&src_kind, &tgt_kind),
                         (Some(TypeKind::Class { .. }), Some(TypeKind::Class { .. }))
                             | (
@@ -17800,7 +17793,7 @@ impl<'a> HirToMirContext<'a> {
                     let type_table = self.type_table;
                     let source_kind = type_table.get(expr.ty).map(|t| t.kind.clone());
                     let target_kind = type_table.get(*target).map(|t| t.kind.clone());
-            
+
                     let source_is_abstract =
                         matches!(&source_kind, Some(TypeKind::Abstract { .. }));
                     let target_is_dynamic = matches!(&target_kind, Some(TypeKind::Dynamic));
@@ -20357,7 +20350,7 @@ impl<'a> HirToMirContext<'a> {
                                         .get(abs_sym.name)
                                         .map(|n| format!("rayzor_{}", n))
                                 });
-                                                if let Some(class) = class_name {
+                            if let Some(class) = class_name {
                                 // Try stdlib mapping (e.g., rayzor_SIMD4f + fromArray)
                                 if let Some((_, mapping)) =
                                     self.stdlib_mapping.find_by_name(&class, method_name)
@@ -20932,7 +20925,11 @@ impl<'a> HirToMirContext<'a> {
             // Fallback: also try matching by class symbol_id
             if fields.is_empty() {
                 for (field_sym, (class_ty, idx)) in &self.field_index_map {
-                    if self.class_type_to_symbol.get(class_ty).map_or(false, |s| *s == class_symbol) {
+                    if self
+                        .class_type_to_symbol
+                        .get(class_ty)
+                        .map_or(false, |s| *s == class_symbol)
+                    {
                         fields.push((*field_sym, *idx));
                     }
                 }
@@ -22956,7 +22953,7 @@ impl<'a> HirToMirContext<'a> {
                     if let Some(IrType::Ptr(inner)) = &obj_ir_type {
                         if matches!(**inner, IrType::Void) {
                             let field_in_class = self.field_exists_in_any_class(field);
-                    
+
                             // Unbox to get the actual object pointer from DynamicValue*
                             let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                             let unbox_func = self.get_or_register_extern_function(
@@ -22983,7 +22980,7 @@ impl<'a> HirToMirContext<'a> {
                     // Also check for I64 - this is a raw pointer from Array element access
                     if matches!(&obj_ir_type, Some(IrType::I64)) {
                         let field_in_class = self.field_exists_in_any_class(field);
-                                        if field_in_class {
+                        if field_in_class {
                             return self.lower_field_access_for_class(obj, field, field_ty);
                         }
                         return self.dynamic_reflect_field_read(obj, field, field_ty);
@@ -22993,7 +22990,7 @@ impl<'a> HirToMirContext<'a> {
                     if matches!(&obj_ir_type, Some(IrType::Ptr(inner)) if matches!(**inner, IrType::U8))
                     {
                         let field_in_class = self.field_exists_in_any_class(field);
-                                        if field_in_class {
+                        if field_in_class {
                             return self.lower_field_access_for_class(obj, field, field_ty);
                         }
                         // Raw Ptr(U8) is NOT boxed — call haxe_reflect_field directly
@@ -23001,7 +22998,7 @@ impl<'a> HirToMirContext<'a> {
                         // dynamic_reflect_field_read would apply.
                         return self.raw_anon_reflect_field_read(obj, field, field_ty);
                     }
-            
+
                     // Unbox to get the actual object pointer
                     let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                     let unbox_func_id = self.get_or_register_extern_function(
@@ -23067,10 +23064,10 @@ impl<'a> HirToMirContext<'a> {
                     // This shouldn't happen for valid Dynamic field access, but provides a fallback
                     (unboxed_obj, actual_type)
                 } else {
-                                (obj, receiver_ty)
+                    (obj, receiver_ty)
                 }
             } else {
-                        (obj, receiver_ty)
+                (obj, receiver_ty)
             }
         };
 
@@ -23331,7 +23328,7 @@ impl<'a> HirToMirContext<'a> {
                     } else {
                         None
                     };
-            
+
                     if let Some((sorted_idx, actual_field_ty)) = sorted_result {
                         // Emit: rayzor_anon_get_field_by_index(handle, sorted_idx) -> u64
                         let anon_get_id = self.get_or_register_extern_function(
@@ -23353,7 +23350,7 @@ impl<'a> HirToMirContext<'a> {
                         return self.coerce_from_i64(raw_val, actual_field_ty);
                     }
                 } else {
-                            }
+                }
             }
         }
 
@@ -23496,7 +23493,7 @@ impl<'a> HirToMirContext<'a> {
                                     }
                                 }
                             }
-                    
+
                             if let Some((found_type_id, field_idx)) = found_field {
                                 // Get the actual field type from the type_table
                                 let actual_field_ty = {
@@ -30432,7 +30429,7 @@ impl<'a> HirToMirContext<'a> {
                 match &ti.kind {
                     crate::tast::TypeKind::TypeParameter { .. } => {
                         // Try to resolve through current class's type_args
-                                        if let Some(this_ty) = self.current_this_type {
+                        if let Some(this_ty) = self.current_this_type {
                             self.resolve_type_param_from_receiver(type_id, this_ty)
                                 .unwrap_or(type_id)
                         } else {
@@ -30443,9 +30440,7 @@ impl<'a> HirToMirContext<'a> {
                         // Already Dynamic (boxed) — no boxing needed
                         return None;
                     }
-                    _ => {
-                                        type_id
-                    }
+                    _ => type_id,
                 }
             } else {
                 type_id
@@ -30660,7 +30655,7 @@ impl<'a> HirToMirContext<'a> {
             Some(TypeKind::Enum { .. }) => type_id.as_raw() + 1000,
             Some(TypeKind::TypeAlias { target_type, .. }) => {
                 let target = *target_type;
-                        self.runtime_type_id(target)
+                self.runtime_type_id(target)
             }
             _ => 0, // default to void/unknown
         }
@@ -31426,7 +31421,11 @@ impl<'a> HirToMirContext<'a> {
         // that originally defines the method. Mark that base method as needing a virtual slot.
         let mut base_virtual_methods: BTreeSet<(SymbolId, InternedString)> = BTreeSet::new();
 
-        let override_methods_snapshot: Vec<_> = self.override_methods.iter().map(|(s,n)| (*s, *n)).collect();
+        let override_methods_snapshot: Vec<_> = self
+            .override_methods
+            .iter()
+            .map(|(s, n)| (*s, *n))
+            .collect();
         for (child_sym, method_name) in &override_methods_snapshot {
             let method_name = *method_name;
             let child_sym = *child_sym;
@@ -31477,7 +31476,11 @@ impl<'a> HirToMirContext<'a> {
         // Include ALL subclasses of classes with vtables — leaf classes that
         // inherit (but don't override) virtual methods still need vtable entries
         // so that haxe_vtable_lookup finds them by type_id at runtime.
-        let parent_map_snapshot: Vec<_> = self.class_parent_map.iter().map(|(&c,&p)| (c,p)).collect();
+        let parent_map_snapshot: Vec<_> = self
+            .class_parent_map
+            .iter()
+            .map(|(&c, &p)| (c, p))
+            .collect();
         let mut changed = true;
         while changed {
             changed = false;
@@ -31518,10 +31521,15 @@ impl<'a> HirToMirContext<'a> {
         // Step 4: Populate virtual_dispatch_info for call sites.
         // Map ALL method SymbolIds in virtual hierarchies (base + overrides) to their slot.
         // This ensures calls through both base and derived types dispatch through the vtable.
-        let virtual_slots_snapshot: Vec<_> = self.class_virtual_slots.iter().map(|(&s, v)| (s, v.clone())).collect();
+        let virtual_slots_snapshot: Vec<_> = self
+            .class_virtual_slots
+            .iter()
+            .map(|(&s, v)| (s, v.clone()))
+            .collect();
         for (class_sym, slots) in &virtual_slots_snapshot {
             for (method_name, slot_idx) in slots {
-                if let Some(&method_sym) = self.class_method_by_name.get(&(*class_sym, *method_name))
+                if let Some(&method_sym) =
+                    self.class_method_by_name.get(&(*class_sym, *method_name))
                 {
                     self.virtual_dispatch_info
                         .insert(method_sym, (*slot_idx, *class_sym));
@@ -32463,7 +32471,7 @@ impl<'a> HirToMirContext<'a> {
                 };
 
                 self.builder.module.add_type(typedef);
-                        return;
+                return;
             }
         }
 

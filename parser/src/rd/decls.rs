@@ -1,9 +1,9 @@
 //! Declaration parsing: class, interface, enum, typedef, abstract, import, package.
 
+use super::error::ParseError;
+use super::RdParser;
 use crate::haxe_ast::*;
 use crate::token::TokenKind;
-use super::RdParser;
-use super::error::ParseError;
 
 impl<'a, 'b> RdParser<'a, 'b> {
     /// Parse `package com.example;`

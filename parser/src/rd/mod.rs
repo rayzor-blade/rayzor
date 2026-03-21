@@ -21,9 +21,12 @@ pub fn rd_parse(
     _is_import_file: bool,
     debug: bool,
 ) -> Result<HaxeFile, Vec<ParseError>> {
-    let tokens = Lexer::new(source)
-        .tokenize()
-        .map_err(|e| vec![ParseError::new(&e.message, Span::new(e.offset, e.offset + 1))])?;
+    let tokens = Lexer::new(source).tokenize().map_err(|e| {
+        vec![ParseError::new(
+            &e.message,
+            Span::new(e.offset, e.offset + 1),
+        )]
+    })?;
 
     let mut stream = TokenStream::new(&tokens, source);
     let mut parser = RdParser::new(&mut stream, source, file_name);
@@ -372,11 +375,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
         };
 
         let span = self.stream.span_from(start);
-        let full_name = if is_colon {
-            name
-        } else {
-            name
-        };
+        let full_name = if is_colon { name } else { name };
 
         Ok(Metadata {
             name: full_name,
@@ -463,10 +462,7 @@ mod tests {
         assert!(result.is_ok());
         let file = result.unwrap();
         assert_eq!(file.imports.len(), 1);
-        assert_eq!(
-            file.imports[0].path,
-            vec!["haxe", "ds", "StringMap"]
-        );
+        assert_eq!(file.imports[0].path, vec!["haxe", "ds", "StringMap"]);
     }
 
     #[test]
@@ -504,12 +500,7 @@ mod tests {
 
     #[test]
     fn test_parse_enum() {
-        let result = rd_parse(
-            "enum Color { Red; Green; Blue; }",
-            "test.hx",
-            false,
-            false,
-        );
+        let result = rd_parse("enum Color { Red; Green; Blue; }", "test.hx", false, false);
         assert!(result.is_ok());
         let file = result.unwrap();
         if let TypeDeclaration::Enum(e) = &file.declarations[0] {

@@ -122,8 +122,16 @@ fn test_file(path: &Path) -> (String, bool, String) {
                 (filename, false, msg)
             }
         }
-        (Some(_), None) => (filename, false, "RD parser failed, nom succeeded".to_string()),
-        (None, Some(_)) => (filename, false, "nom parser failed, RD succeeded".to_string()),
+        (Some(_), None) => (
+            filename,
+            false,
+            "RD parser failed, nom succeeded".to_string(),
+        ),
+        (None, Some(_)) => (
+            filename,
+            false,
+            "nom parser failed, RD succeeded".to_string(),
+        ),
         (None, None) => {
             // Both failed — that's acceptable (file may have intentional errors)
             (filename, true, "both parsers failed (expected)".to_string())
@@ -178,7 +186,8 @@ fn test_rd_vs_nom_haxe_tests() {
 
     // 100% pass rate required — RD parser must match nom for all files
     assert_eq!(
-        failed, 0,
+        failed,
+        0,
         "RD parser failed on {} of {} files — must be 0 before wiring as default",
         failed,
         files.len()
@@ -381,7 +390,7 @@ fn test_rd_debug_failures() {
         "test_enum_abstract_methods.hx",
         "test_reflect_compare_methods.hx",
     ];
-    
+
     let test_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -396,7 +405,10 @@ fn test_rd_debug_failures() {
             Ok(file) => eprintln!("  {} OK ({} decls)", filename, file.declarations.len()),
             Err(errors) => {
                 for e in errors.iter().take(3) {
-                    eprintln!("  {} ERROR at {}..{}: {}", filename, e.span.start, e.span.end, e.message);
+                    eprintln!(
+                        "  {} ERROR at {}..{}: {}",
+                        filename, e.span.start, e.span.end, e.message
+                    );
                 }
             }
         }

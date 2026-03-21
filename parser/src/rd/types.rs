@@ -1,9 +1,9 @@
 //! Type expression parser for the recursive descent parser.
 
+use super::error::ParseError;
+use super::RdParser;
 use crate::haxe_ast::*;
 use crate::token::TokenKind;
-use super::RdParser;
-use super::error::ParseError;
 
 impl<'a, 'b> RdParser<'a, 'b> {
     /// Parse a type expression.

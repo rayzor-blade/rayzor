@@ -1,9 +1,9 @@
 //! Expression parser using precedence climbing (Pratt parsing).
 
+use super::error::ParseError;
+use super::RdParser;
 use crate::haxe_ast::*;
 use crate::token::TokenKind;
-use super::RdParser;
-use super::error::ParseError;
 
 impl<'a, 'b> RdParser<'a, 'b> {
     /// Parse an expression.
@@ -19,10 +19,18 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let left = self.parse_ternary()?;
 
         if self.stream.at_any(&[
-            TokenKind::Assign, TokenKind::PlusAssign, TokenKind::MinusAssign,
-            TokenKind::StarAssign, TokenKind::SlashAssign, TokenKind::PercentAssign,
-            TokenKind::AmpAssign, TokenKind::PipeAssign, TokenKind::CaretAssign,
-            TokenKind::ShlAssign, TokenKind::ShrAssign, TokenKind::UshrAssign,
+            TokenKind::Assign,
+            TokenKind::PlusAssign,
+            TokenKind::MinusAssign,
+            TokenKind::StarAssign,
+            TokenKind::SlashAssign,
+            TokenKind::PercentAssign,
+            TokenKind::AmpAssign,
+            TokenKind::PipeAssign,
+            TokenKind::CaretAssign,
+            TokenKind::ShlAssign,
+            TokenKind::ShrAssign,
+            TokenKind::UshrAssign,
         ]) {
             let op = match self.stream.advance().kind {
                 TokenKind::Assign => AssignOp::Assign,
@@ -136,7 +144,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 let expr = self.parse_unary()?;
                 Ok(Expr {
                     span: Span::new(start, expr.span.end),
-                    kind: ExprKind::Unary { op: UnaryOp::Not, expr: Box::new(expr) },
+                    kind: ExprKind::Unary {
+                        op: UnaryOp::Not,
+                        expr: Box::new(expr),
+                    },
                 })
             }
             TokenKind::Minus => {
@@ -144,7 +155,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 let expr = self.parse_unary()?;
                 Ok(Expr {
                     span: Span::new(start, expr.span.end),
-                    kind: ExprKind::Unary { op: UnaryOp::Neg, expr: Box::new(expr) },
+                    kind: ExprKind::Unary {
+                        op: UnaryOp::Neg,
+                        expr: Box::new(expr),
+                    },
                 })
             }
             TokenKind::Tilde => {
@@ -152,7 +166,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 let expr = self.parse_unary()?;
                 Ok(Expr {
                     span: Span::new(start, expr.span.end),
-                    kind: ExprKind::Unary { op: UnaryOp::BitNot, expr: Box::new(expr) },
+                    kind: ExprKind::Unary {
+                        op: UnaryOp::BitNot,
+                        expr: Box::new(expr),
+                    },
                 })
             }
             TokenKind::PlusPlus => {
@@ -160,7 +177,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 let expr = self.parse_unary()?;
                 Ok(Expr {
                     span: Span::new(start, expr.span.end),
-                    kind: ExprKind::Unary { op: UnaryOp::PreIncr, expr: Box::new(expr) },
+                    kind: ExprKind::Unary {
+                        op: UnaryOp::PreIncr,
+                        expr: Box::new(expr),
+                    },
                 })
             }
             TokenKind::MinusMinus => {
@@ -168,7 +188,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 let expr = self.parse_unary()?;
                 Ok(Expr {
                     span: Span::new(start, expr.span.end),
-                    kind: ExprKind::Unary { op: UnaryOp::PreDecr, expr: Box::new(expr) },
+                    kind: ExprKind::Unary {
+                        op: UnaryOp::PreDecr,
+                        expr: Box::new(expr),
+                    },
                 })
             }
             _ => self.parse_postfix(),
@@ -187,7 +210,11 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     self.stream.advance();
                     expr = Expr {
                         span: Span::new(expr.span.start, end),
-                        kind: ExprKind::Field { expr: Box::new(expr), field, is_optional: false },
+                        kind: ExprKind::Field {
+                            expr: Box::new(expr),
+                            field,
+                            is_optional: false,
+                        },
                     };
                 }
                 TokenKind::QuestionDot => {
@@ -197,7 +224,11 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     self.stream.advance();
                     expr = Expr {
                         span: Span::new(expr.span.start, end),
-                        kind: ExprKind::Field { expr: Box::new(expr), field, is_optional: true },
+                        kind: ExprKind::Field {
+                            expr: Box::new(expr),
+                            field,
+                            is_optional: true,
+                        },
                     };
                 }
                 TokenKind::LBracket => {
@@ -206,7 +237,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     let end = self.stream.expect(TokenKind::RBracket)?;
                     expr = Expr {
                         span: Span::new(expr.span.start, end.end),
-                        kind: ExprKind::Index { expr: Box::new(expr), index: Box::new(index) },
+                        kind: ExprKind::Index {
+                            expr: Box::new(expr),
+                            index: Box::new(index),
+                        },
                     };
                 }
                 TokenKind::LParen => {
@@ -214,7 +248,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     let end = self.stream.span_from(expr.span.start).end;
                     expr = Expr {
                         span: Span::new(expr.span.start, end),
-                        kind: ExprKind::Call { expr: Box::new(expr), args },
+                        kind: ExprKind::Call {
+                            expr: Box::new(expr),
+                            args,
+                        },
                     };
                 }
                 TokenKind::PlusPlus => {
@@ -222,7 +259,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     self.stream.advance();
                     expr = Expr {
                         span: Span::new(expr.span.start, end),
-                        kind: ExprKind::Unary { op: UnaryOp::PostIncr, expr: Box::new(expr) },
+                        kind: ExprKind::Unary {
+                            op: UnaryOp::PostIncr,
+                            expr: Box::new(expr),
+                        },
                     };
                 }
                 TokenKind::MinusMinus => {
@@ -230,7 +270,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     self.stream.advance();
                     expr = Expr {
                         span: Span::new(expr.span.start, end),
-                        kind: ExprKind::Unary { op: UnaryOp::PostDecr, expr: Box::new(expr) },
+                        kind: ExprKind::Unary {
+                            op: UnaryOp::PostDecr,
+                            expr: Box::new(expr),
+                        },
                     };
                 }
                 _ => break,
@@ -266,12 +309,18 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 } else {
                     text.parse::<i64>().unwrap_or(0)
                 };
-                Ok(Expr { kind: ExprKind::Int(val), span: token.span })
+                Ok(Expr {
+                    kind: ExprKind::Int(val),
+                    span: token.span,
+                })
             }
             TokenKind::FloatLit => {
                 let text = token.text(self.source);
                 self.stream.advance();
-                Ok(Expr { kind: ExprKind::Float(text.parse().unwrap_or(0.0)), span: token.span })
+                Ok(Expr {
+                    kind: ExprKind::Float(text.parse().unwrap_or(0.0)),
+                    span: token.span,
+                })
             }
             TokenKind::StringLit => {
                 let text = token.text(self.source);
@@ -282,20 +331,59 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 // Single-quoted strings with $ are interpolated in Haxe
                 if quote == b'\'' && inner.contains('$') {
                     let parts = self.parse_string_interpolation_parts(inner, token.span.start + 1);
-                    Ok(Expr { kind: ExprKind::StringInterpolation(parts), span: token.span })
+                    Ok(Expr {
+                        kind: ExprKind::StringInterpolation(parts),
+                        span: token.span,
+                    })
                 } else {
-                    Ok(Expr { kind: ExprKind::String(inner.to_string()), span: token.span })
+                    Ok(Expr {
+                        kind: ExprKind::String(inner.to_string()),
+                        span: token.span,
+                    })
                 }
             }
-            TokenKind::KwTrue => { self.stream.advance(); Ok(Expr { kind: ExprKind::Bool(true), span: token.span }) }
-            TokenKind::KwFalse => { self.stream.advance(); Ok(Expr { kind: ExprKind::Bool(false), span: token.span }) }
-            TokenKind::KwNull => { self.stream.advance(); Ok(Expr { kind: ExprKind::Null, span: token.span }) }
-            TokenKind::KwThis => { self.stream.advance(); Ok(Expr { kind: ExprKind::This, span: token.span }) }
-            TokenKind::KwSuper => { self.stream.advance(); Ok(Expr { kind: ExprKind::Super, span: token.span }) }
+            TokenKind::KwTrue => {
+                self.stream.advance();
+                Ok(Expr {
+                    kind: ExprKind::Bool(true),
+                    span: token.span,
+                })
+            }
+            TokenKind::KwFalse => {
+                self.stream.advance();
+                Ok(Expr {
+                    kind: ExprKind::Bool(false),
+                    span: token.span,
+                })
+            }
+            TokenKind::KwNull => {
+                self.stream.advance();
+                Ok(Expr {
+                    kind: ExprKind::Null,
+                    span: token.span,
+                })
+            }
+            TokenKind::KwThis => {
+                self.stream.advance();
+                Ok(Expr {
+                    kind: ExprKind::This,
+                    span: token.span,
+                })
+            }
+            TokenKind::KwSuper => {
+                self.stream.advance();
+                Ok(Expr {
+                    kind: ExprKind::Super,
+                    span: token.span,
+                })
+            }
             TokenKind::Ident => {
                 let name = token.text(self.source).to_string();
                 self.stream.advance();
-                Ok(Expr { kind: ExprKind::Ident(name), span: token.span })
+                Ok(Expr {
+                    kind: ExprKind::Ident(name),
+                    span: token.span,
+                })
             }
             TokenKind::KwNew => {
                 self.stream.advance();
@@ -306,7 +394,14 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     Vec::new()
                 };
                 let args = self.parse_call_args()?;
-                Ok(Expr { kind: ExprKind::New { type_path: path, params, args }, span: self.stream.span_from(start) })
+                Ok(Expr {
+                    kind: ExprKind::New {
+                        type_path: path,
+                        params,
+                        args,
+                    },
+                    span: self.stream.span_from(start),
+                })
             }
             TokenKind::KwIf => self.parse_if_expr(),
             TokenKind::KwWhile => self.parse_while_expr(),
@@ -314,38 +409,95 @@ impl<'a, 'b> RdParser<'a, 'b> {
             TokenKind::KwReturn => {
                 self.stream.advance();
                 let value = if !self.stream.at(TokenKind::Semicolon)
-                    && !self.stream.at(TokenKind::RBrace) && !self.stream.is_eof()
+                    && !self.stream.at(TokenKind::RBrace)
+                    && !self.stream.is_eof()
                 {
                     Some(Box::new(self.parse_expression()?))
-                } else { None };
+                } else {
+                    None
+                };
                 let end = value.as_ref().map(|v| v.span.end).unwrap_or(token.span.end);
-                Ok(Expr { kind: ExprKind::Return(value), span: Span::new(start, end) })
+                Ok(Expr {
+                    kind: ExprKind::Return(value),
+                    span: Span::new(start, end),
+                })
             }
-            TokenKind::KwBreak => { self.stream.advance(); Ok(Expr { kind: ExprKind::Break, span: token.span }) }
-            TokenKind::KwContinue => { self.stream.advance(); Ok(Expr { kind: ExprKind::Continue, span: token.span }) }
+            TokenKind::KwBreak => {
+                self.stream.advance();
+                Ok(Expr {
+                    kind: ExprKind::Break,
+                    span: token.span,
+                })
+            }
+            TokenKind::KwContinue => {
+                self.stream.advance();
+                Ok(Expr {
+                    kind: ExprKind::Continue,
+                    span: token.span,
+                })
+            }
             TokenKind::KwThrow => {
                 self.stream.advance();
                 let expr = self.parse_expression()?;
                 let end = expr.span.end;
-                Ok(Expr { kind: ExprKind::Throw(Box::new(expr)), span: Span::new(start, end) })
+                Ok(Expr {
+                    kind: ExprKind::Throw(Box::new(expr)),
+                    span: Span::new(start, end),
+                })
             }
             TokenKind::KwVar => {
                 self.stream.advance();
                 let name = self.stream.current_text().to_string();
                 self.stream.advance();
-                let type_hint = if self.stream.eat(TokenKind::Colon).is_some() { Some(self.parse_type()?) } else { None };
-                let expr = if self.stream.eat(TokenKind::Assign).is_some() { Some(Box::new(self.parse_expression()?)) } else { None };
-                let end = expr.as_ref().map(|e| e.span.end).unwrap_or(self.stream.current_offset());
-                Ok(Expr { kind: ExprKind::Var { name, type_hint, expr }, span: Span::new(start, end) })
+                let type_hint = if self.stream.eat(TokenKind::Colon).is_some() {
+                    Some(self.parse_type()?)
+                } else {
+                    None
+                };
+                let expr = if self.stream.eat(TokenKind::Assign).is_some() {
+                    Some(Box::new(self.parse_expression()?))
+                } else {
+                    None
+                };
+                let end = expr
+                    .as_ref()
+                    .map(|e| e.span.end)
+                    .unwrap_or(self.stream.current_offset());
+                Ok(Expr {
+                    kind: ExprKind::Var {
+                        name,
+                        type_hint,
+                        expr,
+                    },
+                    span: Span::new(start, end),
+                })
             }
             TokenKind::KwFinal => {
                 self.stream.advance();
                 let name = self.stream.current_text().to_string();
                 self.stream.advance();
-                let type_hint = if self.stream.eat(TokenKind::Colon).is_some() { Some(self.parse_type()?) } else { None };
-                let expr = if self.stream.eat(TokenKind::Assign).is_some() { Some(Box::new(self.parse_expression()?)) } else { None };
-                let end = expr.as_ref().map(|e| e.span.end).unwrap_or(self.stream.current_offset());
-                Ok(Expr { kind: ExprKind::Final { name, type_hint, expr }, span: Span::new(start, end) })
+                let type_hint = if self.stream.eat(TokenKind::Colon).is_some() {
+                    Some(self.parse_type()?)
+                } else {
+                    None
+                };
+                let expr = if self.stream.eat(TokenKind::Assign).is_some() {
+                    Some(Box::new(self.parse_expression()?))
+                } else {
+                    None
+                };
+                let end = expr
+                    .as_ref()
+                    .map(|e| e.span.end)
+                    .unwrap_or(self.stream.current_offset());
+                Ok(Expr {
+                    kind: ExprKind::Final {
+                        name,
+                        type_hint,
+                        expr,
+                    },
+                    span: Span::new(start, end),
+                })
             }
             TokenKind::KwDo => self.parse_do_while_expr(),
             TokenKind::KwSwitch => self.parse_switch_expr(),
@@ -355,14 +507,20 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 self.stream.advance();
                 let expr = self.parse_expression()?;
                 let end = expr.span.end;
-                Ok(Expr { kind: ExprKind::Untyped(Box::new(expr)), span: Span::new(start, end) })
+                Ok(Expr {
+                    kind: ExprKind::Untyped(Box::new(expr)),
+                    span: Span::new(start, end),
+                })
             }
             TokenKind::KwFunction => self.parse_function_literal(),
             TokenKind::DollarIdent => {
                 let text = token.text(self.source).to_string();
                 self.stream.advance();
                 Ok(Expr {
-                    kind: ExprKind::DollarIdent { name: text[1..].to_string(), arg: None },
+                    kind: ExprKind::DollarIdent {
+                        name: text[1..].to_string(),
+                        arg: None,
+                    },
                     span: token.span,
                 })
             }
@@ -400,10 +558,19 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.eat(TokenKind::Semicolon);
         let else_branch = if self.stream.eat(TokenKind::KwElse).is_some() {
             Some(Box::new(self.parse_expression()?))
-        } else { None };
-        let end = else_branch.as_ref().map(|e| e.span.end).unwrap_or(then_branch.span.end);
+        } else {
+            None
+        };
+        let end = else_branch
+            .as_ref()
+            .map(|e| e.span.end)
+            .unwrap_or(then_branch.span.end);
         Ok(Expr {
-            kind: ExprKind::If { cond: Box::new(cond), then_branch: Box::new(then_branch), else_branch },
+            kind: ExprKind::If {
+                cond: Box::new(cond),
+                then_branch: Box::new(then_branch),
+                else_branch,
+            },
             span: Span::new(start, end),
         })
     }
@@ -417,7 +584,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let body = self.parse_expression()?;
         let end = body.span.end;
         Ok(Expr {
-            kind: ExprKind::While { cond: Box::new(cond), body: Box::new(body) },
+            kind: ExprKind::While {
+                cond: Box::new(cond),
+                body: Box::new(body),
+            },
             span: Span::new(start, end),
         })
     }
@@ -441,7 +611,12 @@ impl<'a, 'b> RdParser<'a, 'b> {
             let body = self.parse_expression()?;
             let end = body.span.end;
             return Ok(Expr {
-                kind: ExprKind::For { var: value_name, key_var: Some(key), iter: Box::new(iter), body: Box::new(body) },
+                kind: ExprKind::For {
+                    var: value_name,
+                    key_var: Some(key),
+                    iter: Box::new(iter),
+                    body: Box::new(body),
+                },
                 span: Span::new(start, end),
             });
         } else {
@@ -454,7 +629,12 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let body = self.parse_expression()?;
         let end = body.span.end;
         Ok(Expr {
-            kind: ExprKind::For { var: var_name, key_var, iter: Box::new(iter), body: Box::new(body) },
+            kind: ExprKind::For {
+                var: var_name,
+                key_var,
+                iter: Box::new(iter),
+                body: Box::new(body),
+            },
             span: Span::new(start, end),
         })
     }
@@ -468,7 +648,13 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let scrutinee = if self.stream.eat(TokenKind::Colon).is_some() {
             let ty = self.parse_type()?;
             let span = scrutinee.span.merge(ty.span());
-            Expr { kind: ExprKind::TypeCheck { expr: Box::new(scrutinee), type_hint: ty }, span }
+            Expr {
+                kind: ExprKind::TypeCheck {
+                    expr: Box::new(scrutinee),
+                    type_hint: ty,
+                },
+                span,
+            }
         } else {
             scrutinee
         };
@@ -488,11 +674,15 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     let g = self.parse_expression()?;
                     self.stream.expect(TokenKind::RParen)?;
                     Some(g)
-                } else { None };
+                } else {
+                    None
+                };
                 self.stream.expect(TokenKind::Colon)?;
                 let mut body_exprs = Vec::new();
-                while !self.stream.at(TokenKind::KwCase) && !self.stream.at(TokenKind::KwDefault)
-                    && !self.stream.at(TokenKind::RBrace) && !self.stream.is_eof()
+                while !self.stream.at(TokenKind::KwCase)
+                    && !self.stream.at(TokenKind::KwDefault)
+                    && !self.stream.at(TokenKind::RBrace)
+                    && !self.stream.is_eof()
                 {
                     body_exprs.push(self.parse_expression()?);
                     self.stream.eat(TokenKind::Semicolon);
@@ -501,9 +691,13 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 let body = if body_exprs.len() == 1 {
                     body_exprs.pop().unwrap()
                 } else {
-                    let elements: Vec<BlockElement> = body_exprs.into_iter().map(BlockElement::Expr).collect();
+                    let elements: Vec<BlockElement> =
+                        body_exprs.into_iter().map(BlockElement::Expr).collect();
                     let span = self.stream.span_from(case_start);
-                    Expr { kind: ExprKind::Block(elements), span }
+                    Expr {
+                        kind: ExprKind::Block(elements),
+                        span,
+                    }
                 };
                 cases.push(Case {
                     patterns: vec![pattern],
@@ -521,8 +715,12 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 let def_body = if body_exprs.len() == 1 {
                     body_exprs.pop().unwrap()
                 } else {
-                    let elements: Vec<BlockElement> = body_exprs.into_iter().map(BlockElement::Expr).collect();
-                    Expr { kind: ExprKind::Block(elements), span: self.stream.span_from(start) }
+                    let elements: Vec<BlockElement> =
+                        body_exprs.into_iter().map(BlockElement::Expr).collect();
+                    Expr {
+                        kind: ExprKind::Block(elements),
+                        span: self.stream.span_from(start),
+                    }
                 };
                 default = Some(Box::new(def_body));
             } else {
@@ -532,7 +730,11 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
         let end = self.stream.expect(TokenKind::RBrace)?;
         Ok(Expr {
-            kind: ExprKind::Switch { expr: Box::new(scrutinee), cases, default },
+            kind: ExprKind::Switch {
+                expr: Box::new(scrutinee),
+                cases,
+                default,
+            },
             span: Span::new(start, end.end),
         })
     }
@@ -550,7 +752,9 @@ impl<'a, 'b> RdParser<'a, 'b> {
             self.stream.advance();
             let type_hint = if self.stream.eat(TokenKind::Colon).is_some() {
                 Some(self.parse_type()?)
-            } else { None };
+            } else {
+                None
+            };
             self.stream.expect(TokenKind::RParen)?;
             let catch_body = self.parse_expression()?;
             catches.push(Catch {
@@ -564,7 +768,11 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
         let end = catches.last().map(|c| c.span.end).unwrap_or(body.span.end);
         Ok(Expr {
-            kind: ExprKind::Try { expr: Box::new(body), catches, finally_block: None },
+            kind: ExprKind::Try {
+                expr: Box::new(body),
+                catches,
+                finally_block: None,
+            },
             span: Span::new(start, end),
         })
     }
@@ -577,16 +785,24 @@ impl<'a, 'b> RdParser<'a, 'b> {
             let expr = self.parse_expression()?;
             let type_hint = if self.stream.eat(TokenKind::Comma).is_some() {
                 Some(self.parse_type()?)
-            } else { None };
+            } else {
+                None
+            };
             self.stream.expect(TokenKind::RParen)?;
             Ok(Expr {
-                kind: ExprKind::Cast { expr: Box::new(expr), type_hint },
+                kind: ExprKind::Cast {
+                    expr: Box::new(expr),
+                    type_hint,
+                },
                 span: self.stream.span_from(start),
             })
         } else {
             let expr = self.parse_unary()?;
             Ok(Expr {
-                kind: ExprKind::Cast { expr: Box::new(expr), type_hint: None },
+                kind: ExprKind::Cast {
+                    expr: Box::new(expr),
+                    type_hint: None,
+                },
                 span: self.stream.span_from(start),
             })
         }
@@ -594,7 +810,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
     fn parse_function_literal(&mut self) -> Result<Expr, ParseError> {
         let func = self.parse_function_decl()?;
-        Ok(Expr { span: func.span, kind: ExprKind::Function(func) })
+        Ok(Expr {
+            span: func.span,
+            kind: ExprKind::Function(func),
+        })
     }
 
     /// Parse `(...)` — paren expr, type check, or arrow function.
@@ -609,7 +828,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 let body = self.parse_expression()?;
                 let end = body.span.end;
                 return Ok(Expr {
-                    kind: ExprKind::Arrow { params: Vec::new(), expr: Box::new(body) },
+                    kind: ExprKind::Arrow {
+                        params: Vec::new(),
+                        expr: Box::new(body),
+                    },
                     span: Span::new(start, end),
                 });
             }
@@ -627,7 +849,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     let body = self.parse_expression()?;
                     let end = body.span.end;
                     return Ok(Expr {
-                        kind: ExprKind::Arrow { params, expr: Box::new(body) },
+                        kind: ExprKind::Arrow {
+                            params,
+                            expr: Box::new(body),
+                        },
                         span: Span::new(start, end),
                     });
                 }
@@ -642,7 +867,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
             let ty = self.parse_type()?;
             let end = self.stream.expect(TokenKind::RParen)?;
             return Ok(Expr {
-                kind: ExprKind::TypeCheck { expr: Box::new(inner), type_hint: ty },
+                kind: ExprKind::TypeCheck {
+                    expr: Box::new(inner),
+                    type_hint: ty,
+                },
                 span: Span::new(start, end.end),
             });
         }
@@ -652,15 +880,24 @@ impl<'a, 'b> RdParser<'a, 'b> {
             let body = self.parse_expression()?;
             let end = body.span.end;
             let params = match &inner.kind {
-                ExprKind::Ident(name) => vec![ArrowParam { name: name.clone(), type_hint: None }],
+                ExprKind::Ident(name) => vec![ArrowParam {
+                    name: name.clone(),
+                    type_hint: None,
+                }],
                 _ => vec![],
             };
             return Ok(Expr {
-                kind: ExprKind::Arrow { params, expr: Box::new(body) },
+                kind: ExprKind::Arrow {
+                    params,
+                    expr: Box::new(body),
+                },
                 span: Span::new(start, end),
             });
         }
-        Ok(Expr { kind: ExprKind::Paren(Box::new(inner)), span: Span::new(start, end.end) })
+        Ok(Expr {
+            kind: ExprKind::Paren(Box::new(inner)),
+            span: Span::new(start, end.end),
+        })
     }
 
     /// Try to parse arrow function parameters: `(a:Int, b:String)`
@@ -672,7 +909,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
             }
             let name = self.stream.current_text().to_string();
             if !self.stream.at(TokenKind::Ident) {
-                return Err(ParseError::new("expected parameter name", self.stream.peek().span));
+                return Err(ParseError::new(
+                    "expected parameter name",
+                    self.stream.peek().span,
+                ));
             }
             self.stream.advance();
             let type_hint = if self.stream.eat(TokenKind::Colon).is_some() {
@@ -692,7 +932,11 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
     /// Parse string interpolation parts from single-quoted string content.
     /// Handles `$ident` and `${expr}` interpolation.
-    fn parse_string_interpolation_parts(&mut self, inner: &str, base_offset: usize) -> Vec<StringPart> {
+    fn parse_string_interpolation_parts(
+        &mut self,
+        inner: &str,
+        base_offset: usize,
+    ) -> Vec<StringPart> {
         let mut parts = Vec::new();
         let mut current = String::new();
         let bytes = inner.as_bytes();
@@ -711,22 +955,45 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     let expr_start = i;
                     let mut depth = 1;
                     while i < bytes.len() && depth > 0 {
-                        if bytes[i] == b'{' { depth += 1; }
-                        if bytes[i] == b'}' { depth -= 1; }
-                        if depth > 0 { i += 1; }
+                        if bytes[i] == b'{' {
+                            depth += 1;
+                        }
+                        if bytes[i] == b'}' {
+                            depth -= 1;
+                        }
+                        if depth > 0 {
+                            i += 1;
+                        }
                     }
                     let expr_str = &inner[expr_start..i];
-                    if i < bytes.len() { i += 1; } // skip }
+                    if i < bytes.len() {
+                        i += 1;
+                    } // skip }
 
                     // Parse the expression inside ${}
-                    match crate::rd::rd_parse(&format!("class _ {{ static function _() {{ return {}; }} }}", expr_str), "<interp>", false, false) {
+                    match crate::rd::rd_parse(
+                        &format!(
+                            "class _ {{ static function _() {{ return {}; }} }}",
+                            expr_str
+                        ),
+                        "<interp>",
+                        false,
+                        false,
+                    ) {
                         Ok(file) => {
                             if let Some(TypeDeclaration::Class(c)) = file.declarations.first() {
-                                if let Some(ClassFieldKind::Function(f)) = c.fields.first().map(|f| &f.kind) {
+                                if let Some(ClassFieldKind::Function(f)) =
+                                    c.fields.first().map(|f| &f.kind)
+                                {
                                     if let Some(body) = &f.body {
                                         if let ExprKind::Block(elements) = &body.kind {
-                                            if let Some(BlockElement::Expr(Expr { kind: ExprKind::Return(Some(expr)), .. })) = elements.first() {
-                                                parts.push(StringPart::Interpolation(*expr.clone()));
+                                            if let Some(BlockElement::Expr(Expr {
+                                                kind: ExprKind::Return(Some(expr)),
+                                                ..
+                                            })) = elements.first()
+                                            {
+                                                parts
+                                                    .push(StringPart::Interpolation(*expr.clone()));
                                                 continue;
                                             }
                                         }
@@ -739,13 +1006,17 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     // Fallback: treat as identifier
                     parts.push(StringPart::Interpolation(Expr {
                         kind: ExprKind::Ident(expr_str.to_string()),
-                        span: Span::new(base_offset + expr_start, base_offset + expr_start + expr_str.len()),
+                        span: Span::new(
+                            base_offset + expr_start,
+                            base_offset + expr_start + expr_str.len(),
+                        ),
                     }));
                 } else if bytes[i + 1].is_ascii_alphabetic() || bytes[i + 1] == b'_' {
                     // $ident
                     i += 1;
                     let ident_start = i;
-                    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                    while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_')
+                    {
                         i += 1;
                     }
                     let ident = &inner[ident_start..i];
@@ -842,7 +1113,11 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     }
                     self.stream.expect(TokenKind::RParen)?;
                     Ok(Pattern::Constructor {
-                        path: TypePath { package: Vec::new(), name, sub: None },
+                        path: TypePath {
+                            package: Vec::new(),
+                            name,
+                            sub: None,
+                        },
                         params,
                     })
                 } else if self.stream.at(TokenKind::Dot) {
@@ -864,7 +1139,11 @@ impl<'a, 'b> RdParser<'a, 'b> {
                         }
                         self.stream.expect(TokenKind::RParen)?;
                         Ok(Pattern::Constructor {
-                            path: TypePath { package: parts, name: final_name, sub: None },
+                            path: TypePath {
+                                package: parts,
+                                name: final_name,
+                                sub: None,
+                            },
                             params,
                         })
                     } else {
@@ -906,7 +1185,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.expect(TokenKind::RParen)?;
         let end = cond.span.end;
         Ok(Expr {
-            kind: ExprKind::DoWhile { body: Box::new(body), cond: Box::new(cond) },
+            kind: ExprKind::DoWhile {
+                body: Box::new(body),
+                cond: Box::new(cond),
+            },
             span: Span::new(start, end),
         })
     }
@@ -918,7 +1200,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
         if self.stream.at(TokenKind::RBracket) {
             let end = self.stream.expect(TokenKind::RBracket)?;
-            return Ok(Expr { kind: ExprKind::Array(Vec::new()), span: Span::new(start, end.end) });
+            return Ok(Expr {
+                kind: ExprKind::Array(Vec::new()),
+                span: Span::new(start, end.end),
+            });
         }
 
         // Parse first element to check for `=>`
@@ -928,22 +1213,32 @@ impl<'a, 'b> RdParser<'a, 'b> {
             // Map literal: [key => value, ...]
             let first_val = self.parse_expression()?;
             let mut pairs = vec![(first, first_val)];
-            while self.stream.eat(TokenKind::Comma).is_some() && !self.stream.at(TokenKind::RBracket) {
+            while self.stream.eat(TokenKind::Comma).is_some()
+                && !self.stream.at(TokenKind::RBracket)
+            {
                 let key = self.parse_expression()?;
                 self.stream.expect(TokenKind::FatArrow)?;
                 let val = self.parse_expression()?;
                 pairs.push((key, val));
             }
             let end = self.stream.expect(TokenKind::RBracket)?;
-            Ok(Expr { kind: ExprKind::Map(pairs), span: Span::new(start, end.end) })
+            Ok(Expr {
+                kind: ExprKind::Map(pairs),
+                span: Span::new(start, end.end),
+            })
         } else {
             // Array literal
             let mut items = vec![first];
-            while self.stream.eat(TokenKind::Comma).is_some() && !self.stream.at(TokenKind::RBracket) {
+            while self.stream.eat(TokenKind::Comma).is_some()
+                && !self.stream.at(TokenKind::RBracket)
+            {
                 items.push(self.parse_expression()?);
             }
             let end = self.stream.expect(TokenKind::RBracket)?;
-            Ok(Expr { kind: ExprKind::Array(items), span: Span::new(start, end.end) })
+            Ok(Expr {
+                kind: ExprKind::Array(items),
+                span: Span::new(start, end.end),
+            })
         }
     }
 
@@ -958,7 +1253,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
         {
             self.stream.advance(); // {
             let end = self.stream.expect(TokenKind::RBrace)?;
-            return Ok(Expr { kind: ExprKind::Block(Vec::new()), span: Span::new(start, end.end) });
+            return Ok(Expr {
+                kind: ExprKind::Block(Vec::new()),
+                span: Span::new(start, end.end),
+            });
         }
 
         // Check if it's an object literal: { ident: ... } or { "string": ... }
@@ -991,7 +1289,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 }
             }
             let end = self.stream.expect(TokenKind::RBrace)?;
-            return Ok(Expr { kind: ExprKind::Object(fields), span: Span::new(start, end.end) });
+            return Ok(Expr {
+                kind: ExprKind::Object(fields),
+                span: Span::new(start, end.end),
+            });
         }
 
         self.parse_block_expr()
@@ -1006,7 +1307,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
             self.stream.eat(TokenKind::Semicolon);
         }
         let end = self.stream.expect(TokenKind::RBrace)?;
-        Ok(Expr { kind: ExprKind::Block(elements), span: Span::new(start, end.end) })
+        Ok(Expr {
+            kind: ExprKind::Block(elements),
+            span: Span::new(start, end.end),
+        })
     }
 
     /// Parse a type path for `new` expressions
@@ -1016,7 +1320,9 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.advance();
 
         while self.stream.at(TokenKind::Dot) {
-            if self.stream.peek_at(1).kind == TokenKind::Ident || self.stream.peek_at(1).kind.is_keyword() {
+            if self.stream.peek_at(1).kind == TokenKind::Ident
+                || self.stream.peek_at(1).kind.is_keyword()
+            {
                 self.stream.advance(); // skip dot
                 package.push(name);
                 name = self.stream.current_text().to_string();
@@ -1026,7 +1332,11 @@ impl<'a, 'b> RdParser<'a, 'b> {
             }
         }
 
-        Ok(TypePath { package, name, sub: None })
+        Ok(TypePath {
+            package,
+            name,
+            sub: None,
+        })
     }
 
     fn parse_type_args(&mut self) -> Result<Vec<Type>, ParseError> {
@@ -1034,7 +1344,9 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let mut args = Vec::new();
         while !self.stream.at(TokenKind::Gt) && !self.stream.is_eof() {
             args.push(self.parse_type()?);
-            if !self.stream.at(TokenKind::Gt) { self.stream.eat(TokenKind::Comma); }
+            if !self.stream.at(TokenKind::Gt) {
+                self.stream.eat(TokenKind::Comma);
+            }
         }
         self.stream.expect(TokenKind::Gt)?;
         Ok(args)
