@@ -265,7 +265,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.advance(); // skip #
         let mut depth = 1;
         while !self.stream.is_eof() && depth > 0 {
-            let text = self.stream.current_text();
+            let _text = self.stream.current_text();
             if self.stream.at(TokenKind::Hash) {
                 self.stream.advance();
                 let next = self.stream.current_text();
@@ -335,19 +335,11 @@ impl<'a, 'b> RdParser<'a, 'b> {
     fn parse_metadata(&mut self) -> Result<Metadata, ParseError> {
         let start = self.stream.current_offset();
 
-        let is_colon = self.stream.at(TokenKind::AtColon);
         self.stream.advance(); // skip @ or @:
 
         // Name (can be keyword like "native", "forward", etc.)
-        let name = if is_colon {
-            let text = self.stream.current_text().to_string();
-            self.stream.advance();
-            text
-        } else {
-            let text = self.stream.current_text().to_string();
-            self.stream.advance();
-            text
-        };
+        let name = self.stream.current_text().to_string();
+        self.stream.advance();
 
         // Optional parameters
         let params = if self.stream.at(TokenKind::LParen) {
@@ -375,10 +367,9 @@ impl<'a, 'b> RdParser<'a, 'b> {
         };
 
         let span = self.stream.span_from(start);
-        let full_name = if is_colon { name } else { name };
 
         Ok(Metadata {
-            name: full_name,
+            name,
             params,
             span,
         })

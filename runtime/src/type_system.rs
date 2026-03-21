@@ -2684,20 +2684,18 @@ fn ensure_flat_vtable() {
                 })
                 .collect();
             // First pass: copy all vtable data
-            for (&type_id, vtable) in map {
+            for (_type_id, vtable) in map.iter() {
                 owned_slots.push(vtable.clone());
             }
             // Store owned slots and build flat table pointing into them
             let owned_ptr = Box::into_raw(Box::new(owned_slots));
             let owned_ref = &*owned_ptr;
-            let mut slot_idx = 0;
-            for (&type_id, _vtable) in map {
+            for (slot_idx, (&type_id, _vtable)) in map.iter().enumerate() {
                 let owned_vec = &owned_ref[slot_idx];
                 flat[type_id as usize] = FlatVtable {
                     slots: owned_vec.as_ptr(),
                     len: owned_vec.len(),
                 };
-                slot_idx += 1;
             }
             VTABLE_FLAT_SLOTS = owned_ptr as *const Vec<Vec<i64>>;
             VTABLE_FLAT = Box::into_raw(Box::new(flat));

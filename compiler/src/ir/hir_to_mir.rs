@@ -23349,7 +23349,6 @@ impl<'a> HirToMirContext<'a> {
                         // which may be Dynamic)
                         return self.coerce_from_i64(raw_val, actual_field_ty);
                     }
-                } else {
                 }
             }
         }

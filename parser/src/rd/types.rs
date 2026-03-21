@@ -152,7 +152,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
             if !self.stream.at(TokenKind::RBrace) {
                 // Accept comma or semicolon as field separator
-                if !self.stream.eat(TokenKind::Comma).is_some() {
+                if self.stream.eat(TokenKind::Comma).is_none() {
                     self.stream.eat(TokenKind::Semicolon);
                 }
             }

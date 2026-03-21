@@ -154,7 +154,7 @@ fn test_rd_vs_nom_haxe_tests() {
     let mut files: Vec<_> = fs::read_dir(&test_dir)
         .unwrap()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |ext| ext == "hx"))
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "hx"))
         .map(|e| e.path())
         .collect();
     files.sort();
