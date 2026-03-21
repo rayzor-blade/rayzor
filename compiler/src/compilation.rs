@@ -3469,7 +3469,6 @@ impl CompilationUnit {
         source: &str,
         skip_pre_registration: bool,
     ) -> Result<TypedFile, Vec<CompilationError>> {
-        use crate::tast::ast_lowering::AstLowering;
         use parser::parse_haxe_file_with_diagnostics;
 
         // Skip if already successfully compiled - return cached TypedFile
@@ -3488,26 +3487,37 @@ impl CompilationUnit {
             }]
         })?;
 
-        let ast_file = parse_result.file;
-        let _source_map = parse_result.source_map;
+        self.compile_ast_with_shared_state(filename, source, &parse_result.file, skip_pre_registration)
+    }
+
+    fn compile_ast_with_shared_state(
+        &mut self,
+        filename: &str,
+        source: &str,
+        ast_file: &parser::HaxeFile,
+        skip_pre_registration: bool,
+    ) -> Result<TypedFile, Vec<CompilationError>> {
+        use crate::tast::ast_lowering::AstLowering;
+
         let file_id = diagnostics::FileId::new(0);
 
         // Extract type info from AST for BLADE cache (before macros may modify it)
         if self.config.enable_cache {
-            let type_info = crate::tools::preblade::extract_type_info_from_ast(&ast_file);
+            let type_info = crate::tools::preblade::extract_type_info_from_ast(ast_file);
             self.last_compiled_type_info = Some(type_info);
         }
 
         // Stage 1.5: Macro expansion (if enabled)
+        let ast_file_owned;
         let ast_file = if self.config.pipeline_config.enable_macro_expansion {
-            // Build class registry from all available sources for macro interpreter
             let mut class_registry = crate::macro_system::ClassRegistry::new();
             class_registry.register_files(&self.stdlib_files);
             class_registry.register_files(&self.import_hx_files);
-            class_registry.register_file(&ast_file);
-            let expansion =
-                crate::macro_system::expand_macros_with_class_registry(ast_file, class_registry);
-            // Log macro diagnostics as warnings (non-fatal in multi-file context)
+            class_registry.register_file(ast_file);
+            let expansion = crate::macro_system::expand_macros_with_class_registry(
+                ast_file.clone(),
+                class_registry,
+            );
             for diag in &expansion.diagnostics {
                 if matches!(diag.severity, crate::macro_system::MacroSeverity::Error) {
                     debug!("Macro expansion error in {}: {}", filename, diag.message);
@@ -3519,7 +3529,8 @@ impl CompilationUnit {
                     expansion.expansions_count, filename
                 );
             }
-            expansion.file
+            ast_file_owned = expansion.file;
+            &ast_file_owned
         } else {
             ast_file
         };
@@ -3555,7 +3566,7 @@ impl CompilationUnit {
             filename.to_string(),
         );
 
-        let typed_file = lowering.lower_file(&ast_file).map_err(|e| {
+        let typed_file = lowering.lower_file(ast_file).map_err(|e| {
             vec![CompilationError {
                 message: format!("Lowering error: {:?}", e),
                 location: SourceLocation::unknown(),
@@ -4127,6 +4138,22 @@ impl CompilationUnit {
         self.compile_file_with_shared_state_ex(filename, source, false)
     }
 
+    /// Compile using an already-parsed AST (avoids redundant re-parsing).
+    fn compile_pre_parsed_file(
+        &mut self,
+        ast_file: &parser::HaxeFile,
+    ) -> Result<TypedFile, Vec<CompilationError>> {
+        let filename = ast_file.filename.clone();
+        let source = ast_file.input.clone().unwrap_or_default();
+
+        // Skip if already compiled
+        if let Some(cached) = self.compiled_files.get(&filename) {
+            return Ok(cached.clone());
+        }
+
+        self.compile_ast_with_shared_state(&filename, &source, ast_file, false)
+    }
+
     /// Lower all files (stdlib + user) to TAST with full pipeline analysis
     ///
     /// This method delegates to HaxeCompilationPipeline for each file to leverage
@@ -4214,21 +4241,13 @@ impl CompilationUnit {
             }
         }
 
-        // Step 4: Compile user files in dependency order using SHARED state
-        // This ensures user files can see symbols from stdlib and other user files
-        let user_sources: Vec<(String, String)> = analysis
-            .compilation_order
-            .iter()
-            .filter_map(|&idx| {
-                let file = &self.user_files[idx];
-                file.input
-                    .as_ref()
-                    .map(|s| (file.filename.clone(), s.clone()))
-            })
-            .collect();
+        // Step 4: Compile user files in dependency order using SHARED state.
+        // Use pre-parsed ASTs from self.user_files to avoid re-parsing.
+        let user_file_indices: Vec<usize> = analysis.compilation_order.clone();
 
-        for (filename, source) in user_sources {
-            match self.compile_file_with_shared_state(&filename, &source) {
+        for idx in user_file_indices {
+            let ast_file = self.user_files[idx].clone();
+            match self.compile_pre_parsed_file(&ast_file) {
                 Ok(typed_file) => {
                     all_typed_files.push(typed_file);
                 }
@@ -4263,8 +4282,8 @@ impl CompilationUnit {
 
                     // If we successfully loaded any dependencies, retry compiling this file
                     if any_loaded {
-                        debug!("  Retrying {} after loading dependencies...", filename);
-                        match self.compile_file_with_shared_state(&filename, &source) {
+                        debug!("  Retrying {} after loading dependencies...", ast_file.filename);
+                        match self.compile_pre_parsed_file(&ast_file) {
                             Ok(typed_file) => {
                                 all_typed_files.push(typed_file);
                             }
@@ -4306,9 +4325,9 @@ impl CompilationUnit {
                                 if retry_loaded {
                                     debug!(
                                         "  Second retry of {} after loading more dependencies...",
-                                        filename
+                                        ast_file.filename
                                     );
-                                    match self.compile_file_with_shared_state(&filename, &source) {
+                                    match self.compile_pre_parsed_file(&ast_file) {
                                         Ok(typed_file) => {
                                             all_typed_files.push(typed_file);
                                         }
