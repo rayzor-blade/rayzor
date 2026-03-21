@@ -1283,6 +1283,27 @@ impl CSEPass {
     }
 
     /// Check if a binary operation is commutative.
+    /// Key for cross-block CSE: Const and GEP only.
+    /// Pure expressions — same operands always produce the same result.
+    fn cross_block_key(inst: &IrInstruction) -> Option<String> {
+        match inst {
+            IrInstruction::Const { value, .. } => Some(format!("const:{:?}", value)),
+            IrInstruction::GetElementPtr {
+                ptr, indices, ty, ..
+            } => {
+                let idx_str: Vec<String> =
+                    indices.iter().map(|i| i.as_u32().to_string()).collect();
+                Some(format!(
+                    "gep:{}:[{}]:{:?}",
+                    ptr.as_u32(),
+                    idx_str.join(","),
+                    ty
+                ))
+            }
+            _ => None,
+        }
+    }
+
     fn is_commutative(op: BinaryOp) -> bool {
         matches!(
             op,
@@ -1338,6 +1359,11 @@ impl OptimizationPass for CSEPass {
                     replace_terminator_uses(&mut block.terminator, &replacements);
                 }
             }
+
+            // Cross-block CSE for Const/GEP disabled: causes SIGILL on nbody
+            // under all-backends builds. The phi-node fix alone isn't sufficient —
+            // Const CSE interacts with LoopUnrolling in ways that GVN doesn't
+            // (GVN only handles BinOp/UnOp/Cmp/Cast, not Const/GEP).
         }
 
         result

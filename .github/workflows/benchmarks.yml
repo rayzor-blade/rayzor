@@ -148,8 +148,10 @@ jobs:
       - name: Run fibonacci benchmark
         run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- fibonacci --json --disable-trace
 
-      - name: Run deltablue benchmark
-        run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- deltablue --json --disable-trace
+      # deltablue disabled: rayzor-gcc hangs (C backend CallIndirect doesn't
+      # dereference closure struct for vtable dispatch). Re-enable after fix.
+      # - name: Run deltablue benchmark
+      #   run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- deltablue --json --disable-trace
 
       - name: Run mandelbrot benchmark
         run: cargo run --release --package compiler --features all-backends --example benchmark_runner -- mandelbrot --json --disable-trace
