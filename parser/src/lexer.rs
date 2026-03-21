@@ -363,7 +363,8 @@ impl<'a> Lexer<'a> {
                 // Skip unknown bytes (UTF-8 multibyte chars in identifiers)
                 if ch >= 0x80 {
                     // UTF-8 continuation — skip the full character
-                    while self.pos < self.source.len() && self.source[self.pos] >= 0x80
+                    while self.pos < self.source.len()
+                        && self.source[self.pos] >= 0x80
                         && self.source[self.pos] < 0xC0
                     {
                         self.pos += 1;
@@ -408,7 +409,8 @@ impl<'a> Lexer<'a> {
 
     fn lex_number(&mut self, start: usize) -> Result<Token, LexError> {
         // Check for hex: 0x...
-        if self.source[start] == b'0' && self.pos < self.source.len()
+        if self.source[start] == b'0'
+            && self.pos < self.source.len()
             && (self.source[self.pos] == b'x' || self.source[self.pos] == b'X')
         {
             self.pos += 1; // skip 'x'
@@ -426,8 +428,10 @@ impl<'a> Lexer<'a> {
         }
 
         // Check for float: digits followed by '.' then more digits
-        if self.pos < self.source.len() && self.source[self.pos] == b'.'
-            && self.pos + 1 < self.source.len() && self.source[self.pos + 1].is_ascii_digit()
+        if self.pos < self.source.len()
+            && self.source[self.pos] == b'.'
+            && self.pos + 1 < self.source.len()
+            && self.source[self.pos + 1].is_ascii_digit()
         {
             self.pos += 1; // skip '.'
             while self.pos < self.source.len() && self.source[self.pos].is_ascii_digit() {
@@ -455,8 +459,7 @@ impl<'a> Lexer<'a> {
 
     fn lex_identifier(&mut self, start: usize) -> Result<Token, LexError> {
         while self.pos < self.source.len()
-            && (self.source[self.pos].is_ascii_alphanumeric()
-                || self.source[self.pos] == b'_')
+            && (self.source[self.pos].is_ascii_alphanumeric() || self.source[self.pos] == b'_')
         {
             self.pos += 1;
         }
@@ -486,7 +489,7 @@ impl<'a> Lexer<'a> {
             }
             if ch == b'/' {
                 self.pos += 1; // consume closing '/'
-                // Read flags: g, i, m, s, u
+                               // Read flags: g, i, m, s, u
                 while self.pos < self.source.len() && self.source[self.pos].is_ascii_alphabetic() {
                     self.pos += 1;
                 }
@@ -596,12 +599,18 @@ mod tests {
         assert_eq!(
             kinds("( ) { } [ ] . , ; : @ @: ..."),
             vec![
-                TokenKind::LParen, TokenKind::RParen,
-                TokenKind::LBrace, TokenKind::RBrace,
-                TokenKind::LBracket, TokenKind::RBracket,
-                TokenKind::Dot, TokenKind::Comma,
-                TokenKind::Semicolon, TokenKind::Colon,
-                TokenKind::At, TokenKind::AtColon,
+                TokenKind::LParen,
+                TokenKind::RParen,
+                TokenKind::LBrace,
+                TokenKind::RBrace,
+                TokenKind::LBracket,
+                TokenKind::RBracket,
+                TokenKind::Dot,
+                TokenKind::Comma,
+                TokenKind::Semicolon,
+                TokenKind::Colon,
+                TokenKind::At,
+                TokenKind::AtColon,
                 TokenKind::DotDotDot,
                 TokenKind::Eof,
             ]
@@ -613,8 +622,12 @@ mod tests {
         assert_eq!(
             kinds("<< >> >>> <<= >>= >>>="),
             vec![
-                TokenKind::Shl, TokenKind::Shr, TokenKind::Ushr,
-                TokenKind::ShlAssign, TokenKind::ShrAssign, TokenKind::UshrAssign,
+                TokenKind::Shl,
+                TokenKind::Shr,
+                TokenKind::Ushr,
+                TokenKind::ShlAssign,
+                TokenKind::ShrAssign,
+                TokenKind::UshrAssign,
                 TokenKind::Eof,
             ]
         );
@@ -654,7 +667,11 @@ mod tests {
     fn test_dollar_ident() {
         assert_eq!(
             kinds("$type $a"),
-            vec![TokenKind::DollarIdent, TokenKind::DollarIdent, TokenKind::Eof]
+            vec![
+                TokenKind::DollarIdent,
+                TokenKind::DollarIdent,
+                TokenKind::Eof
+            ]
         );
     }
 }

@@ -24,14 +24,18 @@ impl<'a> TokenStream<'a> {
     /// Look at the current token without consuming it.
     pub fn peek(&self) -> &Token {
         self.tokens.get(self.pos).unwrap_or_else(|| {
-            self.tokens.last().expect("token stream must have at least EOF")
+            self.tokens
+                .last()
+                .expect("token stream must have at least EOF")
         })
     }
 
     /// Look ahead by n tokens (0 = current).
     pub fn peek_at(&self, n: usize) -> &Token {
         self.tokens.get(self.pos + n).unwrap_or_else(|| {
-            self.tokens.last().expect("token stream must have at least EOF")
+            self.tokens
+                .last()
+                .expect("token stream must have at least EOF")
         })
     }
 

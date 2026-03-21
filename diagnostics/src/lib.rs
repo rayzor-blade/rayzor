@@ -339,12 +339,8 @@ impl ErrorFormatter {
 
         // Build the ariadne report
         let offset = diagnostic.span.start.byte_offset;
-        let mut builder = Report::<(&str, std::ops::Range<usize>)>::build(
-            kind,
-            file_name,
-            offset,
-        )
-        .with_config(Config::default().with_color(self.use_colors));
+        let mut builder = Report::<(&str, std::ops::Range<usize>)>::build(kind, file_name, offset)
+            .with_config(Config::default().with_color(self.use_colors));
 
         // Add diagnostic code to message
         let msg = if let Some(code) = &diagnostic.code {

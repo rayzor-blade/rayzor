@@ -299,8 +299,7 @@ pub fn load_blade(
     // mmap avoids copying file contents into a heap Vec — the OS pages
     // the data directly from disk into virtual memory on demand.
     let file = std::fs::File::open(path.as_ref())?;
-    let mmap = unsafe { memmap2::Mmap::map(&file) }
-        .map_err(|e| BladeError::Io(e))?;
+    let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| BladeError::Io(e))?;
 
     // Deserialize using postcard from the mmap'd region
     let blade: BladeModule = postcard::from_bytes(&mmap)?;
@@ -589,8 +588,7 @@ pub fn save_symbol_manifest(
 pub fn load_symbol_manifest(path: impl AsRef<Path>) -> Result<BladeSymbolManifest, BladeError> {
     // mmap for zero-copy deserialization of symbol manifest
     let file = std::fs::File::open(path.as_ref())?;
-    let mmap = unsafe { memmap2::Mmap::map(&file) }
-        .map_err(|e| BladeError::Io(e))?;
+    let mmap = unsafe { memmap2::Mmap::map(&file) }.map_err(|e| BladeError::Io(e))?;
     let manifest: BladeSymbolManifest = postcard::from_bytes(&mmap)?;
 
     if &manifest.magic != SYMBOL_MAGIC {

@@ -651,7 +651,11 @@ impl CompilationUnit {
         // Compute per-function granular invalidation hashes (§3.2)
         let cached_maps = cached_maps.map(|mut maps| {
             for entry in &mut maps.functions {
-                if let Some(func) = mir.functions.values().find(|f| f.name.ends_with(&entry.method_name)) {
+                if let Some(func) = mir
+                    .functions
+                    .values()
+                    .find(|f| f.name.ends_with(&entry.method_name))
+                {
                     entry.signature_hash = crate::ir::blade::compute_signature_hash(func);
                     entry.body_hash = crate::ir::blade::compute_body_hash(func);
                 }
@@ -3512,7 +3516,12 @@ impl CompilationUnit {
             }]
         })?;
 
-        self.compile_ast_with_shared_state(filename, source, &parse_result.file, skip_pre_registration)
+        self.compile_ast_with_shared_state(
+            filename,
+            source,
+            &parse_result.file,
+            skip_pre_registration,
+        )
     }
 
     fn compile_ast_with_shared_state(
@@ -3760,7 +3769,11 @@ impl CompilationUnit {
             for (func_id, func) in &import_mir.functions {
                 external_function_param_types.insert(
                     *func_id,
-                    func.signature.parameters.iter().map(|p| p.ty.clone()).collect(),
+                    func.signature
+                        .parameters
+                        .iter()
+                        .map(|p| p.ty.clone())
+                        .collect(),
                 );
                 if constructor_ids.contains(func_id) {
                     constructor_param_counts
@@ -4228,10 +4241,8 @@ impl CompilationUnit {
         // This ensures typedefs like sys.FileStat are available before compilation
         // Also handles root-level imports like "import StringTools;" and "using StringTools;"
         // Extract imports from already-parsed user file ASTs (no re-parsing needed).
-        let (imports_to_load, usings_to_load): (Vec<String>, Vec<String>) = self
-            .user_files
-            .iter()
-            .fold(
+        let (imports_to_load, usings_to_load): (Vec<String>, Vec<String>) =
+            self.user_files.iter().fold(
                 (Vec::new(), Vec::new()),
                 |(mut imports, mut usings), ast| {
                     for import in &ast.imports {
@@ -4317,7 +4328,10 @@ impl CompilationUnit {
 
                     // If we successfully loaded any dependencies, retry compiling this file
                     if any_loaded {
-                        debug!("  Retrying {} after loading dependencies...", ast_file.filename);
+                        debug!(
+                            "  Retrying {} after loading dependencies...",
+                            ast_file.filename
+                        );
                         match self.compile_pre_parsed_file(&ast_file) {
                             Ok(typed_file) => {
                                 all_typed_files.push(typed_file);
