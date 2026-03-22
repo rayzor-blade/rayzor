@@ -146,13 +146,14 @@ impl ProgressTui {
         let state = self.state.lock().unwrap().clone();
         let elapsed = self.start.elapsed();
 
-        // Calculate height needed
+        // Calculate height dynamically based on actual content
+        let phase_rows = state.phases.len().max(1) as u16;
+        let has_stats = state.cache_warm > 0 || state.cache_cold > 0;
+        let stats_rows = if has_stats { 1 } else { 0 };
         let output_lines = state.output_lines.len() as u16;
-        let stats_lines: u16 = 1 // shake
-            + if state.cache_warm > 0 || state.cache_cold > 0 { 1 } else { 0 };
-        let total_height = (3 // header + status + bar chart border
-            + 4  // bar chart content
-            + stats_lines
+        let total_height = (2 // header + status
+            + phase_rows
+            + stats_rows
             + 2  // output panel borders
             + output_lines.max(1))
             .min(30); // cap height
@@ -238,15 +239,18 @@ fn render_final_frame(
 ) {
     let area = frame.area();
 
-    // Split: header(1) + status(1) + phases(4) + stats(2) + output(rest)
+    // Dynamic heights based on content
+    let phase_rows = state.phases.len().max(1) as u16;
+    let has_stats = state.cache_warm > 0 || state.cache_cold > 0;
+    let stats_height = if has_stats { 1 } else { 0 };
     let output_height = state.output_lines.len().max(1) as u16 + 2; // +2 for border
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // Header
-            Constraint::Length(1), // Status
-            Constraint::Length(5), // Phase bars
-            Constraint::Length(2), // Stats
+            Constraint::Length(1),             // Header
+            Constraint::Length(1),             // Status
+            Constraint::Length(phase_rows),    // Phase bars (1 row per phase)
+            Constraint::Length(stats_height),  // Stats (0 if no cache info)
             Constraint::Min(output_height.min(15)), // Output panel
         ])
         .split(area);
