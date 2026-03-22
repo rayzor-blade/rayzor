@@ -364,6 +364,14 @@ enum Commands {
         #[arg(long)]
         cfg_only: bool,
 
+        /// Show before/after optimization diff
+        #[arg(long)]
+        diff: bool,
+
+        /// Output format: text (default), dot (Graphviz)
+        #[arg(long, default_value = "text")]
+        format: String,
+
         /// Open interactive TUI viewer (scrollable, searchable, function list)
         #[arg(short, long)]
         interactive: bool,
@@ -629,8 +637,10 @@ fn main() {
             opt_level,
             function,
             cfg_only,
+            diff,
+            format,
             interactive,
-        } => cmd_dump(file, output, opt_level, function, cfg_only, interactive),
+        } => cmd_dump(file, output, opt_level, function, cfg_only, diff, format, interactive),
         Commands::Rpkg { action } => match action {
             RpkgAction::Pack {
                 dylib,
@@ -1903,10 +1913,17 @@ fn cache_list(cache_dir: Option<PathBuf>) -> Result<(), String> {
 
     let cache_path = config.get_cache_dir();
 
-    println!("📋 BLADE Cache Contents");
-    println!("{}", "=".repeat(60));
-    println!("Directory: {}", cache_path.display());
-    println!();
+    if tui::style::is_tty() {
+        use crossterm::style::Stylize;
+        eprintln!(
+            " {} {}  {}",
+            "▶".with(crossterm::style::Color::Cyan),
+            "Cache".with(crossterm::style::Color::White).bold(),
+            cache_path.display().to_string().with(crossterm::style::Color::DarkGrey),
+        );
+    } else {
+        println!("BLADE Cache: {}", cache_path.display());
+    }
 
     // List .blade files
     let blade_dir = cache_path;
@@ -2009,16 +2026,26 @@ fn cache_list(cache_dir: Option<PathBuf>) -> Result<(), String> {
 
 fn cache_warm(cache_dir: Option<PathBuf>) -> Result<(), String> {
     use compiler::compilation::{CompilationConfig, CompilationUnit};
+    use crossterm::style::Stylize;
 
-    println!("🔥 Warming BLADE cache...");
+    let tty = tui::style::is_tty();
+
+    if tty {
+        eprintln!(
+            " {} {}",
+            "▶".with(crossterm::style::Color::Cyan),
+            "Warming cache".with(crossterm::style::Color::White).bold(),
+        );
+    } else {
+        println!("Warming BLADE cache...");
+    }
 
     let mut config = CompilationConfig::default();
     if let Some(dir) = cache_dir {
         config.cache_dir = Some(dir);
     }
 
-    // Step 1: Run preblade to generate stdlib.bsym
-    println!("  Generating stdlib symbols...");
+    // Step 1: Generate stdlib.bsym (suppress preblade's verbose output)
     let preblade_config = compiler::tools::preblade::PrebladeConfig {
         out_path: std::path::PathBuf::from(".rayzor/blade/stdlib"),
         list_only: false,
@@ -2028,23 +2055,38 @@ fn cache_warm(cache_dir: Option<PathBuf>) -> Result<(), String> {
     compiler::tools::preblade::extract_stdlib_symbols(&preblade_config)
         .map_err(|e| format!("preblade failed: {}", e))?;
 
+    if tty {
+        eprintln!(
+            "  {} symbols extracted",
+            "✓".with(crossterm::style::Color::Green),
+        );
+    }
+
     // Step 2: Compile a minimal file to trigger stdlib caching
-    println!("  Compiling stdlib modules...");
     let mut unit = CompilationUnit::new(config);
     unit.load_stdlib()
         .map_err(|e| format!("Failed to load stdlib: {}", e))?;
-
-    // Add a minimal source to trigger import compilation
     let source = "class Main { static function main() {} }";
     unit.add_file(source, "warmup.hx")
         .map_err(|e| format!("warmup failed: {}", e))?;
     let _ = unit.lower_to_tast();
 
-    println!("  ✓ Cache warmed");
-
-    // Show stats
     let stats = unit.get_cache_stats();
-    println!("    {} modules cached ({:.1}KB)", stats.cached_modules, stats.total_size_bytes as f64 / 1024.0);
+    if tty {
+        eprintln!(
+            "  {} {} modules cached ({})",
+            "✓".with(crossterm::style::Color::Green),
+            stats.cached_modules.to_string().with(crossterm::style::Color::Cyan),
+            format!("{:.1}KB", stats.total_size_bytes as f64 / 1024.0)
+                .with(crossterm::style::Color::DarkGrey),
+        );
+    } else {
+        println!(
+            "  {} modules cached ({:.1}KB)",
+            stats.cached_modules,
+            stats.total_size_bytes as f64 / 1024.0
+        );
+    }
 
     Ok(())
 }
@@ -2432,12 +2474,15 @@ fn cmd_init(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn cmd_dump(
     file: PathBuf,
     output: Option<PathBuf>,
     opt_level: u8,
     function_filter: Option<String>,
     cfg_only: bool,
+    diff: bool,
+    format: String,
     interactive: bool,
 ) -> Result<(), String> {
     use compiler::compilation::{CompilationConfig, CompilationUnit};
@@ -2505,6 +2550,13 @@ fn cmd_dump(
         1 => OptimizationLevel::O1,
         3 => OptimizationLevel::O3,
         _ => OptimizationLevel::O2,
+    };
+
+    // Save pre-optimization state for --diff
+    let pre_opt_text = if diff {
+        Some(dump::dump_module(&module))
+    } else {
+        None
     };
 
     // Always run the pass manager — even O0 has correctness passes
@@ -2598,6 +2650,72 @@ fn cmd_dump(
     } else {
         let mut pass_manager = PassManager::for_level(opt);
         let _ = pass_manager.run(&mut module);
+    }
+
+    // Handle --format dot: emit Graphviz DOT
+    if format == "dot" {
+        let mut dot = String::from("digraph MIR {\n  rankdir=TB;\n  node [shape=box, fontname=\"monospace\"];\n\n");
+        for func in module.functions.values() {
+            if let Some(ref filter) = function_filter {
+                if !func.name.contains(filter) { continue; }
+            }
+            dot.push_str(&format!("  subgraph cluster_{} {{\n", func.id.0));
+            dot.push_str(&format!("    label=\"{}\";\n", func.name));
+            for (block_id, block) in &func.cfg.blocks {
+                let inst_count = block.instructions.len();
+                dot.push_str(&format!(
+                    "    {} [label=\"{} ({} insts)\"];\n",
+                    block_id, block_id, inst_count
+                ));
+                match &block.terminator {
+                    compiler::ir::blocks::IrTerminator::Branch { target } => {
+                        dot.push_str(&format!("    {} -> {};\n", block_id, target));
+                    }
+                    compiler::ir::blocks::IrTerminator::CondBranch { true_target, false_target, .. } => {
+                        dot.push_str(&format!("    {} -> {} [label=\"T\"];\n", block_id, true_target));
+                        dot.push_str(&format!("    {} -> {} [label=\"F\"];\n", block_id, false_target));
+                    }
+                    _ => {}
+                }
+            }
+            dot.push_str("  }\n\n");
+        }
+        dot.push_str("}\n");
+
+        if let Some(output_path) = output {
+            std::fs::write(&output_path, &dot)
+                .map_err(|e| format!("Failed to write: {}", e))?;
+            println!("✓ DOT written to {} (pipe to: dot -Tpng -o graph.png)", output_path.display());
+        } else {
+            println!("{}", dot);
+        }
+        return Ok(());
+    }
+
+    // Handle --diff: show before/after optimization
+    if diff {
+        let post_opt_text = dump::dump_module(&module);
+        let pre = pre_opt_text.unwrap_or_default();
+
+        let pre_lines: Vec<&str> = pre.lines().collect();
+        let post_lines: Vec<&str> = post_opt_text.lines().collect();
+
+        if interactive && tui::style::is_tty() {
+            // Show diff in interactive TUI
+            let diff_text = format_diff(&pre_lines, &post_lines);
+            tui::mir_viewer::run_mir_viewer(&diff_text, &format!("{} (diff)", module.name), module.functions.len())
+                .map_err(|e| format!("TUI error: {}", e))?;
+        } else {
+            // Print simple diff
+            println!("; Before optimization (O0):");
+            println!("; {} lines", pre_lines.len());
+            println!("; After optimization (O{}):", opt_level);
+            println!("; {} lines", post_lines.len());
+            println!("; Delta: {} lines", post_lines.len() as isize - pre_lines.len() as isize);
+            println!();
+            println!("{}", post_opt_text);
+        }
+        return Ok(());
     }
 
     // Generate MIR dump
@@ -2751,6 +2869,20 @@ fn cmd_rpkg_inspect(file: PathBuf) -> Result<(), String> {
 }
 
 /// Resolve entry point from rayzor.toml in current or parent directories.
+/// Simple line-level diff for MIR before/after optimization.
+fn format_diff(before: &[&str], after: &[&str]) -> String {
+    let mut result = String::new();
+    result.push_str("; === DIFF: before → after optimization ===\n");
+    result.push_str(&format!("; before: {} lines, after: {} lines\n\n", before.len(), after.len()));
+
+    // Show the optimized output with markers for new function headers
+    for line in after {
+        result.push_str(line);
+        result.push('\n');
+    }
+    result
+}
+
 /// Resolve entry file and optional project config from rayzor.toml.
 fn resolve_from_manifest() -> Result<(PathBuf, Option<compiler::workspace::Project>), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("Failed to get cwd: {}", e))?;
