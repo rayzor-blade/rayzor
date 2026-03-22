@@ -245,7 +245,7 @@ fn render_final_frame(
         .constraints([
             Constraint::Length(1), // Header
             Constraint::Length(1), // Status
-            Constraint::Length(4), // Phase chart
+            Constraint::Length(5), // Phase bars
             Constraint::Length(2), // Stats
             Constraint::Min(output_height.min(15)), // Output panel
         ])
@@ -321,47 +321,71 @@ fn render_final_frame(
     };
     frame.render_widget(Paragraph::new(status), chunks[1]);
 
-    // ── Phase bar chart ──────────────────────────────────────
+    // ── Phase bars: label | bar | time ─────────────────────────
     if !state.phases.is_empty() {
-        let bars: Vec<Bar> = state
+        let max_ms = state
+            .phases
+            .iter()
+            .map(|p| p.duration_ms)
+            .fold(0.0_f64, f64::max);
+        let bar_max_width = (chunks[2].width as usize).saturating_sub(22); // 10 label + 10 time + 2 pad
+
+        let rows: Vec<Row> = state
             .phases
             .iter()
             .map(|p| {
-                Bar::default()
-                    .value(p.duration_ms.max(1.0) as u64)
-                    .label(Line::from(Span::styled(
-                        format!("{} {:.0}ms", p.name, p.duration_ms),
-                        Style::default().fg(Color::DarkGray),
-                    )))
-                    .style(Style::default().fg(p.color))
+                let frac = if max_ms > 0.0 {
+                    p.duration_ms / max_ms
+                } else {
+                    0.0
+                };
+                let bar_len = (frac * bar_max_width as f64).round().max(1.0) as usize;
+                let bar_str = "\u{2588}".repeat(bar_len);
+
+                Row::new(vec![
+                    Span::styled(
+                        format!(" {:>9}", p.name),
+                        Style::default().fg(Color::White),
+                    ),
+                    Span::styled(bar_str, Style::default().fg(p.color)),
+                    Span::styled(
+                        format!("{:>7.0}ms", p.duration_ms),
+                        Style::default()
+                            .fg(if p.duration_ms == max_ms {
+                                Color::White
+                            } else {
+                                Color::DarkGray
+                            })
+                            .add_modifier(if p.duration_ms == max_ms {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    ),
+                ])
             })
             .collect();
 
-        let bar_width =
-            (chunks[2].width as usize / state.phases.len().max(1)).clamp(8, 20) as u16;
-
-        let chart = BarChart::default()
-            .data(BarGroup::default().bars(&bars))
-            .bar_width(bar_width)
-            .bar_gap(1)
-            .value_style(
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD),
-            );
-
-        frame.render_widget(chart, chunks[2]);
+        let table = Table::new(
+            rows,
+            [
+                Constraint::Length(10),
+                Constraint::Min(10),
+                Constraint::Length(10),
+            ],
+        );
+        frame.render_widget(table, chunks[2]);
     }
 
     // ── Stats row ────────────────────────────────────────────
-    let mut stat_spans = Vec::new();
+    let mut stat_spans: Vec<Span> = Vec::new();
     if state.cache_warm > 0 || state.cache_cold > 0 {
         stat_spans.push(Span::styled(" cache ", Style::default().fg(Color::DarkGray)));
         stat_spans.push(Span::styled(
             format!("{} hit", state.cache_warm),
             Style::default().fg(Color::Green),
         ));
-        stat_spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+        stat_spans.push(Span::styled("  ", Style::default()));
         stat_spans.push(Span::styled(
             format!("{} miss", state.cache_cold),
             Style::default().fg(Color::Yellow),
