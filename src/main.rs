@@ -857,13 +857,21 @@ fn run_file(
 
     // Handle precompiled .rzb bundles (no TUI for these)
     if file.extension().is_some_and(|ext| ext == "rzb") {
-        tui::progress::print_run_banner(&file.display().to_string(), profile, &format!("{:?}", preset));
+        tui::progress::print_run_banner(
+            &file.display().to_string(),
+            profile,
+            &format!("{:?}", preset),
+        );
         return run_bundle(&file, verbose, stats, preset);
     }
 
     // Handle .hxml build files (no TUI for these)
     if file.extension().is_some_and(|ext| ext == "hxml") {
-        tui::progress::print_run_banner(&file.display().to_string(), profile, &format!("{:?}", preset));
+        tui::progress::print_run_banner(
+            &file.display().to_string(),
+            profile,
+            &format!("{:?}", preset),
+        );
         return build_from_hxml(&file, verbose, None, false);
     }
 
@@ -880,7 +888,11 @@ fn run_file(
         );
         Some(tui)
     } else {
-        tui::progress::print_run_banner(&file.display().to_string(), profile, &format!("{:?}", preset));
+        tui::progress::print_run_banner(
+            &file.display().to_string(),
+            profile,
+            &format!("{:?}", preset),
+        );
         None
     };
     let progress_tui_ref = progress_tui.map(Arc::new);
@@ -1010,7 +1022,9 @@ fn run_file(
                 if data.len() > 8 {
                     let stored_hash = u64::from_le_bytes(data[..8].try_into().unwrap());
                     if stored_hash == source_hash {
-                        if let Ok(module) = postcard::from_bytes::<compiler::ir::IrModule>(&data[8..]) {
+                        if let Ok(module) =
+                            postcard::from_bytes::<compiler::ir::IrModule>(&data[8..])
+                        {
                             if let Some(ref h) = progress_handle {
                                 h.end_phase("cached", 0.0);
                                 h.set_functions(module.functions.len());
@@ -1023,7 +1037,9 @@ fn run_file(
         }
 
         // Cache miss — full compile pipeline
-        if let Some(ref h) = progress_handle { h.begin_phase("compile"); }
+        if let Some(ref h) = progress_handle {
+            h.begin_phase("compile");
+        }
         let t_compile = std::time::Instant::now();
         let mut mir_module = compile_haxe_to_mir(
             &source,
@@ -1038,7 +1054,9 @@ fn run_file(
 
         // Tree-shake unused stdlib functions
         {
-            if let Some(ref h) = progress_handle { h.begin_phase("tree-shake"); }
+            if let Some(ref h) = progress_handle {
+                h.begin_phase("tree-shake");
+            }
             let t_shake = std::time::Instant::now();
             use compiler::ir::tree_shake;
             let before = mir_module.functions.len() + mir_module.extern_functions.len();
@@ -1061,7 +1079,9 @@ fn run_file(
 
         // Run O0 pass manager to expand Haxe `inline` functions and apply SRA
         if std::env::var("RAYZOR_RAW_MIR").is_err() {
-            if let Some(ref h) = progress_handle { h.begin_phase("optimize"); }
+            if let Some(ref h) = progress_handle {
+                h.begin_phase("optimize");
+            }
             let t_opt = std::time::Instant::now();
             use compiler::ir::optimization::{OptimizationLevel, PassManager};
             let mut pass_manager = PassManager::for_level(OptimizationLevel::O0);
@@ -1146,7 +1166,9 @@ fn run_file(
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)?;
 
     // Compile module with tiered JIT
-    if let Some(ref h) = progress_handle { h.begin_phase("jit"); }
+    if let Some(ref h) = progress_handle {
+        h.begin_phase("jit");
+    }
     let t_jit = std::time::Instant::now();
     backend.compile_module(mir_module)?;
     if let Some(ref h) = progress_handle {
@@ -1472,20 +1494,19 @@ fn build_from_hxml(
                     0,     // tier
                     false, // llvm
                     Preset::Application,
-                    false,          // cache flag
-                    None,           // cache_dir
-                    false,          // release
-                    false,          // compute
-                    Vec::new(),     // rpkg_files
-                    false,          // safety_warnings
-                    false,          // interactive
-                    Vec::new(),     // program_args
+                    false,      // cache flag
+                    None,       // cache_dir
+                    false,      // release
+                    false,      // compute
+                    Vec::new(), // rpkg_files
+                    false,      // safety_warnings
+                    false,      // interactive
+                    Vec::new(), // program_args
                 )
             }
             RayzorMode::Compile => {
                 let out = output.ok_or(
-                    "Compile mode requires output file. Use --rayzor-compile <output>"
-                        .to_string(),
+                    "Compile mode requires output file. Use --rayzor-compile <output>".to_string(),
                 )?;
                 println!("  Compiling to native binary: {}\n", out.display());
                 use compiler::codegen::aot_compiler::{AotCompiler, OutputFormat};
@@ -1496,7 +1517,11 @@ fn build_from_hxml(
                 };
                 let sources: Vec<String> = vec![main_file.to_string_lossy().to_string()];
                 let result = compiler.compile_c(&sources, &out)?;
-                println!("  Compiled: {} ({} bytes)", result.path.display(), result.code_size);
+                println!(
+                    "  Compiled: {} ({} bytes)",
+                    result.path.display(),
+                    result.code_size
+                );
                 Ok(())
             }
         }
@@ -2026,7 +2051,11 @@ fn cmd_init(
         }
         std::fs::create_dir_all(&dir).ok();
         init::init_from_hxml(hxml_path, &dir)?;
-        println!("Migrated {} to rayzor.toml at {}", hxml_path.display(), dir.display());
+        println!(
+            "Migrated {} to rayzor.toml at {}",
+            hxml_path.display(),
+            dir.display()
+        );
         return Ok(());
     }
 
@@ -2051,7 +2080,11 @@ fn cmd_init(
     if workspace {
         let member_list = members.unwrap_or_default();
         init::init_workspace(&project_name, &dir, &member_list)?;
-        println!("Initialized workspace '{}' at {}", project_name, dir.display());
+        println!(
+            "Initialized workspace '{}' at {}",
+            project_name,
+            dir.display()
+        );
         if member_list.is_empty() {
             println!("  Created: rayzor.toml, .rayzor/cache/, .gitignore");
             println!();
@@ -2074,7 +2107,9 @@ fn cmd_init(
         init::init_project(&project_name, &dir, tmpl)?;
         println!(
             "Initialized {} project '{}' at {}",
-            template, project_name, dir.display()
+            template,
+            project_name,
+            dir.display()
         );
         match tmpl {
             ProjectTemplate::App | ProjectTemplate::Benchmark => {
@@ -2094,7 +2129,10 @@ fn cmd_init(
                         }
                     })
                     .collect::<String>();
-                println!("  Created: rayzor.toml, src/{}.hx, .rayzor/cache/, .gitignore", class_name);
+                println!(
+                    "  Created: rayzor.toml, src/{}.hx, .rayzor/cache/, .gitignore",
+                    class_name
+                );
             }
             ProjectTemplate::Empty => {
                 println!("  Created: rayzor.toml, .rayzor/cache/, .gitignore");
