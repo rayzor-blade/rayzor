@@ -548,7 +548,7 @@ impl PipelineConfig {
         self.enable_flow_sensitive_analysis = false;
         self.enable_enhanced_flow_analysis = false;
         self.enable_memory_safety_analysis = false;
-        self.enable_macro_expansion = false;
+        // NOTE: macro expansion is NOT disabled — it's a correctness feature, not analysis
         self.collect_statistics = false;
         self
     }
