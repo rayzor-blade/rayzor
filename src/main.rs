@@ -1125,8 +1125,6 @@ fn run_file(
         let capture = output_capture.clone();
         rayzor_runtime::haxe_sys::set_trace_callback(Some(Box::new(move |msg: &str| {
             capture.lock().unwrap().push(msg.to_string());
-            // Still print to stdout so piped output works
-            println!("{}", msg);
         })));
     }
 
