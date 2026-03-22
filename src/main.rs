@@ -2163,13 +2163,28 @@ fn cmd_dump(
     let source =
         std::fs::read_to_string(&file).map_err(|e| format!("Failed to read file: {}", e))?;
 
+    // Try loading manifest for class paths
+    let manifest_class_paths: Vec<std::path::PathBuf> = {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        compiler::workspace::find_project_root(&cwd)
+            .and_then(|root| compiler::workspace::load_project(&root).ok())
+            .map(|p| p.resolved_class_paths())
+            .unwrap_or_default()
+    };
+
     // Create compilation unit
-    let config = CompilationConfig {
+    let mut config = CompilationConfig {
         load_stdlib: true,
         ..Default::default()
     };
+    config.pipeline_config = config.pipeline_config.skip_analysis();
 
     let mut unit = CompilationUnit::new(config);
+
+    // Add class paths from manifest
+    for dir in &manifest_class_paths {
+        unit.add_source_path(dir.clone());
+    }
 
     // Load stdlib
     unit.load_stdlib()
