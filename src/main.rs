@@ -19,6 +19,8 @@
 //! rayzor compile --show-ir Main.hx
 //! ```
 
+mod tui;
+
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 use std::process;
@@ -809,7 +811,7 @@ fn run_bundle(file: &Path, verbose: bool, stats: bool, preset: Preset) -> Result
 
     backend.shutdown();
 
-    println!("✓ Complete");
+    // Execution complete — no banner needed, output speaks for itself
     Ok(())
 }
 
@@ -844,11 +846,10 @@ fn run_file(
         .unwrap_or_default();
 
     let profile = if release { "release" } else { "debug" };
-    println!(
-        "🚀 Running {} [{}] [preset: {:?}]...",
-        file.display(),
+    tui::progress::print_run_banner(
+        &file.display().to_string(),
         profile,
-        preset
+        &format!("{:?}", preset),
     );
 
     // Handle precompiled .rzb bundles
@@ -977,7 +978,7 @@ fn run_file(
         mir_module = modules.into_iter().next().unwrap();
         let after = mir_module.functions.len() + mir_module.extern_functions.len();
         if verbose {
-            println!("  shake    {} → {} functions", before, after);
+            tui::progress::print_shake_summary(before, after);
         }
     }
 
@@ -990,7 +991,7 @@ fn run_file(
 
     let total_functions = mir_module.functions.len();
     if verbose {
-        println!("  parse    {} ({} decls)", file.display(), total_functions);
+        tui::style::print_kv("parse", &format!("{} ({} decls)", file.display(), total_functions));
     }
 
     if total_functions == 0 {
@@ -1060,10 +1061,7 @@ fn run_file(
             + backend_stats.standard_functions
             + backend_stats.optimized_functions
             + backend_stats.llvm_functions;
-        println!(
-            "  jit      {} functions compiled (preset: {:?})",
-            compiled, preset
-        );
+        tui::style::print_kv("jit", &format!("{} functions compiled (preset: {:?})", compiled, preset));
     }
 
     // Show stats if requested
@@ -1102,7 +1100,7 @@ fn run_file(
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    println!("✓ Complete");
+    // Execution complete — no banner needed, output speaks for itself
     Ok(())
 }
 
