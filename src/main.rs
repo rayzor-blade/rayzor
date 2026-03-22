@@ -24,6 +24,7 @@ mod tui;
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::{Arc, Mutex};
 
 #[derive(Parser)]
 #[command(name = "rayzor")]
@@ -859,8 +860,9 @@ fn run_file(
         return build_from_hxml(&file, verbose, None, false);
     }
 
-    // Launch live TUI for verbose compilation, simple banner otherwise
-    let progress_tui = if verbose && tui::style::is_tty() {
+    // Launch live TUI when running in a terminal (alternate screen with progress)
+    // Falls back to plain banner when piped or --quiet
+    let progress_tui = if tui::style::is_tty() {
         let tui = tui::progress::ProgressTui::new(
             &file.display().to_string(),
             profile,
@@ -871,9 +873,11 @@ fn run_file(
         tui::progress::print_run_banner(&file.display().to_string(), profile, &format!("{:?}", preset));
         None
     };
-    let progress_handle = progress_tui.as_ref().map(|t| t.handle());
-    // Start TUI render thread
-    let tui_thread = progress_tui.map(|tui| {
+    let progress_tui_ref = progress_tui.map(Arc::new);
+    let progress_handle = progress_tui_ref.as_ref().map(|t| t.handle());
+    // Start spinner thread
+    let tui_thread = progress_tui_ref.as_ref().map(|tui| {
+        let tui = tui.clone();
         std::thread::spawn(move || {
             let _ = tui.run();
         })
@@ -975,7 +979,7 @@ fn run_file(
     }
 
     // Compile source file to MIR (with plugins registered)
-    if let Some(ref h) = progress_handle { h.begin_phase("frontend"); }
+    if let Some(ref h) = progress_handle { h.begin_phase("compile"); }
     let t_compile = std::time::Instant::now();
     let mut mir_module = compile_haxe_to_mir(
         &source,
@@ -985,7 +989,7 @@ fn run_file(
         safety_warnings,
     )?;
     if let Some(ref h) = progress_handle {
-        h.end_phase("frontend", t_compile.elapsed().as_secs_f64() * 1000.0);
+        h.end_phase("compile", t_compile.elapsed().as_secs_f64() * 1000.0);
     }
 
     // Tree-shake unused stdlib functions before optimization
@@ -1092,21 +1096,12 @@ fn run_file(
     backend.compile_module(mir_module)?;
     if let Some(ref h) = progress_handle {
         h.end_phase("jit", t_jit.elapsed().as_secs_f64() * 1000.0);
-        // Signal TUI to finish before execution starts (output goes to stdout)
+        // Stop spinner before execution (output goes to stdout)
         h.finish();
     }
-    // Wait for TUI thread to exit and restore terminal before execution
+    // Wait for spinner thread to stop
     if let Some(handle) = tui_thread {
         let _ = handle.join();
-    }
-
-    // Show stats if requested
-    if stats {
-        let backend_stats = backend.get_statistics();
-        println!("  tier 0   {} functions", backend_stats.baseline_functions);
-        println!("  tier 1   {} functions", backend_stats.standard_functions);
-        println!("  tier 2   {} functions", backend_stats.optimized_functions);
-        println!("  tier 3   {} functions", backend_stats.llvm_functions);
     }
 
     // Execute init functions before main
@@ -1124,19 +1119,42 @@ fn run_file(
     // Initialize Sys.args() before running Haxe code
     rayzor_runtime::haxe_sys::init_program_args(&program_args);
 
+    // Capture program output by intercepting trace
+    let output_capture: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    if progress_tui_ref.is_some() {
+        let capture = output_capture.clone();
+        rayzor_runtime::haxe_sys::set_trace_callback(Some(Box::new(move |msg: &str| {
+            capture.lock().unwrap().push(msg.to_string());
+            // Still print to stdout so piped output works
+            println!("{}", msg);
+        })));
+    }
+
     // Execute main function
     backend
         .execute_function(main_func_id, vec![])
         .map_err(|e| format!("Execution failed: {}", e))?;
 
+    // Remove trace callback
+    rayzor_runtime::haxe_sys::set_trace_callback(None);
+
     backend.shutdown();
+
+    // Render final TUI with output panel
+    if let Some(ref tui) = progress_tui_ref {
+        let captured = output_capture.lock().unwrap();
+        let handle = tui.handle();
+        for line in captured.iter() {
+            handle.add_output_line(line.clone());
+        }
+        let _ = tui.render_final();
+    }
 
     // Clean up temp dirs from rpkg haxe sources (NOT manifest class paths)
     for dir in &rpkg_temp_dirs {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    // Execution complete — no banner needed, output speaks for itself
     Ok(())
 }
 

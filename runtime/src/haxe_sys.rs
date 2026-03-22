@@ -6,6 +6,7 @@ use log::debug;
 use std::cell::RefCell;
 use std::io::{self, Write};
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Mutex;
 
 // Use the canonical HaxeString definition from haxe_string module
 use crate::haxe_string::HaxeString;
@@ -15,6 +16,7 @@ const TRACE_STATE_ENABLED: u8 = 1;
 const TRACE_STATE_DISABLED: u8 = 2;
 
 static TRACE_STATE: AtomicU8 = AtomicU8::new(TRACE_STATE_UNINITIALIZED);
+static TRACE_CALLBACK: Mutex<Option<Box<dyn Fn(&str) + Send>>> = Mutex::new(None);
 
 // Thread-local trace prefix for identifying which backend owns the output
 thread_local! {
@@ -89,9 +91,24 @@ pub fn trace_enabled() -> bool {
     }
 }
 
+/// Set a callback that receives every trace message.
+/// The callback receives the message WITHOUT the prefix.
+/// Set to None to remove the callback.
+pub fn set_trace_callback(cb: Option<Box<dyn Fn(&str) + Send>>) {
+    *TRACE_CALLBACK.lock().unwrap() = cb;
+}
+
 fn print_with_prefix(msg: &str) {
     if !trace_enabled() {
         return;
+    }
+
+    // Invoke callback if set
+    if let Ok(cb) = TRACE_CALLBACK.lock() {
+        if let Some(ref callback) = *cb {
+            callback(msg);
+            return;
+        }
     }
 
     TRACE_PREFIX.with(|p| {
