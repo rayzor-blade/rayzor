@@ -161,7 +161,7 @@ impl ProgressTui {
             + stats_rows
             + 2  // output panel borders
             + output_lines.max(1))
-            .min(30); // cap height
+        .min(30); // cap height
 
         // Use ratatui inline viewport
         terminal::enable_raw_mode()?;
@@ -266,8 +266,7 @@ impl ProgressTui {
                                 app.scroll_offset = 0;
                             }
                             KeyCode::End | KeyCode::Char('G') => {
-                                app.scroll_offset =
-                                    app.state.output_lines.len().saturating_sub(1);
+                                app.scroll_offset = app.state.output_lines.len().saturating_sub(1);
                             }
                             KeyCode::Char('n') => {
                                 // Next search match
@@ -318,7 +317,7 @@ impl InteractiveApp {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(stats_height),
-                Constraint::Min(5),  // Output
+                Constraint::Min(5),    // Output
                 Constraint::Length(1), // Status bar
             ])
             .split(area);
@@ -331,31 +330,61 @@ impl InteractiveApp {
                 .constraints([
                     Constraint::Length(1), // Header
                     Constraint::Length(1), // Status
-                    Constraint::Min(1),   // Phase bars
+                    Constraint::Min(1),    // Phase bars
                 ])
                 .split(stats_area);
 
             // Header
             let header = Line::from(vec![
-                Span::styled(" ▶ rayzor ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::styled(self.state.file.as_str(), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " ▶ rayzor ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    self.state.file.as_str(),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::raw("  "),
-                Span::styled(format!("[{}]", self.state.profile), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    format!("[{}]", self.state.profile),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ]);
             frame.render_widget(Paragraph::new(header), stats_chunks[0]);
 
             // Status
             let total_ms = self.elapsed.as_secs_f64() * 1000.0;
             let mut status_spans = vec![
-                Span::styled(" ✓ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("{:.0}ms", total_ms), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::styled(format!("  {} functions", self.state.total_functions), Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    " ✓ ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("{:.0}ms", total_ms),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!("  {} functions", self.state.total_functions),
+                    Style::default().fg(Color::DarkGray),
+                ),
             ];
             if self.state.shake_before > self.state.shake_after && self.state.shake_before > 0 {
                 let pct = ((self.state.shake_before - self.state.shake_after) as f64
-                    / self.state.shake_before as f64 * 100.0) as usize;
+                    / self.state.shake_before as f64
+                    * 100.0) as usize;
                 status_spans.push(Span::styled(
-                    format!("  ({} → {}, {}% stripped)", self.state.shake_before, self.state.shake_after, pct),
+                    format!(
+                        "  ({} → {}, {}% stripped)",
+                        self.state.shake_before, self.state.shake_after, pct
+                    ),
                     Style::default().fg(Color::DarkGray),
                 ));
             }
@@ -363,21 +392,46 @@ impl InteractiveApp {
 
             // Phase bars
             if !self.state.phases.is_empty() {
-                let max_ms = self.state.phases.iter().map(|p| p.duration_ms).fold(0.0_f64, f64::max);
+                let max_ms = self
+                    .state
+                    .phases
+                    .iter()
+                    .map(|p| p.duration_ms)
+                    .fold(0.0_f64, f64::max);
                 let bar_max = (stats_chunks[2].width as usize).saturating_sub(22).min(40);
-                let rows: Vec<Row> = self.state.phases.iter().map(|p| {
-                    let frac = if max_ms > 0.0 { p.duration_ms / max_ms } else { 0.0 };
-                    let bar_len = (frac * bar_max as f64).round().max(1.0) as usize;
-                    Row::new(vec![
-                        Line::from(Span::styled(format!(" {:>9} ", p.name), Style::default().fg(Color::White))),
-                        Line::from(vec![
-                            Span::styled("\u{2588}".repeat(bar_len), Style::default().fg(p.color)),
-                            Span::styled(format!(" {:.0}ms", p.duration_ms), Style::default().fg(
-                                if p.duration_ms == max_ms { Color::White } else { Color::DarkGray }
+                let rows: Vec<Row> = self
+                    .state
+                    .phases
+                    .iter()
+                    .map(|p| {
+                        let frac = if max_ms > 0.0 {
+                            p.duration_ms / max_ms
+                        } else {
+                            0.0
+                        };
+                        let bar_len = (frac * bar_max as f64).round().max(1.0) as usize;
+                        Row::new(vec![
+                            Line::from(Span::styled(
+                                format!(" {:>9} ", p.name),
+                                Style::default().fg(Color::White),
                             )),
-                        ]),
-                    ])
-                }).collect();
+                            Line::from(vec![
+                                Span::styled(
+                                    "\u{2588}".repeat(bar_len),
+                                    Style::default().fg(p.color),
+                                ),
+                                Span::styled(
+                                    format!(" {:.0}ms", p.duration_ms),
+                                    Style::default().fg(if p.duration_ms == max_ms {
+                                        Color::White
+                                    } else {
+                                        Color::DarkGray
+                                    }),
+                                ),
+                            ]),
+                        ])
+                    })
+                    .collect();
                 let table = Table::new(rows, [Constraint::Length(11), Constraint::Min(10)]);
                 frame.render_widget(table, stats_chunks[2]);
             }
@@ -388,9 +442,14 @@ impl InteractiveApp {
         let visible_height = output_area.height.saturating_sub(2) as usize; // -2 for borders
 
         let output_lines: Vec<Line> = if self.state.output_lines.is_empty() {
-            vec![Line::from(Span::styled("(no output)", Style::default().fg(Color::DarkGray)))]
+            vec![Line::from(Span::styled(
+                "(no output)",
+                Style::default().fg(Color::DarkGray),
+            ))]
         } else {
-            self.state.output_lines.iter()
+            self.state
+                .output_lines
+                .iter()
                 .skip(self.scroll_offset)
                 .take(visible_height)
                 .map(|l| {
@@ -412,31 +471,78 @@ impl InteractiveApp {
         };
 
         let output_block = Block::default()
-            .title(Span::styled(" output ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)))
-            .title_bottom(Line::from(Span::styled(scroll_info, Style::default().fg(Color::DarkGray))).right_aligned())
+            .title(Span::styled(
+                " output ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ))
+            .title_bottom(
+                Line::from(Span::styled(
+                    scroll_info,
+                    Style::default().fg(Color::DarkGray),
+                ))
+                .right_aligned(),
+            )
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::DarkGray));
 
-        frame.render_widget(Paragraph::new(output_lines).block(output_block), output_area);
+        frame.render_widget(
+            Paragraph::new(output_lines).block(output_block),
+            output_area,
+        );
 
         // ── Status bar ───────────────────────────────────────
         let status_bar = if self.search_mode {
             Line::from(vec![
-                Span::styled(" /", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::styled(self.search_query.as_str(), Style::default().fg(Color::White)),
+                Span::styled(
+                    " /",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    self.search_query.as_str(),
+                    Style::default().fg(Color::White),
+                ),
                 Span::styled("▏", Style::default().fg(Color::Yellow)),
             ])
         } else {
             Line::from(vec![
-                Span::styled(" q", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " q",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" quit  ", Style::default().fg(Color::DarkGray)),
-                Span::styled("/", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "/",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" search  ", Style::default().fg(Color::DarkGray)),
-                Span::styled("s", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "s",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" stats  ", Style::default().fg(Color::DarkGray)),
-                Span::styled("↑↓", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "↑↓",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" scroll  ", Style::default().fg(Color::DarkGray)),
-                Span::styled("n", Style::default().fg(Color::DarkGray).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "n",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" next match", Style::default().fg(Color::DarkGray)),
             ])
         };
@@ -549,11 +655,7 @@ impl ProgressHandle {
 
 // ── Final frame render ───────────────────────────────────────────
 
-fn render_final_frame(
-    frame: &mut ratatui::Frame,
-    state: &CompilationState,
-    elapsed: Duration,
-) {
+fn render_final_frame(frame: &mut ratatui::Frame, state: &CompilationState, elapsed: Duration) {
     let area = frame.area();
 
     // Dynamic heights based on content
@@ -564,10 +666,10 @@ fn render_final_frame(
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),             // Header
-            Constraint::Length(1),             // Status
-            Constraint::Length(phase_rows),    // Phase bars (1 row per phase)
-            Constraint::Length(stats_height),  // Stats (0 if no cache info)
+            Constraint::Length(1),                  // Header
+            Constraint::Length(1),                  // Status
+            Constraint::Length(phase_rows),         // Phase bars (1 row per phase)
+            Constraint::Length(stats_height),       // Stats (0 if no cache info)
             Constraint::Min(output_height.min(15)), // Output panel
         ])
         .split(area);
@@ -600,9 +702,7 @@ fn render_final_frame(
         Line::from(vec![
             Span::styled(
                 " ✗ ",
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
             Span::styled(err.as_str(), Style::default().fg(Color::Red)),
         ])
@@ -689,20 +789,17 @@ fn render_final_frame(
             })
             .collect();
 
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Length(11),
-                Constraint::Min(10),
-            ],
-        );
+        let table = Table::new(rows, [Constraint::Length(11), Constraint::Min(10)]);
         frame.render_widget(table, chunks[2]);
     }
 
     // ── Stats row ────────────────────────────────────────────
     let mut stat_spans: Vec<Span> = Vec::new();
     if state.cache_warm > 0 || state.cache_cold > 0 {
-        stat_spans.push(Span::styled(" cache ", Style::default().fg(Color::DarkGray)));
+        stat_spans.push(Span::styled(
+            " cache ",
+            Style::default().fg(Color::DarkGray),
+        ));
         stat_spans.push(Span::styled(
             format!("{} hit", state.cache_warm),
             Style::default().fg(Color::Green),
@@ -760,8 +857,7 @@ fn print_plain_summary(state: &CompilationState, _elapsed: Duration) {
         eprintln!("  {}", parts.join(" → "));
     }
     if state.shake_before > state.shake_after && state.shake_before > 0 {
-        let pct = ((state.shake_before - state.shake_after) as f64
-            / state.shake_before as f64
+        let pct = ((state.shake_before - state.shake_after) as f64 / state.shake_before as f64
             * 100.0) as usize;
         eprintln!(
             "  shake: {} → {} ({}% removed)",
@@ -801,16 +897,11 @@ pub fn print_shake_summary(before: usize, after: usize) {
         eprintln!(
             "  {} {} → {} functions ({}% stripped)",
             "shake".with(crossterm::style::Color::DarkGrey),
-            before
-                .to_string()
-                .with(crossterm::style::Color::DarkGrey),
+            before.to_string().with(crossterm::style::Color::DarkGrey),
             after.to_string().with(crossterm::style::Color::Green),
             pct,
         );
     } else {
-        eprintln!(
-            "  shake: {} → {} ({}% removed)",
-            before, after, pct
-        );
+        eprintln!("  shake: {} → {} ({}% removed)", before, after, pct);
     }
 }

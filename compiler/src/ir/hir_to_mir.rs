@@ -12032,7 +12032,8 @@ impl<'a> HirToMirContext<'a> {
                             let tt = self.type_table;
                             tt.get(arg.ty).map(|ti| ti.kind.clone())
                         };
-                        let is_array = matches!(hir_type_kind.as_ref(), Some(TypeKind::Array { .. }));
+                        let is_array =
+                            matches!(hir_type_kind.as_ref(), Some(TypeKind::Array { .. }));
 
                         if is_array {
                             let arg_reg = self.lower_expression(arg)?;
@@ -20117,7 +20118,9 @@ impl<'a> HirToMirContext<'a> {
             IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void) => {
                 // Ptr(Void) could be Array, Class, or DynBox.
                 // Check register_class_hints to detect Array pointers.
-                let is_array = self.register_class_hints.get(&value)
+                let is_array = self
+                    .register_class_hints
+                    .get(&value)
                     .map(|h| h == "Array")
                     .unwrap_or(false);
                 if is_array {

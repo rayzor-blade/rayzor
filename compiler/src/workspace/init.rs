@@ -345,12 +345,7 @@ pub fn detect_existing_sources(dir: &Path) -> Option<(String, Vec<String>)> {
                 .unwrap_or(false)
         })
         .map(|p| format!("src/{}", p.file_name().unwrap().to_string_lossy()))
-        .unwrap_or_else(|| {
-            format!(
-                "src/{}",
-                hx_files[0].file_name().unwrap().to_string_lossy()
-            )
-        });
+        .unwrap_or_else(|| format!("src/{}", hx_files[0].file_name().unwrap().to_string_lossy()));
 
     Some((entry, vec!["src".to_string()]))
 }
