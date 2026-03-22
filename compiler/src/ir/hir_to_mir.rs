@@ -2177,9 +2177,12 @@ impl<'a> HirToMirContext<'a> {
         // This ensures function_map is fully populated before any calls are made
 
         // Pass 1a: Register class method signatures
+        eprintln!("[PASS1] {} types in HIR module '{}'", hir_module.types.len(), hir_module.name);
         for (type_id, type_decl) in &hir_module.types {
             match type_decl {
                 HirTypeDecl::Class(class) => {
+                    let cname = self.string_interner.get(class.name).unwrap_or("?");
+                    eprintln!("[PASS1] class={} ctor={} methods={}", cname, class.constructor.is_some(), class.methods.len());
                     // eprintln!(
                     //     "DEBUG Pass1a: Registering methods for class {:?}",
                     //     self.string_interner.get(class.name).unwrap_or("<unknown>")
@@ -2724,7 +2727,12 @@ impl<'a> HirToMirContext<'a> {
                 .get(param.name)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("param_{}", param.symbol_id.as_raw()));
-            sig_builder = sig_builder.param(param_name, self.convert_type(param.ty));
+            let ir_ty = self.convert_type(param.ty);
+            let kind = self.type_table.get(param.ty).map(|t| format!("{:?}", t.kind));
+            eprintln!("[CTOR_TP] {}.new param={} ty={:?} kind={:?} → {:?}",
+                self.string_interner.get(self.symbol_table.get_symbol(class_symbol).unwrap().name).unwrap_or("?"),
+                param_name, param.ty, kind, ir_ty);
+            sig_builder = sig_builder.param(param_name, ir_ty);
         }
 
         let mut signature = sig_builder.returns(IrType::Void).build();
@@ -2770,12 +2778,13 @@ impl<'a> HirToMirContext<'a> {
         constructor: &HirConstructor,
         type_id: TypeId,
     ) {
+        let class_name = self.symbol_table.get_symbol(class_symbol)
+            .and_then(|s| self.string_interner.get(s.name))
+            .unwrap_or("?");
         // Constructor signature: takes implicit 'this' parameter + constructor params, returns void
         // 'this' is always a pointer to the class instance, regardless of generic parameters
         let this_type = match self.convert_type(type_id) {
             IrType::Ptr(_) => IrType::Ptr(Box::new(IrType::Void)),
-            // If convert_type failed to resolve (e.g., generic class without instantiation),
-            // default to pointer since 'this' is always a pointer to instance
             _ => IrType::Ptr(Box::new(IrType::Void)),
         };
         let mut sig_builder = FunctionSignatureBuilder::new().param("this".to_string(), this_type);
@@ -2787,7 +2796,10 @@ impl<'a> HirToMirContext<'a> {
                 .get(param.name)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("param_{}", param.symbol_id.as_raw()));
-            sig_builder = sig_builder.param(param_name, self.convert_type(param.ty));
+            let ir_type = self.convert_type(param.ty);
+            let kind = self.type_table.get(param.ty).map(|t| format!("{:?}", t.kind));
+            eprintln!("[CTOR_REG] {}.new({}) ty={:?} kind={:?} → {:?}", class_name, param_name, param.ty, kind, ir_type);
+            sig_builder = sig_builder.param(param_name, ir_type);
         }
 
         let mut signature = sig_builder.returns(IrType::Void).build();
@@ -3762,7 +3774,11 @@ impl<'a> HirToMirContext<'a> {
                 .get(param.name)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("param_{}", param.symbol_id.as_raw()));
-            sig_builder = sig_builder.param(param_name, self.convert_type(param.ty));
+            let ir_type = self.convert_type(param.ty);
+            let type_kind = self.type_table.get(param.ty).map(|t| format!("{:?}", t.kind));
+            eprintln!("[CTOR] {}.new param={} ty={:?} kind={:?} ir={:?}",
+                self.builder.module.source_file, param_name, param.ty, type_kind, ir_type);
+            sig_builder = sig_builder.param(param_name, ir_type);
         }
 
         // Constructor returns void
