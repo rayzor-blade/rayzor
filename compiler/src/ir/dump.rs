@@ -333,13 +333,8 @@ pub fn dump_instruction(inst: &IrInstruction) -> String {
             aggregate,
             indices,
         } => {
-            let idx: Vec<String> = indices.iter().map(|i| format!("{}", i)).collect();
-            format!(
-                "{} = extract_value {}, [{}]",
-                dest,
-                aggregate,
-                idx.join(", ")
-            )
+            let fields: String = indices.iter().map(|i| format!(".{}", i)).collect();
+            format!("{} = {}{}", dest, aggregate, fields)
         }
         IrInstruction::InsertValue {
             dest,
@@ -394,13 +389,19 @@ pub fn dump_instruction(inst: &IrInstruction) -> String {
             value,
             ty,
         } => {
-            let type_name = match ty {
-                IrType::Union { name, .. } => name.clone(),
-                _ => dump_type(ty),
+            let (type_name, variant_name) = match ty {
+                IrType::Union { name, variants } => {
+                    let vname = variants
+                        .get(*discriminant as usize)
+                        .map(|v| v.name.as_str())
+                        .unwrap_or("?");
+                    (name.as_str(), vname)
+                }
+                _ => ("?", "?"),
             };
             format!(
-                "{} = create_union {}(discriminant={}, value={})",
-                dest, type_name, discriminant, value
+                "{} = union {} {{ {}: {} }}",
+                dest, type_name, variant_name, value
             )
         }
         IrInstruction::CreateStruct { dest, ty, fields } => {
@@ -410,14 +411,14 @@ pub fn dump_instruction(inst: &IrInstruction) -> String {
             };
             let field_strs: Vec<String> = fields.iter().map(|f| format!("{}", f)).collect();
             format!(
-                "{} = create_struct {}({})",
+                "{} = struct {} {{ {} }}",
                 dest,
                 type_name,
                 field_strs.join(", ")
             )
         }
         IrInstruction::ExtractDiscriminant { dest, union_val } => {
-            format!("{} = extract_discriminant {}", dest, union_val)
+            format!("{} = discriminant {}", dest, union_val)
         }
         IrInstruction::ExtractUnionValue {
             dest,
@@ -426,42 +427,66 @@ pub fn dump_instruction(inst: &IrInstruction) -> String {
             value_ty,
         } => {
             format!(
-                "{} = extract_union_value {} {} (discriminant={})",
+                "{} = extract {} {} .{}",
                 dest,
                 dump_type(value_ty),
                 union_val,
                 discriminant
             )
         }
+        IrInstruction::FunctionRef { dest, func_id } => {
+            format!("{} = fn_ref @fn{}", dest, func_id.0)
+        }
         IrInstruction::VectorBinOp {
             dest, op, left, right, vec_ty,
         } => {
-            format!("{} = vec_{:?} {}, {} ({})", dest, op, left, right, dump_type(vec_ty))
+            let prefix = vec_type_prefix(vec_ty);
+            format!("{} = {}.{} {}, {}", dest, prefix, format!("{:?}", op).to_lowercase(), left, right)
         }
         IrInstruction::VectorUnaryOp {
             dest, op, operand, vec_ty,
         } => {
-            format!("{} = vec_{:?} {} ({})", dest, op, operand, dump_type(vec_ty))
+            let prefix = vec_type_prefix(vec_ty);
+            format!("{} = {}.{} {}", dest, prefix, format!("{:?}", op).to_lowercase(), operand)
         }
         IrInstruction::VectorSplat {
             dest, scalar, vec_ty,
         } => {
-            format!("{} = vec_splat {} ({})", dest, scalar, dump_type(vec_ty))
+            let prefix = vec_type_prefix(vec_ty);
+            format!("{} = {}.splat {}", dest, prefix, scalar)
         }
         IrInstruction::VectorExtract {
             dest, vector, index,
         } => {
-            format!("{} = vec_extract {}[{}]", dest, vector, index)
+            format!("{} = simd4f.extract {}[{}]", dest, vector, index)
         }
         IrInstruction::VectorInsert {
             dest, vector, scalar, index,
         } => {
-            format!("{} = vec_insert {}, {}[{}]", dest, vector, scalar, index)
+            format!("{} = simd4f.insert {}[{}], {}", dest, vector, index, scalar)
         }
         IrInstruction::VectorReduce {
-            dest, op, vector,
+            dest, op, vector, ..
         } => {
-            format!("{} = vec_reduce_{:?} {}", dest, op, vector)
+            format!("{} = simd4f.reduce.{} {}", dest, format!("{:?}", op).to_lowercase(), vector)
+        }
+        IrInstruction::VectorLoad {
+            dest, ptr, vec_ty,
+        } => {
+            let prefix = vec_type_prefix(vec_ty);
+            format!("{} = {}.load {}", dest, prefix, ptr)
+        }
+        IrInstruction::VectorStore {
+            ptr, value, vec_ty,
+        } => {
+            let prefix = vec_type_prefix(vec_ty);
+            format!("{}.store {}, {}", prefix, ptr, value)
+        }
+        IrInstruction::VectorMinMax {
+            dest, op, left, right, vec_ty,
+        } => {
+            let prefix = vec_type_prefix(vec_ty);
+            format!("{} = {}.{} {}, {}", dest, prefix, format!("{:?}", op).to_lowercase(), left, right)
         }
         _ => format!("{:?}", inst),
     }
@@ -511,6 +536,23 @@ pub fn dump_terminator(term: &IrTerminator) -> String {
 }
 
 /// Dump a type to a string.
+/// Get a SIMD type prefix like "simd4f", "simd4i" from a vector type.
+fn vec_type_prefix(ty: &IrType) -> String {
+    match ty {
+        IrType::Vector { element, count } => {
+            let elem = match element.as_ref() {
+                IrType::F32 => "f",
+                IrType::F64 => "d",
+                IrType::I32 => "i",
+                IrType::I64 => "l",
+                _ => "x",
+            };
+            format!("simd{}{}", count, elem)
+        }
+        _ => "simd".to_string(),
+    }
+}
+
 pub fn dump_type(ty: &IrType) -> String {
     match ty {
         IrType::Void => "void".to_string(),
