@@ -12027,6 +12027,27 @@ impl<'a> HirToMirContext<'a> {
 
                         let arg_type = self.convert_type(arg.ty);
 
+                        // Check HIR type for Array (TypeKind::Array maps to Ptr in MIR)
+                        let hir_type_kind = {
+                            let tt = self.type_table;
+                            tt.get(arg.ty).map(|ti| ti.kind.clone())
+                        };
+                        let is_array = matches!(hir_type_kind.as_ref(), Some(TypeKind::Array { .. }));
+
+                        if is_array {
+                            let arg_reg = self.lower_expression(arg)?;
+                            let conv_fn = self.get_or_register_extern_function(
+                                "haxe_array_to_string",
+                                vec![IrType::Ptr(Box::new(IrType::Void))],
+                                IrType::Ptr(Box::new(IrType::String)),
+                            );
+                            return self.builder.build_call_direct(
+                                conv_fn,
+                                vec![arg_reg],
+                                IrType::Ptr(Box::new(IrType::String)),
+                            );
+                        }
+
                         // Determine which MIR wrapper function to call based on type
                         // These wrappers call the extern runtime functions
                         let mir_wrapper = match arg_type {
@@ -12034,8 +12055,7 @@ impl<'a> HirToMirContext<'a> {
                             IrType::F32 | IrType::F64 => "float_to_string",
                             IrType::Bool => "bool_to_string",
                             IrType::String => "string_to_string",
-                            // TODO: Handle null explicitly, handle Dynamic with runtime dispatch
-                            _ => "int_to_string", // Fallback - will need Dynamic support later
+                            _ => "int_to_string",
                         };
 
                         debug!(
@@ -20036,6 +20056,22 @@ impl<'a> HirToMirContext<'a> {
         from_type: &IrType,
         hir_type_id: Option<crate::tast::TypeId>,
     ) -> Option<IrId> {
+        // Check HIR type for Array (maps to Ptr(Void) in MIR, indistinguishable from Dynamic)
+        if let Some(type_id) = hir_type_id {
+            let type_kind = self.type_table.get(type_id).map(|ti| ti.kind.clone());
+            if matches!(type_kind.as_ref(), Some(TypeKind::Array { .. })) {
+                let func_id = self.get_or_register_extern_function(
+                    "haxe_array_to_string",
+                    vec![IrType::Ptr(Box::new(IrType::Void))],
+                    IrType::Ptr(Box::new(IrType::String)),
+                );
+                return self.builder.build_call_direct(
+                    func_id,
+                    vec![value],
+                    IrType::Ptr(Box::new(IrType::String)),
+                );
+            }
+        }
         // Check if the HIR type is a TypeParameter — if so, use tag-based dispatch
         // even though the MIR type is I64 (type-erased).
         if let Some(type_id) = hir_type_id {
@@ -20079,8 +20115,23 @@ impl<'a> HirToMirContext<'a> {
                 return Some(value);
             }
             IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::Void) => {
-                // Ptr(Void) is often an unresolved generic / DynBox - use runtime dispatch
-                debug!("[CONVERT TO STRING] Ptr(Void) detected, using runtime dispatch");
+                // Ptr(Void) could be Array, Class, or DynBox.
+                // Check register_class_hints to detect Array pointers.
+                let is_array = self.register_class_hints.get(&value)
+                    .map(|h| h == "Array")
+                    .unwrap_or(false);
+                if is_array {
+                    let func_id = self.get_or_register_extern_function(
+                        "haxe_array_to_string",
+                        vec![IrType::Ptr(Box::new(IrType::Void))],
+                        IrType::Ptr(Box::new(IrType::String)),
+                    );
+                    return self.builder.build_call_direct(
+                        func_id,
+                        vec![value],
+                        IrType::Ptr(Box::new(IrType::String)),
+                    );
+                }
                 return self.convert_dynamic_to_string(value);
             }
             IrType::Ptr(_) => {
@@ -30831,6 +30882,19 @@ impl<'a> HirToMirContext<'a> {
                                 let conv_fn = self.get_or_register_extern_function(
                                     "haxe_string_from_bool",
                                     vec![IrType::I32],
+                                    string_ptr_ty.clone(),
+                                );
+                                self.builder.build_call_direct(
+                                    conv_fn,
+                                    vec![expr_val],
+                                    string_ptr_ty.clone(),
+                                )?
+                            }
+                            Some(TypeKind::Array { .. }) => {
+                                // Array<T> → haxe_array_to_string
+                                let conv_fn = self.get_or_register_extern_function(
+                                    "haxe_array_to_string",
+                                    vec![IrType::Ptr(Box::new(IrType::Void))],
                                     string_ptr_ty.clone(),
                                 );
                                 self.builder.build_call_direct(
