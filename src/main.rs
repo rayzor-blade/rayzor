@@ -856,6 +856,11 @@ fn run_file(
         return run_bundle(&file, verbose, stats, preset);
     }
 
+    // Handle .hxml build files
+    if file.extension().is_some_and(|ext| ext == "hxml") {
+        return build_from_hxml(&file, verbose, None, false);
+    }
+
     #[cfg(not(feature = "llvm-backend"))]
     if _llvm {
         return Err(
@@ -1348,23 +1353,38 @@ fn build_from_hxml(
         // Execute based on mode
         match config.mode {
             RayzorMode::Jit => {
-                println!("\n🔥 JIT mode - compiling and executing...");
-                println!("  (Full HXML JIT pipeline coming soon)");
-                println!("  For now, use: rayzor jit {}", main_file.display());
-                Ok(())
+                println!("  Compiling and executing via JIT...\n");
+                run_file(
+                    Some(main_file),
+                    verbose,
+                    false, // stats
+                    0,     // tier
+                    false, // llvm
+                    Preset::Application,
+                    false,          // cache flag
+                    None,           // cache_dir
+                    false,          // release
+                    false,          // compute
+                    Vec::new(),     // rpkg_files
+                    false,          // safety_warnings
+                    Vec::new(),     // program_args
+                )
             }
             RayzorMode::Compile => {
-                println!("\n🔨 Compile mode - generating native binary...");
-                if let Some(out) = output {
-                    println!("  Output: {}", out.display());
-                    println!("  (Full HXML AOT pipeline coming soon)");
-                    println!("  For now, use: rayzor compile {}", main_file.display());
-                } else {
-                    return Err(
-                        "Compile mode requires output file. Use --rayzor-compile <output>"
-                            .to_string(),
-                    );
-                }
+                let out = output.ok_or(
+                    "Compile mode requires output file. Use --rayzor-compile <output>"
+                        .to_string(),
+                )?;
+                println!("  Compiling to native binary: {}\n", out.display());
+                use compiler::codegen::aot_compiler::{AotCompiler, OutputFormat};
+                let compiler = AotCompiler {
+                    output_format: OutputFormat::Executable,
+                    verbose,
+                    ..Default::default()
+                };
+                let sources: Vec<String> = vec![main_file.to_string_lossy().to_string()];
+                let result = compiler.compile_c(&sources, &out)?;
+                println!("  Compiled: {} ({} bytes)", result.path.display(), result.code_size);
                 Ok(())
             }
         }
