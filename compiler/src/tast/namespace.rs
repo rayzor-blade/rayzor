@@ -263,8 +263,10 @@ impl NamespaceResolver {
         let file_path = qualified_path.replace('.', "/") + ".hx";
 
         // First check source paths (user workspace)
+        eprintln!("[NS_RESOLVE] {} → checking {} source_paths", qualified_path, self.source_paths.len());
         for source_path in &self.source_paths {
             let full_path = source_path.join(&file_path);
+            eprintln!("[NS_RESOLVE]   try {} exists={}", full_path.display(), full_path.exists());
             if full_path.exists() {
                 if check_loaded && self.is_file_loaded(&full_path) {
                     // Already loaded from cache - skip
