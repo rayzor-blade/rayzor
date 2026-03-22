@@ -3604,15 +3604,9 @@ impl CompilationUnit {
             filename.to_string(),
         );
 
-        let typed_file = lowering.lower_file(ast_file).map_err(|e| {
-            vec![CompilationError {
-                message: format!("Lowering error: {:?}", e),
-                location: SourceLocation::unknown(),
-                category: ErrorCategory::TypeError,
-                suggestion: None,
-                related_errors: Vec::new(),
-            }]
-        })?;
+        let typed_file = lowering
+            .lower_file(ast_file)
+            .map_err(|e| vec![e.to_compilation_error()])?;
 
         // Send/Sync validation — check thread safety constraints (user files only)
         let is_stdlib = filename.contains("haxe-std/") || filename.contains("haxe-std\\");
@@ -3673,9 +3667,9 @@ impl CompilationUnit {
             errors
                 .into_iter()
                 .map(|e| CompilationError {
-                    message: format!("HIR lowering error: {:?}", e),
-                    location: SourceLocation::unknown(),
-                    category: ErrorCategory::InternalError,
+                    message: e.message,
+                    location: e.location,
+                    category: ErrorCategory::TypeError,
                     suggestion: None,
                     related_errors: Vec::new(),
                 })
