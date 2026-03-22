@@ -2311,17 +2311,17 @@ impl CompilationUnit {
             "EnumValue",
             "Any",
         ];
-        if self
-            .namespace_resolver
-            .is_file_loaded(&file_path.to_path_buf())
-        {
+        let is_loaded = self.namespace_resolver.is_file_loaded(&file_path.to_path_buf());
+        if is_loaded {
             let base = std::path::Path::new(&filename)
                 .file_stem()
                 .and_then(|s| s.to_str())
                 .unwrap_or("");
             if EXTERN_ONLY_STDLIB.contains(&base) {
+                eprintln!("[TRY_COMPILE] {} → extern-only skip", name);
                 return true;
             }
+            eprintln!("[TRY_COMPILE] {} → is_loaded but not extern, continuing", name);
         }
 
         // Mark as loaded
@@ -2340,7 +2340,10 @@ impl CompilationUnit {
         }
 
         // Cache miss or caching disabled - compile normally
-        match self.compile_file_with_shared_state_ex(&filename, source, true) {
+        // Only skip pre-registration for stdlib files (types registered via bsym).
+        // User package files need full pre-registration for correct type resolution.
+        let is_stdlib = file_path.to_string_lossy().contains("haxe-std");
+        match self.compile_file_with_shared_state_ex(&filename, source, is_stdlib) {
             Ok(typed_file) => {
                 self.loaded_stdlib_typed_files.push(typed_file);
 
@@ -3517,8 +3520,10 @@ impl CompilationUnit {
     ) -> Result<TypedFile, Vec<CompilationError>> {
         use parser::parse_haxe_file_with_diagnostics;
 
+        eprintln!("[COMPILE_EX] {} skip_pre_reg={}", filename, skip_pre_registration);
         // Skip if already successfully compiled - return cached TypedFile
         if let Some(cached) = self.compiled_files.get(filename) {
+            eprintln!("[COMPILE_EX] {} → cached", filename);
             return Ok(cached.clone());
         }
 
@@ -4082,17 +4087,34 @@ impl CompilationUnit {
             for (func_id, func) in &renumbered_functions {
                 if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
                     for &existing_id in existing_ids {
-                        id_replacements.insert(existing_id, *func_id);
+                        // Don't replace user import functions (ID >= 100000) that have
+                        // real bodies. These are from user packages (sim.Point2D etc.)
+                        // and should not be overwritten by stdlib functions with the
+                        // same bare name (e.g., "new").
+                        let is_import_with_body = existing_id.0 >= 100_000
+                            && mir_module.functions.get(&existing_id)
+                                .map(|f| !f.cfg.blocks.is_empty())
+                                .unwrap_or(false);
+                        if !is_import_with_body {
+                            id_replacements.insert(existing_id, *func_id);
+                        }
                     }
                 }
             }
 
             // Now merge the stdlib functions
             for (func_id, func) in renumbered_functions {
-                // If this function replaces existing ones, remove ALL old copies
+                // If this function replaces existing ones, remove old copies
+                // BUT protect user import functions (ID >= 100000) with real bodies
                 if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
                     for &existing_id in existing_ids {
-                        mir_module.functions.remove(&existing_id);
+                        let is_import_with_body = existing_id.0 >= 100_000
+                            && mir_module.functions.get(&existing_id)
+                                .map(|f| !f.cfg.blocks.is_empty())
+                                .unwrap_or(false);
+                        if !is_import_with_body {
+                            mir_module.functions.remove(&existing_id);
+                        }
                     }
                 }
 
