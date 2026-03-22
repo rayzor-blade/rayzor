@@ -1101,27 +1101,10 @@ fn run_file(
     };
 
     let (mir_module, _cache_hit) = 'load_mir: {
-        // Try cache
-        if mir_cache_path.exists() {
-            if let Ok(data) = std::fs::read(&mir_cache_path) {
-                if data.len() > 8 {
-                    let stored_hash = u64::from_le_bytes(data[..8].try_into().unwrap());
-                    if stored_hash == source_hash {
-                        if let Ok(module) =
-                            postcard::from_bytes::<compiler::ir::IrModule>(&data[8..])
-                        {
-                            if let Some(ref h) = progress_handle {
-                                h.end_phase("cached", 0.0);
-                                h.set_functions(module.functions.len());
-                            }
-                            break 'load_mir (module, true);
-                        }
-                    }
-                }
-            }
-        }
+        // MIR cache disabled — always compile fresh
+        // TODO: re-enable after cross-package type resolution is fixed
 
-        // Cache miss — full compile pipeline
+        // Full compile pipeline
         if let Some(ref h) = progress_handle {
             h.begin_phase("compile");
         }
@@ -1180,12 +1163,8 @@ fn run_file(
             h.set_functions(mir_module.functions.len());
         }
 
-        // Save to cache for next run
-        if let Ok(serialized) = postcard::to_allocvec(&mir_module) {
-            let mut cache_data = source_hash.to_le_bytes().to_vec();
-            cache_data.extend_from_slice(&serialized);
-            let _ = std::fs::write(&mir_cache_path, &cache_data);
-        }
+        // MIR cache save disabled
+        // TODO: re-enable after cross-package type resolution is fixed
 
         (mir_module, false)
     };
