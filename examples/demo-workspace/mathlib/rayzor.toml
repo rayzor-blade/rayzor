@@ -1,13 +1,12 @@
 [project]
 name = "mathlib"
 version = "0.1.0"
-entry = "src/Main.hx"
+
+[lib]
+expose = ["src"]
 
 [build]
 class-paths = ["src"]
-opt-level = 2
-preset = "application"
-output = "build/mathlib"
 
 [cache]
 enabled = true
