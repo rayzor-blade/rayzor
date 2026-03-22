@@ -413,6 +413,20 @@ enum CacheAction {
         cache_dir: Option<PathBuf>,
     },
 
+    /// List all cached modules with sizes and timestamps
+    List {
+        /// Cache directory
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+    },
+
+    /// Pre-compile stdlib to cache for faster first runs
+    Warm {
+        /// Cache directory
+        #[arg(long)]
+        cache_dir: Option<PathBuf>,
+    },
+
     /// Clear all cached modules
     Clear {
         /// Cache directory (defaults to .rayzor-cache)
@@ -542,6 +556,8 @@ fn main() {
         }
         Commands::Cache { action } => match action {
             CacheAction::Stats { cache_dir } => cache_stats(cache_dir),
+            CacheAction::List { cache_dir } => cache_list(cache_dir),
+            CacheAction::Warm { cache_dir } => cache_warm(cache_dir),
             CacheAction::Clear { cache_dir } => cache_clear(cache_dir),
         },
         Commands::Bundle {
@@ -1873,6 +1889,162 @@ fn cache_stats(cache_dir: Option<PathBuf>) -> Result<(), String> {
         println!("  • Dependency caching: Only recompile modified modules");
         println!("  • Version tracking: Automatic invalidation on compiler updates");
     }
+
+    Ok(())
+}
+
+fn cache_list(cache_dir: Option<PathBuf>) -> Result<(), String> {
+    use compiler::compilation::CompilationConfig;
+
+    let mut config = CompilationConfig::default();
+    if let Some(dir) = cache_dir {
+        config.cache_dir = Some(dir);
+    }
+
+    let cache_path = config.get_cache_dir();
+
+    println!("📋 BLADE Cache Contents");
+    println!("{}", "=".repeat(60));
+    println!("Directory: {}", cache_path.display());
+    println!();
+
+    // List .blade files
+    let blade_dir = cache_path;
+    if !blade_dir.exists() {
+        println!("  (no cache directory)");
+        return Ok(());
+    }
+
+    let mut entries: Vec<(String, u64, std::time::SystemTime)> = Vec::new();
+    if let Ok(dir) = std::fs::read_dir(&blade_dir) {
+        for entry in dir.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("blade") {
+                if let Ok(meta) = path.metadata() {
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    entries.push((name, meta.len(), modified));
+                }
+            }
+        }
+    }
+
+    // Also list .mir.cache files
+    if let Ok(dir) = std::fs::read_dir(&blade_dir) {
+        for entry in dir.flatten() {
+            let path = entry.path();
+            if path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .map(|s| s.ends_with(".mir.cache"))
+                .unwrap_or(false)
+            {
+                if let Ok(meta) = path.metadata() {
+                    let name = path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("?")
+                        .to_string();
+                    let modified = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    entries.push((name, meta.len(), modified));
+                }
+            }
+        }
+    }
+
+    if entries.is_empty() {
+        println!("  (empty)");
+    } else {
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let total_size: u64 = entries.iter().map(|(_, s, _)| s).sum();
+
+        if tui::style::is_tty() {
+            use crossterm::style::Stylize;
+            for (name, size, modified) in &entries {
+                let age = modified
+                    .elapsed()
+                    .map(|d| {
+                        if d.as_secs() < 60 {
+                            format!("{}s ago", d.as_secs())
+                        } else if d.as_secs() < 3600 {
+                            format!("{}m ago", d.as_secs() / 60)
+                        } else if d.as_secs() < 86400 {
+                            format!("{}h ago", d.as_secs() / 3600)
+                        } else {
+                            format!("{}d ago", d.as_secs() / 86400)
+                        }
+                    })
+                    .unwrap_or_else(|_| "?".to_string());
+
+                println!(
+                    "  {} {:>8} {}",
+                    name.as_str().with(crossterm::style::Color::White),
+                    format!("{}KB", size / 1024).with(crossterm::style::Color::DarkGrey),
+                    age.with(crossterm::style::Color::DarkGrey),
+                );
+            }
+            println!();
+            println!(
+                "  {} entries, {} total",
+                entries.len().to_string().with(crossterm::style::Color::Cyan),
+                format!("{}KB", total_size / 1024).with(crossterm::style::Color::Cyan),
+            );
+        } else {
+            println!("  {:30} {:>10} {:>10}", "Module", "Size", "Age");
+            println!("  {}", "-".repeat(52));
+            for (name, size, _) in &entries {
+                println!("  {:30} {:>8}KB", name, size / 1024);
+            }
+            println!();
+            println!("  {} entries, {}KB total", entries.len(), total_size / 1024);
+        }
+    }
+
+    Ok(())
+}
+
+fn cache_warm(cache_dir: Option<PathBuf>) -> Result<(), String> {
+    use compiler::compilation::{CompilationConfig, CompilationUnit};
+
+    println!("🔥 Warming BLADE cache...");
+
+    let mut config = CompilationConfig::default();
+    if let Some(dir) = cache_dir {
+        config.cache_dir = Some(dir);
+    }
+
+    // Step 1: Run preblade to generate stdlib.bsym
+    println!("  Generating stdlib symbols...");
+    let preblade_config = compiler::tools::preblade::PrebladeConfig {
+        out_path: std::path::PathBuf::from(".rayzor/blade/stdlib"),
+        list_only: false,
+        verbose: false,
+        cache_dir: None,
+    };
+    compiler::tools::preblade::extract_stdlib_symbols(&preblade_config)
+        .map_err(|e| format!("preblade failed: {}", e))?;
+
+    // Step 2: Compile a minimal file to trigger stdlib caching
+    println!("  Compiling stdlib modules...");
+    let mut unit = CompilationUnit::new(config);
+    unit.load_stdlib()
+        .map_err(|e| format!("Failed to load stdlib: {}", e))?;
+
+    // Add a minimal source to trigger import compilation
+    let source = "class Main { static function main() {} }";
+    unit.add_file(source, "warmup.hx")
+        .map_err(|e| format!("warmup failed: {}", e))?;
+    let _ = unit.lower_to_tast();
+
+    println!("  ✓ Cache warmed");
+
+    // Show stats
+    let stats = unit.get_cache_stats();
+    println!("    {} modules cached ({:.1}KB)", stats.cached_modules, stats.total_size_bytes as f64 / 1024.0);
 
     Ok(())
 }
