@@ -186,6 +186,10 @@ impl NamespaceResolver {
     }
 
     /// Add an additional source path (e.g. from an rpkg package).
+    pub fn get_source_paths(&self) -> &[PathBuf] {
+        &self.source_paths
+    }
+
     pub fn add_source_path(&mut self, path: PathBuf) {
         if !self.source_paths.contains(&path) {
             self.source_paths.push(path);
