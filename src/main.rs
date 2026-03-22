@@ -598,11 +598,12 @@ fn compile_haxe_to_mir(
     use compiler::compilation::{CompilationConfig, CompilationUnit};
 
     // Create compilation unit with stdlib support
-    let config = CompilationConfig {
+    let mut config = CompilationConfig {
         load_stdlib: true, // Enable stdlib for full Haxe compatibility
         emit_safety_warnings: safety_warnings,
         ..Default::default()
     };
+    config.pipeline_config = config.pipeline_config.skip_analysis();
 
     let mut unit = CompilationUnit::new(config);
 

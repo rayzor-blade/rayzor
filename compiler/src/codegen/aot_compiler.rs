@@ -96,7 +96,9 @@ impl AotCompiler {
             println!("  Parsing and lowering to MIR...");
         }
 
-        let mut unit = CompilationUnit::new(CompilationConfig::default());
+        let mut config = CompilationConfig::default();
+        config.pipeline_config = config.pipeline_config.skip_analysis();
+        let mut unit = CompilationUnit::new(config);
         unit.load_stdlib()
             .map_err(|e| format!("Failed to load stdlib: {}", e))?;
 
@@ -632,7 +634,9 @@ impl AotCompiler {
             println!("  Parsing and lowering to MIR...");
         }
 
-        let mut unit = CompilationUnit::new(CompilationConfig::default());
+        let mut config = CompilationConfig::default();
+        config.pipeline_config = config.pipeline_config.skip_analysis();
+        let mut unit = CompilationUnit::new(config);
         unit.load_stdlib()
             .map_err(|e| format!("Failed to load stdlib: {}", e))?;
 
@@ -757,6 +761,7 @@ impl AotCompiler {
         cmd.arg(&c_path);
         cmd.arg(&runtime_lib);
         cmd.arg(opt_flag);
+        cmd.arg("-pipe"); // Use pipes instead of temp files for speed
         cmd.arg("-ffp-contract=on");
         cmd.arg("-Wno-int-conversion");
         cmd.arg("-Wno-incompatible-pointer-types");
