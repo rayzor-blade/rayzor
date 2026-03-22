@@ -141,6 +141,9 @@ pub struct CompilationUnit {
 
     /// MIR cross-reference maps from the last compiled file (for BLADE cache save)
     last_compiled_cached_maps: Option<BladeCachedMaps>,
+
+    /// Cached stdlib MIR module (built once, cloned for each user file merge)
+    cached_stdlib_mir: Option<crate::ir::IrModule>,
 }
 
 /// Configuration for compilation
@@ -466,6 +469,7 @@ impl CompilationUnit {
             loaded_hdlls: HashSet::new(),
             last_compiled_type_info: None,
             last_compiled_cached_maps: None,
+            cached_stdlib_mir: None,
         }
     }
 
@@ -3908,8 +3912,15 @@ impl CompilationUnit {
             // Merge stdlib MIR (extern functions for Thread, Channel, Mutex, Arc, etc.)
             // This ensures extern runtime functions are available.
             // Uses build_stdlib_with_plugins to include HDLL extern declarations from loaded plugins.
+            // Cache the stdlib MIR module to avoid rebuilding it for each user file.
             use crate::stdlib::build_stdlib_with_plugins;
-            let mut stdlib_mir = build_stdlib_with_plugins(&self.compiler_plugin_registry);
+            let mut stdlib_mir = if let Some(ref cached) = self.cached_stdlib_mir {
+                cached.clone()
+            } else {
+                let mir = build_stdlib_with_plugins(&self.compiler_plugin_registry);
+                self.cached_stdlib_mir = Some(mir.clone());
+                mir
+            };
 
             // Merge on-demand imported MIR modules (e.g., BalancedTree.hx) into the
             // user module. These were already renumbered to high IDs (100000+) during

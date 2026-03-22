@@ -927,6 +927,19 @@ fn run_file(
         safety_warnings,
     )?;
 
+    // Tree-shake unused stdlib functions before optimization
+    {
+        use compiler::ir::tree_shake;
+        let mut modules = vec![mir_module];
+        if let Some((mod_name, func_name)) = modules.iter().rev().find_map(|m| {
+            m.functions.values().find(|f| f.name == "main" || f.name.ends_with("_main"))
+                .map(|f| (m.name.clone(), f.name.clone()))
+        }) {
+            tree_shake::tree_shake_bundle(&mut modules, &mod_name, &func_name);
+        }
+        mir_module = modules.into_iter().next().unwrap();
+    }
+
     // Run O0 pass manager to expand Haxe `inline` functions and apply SRA
     if std::env::var("RAYZOR_RAW_MIR").is_err() {
         use compiler::ir::optimization::{OptimizationLevel, PassManager};
