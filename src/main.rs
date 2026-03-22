@@ -1375,59 +1375,113 @@ fn build_from_manifest(
                 manifest: pm,
             };
 
-            let entry = project
-                .entry_path()
-                .ok_or("No entry point in rayzor.toml. Set [project] entry = \"src/Main.hx\"")?;
+            let project_name = project.manifest.name.as_deref().unwrap_or("project");
 
-            println!(
-                "📦 Building {} ...",
-                project.manifest.name.as_deref().unwrap_or("project")
-            );
-
-            if !entry.exists() {
-                return Err(format!("Entry file not found: {}", entry.display()));
-            }
-
-            if verbose {
-                println!("  entry    {}", entry.display());
-                if let Some(out) = project.output_path() {
-                    println!("  output   {}", out.display());
+            let entry = match project.entry_path() {
+                Some(e) if e.exists() => e,
+                Some(e) => return Err(format!("Entry file not found: {}", e.display())),
+                None => {
+                    // Library project — no entry point, skip build
+                    if tui::style::is_tty() {
+                        use crossterm::style::Stylize;
+                        eprintln!(
+                            "  {} {} (library, no entry point)",
+                            "\u{2022}".with(crossterm::style::Color::DarkGrey),
+                            project_name.with(crossterm::style::Color::DarkGrey),
+                        );
+                    } else {
+                        println!("  {} (library, skipped)", project_name);
+                    }
+                    return Ok(());
                 }
-                for cp in project.resolved_class_paths() {
-                    println!("  classpath {}", cp.display());
-                }
-            }
+            };
 
+            let class_paths = project.resolved_class_paths();
             let output = output_override.or_else(|| project.output_path());
 
-            // Compile via the standard pipeline
+            // Use TUI progress for build
+            let use_tui = verbose && tui::style::is_tty();
+            let tui_instance = if use_tui {
+                let tui = tui::progress::ProgressTui::new(
+                    &entry.display().to_string(),
+                    "build",
+                    project_name,
+                );
+                Some(std::sync::Arc::new(tui))
+            } else {
+                tui::progress::print_run_banner(
+                    &entry.display().to_string(),
+                    "build",
+                    project_name,
+                );
+                None
+            };
+            let progress = tui_instance.as_ref().map(|t| t.handle());
+            let tui_thread = tui_instance.as_ref().map(|t| {
+                let t = t.clone();
+                std::thread::spawn(move || { let _ = t.run(); })
+            });
+
+            // Compile
+            if let Some(ref h) = progress { h.begin_phase("compile"); }
+            let t0 = std::time::Instant::now();
             let source = std::fs::read_to_string(&entry)
                 .map_err(|e| format!("Failed to read {}: {}", entry.display(), e))?;
             let mir_module = compile_haxe_to_mir(
                 &source,
                 entry.to_str().unwrap_or("unknown"),
                 vec![],
-                &[],
+                &class_paths.to_vec(),
                 true,
             )?;
-
-            println!("  Compiled {} functions", mir_module.functions.len());
-
-            if let Some(out) = output {
-                println!(
-                    "  Output: {} (binary serialization coming soon)",
-                    out.display()
-                );
+            if let Some(ref h) = progress {
+                h.end_phase("compile", t0.elapsed().as_secs_f64() * 1000.0);
+                h.set_functions(mir_module.functions.len());
+                h.finish();
+            }
+            if let Some(handle) = tui_thread {
+                let _ = handle.join();
             }
 
-            println!("✓ Build complete");
+            // Render final stats
+            if let Some(ref tui) = tui_instance {
+                if let Some(ref out) = output {
+                    tui.handle().add_output_line(format!("Output: {}", out.display()));
+                }
+                tui.handle().add_output_line(format!("{} functions compiled", mir_module.functions.len()));
+                let _ = tui.render_final();
+            } else {
+                if let Some(ref out) = output {
+                    println!("  output   {}", out.display());
+                }
+            }
+
             Ok(())
         }
         RayzorManifest::Workspace(wm) => {
-            println!("📦 Building workspace ({} members)...", wm.members.len());
-            for member in &wm.members {
+            if tui::style::is_tty() {
+                use crossterm::style::Stylize;
+                eprintln!(
+                    " {} workspace ({} members)",
+                    "\u{25B6}".with(crossterm::style::Color::Cyan),
+                    wm.members.len()
+                );
+            } else {
+                println!("Building workspace ({} members)...", wm.members.len());
+            }
+            for (i, member) in wm.members.iter().enumerate() {
                 let member_dir = root.join(member);
-                println!("\n  Building member: {}", member);
+                if tui::style::is_tty() {
+                    use crossterm::style::Stylize;
+                    eprintln!(
+                        "  [{}/{}] {}",
+                        (i + 1).to_string().with(crossterm::style::Color::Cyan),
+                        wm.members.len(),
+                        member.as_str().with(crossterm::style::Color::White).bold(),
+                    );
+                } else {
+                    println!("  [{}/{}] {}", i + 1, wm.members.len(), member);
+                }
                 build_from_manifest(&member_dir, verbose, None, _dry_run)?;
             }
             Ok(())
