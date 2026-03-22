@@ -978,59 +978,104 @@ fn run_file(
         }
     }
 
-    // Compile source file to MIR (with plugins registered)
-    if let Some(ref h) = progress_handle { h.begin_phase("compile"); }
-    let t_compile = std::time::Instant::now();
-    let mut mir_module = compile_haxe_to_mir(
-        &source,
-        file.to_str().unwrap_or("unknown"),
-        compiler_plugins,
-        &rpkg_source_dirs,
-        safety_warnings,
-    )?;
-    if let Some(ref h) = progress_handle {
-        h.end_phase("compile", t_compile.elapsed().as_secs_f64() * 1000.0);
-    }
+    // Check MIR cache: if source hash matches, skip compile+merge+shake entirely
+    let source_hash = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut h = DefaultHasher::new();
+        source.hash(&mut h);
+        h.finish()
+    };
+    let mir_cache_path = {
+        let cache_dir = std::path::PathBuf::from(".rayzor/cache");
+        let _ = std::fs::create_dir_all(&cache_dir);
+        let fname = file.file_stem().and_then(|s| s.to_str()).unwrap_or("main");
+        cache_dir.join(format!("{}.mir.cache", fname))
+    };
 
-    // Tree-shake unused stdlib functions before optimization
-    {
-        if let Some(ref h) = progress_handle { h.begin_phase("tree-shake"); }
-        let t_shake = std::time::Instant::now();
-        use compiler::ir::tree_shake;
-        let before = mir_module.functions.len() + mir_module.extern_functions.len();
-        let mut modules = vec![mir_module];
-        if let Some((mod_name, func_name)) = modules.iter().rev().find_map(|m| {
-            m.functions
-                .values()
-                .find(|f| f.name == "main" || f.name.ends_with("_main"))
-                .map(|f| (m.name.clone(), f.name.clone()))
-        }) {
-            tree_shake::tree_shake_bundle(&mut modules, &mod_name, &func_name);
+    let (mut mir_module, cache_hit) = 'load_mir: {
+        // Try cache
+        if mir_cache_path.exists() {
+            if let Ok(data) = std::fs::read(&mir_cache_path) {
+                if data.len() > 8 {
+                    let stored_hash = u64::from_le_bytes(data[..8].try_into().unwrap());
+                    if stored_hash == source_hash {
+                        if let Ok(module) = postcard::from_bytes::<compiler::ir::IrModule>(&data[8..]) {
+                            if let Some(ref h) = progress_handle {
+                                h.end_phase("cached", 0.0);
+                                h.set_functions(module.functions.len());
+                            }
+                            break 'load_mir (module, true);
+                        }
+                    }
+                }
+            }
         }
-        mir_module = modules.into_iter().next().unwrap();
-        let after = mir_module.functions.len() + mir_module.extern_functions.len();
-        if let Some(ref h) = progress_handle {
-            h.end_phase("shake", t_shake.elapsed().as_secs_f64() * 1000.0);
-            h.set_shake_stats(before, after);
-        }
-    }
 
-    // Run O0 pass manager to expand Haxe `inline` functions and apply SRA
-    if std::env::var("RAYZOR_RAW_MIR").is_err() {
-        if let Some(ref h) = progress_handle { h.begin_phase("optimize"); }
-        let t_opt = std::time::Instant::now();
-        use compiler::ir::optimization::{OptimizationLevel, PassManager};
-        let mut pass_manager = PassManager::for_level(OptimizationLevel::O0);
-        let _ = pass_manager.run(&mut mir_module);
+        // Cache miss — full compile pipeline
+        if let Some(ref h) = progress_handle { h.begin_phase("compile"); }
+        let t_compile = std::time::Instant::now();
+        let mut mir_module = compile_haxe_to_mir(
+            &source,
+            file.to_str().unwrap_or("unknown"),
+            compiler_plugins,
+            &rpkg_source_dirs,
+            safety_warnings,
+        )?;
         if let Some(ref h) = progress_handle {
-            h.end_phase("optimize", t_opt.elapsed().as_secs_f64() * 1000.0);
+            h.end_phase("compile", t_compile.elapsed().as_secs_f64() * 1000.0);
         }
-    }
+
+        // Tree-shake unused stdlib functions
+        {
+            if let Some(ref h) = progress_handle { h.begin_phase("tree-shake"); }
+            let t_shake = std::time::Instant::now();
+            use compiler::ir::tree_shake;
+            let before = mir_module.functions.len() + mir_module.extern_functions.len();
+            let mut modules = vec![mir_module];
+            if let Some((mod_name, func_name)) = modules.iter().rev().find_map(|m| {
+                m.functions
+                    .values()
+                    .find(|f| f.name == "main" || f.name.ends_with("_main"))
+                    .map(|f| (m.name.clone(), f.name.clone()))
+            }) {
+                tree_shake::tree_shake_bundle(&mut modules, &mod_name, &func_name);
+            }
+            mir_module = modules.into_iter().next().unwrap();
+            let after = mir_module.functions.len() + mir_module.extern_functions.len();
+            if let Some(ref h) = progress_handle {
+                h.end_phase("shake", t_shake.elapsed().as_secs_f64() * 1000.0);
+                h.set_shake_stats(before, after);
+            }
+        }
+
+        // Run O0 pass manager to expand Haxe `inline` functions and apply SRA
+        if std::env::var("RAYZOR_RAW_MIR").is_err() {
+            if let Some(ref h) = progress_handle { h.begin_phase("optimize"); }
+            let t_opt = std::time::Instant::now();
+            use compiler::ir::optimization::{OptimizationLevel, PassManager};
+            let mut pass_manager = PassManager::for_level(OptimizationLevel::O0);
+            let _ = pass_manager.run(&mut mir_module);
+            if let Some(ref h) = progress_handle {
+                h.end_phase("optimize", t_opt.elapsed().as_secs_f64() * 1000.0);
+            }
+        }
+
+        if let Some(ref h) = progress_handle {
+            h.set_functions(mir_module.functions.len());
+        }
+
+        // Save to cache for next run
+        if let Ok(serialized) = postcard::to_allocvec(&mir_module) {
+            let mut cache_data = source_hash.to_le_bytes().to_vec();
+            cache_data.extend_from_slice(&serialized);
+            let _ = std::fs::write(&mir_cache_path, &cache_data);
+        }
+
+        (mir_module, false)
+    };
 
     let total_functions = mir_module.functions.len();
-    if let Some(ref h) = progress_handle {
-        h.set_functions(total_functions);
-    }
 
     if total_functions == 0 {
         return Err("No functions found to execute".to_string());

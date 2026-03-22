@@ -1877,6 +1877,7 @@ dependencies = [
  "crossterm",
  "libloading",
  "parser",
+ "postcard",
  "ratatui",
  "rayzor-gpu",
  "rayzor-plugin",
