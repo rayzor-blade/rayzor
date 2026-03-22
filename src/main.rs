@@ -1827,78 +1827,71 @@ fn compile_file(
     Ok(())
 }
 
-fn show_info(features: bool, tiers: bool) {
-    println!("Rayzor Compiler v0.1.0");
-    println!("High-performance Haxe compiler with tiered JIT compilation\n");
+fn show_info(_features: bool, _tiers: bool) {
+    let content = vec![
+        include_str!("tui/art.text"),
+        "",
+        "  ┌─────────┐    ┌──────┐    ┌─────┐    ┌─────┐",
+        "  │  Parse   │───▶│ TAST │───▶│ HIR │───▶│ MIR │",
+        "  │ (RD, O(n))│    │(typed)│    │(sem) │    │(SSA) │",
+        "  └─────────┘    └──────┘    └─────┘    └──┬──┘",
+        "                                           │",
+        "                    ┌───────────────────────┼───────────────┐",
+        "                    │                       │               │",
+        "               ┌────▼────┐           ┌─────▼─────┐   ┌─────▼─────┐",
+        "               │Cranelift│           │   LLVM    │   │ C Backend │",
+        "               │  JIT    │           │  JIT/AOT  │   │  gcc/clang│",
+        "               │ Tier 0-2│           │  Tier 3   │   │   AOT     │",
+        "               └─────────┘           └───────────┘   └───────────┘",
+        "",
+        "  Tiered execution: functions auto-promote on hot paths",
+        "    Tier 0  Interpreter  MIR direct eval         0ms     ~0.1x",
+        "    Tier 1  Baseline     Cranelift 'none'        ~3ms    1.0x",
+        "    Tier 2  Optimized    Cranelift 'speed'       ~10ms   3-5x",
+        "    Tier 3  Maximum      LLVM -O3                ~500ms  5-20x",
+        "",
+        "  Promotion: 100 calls → T1, 1K → T2, 5K → T3",
+    ];
 
-    if features || !tiers {
-        println!("Features:");
-        println!("  ✓ Full Haxe parser");
-        println!("  ✓ Type checker (TAST)");
-        println!("  ✓ Semantic analysis (HIR)");
-        println!("  ✓ SSA form with phi nodes (MIR)");
-        println!("  ✓ Tiered JIT compilation (Cranelift)");
-
-        #[cfg(feature = "llvm-backend")]
-        println!("  ✓ LLVM backend (Tier 3)");
-
-        #[cfg(not(feature = "llvm-backend"))]
-        println!("  ✗ LLVM backend (not enabled)");
-
-        println!();
-    }
-
-    if tiers || !features {
-        println!("Tiered JIT System:");
-        println!("  Tier 0 (Baseline)  - Cranelift 'none'          - ~3ms compile, 1.0x speed");
-        println!("  Tier 1 (Standard)  - Cranelift 'speed'         - ~10ms compile, 1.5-3x speed");
-        println!("  Tier 2 (Optimized) - Cranelift 'speed_and_size' - ~30ms compile, 3-5x speed");
-
-        #[cfg(feature = "llvm-backend")]
-        println!("  Tier 3 (Maximum)   - LLVM aggressive          - ~500ms compile, 5-20x speed");
-
-        #[cfg(not(feature = "llvm-backend"))]
-        println!("  Tier 3 (Maximum)   - LLVM (not available)");
-
-        println!("\n  Functions automatically promote based on execution count:");
-        println!("    • 100 calls   → Tier 1");
-        println!("    • 1,000 calls → Tier 2");
-        println!("    • 5,000 calls → Tier 3");
-        println!();
-    }
-
-    println!("Examples:");
-    println!("  cargo run --example test_full_pipeline_tiered");
-    println!("  cargo run --example test_tiered_with_loop --features llvm-backend");
+    let _ = tui::panel::render_message_panel("rayzor v0.1.0", &content);
 }
 
 fn cache_stats(cache_dir: Option<PathBuf>) -> Result<(), String> {
     use compiler::compilation::{CompilationConfig, CompilationUnit};
+    use ratatui::style::Color;
+    use tui::panel::{render_info_panel, InfoRow};
 
     let mut config = CompilationConfig::default();
     if let Some(dir) = cache_dir {
         config.cache_dir = Some(dir);
     }
 
+    let cache_path = config.get_cache_dir();
     let unit = CompilationUnit::new(config);
     let stats = unit.get_cache_stats();
 
-    println!("📊 BLADE Cache Statistics");
-    println!("{}", "=".repeat(60));
-    println!("Cache directory: {:?}", unit.config.get_cache_dir());
-    println!("Cached modules:  {}", stats.cached_modules);
-    println!("Total size:      {:.2} MB", stats.total_size_mb());
-    println!();
+    let rows = vec![
+        InfoRow::new("directory", &cache_path.display().to_string()),
+        InfoRow::colored(
+            "modules",
+            &stats.cached_modules.to_string(),
+            Color::Cyan,
+        ),
+        InfoRow::colored(
+            "total size",
+            &format!("{:.2} MB", stats.total_size_mb()),
+            Color::Cyan,
+        ),
+    ];
 
-    if stats.cached_modules == 0 {
-        println!("No cached modules found.");
-        println!("Use --cache flag with 'run' or 'compile' to enable caching.");
+    let footer = if stats.cached_modules == 0 {
+        "run 'rayzor cache warm' to populate"
     } else {
-        println!("Benefits:");
-        println!("  • Incremental compilation: ~30x faster for unchanged files");
-        println!("  • Dependency caching: Only recompile modified modules");
-        println!("  • Version tracking: Automatic invalidation on compiler updates");
-    }
+        "incremental: ~30x faster for unchanged files"
+    };
+
+    render_info_panel("cache stats", &rows, Some(footer))
+        .map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -2439,64 +2432,39 @@ fn cmd_init(
     if workspace {
         let member_list = members.unwrap_or_default();
         init::init_workspace(&project_name, &dir, &member_list)?;
-        println!(
-            "Initialized workspace '{}' at {}",
-            project_name,
-            dir.display()
-        );
-        if member_list.is_empty() {
-            println!("  Created: rayzor.toml, .rayzor/cache/, .gitignore");
-            println!();
-            println!("Add member projects:");
-            println!("  cd {} && rayzor init --name my-app", project_name);
-            println!("  Then add \"my-app\" to [workspace].members in rayzor.toml");
-        } else {
-            println!("  Created: rayzor.toml, .rayzor/cache/, .gitignore");
-            println!("  Members: {}", member_list.join(", "));
-            println!();
-            println!("Get started:");
-            println!("  cd {}/{} && rayzor run", project_name, member_list[0]);
+
+        let mut rows = vec![
+            tui::panel::InfoRow::colored("type", "workspace", ratatui::style::Color::Cyan),
+            tui::panel::InfoRow::new("path", &dir.display().to_string()),
+            tui::panel::InfoRow::new("files", "rayzor.toml, .rayzor/cache/, .gitignore"),
+        ];
+        if !member_list.is_empty() {
+            rows.push(tui::panel::InfoRow::colored("members", &member_list.join(", "), ratatui::style::Color::Green));
         }
+        let hint = if member_list.is_empty() {
+            format!("cd {} && rayzor init --name my-app", project_name)
+        } else {
+            format!("cd {}/{} && rayzor run", project_name, member_list[0])
+        };
+        let _ = tui::panel::render_info_panel(&project_name, &rows, Some(&hint));
     } else {
-        // Check for existing sources
-        if let Some((entry, _class_paths)) = init::detect_existing_sources(&dir) {
-            println!("Detected existing Haxe sources: {}", entry);
+        if let Some((entry, _)) = init::detect_existing_sources(&dir) {
+            let _ = tui::panel::render_message_panel("detected", &[&format!("Existing sources: {}", entry)]);
         }
 
         init::init_project(&project_name, &dir, tmpl)?;
-        println!(
-            "Initialized {} project '{}' at {}",
-            template,
-            project_name,
-            dir.display()
-        );
-        match tmpl {
-            ProjectTemplate::App | ProjectTemplate::Benchmark => {
-                println!("  Created: rayzor.toml, src/Main.hx, .rayzor/cache/, .gitignore");
-                println!();
-                println!("Get started:");
-                println!("  cd {} && rayzor run", project_name);
-            }
-            ProjectTemplate::Lib => {
-                let class_name = project_name
-                    .split(['-', '_'])
-                    .map(|p| {
-                        let mut c = p.chars();
-                        match c.next() {
-                            None => String::new(),
-                            Some(ch) => ch.to_uppercase().to_string() + c.as_str(),
-                        }
-                    })
-                    .collect::<String>();
-                println!(
-                    "  Created: rayzor.toml, src/{}.hx, .rayzor/cache/, .gitignore",
-                    class_name
-                );
-            }
-            ProjectTemplate::Empty => {
-                println!("  Created: rayzor.toml, .rayzor/cache/, .gitignore");
-            }
-        }
+
+        let files = match tmpl {
+            ProjectTemplate::App | ProjectTemplate::Benchmark => "rayzor.toml, src/Main.hx, .gitignore",
+            ProjectTemplate::Lib => "rayzor.toml, src/<Name>.hx, .gitignore",
+            ProjectTemplate::Empty => "rayzor.toml, .gitignore",
+        };
+        let rows = vec![
+            tui::panel::InfoRow::colored("type", &template, ratatui::style::Color::Cyan),
+            tui::panel::InfoRow::new("path", &dir.display().to_string()),
+            tui::panel::InfoRow::new("files", files),
+        ];
+        let _ = tui::panel::render_info_panel(&project_name, &rows, Some(&format!("cd {} && rayzor run", project_name)));
     }
 
     Ok(())
