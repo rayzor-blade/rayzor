@@ -174,6 +174,14 @@ enum Commands {
         #[arg(short, long)]
         output: Option<PathBuf>,
 
+        /// Strip debug symbols from output
+        #[arg(long)]
+        strip: bool,
+
+        /// MIR optimization level (0-3)
+        #[arg(long, default_value = "2")]
+        opt_level: u8,
+
         /// Show what would be built without building
         #[arg(long)]
         dry_run: bool,
@@ -524,8 +532,10 @@ fn main() {
             file,
             verbose,
             output,
+            strip,
+            opt_level,
             dry_run,
-        } => build_hxml(file, verbose, output, dry_run),
+        } => build_hxml(file, verbose, output, strip, opt_level, dry_run),
         Commands::Info { features, tiers } => {
             show_info(features, tiers);
             Ok(())
@@ -1329,6 +1339,8 @@ fn build_hxml(
     file_arg: Option<PathBuf>,
     verbose: bool,
     output_override: Option<PathBuf>,
+    _strip: bool,
+    _opt_level: u8,
     dry_run: bool,
 ) -> Result<(), String> {
     // Auto-detect: if file is .hxml use HXML path, otherwise try rayzor.toml
@@ -1437,23 +1449,69 @@ fn build_from_manifest(
             if let Some(ref h) = progress {
                 h.end_phase("compile", t0.elapsed().as_secs_f64() * 1000.0);
                 h.set_functions(mir_module.functions.len());
-                h.finish();
             }
+            let total_functions = mir_module.functions.len();
+
+            // Produce output bundle (.rzb)
+            if let Some(ref out) = output {
+                if let Some(ref h) = progress { h.begin_phase("bundle"); }
+                let t_bundle = std::time::Instant::now();
+
+                // Ensure output directory exists
+                if let Some(parent) = out.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+
+                // Serialize MIR module as .rzb bundle
+                let out_path = if out.extension().is_none() {
+                    out.with_extension("rzb")
+                } else {
+                    out.clone()
+                };
+                let module_name = mir_module.name.clone();
+                let bundle = compiler::ir::RayzorBundle::new(
+                    vec![mir_module],
+                    &module_name,
+                    "main",
+                    None,
+                );
+                compiler::ir::save_bundle(&out_path, &bundle)
+                    .map_err(|e| format!("Failed to save bundle: {}", e))?;
+
+                if let Some(ref h) = progress {
+                    h.end_phase("bundle", t_bundle.elapsed().as_secs_f64() * 1000.0);
+                }
+            }
+
+            // Stop spinner
+            if let Some(ref h) = progress { h.finish(); }
             if let Some(handle) = tui_thread {
                 let _ = handle.join();
             }
 
             // Render final stats
+            let func_count = total_functions;
             if let Some(ref tui) = tui_instance {
                 if let Some(ref out) = output {
-                    tui.handle().add_output_line(format!("Output: {}", out.display()));
+                    let out_path = if out.extension().is_none() {
+                        out.with_extension("rzb")
+                    } else {
+                        out.clone()
+                    };
+                    let size = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+                    tui.handle().add_output_line(format!("{} ({} bytes)", out_path.display(), size));
+                } else {
+                    tui.handle().add_output_line(format!("{} functions compiled", func_count));
                 }
-                tui.handle().add_output_line(format!("{} functions compiled", mir_module.functions.len()));
                 let _ = tui.render_final();
-            } else {
-                if let Some(ref out) = output {
-                    println!("  output   {}", out.display());
-                }
+            } else if let Some(ref out) = output {
+                let out_path = if out.extension().is_none() {
+                    out.with_extension("rzb")
+                } else {
+                    out.clone()
+                };
+                let size = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
+                println!("  output   {} ({} bytes)", out_path.display(), size);
             }
 
             Ok(())
