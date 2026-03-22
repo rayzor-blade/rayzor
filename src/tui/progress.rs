@@ -341,27 +341,29 @@ fn render_final_frame(
                 };
                 let bar_len = (frac * bar_max_width as f64).round().max(1.0) as usize;
                 let bar_str = "\u{2588}".repeat(bar_len);
+                let time_color = if p.duration_ms == max_ms {
+                    Color::White
+                } else {
+                    Color::DarkGray
+                };
+                let time_mod = if p.duration_ms == max_ms {
+                    Modifier::BOLD
+                } else {
+                    Modifier::empty()
+                };
 
                 Row::new(vec![
-                    Span::styled(
-                        format!(" {:>9}", p.name),
+                    Line::from(Span::styled(
+                        format!(" {:>9} ", p.name),
                         Style::default().fg(Color::White),
-                    ),
-                    Span::styled(bar_str, Style::default().fg(p.color)),
-                    Span::styled(
-                        format!("{:>7.0}ms", p.duration_ms),
-                        Style::default()
-                            .fg(if p.duration_ms == max_ms {
-                                Color::White
-                            } else {
-                                Color::DarkGray
-                            })
-                            .add_modifier(if p.duration_ms == max_ms {
-                                Modifier::BOLD
-                            } else {
-                                Modifier::empty()
-                            }),
-                    ),
+                    )),
+                    Line::from(vec![
+                        Span::styled(bar_str, Style::default().fg(p.color)),
+                        Span::styled(
+                            format!(" {:.0}ms", p.duration_ms),
+                            Style::default().fg(time_color).add_modifier(time_mod),
+                        ),
+                    ]),
                 ])
             })
             .collect();
@@ -369,9 +371,8 @@ fn render_final_frame(
         let table = Table::new(
             rows,
             [
-                Constraint::Length(10),
+                Constraint::Length(11),
                 Constraint::Min(10),
-                Constraint::Length(10),
             ],
         );
         frame.render_widget(table, chunks[2]);
