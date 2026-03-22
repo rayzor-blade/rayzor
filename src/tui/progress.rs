@@ -5,7 +5,7 @@
 
 use crossterm::{
     cursor,
-    event::{self, Event, KeyCode, KeyModifiers},
+    event::{self, Event, KeyCode},
     terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -36,6 +36,7 @@ pub struct PhaseEntry {
 pub struct CompilationState {
     pub file: String,
     pub profile: String,
+    #[allow(dead_code)]
     pub preset: String,
     pub current_phase: String,
     pub phases: Vec<PhaseEntry>,
@@ -624,6 +625,7 @@ impl ProgressHandle {
         state.current_phase.clear();
     }
 
+    #[allow(dead_code)]
     pub fn set_cache_stats(&self, warm: usize, cold: usize) {
         let mut s = self.state.lock().unwrap();
         s.cache_warm = warm;
@@ -644,6 +646,7 @@ impl ProgressHandle {
         self.state.lock().unwrap().output_lines.push(line);
     }
 
+    #[allow(dead_code)]
     pub fn set_error(&self, err: &str) {
         self.state.lock().unwrap().error = Some(err.to_string());
     }
@@ -887,6 +890,7 @@ pub fn print_run_banner(file: &str, profile: &str, preset: &str) {
 }
 
 /// Print tree-shake summary (non-TUI fallback).
+#[allow(dead_code)]
 pub fn print_shake_summary(before: usize, after: usize) {
     if before <= after {
         return;

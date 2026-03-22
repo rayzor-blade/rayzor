@@ -1015,7 +1015,7 @@ fn run_file(
         cache_dir.join(format!("{}.mir.cache", fname))
     };
 
-    let (mut mir_module, cache_hit) = 'load_mir: {
+    let (mir_module, _cache_hit) = 'load_mir: {
         // Try cache
         if mir_cache_path.exists() {
             if let Ok(data) = std::fs::read(&mir_cache_path) {
@@ -2120,7 +2120,7 @@ fn cmd_init(
             }
             ProjectTemplate::Lib => {
                 let class_name = project_name
-                    .split(|c: char| c == '-' || c == '_')
+                    .split(['-', '_'])
                     .map(|p| {
                         let mut c = p.chars();
                         match c.next() {
