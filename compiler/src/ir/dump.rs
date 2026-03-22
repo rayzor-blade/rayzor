@@ -388,6 +388,81 @@ pub fn dump_instruction(inst: &IrInstruction) -> String {
         IrInstruction::Resume { exception } => {
             format!("resume {}", exception)
         }
+        IrInstruction::CreateUnion {
+            dest,
+            discriminant,
+            value,
+            ty,
+        } => {
+            let type_name = match ty {
+                IrType::Union { name, .. } => name.clone(),
+                _ => dump_type(ty),
+            };
+            format!(
+                "{} = create_union {}(discriminant={}, value={})",
+                dest, type_name, discriminant, value
+            )
+        }
+        IrInstruction::CreateStruct { dest, ty, fields } => {
+            let type_name = match ty {
+                IrType::Struct { name, .. } => name.clone(),
+                _ => dump_type(ty),
+            };
+            let field_strs: Vec<String> = fields.iter().map(|f| format!("{}", f)).collect();
+            format!(
+                "{} = create_struct {}({})",
+                dest,
+                type_name,
+                field_strs.join(", ")
+            )
+        }
+        IrInstruction::ExtractDiscriminant { dest, union_val } => {
+            format!("{} = extract_discriminant {}", dest, union_val)
+        }
+        IrInstruction::ExtractUnionValue {
+            dest,
+            union_val,
+            discriminant,
+            value_ty,
+        } => {
+            format!(
+                "{} = extract_union_value {} {} (discriminant={})",
+                dest,
+                dump_type(value_ty),
+                union_val,
+                discriminant
+            )
+        }
+        IrInstruction::VectorBinOp {
+            dest, op, left, right, vec_ty,
+        } => {
+            format!("{} = vec_{:?} {}, {} ({})", dest, op, left, right, dump_type(vec_ty))
+        }
+        IrInstruction::VectorUnaryOp {
+            dest, op, operand, vec_ty,
+        } => {
+            format!("{} = vec_{:?} {} ({})", dest, op, operand, dump_type(vec_ty))
+        }
+        IrInstruction::VectorSplat {
+            dest, scalar, vec_ty,
+        } => {
+            format!("{} = vec_splat {} ({})", dest, scalar, dump_type(vec_ty))
+        }
+        IrInstruction::VectorExtract {
+            dest, vector, index,
+        } => {
+            format!("{} = vec_extract {}[{}]", dest, vector, index)
+        }
+        IrInstruction::VectorInsert {
+            dest, vector, scalar, index,
+        } => {
+            format!("{} = vec_insert {}, {}[{}]", dest, vector, scalar, index)
+        }
+        IrInstruction::VectorReduce {
+            dest, op, vector,
+        } => {
+            format!("{} = vec_reduce_{:?} {}", dest, op, vector)
+        }
         _ => format!("{:?}", inst),
     }
 }
