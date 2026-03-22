@@ -48,6 +48,7 @@ use compiler::codegen::CraneliftBackend;
 use compiler::codegen::InterpValue;
 use compiler::compilation::{CompilationConfig, CompilationUnit};
 use compiler::ir::optimization::{strip_stack_trace_updates, OptimizationLevel, PassManager};
+use compiler::ir::tree_shake;
 use compiler::ir::{load_bundle, IrFunctionId, IrModule, RayzorBundle};
 
 #[cfg(feature = "llvm-backend")]
@@ -370,6 +371,17 @@ fn list_benchmarks() -> Vec<String> {
     benchmarks
 }
 
+fn find_benchmark_entry(modules: &[IrModule]) -> Option<(String, String)> {
+    for module in modules.iter().rev() {
+        for func in module.functions.values() {
+            if func.name == "main" || func.name.ends_with("_main") {
+                return Some((module.name.clone(), func.name.clone()));
+            }
+        }
+    }
+    None
+}
+
 fn run_benchmark_cranelift(
     bench: &Benchmark,
     symbols: &[(&str, *const u8)],
@@ -385,20 +397,25 @@ fn run_benchmark_cranelift(
         .map_err(|e| format!("parse: {}", e))?;
     unit.lower_to_tast().map_err(|e| format!("tast: {:?}", e))?;
 
-    let mut mir_modules = unit.get_mir_modules();
+    let mir_modules = unit.get_mir_modules();
+
+    // Tree-shake before optimization to avoid optimizing dead stdlib code
+    let mut modules: Vec<IrModule> = mir_modules.iter().map(|m| (**m).clone()).collect();
+    if let Some(entry) = find_benchmark_entry(&modules) {
+        tree_shake::tree_shake_bundle(&mut modules, &entry.0, &entry.1);
+    }
 
     // Apply MIR optimizations (O2) for fair comparison with tiered backend
     let mut pass_manager = PassManager::for_level(OptimizationLevel::O2);
-    for module in &mut mir_modules {
-        let module_mut = std::sync::Arc::make_mut(module);
-        let _ = pass_manager.run(module_mut);
-        let _ = strip_stack_trace_updates(module_mut);
+    for module in &mut modules {
+        let _ = pass_manager.run(module);
+        let _ = strip_stack_trace_updates(module);
     }
 
     let mut backend =
         CraneliftBackend::with_symbols(symbols).map_err(|e| format!("backend: {}", e))?;
 
-    for module in &mir_modules {
+    for module in &modules {
         backend
             .compile_module(module)
             .map_err(|e| format!("compile: {}", e))?;
@@ -408,7 +425,7 @@ fn run_benchmark_cranelift(
 
     // Execute
     let exec_start = Instant::now();
-    for module in mir_modules.iter().rev() {
+    for module in modules.iter().rev() {
         if backend.call_main(module).is_ok() {
             break;
         }

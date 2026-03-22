@@ -119,32 +119,7 @@ impl AotCompiler {
 
         let mut modules: Vec<_> = mir_modules.iter().map(|m| (**m).clone()).collect();
 
-        // --- Phase 2: MIR optimizations ---
-        // Check if system LLVM tools are available for optimization.
-        // When they are, cap MIR at O2 because MIR O3's GVN pass changes FP
-        // operation ordering, and system LLVM (newer version) optimizes differently
-        // with the reordered ops, producing different FP results. System opt -O3
-        // handles GVN/vectorization/etc. natively anyway.
-        let has_system_tools = (self.output_format == OutputFormat::Executable
-            || self.output_format == OutputFormat::ObjectFile)
-            && llvm_aot_backend::has_system_llvm_tools();
-        let mir_opt = if has_system_tools && self.opt_level == OptimizationLevel::O3 {
-            OptimizationLevel::O2
-        } else {
-            self.opt_level
-        };
-        if mir_opt != OptimizationLevel::O0 {
-            if self.verbose {
-                println!("  Applying MIR optimizations ({:?})...", mir_opt);
-            }
-            let mut pass_manager = PassManager::for_level(mir_opt);
-            for module in &mut modules {
-                let _ = pass_manager.run(module);
-                let _ = strip_stack_trace_updates(module);
-            }
-        }
-
-        // --- Phase 3: Find entry point ---
+        // --- Phase 2: Find entry point ---
         let (entry_module_name, entry_function_name) = find_entry_point(&modules)?;
         if self.verbose {
             println!(
@@ -153,7 +128,7 @@ impl AotCompiler {
             );
         }
 
-        // --- Phase 4: Tree-shake ---
+        // --- Phase 3: Tree-shake (before optimization to avoid optimizing dead code) ---
         if self.strip {
             if self.verbose {
                 println!("  Tree-shaking...");
@@ -175,6 +150,31 @@ impl AotCompiler {
                     "    Kept: {} functions, {} externs",
                     stats.functions_kept, stats.extern_functions_kept
                 );
+            }
+        }
+
+        // --- Phase 4: MIR optimizations ---
+        // Check if system LLVM tools are available for optimization.
+        // When they are, cap MIR at O2 because MIR O3's GVN pass changes FP
+        // operation ordering, and system LLVM (newer version) optimizes differently
+        // with the reordered ops, producing different FP results. System opt -O3
+        // handles GVN/vectorization/etc. natively anyway.
+        let has_system_tools = (self.output_format == OutputFormat::Executable
+            || self.output_format == OutputFormat::ObjectFile)
+            && llvm_aot_backend::has_system_llvm_tools();
+        let mir_opt = if has_system_tools && self.opt_level == OptimizationLevel::O3 {
+            OptimizationLevel::O2
+        } else {
+            self.opt_level
+        };
+        if mir_opt != OptimizationLevel::O0 {
+            if self.verbose {
+                println!("  Applying MIR optimizations ({:?})...", mir_opt);
+            }
+            let mut pass_manager = PassManager::for_level(mir_opt);
+            for module in &mut modules {
+                let _ = pass_manager.run(module);
+                let _ = strip_stack_trace_updates(module);
             }
         }
 
@@ -657,25 +657,13 @@ impl AotCompiler {
 
         let mut modules: Vec<_> = mir_modules.iter().map(|m| (**m).clone()).collect();
 
-        // --- Phase 2: MIR optimizations ---
-        if self.opt_level != OptimizationLevel::O0 {
-            if self.verbose {
-                println!("  Applying MIR optimizations ({:?})...", self.opt_level);
-            }
-            let mut pass_manager = PassManager::for_level(self.opt_level);
-            for module in &mut modules {
-                let _ = pass_manager.run(module);
-                let _ = strip_stack_trace_updates(module);
-            }
-        }
-
-        // --- Phase 3: Find entry point ---
+        // --- Phase 2: Find entry point ---
         let (_entry_module_name, entry_function_name) = find_entry_point(&modules)?;
         if self.verbose {
             println!("  Entry point: {}", entry_function_name);
         }
 
-        // --- Phase 4: Tree-shake ---
+        // --- Phase 3: Tree-shake (before optimization to avoid optimizing dead code) ---
         if self.strip {
             if self.verbose {
                 println!("  Tree-shaking...");
@@ -690,6 +678,18 @@ impl AotCompiler {
                     "    Removed: {} functions, {} externs",
                     stats.functions_removed, stats.extern_functions_removed
                 );
+            }
+        }
+
+        // --- Phase 4: MIR optimizations ---
+        if self.opt_level != OptimizationLevel::O0 {
+            if self.verbose {
+                println!("  Applying MIR optimizations ({:?})...", self.opt_level);
+            }
+            let mut pass_manager = PassManager::for_level(self.opt_level);
+            for module in &mut modules {
+                let _ = pass_manager.run(module);
+                let _ = strip_stack_trace_updates(module);
             }
         }
 
