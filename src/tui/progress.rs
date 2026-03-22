@@ -1,25 +1,16 @@
 //! Compilation progress TUI using ratatui.
 //!
-//! Renders a live terminal UI during `rayzor run` showing:
-//! - Current phase with animated spinner
-//! - Phase pipeline with timing bars
-//! - Cache hit/miss summary
-//! - Tree-shake stats
+//! Renders inline progress during compilation, then a final summary
+//! with program output in a bordered panel.
 
-use crossterm::{
-    cursor,
-    event::{self, Event, KeyCode},
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen},
-    ExecutableCommand,
-};
+use crossterm::{cursor, terminal, ExecutableCommand};
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout},
     style::{Color, Modifier, Style},
-    symbols,
     text::{Line, Span},
-    widgets::{Bar, BarChart, BarGroup, Block, Borders, Gauge, Paragraph, Row, Table},
-    Frame, Terminal,
+    widgets::{Bar, BarChart, BarGroup, Block, Borders, Paragraph, Row, Table, Wrap},
+    Terminal,
 };
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
@@ -27,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use super::style::is_tty;
 
-// ── Compilation state shared with TUI render thread ──────────────
+// ── Shared state ─────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
 pub struct PhaseEntry {
@@ -55,19 +46,21 @@ pub struct CompilationState {
 
 fn phase_color(name: &str) -> Color {
     match name {
-        "parse" | "frontend" => Color::Blue,
+        "compile" | "parse" => Color::Blue,
         "stdlib" => Color::Cyan,
         "shake" | "tree-shake" => Color::Yellow,
         "optimize" | "opt" => Color::Magenta,
         "jit" | "codegen" => Color::Green,
-        "link" => Color::Red,
         _ => Color::White,
     }
 }
 
-// ── Live TUI ─────────────────────────────────────────────────────
+// ── Spinner constants ────────────────────────────────────────────
 
-/// A live compilation progress TUI that renders in the terminal.
+const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+// ── ProgressTui ──────────────────────────────────────────────────
+
 pub struct ProgressTui {
     state: Arc<Mutex<CompilationState>>,
     start: Instant,
@@ -75,94 +68,118 @@ pub struct ProgressTui {
 
 impl ProgressTui {
     pub fn new(file: &str, profile: &str, preset: &str) -> Self {
-        let state = CompilationState {
-            file: file.to_string(),
-            profile: profile.to_string(),
-            preset: preset.to_string(),
-            ..Default::default()
-        };
         Self {
-            state: Arc::new(Mutex::new(state)),
+            state: Arc::new(Mutex::new(CompilationState {
+                file: file.to_string(),
+                profile: profile.to_string(),
+                preset: preset.to_string(),
+                ..Default::default()
+            })),
             start: Instant::now(),
         }
     }
 
-    /// Get a handle to update state from the compilation thread.
     pub fn handle(&self) -> ProgressHandle {
         ProgressHandle {
             state: self.state.clone(),
         }
     }
 
-    /// Run the TUI render loop. Call this from a background thread.
-    /// Returns when state.done is set to true.
+    /// Run the spinner loop during compilation. Returns when done.
     pub fn run(&self) -> io::Result<()> {
         if !is_tty() {
-            // Non-TTY: just wait for done
             loop {
                 std::thread::sleep(Duration::from_millis(100));
-                let state = self.state.lock().unwrap();
-                if state.done {
-                    // Print plain text summary
+                if self.state.lock().unwrap().done {
+                    let state = self.state.lock().unwrap();
                     print_plain_summary(&state, self.start.elapsed());
                     return Ok(());
                 }
             }
         }
 
-        // Set up terminal
-        terminal::enable_raw_mode()?;
-        let mut stdout = io::stderr();
-        stdout.execute(EnterAlternateScreen)?;
-        stdout.execute(cursor::Hide)?;
+        let mut stderr = io::stderr();
+        stderr.execute(cursor::Hide)?;
 
-        let backend = CrosstermBackend::new(stdout);
-        let mut terminal = Terminal::new(backend)?;
-
-        let tick_rate = Duration::from_millis(80);
-        let mut spinner_idx: usize = 0;
-
+        let mut tick: usize = 0;
         loop {
             let state = self.state.lock().unwrap().clone();
             let elapsed = self.start.elapsed();
 
-            terminal.draw(|frame| {
-                render_progress(frame, &state, elapsed, spinner_idx);
-            })?;
+            // Overwrite spinner line
+            let frame_char = SPINNER[tick % SPINNER.len()];
+            let phase = if state.current_phase.is_empty() {
+                "preparing"
+            } else {
+                &state.current_phase
+            };
+            eprint!(
+                "\r  {} {}  {:.1}s  ",
+                frame_char,
+                phase,
+                elapsed.as_secs_f64()
+            );
+            let _ = stderr.flush();
 
             if state.done {
-                // Brief pause to show final state
-                std::thread::sleep(Duration::from_millis(300));
+                // Clear the spinner line
+                eprint!("\r{}\r", " ".repeat(60));
+                let _ = stderr.flush();
                 break;
             }
 
-            // Handle input (q to quit) or tick
-            if event::poll(tick_rate)? {
-                if let Event::Key(key) = event::read()? {
-                    if key.code == KeyCode::Char('q') {
-                        break;
-                    }
-                }
-            }
-
-            spinner_idx += 1;
+            std::thread::sleep(Duration::from_millis(80));
+            tick += 1;
         }
 
-        // Restore terminal
-        terminal::disable_raw_mode()?;
-        let mut stdout = io::stderr();
-        stdout.execute(LeaveAlternateScreen)?;
-        stdout.execute(cursor::Show)?;
+        stderr.execute(cursor::Show)?;
+        Ok(())
+    }
 
-        // Print final summary to normal stderr after leaving alternate screen
-        let state = self.state.lock().unwrap();
-        print_styled_summary(&state, self.start.elapsed());
+    /// Render the final summary using ratatui inline viewport.
+    /// Call this AFTER execution is complete and output has been captured.
+    pub fn render_final(&self) -> io::Result<()> {
+        if !is_tty() {
+            return Ok(());
+        }
+
+        let state = self.state.lock().unwrap().clone();
+        let elapsed = self.start.elapsed();
+
+        // Calculate height needed
+        let output_lines = state.output_lines.len() as u16;
+        let stats_lines: u16 = 1 // shake
+            + if state.cache_warm > 0 || state.cache_cold > 0 { 1 } else { 0 };
+        let total_height = (3 // header + status + bar chart border
+            + 4  // bar chart content
+            + stats_lines
+            + 2  // output panel borders
+            + output_lines.max(1))
+            .min(30); // cap height
+
+        // Use ratatui inline viewport
+        terminal::enable_raw_mode()?;
+        let backend = CrosstermBackend::new(io::stderr());
+        let mut terminal = Terminal::with_options(
+            backend,
+            ratatui::TerminalOptions {
+                viewport: ratatui::Viewport::Inline(total_height),
+            },
+        )?;
+
+        terminal.draw(|frame| {
+            render_final_frame(frame, &state, elapsed);
+        })?;
+
+        terminal::disable_raw_mode()?;
+        eprintln!(); // newline after viewport
 
         Ok(())
     }
 }
 
-/// Handle for updating compilation state from the main thread.
+// ── Handle ───────────────────────────────────────────────────────
+
 #[derive(Clone)]
 pub struct ProgressHandle {
     state: Arc<Mutex<CompilationState>>,
@@ -170,8 +187,7 @@ pub struct ProgressHandle {
 
 impl ProgressHandle {
     pub fn begin_phase(&self, name: &str) {
-        let mut state = self.state.lock().unwrap();
-        state.current_phase = name.to_string();
+        self.state.lock().unwrap().current_phase = name.to_string();
     }
 
     pub fn end_phase(&self, name: &str, duration_ms: f64) {
@@ -185,239 +201,210 @@ impl ProgressHandle {
     }
 
     pub fn set_cache_stats(&self, warm: usize, cold: usize) {
-        let mut state = self.state.lock().unwrap();
-        state.cache_warm = warm;
-        state.cache_cold = cold;
+        let mut s = self.state.lock().unwrap();
+        s.cache_warm = warm;
+        s.cache_cold = cold;
     }
 
     pub fn set_shake_stats(&self, before: usize, after: usize) {
-        let mut state = self.state.lock().unwrap();
-        state.shake_before = before;
-        state.shake_after = after;
+        let mut s = self.state.lock().unwrap();
+        s.shake_before = before;
+        s.shake_after = after;
     }
 
     pub fn set_functions(&self, count: usize) {
-        let mut state = self.state.lock().unwrap();
-        state.total_functions = count;
+        self.state.lock().unwrap().total_functions = count;
     }
 
-    pub fn add_output(&self, line: &str) {
-        let mut state = self.state.lock().unwrap();
-        state.output_lines.push(line.to_string());
+    pub fn add_output_line(&self, line: String) {
+        self.state.lock().unwrap().output_lines.push(line);
     }
 
     pub fn set_error(&self, err: &str) {
-        let mut state = self.state.lock().unwrap();
-        state.error = Some(err.to_string());
+        self.state.lock().unwrap().error = Some(err.to_string());
     }
 
     pub fn finish(&self) {
-        let mut state = self.state.lock().unwrap();
-        state.done = true;
+        self.state.lock().unwrap().done = true;
     }
 }
 
-// ── Render functions ─────────────────────────────────────────────
+// ── Final frame render ───────────────────────────────────────────
 
-const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-fn render_progress(frame: &mut Frame, state: &CompilationState, elapsed: Duration, tick: usize) {
+fn render_final_frame(
+    frame: &mut ratatui::Frame,
+    state: &CompilationState,
+    elapsed: Duration,
+) {
     let area = frame.area();
 
+    // Split: header(1) + status(1) + phases(4) + stats(2) + output(rest)
+    let output_height = state.output_lines.len().max(1) as u16 + 2; // +2 for border
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Header
-            Constraint::Length(3), // Spinner / current phase
-            Constraint::Min(5),   // Phase timeline + stats
-            Constraint::Length(3), // Footer
+            Constraint::Length(1), // Header
+            Constraint::Length(1), // Status
+            Constraint::Length(4), // Phase chart
+            Constraint::Length(2), // Stats
+            Constraint::Min(output_height.min(15)), // Output panel
         ])
         .split(area);
 
-    // ── Header ───────────────────────────────────────────────────
-    let elapsed_s = elapsed.as_secs_f64();
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled(" ▶ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::styled(&state.file, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+    // ── Header ───────────────────────────────────────────────
+    let header = Line::from(vec![
+        Span::styled(
+            " ▶ rayzor ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            state.file.as_str(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw("  "),
         Span::styled(
             format!("[{}]", state.profile),
             Style::default().fg(Color::DarkGray),
         ),
-        Span::raw("  "),
-        Span::styled(
-            format!("[{}]", state.preset),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]))
-    .block(
-        Block::default()
-            .borders(Borders::BOTTOM)
-            .border_style(Style::default().fg(Color::DarkGray))
-            .title(Span::styled(
-                " rayzor ",
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-            )),
-    );
-    frame.render_widget(header, chunks[0]);
+    ]);
+    frame.render_widget(Paragraph::new(header), chunks[0]);
 
-    // ── Spinner + current phase ──────────────────────────────────
-    if !state.done {
-        let spinner_char = SPINNER[tick % SPINNER.len()];
-        let phase_text = if state.current_phase.is_empty() {
-            "preparing...".to_string()
-        } else {
-            state.current_phase.clone()
-        };
-
-        let spinner_line = Paragraph::new(Line::from(vec![
-            Span::styled(format!("  {} ", spinner_char), Style::default().fg(Color::Cyan)),
-            Span::styled(&phase_text, Style::default().fg(Color::White)),
+    // ── Status line ──────────────────────────────────────────
+    let total_ms = elapsed.as_secs_f64() * 1000.0;
+    let status = if let Some(ref err) = state.error {
+        Line::from(vec![
             Span::styled(
-                format!("  {:.1}s", elapsed_s),
-                Style::default().fg(Color::DarkGray),
+                " ✗ ",
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
             ),
-        ]));
-        frame.render_widget(spinner_line, chunks[1]);
-    } else {
-        let done_line = Paragraph::new(Line::from(vec![
-            Span::styled("  ✓ ", Style::default().fg(Color::Green)),
-            Span::styled("done", Style::default().fg(Color::Green)),
-            Span::styled(
-                format!("  {:.1}s", elapsed_s),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-        frame.render_widget(done_line, chunks[1]);
-    }
-
-    // ── Phase timeline + stats ───────────────────────────────────
-    let inner_chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(4), // Phase bars
-            Constraint::Min(1),   // Stats
+            Span::styled(err.as_str(), Style::default().fg(Color::Red)),
         ])
-        .split(chunks[2]);
+    } else {
+        Line::from(vec![
+            Span::styled(
+                " ✓ ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("{:.0}ms", total_ms),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!("  {} functions", state.total_functions),
+                Style::default().fg(Color::DarkGray),
+            ),
+            if state.shake_before > state.shake_after && state.shake_before > 0 {
+                let pct = ((state.shake_before - state.shake_after) as f64
+                    / state.shake_before as f64
+                    * 100.0) as usize;
+                Span::styled(
+                    format!(
+                        "  ({} → {}, {}% stripped)",
+                        state.shake_before, state.shake_after, pct
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else {
+                Span::raw("")
+            },
+        ])
+    };
+    frame.render_widget(Paragraph::new(status), chunks[1]);
 
-    // Phase bar chart
+    // ── Phase bar chart ──────────────────────────────────────
     if !state.phases.is_empty() {
         let bars: Vec<Bar> = state
             .phases
             .iter()
             .map(|p| {
                 Bar::default()
-                    .value(p.duration_ms as u64)
-                    .label(Line::from(format!("{} {:.0}ms", p.name, p.duration_ms)))
+                    .value(p.duration_ms.max(1.0) as u64)
+                    .label(Line::from(Span::styled(
+                        format!("{} {:.0}ms", p.name, p.duration_ms),
+                        Style::default().fg(Color::DarkGray),
+                    )))
                     .style(Style::default().fg(p.color))
             })
             .collect();
 
+        let bar_width =
+            (chunks[2].width as usize / state.phases.len().max(1)).clamp(8, 20) as u16;
+
         let chart = BarChart::default()
-            .block(Block::default().title(" phases ").borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)))
             .data(BarGroup::default().bars(&bars))
-            .bar_width(
-                (inner_chunks[0].width as usize / state.phases.len().max(1)).max(3) as u16,
-            )
+            .bar_width(bar_width)
             .bar_gap(1)
-            .bar_style(Style::default().fg(Color::Cyan))
-            .value_style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD));
+            .value_style(
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            );
 
-        frame.render_widget(chart, inner_chunks[0]);
+        frame.render_widget(chart, chunks[2]);
     }
 
-    // Stats table
-    let mut rows = Vec::new();
-
+    // ── Stats row ────────────────────────────────────────────
+    let mut stat_spans = Vec::new();
     if state.cache_warm > 0 || state.cache_cold > 0 {
-        rows.push(Row::new(vec![
-            Span::styled("cache", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("{} cached", state.cache_warm),
-                Style::default().fg(Color::Green),
-            ),
-            Span::styled(
-                format!("{} compiled", state.cache_cold),
-                Style::default().fg(Color::Yellow),
-            ),
-        ]));
+        stat_spans.push(Span::styled(" cache ", Style::default().fg(Color::DarkGray)));
+        stat_spans.push(Span::styled(
+            format!("{} hit", state.cache_warm),
+            Style::default().fg(Color::Green),
+        ));
+        stat_spans.push(Span::styled(" | ", Style::default().fg(Color::DarkGray)));
+        stat_spans.push(Span::styled(
+            format!("{} miss", state.cache_cold),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    if !stat_spans.is_empty() {
+        frame.render_widget(Paragraph::new(Line::from(stat_spans)), chunks[3]);
     }
 
-    if state.shake_before > 0 && state.shake_after < state.shake_before {
-        let pct = ((state.shake_before - state.shake_after) as f64
-            / state.shake_before as f64
-            * 100.0) as usize;
-        rows.push(Row::new(vec![
-            Span::styled("shake", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("{} → {}", state.shake_before, state.shake_after),
-                Style::default().fg(Color::Green),
-            ),
-            Span::styled(
-                format!("{}% stripped", pct),
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-    }
+    // ── Output panel ─────────────────────────────────────────
+    let output_text: Vec<Line> = if state.output_lines.is_empty() {
+        vec![Line::from(Span::styled(
+            "(no output)",
+            Style::default().fg(Color::DarkGray),
+        ))]
+    } else {
+        state
+            .output_lines
+            .iter()
+            .map(|l| Line::from(Span::raw(l.as_str())))
+            .collect()
+    };
 
-    if state.total_functions > 0 {
-        rows.push(Row::new(vec![
-            Span::styled("functions", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!("{}", state.total_functions),
-                Style::default().fg(Color::Cyan),
-            ),
-            Span::styled("compiled", Style::default().fg(Color::DarkGray)),
-        ]));
-    }
-
-    if !rows.is_empty() {
-        let table = Table::new(
-            rows,
-            [
-                Constraint::Length(12),
-                Constraint::Length(20),
-                Constraint::Min(10),
-            ],
-        )
+    let output_panel = Paragraph::new(output_text)
         .block(
             Block::default()
-                .title(" stats ")
+                .title(Span::styled(
+                    " output ",
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ))
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::DarkGray)),
-        );
-        frame.render_widget(table, inner_chunks[1]);
-    }
+        )
+        .wrap(Wrap { trim: false });
 
-    // ── Footer ───────────────────────────────────────────────────
-    if let Some(ref err) = state.error {
-        let footer = Paragraph::new(Line::from(vec![
-            Span::styled(" ✗ ", Style::default().fg(Color::Red)),
-            Span::styled(err.as_str(), Style::default().fg(Color::Red)),
-        ]));
-        frame.render_widget(footer, chunks[3]);
-    } else {
-        let total_ms: f64 = state.phases.iter().map(|p| p.duration_ms).sum();
-        let footer = Paragraph::new(Line::from(vec![
-            Span::styled(
-                format!(" total: {:.0}ms", total_ms),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::raw("  "),
-            Span::styled("q quit", Style::default().fg(Color::DarkGray)),
-        ]))
-        .block(
-            Block::default()
-                .borders(Borders::TOP)
-                .border_style(Style::default().fg(Color::DarkGray)),
-        );
-        frame.render_widget(footer, chunks[3]);
-    }
+    frame.render_widget(output_panel, chunks[4]);
 }
 
-// ── Fallback output ──────────────────────────────────────────────
+// ── Fallback ─────────────────────────────────────────────────────
 
-fn print_plain_summary(state: &CompilationState, elapsed: Duration) {
+fn print_plain_summary(state: &CompilationState, _elapsed: Duration) {
     if !state.phases.is_empty() {
         let parts: Vec<String> = state
             .phases
@@ -435,67 +422,13 @@ fn print_plain_summary(state: &CompilationState, elapsed: Duration) {
             state.shake_before, state.shake_after, pct
         );
     }
-}
-
-fn print_styled_summary(state: &CompilationState, elapsed: Duration) {
-    use crossterm::style::Stylize;
-
-    // One-line phase pipeline
-    if !state.phases.is_empty() {
-        let total_ms: f64 = state.phases.iter().map(|p| p.duration_ms).sum();
-        let parts: Vec<String> = state
-            .phases
-            .iter()
-            .map(|p| {
-                let c = match p.color {
-                    Color::Blue => crossterm::style::Color::Blue,
-                    Color::Cyan => crossterm::style::Color::Cyan,
-                    Color::Yellow => crossterm::style::Color::Yellow,
-                    Color::Magenta => crossterm::style::Color::Magenta,
-                    Color::Green => crossterm::style::Color::Green,
-                    Color::Red => crossterm::style::Color::Red,
-                    _ => crossterm::style::Color::White,
-                };
-                format!(
-                    "{} {}",
-                    p.name.as_str().with(crossterm::style::Color::DarkGrey),
-                    format!("{:.0}ms", p.duration_ms).with(c)
-                )
-            })
-            .collect();
-        eprintln!(
-            "  {} total {}",
-            parts.join(" → "),
-            format!("{:.0}ms", total_ms)
-                .with(crossterm::style::Color::White)
-                .bold()
-        );
-    }
-
-    // Shake stats
-    if state.shake_before > state.shake_after && state.shake_before > 0 {
-        let pct = ((state.shake_before - state.shake_after) as f64
-            / state.shake_before as f64
-            * 100.0) as usize;
-        eprintln!(
-            "  {} {} → {} functions ({}% stripped)",
-            "shake".with(crossterm::style::Color::DarkGrey),
-            state
-                .shake_before
-                .to_string()
-                .with(crossterm::style::Color::DarkGrey),
-            state
-                .shake_after
-                .to_string()
-                .with(crossterm::style::Color::Green),
-            pct,
-        );
+    // Print output
+    for line in &state.output_lines {
+        println!("{}", line);
     }
 }
 
-// ── Simple non-TUI banner (used when verbose is off) ─────────────
-
-/// Print a run banner with styled output (non-TUI, just a single line).
+/// Print a simple run banner (non-TUI fallback).
 pub fn print_run_banner(file: &str, profile: &str, preset: &str) {
     if is_tty() {
         use crossterm::style::Stylize;
@@ -530,7 +463,7 @@ pub fn print_shake_summary(before: usize, after: usize) {
         );
     } else {
         eprintln!(
-            "  shake: {} → {} functions ({}% removed)",
+            "  shake: {} → {} ({}% removed)",
             before, after, pct
         );
     }
