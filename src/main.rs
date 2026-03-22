@@ -86,6 +86,10 @@ enum Commands {
         #[arg(long, default_value = "on")]
         safety_warnings: String,
 
+        /// Open interactive TUI after execution (scrollable output, search)
+        #[arg(short, long)]
+        interactive: bool,
+
         /// Arguments to pass to the Haxe program (after --)
         #[arg(last = true)]
         program_args: Vec<String>,
@@ -473,6 +477,7 @@ fn main() {
             compute,
             rpkg_files,
             safety_warnings,
+            interactive,
             program_args,
         } => run_file(
             file,
@@ -487,6 +492,7 @@ fn main() {
             compute,
             rpkg_files,
             safety_warnings != "off",
+            interactive,
             program_args,
         ),
         Commands::Jit {
@@ -830,6 +836,7 @@ fn run_file(
     compute: bool,
     rpkg_files: Vec<PathBuf>,
     safety_warnings: bool,
+    interactive: bool,
     program_args: Vec<String>,
 ) -> Result<(), String> {
     use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
@@ -860,9 +867,12 @@ fn run_file(
         return build_from_hxml(&file, verbose, None, false);
     }
 
-    // Launch live TUI when running in a terminal (alternate screen with progress)
-    // Falls back to plain banner when piped or --quiet
-    let progress_tui = if tui::style::is_tty() {
+    // TUI modes:
+    // -i (interactive): full ratatui TUI with scrollable output, search (after execution)
+    // -v (verbose):     spinner during compilation + inline stats after
+    // default:          plain output, no TUI overhead
+    let use_tui = (interactive || verbose) && tui::style::is_tty();
+    let progress_tui = if use_tui {
         let tui = tui::progress::ProgressTui::new(
             &file.display().to_string(),
             profile,
@@ -1183,14 +1193,20 @@ fn run_file(
 
     backend.shutdown();
 
-    // Render final TUI with output panel
+    // Render TUI
     if let Some(ref tui) = progress_tui_ref {
         let captured = output_capture.lock().unwrap();
         let handle = tui.handle();
         for line in captured.iter() {
             handle.add_output_line(line.clone());
         }
-        let _ = tui.render_final();
+        if interactive {
+            // Full interactive TUI — stays alive until user quits
+            let _ = tui.run_interactive();
+        } else {
+            // One-shot inline render for -v mode
+            let _ = tui.render_final();
+        }
     }
 
     // Clean up temp dirs from rpkg haxe sources (NOT manifest class paths)
@@ -1462,6 +1478,7 @@ fn build_from_hxml(
                     false,          // compute
                     Vec::new(),     // rpkg_files
                     false,          // safety_warnings
+                    false,          // interactive
                     Vec::new(),     // program_args
                 )
             }
