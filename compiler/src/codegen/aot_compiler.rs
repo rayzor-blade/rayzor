@@ -630,10 +630,6 @@ impl AotCompiler {
         let t0 = Instant::now();
 
         // --- Phase 1: Parse and compile to MIR ---
-        if self.verbose {
-            println!("  Parsing and lowering to MIR...");
-        }
-
         let mut config = CompilationConfig::default();
         config.pipeline_config = config.pipeline_config.skip_analysis();
         let mut unit = CompilationUnit::new(config);
@@ -650,6 +646,8 @@ impl AotCompiler {
         unit.lower_to_tast()
             .map_err(|errors| format!("Compilation failed: {:?}", errors))?;
 
+        let t_frontend = if self.verbose { t0.elapsed() } else { std::time::Duration::ZERO };
+
         let mir_modules = unit.get_mir_modules();
         if mir_modules.is_empty() {
             return Err("No MIR modules generated".to_string());
@@ -659,33 +657,18 @@ impl AotCompiler {
 
         // --- Phase 2: Find entry point ---
         let (_entry_module_name, entry_function_name) = find_entry_point(&modules)?;
-        if self.verbose {
-            println!("  Entry point: {}", entry_function_name);
-        }
 
         // --- Phase 3: Tree-shake (before optimization to avoid optimizing dead code) ---
         if self.strip {
-            if self.verbose {
-                println!("  Tree-shaking...");
-            }
-            let stats = tree_shake::tree_shake_bundle(
+            tree_shake::tree_shake_bundle(
                 &mut modules,
                 &_entry_module_name,
                 &entry_function_name,
             );
-            if self.verbose {
-                println!(
-                    "    Removed: {} functions, {} externs",
-                    stats.functions_removed, stats.extern_functions_removed
-                );
-            }
         }
 
         // --- Phase 4: MIR optimizations ---
         if self.opt_level != OptimizationLevel::O0 {
-            if self.verbose {
-                println!("  Applying MIR optimizations ({:?})...", self.opt_level);
-            }
             let mut pass_manager = PassManager::for_level(self.opt_level);
             for module in &mut modules {
                 let _ = pass_manager.run(module);
@@ -693,11 +676,9 @@ impl AotCompiler {
             }
         }
 
-        // --- Phase 5: Emit C source ---
-        if self.verbose {
-            println!("  Emitting C source...");
-        }
+        let t_mir = if self.verbose { t0.elapsed() } else { std::time::Duration::ZERO };
 
+        // --- Phase 5: Emit C source ---
         // Find startup functions
         let startup_funcs: Vec<String> = modules
             .iter()
@@ -713,6 +694,7 @@ impl AotCompiler {
             .collect();
 
         let c_source = CBackend::emit_modules(&modules, &entry_function_name, &startup_funcs)?;
+        let t_emit = if self.verbose { t0.elapsed() } else { std::time::Duration::ZERO };
 
         // If output format is CSource, just write the .c file
         if self.output_format == OutputFormat::CSource {
@@ -738,18 +720,15 @@ impl AotCompiler {
             .map_err(|e| format!("Failed to write temp C source: {}", e))?;
 
         let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
-        // Cap optimization for large C files to avoid gcc OOM.
-        // gcc -O2/-O3 can use 4GB+ RAM on files with 1000+ line functions.
+        // Cap gcc at -O2 max — O3 adds significant compile time (~200ms) with
+        // marginal runtime benefit. For very large files, cap at -O1 to prevent OOM.
         let opt_flag = if c_source.len() > 150_000 {
-            "-O1" // Very large files: cap at O1 to prevent OOM
-        } else if c_source.len() > 100_000 && self.opt_level == OptimizationLevel::O3 {
-            "-O2"
+            "-O1"
         } else {
             match self.opt_level {
                 OptimizationLevel::O0 => "-O0",
                 OptimizationLevel::O1 => "-O1",
-                OptimizationLevel::O2 => "-O2",
-                OptimizationLevel::O3 => "-O3",
+                _ => "-O2",
             }
         };
 
@@ -793,7 +772,16 @@ impl AotCompiler {
         let code_size = std::fs::metadata(output_path).map(|m| m.len()).unwrap_or(0);
 
         if self.verbose {
-            println!("  Done in {:.1}ms", t0.elapsed().as_secs_f64() * 1000.0);
+            let t_total = t0.elapsed();
+            println!(
+                "  Timing: frontend={:.0}ms mir={:.0}ms emit={:.0}ms gcc={:.0}ms total={:.0}ms ({}KB C)",
+                t_frontend.as_secs_f64() * 1000.0,
+                (t_mir - t_frontend).as_secs_f64() * 1000.0,
+                (t_emit - t_mir).as_secs_f64() * 1000.0,
+                (t_total - t_emit).as_secs_f64() * 1000.0,
+                t_total.as_secs_f64() * 1000.0,
+                c_source.len() / 1024,
+            );
         }
 
         Ok(AotOutput {
