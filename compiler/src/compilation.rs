@@ -4631,6 +4631,14 @@ impl CompilationUnit {
             }
         }
 
+        // Add on-demand compiled files (user packages like sim/Particle.hx)
+        // These were compiled via load_imports_efficiently and have source on disk
+        for (filename, _) in &self.compiled_files {
+            if let Ok(source) = std::fs::read_to_string(filename) {
+                source_map.add_file(filename.clone(), source);
+            }
+        }
+
         let formatter = ErrorFormatter::with_colors();
 
         for error in errors {

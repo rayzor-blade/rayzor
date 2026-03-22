@@ -993,6 +993,7 @@ fn run_file(
     let mut rpkg_source_dirs: Vec<PathBuf> = Vec::new();
     let mut rpkg_temp_dirs: Vec<PathBuf> = Vec::new();
     // Manifest class paths go into source dirs but NOT temp dirs (they're real, not cleanup targets)
+    let manifest_dirs = extra_source_dirs_from_manifest.clone();
     rpkg_source_dirs.extend(extra_source_dirs_from_manifest);
     for rpkg_path in &rpkg_files {
         match compiler::rpkg::install::RpkgPlugin::load(rpkg_path) {
@@ -1042,11 +1043,41 @@ fn run_file(
     }
 
     // Check MIR cache: if source hash matches, skip compile+merge+shake entirely
+    // Hash main source + all files in class paths for cache invalidation
     let source_hash = {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut h = DefaultHasher::new();
         source.hash(&mut h);
+        // Include modification times of all .hx files in class paths
+        for dir in &manifest_dirs {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) == Some("hx") {
+                        if let Ok(meta) = path.metadata() {
+                            if let Ok(modified) = meta.modified() {
+                                modified.hash(&mut h);
+                            }
+                        }
+                    }
+                    // Also check subdirectories (packages)
+                    if path.is_dir() {
+                        if let Ok(sub_entries) = std::fs::read_dir(&path) {
+                            for sub in sub_entries.flatten() {
+                                if sub.path().extension().and_then(|e| e.to_str()) == Some("hx") {
+                                    if let Ok(meta) = sub.path().metadata() {
+                                        if let Ok(modified) = meta.modified() {
+                                            modified.hash(&mut h);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         h.finish()
     };
     let mir_cache_path = {
