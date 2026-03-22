@@ -125,6 +125,17 @@ pub fn tree_shake_bundle(
                             reachable_externs.insert((mod_idx, *closure_id));
                         }
                     }
+                    IrInstruction::Const {
+                        value: crate::ir::types::IrValue::Function(ref_id),
+                        ..
+                    } => {
+                        // Function pointers stored as constants (e.g., `var fn = plusOne;`)
+                        if module.functions.contains_key(ref_id) {
+                            worklist.push((mod_idx, *ref_id));
+                        } else if module.extern_functions.contains_key(ref_id) {
+                            reachable_externs.insert((mod_idx, *ref_id));
+                        }
+                    }
                     IrInstruction::LoadGlobal { global_id, .. }
                     | IrInstruction::StoreGlobal { global_id, .. } => {
                         reachable_globals.insert((mod_idx, *global_id));
