@@ -109,8 +109,10 @@ impl AotCompiler {
                 .map_err(|e| format!("Failed to add {}: {}", source_file, e))?;
         }
 
-        unit.lower_to_tast()
-            .map_err(|errors| format!("Compilation failed: {:?}", errors))?;
+        unit.lower_to_tast().map_err(|errors| {
+            unit.print_compilation_errors(&errors);
+            format!("Compilation failed with {} error(s)", errors.len())
+        })?;
 
         let mir_modules = unit.get_mir_modules();
         if mir_modules.is_empty() {
@@ -643,8 +645,10 @@ impl AotCompiler {
                 .map_err(|e| format!("Failed to add {}: {}", source_file, e))?;
         }
 
-        unit.lower_to_tast()
-            .map_err(|errors| format!("Compilation failed: {:?}", errors))?;
+        unit.lower_to_tast().map_err(|errors| {
+            unit.print_compilation_errors(&errors);
+            format!("Compilation failed with {} error(s)", errors.len())
+        })?;
 
         let t_frontend = if self.verbose {
             t0.elapsed()
