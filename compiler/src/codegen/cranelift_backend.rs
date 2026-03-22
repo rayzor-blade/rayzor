@@ -54,10 +54,15 @@ pub struct CraneliftBackend {
     module_counter: usize,
 
     /// Set of Cranelift FuncIds that have already been defined (had their bodies compiled)
-    /// Used to prevent duplicate definition errors when functions are shared across modules
-    /// We track by FuncId (not name) because different modules can have functions with the
-    /// same MIR name (e.g., 'new') but different Cranelift symbols (e.g., m1_func_0 vs m3_func_0)
     defined_functions: HashSet<FuncId>,
+
+    /// Functions that are used as FunctionRef/MakeClosure targets (vtable/closure).
+    /// These MUST keep the env parameter. All other functions can skip it
+    /// for faster direct calls (eliminates ~2 billion env=0 pushes in fibonacci).
+    indirect_target_functions: HashSet<IrFunctionId>,
+
+    /// Tracks which declared functions have env parameter (for call site matching)
+    functions_with_env: HashSet<IrFunctionId>,
 
     /// The environment parameter for the current function being compiled
     /// This is used by ClosureEnv to access the environment
@@ -226,6 +231,8 @@ impl CraneliftBackend {
             pointer_type,
             module_counter: 0,
             defined_functions: HashSet::new(),
+            indirect_target_functions: HashSet::new(),
+            functions_with_env: HashSet::new(),
             current_env_param: None,
             string_data: HashMap::new(),
             string_counter: 0,
@@ -451,6 +458,28 @@ impl CraneliftBackend {
             self.function_map.len()
         );
 
+        // Scan for indirect call targets (FunctionRef/MakeClosure/CallIndirect args).
+        // These must keep the env parameter for closure/vtable compatibility.
+        for function in mir_module.functions.values() {
+            for block in function.cfg.blocks.values() {
+                for inst in &block.instructions {
+                    match inst {
+                        crate::ir::IrInstruction::FunctionRef { func_id, .. }
+                        | crate::ir::IrInstruction::MakeClosure { func_id, .. } => {
+                            self.indirect_target_functions.insert(*func_id);
+                        }
+                        // Also mark all direct call targets from __vtable_init__ as indirect
+                        crate::ir::IrInstruction::CallDirect { func_id, .. }
+                            if function.name == "__vtable_init__" =>
+                        {
+                            self.indirect_target_functions.insert(*func_id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
         // First pass: declare all functions (except malloc/realloc/free which we handle separately)
         for (func_id, function) in &mir_module.functions {
             // Skip libc memory management functions - we'll declare them separately and map MIR IDs to libc
@@ -650,6 +679,26 @@ impl CraneliftBackend {
             current_module,
             self.function_map.len()
         );
+
+        // Scan for indirect targets (same as compile_module)
+        for function in mir_module.functions.values() {
+            for block in function.cfg.blocks.values() {
+                for inst in &block.instructions {
+                    match inst {
+                        crate::ir::IrInstruction::FunctionRef { func_id, .. }
+                        | crate::ir::IrInstruction::MakeClosure { func_id, .. } => {
+                            self.indirect_target_functions.insert(*func_id);
+                        }
+                        crate::ir::IrInstruction::CallDirect { func_id, .. }
+                            if function.name == "__vtable_init__" =>
+                        {
+                            self.indirect_target_functions.insert(*func_id);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
 
         // First pass: declare all functions (except malloc/realloc/free which we handle separately)
         for (func_id, function) in &mir_module.functions {
@@ -960,8 +1009,20 @@ impl CraneliftBackend {
         let is_c_calling_conv =
             function.signature.calling_convention == crate::ir::CallingConvention::C;
 
-        if !is_extern && !already_has_env_param && !is_c_calling_conv {
+        // Skip env for functions that are never used as indirect call targets.
+        // Keep env for: FunctionRef/MakeClosure targets, __vtable_init__, __init__,
+        // and main (called externally with env=0).
+        let is_entry = function.name == "main"
+            || function.name == "__vtable_init__"
+            || function.name == "__init__"
+            || function.name.starts_with("Main");
+        let needs_env = !is_extern
+            && !already_has_env_param
+            && !is_c_calling_conv
+            && (self.indirect_target_functions.contains(&mir_func_id) || is_entry);
+        if needs_env {
             sig.params.push(AbiParam::new(types::I64));
+            self.functions_with_env.insert(mir_func_id);
         }
 
         // Add parameters
@@ -1262,7 +1323,11 @@ impl CraneliftBackend {
         let is_c_calling_conv =
             function.signature.calling_convention == crate::ir::CallingConvention::C;
 
-        if !already_has_env_param && !is_c_calling_conv {
+        // Match declare_function: only add env for indirect target functions
+        let needs_env = !already_has_env_param
+            && !is_c_calling_conv
+            && self.functions_with_env.contains(&mir_func_id);
+        if needs_env {
             self.ctx
                 .func
                 .signature
@@ -1357,7 +1422,11 @@ impl CraneliftBackend {
         let is_c_calling_conv =
             function.signature.calling_convention == crate::ir::CallingConvention::C;
 
-        if !already_has_env_param && !is_c_calling_conv {
+        // Match declare_function: only add env for indirect target functions
+        let needs_env = !already_has_env_param
+            && !is_c_calling_conv
+            && self.functions_with_env.contains(&mir_func_id);
+        if needs_env {
             self.ctx
                 .func
                 .signature
@@ -1431,23 +1500,18 @@ impl CraneliftBackend {
             // For lambdas, the env parameter is the first user parameter
             // current_env_param should point to it
             self.current_env_param = Some(param_values[sret_offset]);
-        } else if is_c_calling_conv {
-            // C calling convention function: no hidden environment parameter
-            // Parameters map directly (after optional sret)
+        } else if is_c_calling_conv || !self.functions_with_env.contains(&mir_func_id) {
+            // C calling convention OR env-free direct function: no hidden env parameter
             for (i, param) in function.signature.parameters.iter().enumerate() {
                 self.value_map
                     .insert(param.reg, param_values[i + sret_offset]);
             }
-            // No env param for C functions
             self.current_env_param = None;
         } else {
             // Regular Haxe function with implicit hidden environment parameter
-            let env_offset = sret_offset; // env param is at this index
-            let param_offset = env_offset + 1; // user params start after env
-
-            // Store environment parameter for ClosureEnv
+            let env_offset = sret_offset;
+            let param_offset = env_offset + 1;
             self.current_env_param = Some(param_values[env_offset]);
-
             for (i, param) in function.signature.parameters.iter().enumerate() {
                 self.value_map
                     .insert(param.reg, param_values[i + param_offset]);
@@ -1587,6 +1651,7 @@ impl CraneliftBackend {
                     self.current_env_param,
                     &mut self.string_data,
                     &mut self.string_counter,
+                    &self.functions_with_env,
                 );
                 inst_result?;
             }
@@ -1908,6 +1973,7 @@ impl CraneliftBackend {
         current_env_param: Option<Value>,
         string_data: &mut HashMap<String, DataId>,
         string_counter: &mut usize,
+        functions_with_env: &HashSet<IrFunctionId>,
     ) -> Result<(), String> {
         use crate::ir::IrInstruction;
 
@@ -2440,7 +2506,8 @@ impl CraneliftBackend {
                         && !is_c_calling_conv
                         && !(called_func.name == "malloc"
                             || called_func.name == "realloc"
-                            || called_func.name == "free");
+                            || called_func.name == "free")
+                        && functions_with_env.contains(func_id);
                     if should_add_env {
                         // For direct calls to regular functions, we pass a null environment pointer
                         call_args.push(builder.ins().iconst(types::I64, 0));
