@@ -199,11 +199,13 @@ pub fn create_bundle(config: &BundleConfig) -> Result<usize, String> {
 ///
 /// Returns (classes, enums, aliases) counts.
 pub fn extract_stdlib_symbols(config: &PrebladeConfig) -> Result<(usize, usize, usize), String> {
-    // Find stdlib path
-    let stdlib_path = PathBuf::from("compiler/haxe-std");
-    if !stdlib_path.exists() {
-        return Err("Could not find stdlib path".to_string());
-    }
+    // Find stdlib path using the same resolution as CompilationConfig
+    let stdlib_path = crate::compilation::CompilationConfig::discover_stdlib_paths()
+        .into_iter()
+        .find(|p| p.exists())
+        .ok_or_else(|| {
+            "Could not find stdlib path. Set RAYZOR_STD_PATH or run from project root.".to_string()
+        })?;
 
     // Discover all modules with their file paths
     let all_files = discover_stdlib_files(&stdlib_path);
