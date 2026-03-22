@@ -2064,7 +2064,18 @@ pub extern "C" fn haxe_std_string_ptr(dynamic_ptr: *mut u8) -> *mut crate::haxe_
                 cap: 0, // StringPtr strings are either static or leaked
             }))
         } else {
-            // Unknown type, return type name
+            // type_id not recognized — this pointer may be a raw HaxeArray*, not a DynamicValue*.
+            // When the compiler passes Array pointers through Std.string(), they arrive unboxed.
+            // Detect by checking if the fourth field (elem_size) is a typical element size (1, 2, 4, 8).
+            let maybe_array = &*(dynamic_ptr as *const crate::haxe_array::HaxeArray);
+            if (maybe_array.elem_size == 4 || maybe_array.elem_size == 8)
+                && maybe_array.cap >= maybe_array.len
+                && maybe_array.len < 100_000_000 // sanity: not garbage
+            {
+                return crate::haxe_array::haxe_array_to_string(dynamic_ptr as *const crate::haxe_array::HaxeArray);
+            }
+
+            // Truly unknown type
             let s = format!("<unknown type {}>", dynamic.type_id.0);
             let bytes = s.into_bytes();
             let len = bytes.len();
