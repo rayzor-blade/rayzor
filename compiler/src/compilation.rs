@@ -2289,8 +2289,10 @@ impl CompilationUnit {
     ) -> bool {
         let filename = file_path.to_string_lossy().to_string();
 
+        eprintln!("[TRY_COMPILE] {} file={}", name, filename);
         // Skip if already compiled
         if self.compiled_files.contains_key(&filename) {
+            eprintln!("[TRY_COMPILE] {} → skip (already compiled)", name);
             return true;
         }
 
@@ -2358,6 +2360,17 @@ impl CompilationUnit {
                         );
                     }
 
+                    // Debug: check constructor params in the actual MIR
+                    if filename.contains("Point2D") {
+                        for func in mir_arc.functions.values() {
+                            if func.name == "new" || func.name.contains("new") {
+                                let params: Vec<String> = func.signature.parameters.iter()
+                                    .map(|p| format!("{}:{:?}", p.name, p.ty))
+                                    .collect();
+                                eprintln!("[POINT2D_MIR] fn{}={} new({})", func.id.0, func.name, params.join(", "));
+                            }
+                        }
+                    }
                     self.renumber_and_push_import_mir((*mir_arc).clone());
                 }
                 true
@@ -3781,6 +3794,10 @@ impl CompilationUnit {
             }
         }
 
+        // Save external constructor keys to filter them out of the result
+        let external_constructor_keys: std::collections::HashSet<String> =
+            self.import_constructor_name_map.keys().cloned().collect();
+
         let mir_result = lower_hir_to_mir_with_function_map(
             &hir_module,
             &self.string_interner,
@@ -3842,14 +3859,18 @@ impl CompilationUnit {
             mir_result.function_map.len(),
             filename
         );
+        // (max_own_func_id computed earlier before module was moved)
         for (symbol_id, func_id) in mir_result.function_map {
             self.stdlib_function_map.insert(symbol_id, func_id);
         }
 
-        // Collect constructor name map from ALL files
-        // Maps class qualified name -> constructor IrFunctionId
+        // Collect constructor name map — only include constructors NEW to this file,
+        // not external ones that were passed in via import_constructor_name_map.
         for (class_name, func_id) in mir_result.constructor_name_map {
-            self.import_constructor_name_map.insert(class_name, func_id);
+            if !external_constructor_keys.contains(&class_name) {
+                self.import_constructor_name_map
+                    .insert(class_name, func_id);
+            }
         }
 
         // Collect class allocation sizes from ALL files
