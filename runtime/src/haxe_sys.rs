@@ -16,7 +16,8 @@ const TRACE_STATE_ENABLED: u8 = 1;
 const TRACE_STATE_DISABLED: u8 = 2;
 
 static TRACE_STATE: AtomicU8 = AtomicU8::new(TRACE_STATE_UNINITIALIZED);
-static TRACE_CALLBACK: Mutex<Option<Box<dyn Fn(&str) + Send>>> = Mutex::new(None);
+type TraceCallback = Box<dyn Fn(&str) + Send>;
+static TRACE_CALLBACK: Mutex<Option<TraceCallback>> = Mutex::new(None);
 
 // Thread-local trace prefix for identifying which backend owns the output
 thread_local! {
@@ -94,7 +95,7 @@ pub fn trace_enabled() -> bool {
 /// Set a callback that receives every trace message.
 /// The callback receives the message WITHOUT the prefix.
 /// Set to None to remove the callback.
-pub fn set_trace_callback(cb: Option<Box<dyn Fn(&str) + Send>>) {
+pub fn set_trace_callback(cb: Option<TraceCallback>) {
     *TRACE_CALLBACK.lock().unwrap() = cb;
 }
 

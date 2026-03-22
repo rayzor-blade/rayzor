@@ -352,7 +352,7 @@ pub fn detect_existing_sources(dir: &Path) -> Option<(String, Vec<String>)> {
 
 /// Convert a kebab-case or snake_case name to PascalCase class name.
 fn to_class_name(name: &str) -> String {
-    name.split(|c: char| c == '-' || c == '_')
+    name.split(['-', '_'])
         .map(|part| {
             let mut chars = part.chars();
             match chars.next() {
