@@ -932,7 +932,9 @@ fn run_file(
         use compiler::ir::tree_shake;
         let mut modules = vec![mir_module];
         if let Some((mod_name, func_name)) = modules.iter().rev().find_map(|m| {
-            m.functions.values().find(|f| f.name == "main" || f.name.ends_with("_main"))
+            m.functions
+                .values()
+                .find(|f| f.name == "main" || f.name.ends_with("_main"))
                 .map(|f| (m.name.clone(), f.name.clone()))
         }) {
             tree_shake::tree_shake_bundle(&mut modules, &mod_name, &func_name);
