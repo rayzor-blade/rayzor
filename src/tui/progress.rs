@@ -23,6 +23,20 @@ use std::time::{Duration, Instant};
 
 use super::style::is_tty;
 
+/// Format milliseconds with appropriate precision.
+/// >= 10ms: "123ms", >= 1ms: "1.2ms", >= 0.01ms: "0.12ms", < 0.01ms: "5µs"
+fn fmt_ms(ms: f64) -> String {
+    if ms >= 10.0 {
+        format!("{:.0}ms", ms)
+    } else if ms >= 1.0 {
+        format!("{:.1}ms", ms)
+    } else if ms >= 0.01 {
+        format!("{:.2}ms", ms)
+    } else {
+        format!("{:.0}µs", ms * 1000.0)
+    }
+}
+
 // ── Shared state ─────────────────────────────────────────────────
 
 #[derive(Clone, Debug)]
@@ -410,7 +424,7 @@ impl InteractiveApp {
                         } else {
                             0.0
                         };
-                        let bar_len = (frac * bar_max as f64).round().max(1.0) as usize;
+                        let bar_len = if p.duration_ms < 0.001 { 0 } else { (frac * bar_max as f64).round().max(1.0) as usize };
                         Row::new(vec![
                             Line::from(Span::styled(
                                 format!(" {:>9} ", p.name),
@@ -422,7 +436,7 @@ impl InteractiveApp {
                                     Style::default().fg(p.color),
                                 ),
                                 Span::styled(
-                                    format!(" {:.0}ms", p.duration_ms),
+                                    format!(" {}", fmt_ms(p.duration_ms)),
                                     Style::default().fg(if p.duration_ms == max_ms {
                                         Color::White
                                     } else {
@@ -763,7 +777,7 @@ fn render_final_frame(frame: &mut ratatui::Frame, state: &CompilationState, elap
                 } else {
                     0.0
                 };
-                let bar_len = (frac * bar_max_width as f64).round().max(1.0) as usize;
+                let bar_len = if p.duration_ms < 0.5 { 0 } else { (frac * bar_max_width as f64).round().max(1.0) as usize };
                 let bar_str = "\u{2588}".repeat(bar_len);
                 let time_color = if p.duration_ms == max_ms {
                     Color::White
@@ -784,7 +798,7 @@ fn render_final_frame(frame: &mut ratatui::Frame, state: &CompilationState, elap
                     Line::from(vec![
                         Span::styled(bar_str, Style::default().fg(p.color)),
                         Span::styled(
-                            format!(" {:.0}ms", p.duration_ms),
+                            format!(" {}", fmt_ms(p.duration_ms)),
                             Style::default().fg(time_color).add_modifier(time_mod),
                         ),
                     ]),
@@ -855,7 +869,7 @@ fn print_plain_summary(state: &CompilationState, _elapsed: Duration) {
         let parts: Vec<String> = state
             .phases
             .iter()
-            .map(|p| format!("{} {:.0}ms", p.name, p.duration_ms))
+            .map(|p| format!("{} {}", p.name, fmt_ms(p.duration_ms)))
             .collect();
         eprintln!("  {}", parts.join(" → "));
     }
