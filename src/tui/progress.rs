@@ -328,7 +328,7 @@ fn render_final_frame(
             .iter()
             .map(|p| p.duration_ms)
             .fold(0.0_f64, f64::max);
-        let bar_max_width = (chunks[2].width as usize).saturating_sub(22); // 10 label + 10 time + 2 pad
+        let bar_max_width = (chunks[2].width as usize).saturating_sub(22).min(40); // cap bar length
 
         let rows: Vec<Row> = state
             .phases
