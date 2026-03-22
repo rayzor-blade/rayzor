@@ -646,7 +646,11 @@ impl AotCompiler {
         unit.lower_to_tast()
             .map_err(|errors| format!("Compilation failed: {:?}", errors))?;
 
-        let t_frontend = if self.verbose { t0.elapsed() } else { std::time::Duration::ZERO };
+        let t_frontend = if self.verbose {
+            t0.elapsed()
+        } else {
+            std::time::Duration::ZERO
+        };
 
         let mir_modules = unit.get_mir_modules();
         if mir_modules.is_empty() {
@@ -660,11 +664,7 @@ impl AotCompiler {
 
         // --- Phase 3: Tree-shake (before optimization to avoid optimizing dead code) ---
         if self.strip {
-            tree_shake::tree_shake_bundle(
-                &mut modules,
-                &_entry_module_name,
-                &entry_function_name,
-            );
+            tree_shake::tree_shake_bundle(&mut modules, &_entry_module_name, &entry_function_name);
         }
 
         // --- Phase 4: MIR optimizations ---
@@ -676,7 +676,11 @@ impl AotCompiler {
             }
         }
 
-        let t_mir = if self.verbose { t0.elapsed() } else { std::time::Duration::ZERO };
+        let t_mir = if self.verbose {
+            t0.elapsed()
+        } else {
+            std::time::Duration::ZERO
+        };
 
         // --- Phase 5: Emit C source ---
         // Find startup functions
@@ -694,7 +698,11 @@ impl AotCompiler {
             .collect();
 
         let c_source = CBackend::emit_modules(&modules, &entry_function_name, &startup_funcs)?;
-        let t_emit = if self.verbose { t0.elapsed() } else { std::time::Duration::ZERO };
+        let t_emit = if self.verbose {
+            t0.elapsed()
+        } else {
+            std::time::Duration::ZERO
+        };
 
         // If output format is CSource, just write the .c file
         if self.output_format == OutputFormat::CSource {
