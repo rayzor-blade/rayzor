@@ -846,21 +846,38 @@ fn run_file(
         .unwrap_or_default();
 
     let profile = if release { "release" } else { "debug" };
-    tui::progress::print_run_banner(
-        &file.display().to_string(),
-        profile,
-        &format!("{:?}", preset),
-    );
 
-    // Handle precompiled .rzb bundles
+    // Handle precompiled .rzb bundles (no TUI for these)
     if file.extension().is_some_and(|ext| ext == "rzb") {
+        tui::progress::print_run_banner(&file.display().to_string(), profile, &format!("{:?}", preset));
         return run_bundle(&file, verbose, stats, preset);
     }
 
-    // Handle .hxml build files
+    // Handle .hxml build files (no TUI for these)
     if file.extension().is_some_and(|ext| ext == "hxml") {
+        tui::progress::print_run_banner(&file.display().to_string(), profile, &format!("{:?}", preset));
         return build_from_hxml(&file, verbose, None, false);
     }
+
+    // Launch live TUI for verbose compilation, simple banner otherwise
+    let progress_tui = if verbose && tui::style::is_tty() {
+        let tui = tui::progress::ProgressTui::new(
+            &file.display().to_string(),
+            profile,
+            &format!("{:?}", preset),
+        );
+        Some(tui)
+    } else {
+        tui::progress::print_run_banner(&file.display().to_string(), profile, &format!("{:?}", preset));
+        None
+    };
+    let progress_handle = progress_tui.as_ref().map(|t| t.handle());
+    // Start TUI render thread
+    let tui_thread = progress_tui.map(|tui| {
+        std::thread::spawn(move || {
+            let _ = tui.run();
+        })
+    });
 
     #[cfg(not(feature = "llvm-backend"))]
     if _llvm {
@@ -954,6 +971,8 @@ fn run_file(
     }
 
     // Compile source file to MIR (with plugins registered)
+    if let Some(ref h) = progress_handle { h.begin_phase("frontend"); }
+    let t_compile = std::time::Instant::now();
     let mut mir_module = compile_haxe_to_mir(
         &source,
         file.to_str().unwrap_or("unknown"),
@@ -961,9 +980,14 @@ fn run_file(
         &rpkg_source_dirs,
         safety_warnings,
     )?;
+    if let Some(ref h) = progress_handle {
+        h.end_phase("frontend", t_compile.elapsed().as_secs_f64() * 1000.0);
+    }
 
     // Tree-shake unused stdlib functions before optimization
     {
+        if let Some(ref h) = progress_handle { h.begin_phase("tree-shake"); }
+        let t_shake = std::time::Instant::now();
         use compiler::ir::tree_shake;
         let before = mir_module.functions.len() + mir_module.extern_functions.len();
         let mut modules = vec![mir_module];
@@ -977,21 +1001,27 @@ fn run_file(
         }
         mir_module = modules.into_iter().next().unwrap();
         let after = mir_module.functions.len() + mir_module.extern_functions.len();
-        if verbose {
-            tui::progress::print_shake_summary(before, after);
+        if let Some(ref h) = progress_handle {
+            h.end_phase("shake", t_shake.elapsed().as_secs_f64() * 1000.0);
+            h.set_shake_stats(before, after);
         }
     }
 
     // Run O0 pass manager to expand Haxe `inline` functions and apply SRA
     if std::env::var("RAYZOR_RAW_MIR").is_err() {
+        if let Some(ref h) = progress_handle { h.begin_phase("optimize"); }
+        let t_opt = std::time::Instant::now();
         use compiler::ir::optimization::{OptimizationLevel, PassManager};
         let mut pass_manager = PassManager::for_level(OptimizationLevel::O0);
         let _ = pass_manager.run(&mut mir_module);
+        if let Some(ref h) = progress_handle {
+            h.end_phase("optimize", t_opt.elapsed().as_secs_f64() * 1000.0);
+        }
     }
 
     let total_functions = mir_module.functions.len();
-    if verbose {
-        tui::style::print_kv("parse", &format!("{} ({} decls)", file.display(), total_functions));
+    if let Some(ref h) = progress_handle {
+        h.set_functions(total_functions);
     }
 
     if total_functions == 0 {
@@ -1053,15 +1083,17 @@ fn run_file(
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)?;
 
     // Compile module with tiered JIT
+    if let Some(ref h) = progress_handle { h.begin_phase("jit"); }
+    let t_jit = std::time::Instant::now();
     backend.compile_module(mir_module)?;
-
-    if verbose {
-        let backend_stats = backend.get_statistics();
-        let compiled = backend_stats.baseline_functions
-            + backend_stats.standard_functions
-            + backend_stats.optimized_functions
-            + backend_stats.llvm_functions;
-        tui::style::print_kv("jit", &format!("{} functions compiled (preset: {:?})", compiled, preset));
+    if let Some(ref h) = progress_handle {
+        h.end_phase("jit", t_jit.elapsed().as_secs_f64() * 1000.0);
+        // Signal TUI to finish before execution starts (output goes to stdout)
+        h.finish();
+    }
+    // Wait for TUI thread to exit and restore terminal before execution
+    if let Some(handle) = tui_thread {
+        let _ = handle.join();
     }
 
     // Show stats if requested
