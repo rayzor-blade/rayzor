@@ -1400,7 +1400,7 @@ fn build_from_manifest(
             let output = output_override.or_else(|| project.output_path());
 
             // Use TUI progress for build
-            let use_tui = verbose && tui::style::is_tty();
+            let use_tui = tui::style::is_tty();
             let tui_instance = if use_tui {
                 let tui = tui::progress::ProgressTui::new(
                     &entry.display().to_string(),
