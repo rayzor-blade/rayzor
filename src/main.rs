@@ -884,7 +884,20 @@ fn run_file(
 
     // Resolve file: from arg or rayzor.toml
     let (file, manifest_project) = match file_arg {
-        Some(f) => (f, None),
+        Some(f) => {
+            // Even with explicit file, try to load manifest from its parent directory
+            // for class-paths, dependencies, and build settings
+            let file_dir = f.parent().and_then(|p| {
+                let abs = if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    std::env::current_dir().unwrap_or_default().join(p)
+                };
+                compiler::workspace::find_project_root(&abs)
+            });
+            let project = file_dir.and_then(|root| compiler::workspace::load_project(&root).ok());
+            (f, project)
+        }
         None => resolve_from_manifest()?,
     };
 
