@@ -501,19 +501,27 @@ impl CompilationUnit {
 
     /// Get the BLADE cache path for a source file
     fn blade_cache_path(&self, source_path: &str) -> Option<PathBuf> {
-        // Use get_cache_dir() to auto-discover the cache directory
         let cache_dir = self.config.get_cache_dir();
 
-        // Convert source path to a cache-safe filename
-        // e.g., "compiler/haxe-std/haxe/io/Bytes.hx" -> "haxe.io.Bytes.blade"
-        let module_name = source_path
+        // Extract module name from source path, stripping any prefix up to "haxe-std/"
+        // Works for both relative ("compiler/haxe-std/haxe/io/Bytes.hx")
+        // and absolute ("/Users/.../compiler/haxe-std/haxe/io/Bytes.hx")
+        let normalized = source_path.replace('\\', "/");
+        let module_part = if let Some(pos) = normalized.rfind("haxe-std/") {
+            &normalized[pos + 9..] // after "haxe-std/"
+        } else if let Some(pos) = normalized.rfind("/src/") {
+            &normalized[pos + 5..] // after "/src/"
+        } else {
+            // Use filename only
+            normalized
+                .rsplit('/')
+                .next()
+                .unwrap_or(&normalized)
+        };
+
+        let module_name = module_part
             .replace('/', ".")
-            .replace('\\', ".")
-            .replace(".hx", "")
-            .split('.')
-            .skip_while(|s| *s == "compiler" || *s == "haxe-std" || s.is_empty())
-            .collect::<Vec<_>>()
-            .join(".");
+            .replace(".hx", "");
 
         if module_name.is_empty() {
             return None;
