@@ -1,16 +1,16 @@
 package world;
 
 import sim.Particle;
-import sim.Vec2;
+import sim.Point2D;
 
 class Simulation {
     public var particles:Array<Particle>;
-    public var gravity:Vec2;
+    public var gravity:Point2D;
     public var time:Float;
 
     public function new() {
         particles = [];
-        gravity = new Vec2(0, -9.81);
+        gravity = new Point2D(0, -9.81);
         time = 0;
     }
 

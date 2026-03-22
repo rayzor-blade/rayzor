@@ -1,6 +1,6 @@
 package sim;
 
-class Vec2 {
+class Point2D {
     public var x:Float;
     public var y:Float;
 
@@ -9,19 +9,19 @@ class Vec2 {
         this.y = y;
     }
 
-    public function add(other:Vec2):Vec2 {
-        return new Vec2(x + other.x, y + other.y);
+    public function add(other:Point2D):Point2D {
+        return new Point2D(x + other.x, y + other.y);
     }
 
-    public function scale(s:Float):Vec2 {
-        return new Vec2(x * s, y * s);
+    public function scale(s:Float):Point2D {
+        return new Point2D(x * s, y * s);
     }
 
     public function length():Float {
         return Math.sqrt(x * x + y * y);
     }
 
-    public function distanceTo(other:Vec2):Float {
+    public function distanceTo(other:Point2D):Float {
         var dx = x - other.x;
         var dy = y - other.y;
         return Math.sqrt(dx * dx + dy * dy);

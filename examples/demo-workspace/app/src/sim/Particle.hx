@@ -1,17 +1,17 @@
 package sim;
 
 class Particle {
-    public var pos:Vec2;
-    public var vel:Vec2;
+    public var pos:Point2D;
+    public var vel:Point2D;
     public var mass:Float;
 
     public function new(x:Float, y:Float, vx:Float, vy:Float, mass:Float) {
-        this.pos = new Vec2(x, y);
-        this.vel = new Vec2(vx, vy);
+        this.pos = new Point2D(x, y);
+        this.vel = new Point2D(vx, vy);
         this.mass = mass;
     }
 
-    public function applyForce(force:Vec2):Void {
+    public function applyForce(force:Point2D):Void {
         var accel = force.scale(1.0 / mass);
         vel = vel.add(accel);
     }

@@ -1,4 +1,4 @@
-import sim.Vec2;
+import sim.Point2D;
 import sim.Particle;
 import world.Simulation;
 
@@ -10,9 +10,9 @@ class Main {
         trace('fib(15) = ${MathUtils.fibonacci(15)}');
         trace('7! = ${MathUtils.factorial(7)}');
 
-        // Local packages: sim.Vec2
-        var a = new Vec2(3, 4);
-        var b = new Vec2(1, 2);
+        // Local packages: sim.Point2D
+        var a = new Point2D(3, 4);
+        var b = new Point2D(1, 2);
         trace('a = ${a.toString()}');
         trace('|a| = ${a.length()}');
         trace('a + b = ${a.add(b).toString()}');
