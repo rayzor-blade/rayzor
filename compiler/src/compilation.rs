@@ -250,32 +250,43 @@ impl CompilationConfig {
             }
         }
 
-        // 2. Relative to the rayzor binary
+        // 2. Walk up from the binary location looking for haxe-std/
         if let Ok(exe) = std::env::current_exe() {
-            if let Some(exe_dir) = exe.parent() {
-                // Binary at target/debug/rayzor → ../../compiler/haxe-std
-                for relative in &["../compiler/haxe-std", "../haxe-std", "haxe-std"] {
-                    let candidate = exe_dir.join(relative);
-                    if candidate.exists() {
-                        paths.push(candidate);
+            if let Some(mut dir) = exe.parent().map(|p| p.to_path_buf()) {
+                for _ in 0..5 {
+                    for name in &["haxe-std", "compiler/haxe-std"] {
+                        let candidate = dir.join(name);
+                        if candidate.is_dir() {
+                            paths.push(candidate);
+                        }
+                    }
+                    if !dir.pop() {
+                        break;
                     }
                 }
             }
         }
 
-        // 3. Relative to cwd (development layout)
-        for relative in &["compiler/haxe-std", "./haxe-std", "../haxe-std"] {
-            let candidate = PathBuf::from(relative);
-            if candidate.exists() {
-                // Deduplicate by canonical path
-                let dominated = paths.iter().any(|p| {
-                    matches!(
-                        (p.canonicalize(), candidate.canonicalize()),
-                        (Ok(a), Ok(b)) if a == b
-                    )
-                });
-                if !dominated {
-                    paths.push(candidate);
+        // 3. Walk up from cwd looking for haxe-std/
+        if let Ok(mut dir) = std::env::current_dir() {
+            for _ in 0..5 {
+                for name in &["haxe-std", "compiler/haxe-std"] {
+                    let candidate = dir.join(name);
+                    if candidate.is_dir() {
+                        // Deduplicate by canonical path
+                        let dominated = paths.iter().any(|p| {
+                            matches!(
+                                (p.canonicalize(), candidate.canonicalize()),
+                                (Ok(a), Ok(b)) if a == b
+                            )
+                        });
+                        if !dominated {
+                            paths.push(candidate);
+                        }
+                    }
+                }
+                if !dir.pop() {
+                    break;
                 }
             }
         }
