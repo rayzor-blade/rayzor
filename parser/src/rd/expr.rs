@@ -756,11 +756,18 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 None
             };
             self.stream.expect(TokenKind::RParen)?;
+            // Parse optional catch guard: catch (e:Type) if (condition)
+            let filter = if self.stream.at(TokenKind::KwIf) {
+                self.stream.advance(); // skip 'if'
+                Some(self.parse_expression()?)
+            } else {
+                None
+            };
             let catch_body = self.parse_expression()?;
             catches.push(Catch {
                 var: var_name,
                 type_hint,
-                filter: None,
+                filter,
                 body: catch_body,
                 span: self.stream.span_from(catch_start),
             });
