@@ -288,6 +288,22 @@ enum Commands {
         /// Create a multi-project workspace instead of a single project
         #[arg(long)]
         workspace: bool,
+
+        /// Project template: app (default), lib, benchmark, empty
+        #[arg(long, default_value = "app")]
+        template: String,
+
+        /// Workspace member projects to create (comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        members: Option<Vec<String>>,
+
+        /// Generate rayzor.toml from an existing .hxml build file
+        #[arg(long)]
+        from_hxml: Option<PathBuf>,
+
+        /// Overwrite existing rayzor.toml
+        #[arg(long)]
+        force: bool,
     },
 
     /// Extract stdlib symbols to .bsym format (pre-BLADE)
@@ -553,7 +569,14 @@ fn main() {
             cache_dir,
             verbose,
         ),
-        Commands::Init { name, workspace } => cmd_init(name, workspace),
+        Commands::Init {
+            name,
+            workspace,
+            template,
+            members,
+            from_hxml,
+            force,
+        } => cmd_init(name, workspace, template, members, from_hxml, force),
         Commands::Preblade {
             files,
             out,
@@ -1831,43 +1854,114 @@ fn cmd_preblade(
     }
 }
 
-fn cmd_init(name: Option<String>, workspace: bool) -> Result<(), String> {
+fn cmd_init(
+    name: Option<String>,
+    workspace: bool,
+    template: String,
+    members: Option<Vec<String>>,
+    from_hxml: Option<PathBuf>,
+    force: bool,
+) -> Result<(), String> {
+    use compiler::workspace::init::{self, ProjectTemplate};
+
+    // Parse template
+    let tmpl = ProjectTemplate::from_str(&template).ok_or_else(|| {
+        format!(
+            "Unknown template '{}'. Available: {}",
+            template,
+            ProjectTemplate::all_names().join(", ")
+        )
+    })?;
+
+    // --from-hxml: generate rayzor.toml from HXML
+    if let Some(ref hxml_path) = from_hxml {
+        let dir = if let Some(ref n) = name {
+            PathBuf::from(n)
+        } else {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        };
+        if !force && dir.join("rayzor.toml").exists() {
+            return Err(format!(
+                "rayzor.toml already exists in {}. Use --force to overwrite.",
+                dir.display()
+            ));
+        }
+        std::fs::create_dir_all(&dir).ok();
+        init::init_from_hxml(hxml_path, &dir)?;
+        println!("Migrated {} to rayzor.toml at {}", hxml_path.display(), dir.display());
+        return Ok(());
+    }
+
+    // Determine project name and directory
     let project_name = name.unwrap_or_else(|| {
         std::env::current_dir()
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
             .unwrap_or_else(|| "my-project".to_string())
     });
-
     let dir = PathBuf::from(&project_name);
 
-    if dir.join("rayzor.toml").exists() {
-        return Err(format!("rayzor.toml already exists in {}", dir.display()));
+    if !force && dir.join("rayzor.toml").exists() {
+        return Err(format!(
+            "rayzor.toml already exists in {}. Use --force to overwrite.",
+            dir.display()
+        ));
     }
 
+    std::fs::create_dir_all(&dir).ok();
+
     if workspace {
-        compiler::workspace::init::init_workspace(&project_name, &dir)?;
-        println!(
-            "Initialized workspace '{}' at {}",
-            project_name,
-            dir.display()
-        );
-        println!("  Created: rayzor.toml, .rayzor/cache/, .gitignore");
-        println!();
-        println!("Add member projects:");
-        println!("  cd {} && rayzor init --name my-lib", project_name);
-        println!("  Then add \"my-lib\" to [workspace].members in rayzor.toml");
+        let member_list = members.unwrap_or_default();
+        init::init_workspace(&project_name, &dir, &member_list)?;
+        println!("Initialized workspace '{}' at {}", project_name, dir.display());
+        if member_list.is_empty() {
+            println!("  Created: rayzor.toml, .rayzor/cache/, .gitignore");
+            println!();
+            println!("Add member projects:");
+            println!("  cd {} && rayzor init --name my-app", project_name);
+            println!("  Then add \"my-app\" to [workspace].members in rayzor.toml");
+        } else {
+            println!("  Created: rayzor.toml, .rayzor/cache/, .gitignore");
+            println!("  Members: {}", member_list.join(", "));
+            println!();
+            println!("Get started:");
+            println!("  cd {}/{} && rayzor run", project_name, member_list[0]);
+        }
     } else {
-        compiler::workspace::init::init_project(&project_name, &dir)?;
+        // Check for existing sources
+        if let Some((entry, _class_paths)) = init::detect_existing_sources(&dir) {
+            println!("Detected existing Haxe sources: {}", entry);
+        }
+
+        init::init_project(&project_name, &dir, tmpl)?;
         println!(
-            "Initialized project '{}' at {}",
-            project_name,
-            dir.display()
+            "Initialized {} project '{}' at {}",
+            template, project_name, dir.display()
         );
-        println!("  Created: rayzor.toml, src/Main.hx, .rayzor/cache/, .gitignore");
-        println!();
-        println!("Get started:");
-        println!("  cd {} && rayzor run", project_name);
+        match tmpl {
+            ProjectTemplate::App | ProjectTemplate::Benchmark => {
+                println!("  Created: rayzor.toml, src/Main.hx, .rayzor/cache/, .gitignore");
+                println!();
+                println!("Get started:");
+                println!("  cd {} && rayzor run", project_name);
+            }
+            ProjectTemplate::Lib => {
+                let class_name = project_name
+                    .split(|c: char| c == '-' || c == '_')
+                    .map(|p| {
+                        let mut c = p.chars();
+                        match c.next() {
+                            None => String::new(),
+                            Some(ch) => ch.to_uppercase().to_string() + c.as_str(),
+                        }
+                    })
+                    .collect::<String>();
+                println!("  Created: rayzor.toml, src/{}.hx, .rayzor/cache/, .gitignore", class_name);
+            }
+            ProjectTemplate::Empty => {
+                println!("  Created: rayzor.toml, .rayzor/cache/, .gitignore");
+            }
+        }
     }
 
     Ok(())
