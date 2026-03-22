@@ -1829,15 +1829,13 @@ fn compile_file(
 
 fn show_info(_features: bool, _tiers: bool) {
     if !tui::style::is_tty() {
-        // Plain text
         println!("rayzor v0.1.0");
-        println!("  Parse → TAST → HIR → MIR → Cranelift/LLVM/C");
-        println!("  Tier 0: Interpreter, Tier 1: Cranelift, Tier 2: Optimized, Tier 3: LLVM");
+        println!("  A next-generation Haxe compiler with 5-tier JIT,");
+        println!("  ownership-based memory, and LLVM-powered native codegen");
+        println!("  © rayzor-blade.com");
         return;
     }
 
-    // Render ASCII art with ratatui — convert '+' to colored blocks
-    use crossterm::style::Stylize;
     use ratatui::{
         backend::CrosstermBackend,
         layout::Constraint,
@@ -1847,7 +1845,10 @@ fn show_info(_features: bool, _tiers: bool) {
         Terminal,
     };
 
-    let art_raw = include_str!("tui/art.text");
+    // Orange color (RGB)
+    let orange = Color::Rgb(255, 140, 0);
+
+    let art_raw = include_str!("tui/art.txt");
     let art_lines: Vec<Line> = art_raw
         .lines()
         .map(|line| {
@@ -1855,7 +1856,7 @@ fn show_info(_features: bool, _tiers: bool) {
                 .chars()
                 .map(|c| {
                     if c == '+' {
-                        Span::styled("█", Style::default().fg(Color::Cyan))
+                        Span::styled("█", Style::default().fg(orange))
                     } else {
                         Span::styled(" ", Style::default())
                     }
@@ -1867,46 +1868,56 @@ fn show_info(_features: bool, _tiers: bool) {
 
     let info_rows = vec![
         Row::new(vec![
-            Span::styled(" pipeline", Style::default().fg(Color::DarkGray)),
+            Span::styled(" version", Style::default().fg(Color::DarkGray)),
+            Span::styled("0.1.0", Style::default().fg(orange).add_modifier(Modifier::BOLD)),
+        ]),
+        Row::new(vec![
+            Span::styled("", Style::default()),
             Span::styled(
-                "Parse → TAST → HIR → MIR → JIT",
+                "A next-generation Haxe compiler with 5-tier JIT,",
                 Style::default().fg(Color::White),
             ),
         ]),
         Row::new(vec![
-            Span::styled(" backends", Style::default().fg(Color::DarkGray)),
+            Span::styled("", Style::default()),
             Span::styled(
-                "Cranelift, LLVM, C (gcc/clang)",
+                "ownership-based memory, and LLVM-powered native codegen",
                 Style::default().fg(Color::White),
             ),
         ]),
         Row::new(vec![
-            Span::styled(" tier 0", Style::default().fg(Color::DarkGray)),
-            Span::styled("MIR Interpreter", Style::default().fg(Color::White)),
+            Span::styled("", Style::default()),
+            Span::styled("", Style::default()),
         ]),
         Row::new(vec![
-            Span::styled(" tier 1", Style::default().fg(Color::DarkGray)),
-            Span::styled("Cranelift baseline", Style::default().fg(Color::White)),
+            Span::styled(" compile", Style::default().fg(Color::DarkGray)),
+            Span::styled("50-200ms JIT vs 2-5s C++", Style::default().fg(Color::Green)),
         ]),
         Row::new(vec![
-            Span::styled(" tier 2", Style::default().fg(Color::DarkGray)),
-            Span::styled("Cranelift optimized", Style::default().fg(Color::Green)),
+            Span::styled(" safety", Style::default().fg(Color::DarkGray)),
+            Span::styled("Ownership and lifetimes safety model", Style::default().fg(Color::Green)),
         ]),
         Row::new(vec![
-            Span::styled(" tier 3", Style::default().fg(Color::DarkGray)),
-            Span::styled("LLVM -O3", Style::default().fg(Color::Magenta)),
+            Span::styled(" concurrency", Style::default().fg(Color::DarkGray)),
+            Span::styled("Safe and fearless concurrency", Style::default().fg(Color::Green)),
         ]),
         Row::new(vec![
-            Span::styled(" promote", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                "100→T1  1K→T2  5K→T3",
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(" simd", Style::default().fg(Color::DarkGray)),
+            Span::styled("First-class SIMD support", Style::default().fg(Color::Green)),
+        ]),
+        Row::new(vec![
+            Span::styled(" embed", Style::default().fg(Color::DarkGray)),
+            Span::styled("Embeddable C code via TinyCC", Style::default().fg(Color::Green)),
+        ]),
+        Row::new(vec![
+            Span::styled(" cache", Style::default().fg(Color::DarkGray)),
+            Span::styled("BLADE incremental + .rzb bundles", Style::default().fg(Color::Green)),
         ]),
     ];
 
     let art_height = art_lines.len() as u16;
-    let total_height = art_height + info_rows.len() as u16 + 3; // +3 for borders
+    let info_height = info_rows.len() as u16 + 2; // +2 for borders
+    let total_height = art_height + info_height;
 
     let _ = crossterm::terminal::enable_raw_mode();
     let backend = CrosstermBackend::new(std::io::stderr());
@@ -1922,28 +1933,27 @@ fn show_info(_features: bool, _tiers: bool) {
                 .direction(ratatui::layout::Direction::Vertical)
                 .constraints([
                     Constraint::Length(art_height),
-                    Constraint::Min(3),
+                    Constraint::Length(info_height),
                 ])
                 .split(area);
 
-            // Art
             frame.render_widget(Paragraph::new(art_lines), chunks[0]);
 
-            // Info table
             let table = Table::new(
                 info_rows,
-                [Constraint::Length(12), Constraint::Min(30)],
+                [Constraint::Length(10), Constraint::Min(40)],
             )
             .block(
                 Block::default()
-                    .title(Span::styled(
-                        " v0.1.0 ",
-                        Style::default()
-                            .fg(Color::Cyan)
-                            .add_modifier(Modifier::BOLD),
-                    ))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::DarkGray)),
+                    .border_style(Style::default().fg(Color::DarkGray))
+                    .title_bottom(
+                        Line::from(Span::styled(
+                            " © rayzor-blade.com ",
+                            Style::default().fg(Color::DarkGray),
+                        ))
+                        .right_aligned(),
+                    ),
             );
             frame.render_widget(table, chunks[1]);
         });
