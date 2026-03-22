@@ -2283,6 +2283,7 @@ impl CompilationUnit {
 
         // Step 3: Compile in topological order with retry for files that fail
         // due to unresolved symbols (dependency ordering issues from cycles).
+        debug!("[IMPORT_LOAD] Compiling {} stdlib files: {:?}", compile_order.len(), compile_order);
         let mut retry_queue: Vec<(String, PathBuf, String, Vec<String>)> = Vec::new();
         for name in compile_order {
             if let Some((file_path, source, deps)) = all_files.remove(&name) {
@@ -2320,6 +2321,24 @@ impl CompilationUnit {
         // Skip if already compiled
         if self.compiled_files.contains_key(&filename) {
             return true;
+        }
+
+        // Skip extern-only stdlib files whose types are already registered via bsym.
+        // These files have no function bodies — their methods map to runtime externs
+        // via MIR wrappers. Compiling them produces 0 MIR functions.
+        // Files with real code (Exception, StringTools, BalancedTree, etc.) must still
+        // be compiled to get field indices, constructors, and MIR.
+        const EXTERN_ONLY_STDLIB: &[&str] = &[
+            "Math", "Array", "String", "Std", "Class", "Enum", "EnumValue", "Any",
+        ];
+        if self.namespace_resolver.is_file_loaded(&file_path.to_path_buf()) {
+            let base = std::path::Path::new(&filename)
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            if EXTERN_ONLY_STDLIB.contains(&base) {
+                return true;
+            }
         }
 
         // Mark as loaded
