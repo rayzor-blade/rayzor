@@ -832,10 +832,16 @@ fn run_file(
     use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
 
     // Resolve file: from arg or rayzor.toml
-    let file = match file_arg {
-        Some(f) => f,
-        None => resolve_entry_from_manifest()?,
+    let (file, manifest_project) = match file_arg {
+        Some(f) => (f, None),
+        None => resolve_from_manifest()?,
     };
+
+    // Apply manifest config (class paths, cache settings) if resolved from rayzor.toml
+    let extra_source_dirs_from_manifest: Vec<PathBuf> = manifest_project
+        .as_ref()
+        .map(|p| p.resolved_class_paths())
+        .unwrap_or_default();
 
     let profile = if release { "release" } else { "debug" };
     println!(
@@ -894,7 +900,7 @@ fn run_file(
 
     // Load .rpkg packages
     let mut loaded_rpkgs: Vec<compiler::rpkg::install::RpkgPlugin> = Vec::new();
-    let mut rpkg_source_dirs: Vec<PathBuf> = Vec::new();
+    let mut rpkg_source_dirs: Vec<PathBuf> = extra_source_dirs_from_manifest;
     for rpkg_path in &rpkg_files {
         match compiler::rpkg::install::RpkgPlugin::load(rpkg_path) {
             Ok(rpkg) => {
@@ -2267,7 +2273,8 @@ fn cmd_rpkg_inspect(file: PathBuf) -> Result<(), String> {
 }
 
 /// Resolve entry point from rayzor.toml in current or parent directories.
-fn resolve_entry_from_manifest() -> Result<PathBuf, String> {
+/// Resolve entry file and optional project config from rayzor.toml.
+fn resolve_from_manifest() -> Result<(PathBuf, Option<compiler::workspace::Project>), String> {
     let cwd = std::env::current_dir().map_err(|e| format!("Failed to get cwd: {}", e))?;
 
     let root = compiler::workspace::find_project_root(&cwd)
@@ -2275,7 +2282,9 @@ fn resolve_entry_from_manifest() -> Result<PathBuf, String> {
 
     let project = compiler::workspace::load_project(&root)?;
 
-    project.entry_path().ok_or_else(|| {
+    let entry = project.entry_path().ok_or_else(|| {
         "No entry point in rayzor.toml. Set [project] entry = \"src/Main.hx\"".to_string()
-    })
+    })?;
+
+    Ok((entry, Some(project)))
 }

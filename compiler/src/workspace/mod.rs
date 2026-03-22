@@ -76,6 +76,45 @@ impl Project {
             .map(|c| c.enabled.unwrap_or(true))
             .unwrap_or(true)
     }
+
+    /// Get the MIR optimization level (0-3, default 2).
+    pub fn opt_level(&self) -> u8 {
+        self.manifest
+            .build
+            .as_ref()
+            .and_then(|b| b.opt_level)
+            .unwrap_or(2)
+    }
+
+    /// Get the JIT preset name (default "application").
+    pub fn preset(&self) -> &str {
+        self.manifest
+            .build
+            .as_ref()
+            .and_then(|b| b.preset.as_deref())
+            .unwrap_or("application")
+    }
+
+    /// Get defines as (key, optional value) pairs.
+    pub fn defines(&self) -> Vec<(String, Option<String>)> {
+        self.manifest
+            .build
+            .as_ref()
+            .and_then(|b| b.defines.as_ref())
+            .map(|defs| {
+                defs.iter()
+                    .map(|(k, v)| {
+                        let val = match v {
+                            toml::Value::Boolean(true) => None,
+                            toml::Value::String(s) => Some(s.clone()),
+                            other => Some(other.to_string()),
+                        };
+                        (k.clone(), val)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 /// The manifest file name.
