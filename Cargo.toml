@@ -30,6 +30,8 @@ rayzor-runtime = { path = "runtime" }
 gpu = { path = "gpu", package = "rayzor-gpu", optional = true }
 clap = { version = "4.5", features = ["derive"] }
 libloading = "0.8"
+ratatui = "0.29"
+crossterm = "0.28"
 
 # Workaround for LLVM optimizer bug that causes infinite loops in release builds
 # when lowering TAST expressions. Using opt-level=2 instead of 3 prevents the bug.
