@@ -58,6 +58,7 @@ use compiler::codegen::reset_llvm_global_state;
 use compiler::codegen::LLVMJitBackend;
 #[cfg(feature = "llvm-backend")]
 use inkwell::context::Context;
+use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -66,6 +67,32 @@ use std::process::Command;
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Rayzor Benchmark Suite Runner
+///
+/// Compares Rayzor execution modes against each other and external targets.
+#[derive(Parser)]
+#[command(name = "benchmark_runner")]
+struct Cli {
+    /// Benchmark to run (e.g. nbody, deltablue, fibonacci, mandelbrot). Runs all if omitted.
+    benchmark: Option<String>,
+
+    /// Comma-separated list of targets (e.g. rayzor-cranelift,rayzor-gcc,haxe-cpp)
+    #[arg(short, long, value_delimiter = ',')]
+    targets: Option<Vec<String>>,
+
+    /// Output results as JSON
+    #[arg(long)]
+    json: bool,
+
+    /// Disable trace output for Rayzor targets
+    #[arg(long)]
+    disable_trace: bool,
+
+    /// List available benchmarks and targets, then exit
+    #[arg(long)]
+    list: bool,
+}
 
 const WARMUP_RUNS: usize = 15; // Increased to ensure LLVM promotion during warmup
 const BENCH_RUNS: usize = 10;
@@ -1612,32 +1639,55 @@ fn main() {
     #[cfg(feature = "llvm-backend")]
     init_llvm_once();
 
-    let args: Vec<String> = std::env::args().collect();
+    let cli = Cli::parse();
+
+    // Build full target list (order matters: Cranelift first, LLVM last)
+    let mut all_targets_list = vec![
+        Target::RayzorCranelift,
+        Target::RayzorPrecompiled,
+        Target::RayzorInterpreter,
+        Target::RayzorTiered,
+        Target::RayzorPrecompiledTiered,
+    ];
+    #[cfg(feature = "llvm-backend")]
+    all_targets_list.push(Target::RayzorLLVM);
+    #[cfg(feature = "llvm-backend")]
+    all_targets_list.push(Target::RayzorAOT);
+    all_targets_list.push(Target::RayzorGCC);
+
+    if haxe_available() {
+        if hashlink_available() {
+            all_targets_list.push(Target::HaxeHashLink);
+            if hashlink_c_available() {
+                all_targets_list.push(Target::HaxeHashLinkC);
+            }
+        }
+        all_targets_list.push(Target::HaxeCpp);
+        if java_available() {
+            all_targets_list.push(Target::HaxeJvm);
+        }
+    }
+
+    // --list: show available benchmarks and targets, then exit
+    if cli.list {
+        let available = list_benchmarks();
+        println!("Available benchmarks:");
+        for b in &available {
+            println!("  {}", b);
+        }
+        println!("\nAvailable targets:");
+        for t in &all_targets_list {
+            println!("  {:<30} {}", t.name(), t.description());
+        }
+        return;
+    }
 
     println!("{}", "=".repeat(70));
     println!("           Rayzor Benchmark Suite");
     println!("{}", "=".repeat(70));
     println!();
 
-    // Parse arguments
-    let json_output = args.iter().any(|a| a == "--json");
-    let disable_trace = args.iter().any(|a| a == "--disable-trace");
-    let specific_target = args
-        .iter()
-        .position(|a| a == "--target")
-        .and_then(|i| args.get(i + 1).cloned());
-    let specific_bench = args
-        .iter()
-        .find(|a| {
-            !a.starts_with("-") && *a != &args[0] && {
-                // Skip the value after --target
-                let idx = args.iter().position(|x| x == *a).unwrap_or(0);
-                idx == 0 || args.get(idx - 1).map_or(true, |prev| prev != "--target")
-            }
-        })
-        .cloned();
-
-    if disable_trace {
+    if cli.disable_trace {
         rayzor_runtime::haxe_sys::set_trace_enabled(false);
         std::env::set_var("RAYZOR_DISABLE_TRACE", "1");
     }
@@ -1645,12 +1695,18 @@ fn main() {
     // Get available benchmarks
     let available = list_benchmarks();
     println!("Available benchmarks: {}", available.join(", "));
+
+    if haxe_available() {
+        println!("Haxe CLI detected — including Haxe targets");
+    } else {
+        println!("Haxe CLI not found — skipping Haxe targets (install haxe to enable)");
+    }
     println!();
 
     // Select benchmarks to run
-    let benchmarks_to_run: Vec<String> = if let Some(name) = specific_bench {
-        if available.contains(&name) {
-            vec![name]
+    let benchmarks_to_run: Vec<String> = if let Some(ref name) = cli.benchmark {
+        if available.contains(name) {
+            vec![name.clone()]
         } else {
             eprintln!(
                 "Unknown benchmark: {}. Available: {}",
@@ -1660,60 +1716,25 @@ fn main() {
             return;
         }
     } else {
-        // Run all by default
         available
     };
 
-    // Order targets so Cranelift-only targets run first, before LLVM-related
-    // targets. This prevents LLVM compilation from corrupting shared heap state
-    // that affects subsequent Cranelift targets.
-    let mut all_targets_list = vec![
-        // Cranelift-only targets first
-        Target::RayzorCranelift,
-        Target::RayzorPrecompiled,
-        Target::RayzorInterpreter,
-        // LLVM-related targets last (tiered upgrades to LLVM)
-        Target::RayzorTiered,
-        Target::RayzorPrecompiledTiered,
-    ];
-    #[cfg(feature = "llvm-backend")]
-    all_targets_list.push(Target::RayzorLLVM);
-
-    #[cfg(feature = "llvm-backend")]
-    all_targets_list.push(Target::RayzorAOT);
-
-    all_targets_list.push(Target::RayzorGCC);
-
-    // Add Haxe targets if haxe CLI is available
-    if haxe_available() {
-        // HaxeInterp removed — too slow (50+ seconds), dominates benchmark runtime
-        if hashlink_available() {
-            all_targets_list.push(Target::HaxeHashLink);
-            // HashLink/C requires gcc and proper hl --hlc support
-            if hashlink_c_available() {
-                all_targets_list.push(Target::HaxeHashLinkC);
-            }
-        }
-        all_targets_list.push(Target::HaxeCpp);
-        if java_available() {
-            all_targets_list.push(Target::HaxeJvm);
-        }
-        println!("Haxe CLI detected — including Haxe targets");
-    } else {
-        println!("Haxe CLI not found — skipping Haxe targets (install haxe to enable)");
-    }
-
-    // Filter by --target flag if provided
-    let all_targets: Vec<Target> = if let Some(ref target_name) = specific_target {
+    // Filter targets by --targets flag (comma-separated)
+    let has_target_filter = cli.targets.is_some();
+    let all_targets: Vec<Target> = if let Some(ref target_names) = cli.targets {
         let filtered: Vec<Target> = all_targets_list
             .iter()
-            .filter(|t| t.name() == target_name.as_str())
+            .filter(|t| target_names.iter().any(|name| t.name() == name.as_str()))
             .copied()
             .collect();
-        if filtered.is_empty() {
+        let unknown: Vec<&String> = target_names
+            .iter()
+            .filter(|name| !all_targets_list.iter().any(|t| t.name() == name.as_str()))
+            .collect();
+        if !unknown.is_empty() {
             eprintln!(
-                "Unknown target: {}. Available: {}",
-                target_name,
+                "Unknown target(s): {}. Available: {}",
+                unknown.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
                 all_targets_list
                     .iter()
                     .map(|t| t.name())
@@ -1736,7 +1757,7 @@ fn main() {
         "Warmup: {} runs, Benchmark: {} runs",
         WARMUP_RUNS, BENCH_RUNS
     );
-    if disable_trace {
+    if cli.disable_trace {
         println!("Trace output disabled for Rayzor targets");
     }
     println!();
@@ -1771,8 +1792,8 @@ fn main() {
 
         let has_haxe_source = get_haxe_source(bench_name).is_some();
 
-        let mut targets: Vec<Target> = if specific_target.is_some() {
-            // When --target is specified, use exactly the requested targets
+        let mut targets: Vec<Target> = if has_target_filter {
+            // When --targets is specified, use exactly the requested targets
             all_targets.clone()
         } else {
             // Default: filter heavy benchmarks, filter Haxe/precompiled without sources/bundles
@@ -1800,18 +1821,6 @@ fn main() {
             }
             t
         };
-
-        // When --target is specified, filter to only that target
-        if let Some(ref tn) = specific_target {
-            targets.retain(|t| t.name() == tn.as_str());
-            if targets.is_empty() {
-                eprintln!(
-                    "  Target '{}' not available for benchmark '{}'",
-                    tn, bench_name
-                );
-                continue;
-            }
-        }
 
         // Run all targets sequentially to avoid CPU contention between benchmarks.
         // This ensures each target gets full CPU resources for accurate measurement.
@@ -1875,7 +1884,7 @@ fn main() {
         eprintln!("Failed to generate charts: {}", e);
     }
 
-    if json_output {
+    if cli.json {
         println!("\nJSON Output:");
         println!(
             "{}",

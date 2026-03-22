@@ -422,6 +422,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "chrono",
+ "clap",
  "cranelift",
  "cranelift-codegen",
  "cranelift-frontend",
