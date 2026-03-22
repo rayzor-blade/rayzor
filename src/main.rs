@@ -355,6 +355,10 @@ enum Commands {
         /// Show only CFG (control flow graph) without instructions
         #[arg(long)]
         cfg_only: bool,
+
+        /// Open interactive TUI viewer (scrollable, searchable, function list)
+        #[arg(short, long)]
+        interactive: bool,
     },
 
     /// Manage .rpkg packages (pack, inspect)
@@ -599,7 +603,8 @@ fn main() {
             opt_level,
             function,
             cfg_only,
-        } => cmd_dump(file, output, opt_level, function, cfg_only),
+            interactive,
+        } => cmd_dump(file, output, opt_level, function, cfg_only, interactive),
         Commands::Rpkg { action } => match action {
             RpkgAction::Pack {
                 dylib,
@@ -2149,6 +2154,7 @@ fn cmd_dump(
     opt_level: u8,
     function_filter: Option<String>,
     cfg_only: bool,
+    interactive: bool,
 ) -> Result<(), String> {
     use compiler::compilation::{CompilationConfig, CompilationUnit};
     use compiler::ir::dump;
@@ -2350,7 +2356,10 @@ fn cmd_dump(
     };
 
     // Output
-    if let Some(output_path) = output {
+    if interactive && tui::style::is_tty() {
+        tui::mir_viewer::run_mir_viewer(&mir_text, &module.name, module.functions.len())
+            .map_err(|e| format!("TUI error: {}", e))?;
+    } else if let Some(output_path) = output {
         std::fs::write(&output_path, &mir_text)
             .map_err(|e| format!("Failed to write output: {}", e))?;
         println!("✓ MIR dumped to {}", output_path.display());
