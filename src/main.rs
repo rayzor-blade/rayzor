@@ -1828,32 +1828,128 @@ fn compile_file(
 }
 
 fn show_info(_features: bool, _tiers: bool) {
-    let content = vec![
-        include_str!("tui/art.text"),
-        "",
-        "  ┌─────────┐    ┌──────┐    ┌─────┐    ┌─────┐",
-        "  │  Parse   │───▶│ TAST │───▶│ HIR │───▶│ MIR │",
-        "  │ (RD, O(n))│    │(typed)│    │(sem) │    │(SSA) │",
-        "  └─────────┘    └──────┘    └─────┘    └──┬──┘",
-        "                                           │",
-        "                    ┌───────────────────────┼───────────────┐",
-        "                    │                       │               │",
-        "               ┌────▼────┐           ┌─────▼─────┐   ┌─────▼─────┐",
-        "               │Cranelift│           │   LLVM    │   │ C Backend │",
-        "               │  JIT    │           │  JIT/AOT  │   │  gcc/clang│",
-        "               │ Tier 0-2│           │  Tier 3   │   │   AOT     │",
-        "               └─────────┘           └───────────┘   └───────────┘",
-        "",
-        "  Tiered execution: functions auto-promote on hot paths",
-        "    Tier 0  Interpreter  MIR direct eval         0ms     ~0.1x",
-        "    Tier 1  Baseline     Cranelift 'none'        ~3ms    1.0x",
-        "    Tier 2  Optimized    Cranelift 'speed'       ~10ms   3-5x",
-        "    Tier 3  Maximum      LLVM -O3                ~500ms  5-20x",
-        "",
-        "  Promotion: 100 calls → T1, 1K → T2, 5K → T3",
+    if !tui::style::is_tty() {
+        // Plain text
+        println!("rayzor v0.1.0");
+        println!("  Parse → TAST → HIR → MIR → Cranelift/LLVM/C");
+        println!("  Tier 0: Interpreter, Tier 1: Cranelift, Tier 2: Optimized, Tier 3: LLVM");
+        return;
+    }
+
+    // Render ASCII art with ratatui — convert '+' to colored blocks
+    use crossterm::style::Stylize;
+    use ratatui::{
+        backend::CrosstermBackend,
+        layout::Constraint,
+        style::{Color, Modifier, Style},
+        text::{Line, Span},
+        widgets::{Block, Borders, Paragraph, Row, Table},
+        Terminal,
+    };
+
+    let art_raw = include_str!("tui/art.text");
+    let art_lines: Vec<Line> = art_raw
+        .lines()
+        .map(|line| {
+            let spans: Vec<Span> = line
+                .chars()
+                .map(|c| {
+                    if c == '+' {
+                        Span::styled("█", Style::default().fg(Color::Cyan))
+                    } else {
+                        Span::styled(" ", Style::default())
+                    }
+                })
+                .collect();
+            Line::from(spans)
+        })
+        .collect();
+
+    let info_rows = vec![
+        Row::new(vec![
+            Span::styled(" pipeline", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "Parse → TAST → HIR → MIR → JIT",
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Row::new(vec![
+            Span::styled(" backends", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "Cranelift, LLVM, C (gcc/clang)",
+                Style::default().fg(Color::White),
+            ),
+        ]),
+        Row::new(vec![
+            Span::styled(" tier 0", Style::default().fg(Color::DarkGray)),
+            Span::styled("MIR Interpreter", Style::default().fg(Color::White)),
+        ]),
+        Row::new(vec![
+            Span::styled(" tier 1", Style::default().fg(Color::DarkGray)),
+            Span::styled("Cranelift baseline", Style::default().fg(Color::White)),
+        ]),
+        Row::new(vec![
+            Span::styled(" tier 2", Style::default().fg(Color::DarkGray)),
+            Span::styled("Cranelift optimized", Style::default().fg(Color::Green)),
+        ]),
+        Row::new(vec![
+            Span::styled(" tier 3", Style::default().fg(Color::DarkGray)),
+            Span::styled("LLVM -O3", Style::default().fg(Color::Magenta)),
+        ]),
+        Row::new(vec![
+            Span::styled(" promote", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                "100→T1  1K→T2  5K→T3",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
     ];
 
-    let _ = tui::panel::render_message_panel("rayzor v0.1.0", &content);
+    let art_height = art_lines.len() as u16;
+    let total_height = art_height + info_rows.len() as u16 + 3; // +3 for borders
+
+    let _ = crossterm::terminal::enable_raw_mode();
+    let backend = CrosstermBackend::new(std::io::stderr());
+    if let Ok(mut terminal) = Terminal::with_options(
+        backend,
+        ratatui::TerminalOptions {
+            viewport: ratatui::Viewport::Inline(total_height.min(30)),
+        },
+    ) {
+        let _ = terminal.draw(|frame| {
+            let area = frame.area();
+            let chunks = ratatui::layout::Layout::default()
+                .direction(ratatui::layout::Direction::Vertical)
+                .constraints([
+                    Constraint::Length(art_height),
+                    Constraint::Min(3),
+                ])
+                .split(area);
+
+            // Art
+            frame.render_widget(Paragraph::new(art_lines), chunks[0]);
+
+            // Info table
+            let table = Table::new(
+                info_rows,
+                [Constraint::Length(12), Constraint::Min(30)],
+            )
+            .block(
+                Block::default()
+                    .title(Span::styled(
+                        " v0.1.0 ",
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray)),
+            );
+            frame.render_widget(table, chunks[1]);
+        });
+    }
+    let _ = crossterm::terminal::disable_raw_mode();
+    eprintln!();
 }
 
 fn cache_stats(cache_dir: Option<PathBuf>) -> Result<(), String> {
