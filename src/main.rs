@@ -930,6 +930,7 @@ fn run_file(
     // Tree-shake unused stdlib functions before optimization
     {
         use compiler::ir::tree_shake;
+        let before = mir_module.functions.len() + mir_module.extern_functions.len();
         let mut modules = vec![mir_module];
         if let Some((mod_name, func_name)) = modules.iter().rev().find_map(|m| {
             m.functions
@@ -940,6 +941,10 @@ fn run_file(
             tree_shake::tree_shake_bundle(&mut modules, &mod_name, &func_name);
         }
         mir_module = modules.into_iter().next().unwrap();
+        let after = mir_module.functions.len() + mir_module.extern_functions.len();
+        if verbose {
+            println!("  shake    {} → {} functions", before, after);
+        }
     }
 
     // Run O0 pass manager to expand Haxe `inline` functions and apply SRA
