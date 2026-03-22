@@ -51,6 +51,7 @@ use compiler::ir::optimization::{strip_stack_trace_updates, OptimizationLevel, P
 use compiler::ir::tree_shake;
 use compiler::ir::{load_bundle, IrFunctionId, IrModule, RayzorBundle};
 
+use clap::Parser;
 #[cfg(feature = "llvm-backend")]
 use compiler::codegen::init_llvm_once;
 #[cfg(feature = "llvm-backend")]
@@ -59,7 +60,6 @@ use compiler::codegen::reset_llvm_global_state;
 use compiler::codegen::LLVMJitBackend;
 #[cfg(feature = "llvm-backend")]
 use inkwell::context::Context;
-use clap::Parser;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -1751,7 +1751,11 @@ fn main() {
         if !unknown.is_empty() {
             eprintln!(
                 "Unknown target(s): {}. Available: {}",
-                unknown.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+                unknown
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
                 all_targets_list
                     .iter()
                     .map(|t| t.name())
