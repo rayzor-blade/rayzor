@@ -1686,7 +1686,7 @@ fn main() {
 
     // Add Haxe targets if haxe CLI is available
     if haxe_available() {
-        all_targets_list.push(Target::HaxeInterp);
+        // HaxeInterp removed — too slow (50+ seconds), dominates benchmark runtime
         if hashlink_available() {
             all_targets_list.push(Target::HaxeHashLink);
             // HashLink/C requires gcc and proper hl --hlc support
