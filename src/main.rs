@@ -923,7 +923,10 @@ fn run_file(
 
     // Load .rpkg packages
     let mut loaded_rpkgs: Vec<compiler::rpkg::install::RpkgPlugin> = Vec::new();
-    let mut rpkg_source_dirs: Vec<PathBuf> = extra_source_dirs_from_manifest;
+    let mut rpkg_source_dirs: Vec<PathBuf> = Vec::new();
+    let mut rpkg_temp_dirs: Vec<PathBuf> = Vec::new();
+    // Manifest class paths go into source dirs but NOT temp dirs (they're real, not cleanup targets)
+    rpkg_source_dirs.extend(extra_source_dirs_from_manifest);
     for rpkg_path in &rpkg_files {
         match compiler::rpkg::install::RpkgPlugin::load(rpkg_path) {
             Ok(rpkg) => {
@@ -949,7 +952,8 @@ fn run_file(
                         }
                         let _ = std::fs::write(&dest, source);
                     }
-                    rpkg_source_dirs.push(tmp_dir);
+                    rpkg_source_dirs.push(tmp_dir.clone());
+                    rpkg_temp_dirs.push(tmp_dir);
                 }
                 loaded_rpkgs.push(rpkg);
             }
@@ -1127,8 +1131,8 @@ fn run_file(
 
     backend.shutdown();
 
-    // Clean up temp dirs from rpkg haxe sources
-    for dir in &rpkg_source_dirs {
+    // Clean up temp dirs from rpkg haxe sources (NOT manifest class paths)
+    for dir in &rpkg_temp_dirs {
         let _ = std::fs::remove_dir_all(dir);
     }
 

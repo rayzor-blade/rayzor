@@ -23542,8 +23542,8 @@ impl<'a> HirToMirContext<'a> {
 
                             self.add_error(
                                 &format!(
-                                    "Field '{}' ({:?}) index not found - class may not be registered",
-                                    field_name, field
+                                    "Cannot access field '{}': class not registered or field does not exist",
+                                    field_name_str,
                                 ),
                                 SourceLocation::unknown(),
                             );

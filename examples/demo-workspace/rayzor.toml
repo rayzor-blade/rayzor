@@ -1,0 +1,5 @@
+[workspace]
+members = ["app", "mathlib"]
+
+[workspace.cache]
+dir = ".rayzor/cache"

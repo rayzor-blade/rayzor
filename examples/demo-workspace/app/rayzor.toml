@@ -1,0 +1,13 @@
+[project]
+name = "app"
+version = "0.1.0"
+entry = "src/Main.hx"
+
+[build]
+class-paths = ["src", "../mathlib/src"]
+opt-level = 2
+preset = "application"
+output = "build/app"
+
+[cache]
+enabled = true

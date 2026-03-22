@@ -222,120 +222,68 @@ impl CompilationConfig {
     /// Discover standard library paths from environment and standard locations
     ///
     /// Search order:
-    /// 1. HAXE_STD_PATH environment variable
-    /// 2. HAXE_HOME environment variable (looking for std/ subdirectory)
-    /// 3. Current project's haxe-std directory
-    /// 4. Parent directory's haxe-std
-    /// 5. Standard installation locations (platform-specific)
+    /// Discover rayzor's own stdlib (haxe-std).
+    ///
+    /// Resolution order:
+    /// 1. RAYZOR_STD_PATH environment variable (explicit override)
+    /// 2. Relative to the rayzor binary (../haxe-std, ../compiler/haxe-std)
+    /// 3. Relative to cwd (compiler/haxe-std, ./haxe-std, ../haxe-std)
+    ///
+    /// NOTE: System Haxe installations (/usr/local/lib/haxe/std etc.) are NOT
+    /// searched. Rayzor uses its own stdlib with rayzor-specific extensions.
+    /// Mixing system Haxe stdlib causes subtle compilation errors.
     pub fn discover_stdlib_paths() -> Vec<PathBuf> {
         let mut paths = Vec::new();
 
-        // 1. Check HAXE_STD_PATH environment variable
-        if let Ok(haxe_std_path) = std::env::var("HAXE_STD_PATH") {
-            let path = PathBuf::from(&haxe_std_path);
+        // 1. Explicit override via RAYZOR_STD_PATH
+        if let Ok(std_path) = std::env::var("RAYZOR_STD_PATH") {
+            let path = PathBuf::from(&std_path);
             if path.exists() {
-                info!("Found stdlib at HAXE_STD_PATH: {}", haxe_std_path);
+                info!("Found stdlib at RAYZOR_STD_PATH: {}", std_path);
                 paths.push(path);
-                return paths; // Use this path exclusively if set
+                return paths;
             } else {
                 warn!(
-                    "HAXE_STD_PATH set but directory doesn't exist: {}",
-                    haxe_std_path
+                    "RAYZOR_STD_PATH set but directory doesn't exist: {}",
+                    std_path
                 );
             }
         }
 
-        // 2. Check HAXE_HOME/std
-        if let Ok(haxe_home) = std::env::var("HAXE_HOME") {
-            let std_path = PathBuf::from(&haxe_home).join("std");
-            if std_path.exists() {
-                info!("Found stdlib at HAXE_HOME/std: {:?}", std_path);
-                paths.push(std_path);
-            }
-        }
-
-        // 3. Check current project's haxe-std directory
-        let project_stdlib = PathBuf::from("compiler/haxe-std");
-        if project_stdlib.exists() {
-            paths.push(project_stdlib);
-        }
-
-        // 4. Check parent directory's haxe-std
-        let parent_stdlib = PathBuf::from("../haxe-std");
-        if parent_stdlib.exists() {
-            paths.push(parent_stdlib);
-        }
-
-        let current_dir_stdlib = PathBuf::from("./haxe-std");
-        if current_dir_stdlib.exists() {
-            paths.push(current_dir_stdlib);
-        }
-
-        // 5. Platform-specific standard installation locations
-        #[cfg(target_os = "linux")]
-        {
-            let linux_paths = vec![
-                PathBuf::from("/usr/share/haxe/std"),
-                PathBuf::from("/usr/local/share/haxe/std"),
-                PathBuf::from("/opt/haxe/std"),
-            ];
-            for path in linux_paths {
-                if path.exists() {
-                    paths.push(path);
+        // 2. Relative to the rayzor binary
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(exe_dir) = exe.parent() {
+                // Binary at target/debug/rayzor → ../../compiler/haxe-std
+                for relative in &["../compiler/haxe-std", "../haxe-std", "haxe-std"] {
+                    let candidate = exe_dir.join(relative);
+                    if candidate.exists() {
+                        paths.push(candidate);
+                    }
                 }
             }
         }
 
-        #[cfg(target_os = "macos")]
-        {
-            let macos_paths = vec![
-                PathBuf::from("/usr/local/lib/haxe/std"),
-                PathBuf::from("/opt/homebrew/lib/haxe/std"),
-                PathBuf::from("/Library/Haxe/std"),
-            ];
-            for path in macos_paths {
-                if path.exists() {
-                    paths.push(path);
-                }
-            }
-
-            // Check user's home directory
-            if let Ok(home) = std::env::var("HOME") {
-                let user_haxe = PathBuf::from(home).join(".haxe/std");
-                if user_haxe.exists() {
-                    paths.push(user_haxe);
-                }
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            let windows_paths = vec![
-                PathBuf::from("C:\\HaxeToolkit\\haxe\\std"),
-                PathBuf::from("C:\\Program Files\\Haxe\\std"),
-                PathBuf::from("C:\\Program Files (x86)\\Haxe\\std"),
-            ];
-            for path in windows_paths {
-                if path.exists() {
-                    paths.push(path);
-                }
-            }
-
-            // Check user's AppData
-            if let Ok(appdata) = std::env::var("APPDATA") {
-                let user_haxe = PathBuf::from(appdata).join("Haxe\\std");
-                if user_haxe.exists() {
-                    paths.push(user_haxe);
+        // 3. Relative to cwd (development layout)
+        for relative in &["compiler/haxe-std", "./haxe-std", "../haxe-std"] {
+            let candidate = PathBuf::from(relative);
+            if candidate.exists() {
+                // Deduplicate by canonical path
+                let dominated = paths.iter().any(|p| {
+                    matches!(
+                        (p.canonicalize(), candidate.canonicalize()),
+                        (Ok(a), Ok(b)) if a == b
+                    )
+                });
+                if !dominated {
+                    paths.push(candidate);
                 }
             }
         }
 
         if paths.is_empty() {
-            warn!("No standard library found. Set HAXE_STD_PATH environment variable.");
-            warn!("         or install Haxe to a standard location.");
-            // Still provide fallback paths for development
+            warn!("No rayzor stdlib found. Set RAYZOR_STD_PATH environment variable.");
+            // Fallback for development
             paths.push(PathBuf::from("compiler/haxe-std"));
-            paths.push(PathBuf::from("../haxe-std"));
             paths.push(PathBuf::from("./haxe-std"));
         }
 
@@ -3842,9 +3790,9 @@ impl CompilationUnit {
             errors
                 .into_iter()
                 .map(|e| CompilationError {
-                    message: format!("MIR lowering error: {:?}", e),
-                    location: SourceLocation::unknown(),
-                    category: ErrorCategory::InternalError,
+                    message: e.message,
+                    location: e.location,
+                    category: ErrorCategory::TypeError,
                     suggestion: None,
                     related_errors: Vec::new(),
                 })
