@@ -1213,10 +1213,10 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             let src_path = tmp.join(format!("{}.hx", bench.name));
             std::fs::write(&src_path, &bench.source).map_err(|e| format!("write source: {}", e))?;
 
-            // Compile once (AOT)
+            // Compile once (AOT) — O2 for faster compile, LLVM O2 is already very good
             let compile_start = Instant::now();
             let compiler = AotCompiler {
-                opt_level: MirOpt::O3,
+                opt_level: MirOpt::O2,
                 strip: true,
                 verbose: false,
                 ..Default::default()
@@ -1262,9 +1262,10 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
             std::fs::write(&src_path, &bench.source).map_err(|e| format!("write source: {}", e))?;
 
             // Compile once (C backend → gcc)
+            // Use O2 for gcc — O3 adds ~200ms compile time with negligible runtime benefit
             let compile_start = Instant::now();
             let compiler = AotCompiler {
-                opt_level: MirOpt::O3,
+                opt_level: MirOpt::O2,
                 strip: true,
                 verbose: false,
                 ..Default::default()
