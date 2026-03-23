@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Mon Mar 23 08:46:24 GMT 2026
+  Mon Mar 23 09:08:21 GMT 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -674,11 +674,11 @@ Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
 0
 1
 2
-hello
 world
-20
+hello
 10
 30
+20
 done
 
 --- test_forward [PASS] ---
