@@ -14985,9 +14985,25 @@ impl<'a> HirToMirContext<'a> {
                                     }
                                 }
 
-                                // NOTE: Removed bare-name Pass 2 search in external_function_map.
-                                // Bare-name matching across modules causes false positives.
-                                // Inherited method dispatch should use class hierarchy resolution instead.
+                                // Pass 2: Search external_function_name_map by qualified name
+                                // Try both "ClassName.method" and "pkg.ClassName.method" patterns
+                                if func_id_opt.is_none() {
+                                    if let Some(ref class_name) = receiver_class_name {
+                                        let suffix = format!("{}.{}", class_name, method_name);
+                                        // Direct match first
+                                        if let Some(&fid) = self.external_function_name_map.get(&suffix) {
+                                            func_id_opt = Some(fid);
+                                        } else {
+                                            // Suffix match: find "pkg.ClassName.method"
+                                            for (name, &fid) in &self.external_function_name_map {
+                                                if name.ends_with(&suffix) {
+                                                    func_id_opt = Some(fid);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

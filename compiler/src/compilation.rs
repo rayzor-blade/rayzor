@@ -3767,6 +3767,11 @@ impl CompilationUnit {
         };
 
         // Name-based external function map for cross-file lookups where SymbolIds differ
+        // Debug: check what's in the name map for toString
+        for (name, fid) in &self.stdlib_function_name_map {
+            if name.contains("toString") || name.contains("Point2D") {
+            }
+        }
         let external_functions_by_name = self.stdlib_function_name_map.clone();
 
         let stdlib_mapping = self.compiler_plugin_registry.build_combined_mapping();
