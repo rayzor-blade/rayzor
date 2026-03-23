@@ -4204,6 +4204,36 @@ impl CompilationUnit {
                       mono_stats.call_sites_rewritten);
         }
 
+        // Debug: dump alloc sizes
+        for (name, size) in &self.import_class_alloc_sizes_by_name {
+            if name.contains("Point") || name.contains("Particle") || name.contains("Simulation") {
+                eprintln!("[ALLOC_SIZE] {} → {} bytes", name, size);
+            }
+        }
+        // Debug: dump constructor name map
+        for (name, fid) in &self.import_constructor_name_map {
+            eprintln!("[CTOR_MAP] {} → fn{}", name, fid.0);
+        }
+        // Debug: dump constructor signatures in final merged module
+        for (fid, func) in &mir_module.functions {
+            if func.name == "new" && !func.cfg.blocks.is_empty() {
+                let params: Vec<String> = func.signature.parameters.iter()
+                    .map(|p| format!("{}:{:?}", p.name, p.ty)).collect();
+                let qn = func.qualified_name.as_deref().unwrap_or("?");
+                let blocks = func.cfg.blocks.len();
+                let insts: usize = func.cfg.blocks.values().map(|b| b.instructions.len()).sum();
+                eprintln!("[FINAL_MIR] fn{}={} qn={} blocks={} insts={} new({})", fid.0, func.name, qn, blocks, insts, params.join(", "));
+                // Dump instructions for Point2D-sized constructors
+                if params.len() == 3 && params[1].contains("F64") {
+                    for block in func.cfg.blocks.values() {
+                        for inst in &block.instructions {
+                            eprintln!("[FINAL_MIR]   {:?}", inst);
+                        }
+                    }
+                }
+            }
+        }
+
         // Store the MIR module
         self.mir_modules.push(std::sync::Arc::new(mir_module));
 
