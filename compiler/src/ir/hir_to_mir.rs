@@ -2177,12 +2177,12 @@ impl<'a> HirToMirContext<'a> {
         // This ensures function_map is fully populated before any calls are made
 
         // Pass 1a: Register class method signatures
-        eprintln!("[PASS1] {} types in HIR module '{}'", hir_module.types.len(), hir_module.name);
+        // eprintln!("[PASS1] {} types in HIR module '{}'", hir_module.types.len(), hir_module.name);
         for (type_id, type_decl) in &hir_module.types {
             match type_decl {
                 HirTypeDecl::Class(class) => {
                     let cname = self.string_interner.get(class.name).unwrap_or("?");
-                    eprintln!("[PASS1] class={} ctor={} methods={}", cname, class.constructor.is_some(), class.methods.len());
+                    // eprintln!("[PASS1] class={} ctor={} methods={}", cname, class.constructor.is_some(), class.methods.len());
                     // eprintln!(
                     //     "DEBUG Pass1a: Registering methods for class {:?}",
                     //     self.string_interner.get(class.name).unwrap_or("<unknown>")
@@ -2729,9 +2729,9 @@ impl<'a> HirToMirContext<'a> {
                 .unwrap_or_else(|| format!("param_{}", param.symbol_id.as_raw()));
             let ir_ty = self.convert_type(param.ty);
             let kind = self.type_table.get(param.ty).map(|t| format!("{:?}", t.kind));
-            eprintln!("[CTOR_TP] {}.new param={} ty={:?} kind={:?} → {:?}",
-                self.string_interner.get(self.symbol_table.get_symbol(class_symbol).unwrap().name).unwrap_or("?"),
-                param_name, param.ty, kind, ir_ty);
+            // eprintln!("[CTOR_TP] {}.new param={} ty={:?} kind={:?} → {:?}",
+            //     self.string_interner.get(self.symbol_table.get_symbol(class_symbol).unwrap().name).unwrap_or("?"),
+            //     param_name, param.ty, kind, ir_ty);
             sig_builder = sig_builder.param(param_name, ir_ty);
         }
 
@@ -9515,11 +9515,16 @@ impl<'a> HirToMirContext<'a> {
                                     result_type.clone()
                                 };
 
-                            return self.builder.build_call_direct(
+                            let result = self.builder.build_call_direct(
                                 func_id,
                                 arg_regs,
                                 actual_return_type,
                             );
+                            // Set class hint on result for cross-module method dispatch
+                            if let Some(reg) = result {
+                                self.set_class_hint_for_return(reg, expr.ty);
+                            }
+                            return result;
                         }
 
                         // Lower the object (this will be the first parameter)
@@ -15407,6 +15412,10 @@ impl<'a> HirToMirContext<'a> {
                                     ir_type_args,
                                 )
                             };
+                            // Set class hint on result for cross-module method dispatch
+                            if let Some(reg) = result {
+                                self.set_class_hint_for_return(reg, expr.ty);
+                            }
                             debug!("[FUNCTION_MAP] Result: {:?}", result);
 
                             // Type erasure coercion for generic method returns:
@@ -19687,8 +19696,26 @@ impl<'a> HirToMirContext<'a> {
     /// Fill in default argument values for a function call when fewer args are provided
     /// than the function expects. `arg_regs` already contains the lowered arguments
     /// (possibly including implicit 'this' for methods/constructors).
-    /// `has_implicit_this` indicates whether arg_regs[0] is an implicit 'this' pointer
-    /// that is NOT part of the user-visible params.
+    /// Set register_class_hints on a call result if the HIR return type is a class.
+    /// This enables method dispatch on cross-module return values
+    /// (e.g., `a.add(b).toString()` where `add` returns Point2D across packages).
+    fn set_class_hint_for_return(&mut self, result_reg: IrId, hir_return_type: TypeId) {
+        let type_info = self.type_table.get(hir_return_type);
+        if let Some(ti) = type_info {
+            if let TypeKind::Class { symbol_id, .. } = &ti.kind {
+                if let Some(sym) = self.symbol_table.get_symbol(*symbol_id) {
+                    let name = sym
+                        .qualified_name
+                        .and_then(|qn| self.string_interner.get(qn))
+                        .or_else(|| self.string_interner.get(sym.name))
+                        .unwrap_or("?");
+                    self.register_class_hints
+                        .insert(result_reg, name.to_string());
+                }
+            }
+        }
+    }
+
     /// Coerce args to match external function param types at cross-module call boundaries.
     /// Only casts I32→F64 and I64→F64 where the callee expects Float but caller passes Int.
     fn coerce_args_for_cross_module_call(
