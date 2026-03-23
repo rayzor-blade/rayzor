@@ -2404,9 +2404,11 @@ impl CompilationUnit {
         // Only skip pre-registration for stdlib files (types registered via bsym).
         // User package files need full pre-registration for correct type resolution.
         let is_stdlib = file_path.to_string_lossy().contains("haxe-std");
-        // Import files skip the stdlib merge — it happens once in the main file's compilation.
-        // This prevents stdlib functions from overwriting user package functions by bare name.
-        let skip_stdlib_merge = true;
+        // User package imports skip the stdlib merge — it happens once in the main file's
+        // compilation. This prevents stdlib functions from overwriting user functions by bare name.
+        // Stdlib imports (EReg, StringTools, etc.) still need the merge because their Haxe
+        // source has placeholder method bodies that must be replaced by MIR wrappers.
+        let skip_stdlib_merge = !is_stdlib;
         match self.compile_file_with_shared_state_ex(&filename, source, is_stdlib, skip_stdlib_merge) {
             Ok(typed_file) => {
                 self.loaded_stdlib_typed_files.push(typed_file);
@@ -2429,12 +2431,16 @@ impl CompilationUnit {
 
                     // Track which import functions are source-level declarations
                     // (methods, constructors) vs generated MIR wrappers.
-                    // The renumbering will shift IDs, so compute the mapping.
+                    // Only for USER PACKAGES — stdlib files (EReg, StringTools, etc.) have
+                    // placeholder method bodies that must be replaced by stdlib MIR wrappers.
                     let own_ids = self.last_compiled_own_func_ids.take().unwrap_or_default();
-                    let import_base: u32 = 100_000 + (self.import_mir_modules.len() as u32 * 10_000);
-                    for old_id in &own_ids {
-                        let new_id = crate::ir::IrFunctionId(old_id.0 + import_base);
-                        self.import_own_func_ids.insert(new_id);
+                    let is_user_package = !filename.contains("haxe-std");
+                    if is_user_package {
+                        let import_base: u32 = 100_000 + (self.import_mir_modules.len() as u32 * 10_000);
+                        for old_id in &own_ids {
+                            let new_id = crate::ir::IrFunctionId(old_id.0 + import_base);
+                            self.import_own_func_ids.insert(new_id);
+                        }
                     }
 
                     self.renumber_and_push_import_mir((*mir_arc).clone());
@@ -4007,9 +4013,19 @@ impl CompilationUnit {
         // NOTE: extern-only files are handled above (before MIR generation).
 
         // Capture this file's user-defined function IDs (from function_map + constructor_map).
-        // These are source-level declarations, NOT generated MIR wrappers.
-        let own_func_ids: std::collections::HashSet<crate::ir::IrFunctionId> =
-            mir_result_func_ids.union(&mir_result_ctor_ids).copied().collect();
+        // Exclude MIR wrapper stubs — these have trivial bodies (ret false/null) and must be
+        // replaced by the stdlib merge with real implementations that delegate to runtime.
+        // Without this filter, non-extern stdlib classes like EReg have their methods (match,
+        // matched, etc.) incorrectly protected from replacement.
+        let own_func_ids: std::collections::HashSet<crate::ir::IrFunctionId> = mir_result_func_ids
+            .union(&mir_result_ctor_ids)
+            .copied()
+            .filter(|func_id| {
+                mir_module.functions.get(func_id)
+                    .map(|f| !matches!(f.kind, crate::ir::FunctionKind::MirWrapper))
+                    .unwrap_or(true)
+            })
+            .collect();
 
         // Store for try_compile_import to pick up and track after renumbering
         self.last_compiled_own_func_ids = Some(own_func_ids.clone());
@@ -4186,6 +4202,9 @@ impl CompilationUnit {
                         // Protect source-level import functions from stdlib replacement.
                         if !merged_import_func_ids.contains(&existing_id) {
                             id_replacements.insert(existing_id, *func_id);
+                        } else if func.name == "match" || func.name == "matched" {
+                            eprintln!("[MERGE_PROTECT] fn{}={} protected from fn{}",
+                                existing_id.0, func.name, func_id.0);
                         }
                     }
                 }
