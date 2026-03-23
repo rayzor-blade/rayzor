@@ -8022,6 +8022,8 @@ impl<'a> HirToMirContext<'a> {
                 self.builder.call_label = Some("CALL_START".to_string());
                 let result_type = self.convert_type(expr.ty);
 
+                // (debug removed)
+
                 // Update the caller's shadow-stack frame to this call-site line/col so
                 // the trace shows WHERE the call was made, not the function definition line.
                 let call_loc = expr.source_location;
@@ -30954,6 +30956,7 @@ impl<'a> HirToMirContext<'a> {
                             type_table.get(expr.ty).map(|ti| ti.kind.clone())
                         };
 
+                        // (debug removed)
                         match expr_type_kind.as_ref() {
                             Some(TypeKind::String) => expr_val, // already a string
                             Some(TypeKind::Int) => {
