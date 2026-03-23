@@ -30,17 +30,12 @@ class Simulation {
         var total = 0.0;
         for (p in particles) {
             total += p.kineticEnergy();
-            total += p.mass * 9.81 * p.pos.y;
         }
         return total;
     }
 
     public function report():String {
-        var lines:Array<String> = [];
-        lines.push('t=${Math.round(time * 1000) / 1000}s  particles=${particles.length}  energy=${Math.round(totalEnergy() * 100) / 100}');
-        for (p in particles) {
-            lines.push('  ${p.toString()}');
-        }
-        return lines.join("\n");
+        var result = 'particles=${particles.length}';
+        return result;
     }
 }
