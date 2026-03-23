@@ -6093,11 +6093,26 @@ impl<'a> AstLowering<'a> {
                 // We need to infer the type of that expression and resolve the method on it.
                 if let Ok(receiver_type) = self.infer_expression_type(&receiver.kind) {
                     if let Some(class_symbol) = self.resolve_type_to_class_symbol(receiver_type) {
+                        // Check local class_methods first (classes in this compilation unit)
                         if let Some(methods) = self.class_methods.get(&class_symbol) {
                             if let Some((_, method_symbol, _)) =
                                 methods.iter().find(|(name, _, _)| *name == method_name)
                             {
                                 return *method_symbol;
+                            }
+                        }
+                        // Fallback: check shared symbol table's class scope
+                        // (for classes compiled in a different compilation unit / package)
+                        if let Some(class_sym) = self.context.symbol_table.get_symbol(class_symbol)
+                        {
+                            if let Some(method_sym) = self
+                                .context
+                                .symbol_table
+                                .lookup_symbol(class_sym.scope_id, method_name)
+                            {
+                                if method_sym.kind == crate::tast::symbols::SymbolKind::Function {
+                                    return method_sym.id;
+                                }
                             }
                         }
                     }
@@ -6113,6 +6128,18 @@ impl<'a> AstLowering<'a> {
                             return *method_symbol;
                         }
                     }
+                    // Fallback: shared symbol table (cross-package classes)
+                    if let Some(class_sym) = self.context.symbol_table.get_symbol(class_symbol) {
+                        if let Some(method_sym) = self
+                            .context
+                            .symbol_table
+                            .lookup_symbol(class_sym.scope_id, method_name)
+                        {
+                            if method_sym.kind == crate::tast::symbols::SymbolKind::Function {
+                                return method_sym.id;
+                            }
+                        }
+                    }
                 }
             }
             _ => {
@@ -6124,6 +6151,22 @@ impl<'a> AstLowering<'a> {
                                 methods.iter().find(|(name, _, _)| *name == method_name)
                             {
                                 return *method_symbol;
+                            }
+                        }
+                        // Fallback: shared symbol table (cross-package classes)
+                        if let Some(class_sym) =
+                            self.context.symbol_table.get_symbol(class_symbol)
+                        {
+                            if let Some(method_sym) = self
+                                .context
+                                .symbol_table
+                                .lookup_symbol(class_sym.scope_id, method_name)
+                            {
+                                if method_sym.kind
+                                    == crate::tast::symbols::SymbolKind::Function
+                                {
+                                    return method_sym.id;
+                                }
                             }
                         }
                     }
@@ -6139,6 +6182,18 @@ impl<'a> AstLowering<'a> {
                     methods.iter().find(|(name, _, _)| *name == method_name)
                 {
                     return *method_symbol;
+                }
+            }
+            // Fallback: shared symbol table (cross-package classes)
+            if let Some(class_sym) = self.context.symbol_table.get_symbol(class_symbol) {
+                if let Some(method_sym) = self
+                    .context
+                    .symbol_table
+                    .lookup_symbol(class_sym.scope_id, method_name)
+                {
+                    if method_sym.kind == crate::tast::symbols::SymbolKind::Function {
+                        return method_sym.id;
+                    }
                 }
             }
         }

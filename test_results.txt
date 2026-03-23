@@ -1,19 +1,10 @@
 ============================================
   Rayzor Haxe Test Results
-  Mon Mar 23 00:27:59 GMT 2026
+  Mon Mar 23 08:46:24 GMT 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
 Running compiler/tests/haxe/DebugChecksum.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/iterators/ArrayKeyValueIterator.hx skip_pre_reg=true
-[CTOR_TP] ArrayKeyValueIterator.new param=array ty=TypeId(1152) kind=Some("Array { element_type: TypeId(1151) }") → Ptr(Void)
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/iterators/ArrayIterator.hx skip_pre_reg=true
-[CTOR_TP] ArrayIterator.new param=array ty=TypeId(1160) kind=Some("Array { element_type: TypeId(1159) }") → Ptr(Void)
-[CTOR_TP] RGB.new param=inR ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] RGB.new param=inG ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] RGB.new param=inB ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Complex.new param=inI ty=TypeId(3) kind=Some("Float") → F64
-[CTOR_TP] Complex.new param=inJ ty=TypeId(3) kind=Some("Float") → F64
 === Palette Debug ===
 Palette[0]: r=0 g=255 b=0 (abs=0.5)
 Palette[500]: r=127 g=127 b=255 (abs=0)
@@ -101,23 +92,12 @@ Direct 1 << 8: 256
 
 --- debug_channel [PASS] ---
 Running compiler/tests/haxe/debug_channel.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/thread/Thread.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/rayzor/Ptr.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/rayzor/Ref.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/rayzor/concurrent/Channel.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/rayzor/concurrent/Thread.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/rayzor/concurrent/Arc.hx skip_pre_reg=true
 5
 100
 done
 
 --- debug_checksum [PASS] ---
 Running compiler/tests/haxe/debug_checksum.hx [debug] [preset: Application]...
-[CTOR_TP] RGB.new param=inR ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] RGB.new param=inG ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] RGB.new param=inB ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Complex.new param=inI ty=TypeId(3) kind=Some("Float") → F64
-[CTOR_TP] Complex.new param=inJ ty=TypeId(3) kind=Some("Float") → F64
 === Palette Debug ===
 Palette[0]: r=0 g=255 b=0 (abs=0.5)
 Palette[500]: r=127 g=127 b=255 (abs=0)
@@ -157,9 +137,6 @@ i / 1000.0 = 0.004
 
 --- debug_palette [PASS] ---
 Running compiler/tests/haxe/debug_palette.hx [debug] [preset: Application]...
-[CTOR_TP] RGB.new param=inR ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] RGB.new param=inG ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] RGB.new param=inB ty=TypeId(2) kind=Some("Int") → I32
 Creating palette...
 palette[0]: frac=0 r=0 g=255 b=0
 palette[1]: frac=0.001 r=0 g=254 b=0
@@ -245,11 +222,6 @@ Final iteration = 4
 
 --- mandelbrot_small [PASS] ---
 Running compiler/tests/haxe/mandelbrot_small.hx [debug] [preset: Application]...
-[CTOR_TP] RGB.new param=inR ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] RGB.new param=inG ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] RGB.new param=inB ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Complex.new param=inI ty=TypeId(3) kind=Some("Float") → F64
-[CTOR_TP] Complex.new param=inJ ty=TypeId(3) kind=Some("Float") → F64
 Creating palette...
 Palette created: 1001 entries
 Creating image array...
@@ -274,7 +246,6 @@ Running compiler/tests/haxe/test_abstract_static.hx [debug] [preset: Application
 
 --- test_anon_object [PASS] ---
 Running compiler/tests/haxe/test_anon_object.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/Reflect.hx skip_pre_reg=true
 10
 20
 3.14
@@ -334,7 +305,6 @@ Running compiler/tests/haxe/test_array_methods.hx [debug] [preset: Application].
 
 --- test_async_await [PASS] ---
 Running compiler/tests/haxe/test_async_await.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/rayzor/concurrent/Future.hx skip_pre_reg=true
 42
 not blocked
 200
@@ -343,11 +313,6 @@ done
 
 --- test_balanced_tree [PASS] ---
 Running compiler/tests/haxe/test_balanced_tree.hx [debug] [preset: Application]...
-[CTOR_TP] Node.new param=l ty=TypeId(1150) kind=Some("Class { symbol_id: SymbolId(2154), type_args: [] }") → Ptr(Void)
-[CTOR_TP] Node.new param=k ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Node.new param=v ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Node.new param=r ty=TypeId(1150) kind=Some("Class { symbol_id: SymbolId(2154), type_args: [] }") → Ptr(Void)
-[CTOR_TP] Node.new param=h ty=TypeId(2) kind=Some("Int") → I32
 10
 20
 30
@@ -355,18 +320,6 @@ done
 
 --- test_balanced_tree_generic [PASS] ---
 Running compiler/tests/haxe/test_balanced_tree_generic.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/ds/BalancedTree.hx skip_pre_reg=true
-[CTOR_TP] TreeNode.new param=l ty=TypeId(5) kind=Some("Dynamic") → Ptr(Void)
-[CTOR_TP] TreeNode.new param=k ty=TypeId(5) kind=Some("Dynamic") → Ptr(Void)
-[CTOR_TP] TreeNode.new param=v ty=TypeId(5) kind=Some("Dynamic") → Ptr(Void)
-[CTOR_TP] TreeNode.new param=r ty=TypeId(5) kind=Some("Dynamic") → Ptr(Void)
-[CTOR_TP] TreeNode.new param=h ty=TypeId(5) kind=Some("Dynamic") → Ptr(Void)
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/Reflect.hx skip_pre_reg=true
-[CTOR_TP] TreeNode.new param=l ty=TypeId(1194) kind=Some("Class { symbol_id: SymbolId(701), type_args: [TypeId(1192), TypeId(1193)] }") → Ptr(Void)
-[CTOR_TP] TreeNode.new param=k ty=TypeId(1192) kind=Some("TypeParameter { symbol_id: SymbolId(2336), constraints: [], variance: Invariant }") → I64
-[CTOR_TP] TreeNode.new param=v ty=TypeId(1193) kind=Some("TypeParameter { symbol_id: SymbolId(2337), constraints: [], variance: Invariant }") → I64
-[CTOR_TP] TreeNode.new param=r ty=TypeId(1194) kind=Some("Class { symbol_id: SymbolId(701), type_args: [TypeId(1192), TypeId(1193)] }") → Ptr(Void)
-[CTOR_TP] TreeNode.new param=h ty=TypeId(2) kind=Some("Int") → I32
 10
 20
 30
@@ -410,11 +363,6 @@ Running compiler/tests/haxe/test_closures.hx [debug] [preset: Application]...
 
 --- test_compress [PASS] ---
 Running compiler/tests/haxe/test_compress.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/zip/FlushMode.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Bytes.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/zip/Compress.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/zip/Uncompress.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/rayzor/Bytes.hx skip_pre_reg=true
 55
 true
 true
@@ -431,8 +379,6 @@ done
 
 --- test_copy [PASS] ---
 Running compiler/tests/haxe/test_copy.hx [debug] [preset: Application]...
-[CTOR_TP] Point.new param=x ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Point.new param=y ty=TypeId(2) kind=Some("Int") → I32
 3
 42
 3
@@ -441,10 +387,6 @@ done
 
 --- test_copy_clone_identity [PASS] ---
 Running compiler/tests/haxe/test_copy_clone_identity.hx [debug] [preset: Application]...
-[CTOR_TP] Point.new param=x ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Point.new param=y ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Named.new param=name ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] Named.new param=val ty=TypeId(2) kind=Some("Int") → I32
 10
 99
 100
@@ -455,21 +397,16 @@ done
 
 --- test_create_enum [PASS] ---
 Running compiler/tests/haxe/test_create_enum.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/Type.hx skip_pre_reg=true
 0
 1
 2
 
 --- test_debug_circular [PASS] ---
 Running compiler/tests/haxe/test_debug_circular.hx [debug] [preset: Application]...
-[CTOR_TP] Node.new param=v ty=TypeId(2) kind=Some("Int") → I32
 Node { value: 1, next: Node { value: 2, next: <object> } }
 
 --- test_default_params [PASS] ---
 Running compiler/tests/haxe/test_default_params.hx [debug] [preset: Application]...
-[CTOR_TP] Pair.new param=a ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Pair.new param=b ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Pair.new param=s ty=TypeId(4) kind=Some("String") → String
 1
 2
 full
@@ -487,10 +424,6 @@ done
 
 --- test_default_params2 [PASS] ---
 Running compiler/tests/haxe/test_default_params2.hx [debug] [preset: Application]...
-[CTOR_TP] Node.new param=l ty=TypeId(1150) kind=Some("Class { symbol_id: SymbolId(2154), type_args: [] }") → Ptr(Void)
-[CTOR_TP] Node.new param=k ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Node.new param=r ty=TypeId(1150) kind=Some("Class { symbol_id: SymbolId(2154), type_args: [] }") → Ptr(Void)
-[CTOR_TP] Node.new param=h ty=TypeId(2) kind=Some("Int") → I32
 1
 1
 2
@@ -501,8 +434,6 @@ done
 
 --- test_derive_clone [PASS] ---
 Running compiler/tests/haxe/test_derive_clone.hx [debug] [preset: Application]...
-[CTOR_TP] Point.new param=x ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Point.new param=y ty=TypeId(2) kind=Some("Int") → I32
 3
 7
 3
@@ -510,28 +441,16 @@ Running compiler/tests/haxe/test_derive_clone.hx [debug] [preset: Application]..
 
 --- test_derive_debug [PASS] ---
 Running compiler/tests/haxe/test_derive_debug.hx [debug] [preset: Application]...
-[CTOR_TP] Point.new param=x ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Point.new param=y ty=TypeId(2) kind=Some("Int") → I32
 Point { x: 3, y: 7 }
 
 --- test_derive_debug_format [PASS] ---
 Running compiler/tests/haxe/test_derive_debug_format.hx [debug] [preset: Application]...
-[CTOR_TP] Point.new param=x ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Point.new param=y ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Entity.new param=name ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] Entity.new param=id ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Entity.new param=active ty=TypeId(1) kind=Some("Bool") → Bool
 (3, 7)
 [Player #42]
 done
 
 --- test_derive_debug_nested [PASS] ---
 Running compiler/tests/haxe/test_derive_debug_nested.hx [debug] [preset: Application]...
-[CTOR_TP] Point.new param=x ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Point.new param=y ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Rect.new param=tl ty=TypeId(1152) kind=Some("Class { symbol_id: SymbolId(2166), type_args: [] }") → Ptr(Void)
-[CTOR_TP] Rect.new param=br ty=TypeId(1152) kind=Some("Class { symbol_id: SymbolId(2166), type_args: [] }") → Ptr(Void)
-[CTOR_TP] Rect.new param=label ty=TypeId(4) kind=Some("String") → String
 Point { x: 3, y: 7 }
 Rect { topLeft: Point { x: 0, y: 0 }, bottomRight: Point { x: 10, y: 20 }, label: box }
 done
@@ -562,8 +481,6 @@ false
 
 --- test_derive_string_fields [PASS] ---
 Running compiler/tests/haxe/test_derive_string_fields.hx [debug] [preset: Application]...
-[CTOR_TP] Person.new param=name ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] Person.new param=age ty=TypeId(2) kind=Some("Int") → I32
 true
 false
 true
@@ -574,8 +491,6 @@ true
 
 --- test_derive_traits [PASS] ---
 Running compiler/tests/haxe/test_derive_traits.hx [debug] [preset: Application]...
-[CTOR_TP] Point.new param=x ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Point.new param=y ty=TypeId(2) kind=Some("Int") → I32
 true
 false
 true
@@ -593,7 +508,6 @@ true
 
 --- test_drop [PASS] ---
 Running compiler/tests/haxe/test_drop.hx [debug] [preset: Application]...
-[CTOR_TP] Connection.new param=id ty=TypeId(2) kind=Some("Int") → I32
 1
 drop 1
 2
@@ -614,8 +528,6 @@ done
 
 --- test_dynamic_class [PASS] ---
 Running compiler/tests/haxe/test_dynamic_class.hx [debug] [preset: Application]...
-[CTOR_TP] Point.new param=x ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Point.new param=y ty=TypeId(2) kind=Some("Int") → I32
 10
 20
 3
@@ -624,8 +536,6 @@ done
 
 --- test_dynamic_methods [PASS] ---
 Running compiler/tests/haxe/test_dynamic_methods.hx [debug] [preset: Application]...
-[CTOR_TP] Point.new param=x ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Point.new param=y ty=TypeId(2) kind=Some("Int") → I32
 3
 7
 10
@@ -663,30 +573,12 @@ done
 
 --- test_enum_switch [PASS] ---
 Running compiler/tests/haxe/test_enum_switch.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/ds/Option.hx skip_pre_reg=true
 42
 none
 other
 
 --- test_ereg [PASS] ---
 Running compiler/tests/haxe/test_ereg.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/exceptions/PosException.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/EReg.hx skip_pre_reg=true
-[CTOR_TP] EReg.new param=r ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] EReg.new param=opt ty=TypeId(4) kind=Some("String") → String
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/Exception.hx skip_pre_reg=true
-[CTOR_TP] Exception.new param=message ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] Exception.new param=previous ty=TypeId(271) kind=Some("Class { symbol_id: SymbolId(431), type_args: [] }") → Ptr(Void)
-[CTOR_TP] Exception.new param=native ty=TypeId(1156) kind=Some("Abstract { symbol_id: SymbolId(0), underlying: None, type_args: [] }") → I32
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/PosInfos.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/exceptions/NotImplementedException.hx skip_pre_reg=true
-[CTOR_TP] NotImplementedException.new param=message ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] NotImplementedException.new param=previous ty=TypeId(271) kind=Some("Class { symbol_id: SymbolId(431), type_args: [] }") → Ptr(Void)
-[CTOR_TP] NotImplementedException.new param=pos ty=TypeId(1159) kind=Some("TypeAlias { symbol_id: SymbolId(461), target_type: TypeId(1158), type_args: [] }") → Ptr(Void)
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/exceptions/NotImplementedException.hx skip_pre_reg=true
-[CTOR_TP] NotImplementedException.new param=message ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] NotImplementedException.new param=previous ty=TypeId(271) kind=Some("Class { symbol_id: SymbolId(431), type_args: [] }") → Ptr(Void)
-[CTOR_TP] NotImplementedException.new param=pos ty=TypeId(1159) kind=Some("TypeAlias { symbol_id: SymbolId(461), target_type: TypeId(1158), type_args: [] }") → Ptr(Void)
 match1: true
 world
 hello 
@@ -708,14 +600,6 @@ done
 
 --- test_ereg_map [PASS] ---
 Running compiler/tests/haxe/test_ereg_map.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/exceptions/NotImplementedException.hx skip_pre_reg=true
-[CTOR_TP] NotImplementedException.new param=message ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] NotImplementedException.new param=previous ty=TypeId(1154) kind=Some("Class { symbol_id: SymbolId(2166), type_args: [] }") → Ptr(Void)
-[CTOR_TP] NotImplementedException.new param=pos ty=TypeId(1156) kind=Some("TypeAlias { symbol_id: SymbolId(2173), target_type: TypeId(291), type_args: [] }") → Ptr(Void)
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/exceptions/NotImplementedException.hx skip_pre_reg=true
-[CTOR_TP] NotImplementedException.new param=message ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] NotImplementedException.new param=previous ty=TypeId(1154) kind=Some("Class { symbol_id: SymbolId(2166), type_args: [] }") → Ptr(Void)
-[CTOR_TP] NotImplementedException.new param=pos ty=TypeId(1156) kind=Some("TypeAlias { symbol_id: SymbolId(2173), target_type: TypeId(291), type_args: [] }") → Ptr(Void)
 123ABC456def
 123ABC456DEF789GHI
 1:a 2:b 3:c
@@ -724,11 +608,9 @@ done
 
 --- test_exception [PASS] ---
 Running compiler/tests/haxe/test_exception.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/NativeStackTrace.hx skip_pre_reg=true
-[CTOR_TP] MyException.new param=msg ty=TypeId(4) kind=Some("String") → String
 basic error
-null
-null
+custom error
+specific
 42
 caught dynamic
 has stack
@@ -776,30 +658,6 @@ done
 
 --- test_file_readall [PASS] ---
 Running compiler/tests/haxe/test_file_readall.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Encoding.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Eof.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Error.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/FPHelper.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/Int64.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/io/FileSeek.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/BytesBuffer.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/exceptions/NotImplementedException.hx skip_pre_reg=true
-[CTOR_TP] NotImplementedException.new param=message ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] NotImplementedException.new param=previous ty=TypeId(1163) kind=Some("Class { symbol_id: SymbolId(2229), type_args: [] }") → Ptr(Void)
-[CTOR_TP] NotImplementedException.new param=pos ty=TypeId(1165) kind=Some("TypeAlias { symbol_id: SymbolId(2236), target_type: TypeId(291), type_args: [] }") → Ptr(Void)
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Input.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Output.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/rayzor/Bytes.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/io/File.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/io/FileInput.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/io/FileOutput.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/BytesBuffer.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/exceptions/NotImplementedException.hx skip_pre_reg=true
-[CTOR_TP] NotImplementedException.new param=message ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] NotImplementedException.new param=previous ty=TypeId(1163) kind=Some("Class { symbol_id: SymbolId(2229), type_args: [] }") → Ptr(Void)
-[CTOR_TP] NotImplementedException.new param=pos ty=TypeId(1165) kind=Some("TypeAlias { symbol_id: SymbolId(2236), target_type: TypeId(291), type_args: [] }") → Ptr(Void)
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Input.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Output.hx skip_pre_reg=true
 3
 65
 66
@@ -816,10 +674,10 @@ Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
 0
 1
 2
-world
 hello
-10
+world
 20
+10
 30
 done
 
@@ -835,7 +693,6 @@ Running compiler/tests/haxe/test_forward.hx [debug] [preset: Application]...
 
 --- test_future [PASS] ---
 Running compiler/tests/haxe/test_future.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/rayzor/concurrent/Future.hx skip_pre_reg=true
 42
 30
 100
@@ -849,7 +706,6 @@ done
 
 --- test_generic_tree [PASS] ---
 Running compiler/tests/haxe/test_generic_tree.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/Reflect.hx skip_pre_reg=true
 0
 -1
 0
@@ -858,9 +714,6 @@ done
 
 --- test_generics [PASS] ---
 Running compiler/tests/haxe/test_generics.hx [debug] [preset: Application]...
-[CTOR_TP] Container.new param=v ty=TypeId(1158) kind=Some("TypeParameter { symbol_id: SymbolId(2173), constraints: [], variance: Invariant }") → I64
-[CTOR_TP] Pair.new param=a ty=TypeId(1164) kind=Some("TypeParameter { symbol_id: SymbolId(2180), constraints: [], variance: Invariant }") → I64
-[CTOR_TP] Pair.new param=b ty=TypeId(1165) kind=Some("TypeParameter { symbol_id: SymbolId(2181), constraints: [], variance: Invariant }") → I64
 42
 42
 hello
@@ -871,7 +724,6 @@ done
 
 --- test_generics_simple [PASS] ---
 Running compiler/tests/haxe/test_generics_simple.hx [debug] [preset: Application]...
-[CTOR_TP] Container.new param=v ty=TypeId(1153) kind=Some("TypeParameter { symbol_id: SymbolId(2158), constraints: [], variance: Invariant }") → I64
 42
 done
 
@@ -890,12 +742,10 @@ hello
 
 --- test_host_localhost [PASS] ---
 Running compiler/tests/haxe/test_host_localhost.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/net/Host.hx skip_pre_reg=true
 Damilares-MBP.lan
 
 --- test_host_simple [PASS] ---
 Running compiler/tests/haxe/test_host_simple.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/net/Host.hx skip_pre_reg=true
 
 --- test_interface [PASS] ---
 Running compiler/tests/haxe/test_interface.hx [debug] [preset: Application]...
@@ -904,8 +754,6 @@ square
 
 --- test_interface_cast [PASS] ---
 Running compiler/tests/haxe/test_interface_cast.hx [debug] [preset: Application]...
-[CTOR_TP] Widget.new param=n ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] Button.new param=n ty=TypeId(4) kind=Some("String") → String
 draw:box
 null
 click:submit
@@ -930,7 +778,6 @@ done
 
 --- test_interface_lifetime [PASS] ---
 Running compiler/tests/haxe/test_interface_lifetime.hx [debug] [preset: Application]...
-[CTOR_TP] C.new param=v ty=TypeId(2) kind=Some("Int") → I32
 1
 2
 3
@@ -938,7 +785,6 @@ Running compiler/tests/haxe/test_interface_lifetime.hx [debug] [preset: Applicat
 
 --- test_interface_wrapper_copy [PASS] ---
 Running compiler/tests/haxe/test_interface_wrapper_copy.hx [debug] [preset: Application]...
-[CTOR_TP] ValueBox.new param=v ty=TypeId(2) kind=Some("Int") → I32
 10
 20
 20
@@ -946,16 +792,12 @@ Running compiler/tests/haxe/test_interface_wrapper_copy.hx [debug] [preset: Appl
 
 --- test_iterator [PASS] ---
 Running compiler/tests/haxe/test_iterator.hx [debug] [preset: Application]...
-[CTOR_TP] Range.new param=s ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Range.new param=e ty=TypeId(2) kind=Some("Int") → I32
 15
 33
 done
 
 --- test_json [PASS] ---
 Running compiler/tests/haxe/test_json.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/Json.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/Reflect.hx skip_pre_reg=true
 Alice
 30
 [1,2,3]
@@ -970,10 +812,6 @@ done
 
 --- test_macro [PASS] ---
 Running compiler/tests/haxe/test_macro.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/macro/Expr.hx skip_pre_reg=true
-[CTOR_TP] Error.new param=message ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] Error.new param=pos ty=TypeId(1157) kind=Some("TypeAlias { symbol_id: SymbolId(1353), target_type: TypeId(1156), type_args: [] }") → Ptr(Void)
-[CTOR_TP] Error.new param=previous ty=TypeId(1152) kind=Some("Class { symbol_id: SymbolId(2159), type_args: [] }") → Ptr(Void)
 300
 42
 done
@@ -991,14 +829,12 @@ done
 
 --- test_manual_drop [PASS] ---
 Running compiler/tests/haxe/test_manual_drop.hx [debug] [preset: Application]...
-[CTOR_TP] Handle.new param=fd ty=TypeId(2) kind=Some("Int") → I32
 42
 Released handle 42
 done
 
 --- test_map_kv [PASS] ---
 Running compiler/tests/haxe/test_map_kv.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/ds/IntMap.hx skip_pre_reg=true
 60
 182
 300
@@ -1006,20 +842,17 @@ done
 
 --- test_map_literal [PASS] ---
 Running compiler/tests/haxe/test_map_literal.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/ds/StringMap.hx skip_pre_reg=true
 {hello => 42}
 42
 
 --- test_map_literal2 [PASS] ---
 Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/ds/IntMap.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/ds/StringMap.hx skip_pre_reg=true
-{hello => 42, world => 99}
+{world => 99, hello => 42}
 42
 99
 true
 false
-{2 => 200, 1 => 100}
+{1 => 100, 2 => 200}
 100
 200
 true
@@ -1067,9 +900,6 @@ done
 
 --- test_objectmap [PASS] ---
 Running compiler/tests/haxe/test_objectmap.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/ds/ObjectMap.hx skip_pre_reg=true
-[CTOR_TP] Point.new param=x ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Point.new param=y ty=TypeId(2) kind=Some("Int") → I32
 10
 20
 true
@@ -1086,7 +916,6 @@ none
 
 --- test_optional_chain [PASS] ---
 Running compiler/tests/haxe/test_optional_chain.hx [debug] [preset: Application]...
-[CTOR_TP] Node.new param=v ty=TypeId(2) kind=Some("Int") → I32
 42
 null
 42
@@ -1098,8 +927,6 @@ done
 
 --- test_property [PASS] ---
 Running compiler/tests/haxe/test_property.hx [debug] [preset: Application]...
-[CTOR_TP] WithGetSet.new param=v ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] WithReadOnly.new param=n ty=TypeId(4) kind=Some("String") → String
 10
 42
 hello
@@ -1107,15 +934,12 @@ done
 
 --- test_recursive_class [PASS] ---
 Running compiler/tests/haxe/test_recursive_class.hx [debug] [preset: Application]...
-[CTOR_TP] Node.new param=v ty=TypeId(2) kind=Some("Int") → I32
 1
 2
 done
 
 --- test_recursive_ctor [PASS] ---
 Running compiler/tests/haxe/test_recursive_ctor.hx [debug] [preset: Application]...
-[CTOR_TP] Node.new param=l ty=TypeId(1150) kind=Some("Class { symbol_id: SymbolId(2154), type_args: [] }") → Ptr(Void)
-[CTOR_TP] Node.new param=k ty=TypeId(2) kind=Some("Int") → I32
 1
 1
 2
@@ -1124,14 +948,12 @@ done
 
 --- test_reflect_call_method [PASS] ---
 Running compiler/tests/haxe/test_reflect_call_method.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/Reflect.hx skip_pre_reg=true
 42
 21
 true
 
 --- test_reflect_compare_methods [PASS] ---
 Running compiler/tests/haxe/test_reflect_compare_methods.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/Reflect.hx skip_pre_reg=true
 true
 false
 true
@@ -1142,7 +964,6 @@ done
 
 --- test_reflect_isfunction [PASS] ---
 Running compiler/tests/haxe/test_reflect_isfunction.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/Reflect.hx skip_pre_reg=true
 true
 TFunction
 false
@@ -1150,10 +971,6 @@ false
 
 --- test_rtti [PASS] ---
 Running compiler/tests/haxe/test_rtti.hx [debug] [preset: Application]...
-[CTOR_TP] Animal.new param=n ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] Dog.new param=n ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] Dog.new param=b ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] Cat.new param=n ty=TypeId(4) kind=Some("String") → String
 true
 true
 true
@@ -1172,10 +989,6 @@ done
 
 --- test_safe_cast [PASS] ---
 Running compiler/tests/haxe/test_safe_cast.hx [debug] [preset: Application]...
-[CTOR_TP] Animal.new param=n ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] Dog.new param=n ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] Dog.new param=b ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] Cat.new param=n ty=TypeId(4) kind=Some("String") → String
 Shepherd
 null
 Whiskers
@@ -1183,9 +996,6 @@ done
 
 --- test_safety_use_after_move [PASS] ---
 Running compiler/tests/haxe/test_safety_use_after_move.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/Resource.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/rayzor/Bytes.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/Resource.hx skip_pre_reg=true
 [33mWarning:[0m [E0382] use of moved value: `r`
     [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0mcompiler/tests/haxe/test_safety_use_after_move.hx:16:15[38;5;246m][0m
     [38;5;246m│[0m
@@ -1198,17 +1008,11 @@ Running compiler/tests/haxe/test_safety_use_after_move.hx [debug] [preset: Appli
  [38;5;240m   │[0m 
  [38;5;240m   │[0m [38;5;115mHelp[0m: Consider cloning: `var copy = r.clone();`
 [38;5;246m────╯[0m
-[CTOR_TP] Resource.new param=d ty=TypeId(2) kind=Some("Int") → I32
 42
 42
 
 --- test_send_sync [PASS] ---
 Running compiler/tests/haxe/test_send_sync.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/thread/Thread.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/rayzor/concurrent/Thread.hx skip_pre_reg=true
-[CTOR_TP] Counter.new param=v ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] SharedConfig.new param=t ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] SharedConfig.new param=n ty=TypeId(4) kind=Some("String") → String
 84
 15
 100
@@ -1217,82 +1021,19 @@ done
 
 --- test_simd_from_array [PASS] ---
 Running compiler/tests/haxe/test_simd_from_array.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/rayzor/Ptr.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/rayzor/SIMD4f.hx skip_pre_reg=true
 10
 
 --- test_socket_basic [PASS] ---
 Running compiler/tests/haxe/test_socket_basic.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/BytesBuffer.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/exceptions/NotImplementedException.hx skip_pre_reg=true
-[CTOR_TP] NotImplementedException.new param=message ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] NotImplementedException.new param=previous ty=TypeId(1164) kind=Some("Class { symbol_id: SymbolId(2232), type_args: [] }") → Ptr(Void)
-[CTOR_TP] NotImplementedException.new param=pos ty=TypeId(1166) kind=Some("TypeAlias { symbol_id: SymbolId(2239), target_type: TypeId(291), type_args: [] }") → Ptr(Void)
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Input.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Output.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/rayzor/Bytes.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/net/Host.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/net/Socket.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/net/SocketInput.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/net/SocketOutput.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/BytesBuffer.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/exceptions/NotImplementedException.hx skip_pre_reg=true
-[CTOR_TP] NotImplementedException.new param=message ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] NotImplementedException.new param=previous ty=TypeId(1164) kind=Some("Class { symbol_id: SymbolId(2232), type_args: [] }") → Ptr(Void)
-[CTOR_TP] NotImplementedException.new param=pos ty=TypeId(1166) kind=Some("TypeAlias { symbol_id: SymbolId(2239), target_type: TypeId(291), type_args: [] }") → Ptr(Void)
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Input.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Output.hx skip_pre_reg=true
 
 --- test_socket_new [PASS] ---
 Running compiler/tests/haxe/test_socket_new.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/BytesBuffer.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/exceptions/NotImplementedException.hx skip_pre_reg=true
-[CTOR_TP] NotImplementedException.new param=message ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] NotImplementedException.new param=previous ty=TypeId(1164) kind=Some("Class { symbol_id: SymbolId(2232), type_args: [] }") → Ptr(Void)
-[CTOR_TP] NotImplementedException.new param=pos ty=TypeId(1166) kind=Some("TypeAlias { symbol_id: SymbolId(2239), target_type: TypeId(291), type_args: [] }") → Ptr(Void)
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Input.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Output.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/rayzor/Bytes.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/net/Host.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/net/Socket.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/net/SocketInput.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/net/SocketOutput.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/BytesBuffer.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/exceptions/NotImplementedException.hx skip_pre_reg=true
-[CTOR_TP] NotImplementedException.new param=message ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] NotImplementedException.new param=previous ty=TypeId(1164) kind=Some("Class { symbol_id: SymbolId(2232), type_args: [] }") → Ptr(Void)
-[CTOR_TP] NotImplementedException.new param=pos ty=TypeId(1166) kind=Some("TypeAlias { symbol_id: SymbolId(2239), target_type: TypeId(291), type_args: [] }") → Ptr(Void)
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Input.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Output.hx skip_pre_reg=true
 Damilares-MBP.lan
 socket created
 socket closed
 
 --- test_ssl [PASS] ---
 Running compiler/tests/haxe/test_ssl.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/BytesBuffer.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/Date.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/exceptions/NotImplementedException.hx skip_pre_reg=true
-[CTOR_TP] NotImplementedException.new param=message ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] NotImplementedException.new param=previous ty=TypeId(1164) kind=Some("Class { symbol_id: SymbolId(2261), type_args: [] }") → Ptr(Void)
-[CTOR_TP] NotImplementedException.new param=pos ty=TypeId(1166) kind=Some("TypeAlias { symbol_id: SymbolId(2268), target_type: TypeId(291), type_args: [] }") → Ptr(Void)
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Input.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Output.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/rayzor/Bytes.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/net/Host.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/net/Socket.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/net/SocketInput.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/net/SocketOutput.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/ssl/Certificate.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/ssl/Key.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/sys/ssl/Socket.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/BytesBuffer.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/exceptions/NotImplementedException.hx skip_pre_reg=true
-[CTOR_TP] NotImplementedException.new param=message ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] NotImplementedException.new param=previous ty=TypeId(1164) kind=Some("Class { symbol_id: SymbolId(2261), type_args: [] }") → Ptr(Void)
-[CTOR_TP] NotImplementedException.new param=pos ty=TypeId(1166) kind=Some("TypeAlias { symbol_id: SymbolId(2268), target_type: TypeId(291), type_args: [] }") → Ptr(Void)
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Input.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/io/Output.hx skip_pre_reg=true
 true
 true
 hostname set
@@ -1325,18 +1066,6 @@ true
 
 --- test_stringbuf_stringtools [PASS] ---
 Running compiler/tests/haxe/test_stringbuf_stringtools.hx [debug] [preset: Application]...
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/StringBuf.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/iterators/StringIterator.hx skip_pre_reg=true
-[CTOR_TP] StringIterator.new param=s ty=TypeId(4) kind=Some("String") → String
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/iterators/StringKeyValueIterator.hx skip_pre_reg=true
-[CTOR_TP] StringKeyValueIterator.new param=s ty=TypeId(4) kind=Some("String") → String
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/StringTools.hx skip_pre_reg=true
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/iterators/StringIteratorUnicode.hx skip_pre_reg=true
-[CTOR_TP] StringIteratorUnicode.new param=s ty=TypeId(4) kind=Some("String") → String
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/iterators/StringIterator.hx skip_pre_reg=true
-[CTOR_TP] StringIterator.new param=s ty=TypeId(4) kind=Some("String") → String
-[COMPILE_EX] /Users/amaterasu/Vibranium/rayzor/compiler/haxe-std/haxe/iterators/StringKeyValueIterator.hx skip_pre_reg=true
-[CTOR_TP] StringKeyValueIterator.new param=s ty=TypeId(4) kind=Some("String") → String
 Hello World
 11
 Hello World!
@@ -1360,8 +1089,6 @@ hi...
 
 --- test_structural [PASS] ---
 Running compiler/tests/haxe/test_structural.hx [debug] [preset: Application]...
-[CTOR_TP] Point.new param=x ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Point.new param=y ty=TypeId(2) kind=Some("Int") → I32
 10
 20
 3
@@ -1383,8 +1110,6 @@ ok
 
 --- test_type_api [PASS] ---
 Running compiler/tests/haxe/test_type_api.hx [debug] [preset: Application]...
-[CTOR_TP] Animal.new param=n ty=TypeId(4) kind=Some("String") → String
-[CTOR_TP] Dog.new param=n ty=TypeId(4) kind=Some("String") → String
 Animal
 Dog
 Dog
@@ -1398,8 +1123,6 @@ ctor
 
 --- test_type_create_instance [PASS] ---
 Running compiler/tests/haxe/test_type_create_instance.hx [debug] [preset: Application]...
-[CTOR_TP] Point.new param=x ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Point.new param=y ty=TypeId(2) kind=Some("Int") → I32
 3
 4
 
@@ -1416,7 +1139,6 @@ false
 
 --- test_typed_catch [PASS] ---
 Running compiler/tests/haxe/test_typed_catch.hx [debug] [preset: Application]...
-[CTOR_TP] MyError.new param=m ty=TypeId(4) kind=Some("String") → String
 42
 hello
 99
@@ -1459,9 +1181,6 @@ done
 
 --- test_virtual_dispatch [PASS] ---
 Running compiler/tests/haxe/test_virtual_dispatch.hx [debug] [preset: Application]...
-[CTOR_TP] Base.new param=v ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] Child.new param=v ty=TypeId(2) kind=Some("Int") → I32
-[CTOR_TP] GrandChild.new param=v ty=TypeId(2) kind=Some("Int") → I32
 Base
 Child
 GrandChild
