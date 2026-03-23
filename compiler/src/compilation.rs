@@ -2364,16 +2364,16 @@ impl CompilationUnit {
                     }
 
                     // Debug: check constructor params in the actual MIR
-                    if filename.contains("Point2D") {
-                        for func in mir_arc.functions.values() {
-                            if func.name == "new" || func.name.contains("new") {
-                                let params: Vec<String> = func.signature.parameters.iter()
-                                    .map(|p| format!("{}:{:?}", p.name, p.ty))
-                                    .collect();
-                                eprintln!("[POINT2D_MIR] fn{}={} new({})", func.id.0, func.name, params.join(", "));
-                            }
-                        }
-                    }
+                    // if filename.contains("Point2D") {
+                    //     for func in mir_arc.functions.values() {
+                    //         if func.name == "new" || func.name.contains("new") {
+                    //             let params: Vec<String> = func.signature.parameters.iter()
+                    //                 .map(|p| format!("{}:{:?}", p.name, p.ty))
+                    //                 .collect();
+                    //             eprintln!("[POINT2D_MIR] fn{}={} new({})", func.id.0, func.name, params.join(", "));
+                    //         }
+                    //     }
+                    // }
                     self.renumber_and_push_import_mir((*mir_arc).clone());
                 }
                 true
@@ -3520,10 +3520,10 @@ impl CompilationUnit {
     ) -> Result<TypedFile, Vec<CompilationError>> {
         use parser::parse_haxe_file_with_diagnostics;
 
-        eprintln!("[COMPILE_EX] {} skip_pre_reg={}", filename, skip_pre_registration);
+        // eprintln!("[COMPILE_EX] {} skip_pre_reg={}", filename, skip_pre_registration);
         // Skip if already successfully compiled - return cached TypedFile
         if let Some(cached) = self.compiled_files.get(filename) {
-            eprintln!("[COMPILE_EX] {} → cached", filename);
+            // eprintln!("[COMPILE_EX] {} → cached", filename);
             return Ok(cached.clone());
         }
 
