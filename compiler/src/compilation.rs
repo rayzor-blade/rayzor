@@ -83,9 +83,10 @@ pub struct CompilationUnit {
     /// being stored as separate modules, because their function IDs would collide.
     import_mir_modules: Vec<crate::ir::IrModule>,
 
-    /// Function IDs from user package imports (not stdlib).
+    /// Function IDs from import modules that correspond to source-level declarations
+    /// (class methods, constructors, top-level functions — NOT generated MIR wrappers).
     /// These must be protected from stdlib merge name collisions.
-    user_import_func_ids: std::collections::HashSet<crate::ir::IrFunctionId>,
+    import_own_func_ids: std::collections::HashSet<crate::ir::IrFunctionId>,
 
     /// Stdlib typed files loaded on-demand (typedefs, etc. that need to be in HIR)
     loaded_stdlib_typed_files: Vec<TypedFile>,
@@ -145,6 +146,11 @@ pub struct CompilationUnit {
 
     /// MIR cross-reference maps from the last compiled file (for BLADE cache save)
     last_compiled_cached_maps: Option<BladeCachedMaps>,
+
+    /// Source-level function IDs from the last compiled file (methods + constructors).
+    /// Used by try_compile_import to track which functions in import modules are
+    /// genuine declarations vs generated MIR wrappers.
+    last_compiled_own_func_ids: Option<std::collections::HashSet<crate::ir::IrFunctionId>>,
 
     /// Cached stdlib MIR module (built once, cloned for each user file merge)
     cached_stdlib_mir: Option<crate::ir::IrModule>,
@@ -416,7 +422,7 @@ impl CompilationUnit {
             pipeline,
             mir_modules: Vec::new(),
             import_mir_modules: Vec::new(),
-            user_import_func_ids: std::collections::HashSet::new(),
+            import_own_func_ids: std::collections::HashSet::new(),
             loaded_stdlib_typed_files: Vec::new(),
             stdlib_function_map: BTreeMap::new(),
             stdlib_function_name_map: BTreeMap::new(),
@@ -433,6 +439,7 @@ impl CompilationUnit {
             loaded_hdlls: HashSet::new(),
             last_compiled_type_info: None,
             last_compiled_cached_maps: None,
+            last_compiled_own_func_ids: None,
             cached_stdlib_mir: None,
         }
     }
@@ -2196,6 +2203,14 @@ impl CompilationUnit {
         let mut in_degree: BTreeMap<String, usize> = BTreeMap::new();
         let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
+        // Build reverse map: bare class name → qualified name for same-package deps
+        let bare_to_qualified: BTreeMap<String, String> = all_files.keys()
+            .filter_map(|qn| {
+                let short = qn.rsplit('.').next()?;
+                Some((short.to_string(), qn.clone()))
+            })
+            .collect();
+
         for (name, (_, _, deps)) in &all_files {
             in_degree.entry(name.clone()).or_insert(0);
             for dep in deps {
@@ -2203,9 +2218,17 @@ impl CompilationUnit {
                 if dep == name {
                     continue;
                 }
-                if all_files.contains_key(dep) {
-                    graph.entry(dep.clone()).or_default().push(name.clone());
-                    *in_degree.entry(name.clone()).or_insert(0) += 1;
+                // Check both qualified name ("sim.Point2D") and bare name ("Point2D")
+                let resolved_dep = if all_files.contains_key(dep) {
+                    Some(dep.clone())
+                } else {
+                    bare_to_qualified.get(dep).cloned()
+                };
+                if let Some(resolved) = resolved_dep {
+                    if resolved != *name {
+                        graph.entry(resolved.clone()).or_default().push(name.clone());
+                        *in_degree.entry(name.clone()).or_insert(0) += 1;
+                    }
                 }
             }
         }
@@ -2232,8 +2255,6 @@ impl CompilationUnit {
             }
         }
 
-        debug!("[IMPORT_LOAD] compile_order: {:?}", compile_order);
-
         // Handle cycle: if compile_order doesn't include all files, some are stuck in a cycle.
         // Append remaining files in any order (they'll still compile, just without guaranteed dep order).
         if compile_order.len() < all_files.len() {
@@ -2245,10 +2266,45 @@ impl CompilationUnit {
                 );
                 let in_order: std::collections::HashSet<_> =
                     compile_order.iter().cloned().collect();
+                // Mini topological sort for stuck files: repeatedly emit files
+                // whose deps (among remaining stuck files) are all already emitted.
+                let mut stuck: BTreeMap<String, Vec<String>> = BTreeMap::new();
                 for name in all_files.keys() {
-                    if !in_order.contains(name) {
-                        compile_order.push(name.clone());
+                    if in_order.contains(name) { continue; }
+                    let deps_in_stuck: Vec<String> = all_files.get(name)
+                        .map(|(_, _, deps)| deps.iter().filter_map(|d| {
+                            let resolved = if all_files.contains_key(d) {
+                                Some(d.clone())
+                            } else {
+                                bare_to_qualified.get(d).cloned()
+                            };
+                            resolved.filter(|r| r != name && !in_order.contains(r) && all_files.contains_key(r))
+                        }).collect())
+                        .unwrap_or_default();
+                    stuck.insert(name.clone(), deps_in_stuck);
+                }
+                let mut emitted: HashSet<String> = HashSet::new();
+                loop {
+                    let ready: Vec<String> = stuck.iter()
+                        .filter(|(_, deps)| deps.iter().all(|d| emitted.contains(d)))
+                        .map(|(name, _)| name.clone())
+                        .collect();
+                    if !ready.is_empty() {
+                        for name in &ready {
+                            compile_order.push(name.clone());
+                            emitted.insert(name.clone());
+                            stuck.remove(name);
+                        }
+                        continue; // Check for more ready files
                     }
+                    // No ready files — break one cycle by emitting the first stuck file
+                    if let Some(name) = stuck.keys().next().cloned() {
+                        compile_order.push(name.clone());
+                        emitted.insert(name.clone());
+                        stuck.remove(&name);
+                        continue; // Re-check after cycle break
+                    }
+                    break; // All emitted
                 }
             }
         }
@@ -2348,7 +2404,10 @@ impl CompilationUnit {
         // Only skip pre-registration for stdlib files (types registered via bsym).
         // User package files need full pre-registration for correct type resolution.
         let is_stdlib = file_path.to_string_lossy().contains("haxe-std");
-        match self.compile_file_with_shared_state_ex(&filename, source, is_stdlib) {
+        // Import files skip the stdlib merge — it happens once in the main file's compilation.
+        // This prevents stdlib functions from overwriting user package functions by bare name.
+        let skip_stdlib_merge = true;
+        match self.compile_file_with_shared_state_ex(&filename, source, is_stdlib, skip_stdlib_merge) {
             Ok(typed_file) => {
                 self.loaded_stdlib_typed_files.push(typed_file);
 
@@ -2368,25 +2427,16 @@ impl CompilationUnit {
                         );
                     }
 
-                    // Debug: check constructor params in the actual MIR
-                    // if filename.contains("Point2D") {
-                    //     for func in mir_arc.functions.values() {
-                    //         if func.name == "new" || func.name.contains("new") {
-                    //             let params: Vec<String> = func.signature.parameters.iter()
-                    //                 .map(|p| format!("{}:{:?}", p.name, p.ty))
-                    //                 .collect();
-                    //             eprintln!("[POINT2D_MIR] fn{}={} new({})", func.id.0, func.name, params.join(", "));
-                    //         }
-                    //     }
-                    // }
-                    // Track user package function IDs for stdlib merge protection
-                    let is_user_package = !filename.contains("haxe-std");
-                    if is_user_package {
-                        let import_base: u32 = 100_000 + (self.import_mir_modules.len() as u32 * 10_000);
-                        for old_id in mir_arc.functions.keys() {
-                            self.user_import_func_ids.insert(crate::ir::IrFunctionId(old_id.0 + import_base));
-                        }
+                    // Track which import functions are source-level declarations
+                    // (methods, constructors) vs generated MIR wrappers.
+                    // The renumbering will shift IDs, so compute the mapping.
+                    let own_ids = self.last_compiled_own_func_ids.take().unwrap_or_default();
+                    let import_base: u32 = 100_000 + (self.import_mir_modules.len() as u32 * 10_000);
+                    for old_id in &own_ids {
+                        let new_id = crate::ir::IrFunctionId(old_id.0 + import_base);
+                        self.import_own_func_ids.insert(new_id);
                     }
+
                     self.renumber_and_push_import_mir((*mir_arc).clone());
                 }
                 true
@@ -3530,13 +3580,12 @@ impl CompilationUnit {
         filename: &str,
         source: &str,
         skip_pre_registration: bool,
+        skip_stdlib_merge: bool,
     ) -> Result<TypedFile, Vec<CompilationError>> {
         use parser::parse_haxe_file_with_diagnostics;
 
-        // eprintln!("[COMPILE_EX] {} skip_pre_reg={}", filename, skip_pre_registration);
         // Skip if already successfully compiled - return cached TypedFile
         if let Some(cached) = self.compiled_files.get(filename) {
-            // eprintln!("[COMPILE_EX] {} → cached", filename);
             return Ok(cached.clone());
         }
 
@@ -3556,6 +3605,7 @@ impl CompilationUnit {
             source,
             &parse_result.file,
             skip_pre_registration,
+            skip_stdlib_merge,
         )
     }
 
@@ -3565,6 +3615,7 @@ impl CompilationUnit {
         source: &str,
         ast_file: &parser::HaxeFile,
         skip_pre_registration: bool,
+        skip_stdlib_merge: bool,
     ) -> Result<TypedFile, Vec<CompilationError>> {
         use crate::tast::ast_lowering::AstLowering;
 
@@ -3780,11 +3831,6 @@ impl CompilationUnit {
         };
 
         // Name-based external function map for cross-file lookups where SymbolIds differ
-        // Debug: check what's in the name map for toString
-        for (name, fid) in &self.stdlib_function_name_map {
-            if name.contains("toString") || name.contains("Point2D") {
-            }
-        }
         let external_functions_by_name = self.stdlib_function_name_map.clone();
 
         let stdlib_mapping = self.compiler_plugin_registry.build_combined_mapping();
@@ -3857,6 +3903,12 @@ impl CompilationUnit {
             self.print_mir_diagnostics(&mir_result.diagnostics);
         }
 
+        // Capture user-defined function IDs before module is consumed
+        let mir_result_func_ids: std::collections::HashSet<crate::ir::IrFunctionId> =
+            mir_result.function_map.values().copied().collect();
+        let mir_result_ctor_ids: std::collections::HashSet<crate::ir::IrFunctionId> =
+            mir_result.constructor_name_map.values().copied().collect();
+
         let mut mir_module = mir_result.module;
 
         // (MIR dump moved to after stdlib merge)
@@ -3911,17 +3963,28 @@ impl CompilationUnit {
             self.import_class_method_symbols.insert(key, sym);
         }
 
-        // For stdlib files, also collect name-based mappings for cross-file lookups
+        // Collect name-based mappings for cross-file lookups.
         // Use qualified names to avoid collisions (e.g., "current" matching
-        // both ArrayIterator.current field and Thread.current method)
+        // both ArrayIterator.current field and Thread.current method).
+        // For stdlib files: all functions with non-empty bodies.
+        // For user packages: only functions with qualified names (to avoid
+        // polluting the namespace with bare names like "new").
         if is_stdlib_file {
             for (func_id, func) in &mir_module.functions {
-                // Only add non-empty CFG functions (skip forward refs/stubs)
                 if !func.cfg.blocks.is_empty() {
-                    // Prefer qualified_name (e.g., "ArrayIterator.hasNext") over bare name
                     let map_name = func.qualified_name.as_deref().unwrap_or(&func.name);
                     self.stdlib_function_name_map
                         .insert(map_name.to_string(), *func_id);
+                }
+            }
+        } else {
+            // User packages: only add functions with qualified names
+            for (func_id, func) in &mir_module.functions {
+                if !func.cfg.blocks.is_empty() {
+                    if let Some(qn) = func.qualified_name.as_deref() {
+                        self.stdlib_function_name_map
+                            .insert(qn.to_string(), *func_id);
+                    }
                 }
             }
         }
@@ -3943,10 +4006,20 @@ impl CompilationUnit {
 
         // NOTE: extern-only files are handled above (before MIR generation).
 
-        // For stdlib/import files, skip stdlib MIR merge and import module merge.
-        // Only the final user file should merge stdlib + imports to avoid duplicate
-        // stdlib copies and function ID conflicts during renumbering.
-        if !is_stdlib_file {
+        // Capture this file's user-defined function IDs (from function_map + constructor_map).
+        // These are source-level declarations, NOT generated MIR wrappers.
+        let own_func_ids: std::collections::HashSet<crate::ir::IrFunctionId> =
+            mir_result_func_ids.union(&mir_result_ctor_ids).copied().collect();
+
+        // Store for try_compile_import to pick up and track after renumbering
+        self.last_compiled_own_func_ids = Some(own_func_ids.clone());
+
+        // The stdlib merge (imports + stdlib MIR wrappers) should only happen for the
+        // final user file, not for import files. Import files produce clean MIR with only
+        // their own functions. When the main file is compiled, all imports are merged in
+        // first, then a single stdlib merge resolves forward refs without corrupting
+        // user package functions.
+        if !is_stdlib_file && !skip_stdlib_merge {
             // Merge stdlib MIR (extern functions for Thread, Channel, Mutex, Arc, etc.)
             // This ensures extern runtime functions are available.
             // Uses build_stdlib_with_plugins to include HDLL extern declarations from loaded plugins.
@@ -3960,25 +4033,31 @@ impl CompilationUnit {
                 mir
             };
 
-            // Merge on-demand imported MIR modules (e.g., BalancedTree.hx) into the
-            // user module. These were already renumbered to high IDs (100000+) during
-            // load_imports_efficiently, so they won't collide with either user or stdlib IDs.
-            // The user module already references these high IDs via external_function_map.
+            // Merge on-demand imported MIR modules (e.g., BalancedTree.hx, Point2D.hx)
+            // into the user module. These were already renumbered to high IDs (100000+)
+            // during load_imports_efficiently, so they won't collide with user or stdlib IDs.
+            // Import modules now skip the stdlib merge, so they contain both:
+            // (a) source-level declarations (tracked in import_own_func_ids) — protect these
+            // (b) generated MIR wrappers for stdlib calls — let stdlib merge replace these
+            let mut merged_import_func_ids: std::collections::HashSet<IrFunctionId> =
+                own_func_ids.clone();
             for import_module in self.import_mir_modules.drain(..) {
                 // Merge import type definitions so runtime RTTI registration includes
                 // imported classes/enums (needed for uncaught exception formatting and
-                // hierarchy-aware typed catches). TypeDef IDs are module-local map keys,
-                // so re-key them on insert to avoid collisions.
+                // hierarchy-aware typed catches).
                 for (_old_type_def_id, mut typedef) in import_module.types {
                     let new_type_def_id = mir_module.alloc_typedef_id();
                     typedef.id = new_type_def_id;
                     mir_module.types.insert(new_type_def_id, typedef);
                 }
                 for (func_id, func) in import_module.functions {
+                    // Only protect source-level declarations (methods, constructors).
+                    // MIR wrappers (not in import_own_func_ids) can be replaced by stdlib.
+                    if self.import_own_func_ids.contains(&func_id) {
+                        merged_import_func_ids.insert(func_id);
+                    }
                     mir_module.functions.insert(func_id, func);
                 }
-                // Also merge extern_functions so import modules' extern declarations
-                // (e.g., haxe_string_length) are available for codegen linking.
                 for (func_id, extern_func) in import_module.extern_functions {
                     mir_module.extern_functions.insert(func_id, extern_func);
                 }
@@ -4099,15 +4178,13 @@ impl CompilationUnit {
             }
 
             // Build a map of old ID -> new ID for all replacements
-            // This must be done BEFORE we start modifying the module
             let mut id_replacements: HashMap<IrFunctionId, IrFunctionId> = HashMap::new();
 
             for (func_id, func) in &renumbered_functions {
                 if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
                     for &existing_id in existing_ids {
-                        // Protect user package import functions from stdlib replacement.
-                        // Stdlib imports (ArrayIterator, etc.) CAN be replaced.
-                        if !self.user_import_func_ids.contains(&existing_id) {
+                        // Protect source-level import functions from stdlib replacement.
+                        if !merged_import_func_ids.contains(&existing_id) {
                             id_replacements.insert(existing_id, *func_id);
                         }
                     }
@@ -4120,7 +4197,7 @@ impl CompilationUnit {
                 // Remove stubs, but protect user package import functions
                 if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
                     for &existing_id in existing_ids {
-                        if !self.user_import_func_ids.contains(&existing_id) {
+                        if !merged_import_func_ids.contains(&existing_id) {
                             mir_module.functions.remove(&existing_id);
                         }
                     }
@@ -4252,14 +4329,14 @@ impl CompilationUnit {
         Ok(typed_file)
     }
 
-    /// Compile a single file using shared state (backward-compatible wrapper)
-
+    /// Compile a single file using shared state (backward-compatible wrapper).
+    /// This is used for the main/final user file — stdlib merge runs.
     fn compile_file_with_shared_state(
         &mut self,
         filename: &str,
         source: &str,
     ) -> Result<TypedFile, Vec<CompilationError>> {
-        self.compile_file_with_shared_state_ex(filename, source, false)
+        self.compile_file_with_shared_state_ex(filename, source, false, false)
     }
 
     /// Compile using an already-parsed AST (avoids redundant re-parsing).
@@ -4275,7 +4352,7 @@ impl CompilationUnit {
             return Ok(cached.clone());
         }
 
-        self.compile_ast_with_shared_state(&filename, &source, ast_file, false)
+        self.compile_ast_with_shared_state(&filename, &source, ast_file, false, false)
     }
 
     /// Lower all files (stdlib + user) to TAST with full pipeline analysis

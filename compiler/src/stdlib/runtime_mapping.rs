@@ -603,6 +603,13 @@ impl StdlibMapping {
             .any(|(sig, call)| self.class_matches(class_name, &sig.class) && call.is_mir_wrapper)
     }
 
+    /// Check if any method of the given class is registered in the stdlib mapping
+    pub fn class_has_any_method(&self, class_name: &str) -> bool {
+        self.mappings
+            .keys()
+            .any(|sig| self.class_matches(class_name, &sig.class))
+    }
+
     /// Register a stdlib method -> runtime function mapping (internal)
     fn register(&mut self, sig: MethodSignature, call: RuntimeFunctionCall) {
         self.mappings.insert(sig, call);
