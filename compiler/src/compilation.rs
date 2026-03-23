@@ -2289,10 +2289,10 @@ impl CompilationUnit {
     ) -> bool {
         let filename = file_path.to_string_lossy().to_string();
 
-        eprintln!("[TRY_COMPILE] {} file={}", name, filename);
+        // eprintln!("[TRY_COMPILE] {} file={}", name, filename);
         // Skip if already compiled
         if self.compiled_files.contains_key(&filename) {
-            eprintln!("[TRY_COMPILE] {} → skip (already compiled)", name);
+            // eprintln!("[TRY_COMPILE] {} → skip (already compiled)", name);
             return true;
         }
 
@@ -2318,10 +2318,10 @@ impl CompilationUnit {
                 .and_then(|s| s.to_str())
                 .unwrap_or("");
             if EXTERN_ONLY_STDLIB.contains(&base) {
-                eprintln!("[TRY_COMPILE] {} → extern-only skip", name);
+                // eprintln!("[TRY_COMPILE] {} → extern-only skip", name);
                 return true;
             }
-            eprintln!("[TRY_COMPILE] {} → is_loaded but not extern, continuing", name);
+            // eprintln!("[TRY_COMPILE] {} → is_loaded but not extern, continuing", name);
         }
 
         // Mark as loaded
@@ -4091,11 +4091,14 @@ impl CompilationUnit {
                         // real bodies. These are from user packages (sim.Point2D etc.)
                         // and should not be overwritten by stdlib functions with the
                         // same bare name (e.g., "new").
-                        let is_import_with_body = existing_id.0 >= 100_000
+                        // Protect user package functions from stdlib replacement.
+                        // Stdlib imports (haxe.*) should still be replaceable.
+                        let is_user_pkg = existing_id.0 >= 100_000
                             && mir_module.functions.get(&existing_id)
-                                .map(|f| !f.cfg.blocks.is_empty())
+                                .and_then(|f| if f.cfg.blocks.is_empty() { None } else { f.qualified_name.as_deref() })
+                                .map(|qn| qn.contains('.') && !qn.starts_with("haxe."))
                                 .unwrap_or(false);
-                        if !is_import_with_body {
+                        if !is_user_pkg {
                             id_replacements.insert(existing_id, *func_id);
                         }
                     }
@@ -4108,11 +4111,14 @@ impl CompilationUnit {
                 // BUT protect user import functions (ID >= 100000) with real bodies
                 if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
                     for &existing_id in existing_ids {
-                        let is_import_with_body = existing_id.0 >= 100_000
+                        // Protect user package functions from stdlib replacement.
+                        // Stdlib imports (haxe.*) should still be replaceable.
+                        let is_user_pkg = existing_id.0 >= 100_000
                             && mir_module.functions.get(&existing_id)
-                                .map(|f| !f.cfg.blocks.is_empty())
+                                .and_then(|f| if f.cfg.blocks.is_empty() { None } else { f.qualified_name.as_deref() })
+                                .map(|qn| qn.contains('.') && !qn.starts_with("haxe."))
                                 .unwrap_or(false);
-                        if !is_import_with_body {
+                        if !is_user_pkg {
                             mir_module.functions.remove(&existing_id);
                         }
                     }
@@ -4196,43 +4202,43 @@ impl CompilationUnit {
         // Run monomorphization pass to specialize generic functions
         let mut monomorphizer = Monomorphizer::new();
         monomorphizer.monomorphize_module(&mut mir_module);
-        let mono_stats = monomorphizer.stats();
-        if mono_stats.generic_functions_found > 0 || mono_stats.instantiations_created > 0 {
-            debug!("DEBUG: Monomorphization stats: {} generic functions, {} instantiations, {} call sites rewritten",
-                      mono_stats.generic_functions_found,
-                      mono_stats.instantiations_created,
-                      mono_stats.call_sites_rewritten);
-        }
+        // let mono_stats = monomorphizer.stats();
+        // if mono_stats.generic_functions_found > 0 || mono_stats.instantiations_created > 0 {
+        //     debug!("DEBUG: Monomorphization stats: {} generic functions, {} instantiations, {} call sites rewritten",
+        //               mono_stats.generic_functions_found,
+        //               mono_stats.instantiations_created,
+        //               mono_stats.call_sites_rewritten);
+        // }
 
-        // Debug: dump alloc sizes
-        for (name, size) in &self.import_class_alloc_sizes_by_name {
-            if name.contains("Point") || name.contains("Particle") || name.contains("Simulation") {
-                eprintln!("[ALLOC_SIZE] {} → {} bytes", name, size);
-            }
-        }
-        // Debug: dump constructor name map
-        for (name, fid) in &self.import_constructor_name_map {
-            eprintln!("[CTOR_MAP] {} → fn{}", name, fid.0);
-        }
-        // Debug: dump constructor signatures in final merged module
-        for (fid, func) in &mir_module.functions {
-            if func.name == "new" && !func.cfg.blocks.is_empty() {
-                let params: Vec<String> = func.signature.parameters.iter()
-                    .map(|p| format!("{}:{:?}", p.name, p.ty)).collect();
-                let qn = func.qualified_name.as_deref().unwrap_or("?");
-                let blocks = func.cfg.blocks.len();
-                let insts: usize = func.cfg.blocks.values().map(|b| b.instructions.len()).sum();
-                eprintln!("[FINAL_MIR] fn{}={} qn={} blocks={} insts={} new({})", fid.0, func.name, qn, blocks, insts, params.join(", "));
-                // Dump instructions for Point2D-sized constructors
-                if params.len() == 3 && params[1].contains("F64") {
-                    for block in func.cfg.blocks.values() {
-                        for inst in &block.instructions {
-                            eprintln!("[FINAL_MIR]   {:?}", inst);
-                        }
-                    }
-                }
-            }
-        }
+        // // Debug: dump alloc sizes
+        // for (name, size) in &self.import_class_alloc_sizes_by_name {
+        //     if name.contains("Point") || name.contains("Particle") || name.contains("Simulation") {
+        //         eprintln!("[ALLOC_SIZE] {} → {} bytes", name, size);
+        //     }
+        // }
+        // // Debug: dump constructor name map
+        // for (name, fid) in &self.import_constructor_name_map {
+        //     eprintln!("[CTOR_MAP] {} → fn{}", name, fid.0);
+        // }
+        // // Debug: dump constructor signatures in final merged module
+        // for (fid, func) in &mir_module.functions {
+        //     if func.name == "new" && !func.cfg.blocks.is_empty() {
+        //         let params: Vec<String> = func.signature.parameters.iter()
+        //             .map(|p| format!("{}:{:?}", p.name, p.ty)).collect();
+        //         let qn = func.qualified_name.as_deref().unwrap_or("?");
+        //         let blocks = func.cfg.blocks.len();
+        //         let insts: usize = func.cfg.blocks.values().map(|b| b.instructions.len()).sum();
+        //         // eprintln!("[FINAL_MIR] fn{}={} qn={} blocks={} insts={} new({})", fid.0, func.name, qn, blocks, insts, params.join(", "));
+        //         // Dump instructions for Point2D-sized constructors
+        //         // if params.len() == 3 && params[1].contains("F64") {
+        //         //     for block in func.cfg.blocks.values() {
+        //         //         for inst in &block.instructions {
+        //         //             eprintln!("[FINAL_MIR]   {:?}", inst);
+        //         //         }
+        //         //     }
+        //         // }
+        //     }
+        // }
 
         // Store the MIR module
         self.mir_modules.push(std::sync::Arc::new(mir_module));
