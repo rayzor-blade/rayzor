@@ -11061,14 +11061,36 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
-                    // EARLY RESOLUTION: For typed instance method calls, check if the
-                    // method can be resolved to a known import function BEFORE the extern
-                    // class method dispatch. This prevents user methods like Point2D.add
-                    // from being incorrectly matched to stdlib methods (sys_deque_add).
+                    // EARLY RESOLUTION: For typed instance method calls on USER classes,
+                    // resolve to the import function BEFORE the extern class method dispatch.
+                    // This prevents user methods like Point2D.add from being incorrectly
+                    // matched to stdlib methods (sys_deque_add).
+                    // Skip for classes that have runtime mappings (e.g., EReg) — those
+                    // must go through get_stdlib_runtime_info for proper dispatch.
                     if *is_method && !args.is_empty() {
                         let method_name_i = self.symbol_table.get_symbol(*symbol).map(|s| s.name);
+                        // Check if receiver class has runtime mappings (skip early resolution if so)
+                        let receiver_has_runtime_mapping = {
+                            let receiver_type = self.resolve_through_aliases(args[0].ty);
+                            let type_table = self.type_table;
+                            type_table.get(receiver_type)
+                                .and_then(|ti| {
+                                    if let crate::tast::core::TypeKind::Class { symbol_id, .. } = &ti.kind {
+                                        self.symbol_table.get_symbol(*symbol_id)
+                                            .and_then(|sym| self.string_interner.get(sym.name))
+                                            .map(|name| self.stdlib_mapping.class_has_any_method(name))
+                                    } else {
+                                        None
+                                    }
+                                })
+                                .unwrap_or(false)
+                        };
                         if let Some(mn) = method_name_i {
-                            let resolved = self.resolve_method_function_id(args[0].ty, mn);
+                            let resolved = if receiver_has_runtime_mapping {
+                                None // Let runtime mapping handle it
+                            } else {
+                                self.resolve_method_function_id(args[0].ty, mn)
+                            };
                             if let Some(func_id) = resolved {
                                 if func_id.0 >= 100_000 {
                                     // Resolved to an import function — use it directly
@@ -14929,6 +14951,7 @@ impl<'a> HirToMirContext<'a> {
                     let method_name_interned =
                         self.symbol_table.get_symbol(*symbol).map(|s| s.name);
                     let mut func_id_opt = self.get_function_id(symbol);
+
                     let has_synthetic_static_receiver =
                         *is_method && self.effective_static_call_args(args).len() != args.len();
 
