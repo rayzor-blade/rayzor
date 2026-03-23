@@ -83,6 +83,10 @@ pub struct CompilationUnit {
     /// being stored as separate modules, because their function IDs would collide.
     import_mir_modules: Vec<crate::ir::IrModule>,
 
+    /// Function IDs from user package imports (not stdlib).
+    /// These must be protected from stdlib merge name collisions.
+    user_import_func_ids: std::collections::HashSet<crate::ir::IrFunctionId>,
+
     /// Stdlib typed files loaded on-demand (typedefs, etc. that need to be in HIR)
     loaded_stdlib_typed_files: Vec<TypedFile>,
 
@@ -412,6 +416,7 @@ impl CompilationUnit {
             pipeline,
             mir_modules: Vec::new(),
             import_mir_modules: Vec::new(),
+            user_import_func_ids: std::collections::HashSet::new(),
             loaded_stdlib_typed_files: Vec::new(),
             stdlib_function_map: BTreeMap::new(),
             stdlib_function_name_map: BTreeMap::new(),
@@ -2374,6 +2379,14 @@ impl CompilationUnit {
                     //         }
                     //     }
                     // }
+                    // Track user package function IDs for stdlib merge protection
+                    let is_user_package = !filename.contains("haxe-std");
+                    if is_user_package {
+                        let import_base: u32 = 100_000 + (self.import_mir_modules.len() as u32 * 10_000);
+                        for old_id in mir_arc.functions.keys() {
+                            self.user_import_func_ids.insert(crate::ir::IrFunctionId(old_id.0 + import_base));
+                        }
+                    }
                     self.renumber_and_push_import_mir((*mir_arc).clone());
                 }
                 true
@@ -4092,18 +4105,9 @@ impl CompilationUnit {
             for (func_id, func) in &renumbered_functions {
                 if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
                     for &existing_id in existing_ids {
-                        // Don't replace user import functions (ID >= 100000) that have
-                        // real bodies. These are from user packages (sim.Point2D etc.)
-                        // and should not be overwritten by stdlib functions with the
-                        // same bare name (e.g., "new").
-                        // Protect user package functions from stdlib replacement.
-                        // Stdlib imports (haxe.*) should still be replaceable.
-                        let is_user_pkg = existing_id.0 >= 100_000
-                            && mir_module.functions.get(&existing_id)
-                                .and_then(|f| if f.cfg.blocks.is_empty() { None } else { f.qualified_name.as_deref() })
-                                .map(|qn| qn.contains('.') && !qn.starts_with("haxe."))
-                                .unwrap_or(false);
-                        if !is_user_pkg {
+                        // Protect user package import functions from stdlib replacement.
+                        // Stdlib imports (ArrayIterator, etc.) CAN be replaced.
+                        if !self.user_import_func_ids.contains(&existing_id) {
                             id_replacements.insert(existing_id, *func_id);
                         }
                     }
@@ -4113,17 +4117,10 @@ impl CompilationUnit {
             // Now merge the stdlib functions
             for (func_id, func) in renumbered_functions {
                 // If this function replaces existing ones, remove old copies
-                // BUT protect user import functions (ID >= 100000) with real bodies
+                // Remove stubs, but protect user package import functions
                 if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
                     for &existing_id in existing_ids {
-                        // Protect user package functions from stdlib replacement.
-                        // Stdlib imports (haxe.*) should still be replaceable.
-                        let is_user_pkg = existing_id.0 >= 100_000
-                            && mir_module.functions.get(&existing_id)
-                                .and_then(|f| if f.cfg.blocks.is_empty() { None } else { f.qualified_name.as_deref() })
-                                .map(|qn| qn.contains('.') && !qn.starts_with("haxe."))
-                                .unwrap_or(false);
-                        if !is_user_pkg {
+                        if !self.user_import_func_ids.contains(&existing_id) {
                             mir_module.functions.remove(&existing_id);
                         }
                     }
