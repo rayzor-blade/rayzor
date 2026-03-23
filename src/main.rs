@@ -1006,8 +1006,8 @@ fn run_file(
     let mut rpkg_source_dirs: Vec<PathBuf> = Vec::new();
     let mut rpkg_temp_dirs: Vec<PathBuf> = Vec::new();
     // Manifest class paths go into source dirs but NOT temp dirs (they're real, not cleanup targets)
-    eprintln!("[DEBUG] manifest_project={}", manifest_project.is_some());
-    eprintln!("[DEBUG] extra_source_dirs={:?}", extra_source_dirs_from_manifest);
+    // eprintln!("[DEBUG] manifest_project={}", manifest_project.is_some());
+    // eprintln!("[DEBUG] extra_source_dirs={:?}", extra_source_dirs_from_manifest);
     let manifest_dirs = extra_source_dirs_from_manifest.clone();
     rpkg_source_dirs.extend(extra_source_dirs_from_manifest);
     for rpkg_path in &rpkg_files {

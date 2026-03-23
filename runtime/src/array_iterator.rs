@@ -56,13 +56,13 @@ fn ensure_kv_shape() {
 /// Create a new ArrayIterator from an array pointer.
 #[no_mangle]
 pub extern "C" fn haxe_array_iterator_new(arr: *mut u8) -> *mut u8 {
-    eprintln!("[DEBUG] haxe_array_iterator_new called, arr={:?}", arr);
+    // eprintln!("[DEBUG] haxe_array_iterator_new called, arr={:?}", arr);
     let iter = Box::new(HaxeArrayIterator {
         array: arr as *mut HaxeArray,
         current: 0,
     });
     let ptr = Box::into_raw(iter) as *mut u8;
-    eprintln!("[DEBUG] haxe_array_iterator_new returning {:?}", ptr);
+    // eprintln!("[DEBUG] haxe_array_iterator_new returning {:?}", ptr);
     ptr
 }
 
@@ -70,7 +70,7 @@ pub extern "C" fn haxe_array_iterator_new(arr: *mut u8) -> *mut u8 {
 /// Returns 1 if more elements, 0 otherwise.
 #[no_mangle]
 pub extern "C" fn haxe_array_iterator_has_next(iter: *mut u8) -> i32 {
-    eprintln!("[DEBUG] haxe_array_iterator_has_next called, iter={:?}", iter);
+    // eprintln!("[DEBUG] haxe_array_iterator_has_next called, iter={:?}", iter);
     if iter.is_null() {
         return 0;
     }
@@ -80,7 +80,7 @@ pub extern "C" fn haxe_array_iterator_has_next(iter: *mut u8) -> i32 {
             return 0;
         }
         let result = if iter.current < (*iter.array).len { 1 } else { 0 };
-        eprintln!("[DEBUG] has_next returning {}", result);
+        // eprintln!("[DEBUG] has_next returning {}", result);
         result
     }
 }
@@ -89,23 +89,23 @@ pub extern "C" fn haxe_array_iterator_has_next(iter: *mut u8) -> i32 {
 /// Advances the iterator position.
 #[no_mangle]
 pub extern "C" fn haxe_array_iterator_next(iter: *mut u8) -> i64 {
-    eprintln!("[DEBUG] haxe_array_iterator_next called, iter={:?}", iter);
+    // eprintln!("[DEBUG] haxe_array_iterator_next called, iter={:?}", iter);
     if iter.is_null() {
-        eprintln!("[DEBUG] iter is null, returning 0");
+        // eprintln!("[DEBUG] iter is null, returning 0");
         return 0;
     }
     unsafe {
         let iter = &mut *(iter as *mut HaxeArrayIterator);
-        eprintln!("[DEBUG] array={:?}, current={}, array.len={}", iter.array, iter.current, if iter.array.is_null() { 0 } else { (*iter.array).len });
+        // eprintln!("[DEBUG] array={:?}, current={}, array.len={}", iter.array, iter.current, if iter.array.is_null() { 0 } else { (*iter.array).len });
         if iter.array.is_null() || iter.current >= (*iter.array).len {
             return 0;
         }
         let arr = &*iter.array;
-        eprintln!("[DEBUG] elem_size={}, ptr={:?}", arr.elem_size, arr.ptr);
+        // eprintln!("[DEBUG] elem_size={}, ptr={:?}", arr.elem_size, arr.ptr);
         let elem_ptr = arr.ptr.add(iter.current * arr.elem_size);
         let value = *(elem_ptr as *const i64);
         iter.current += 1;
-        eprintln!("[DEBUG] returning value={}", value);
+        // eprintln!("[DEBUG] returning value={}", value);
         value
     }
 }
