@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Mon Mar 23 09:19:43 GMT 2026
+  Mon Mar 23 15:53:12 GMT 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -577,33 +577,28 @@ Running compiler/tests/haxe/test_enum_switch.hx [debug] [preset: Application]...
 none
 other
 
---- test_ereg [PASS] ---
+--- test_ereg [CRASH(139/SIGSEGV)] ---
 Running compiler/tests/haxe/test_ereg.hx [debug] [preset: Application]...
-match1: true
-world
-hello 
-
-match2: true
-user@host
-user
-host
-aXbXcX
-aXb2c3
-match6: true
-HELLO
+null
+null
+null
+match2: false
+null
+null
+null
+null
+null
+null
 a\.b\+c
 match7: false
-match8: true
-test
-2
-done
+null
 
 --- test_ereg_map [PASS] ---
 Running compiler/tests/haxe/test_ereg_map.hx [debug] [preset: Application]...
-123ABC456def
-123ABC456DEF789GHI
-1:a 2:b 3:c
-hello world
+null
+null
+null
+null
 done
 
 --- test_exception [PASS] ---
@@ -674,11 +669,11 @@ Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
 0
 1
 2
-world
 hello
+world
 10
-30
 20
+30
 done
 
 --- test_forward [PASS] ---
@@ -852,7 +847,7 @@ Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]..
 99
 true
 false
-{1 => 100, 2 => 200}
+{2 => 200, 1 => 100}
 100
 200
 true
@@ -1202,7 +1197,7 @@ Done
 
 =========================================
   TOTAL:        118
-  PASSED:       118
+  PASSED:       117
   FAILED:       0
-  CRASHED:      0
+  CRASHED:      1
 =========================================

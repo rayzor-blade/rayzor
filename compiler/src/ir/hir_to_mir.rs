@@ -1348,6 +1348,32 @@ impl<'a> HirToMirContext<'a> {
         receiver_type: TypeId,
         method_name: InternedString,
     ) -> Option<IrFunctionId> {
+        // Handle Placeholder types (unresolved cross-module types like "Point2D").
+        // Construct "ClassName.methodName" and search external_function_name_map directly.
+        {
+            let type_table = self.type_table;
+            if let Some(ti) = type_table.get(receiver_type) {
+                if let crate::tast::core::TypeKind::Placeholder { name } = &ti.kind {
+                    if let Some(class_name) = self.string_interner.get(*name) {
+                        if let Some(method_name_str) = self.string_interner.get(method_name) {
+                            // Try direct match first (e.g., "Point2D.add")
+                            let qn = format!("{}.{}", class_name, method_name_str);
+                            if let Some(&func_id) = self.external_function_name_map.get(&qn) {
+                                return Some(func_id);
+                            }
+                            // Try suffix match for package-qualified names (e.g., "sim.Point2D.add")
+                            let suffix = format!(".{}", qn);
+                            for (map_name, &func_id) in &self.external_function_name_map {
+                                if map_name.ends_with(&suffix) {
+                                    return Some(func_id);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         let class_symbol = self.resolve_receiver_class_symbol(receiver_type)?;
         let method_symbol_opt = self.resolve_class_method_symbol(class_symbol, method_name);
         if let Some(method_symbol) = method_symbol_opt {
@@ -1461,6 +1487,24 @@ impl<'a> HirToMirContext<'a> {
 
         if name_matches.len() == 1 {
             return name_matches.iter().next().copied();
+        }
+
+        // Final fallback: construct "ClassName.methodName" and search external_function_name_map.
+        // This handles cross-module method calls where SymbolIds don't match across
+        // compilation contexts but the qualified function name is stable.
+        if let Some(class_hint) = class_name_hint {
+            // Try "ClassName.methodName" (e.g., "Point2D.add")
+            let constructed_qn = format!("{}.{}", class_hint, method_name_str);
+            if let Some(&func_id) = self.external_function_name_map.get(&constructed_qn) {
+                return Some(func_id);
+            }
+            // Try with just the short class name if class_hint has a package prefix
+            if let Some(short) = class_short_hint {
+                let short_qn = format!("{}.{}", short, method_name_str);
+                if let Some(&func_id) = self.external_function_name_map.get(&short_qn) {
+                    return Some(func_id);
+                }
+            }
         }
 
         None
@@ -5200,6 +5244,51 @@ impl<'a> HirToMirContext<'a> {
         let type_table = self.type_table;
         let type_info = type_table.get(receiver_type);
 
+        // GUARD: If receiver is a user-defined class (not a known stdlib/extern class),
+        // return None immediately. User class methods are resolved by the method
+        // resolution code, not through stdlib runtime mappings. Without this guard,
+        // common method names like "add", "get", "set", "length" would incorrectly
+        // match stdlib methods (e.g., Point2D.add → sys_deque_add).
+        if let Some(ti) = type_info {
+            match &ti.kind {
+                crate::tast::core::TypeKind::Class { symbol_id, .. } => {
+                    let is_known_stdlib = self.symbol_table.get_symbol(*symbol_id)
+                        .map(|s| {
+                            let name = self.string_interner.get(s.name).unwrap_or("");
+                            let is_extern = s.flags.contains(SymbolFlags::EXTERN);
+                            let is_wrapper = self.stdlib_mapping.is_mir_wrapper_class(name);
+                            // Check if class is in stdlib namespace via qualified name
+                            let in_stdlib_ns = s.qualified_name
+                                .and_then(|qn| self.string_interner.get(qn))
+                                .map(|qn| qn.starts_with("haxe.") || qn.starts_with("sys.") || qn.starts_with("rayzor."))
+                                .unwrap_or(false);
+                            // Check if the stdlib mapping has ANY method for this class
+                            let has_stdlib_methods = self.stdlib_mapping.class_has_any_method(name);
+                            is_extern || is_wrapper || in_stdlib_ns || has_stdlib_methods
+                        })
+                        .unwrap_or(false);
+                    if !is_known_stdlib {
+                        return None;
+                    }
+                }
+                crate::tast::core::TypeKind::Placeholder { name } => {
+                    // Placeholder types arise from unresolved cross-module types.
+                    // Check if the placeholder name maps to a known stdlib class.
+                    // If not, it's a user class and we should not match stdlib methods.
+                    let placeholder_name = self.string_interner.get(*name);
+                    let is_known_stdlib = placeholder_name
+                        .map(|n| self.stdlib_mapping.is_mir_wrapper_class(n)
+                            || self.stdlib_mapping.class_has_any_method(n)
+                            || n.starts_with("haxe.") || n.starts_with("sys."))
+                        .unwrap_or(false);
+                    if !is_known_stdlib {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+
         debug!(
             "[get_stdlib_runtime_info] method={}, receiver_type={:?}, type_info_exists={}, qualified_name={:?}",
             method_name,
@@ -8581,9 +8670,15 @@ impl<'a> HirToMirContext<'a> {
                                 .and_then(|name| self.resolve_method_function_id(object.ty, name))
                         });
                     if let Some(func_id) = maybe_func_id {
+                        // If the resolved function is from an import module (renumbered to
+                        // 100_000+), it's a real user-defined or compiled stdlib function.
+                        // Skip the stdlib runtime mapping check — it would incorrectly redirect
+                        // user methods like "add" to stdlib functions (e.g., sys_deque_add).
                         // FIRST: Try to route through runtime mapping for extern class methods
                         // Check if there's a runtime mapping using the standard approach
                         // BUT: for String methods with optional params, use param-count-aware lookup
+                        // Note: get_stdlib_runtime_info has an internal guard that returns None
+                        // for user-defined class receivers, preventing name collisions.
                         let stdlib_info = {
                             let method_name_str = self
                                 .symbol_table
@@ -10966,6 +11061,34 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
+                    // EARLY RESOLUTION: For typed instance method calls, check if the
+                    // method can be resolved to a known import function BEFORE the extern
+                    // class method dispatch. This prevents user methods like Point2D.add
+                    // from being incorrectly matched to stdlib methods (sys_deque_add).
+                    if *is_method && !args.is_empty() {
+                        let method_name_i = self.symbol_table.get_symbol(*symbol).map(|s| s.name);
+                        if let Some(mn) = method_name_i {
+                            let resolved = self.resolve_method_function_id(args[0].ty, mn);
+                            if let Some(func_id) = resolved {
+                                if func_id.0 >= 100_000 {
+                                    // Resolved to an import function — use it directly
+                                    let mut arg_regs = Vec::new();
+                                    for arg in args.iter() {
+                                        if let Some(reg) = self.lower_expression(arg) {
+                                            arg_regs.push(reg);
+                                        }
+                                    }
+                                    self.coerce_args_for_cross_module_call(func_id, &mut arg_regs, false);
+                                    return self.builder.build_call_direct(
+                                        func_id,
+                                        arg_regs,
+                                        result_type,
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     // EXTERN CLASS METHOD HANDLING:
                     // When MethodCall is desugared to Call with Variable callee,
                     // is_method=true and args[0] is the receiver (for instance methods).
@@ -12816,6 +12939,7 @@ impl<'a> HirToMirContext<'a> {
                             // Calculate param_count for overload disambiguation: args[0] is receiver, rest are params
                             let method_param_count =
                                 if args.len() > 1 { args.len() - 1 } else { 0 };
+                            {
                             if let Some((class_name, method_name, runtime_call)) = self
                                 .get_stdlib_runtime_info(
                                     *symbol,
@@ -14191,6 +14315,7 @@ impl<'a> HirToMirContext<'a> {
                                     }
                                 }
                             } // end of else block for receiver_is_user_class
+                            }
                         } else {
                             // receiver_is_class_type == true
                             // This is an instance method call on a MIR wrapper class (Thread, Channel, etc.)
