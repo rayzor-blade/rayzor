@@ -9505,6 +9505,7 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
 
+                            self.coerce_args_for_cross_module_call(func_id, &mut arg_regs, false);
                             self.fill_default_args(func_id, &mut arg_regs, false);
 
                             let actual_return_type =
@@ -15269,6 +15270,8 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
 
+                            // Coerce Int→Float at cross-module call boundaries
+                            self.coerce_args_for_cross_module_call(func_id, &mut arg_regs, true);
                             // Fill in default values for any missing optional parameters
                             self.fill_default_args(func_id, &mut arg_regs, true);
 
@@ -15514,6 +15517,7 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
 
+                            self.coerce_args_for_cross_module_call(func_id, &mut arg_regs, false);
                             // Fill in default values for any missing optional parameters
                             self.fill_default_args(func_id, &mut arg_regs, false);
 
@@ -16840,6 +16844,8 @@ impl<'a> HirToMirContext<'a> {
                         .collect();
 
                     let pre_fill = arg_regs.len();
+                    // Coerce Int→Float at cross-module call boundaries
+                    self.coerce_args_for_cross_module_call(constructor_func_id, &mut arg_regs, true);
                     // Fill in default values for any missing optional parameters
                     self.fill_default_args(constructor_func_id, &mut arg_regs, true);
                     let post_fill = arg_regs.len();
@@ -19683,6 +19689,40 @@ impl<'a> HirToMirContext<'a> {
     /// (possibly including implicit 'this' for methods/constructors).
     /// `has_implicit_this` indicates whether arg_regs[0] is an implicit 'this' pointer
     /// that is NOT part of the user-visible params.
+    /// Coerce args to match external function param types at cross-module call boundaries.
+    /// Only casts I32→F64 and I64→F64 where the callee expects Float but caller passes Int.
+    fn coerce_args_for_cross_module_call(
+        &mut self,
+        func_id: IrFunctionId,
+        arg_regs: &mut [IrId],
+        skip_first: bool, // true if first arg is implicit 'this'
+    ) {
+        // Only coerce for external (cross-module) functions
+        let param_types = match self.external_function_param_types.get(&func_id) {
+            Some(types) => types.clone(),
+            None => return,
+        };
+
+        let start = if skip_first { 1 } else { 0 };
+        for (i, arg_reg) in arg_regs.iter_mut().enumerate().skip(start) {
+            if let Some(expected_ty) = param_types.get(i) {
+                let actual_ty = self.builder.get_register_type(*arg_reg);
+                // Cast I32/I64 → F64 when callee expects Float
+                if matches!(expected_ty, IrType::F64)
+                    && matches!(actual_ty, Some(IrType::I32) | Some(IrType::I64))
+                {
+                    if let Some(cast_reg) = self.builder.build_cast(
+                        *arg_reg,
+                        actual_ty.unwrap().clone(),
+                        IrType::F64,
+                    ) {
+                        *arg_reg = cast_reg;
+                    }
+                }
+            }
+        }
+    }
+
     fn fill_default_args(
         &mut self,
         func_id: IrFunctionId,

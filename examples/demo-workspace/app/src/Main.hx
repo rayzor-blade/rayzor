@@ -11,8 +11,8 @@ class Main {
         trace('7! = ${MathUtils.factorial(7)}');
 
         // Local packages: sim.Point2D
-        var a = new Point2D(3.0, 4.0);
-        var b = new Point2D(1.0, 2.0);
+        var a = new Point2D(3, 4);
+        var b = new Point2D(1, 2);
         trace('a = ${a.toString()}');
         trace('|a| = ${a.length()}');
         trace('a + b = ${a.add(b).toString()}');
@@ -20,9 +20,9 @@ class Main {
 
         // Local packages: sim.Particle + world.Simulation
         var sim = new Simulation();
-        sim.addParticle(new Particle(0.0, 100.0, 5.0, 0.0, 1.0));
-        sim.addParticle(new Particle(10.0, 50.0, -3.0, 2.0, 2.0));
-        sim.addParticle(new Particle(5.0, 75.0, 1.0, -1.0, 0.5));
+        sim.addParticle(new Particle(0, 100, 5, 0, 1.0));
+        sim.addParticle(new Particle(10, 50, -3, 2, 2.0));
+        sim.addParticle(new Particle(5, 75, 1, -1, 0.5));
 
         trace("--- Initial State ---");
         trace(sim.report());
