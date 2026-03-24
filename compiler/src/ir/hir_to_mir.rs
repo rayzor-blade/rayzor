@@ -2006,12 +2006,12 @@ impl<'a> HirToMirContext<'a> {
 
             // Map GPU type to WGSL vertex format code
             let vertex_format = match (&gpu_ir_type, size) {
-                (IrType::F32, 4) => 0,   // Float32
-                (IrType::F32, 8) => 1,   // Float32x2
-                (IrType::F32, 12) => 2,  // Float32x3
-                (IrType::F32, 16) => 3,  // Float32x4
-                (IrType::I32, _) => 4,   // Sint32
-                _ => 0,                   // default Float32
+                (IrType::F32, 4) => 0,  // Float32
+                (IrType::F32, 8) => 1,  // Float32x2
+                (IrType::F32, 12) => 2, // Float32x3
+                (IrType::F32, 16) => 3, // Float32x4
+                (IrType::I32, _) => 4,  // Sint32
+                _ => 0,                 // default Float32
             };
 
             layout_fields.push(GpuStructFieldLayout {
@@ -8259,7 +8259,11 @@ impl<'a> HirToMirContext<'a> {
                     // @:gpuStruct synthetic static methods: gpuDef/gpuSize/gpuAlignment
                     if matches!(
                         callee_name.as_deref(),
-                        Some("gpuDef") | Some("gpuSize") | Some("gpuAlignment") | Some("gpuVertexLayout") | Some("wgsl")
+                        Some("gpuDef")
+                            | Some("gpuSize")
+                            | Some("gpuAlignment")
+                            | Some("gpuVertexLayout")
+                            | Some("wgsl")
                     ) {
                         for (tid, decl) in self.current_hir_types.iter() {
                             if let crate::ir::hir::HirTypeDecl::Class(c) = decl {
@@ -8325,7 +8329,10 @@ impl<'a> HirToMirContext<'a> {
                                                     let mut parts = Vec::new();
                                                     parts.push(format!("{}", layout.total_size));
                                                     for (i, f) in layout.fields.iter().enumerate() {
-                                                        parts.push(format!("{},{},{}", f.byte_offset, f.vertex_format, i));
+                                                        parts.push(format!(
+                                                            "{},{},{}",
+                                                            f.byte_offset, f.vertex_format, i
+                                                        ));
                                                     }
                                                     let encoded = parts.join(";");
                                                     return self

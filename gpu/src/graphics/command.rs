@@ -16,10 +16,10 @@ enum RenderCommand {
     SetVertexBuffer(u32, *const GraphicsBuffer),
     SetIndexBuffer(*const GraphicsBuffer, wgpu::IndexFormat),
     SetBindGroup(u32, *const GraphicsBindGroup),
-    Draw(u32, u32, u32, u32),           // vertex_count, instance_count, first_vertex, first_instance
+    Draw(u32, u32, u32, u32), // vertex_count, instance_count, first_vertex, first_instance
     DrawIndexed(u32, u32, u32, i32, u32), // index_count, instance_count, first_index, base_vertex, first_instance
     SetViewport(f32, f32, f32, f32, f32, f32), // x, y, w, h, min_depth, max_depth
-    SetScissor(u32, u32, u32, u32),     // x, y, w, h
+    SetScissor(u32, u32, u32, u32),       // x, y, w, h
 }
 
 /// A recorded render pass — stores attachment config + commands.
@@ -238,23 +238,24 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_submit(
         cmd.passes.push(pass);
     }
 
-    let mut encoder =
-        ctx.device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("rayzor_multi_pass"),
-            });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("rayzor_multi_pass"),
+        });
 
     for recorded_pass in &cmd.passes {
-        let depth_attachment = recorded_pass.depth_view.map(|dv| {
-            wgpu::RenderPassDepthStencilAttachment {
-                view: &*dv,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }
-        });
+        let depth_attachment =
+            recorded_pass
+                .depth_view
+                .map(|dv| wgpu::RenderPassDepthStencilAttachment {
+                    view: &*dv,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                });
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

@@ -27,13 +27,17 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_shader_create(
     }
     let ctx = &*ctx;
     let wgsl = std::str::from_utf8(std::slice::from_raw_parts(wgsl_ptr, wgsl_len)).unwrap_or("");
-    let vert = std::str::from_utf8(std::slice::from_raw_parts(vert_ptr, vert_len)).unwrap_or("vs_main");
-    let frag = std::str::from_utf8(std::slice::from_raw_parts(frag_ptr, frag_len)).unwrap_or("fs_main");
+    let vert =
+        std::str::from_utf8(std::slice::from_raw_parts(vert_ptr, vert_len)).unwrap_or("vs_main");
+    let frag =
+        std::str::from_utf8(std::slice::from_raw_parts(frag_ptr, frag_len)).unwrap_or("fs_main");
 
-    let module = ctx.device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("rayzor_shader"),
-        source: wgpu::ShaderSource::Wgsl(wgsl.into()),
-    });
+    let module = ctx
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("rayzor_shader"),
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+        });
 
     Box::into_raw(Box::new(GraphicsShader {
         module,
