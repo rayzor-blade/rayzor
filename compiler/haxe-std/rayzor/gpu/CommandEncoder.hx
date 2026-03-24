@@ -1,7 +1,7 @@
 package rayzor.gpu;
 
 /**
- * Command encoder for recording GPU render commands.
+ * Command encoder for recording multi-pass GPU render commands.
  *
  * Records multiple render passes, then submits all at once.
  *
@@ -9,18 +9,18 @@ package rayzor.gpu;
  * ```haxe
  * var cmd = CommandEncoder.create();
  *
- * // Pass 1: Clear to dark blue
- * var pass = cmd.beginRenderPass(view, LoadOp.Clear, {r:0.1, g:0.2, b:0.3, a:1.0});
- * pass.setPipeline(pipeline);
- * pass.setVertexBuffer(0, vertexBuf);
- * pass.draw(3);
- * pass.end();
+ * // Pass 1: Clear + draw triangle
+ * cmd.beginPass(view, 0, 0.1, 0.2, 0.3, 1.0, null);
+ * cmd.setPipeline(pipeline);
+ * cmd.setVertexBuffer(0, vertexBuf);
+ * cmd.draw(3, 1, 0, 0);
+ * cmd.endPass();
  *
- * // Pass 2: Overlay
- * var pass2 = cmd.beginRenderPass(view, LoadOp.Load, {r:0, g:0, b:0, a:0});
- * pass2.setPipeline(overlayPipeline);
- * pass2.draw(6);
- * pass2.end();
+ * // Pass 2: Overlay (load existing content)
+ * cmd.beginPass(view, 1, 0, 0, 0, 0, null);
+ * cmd.setPipeline(overlayPipeline);
+ * cmd.draw(6, 1, 0, 0);
+ * cmd.endPass();
  *
  * cmd.submit(device);
  * ```
@@ -31,24 +31,23 @@ extern class CommandEncoder {
     @:native("rayzor_gpu_gfx_cmd_create")
     public static function create():CommandEncoder;
 
-    /** Begin a new render pass targeting the given color view. */
+    /** Begin a render pass. loadOp: 0=Clear, 1=Load. */
     @:native("rayzor_gpu_gfx_cmd_begin_pass")
     public function beginPass(
-        colorView:Dynamic,
-        loadOp:Int,
+        colorView:Dynamic, loadOp:Int,
         clearR:Float, clearG:Float, clearB:Float, clearA:Float,
         depthView:Dynamic
     ):Void;
 
-    /** Set the active render pipeline for the current pass. */
+    /** Set the active render pipeline. */
     @:native("rayzor_gpu_gfx_cmd_set_pipeline")
     public function setPipeline(pipeline:RenderPipeline):Void;
 
-    /** Bind a vertex buffer to a slot in the current pass. */
+    /** Bind a vertex buffer to a slot. */
     @:native("rayzor_gpu_gfx_cmd_set_vertex_buffer")
     public function setVertexBuffer(slot:Int, buffer:GfxBuffer):Void;
 
-    /** Bind an index buffer in the current pass. Format: 0=Uint16, 1=Uint32. */
+    /** Bind an index buffer. format: 0=Uint16, 1=Uint32. */
     @:native("rayzor_gpu_gfx_cmd_set_index_buffer")
     public function setIndexBuffer(buffer:GfxBuffer, format:Int):Void;
 
