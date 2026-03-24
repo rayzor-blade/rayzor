@@ -373,6 +373,21 @@ pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
             ("rayzor_gpu_gfx_render_submit", graphics::render_pass::rayzor_gpu_gfx_render_submit as *const u8),
             ("rayzor_gpu_gfx_render_triangles", graphics::render_pass::rayzor_gpu_gfx_render_triangles as *const u8),
             ("rayzor_gpu_gfx_texture_to_bytes", graphics::render_pass::rayzor_gpu_gfx_texture_to_bytes as *const u8),
+            // Haxe-friendly wrappers
+            ("rayzor_gpu_gfx_render_with_vb", graphics::haxe_api::rayzor_gpu_gfx_render_with_vb as *const u8),
+            ("rayzor_gpu_gfx_render_indexed", graphics::haxe_api::rayzor_gpu_gfx_render_indexed as *const u8),
+            ("rayzor_gpu_gfx_render_with_depth", graphics::haxe_api::rayzor_gpu_gfx_render_with_depth as *const u8),
+            ("rayzor_gpu_gfx_render_with_bindings", graphics::haxe_api::rayzor_gpu_gfx_render_with_bindings as *const u8),
+            ("rayzor_gpu_gfx_buffer_from_bytes", graphics::haxe_api::rayzor_gpu_gfx_buffer_from_bytes as *const u8),
+            ("rayzor_gpu_gfx_buffer_write_bytes", graphics::haxe_api::rayzor_gpu_gfx_buffer_write_bytes as *const u8),
+            ("rayzor_gpu_gfx_bind_group_layout_uniform", graphics::haxe_api::rayzor_gpu_gfx_bind_group_layout_uniform as *const u8),
+            ("rayzor_gpu_gfx_bind_group_single", graphics::haxe_api::rayzor_gpu_gfx_bind_group_single as *const u8),
+            ("rayzor_gpu_gfx_pipeline_set_vertex_layout_simple", graphics::haxe_api::rayzor_gpu_gfx_pipeline_set_vertex_layout_simple as *const u8),
+            ("rayzor_gpu_gfx_pipeline_set_depth_simple", graphics::haxe_api::rayzor_gpu_gfx_pipeline_set_depth_simple as *const u8),
+            ("rayzor_gpu_gfx_pipeline_add_layout", graphics::haxe_api::rayzor_gpu_gfx_pipeline_add_layout as *const u8),
+            ("rayzor_gpu_gfx_depth_texture_create", graphics::haxe_api::rayzor_gpu_gfx_depth_texture_create as *const u8),
+            ("rayzor_gpu_gfx_sampler_linear", graphics::haxe_api::rayzor_gpu_gfx_sampler_linear as *const u8),
+            ("rayzor_gpu_gfx_texture_upload", graphics::haxe_api::rayzor_gpu_gfx_texture_upload as *const u8),
         ];
         symbols.extend(gfx_symbols);
     }
