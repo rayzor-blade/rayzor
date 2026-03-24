@@ -1,17 +1,11 @@
 package rayzor.gpu;
 
 /**
- * Uniform buffer for passing data to shaders (camera matrices, colors, etc.).
+ * Uniform buffer for passing data to shaders.
  *
- * Wraps a GPU buffer with UNIFORM usage and provides typed write helpers.
- *
- * Example:
- * ```haxe
- * var ubo = UniformBuffer.create(device, 64); // 64 bytes (e.g., 4x4 matrix)
- * ubo.writeFloat(device, 0, 1.0);  // Write float at offset 0
- * ubo.writeVec4(device, 0, 1.0, 0.0, 0.0, 1.0); // RGBA color
- * ```
+ * Auto-released via @:derive([Drop]). No manual destroy() needed.
  */
+@:derive([Drop])
 class UniformBuffer {
     public var buffer:GfxBuffer;
     public var size:Int;
@@ -26,7 +20,8 @@ class UniformBuffer {
         return new UniformBuffer(buf, size);
     }
 
-    public function destroy():Void {
-        buffer.destroy();
+    /** Called automatically when this UniformBuffer is dropped. */
+    public function drop():Void {
+        if (buffer != null) buffer.destroy();
     }
 }
