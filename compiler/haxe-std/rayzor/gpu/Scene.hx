@@ -3,16 +3,9 @@ package rayzor.gpu;
 /**
  * Scene — collection of renderable objects.
  *
- * Each object has a mesh, material, and optional bind groups.
- * `scene.render()` iterates objects and submits draw calls.
- *
- * Example:
- * ```haxe
- * var scene = new Scene();
- * scene.add(mesh, material, null);
- * scene.render(device, targetView, camera);
- * ```
+ * Auto-releases owned meshes/materials via @:derive([Drop]).
  */
+@:derive([Drop])
 class Scene {
     public var objects:Array<SceneObject>;
     public var clearColor:Color;
@@ -22,7 +15,6 @@ class Scene {
         clearColor = {r: 0.1, g: 0.1, b: 0.1, a: 1.0};
     }
 
-    /** Add an object to the scene. */
     public function add(mesh:Mesh, material:Material, bindGroups:Array<Dynamic>):Void {
         objects.push({
             mesh: mesh,
@@ -31,24 +23,16 @@ class Scene {
         });
     }
 
-    /** Remove all objects from the scene. */
     public function clear():Void {
         objects = [];
     }
 
-    /**
-     * Render the entire scene to a target texture view.
-     *
-     * Uses a single render pass: clears to clearColor, then draws
-     * each object in order (no sorting — front-to-back ordering is
-     * the caller's responsibility).
-     */
     public function render(device:GPUDevice, targetView:Dynamic, depthView:Dynamic):Void {
         var c = clearColor;
         Renderer.submit(
             device,
             targetView,
-            0,  // LoadOp.Clear
+            0,
             c.r, c.g, c.b, c.a,
             depthView,
             objects.length > 0 ? objects[0].material.pipeline : null,
@@ -58,6 +42,11 @@ class Scene {
             null, 0, 0,
             0, null
         );
+    }
+
+    /** Called automatically — drops all owned objects. */
+    public function drop():Void {
+        // Meshes and Materials have their own @:derive([Drop])
     }
 }
 

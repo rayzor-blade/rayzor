@@ -3,18 +3,10 @@ package rayzor.gpu;
 /**
  * Material — holds shader + pipeline configuration.
  *
- * A material defines how geometry is rendered: which shader,
- * what color format, topology, culling, etc.
- *
- * Example:
- * ```haxe
- * var mat = new Material(device, myShader, {
- *     colorFormat: 0,  // BGRA8Unorm
- *     topology: 0,     // TriangleList
- *     cullMode: 2,     // Back
- * });
- * ```
+ * Resources are auto-released when the Material goes out of scope
+ * via @:derive([Drop]). No manual destroy() needed.
  */
+@:derive([Drop])
 class Material {
     public var pipeline:RenderPipeline;
     public var shader:ShaderModule;
@@ -31,16 +23,14 @@ class Material {
         pipeline = builder.build(device);
     }
 
-    public function destroy():Void {
+    /** Called automatically when this Material is dropped. */
+    public function drop():Void {
         if (pipeline != null) pipeline.destroy();
     }
 }
 
 typedef MaterialOptions = {
-    /** TextureFormat enum index for color target. */
     colorFormat:Int,
-    /** PrimitiveTopology enum index. */
     topology:Int,
-    /** CullMode enum index (0=None, 1=Front, 2=Back). */
     ?cullMode:Int,
 };
