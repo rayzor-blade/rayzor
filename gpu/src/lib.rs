@@ -197,7 +197,7 @@ pub unsafe extern "C" fn rayzor_gpu_plugin_describe(
 
 /// Rust-callable API returning runtime symbols.
 pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
-    vec![
+    let mut symbols = vec![
         // Device lifecycle
         (
             "rayzor_gpu_compute_create",
@@ -342,7 +342,38 @@ pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
             "rayzor_gpu_compute_read_struct_int",
             buffer::rayzor_gpu_compute_read_struct_int as *const u8,
         ),
-    ]
+    ];
+
+    // Graphics rendering symbols (only when webgpu-backend is compiled)
+    #[cfg(feature = "webgpu-backend")]
+    {
+        let gfx_symbols: Vec<(&'static str, *const u8)> = vec![
+            ("rayzor_gpu_gfx_device_create", graphics::rayzor_gpu_gfx_device_create as *const u8),
+            ("rayzor_gpu_gfx_device_destroy", graphics::rayzor_gpu_gfx_device_destroy as *const u8),
+            ("rayzor_gpu_gfx_is_available", graphics::rayzor_gpu_gfx_is_available as *const u8),
+            ("rayzor_gpu_gfx_buffer_create", graphics::rayzor_gpu_gfx_buffer_create as *const u8),
+            ("rayzor_gpu_gfx_buffer_create_with_data", graphics::rayzor_gpu_gfx_buffer_create_with_data as *const u8),
+            ("rayzor_gpu_gfx_buffer_write", graphics::rayzor_gpu_gfx_buffer_write as *const u8),
+            ("rayzor_gpu_gfx_buffer_destroy", graphics::rayzor_gpu_gfx_buffer_destroy as *const u8),
+            ("rayzor_gpu_gfx_shader_create", graphics::shader::rayzor_gpu_gfx_shader_create as *const u8),
+            ("rayzor_gpu_gfx_shader_destroy", graphics::shader::rayzor_gpu_gfx_shader_destroy as *const u8),
+            ("rayzor_gpu_gfx_pipeline_begin", graphics::pipeline::rayzor_gpu_gfx_pipeline_begin as *const u8),
+            ("rayzor_gpu_gfx_pipeline_set_shader", graphics::pipeline::rayzor_gpu_gfx_pipeline_set_shader as *const u8),
+            ("rayzor_gpu_gfx_pipeline_set_format", graphics::pipeline::rayzor_gpu_gfx_pipeline_set_format as *const u8),
+            ("rayzor_gpu_gfx_pipeline_set_topology", graphics::pipeline::rayzor_gpu_gfx_pipeline_set_topology as *const u8),
+            ("rayzor_gpu_gfx_pipeline_set_cull", graphics::pipeline::rayzor_gpu_gfx_pipeline_set_cull as *const u8),
+            ("rayzor_gpu_gfx_pipeline_build", graphics::pipeline::rayzor_gpu_gfx_pipeline_build as *const u8),
+            ("rayzor_gpu_gfx_pipeline_destroy", graphics::pipeline::rayzor_gpu_gfx_pipeline_destroy as *const u8),
+            ("rayzor_gpu_gfx_texture_create", graphics::texture::rayzor_gpu_gfx_texture_create as *const u8),
+            ("rayzor_gpu_gfx_texture_get_view", graphics::texture::rayzor_gpu_gfx_texture_get_view as *const u8),
+            ("rayzor_gpu_gfx_texture_read_pixels", graphics::texture::rayzor_gpu_gfx_texture_read_pixels as *const u8),
+            ("rayzor_gpu_gfx_texture_destroy", graphics::texture::rayzor_gpu_gfx_texture_destroy as *const u8),
+            ("rayzor_gpu_gfx_render_submit", graphics::render_pass::rayzor_gpu_gfx_render_submit as *const u8),
+        ];
+        symbols.extend(gfx_symbols);
+    }
+
+    symbols
 }
 
 fn collect_symbols() -> Vec<SymbolEntry> {
