@@ -18,6 +18,28 @@ struct RawManifest {
     build: Option<BuildConfig>,
     cache: Option<CacheConfig>,
     bundle: Option<BundleConfig>,
+    dependencies: Option<HashMap<String, DependencySpec>>,
+}
+
+/// A single dependency specification in `[dependencies]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum DependencySpec {
+    /// Simple version string: `mylib = "1.0"`
+    Version(String),
+    /// Table with fields: `mylib = { path = "../mylib" }`
+    Table {
+        /// Local path to the package directory or .rpkg file.
+        path: Option<String>,
+        /// Package name in the rpkg registry.
+        rpkg: Option<String>,
+        /// Git repository URL.
+        git: Option<String>,
+        /// Git branch (used with `git`).
+        branch: Option<String>,
+        /// Version constraint.
+        version: Option<String>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -46,6 +68,9 @@ pub struct ProjectManifest {
     /// Bundle configuration
     #[serde(skip)]
     pub bundle: Option<BundleConfig>,
+    /// Dependencies
+    #[serde(skip)]
+    pub dependencies: Option<HashMap<String, DependencySpec>>,
 }
 
 /// Workspace manifest fields.
@@ -119,6 +144,7 @@ pub fn parse_manifest(content: &str) -> Result<RayzorManifest, String> {
         project.build = raw.build;
         project.cache = raw.cache;
         project.bundle = raw.bundle;
+        project.dependencies = raw.dependencies;
         return Ok(RayzorManifest::SingleProject(project));
     }
 

@@ -410,6 +410,27 @@ enum RpkgAction {
         /// Path to the .rpkg file
         file: PathBuf,
     },
+
+    /// Install an .rpkg file into the local package registry
+    Install {
+        /// Path to the .rpkg file
+        file: PathBuf,
+    },
+
+    /// Add a package to the project's [dependencies] in rayzor.toml
+    Add {
+        /// Package name (must be installed in the registry)
+        name: String,
+    },
+
+    /// Remove a package from the project's [dependencies] in rayzor.toml
+    Remove {
+        /// Package name to remove
+        name: String,
+    },
+
+    /// List installed packages in the local registry
+    List,
 }
 
 #[derive(Subcommand)]
@@ -658,6 +679,10 @@ fn main() {
                 name,
             } => cmd_rpkg_pack(dylib, haxe_dir, output, name),
             RpkgAction::Inspect { file } => cmd_rpkg_inspect(file),
+            RpkgAction::Install { file } => cmd_rpkg_install(file),
+            RpkgAction::Add { name } => cmd_rpkg_add(name),
+            RpkgAction::Remove { name } => cmd_rpkg_remove(name),
+            RpkgAction::List => cmd_rpkg_list(),
         },
     };
 
@@ -3027,6 +3052,168 @@ fn cmd_rpkg_pack(
     );
 
     Ok(())
+}
+
+fn cmd_rpkg_install(file: PathBuf) -> Result<(), String> {
+    use compiler::rpkg::registry::LocalRegistry;
+
+    let mut registry = LocalRegistry::open_default()?;
+    let entry = registry.install(&file)?;
+
+    let rows = vec![
+        tui::panel::InfoRow::colored("Package", &entry.name, ratatui::style::Color::Cyan),
+        tui::panel::InfoRow::new(
+            "Size",
+            &format_bytes(entry.size_bytes),
+        ),
+        tui::panel::InfoRow::new("Haxe files", &entry.haxe_file_count.to_string()),
+        tui::panel::InfoRow::new(
+            "Native",
+            if entry.has_native { "yes" } else { "no" },
+        ),
+        tui::panel::InfoRow::new("Location", &registry.root_dir().display().to_string()),
+    ];
+    let _ = tui::panel::render_info_panel("Package Installed", &rows, None);
+    Ok(())
+}
+
+fn cmd_rpkg_add(name: String) -> Result<(), String> {
+    use compiler::rpkg::registry::LocalRegistry;
+
+    // Verify the package is installed in the registry
+    let registry = LocalRegistry::open_default()?;
+    if registry.get(&name).is_none() {
+        return Err(format!(
+            "Package '{}' is not installed. Run `rayzor rpkg install <file.rpkg>` first.",
+            name
+        ));
+    }
+
+    // Find rayzor.toml in current directory
+    let manifest_path = std::path::PathBuf::from("rayzor.toml");
+    if !manifest_path.exists() {
+        return Err("No rayzor.toml found in current directory".to_string());
+    }
+
+    let content = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("Failed to read rayzor.toml: {}", e))?;
+
+    // Check if dependency already exists
+    if content.contains(&format!("[dependencies]"))
+        && content.contains(&format!("{} ", name))
+    {
+        return Err(format!("Dependency '{}' already exists in rayzor.toml", name));
+    }
+
+    // Append [dependencies] section if missing, or add to existing
+    let updated = if content.contains("[dependencies]") {
+        // Add to existing section
+        content.replace(
+            "[dependencies]",
+            &format!("[dependencies]\n{} = {{ rpkg = \"{}\" }}", name, name),
+        )
+    } else {
+        format!("{}\n[dependencies]\n{} = {{ rpkg = \"{}\" }}\n", content.trim_end(), name, name)
+    };
+
+    std::fs::write(&manifest_path, updated)
+        .map_err(|e| format!("Failed to write rayzor.toml: {}", e))?;
+
+    let rows = vec![
+        tui::panel::InfoRow::colored("Added", &name, ratatui::style::Color::Green),
+        tui::panel::InfoRow::new("Source", "rpkg registry"),
+    ];
+    let _ = tui::panel::render_info_panel("Dependency Added", &rows, None);
+    Ok(())
+}
+
+fn cmd_rpkg_remove(name: String) -> Result<(), String> {
+    let manifest_path = std::path::PathBuf::from("rayzor.toml");
+    if !manifest_path.exists() {
+        return Err("No rayzor.toml found in current directory".to_string());
+    }
+
+    let content = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("Failed to read rayzor.toml: {}", e))?;
+
+    // Remove the dependency line
+    let lines: Vec<&str> = content.lines().collect();
+    let filtered: Vec<&str> = lines
+        .into_iter()
+        .filter(|line| {
+            let trimmed = line.trim();
+            // Remove lines like: mylib = { rpkg = "mylib" } or mylib = "1.0"
+            !(trimmed.starts_with(&name) && (trimmed.contains("=") && !trimmed.starts_with("[")))
+        })
+        .collect();
+
+    let updated = filtered.join("\n") + "\n";
+    std::fs::write(&manifest_path, updated)
+        .map_err(|e| format!("Failed to write rayzor.toml: {}", e))?;
+
+    let rows = vec![tui::panel::InfoRow::colored(
+        "Removed",
+        &name,
+        ratatui::style::Color::Yellow,
+    )];
+    let _ = tui::panel::render_info_panel("Dependency Removed", &rows, None);
+    Ok(())
+}
+
+fn cmd_rpkg_list() -> Result<(), String> {
+    use compiler::rpkg::registry::LocalRegistry;
+
+    let registry = LocalRegistry::open_default()?;
+    let packages = registry.list();
+
+    if packages.is_empty() {
+        let rows = vec![tui::panel::InfoRow::new(
+            "Status",
+            "No packages installed",
+        )];
+        let _ = tui::panel::render_info_panel(
+            "Package Registry",
+            &rows,
+            Some("Install with: rayzor rpkg install <file.rpkg>"),
+        );
+        return Ok(());
+    }
+
+    let mut rows = Vec::new();
+    for (name, entry) in packages {
+        let info = format!(
+            "{} | {} hx files{}",
+            format_bytes(entry.size_bytes),
+            entry.haxe_file_count,
+            if entry.has_native { " | native" } else { "" }
+        );
+        rows.push(tui::panel::InfoRow::colored(
+            name,
+            &info,
+            if entry.has_native {
+                ratatui::style::Color::Magenta
+            } else {
+                ratatui::style::Color::Cyan
+            },
+        ));
+    }
+
+    let _ = tui::panel::render_info_panel(
+        &format!("Package Registry ({} packages)", packages.len()),
+        &rows,
+        Some(&registry.root_dir().display().to_string()),
+    );
+    Ok(())
+}
+
+fn format_bytes(bytes: u64) -> String {
+    if bytes < 1024 {
+        format!("{} B", bytes)
+    } else if bytes < 1024 * 1024 {
+        format!("{:.1} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+    }
 }
 
 fn cmd_rpkg_inspect(file: PathBuf) -> Result<(), String> {
