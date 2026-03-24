@@ -139,6 +139,17 @@ declare_native_methods! {
     // Surface
     "rayzor_gpu_Surface", "present",        instance, "rayzor_gpu_gfx_surface_present",    [Ptr]           => Void;
     "rayzor_gpu_Surface", "destroy",        instance, "rayzor_gpu_gfx_surface_destroy",    [Ptr]           => Void;
+
+    // CommandEncoder (multi-pass)
+    "rayzor_gpu_CommandEncoder", "create",          static,   "rayzor_gpu_gfx_cmd_create",           []                  => Ptr;
+    "rayzor_gpu_CommandEncoder", "endPass",         instance, "rayzor_gpu_gfx_cmd_end_pass",         [Ptr]               => Void;
+    "rayzor_gpu_CommandEncoder", "submit",          instance, "rayzor_gpu_gfx_cmd_submit",           [Ptr, Ptr]          => Void;
+    "rayzor_gpu_CommandEncoder", "setPipeline",     instance, "rayzor_gpu_gfx_cmd_set_pipeline",     [Ptr, Ptr]          => Void;
+    "rayzor_gpu_CommandEncoder", "setVertexBuffer", instance, "rayzor_gpu_gfx_cmd_set_vertex_buffer",[Ptr, I64, Ptr]     => Void;
+    "rayzor_gpu_CommandEncoder", "setIndexBuffer",  instance, "rayzor_gpu_gfx_cmd_set_index_buffer", [Ptr, Ptr, I64]     => Void;
+    "rayzor_gpu_CommandEncoder", "setBindGroup",    instance, "rayzor_gpu_gfx_cmd_set_bind_group",   [Ptr, I64, Ptr]     => Void;
+    "rayzor_gpu_CommandEncoder", "setViewport",     instance, "rayzor_gpu_gfx_cmd_set_viewport",     [Ptr, F64, F64, F64, F64, F64, F64] => Void;
+    "rayzor_gpu_CommandEncoder", "setScissor",      instance, "rayzor_gpu_gfx_cmd_set_scissor",      [Ptr, I64, I64, I64, I64]           => Void;
 }
 
 // ============================================================================
