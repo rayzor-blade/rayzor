@@ -6,7 +6,7 @@ package rayzor.gpu;
  * Handles the full lifecycle: create encoder → begin render pass →
  * set pipeline → bind resources → draw → end → submit.
  *
- * For more control, use CommandEncoder and RenderPass directly (future API).
+ * For more control, use CommandEncoder for multi-pass recording.
  *
  * Example:
  * ```haxe
