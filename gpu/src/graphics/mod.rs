@@ -5,6 +5,7 @@
 //! and command encoding. Used from Haxe via extern native methods.
 
 pub mod bind_group;
+pub mod command;
 pub mod pipeline;
 pub mod render_pass;
 pub mod shader;
