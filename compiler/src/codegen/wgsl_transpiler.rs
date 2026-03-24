@@ -86,7 +86,26 @@ pub fn transpile_shader_from_hir(
             }
             let pname = interner.get(param.name).unwrap_or("p");
             let ptype = ctx.type_to_wgsl(param.ty);
-            write!(ctx.out, "{}: {}", pname, ptype).unwrap();
+            // Auto-detect builtin parameters by name convention
+            // Auto-detect builtin parameters by name — use correct WGSL types
+            let builtin = match pname {
+                "vertexIndex" | "vertex_index" => Some(("vertex_index", "u32")),
+                "instanceIndex" | "instance_index" => Some(("instance_index", "u32")),
+                "frontFacing" | "front_facing" => Some(("front_facing", "bool")),
+                "sampleIndex" | "sample_index" => Some(("sample_index", "u32")),
+                _ => None,
+            };
+            if let Some((b, btype)) = builtin {
+                write!(ctx.out, "@builtin({}) {}: {}", b, pname, btype).unwrap();
+            } else if stage == Some("vertex") && ctx.is_gpu_struct(param.ty) {
+                // Vertex input struct — no annotation needed (struct fields have @location)
+                write!(ctx.out, "{}: {}", pname, ptype).unwrap();
+            } else if stage == Some("fragment") {
+                // Fragment input from vertex output — no annotation needed
+                write!(ctx.out, "{}: {}", pname, ptype).unwrap();
+            } else {
+                write!(ctx.out, "{}: {}", pname, ptype).unwrap();
+            }
         }
         ctx.out.push_str(") -> ");
 
@@ -540,7 +559,7 @@ impl<'a> WgslCtx<'a> {
 
     fn emit_lit(&self, lit: &LiteralValue) -> String {
         match lit {
-            LiteralValue::Int(n) => format!("{}i", n),
+            LiteralValue::Int(n) => n.to_string(),
             LiteralValue::Float(f) => {
                 let s = format!("{}", f);
                 if s.contains('.') {
@@ -813,7 +832,7 @@ impl<'a> WgslCtx<'a> {
 
     fn hir_lit(&self, lit: &hir::HirLiteral) -> String {
         match lit {
-            hir::HirLiteral::Int(n) => format!("{}i", n),
+            hir::HirLiteral::Int(n) => n.to_string(),
             hir::HirLiteral::Float(f) => {
                 let s = format!("{}", f);
                 if s.contains('.') { format!("{}f", s) } else { format!("{}.0f", s) }

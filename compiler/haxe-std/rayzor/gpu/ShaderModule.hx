@@ -23,7 +23,7 @@ package rayzor.gpu;
 @:native("rayzor::gpu::ShaderModule")
 extern class ShaderModule {
     /** Compile WGSL source into a shader module. */
-    @:native("rayzor_gpu_gfx_shader_create")
+    @:native("rayzor_gpu_gfx_shader_create_hx")
     public static function create(device:GPUDevice, wgslSource:String, vertexEntry:String, fragmentEntry:String):ShaderModule;
 
     /** Destroy this shader module. */
