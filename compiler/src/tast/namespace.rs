@@ -286,6 +286,80 @@ impl NamespaceResolver {
             }
         }
 
+        // Sub-type resolution: Haxe modules can contain multiple types.
+        // For "rayzor.gpu.GraphicsTypes.TextureUsage", try each possible split:
+        //   1. rayzor/gpu/GraphicsTypes/TextureUsage.hx (already tried above)
+        //   2. rayzor/gpu/GraphicsTypes.hx containing "TextureUsage" (module sub-type)
+        //   3. rayzor/gpu.hx containing "GraphicsTypes" (unlikely but check)
+        // Also handles: "rayzor.gpu.TextureUsage" → scan rayzor/gpu/*.hx for TextureUsage
+        if qualified_path.contains('.') {
+            let segments: Vec<&str> = qualified_path.split('.').collect();
+            // Try splitting at each dot from right to left
+            for split_at in (1..segments.len()).rev() {
+                let module_path = segments[..split_at].join("/") + ".hx";
+                let sub_type = segments[split_at]; // First sub-type after module
+
+                let all_paths = self.source_paths.iter().chain(self.stdlib_paths.iter());
+                for base in all_paths {
+                    let full_path = base.join(&module_path);
+                    if full_path.exists() {
+                        // Check if this file defines the sub-type
+                        if let Ok(content) = std::fs::read_to_string(&full_path) {
+                            let patterns = [
+                                format!("class {}", sub_type),
+                                format!("enum {}", sub_type),
+                                format!("typedef {}", sub_type),
+                                format!("abstract {}", sub_type),
+                                format!("interface {}", sub_type),
+                            ];
+                            if patterns.iter().any(|p| content.contains(p)) {
+                                if check_loaded && self.is_file_loaded(&full_path) {
+                                    return None;
+                                }
+                                return Some(full_path);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Also try scanning sibling .hx files in the package directory
+            // For "rayzor.gpu.TextureUsage" → scan rayzor/gpu/*.hx
+            let parts: Vec<&str> = qualified_path.rsplitn(2, '.').collect();
+            if parts.len() == 2 {
+                let type_name = parts[0];
+                let package_path = parts[1].replace('.', "/");
+                let all_paths = self.source_paths.iter().chain(self.stdlib_paths.iter());
+                for base in all_paths {
+                    let dir = base.join(&package_path);
+                    if dir.is_dir() {
+                        if let Ok(entries) = std::fs::read_dir(&dir) {
+                            for entry in entries.flatten() {
+                                let path = entry.path();
+                                if path.extension().and_then(|e| e.to_str()) == Some("hx") {
+                                    if let Ok(content) = std::fs::read_to_string(&path) {
+                                        let patterns = [
+                                            format!("class {}", type_name),
+                                            format!("enum {}", type_name),
+                                            format!("typedef {}", type_name),
+                                            format!("abstract {}", type_name),
+                                            format!("interface {}", type_name),
+                                        ];
+                                        if patterns.iter().any(|p| content.contains(p)) {
+                                            if check_loaded && self.is_file_loaded(&path) {
+                                                return None;
+                                            }
+                                            return Some(path);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         None
     }
 

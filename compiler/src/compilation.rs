@@ -94,6 +94,11 @@ pub struct CompilationUnit {
     /// Stdlib typed files loaded on-demand (typedefs, etc. that need to be in HIR)
     loaded_stdlib_typed_files: Vec<TypedFile>,
 
+    /// Accumulated class_fields from all compiled files.
+    /// Allows cross-file static field access (e.g., BufferUsage.VERTEX from imported GraphicsTypes.hx).
+    global_class_fields:
+        HashMap<crate::tast::SymbolId, Vec<(crate::tast::InternedString, crate::tast::SymbolId, bool)>>,
+
     /// Mapping from HIR function symbols to MIR function IDs for stdlib functions
     /// This allows user code to call pure Haxe stdlib functions (like StringTools)
     stdlib_function_map: BTreeMap<crate::tast::SymbolId, crate::ir::IrFunctionId>,
@@ -428,6 +433,7 @@ impl CompilationUnit {
             import_mir_modules: Vec::new(),
             import_own_func_ids: std::collections::HashSet::new(),
             loaded_stdlib_typed_files: Vec::new(),
+            global_class_fields: HashMap::new(),
             stdlib_function_map: BTreeMap::new(),
             stdlib_function_name_map: BTreeMap::new(),
             import_field_index_map: BTreeMap::new(),
@@ -1693,7 +1699,7 @@ impl CompilationUnit {
                         extract_expr_deps(arg, deps);
                     }
                 }
-                ExprKind::Field { expr, .. } => {
+                ExprKind::Field { expr, field, .. } => {
                     // If the object is a capitalized identifier, it may be a class/module
                     // reference (e.g. NativeStackTrace.exceptionStack()). Add it as a
                     // potential unqualified dep so load_imports_efficiently can resolve it
@@ -1706,6 +1712,30 @@ impl CompilationUnit {
                             .unwrap_or(false)
                         {
                             deps.insert(name.clone());
+                        }
+                    }
+                    // Also try to extract qualified paths from nested field chains
+                    // e.g. haxe.io.Bytes.ofString(...) → "haxe.io.Bytes"
+                    // We check the full chain including current field — if the last
+                    // component is uppercase, it's a package.Class pattern
+                    if field.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                        // Current field is uppercase (e.g. "Bytes" in haxe.io.Bytes)
+                        // Try to build full qualified path from the expression chain + this field
+                        let mut parts = Vec::new();
+                        fn collect_parts_for_dep(e: &parser::Expr, parts: &mut Vec<String>) {
+                            match &e.kind {
+                                ExprKind::Ident(name) => parts.push(name.clone()),
+                                ExprKind::Field { expr, field, .. } => {
+                                    collect_parts_for_dep(expr, parts);
+                                    parts.push(field.clone());
+                                }
+                                _ => {}
+                            }
+                        }
+                        collect_parts_for_dep(expr, &mut parts);
+                        parts.push(field.clone());
+                        if parts.len() >= 2 {
+                            deps.insert(parts.join("."));
                         }
                     }
                     extract_expr_deps(expr, deps);
@@ -2365,10 +2395,8 @@ impl CompilationUnit {
     ) -> bool {
         let filename = file_path.to_string_lossy().to_string();
 
-        // eprintln!("[TRY_COMPILE] {} file={}", name, filename);
         // Skip if already compiled
         if self.compiled_files.contains_key(&filename) {
-            // eprintln!("[TRY_COMPILE] {} → skip (already compiled)", name);
             return true;
         }
 
@@ -2407,7 +2435,11 @@ impl CompilationUnit {
             .mark_file_loaded(file_path.to_path_buf());
 
         // Try BLADE cache first
-        let cache_hit = if self.config.enable_cache {
+        // Skip BLADE cache for typedef files — they produce no MIR functions and
+        // need fresh compilation to properly resolve their target types (e.g.,
+        // `typedef Bytes = rayzor.Bytes;` must resolve rayzor.Bytes in current session).
+        let source_has_typedef = source.contains("typedef ");
+        let cache_hit = if self.config.enable_cache && !source_has_typedef {
             self.try_load_import_from_cache(&filename, source)
         } else {
             false
@@ -3268,12 +3300,16 @@ impl CompilationUnit {
     /// Returns Some(type_name) if this is an UnresolvedType error, None otherwise
     fn extract_unresolved_type_from_error(error_msg: &str) -> Option<String> {
         // Match pattern: "UnresolvedType { type_name: \"SomeType\", ..."
-        // Find the start of type_name: \" marker
         if let Some(type_name_start) = error_msg.find("type_name: \"") {
-            // Move past 'type_name: "' to get to the actual name
             let after_marker = &error_msg[type_name_start + 12..]; // 12 = length of 'type_name: "'
-                                                                   // Find the closing quote
             if let Some(end) = after_marker.find('"') {
+                return Some(after_marker[..end].to_string());
+            }
+        }
+        // Match pattern: "Cannot find type 'SomeType'"
+        if let Some(start) = error_msg.find("Cannot find type '") {
+            let after_marker = &error_msg[start + 18..]; // 18 = length of "Cannot find type '"
+            if let Some(end) = after_marker.find('\'') {
                 return Some(after_marker[..end].to_string());
             }
         }
@@ -3711,6 +3747,11 @@ impl CompilationUnit {
         // cached path, which changes bundle contents and breaks DeltaBlue parity.
         lowering.set_skip_stdlib_loading(true);
 
+        // Seed class_fields from previously compiled files
+        if !self.global_class_fields.is_empty() {
+            lowering.seed_class_fields(&self.global_class_fields);
+        }
+
         lowering.initialize_span_converter_with_filename(
             file_id.as_usize() as u32,
             source.to_string(),
@@ -3720,6 +3761,13 @@ impl CompilationUnit {
         let typed_file = lowering
             .lower_file(ast_file)
             .map_err(|e| vec![e.to_compilation_error()])?;
+
+        // Export class_fields for subsequent compilations
+        for (class_sym, fields) in lowering.export_class_fields() {
+            self.global_class_fields
+                .entry(*class_sym)
+                .or_insert_with(|| fields.clone());
+        }
 
         // Send/Sync validation — check thread safety constraints (user files only)
         let is_stdlib = filename.contains("haxe-std/") || filename.contains("haxe-std\\");
@@ -3767,14 +3815,19 @@ impl CompilationUnit {
             }
         }
 
-        // Lower to HIR
-        use crate::ir::tast_to_hir::lower_tast_to_hir;
-        let hir_module = lower_tast_to_hir(
+        // Lower to HIR — pass loaded stdlib typed files so cross-file
+        // static inline var references can be resolved
+        use crate::ir::tast_to_hir::lower_tast_to_hir_with_imports;
+        let import_refs: Vec<&crate::tast::node::TypedFile> =
+            self.loaded_stdlib_typed_files.iter().collect();
+        // (import_refs passed for inline var seeding)
+        let hir_module = lower_tast_to_hir_with_imports(
             &typed_file,
             &self.symbol_table,
             &self.type_table,
             &mut self.string_interner,
             None, // No semantic graphs for now
+            &import_refs,
         )
         .map_err(|errors| {
             errors
@@ -4512,6 +4565,7 @@ impl CompilationUnit {
                     let (loadable, other): (Vec<_>, Vec<_>) = errors.into_iter().partition(|e| {
                         e.message.contains("Unresolved type")
                             || e.message.contains("UnresolvedType")
+                            || e.message.contains("Cannot find type")
                     });
 
                     // Try to load unresolved types on-demand
@@ -4553,6 +4607,7 @@ impl CompilationUnit {
                                     retry_errors.into_iter().partition(|e| {
                                         e.message.contains("Unresolved type")
                                             || e.message.contains("UnresolvedType")
+                                            || e.message.contains("Cannot find type")
                                     });
 
                                 let mut retry_loaded = false;
@@ -4641,6 +4696,13 @@ impl CompilationUnit {
                 .find(|c: char| !c.is_alphanumeric() && c != '.')
                 .unwrap_or(message.len() - start);
             Some(message[start..start + end].to_string())
+        } else if let Some(start) = message.find("Cannot find type '") {
+            let start = start + "Cannot find type '".len();
+            if let Some(end) = message[start..].find('\'') {
+                Some(message[start..start + end].to_string())
+            } else {
+                None
+            }
         } else {
             None
         };

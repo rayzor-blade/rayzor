@@ -1923,9 +1923,7 @@ dependencies = [
  "parser",
  "postcard",
  "ratatui",
- "rayzor-gpu",
  "rayzor-lsp",
- "rayzor-plugin",
  "rayzor-runtime",
 ]
 

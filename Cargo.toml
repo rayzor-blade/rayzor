@@ -20,15 +20,11 @@ edition = "2021"
 
 [features]
 llvm-backend = ["compiler/llvm-backend"]
-metal-gpu = ["gpu/metal-backend"]
-webgpu = ["gpu/webgpu-backend"]
 
 [dependencies]
 parser = { path = "parser" }
 compiler = { path = "compiler" }
-rayzor-plugin = { path = "plugin" }
 rayzor-runtime = { path = "runtime" }
-gpu = { path = "gpu", package = "rayzor-gpu", optional = true }
 clap = { version = "4.5", features = ["derive"] }
 libloading = "0.8"
 ratatui = "0.29"
