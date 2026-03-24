@@ -5,8 +5,8 @@
 //! Covers ALL Haxe language features from the rayzor parser and TAST.
 
 use compiler::tast::symbols::{Symbol, SymbolFlags, SymbolKind, Visibility};
-use compiler::tast::{InternedString, StringInterner, SymbolId, SymbolTable, TypeId, TypeTable};
 use compiler::tast::TypeKind;
+use compiler::tast::{StringInterner, SymbolId, SymbolTable, TypeId, TypeTable};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -165,31 +165,62 @@ fn format_symbol_flags(sym: &Symbol) -> String {
 }
 
 /// Format a symbol's type signature as a Haxe-style string.
-fn format_symbol_signature(sym: &Symbol, type_table: &TypeTable, interner: &StringInterner) -> String {
+fn format_symbol_signature(
+    sym: &Symbol,
+    type_table: &TypeTable,
+    interner: &StringInterner,
+) -> String {
     let name = interner.get(sym.name).unwrap_or("?");
     let vis = match sym.visibility {
         Visibility::Public => "public ",
         Visibility::Private => "private ",
         _ => "",
     };
-    let static_kw = if sym.flags.contains(SymbolFlags::STATIC) { "static " } else { "" };
-    let inline_kw = if sym.flags.contains(SymbolFlags::INLINE) { "inline " } else { "" };
-    let override_kw = if sym.flags.contains(SymbolFlags::OVERRIDE) { "override " } else { "" };
-    let final_kw = if sym.flags.contains(SymbolFlags::FINAL) { "final " } else { "" };
+    let static_kw = if sym.flags.contains(SymbolFlags::STATIC) {
+        "static "
+    } else {
+        ""
+    };
+    let inline_kw = if sym.flags.contains(SymbolFlags::INLINE) {
+        "inline "
+    } else {
+        ""
+    };
+    let override_kw = if sym.flags.contains(SymbolFlags::OVERRIDE) {
+        "override "
+    } else {
+        ""
+    };
+    let final_kw = if sym.flags.contains(SymbolFlags::FINAL) {
+        "final "
+    } else {
+        ""
+    };
 
     match sym.kind {
         SymbolKind::Function => {
             let type_str = format_function_type(sym.type_id, type_table, interner);
-            format!("{}{}{}{}{}function {}{}", vis, static_kw, inline_kw, override_kw, final_kw, name, type_str)
+            format!(
+                "{}{}{}{}{}function {}{}",
+                vis, static_kw, inline_kw, override_kw, final_kw, name, type_str
+            )
         }
         SymbolKind::Variable => {
             let type_str = format_type_name(sym.type_id, type_table, interner);
-            let kw = if sym.flags.contains(SymbolFlags::FINAL) { "final" } else { "var" };
+            let kw = if sym.flags.contains(SymbolFlags::FINAL) {
+                "final"
+            } else {
+                "var"
+            };
             format!("{}{}{} {}:{}", vis, static_kw, kw, name, type_str)
         }
         SymbolKind::Field => {
             let type_str = format_type_name(sym.type_id, type_table, interner);
-            let kw = if sym.flags.contains(SymbolFlags::FINAL) { "final" } else { "var" };
+            let kw = if sym.flags.contains(SymbolFlags::FINAL) {
+                "final"
+            } else {
+                "var"
+            };
             format!("{}{}{} {}:{}", vis, static_kw, kw, name, type_str)
         }
         SymbolKind::Property => {
@@ -198,17 +229,29 @@ fn format_symbol_signature(sym: &Symbol, type_table: &TypeTable, interner: &Stri
         }
         SymbolKind::Parameter => {
             let type_str = format_type_name(sym.type_id, type_table, interner);
-            let opt = if sym.flags.contains(SymbolFlags::OPTIONAL) { "?" } else { "" };
+            let opt = if sym.flags.contains(SymbolFlags::OPTIONAL) {
+                "?"
+            } else {
+                ""
+            };
             format!("{}{}:{}", opt, name, type_str)
         }
         SymbolKind::Class => {
-            let extern_kw = if sym.flags.contains(SymbolFlags::EXTERN) { "extern " } else { "" };
+            let extern_kw = if sym.flags.contains(SymbolFlags::EXTERN) {
+                "extern "
+            } else {
+                ""
+            };
             format!("{}{}class {}", vis, extern_kw, name)
         }
         SymbolKind::Interface => format!("{}interface {}", vis, name),
         SymbolKind::Enum => format!("{}enum {}", vis, name),
         SymbolKind::Abstract => {
-            let ea = if sym.flags.contains(SymbolFlags::ABSTRACT) { "enum " } else { "" };
+            let ea = if sym.flags.contains(SymbolFlags::ABSTRACT) {
+                "enum "
+            } else {
+                ""
+            };
             format!("{}{}abstract {}", vis, ea, name)
         }
         SymbolKind::TypeAlias => {
@@ -238,22 +281,35 @@ fn format_symbol_signature(sym: &Symbol, type_table: &TypeTable, interner: &Stri
 // ---------------------------------------------------------------------------
 
 /// Format function type as `(param:Type, ...):ReturnType`.
-fn format_function_type(type_id: TypeId, type_table: &TypeTable, interner: &StringInterner) -> String {
+fn format_function_type(
+    type_id: TypeId,
+    type_table: &TypeTable,
+    interner: &StringInterner,
+) -> String {
     if let Some(ti) = type_table.get(type_id) {
-        if let TypeKind::Function { params, return_type, .. } = &ti.kind {
+        if let TypeKind::Function {
+            params,
+            return_type,
+            ..
+        } = &ti.kind
+        {
             let param_strs: Vec<String> = params
                 .iter()
                 .map(|p| format_type_name(*p, type_table, interner))
                 .collect();
             let ret = format_type_name(*return_type, type_table, interner);
-            return format!("({}):{}",  param_strs.join(", "), ret);
+            return format!("({}):{}", param_strs.join(", "), ret);
         }
     }
     format_type_name(type_id, type_table, interner)
 }
 
 /// Format a type as a human-readable Haxe type name.
-pub fn format_type_name(type_id: TypeId, type_table: &TypeTable, interner: &StringInterner) -> String {
+pub fn format_type_name(
+    type_id: TypeId,
+    type_table: &TypeTable,
+    interner: &StringInterner,
+) -> String {
     let ti = match type_table.get(type_id) {
         Some(ti) => ti,
         None => return "Unknown".to_string(),
@@ -274,38 +330,66 @@ pub fn format_type_name(type_id: TypeId, type_table: &TypeTable, interner: &Stri
         TypeKind::Interface { .. } => "Interface".into(),
         TypeKind::Enum { .. } => "Enum".into(),
         TypeKind::Array { element_type, .. } => {
-            format!("Array<{}>", format_type_name(*element_type, type_table, interner))
+            format!(
+                "Array<{}>",
+                format_type_name(*element_type, type_table, interner)
+            )
         }
-        TypeKind::Map { key_type, value_type, .. } => {
-            format!("Map<{}, {}>",
+        TypeKind::Map {
+            key_type,
+            value_type,
+            ..
+        } => {
+            format!(
+                "Map<{}, {}>",
                 format_type_name(*key_type, type_table, interner),
-                format_type_name(*value_type, type_table, interner))
+                format_type_name(*value_type, type_table, interner)
+            )
         }
         TypeKind::Optional { inner_type, .. } => {
-            format!("Null<{}>", format_type_name(*inner_type, type_table, interner))
+            format!(
+                "Null<{}>",
+                format_type_name(*inner_type, type_table, interner)
+            )
         }
-        TypeKind::Function { params, return_type, .. } => {
-            let ps: Vec<String> = params.iter()
+        TypeKind::Function {
+            params,
+            return_type,
+            ..
+        } => {
+            let ps: Vec<String> = params
+                .iter()
                 .map(|p| format_type_name(*p, type_table, interner))
                 .collect();
-            format!("({}) -> {}", ps.join(", "), format_type_name(*return_type, type_table, interner))
+            format!(
+                "({}) -> {}",
+                ps.join(", "),
+                format_type_name(*return_type, type_table, interner)
+            )
         }
-        TypeKind::TypeParameter { symbol_id, .. } => {
-            // Resolve name from symbol table via the type's symbol_id
-            "T".to_string()
-        }
-        TypeKind::GenericInstance { base_type, type_args, .. } => {
+        TypeKind::TypeParameter { .. } => "T".to_string(),
+        TypeKind::GenericInstance {
+            base_type,
+            type_args,
+            ..
+        } => {
             let base = format_type_name(*base_type, type_table, interner);
-            let args: Vec<String> = type_args.iter()
+            let args: Vec<String> = type_args
+                .iter()
                 .map(|a| format_type_name(*a, type_table, interner))
                 .collect();
-            if args.is_empty() { base } else { format!("{}<{}>", base, args.join(", ")) }
+            if args.is_empty() {
+                base
+            } else {
+                format!("{}<{}>", base, args.join(", "))
+            }
         }
         TypeKind::TypeAlias { target_type, .. } => {
             format_type_name(*target_type, type_table, interner)
         }
         TypeKind::Anonymous { fields, .. } => {
-            let fs: Vec<String> = fields.iter()
+            let fs: Vec<String> = fields
+                .iter()
                 .map(|f| {
                     let fname = interner.get(f.name).unwrap_or("?");
                     let ftype = format_type_name(f.type_id, type_table, interner);
@@ -350,7 +434,10 @@ pub fn collect_completions(
 
         let kind = symbol_kind_to_completion(sym.kind);
         let detail = format_type_name(sym.type_id, &tt, interner);
-        let doc = sym.documentation.and_then(|d| interner.get(d)).map(|s| s.to_string());
+        let doc = sym
+            .documentation
+            .and_then(|d| interner.get(d))
+            .map(|s| s.to_string());
 
         // Deprecated tag
         let deprecated = sym.flags.contains(SymbolFlags::DEPRECATED);
@@ -370,12 +457,12 @@ pub fn collect_completions(
 
 fn completion_sort_priority(sym: &Symbol) -> u8 {
     match sym.kind {
-        SymbolKind::Variable | SymbolKind::Parameter => 0,    // Locals first
-        SymbolKind::Field | SymbolKind::Property => 1,        // Members
-        SymbolKind::Function => 2,                            // Methods
-        SymbolKind::EnumVariant => 3,                         // Enum values
+        SymbolKind::Variable | SymbolKind::Parameter => 0, // Locals first
+        SymbolKind::Field | SymbolKind::Property => 1,     // Members
+        SymbolKind::Function => 2,                         // Methods
+        SymbolKind::EnumVariant => 3,                      // Enum values
         SymbolKind::Class | SymbolKind::Interface | SymbolKind::Enum => 4, // Types
-        SymbolKind::TypeAlias | SymbolKind::Abstract => 5,    // Type aliases
+        SymbolKind::TypeAlias | SymbolKind::Abstract => 5, // Type aliases
         _ => 6,
     }
 }
@@ -483,10 +570,10 @@ pub const SEMANTIC_TOKEN_MODIFIERS: &[&str] = &[
 
 /// A single semantic token for LSP response.
 pub struct SemanticToken {
-    pub line: u32,         // 0-based
-    pub start_char: u32,   // 0-based
+    pub line: u32,       // 0-based
+    pub start_char: u32, // 0-based
     pub length: u32,
-    pub token_type: u32,   // index into SEMANTIC_TOKEN_TYPES
+    pub token_type: u32,      // index into SEMANTIC_TOKEN_TYPES
     pub token_modifiers: u32, // bitmask into SEMANTIC_TOKEN_MODIFIERS
 }
 
@@ -575,11 +662,10 @@ pub fn build_document_symbols(
     file_id: u32,
 ) -> Vec<DocumentSymbolEntry> {
     let tt = type_table.borrow();
-    let mut top_level = Vec::new();
 
     // Collect top-level declarations (classes, enums, functions, typedefs)
-    // Then nest methods/fields under their parent class/interface
-    let mut class_children: BTreeMap<SymbolId, Vec<DocumentSymbolEntry>> = BTreeMap::new();
+    // TODO: nest methods/fields under their parent class using scope_tree
+    let mut top_level = Vec::new();
 
     for sym in symbol_table.all_symbols() {
         if sym.definition_location.file_id != file_id || !sym.definition_location.is_valid() {
@@ -608,12 +694,18 @@ pub fn build_document_symbols(
         };
 
         match sym.kind {
-            SymbolKind::Class | SymbolKind::Interface | SymbolKind::Enum
-            | SymbolKind::Abstract | SymbolKind::Module => {
+            SymbolKind::Class
+            | SymbolKind::Interface
+            | SymbolKind::Enum
+            | SymbolKind::Abstract
+            | SymbolKind::Module => {
                 top_level.push((sym.id, entry));
             }
-            SymbolKind::Function | SymbolKind::Field | SymbolKind::Property
-            | SymbolKind::EnumVariant | SymbolKind::Variable => {
+            SymbolKind::Function
+            | SymbolKind::Field
+            | SymbolKind::Property
+            | SymbolKind::EnumVariant
+            | SymbolKind::Variable => {
                 // Try to find parent class
                 // For now, add as top-level (proper nesting needs scope_tree)
                 top_level.push((sym.id, entry));
@@ -676,21 +768,28 @@ pub fn build_signature_help(
     }
 
     let ti = tt.get(sym.type_id)?;
-    let (params, ret) = if let TypeKind::Function { params, return_type, .. } = &ti.kind {
+    let (params, ret) = if let TypeKind::Function {
+        params,
+        return_type,
+        ..
+    } = &ti.kind
+    {
         (params.clone(), *return_type)
     } else {
         return None;
     };
 
     let name = interner.get(sym.name)?;
-    let param_strs: Vec<String> = params.iter()
+    let param_strs: Vec<String> = params
+        .iter()
         .map(|p| format_type_name(*p, &tt, interner))
         .collect();
     let ret_str = format_type_name(ret, &tt, interner);
 
-    let label = format!("{}({}):{}",  name, param_strs.join(", "), ret_str);
+    let label = format!("{}({}):{}", name, param_strs.join(", "), ret_str);
 
-    let parameters: Vec<ParameterInfo> = param_strs.into_iter()
+    let parameters: Vec<ParameterInfo> = param_strs
+        .into_iter()
         .map(|p| ParameterInfo {
             label: p,
             documentation: None,
@@ -699,7 +798,10 @@ pub fn build_signature_help(
 
     Some(SignatureInfo {
         label,
-        documentation: sym.documentation.and_then(|d| interner.get(d)).map(|s| s.to_string()),
+        documentation: sym
+            .documentation
+            .and_then(|d| interner.get(d))
+            .map(|s| s.to_string()),
         parameters,
         active_parameter: active_param,
     })

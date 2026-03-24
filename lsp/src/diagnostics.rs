@@ -22,11 +22,7 @@ pub fn to_lsp_diagnostics(diags: &[LspDiagnostic]) -> Vec<Diagnostic> {
             // LSP uses 0-based lines/columns
             let line = if d.line > 0 { d.line - 1 } else { 0 };
             let col = if d.column > 0 { d.column - 1 } else { 0 };
-            let end_line = if d.end_line > 0 {
-                d.end_line - 1
-            } else {
-                line
-            };
+            let end_line = if d.end_line > 0 { d.end_line - 1 } else { line };
             let end_col = if d.end_column > 0 {
                 d.end_column - 1
             } else {

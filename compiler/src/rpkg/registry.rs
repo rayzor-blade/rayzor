@@ -84,9 +84,7 @@ impl LocalRegistry {
         std::fs::copy(rpkg_path, &dest_path)
             .map_err(|e| format!("Failed to copy to registry: {}", e))?;
 
-        let size_bytes = std::fs::metadata(&dest_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let size_bytes = std::fs::metadata(&dest_path).map(|m| m.len()).unwrap_or(0);
 
         let entry = PackageEntry {
             name: name.clone(),

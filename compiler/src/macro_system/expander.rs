@@ -1042,7 +1042,12 @@ fn compact_expr_string(expr: &Expr) -> String {
             format!("[{}]", inner.join(", "))
         }
         ExprKind::Binary { left, op, right } => {
-            format!("{} {:?} {}", compact_expr_string(left), op, compact_expr_string(right))
+            format!(
+                "{} {:?} {}",
+                compact_expr_string(left),
+                op,
+                compact_expr_string(right)
+            )
         }
         ExprKind::Unary { op, expr: inner } => {
             format!("{:?}{}", op, compact_expr_string(inner))
@@ -1052,7 +1057,11 @@ fn compact_expr_string(expr: &Expr) -> String {
             let args_str: Vec<String> = args.iter().map(compact_expr_string).collect();
             format!("{}({})", compact_expr_string(callee), args_str.join(", "))
         }
-        ExprKind::Field { expr: obj, field, is_optional } => {
+        ExprKind::Field {
+            expr: obj,
+            field,
+            is_optional,
+        } => {
             let op = if *is_optional { "?." } else { "." };
             format!("{}{}{}", compact_expr_string(obj), op, field)
         }

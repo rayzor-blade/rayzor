@@ -3066,15 +3066,9 @@ fn cmd_rpkg_install(file: PathBuf) -> Result<(), String> {
 
     let rows = vec![
         tui::panel::InfoRow::colored("Package", &entry.name, ratatui::style::Color::Cyan),
-        tui::panel::InfoRow::new(
-            "Size",
-            &format_bytes(entry.size_bytes),
-        ),
+        tui::panel::InfoRow::new("Size", &format_bytes(entry.size_bytes)),
         tui::panel::InfoRow::new("Haxe files", &entry.haxe_file_count.to_string()),
-        tui::panel::InfoRow::new(
-            "Native",
-            if entry.has_native { "yes" } else { "no" },
-        ),
+        tui::panel::InfoRow::new("Native", if entry.has_native { "yes" } else { "no" }),
         tui::panel::InfoRow::new("Location", &registry.root_dir().display().to_string()),
     ];
     let _ = tui::panel::render_info_panel("Package Installed", &rows, None);
@@ -3103,10 +3097,11 @@ fn cmd_rpkg_add(name: String) -> Result<(), String> {
         .map_err(|e| format!("Failed to read rayzor.toml: {}", e))?;
 
     // Check if dependency already exists
-    if content.contains(&format!("[dependencies]"))
-        && content.contains(&format!("{} ", name))
-    {
-        return Err(format!("Dependency '{}' already exists in rayzor.toml", name));
+    if content.contains("[dependencies]") && content.contains(&format!("{} ", name)) {
+        return Err(format!(
+            "Dependency '{}' already exists in rayzor.toml",
+            name
+        ));
     }
 
     // Append [dependencies] section if missing, or add to existing
@@ -3117,7 +3112,12 @@ fn cmd_rpkg_add(name: String) -> Result<(), String> {
             &format!("[dependencies]\n{} = {{ rpkg = \"{}\" }}", name, name),
         )
     } else {
-        format!("{}\n[dependencies]\n{} = {{ rpkg = \"{}\" }}\n", content.trim_end(), name, name)
+        format!(
+            "{}\n[dependencies]\n{} = {{ rpkg = \"{}\" }}\n",
+            content.trim_end(),
+            name,
+            name
+        )
     };
 
     std::fs::write(&manifest_path, updated)
@@ -3171,10 +3171,7 @@ fn cmd_rpkg_list() -> Result<(), String> {
     let packages = registry.list();
 
     if packages.is_empty() {
-        let rows = vec![tui::panel::InfoRow::new(
-            "Status",
-            "No packages installed",
-        )];
+        let rows = vec![tui::panel::InfoRow::new("Status", "No packages installed")];
         let _ = tui::panel::render_info_panel(
             "Package Registry",
             &rows,
