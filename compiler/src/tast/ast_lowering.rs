@@ -3076,6 +3076,7 @@ impl<'a> AstLowering<'a> {
                 ("gpuDef", string_type),
                 ("gpuSize", int_type),
                 ("gpuAlignment", int_type),
+                ("gpuVertexLayout", string_type),
             ];
             for (name_str, ret_type) in &synthetic_names {
                 let method_name = self.context.intern_string(name_str);
