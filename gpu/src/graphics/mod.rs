@@ -169,6 +169,17 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_buffer_create_with_data(
     }))
 }
 
+/// Get the inner wgpu::Buffer pointer for interop (e.g., compute → graphics).
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_gfx_buffer_get_inner(
+    buf: *const GraphicsBuffer,
+) -> *const wgpu::Buffer {
+    if buf.is_null() {
+        return std::ptr::null();
+    }
+    &(*buf).buffer as *const wgpu::Buffer
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_buffer_destroy(buf: *mut GraphicsBuffer) {
     if !buf.is_null() {
