@@ -2,14 +2,6 @@ package rayzor.gpu;
 
 /**
  * GPU texture — 2D image for rendering or sampling.
- *
- * Example:
- * ```haxe
- * var tex = Texture.create(device, 800, 600, TextureFormat.BGRA8Unorm,
- *     TextureUsage.RENDER_ATTACHMENT | TextureUsage.COPY_SRC);
- * var view = tex.getView();
- * tex.destroy();
- * ```
  */
 @:native("rayzor::gpu::Texture")
 extern class Texture {
@@ -21,9 +13,9 @@ extern class Texture {
     @:native("rayzor_gpu_gfx_texture_get_view")
     public function getView():Dynamic;
 
-    /** Read pixel data back from GPU to CPU. Returns RGBA8 bytes (4 bytes per pixel). */
-    @:native("rayzor_gpu_gfx_texture_read_pixels")
-    public function readPixels(device:GPUDevice, outPtr:Dynamic, outLen:Int):Int;
+    /** Read pixel data from GPU to CPU as haxe.io.Bytes (RGBA8, 4 bytes/pixel). */
+    @:native("rayzor_gpu_gfx_texture_to_bytes")
+    public function toBytes(device:GPUDevice):haxe.io.Bytes;
 
     /** Destroy this texture. */
     @:native("rayzor_gpu_gfx_texture_destroy")

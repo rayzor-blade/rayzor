@@ -220,6 +220,91 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_read_rgba(
     ptr
 }
 
+/// Haxe-friendly: read texture pixels into a HaxeBytes (RGBA8, 4 bytes per pixel).
+/// Returns null on failure.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_gfx_texture_to_bytes(
+    tex: *mut super::texture::GraphicsTexture,
+    ctx: *mut GraphicsContext,
+) -> *mut rayzor_runtime::haxe_sys::HaxeBytes {
+    use rayzor_runtime::haxe_sys::{haxe_bytes_alloc, HaxeBytes};
+
+    if ctx.is_null() || tex.is_null() {
+        return std::ptr::null_mut();
+    }
+    let tex_ref = &*tex;
+    let byte_count = (tex_ref.width * tex_ref.height * 4) as i32;
+    let bytes = haxe_bytes_alloc(byte_count);
+    if bytes.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let read = super::texture::rayzor_gpu_gfx_texture_read_pixels(
+        ctx,
+        tex,
+        (*bytes).ptr,
+        (*bytes).len,
+    );
+    if read == 0 {
+        // Failed — free and return null
+        return std::ptr::null_mut();
+    }
+
+    bytes
+}
+
+/// Haxe-friendly: read texture pixels and save as PPM file.
+/// Accepts a HaxeString* path.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_gfx_save_texture_ppm(
+    ctx: *mut GraphicsContext,
+    tex: *mut super::texture::GraphicsTexture,
+    path: *const rayzor_runtime::haxe_string::HaxeString,
+) -> i32 {
+    if ctx.is_null() || tex.is_null() || path.is_null() {
+        return 0;
+    }
+    let path_str = {
+        let hs = &*path;
+        if hs.ptr.is_null() || hs.len == 0 {
+            return 0;
+        }
+        std::str::from_utf8(std::slice::from_raw_parts(hs.ptr, hs.len)).unwrap_or("output.ppm")
+    };
+
+    let tex_ref = &*tex;
+    let w = tex_ref.width;
+    let h = tex_ref.height;
+    let byte_count = (w * h * 4) as usize;
+    let mut pixels = vec![0u8; byte_count];
+    let read = super::texture::rayzor_gpu_gfx_texture_read_pixels(
+        ctx,
+        tex,
+        pixels.as_mut_ptr(),
+        pixels.len(),
+    );
+    if read == 0 {
+        return 0;
+    }
+
+    // Build PPM (P6 binary)
+    let header = format!("P6\n{} {}\n255\n", w, h);
+    let mut data = header.into_bytes();
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            data.push(pixels[i]);     // R
+            data.push(pixels[i + 1]); // G
+            data.push(pixels[i + 2]); // B
+        }
+    }
+
+    match std::fs::write(path_str, &data) {
+        Ok(_) => 1,
+        Err(_) => 0,
+    }
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_encoder_destroy(encoder: *mut GraphicsEncoder) {
     if !encoder.is_null() {

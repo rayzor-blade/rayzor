@@ -135,7 +135,7 @@ declare_native_methods! {
 
     // Render (Haxe-friendly simplified APIs)
     "rayzor_gpu_Renderer", "renderTriangles", static, "rayzor_gpu_gfx_render_triangles", [Ptr, Ptr, Ptr, I64, F64, F64, F64, F64] => Void;
-    "rayzor_gpu_Texture", "readRGBA",        instance, "rayzor_gpu_gfx_texture_read_rgba", [Ptr, Ptr, Ptr] => Ptr;
+    "rayzor_gpu_Texture", "toBytes",          instance, "rayzor_gpu_gfx_texture_to_bytes", [Ptr, Ptr] => Ptr;
 
     // Surface
     "rayzor_gpu_Surface", "present",        instance, "rayzor_gpu_gfx_surface_present",    [Ptr]           => Void;
@@ -372,7 +372,7 @@ pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
             ("rayzor_gpu_gfx_texture_destroy", graphics::texture::rayzor_gpu_gfx_texture_destroy as *const u8),
             ("rayzor_gpu_gfx_render_submit", graphics::render_pass::rayzor_gpu_gfx_render_submit as *const u8),
             ("rayzor_gpu_gfx_render_triangles", graphics::render_pass::rayzor_gpu_gfx_render_triangles as *const u8),
-            ("rayzor_gpu_gfx_texture_read_rgba", graphics::render_pass::rayzor_gpu_gfx_texture_read_rgba as *const u8),
+            ("rayzor_gpu_gfx_texture_to_bytes", graphics::render_pass::rayzor_gpu_gfx_texture_to_bytes as *const u8),
         ];
         symbols.extend(gfx_symbols);
     }
