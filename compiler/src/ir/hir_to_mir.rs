@@ -8162,7 +8162,7 @@ impl<'a> HirToMirContext<'a> {
                                         if c.symbol_id == *class_sym {
                                             let tt = self.type_table;
                                             match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
-                                                c, self.symbol_table, tt, self.string_interner,
+                                                c, self.symbol_table, tt, self.string_interner, self.current_hir_types,
                                             ) {
                                                 Ok(wgsl) => return self.builder.build_const(IrValue::String(wgsl)),
                                                 Err(e) => return self.builder.build_const(IrValue::String(format!("/* WGSL error: {} */", e))),
@@ -8314,6 +8314,7 @@ impl<'a> HirToMirContext<'a> {
                                         self.symbol_table,
                                         type_table,
                                         self.string_interner,
+                                        self.current_hir_types,
                                     ) {
                                         Ok(wgsl_source) => {
                                             return self.builder.build_const(
@@ -8358,6 +8359,7 @@ impl<'a> HirToMirContext<'a> {
                                             self.symbol_table,
                                             type_table,
                                             self.string_interner,
+                                            self.current_hir_types,
                                         ) {
                                             Ok(wgsl_source) => {
                                                 return self.builder.build_const(
@@ -8421,6 +8423,7 @@ impl<'a> HirToMirContext<'a> {
                                                         self.symbol_table,
                                                         type_table,
                                                         self.string_interner,
+                                                        self.current_hir_types,
                                                     ) {
                                                         Ok(wgsl_source) => {
                                                             return self.builder.build_const(
@@ -8695,7 +8698,7 @@ impl<'a> HirToMirContext<'a> {
                                     if Some(c.symbol_id) == obj_sym {
                                         let type_table = self.type_table;
                                         match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
-                                            c, self.symbol_table, type_table, self.string_interner,
+                                            c, self.symbol_table, type_table, self.string_interner, self.current_hir_types,
                                         ) {
                                             Ok(wgsl) => return self.builder.build_const(IrValue::String(wgsl)),
                                             Err(e) => return self.builder.build_const(IrValue::String(format!("/* WGSL error: {} */", e))),
@@ -15223,7 +15226,7 @@ impl<'a> HirToMirContext<'a> {
                                     if is_shader {
                                         let type_table = self.type_table;
                                         match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
-                                            c, self.symbol_table, type_table, self.string_interner,
+                                            c, self.symbol_table, type_table, self.string_interner, self.current_hir_types,
                                         ) {
                                             Ok(wgsl) => return self.builder.build_const(IrValue::String(wgsl)),
                                             Err(e) => return self.builder.build_const(IrValue::String(format!("/* WGSL error: {} */", e))),
