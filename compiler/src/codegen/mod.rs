@@ -15,6 +15,7 @@ pub mod llvm_jit_backend;
 pub mod mir_interpreter;
 pub mod profiling;
 pub mod tiered_backend;
+pub mod wgsl_transpiler;
 
 // Apple Silicon-specific JIT memory management
 #[cfg(all(target_arch = "aarch64", target_os = "macos"))]

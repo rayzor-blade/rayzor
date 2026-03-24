@@ -668,6 +668,9 @@ impl<'a> AstLowering<'a> {
                 "gpuStruct" => {
                     flags = flags.union(SymbolFlags::GPU_STRUCT);
                 }
+                "shader" => {
+                    flags = flags.union(SymbolFlags::SHADER);
+                }
                 "no_mangle" => flags = flags.union(SymbolFlags::NO_MANGLE),
                 "notNull" => flags = flags.union(SymbolFlags::NOT_NULL),
                 "async" => flags = flags.union(SymbolFlags::ASYNC),
@@ -3142,6 +3145,65 @@ impl<'a> AstLowering<'a> {
                     },
                 });
             }
+        }
+
+        // Auto-inject synthetic wgsl() for @:shader classes
+        if symbol_flags.is_shader() {
+            let string_type = self.context.type_table.borrow().string_type();
+            let method_name = self.context.intern_string("wgsl");
+            let method_symbol = self
+                .context
+                .symbol_table
+                .create_function_in_scope(method_name, class_scope);
+            self.context
+                .symbol_table
+                .add_symbol_flags(method_symbol, crate::tast::symbols::SymbolFlags::STATIC);
+            if let Some(scope) = self.context.scope_tree.get_scope_mut(class_scope) {
+                scope.add_symbol(method_symbol, method_name);
+            }
+            let fn_type = self
+                .context
+                .type_table
+                .borrow_mut()
+                .create_function_type(vec![], string_type);
+            self.context
+                .symbol_table
+                .update_symbol_type(method_symbol, fn_type);
+
+            if let Some(methods_list) = self.class_methods.get_mut(&class_symbol) {
+                methods_list.push((method_name, method_symbol, true));
+            }
+
+            methods.push(crate::tast::node::TypedFunction {
+                symbol_id: method_symbol,
+                name: method_name,
+                parameters: vec![],
+                return_type: string_type,
+                body: vec![],
+                visibility: crate::tast::symbols::Visibility::Public,
+                effects: Default::default(),
+                type_parameters: vec![],
+                is_static: true,
+                source_location: crate::tast::SourceLocation {
+                    file_id: 0,
+                    line: 0,
+                    column: 0,
+                    byte_offset: 0,
+                },
+                metadata: crate::tast::node::FunctionMetadata {
+                    complexity_score: 0,
+                    statement_count: 0,
+                    is_recursive: false,
+                    call_count: 0,
+                    is_override: false,
+                    overload_signatures: vec![],
+                    operator_metadata: vec![],
+                    is_array_access: false,
+                    is_from_conversion: false,
+                    is_to_conversion: false,
+                    memory_annotations: vec![],
+                },
+            });
         }
 
         // Extract memory safety annotations from metadata
