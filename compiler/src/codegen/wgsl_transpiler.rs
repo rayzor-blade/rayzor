@@ -654,9 +654,20 @@ impl<'a> WgslCtx<'a> {
                         writeln!(self.out, "{}}}", ind).unwrap();
                     }
                     _ => {
-                        let s = self.hir_expr_to_string(expr)?;
-                        if !s.is_empty() {
-                            writeln!(self.out, "{}{};", ind, s).unwrap();
+                        // Skip side-effect-free expression statements
+                        // (dead code from HIR assignment trailing values)
+                        if matches!(
+                            expr.kind,
+                            hir::HirExprKind::Variable { .. }
+                                | hir::HirExprKind::Field { .. }
+                                | hir::HirExprKind::Null
+                        ) {
+                            // Skip — assignment result value, not a real statement
+                        } else {
+                            let s = self.hir_expr_to_string(expr)?;
+                            if !s.is_empty() {
+                                writeln!(self.out, "{}{};", ind, s).unwrap();
+                            }
                         }
                     }
                 }
@@ -867,11 +878,20 @@ impl<'a> WgslCtx<'a> {
                 let e = self.hir_expr_to_string(trailing)?;
                 writeln!(self.out, "{}return {};", ind, e).unwrap();
             } else {
-                // Just emit as expression statement (for if/else blocks)
-                let ind = self.ind(depth);
-                let e = self.hir_expr_to_string(trailing)?;
-                if !e.is_empty() {
-                    writeln!(self.out, "{}{};", ind, e).unwrap();
+                // Skip trailing expressions that are just assignment results
+                // (field access, variable ref — these are the value of the preceding assignment)
+                let is_assignment_result = matches!(
+                    trailing.kind,
+                    hir::HirExprKind::Variable { .. }
+                        | hir::HirExprKind::Field { .. }
+                        | hir::HirExprKind::Null
+                );
+                if !is_assignment_result {
+                    let ind = self.ind(depth);
+                    let e = self.hir_expr_to_string(trailing)?;
+                    if !e.is_empty() {
+                        writeln!(self.out, "{}{};", ind, e).unwrap();
+                    }
                 }
             }
         }

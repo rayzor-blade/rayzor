@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Tue Mar 24 12:39:31 GMT 2026
+  Tue Mar 24 13:21:19 GMT 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -610,7 +610,7 @@ done
 Running compiler/tests/haxe/test_exception.hx [debug] [preset: Application]...
 basic error
 custom error
-specific
+null
 42
 caught dynamic
 has stack
@@ -676,8 +676,8 @@ Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
 2
 hello
 world
-10
 20
+10
 30
 done
 
@@ -694,7 +694,7 @@ Running compiler/tests/haxe/test_forward.hx [debug] [preset: Application]...
 --- test_future [PASS] ---
 Running compiler/tests/haxe/test_future.hx [debug] [preset: Application]...
 42
-30
+<unknown type 248132486>
 100
 42
 99
@@ -847,7 +847,7 @@ Running compiler/tests/haxe/test_map_literal.hx [debug] [preset: Application]...
 
 --- test_map_literal2 [PASS] ---
 Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]...
-{hello => 42, world => 99}
+{world => 99, hello => 42}
 42
 99
 true
