@@ -103,15 +103,17 @@ declare_native_methods! {
     "rayzor_gpu_ShaderModule", "destroy",   instance, "rayzor_gpu_gfx_shader_destroy",     [Ptr]           => Void;
 
     // Buffer (graphics)
-    "rayzor_gpu_GfxBuffer", "create",       static,   "rayzor_gpu_gfx_buffer_create",      [Ptr, I64, I64] => Ptr;
-    "rayzor_gpu_GfxBuffer", "write",        instance, "rayzor_gpu_gfx_buffer_write",       [Ptr, Ptr, I64, Ptr, I64] => Void;
-    "rayzor_gpu_GfxBuffer", "destroy",      instance, "rayzor_gpu_gfx_buffer_destroy",     [Ptr]           => Void;
+    "rayzor_gpu_GfxBuffer", "create",           static,   "rayzor_gpu_gfx_buffer_create",           [Ptr, I64, I64] => Ptr;
+    "rayzor_gpu_GfxBuffer", "createWithData",   static,   "rayzor_gpu_gfx_buffer_create_with_data", [Ptr, Ptr, I64, I64] => Ptr;
+    "rayzor_gpu_GfxBuffer", "write",            instance, "rayzor_gpu_gfx_buffer_write",            [Ptr, Ptr, I64, Ptr, I64] => Void;
+    "rayzor_gpu_GfxBuffer", "destroy",          instance, "rayzor_gpu_gfx_buffer_destroy",          [Ptr]           => Void;
 
     // Texture
     "rayzor_gpu_Texture", "create",         static,   "rayzor_gpu_gfx_texture_create",     [Ptr, I64, I64, I64, I64] => Ptr;
     "rayzor_gpu_Texture", "write",          instance, "rayzor_gpu_gfx_texture_write",      [Ptr, Ptr, Ptr, I64, I64] => Void;
     "rayzor_gpu_Texture", "getView",        instance, "rayzor_gpu_gfx_texture_get_view",   [Ptr]           => Ptr;
     "rayzor_gpu_Texture", "destroy",        instance, "rayzor_gpu_gfx_texture_destroy",    [Ptr]           => Void;
+    "rayzor_gpu_Texture", "readPixels",     instance, "rayzor_gpu_gfx_texture_read_pixels", [Ptr, Ptr, Ptr, I64] => I64;
 
     // Sampler
     "rayzor_gpu_Sampler", "create",         static,   "rayzor_gpu_gfx_sampler_create",     [Ptr, I64, I64, I64] => Ptr;

@@ -93,6 +93,94 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_destroy(tex: *mut GraphicsTextur
     }
 }
 
+/// Read pixel data from a texture into a CPU buffer.
+/// The texture must have COPY_SRC usage. Returns the number of bytes written,
+/// or 0 on failure. Output is RGBA8 (4 bytes per pixel).
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_gfx_texture_read_pixels(
+    ctx: *mut GraphicsContext,
+    tex: *mut GraphicsTexture,
+    out_ptr: *mut u8,
+    out_capacity: usize,
+) -> usize {
+    if ctx.is_null() || tex.is_null() || out_ptr.is_null() {
+        return 0;
+    }
+    let ctx = &*ctx;
+    let tex = &*tex;
+
+    let bytes_per_pixel = 4u32; // RGBA8
+    let padded_bytes_per_row = (tex.width * bytes_per_pixel + 255) & !255; // Align to 256
+    let total_size = (padded_bytes_per_row * tex.height) as u64;
+
+    // Create staging buffer
+    let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rayzor_readback_staging"),
+        size: total_size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+
+    // Copy texture → staging buffer
+    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("rayzor_readback_encoder"),
+    });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture: &tex.texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(padded_bytes_per_row),
+                rows_per_image: Some(tex.height),
+            },
+        },
+        wgpu::Extent3d {
+            width: tex.width,
+            height: tex.height,
+            depth_or_array_layers: 1,
+        },
+    );
+    ctx.queue.submit(std::iter::once(encoder.finish()));
+
+    // Map and read back
+    let buffer_slice = staging.slice(..);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    ctx.device.poll(wgpu::Maintain::Wait);
+
+    if receiver.recv().ok().and_then(|r| r.ok()).is_none() {
+        return 0;
+    }
+
+    let mapped = buffer_slice.get_mapped_range();
+    let unpadded_row_bytes = (tex.width * bytes_per_pixel) as usize;
+    let needed = unpadded_row_bytes * tex.height as usize;
+    if out_capacity < needed {
+        return 0;
+    }
+
+    // Copy with padding removal
+    let out = std::slice::from_raw_parts_mut(out_ptr, needed);
+    for row in 0..tex.height as usize {
+        let src_offset = row * padded_bytes_per_row as usize;
+        let dst_offset = row * unpadded_row_bytes;
+        out[dst_offset..dst_offset + unpadded_row_bytes]
+            .copy_from_slice(&mapped[src_offset..src_offset + unpadded_row_bytes]);
+    }
+
+    drop(mapped);
+    staging.unmap();
+    needed
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_sampler_create(
     ctx: *mut GraphicsContext,

@@ -1,7 +1,8 @@
 //! Command encoder and render pass recording.
 
-use super::pipeline::GraphicsPipeline;
 use super::bind_group::GraphicsBindGroup;
+use super::pipeline::GraphicsPipeline;
+use super::GraphicsBuffer;
 use super::GraphicsContext;
 
 /// Wrapper around wgpu CommandEncoder. Owns the encoder until finish+submit.
@@ -48,10 +49,10 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_render_submit(
     clear_r: f64, clear_g: f64, clear_b: f64, clear_a: f64,
     depth_view: *const wgpu::TextureView,
     pipeline: *const GraphicsPipeline,
-    vertex_buffer: *const wgpu::Buffer,
+    vertex_buffer: *const GraphicsBuffer,
     vertex_count: u32,
     instance_count: u32,
-    index_buffer: *const wgpu::Buffer,
+    index_buffer: *const GraphicsBuffer,
     index_count: u32,
     index_format: i32,
     bind_group_count: i32,
@@ -120,7 +121,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_render_submit(
 
         // Vertex buffer
         if !vertex_buffer.is_null() {
-            pass.set_vertex_buffer(0, (*vertex_buffer).slice(..));
+            pass.set_vertex_buffer(0, (*vertex_buffer).buffer.slice(..));
         }
 
         // Index buffer + indexed draw
@@ -130,7 +131,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_render_submit(
             } else {
                 wgpu::IndexFormat::Uint16
             };
-            pass.set_index_buffer((*index_buffer).slice(..), fmt);
+            pass.set_index_buffer((*index_buffer).buffer.slice(..), fmt);
             pass.draw_indexed(0..index_count, 0, 0..instance_count);
         } else if vertex_count > 0 {
             pass.draw(0..vertex_count, 0..instance_count);
