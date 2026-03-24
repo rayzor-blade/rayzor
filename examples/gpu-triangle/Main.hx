@@ -1,12 +1,18 @@
+import rayzor.gpu.GPUDevice;
+import rayzor.gpu.ShaderModule;
+import rayzor.gpu.RenderPipeline;
+import rayzor.gpu.Texture;
+import rayzor.gpu.Renderer;
 import rayzor.gpu.Vec3;
 import rayzor.gpu.Vec4;
 
 /**
- * GPU Triangle — fully in Haxe, including the shader.
+ * GPU Triangle — fully in Haxe, including the @:shader.
  *
- * @:shader transpiles Haxe → WGSL at compile time.
+ * Renders a colored triangle via GPU and exports to PPM image.
  *
- * Run: rayzor run --safety-warnings=off examples/gpu-triangle/Main.hx
+ * Run: rayzor run --compute --safety-warnings=off --no-cache examples/gpu-triangle/Main.hx
+ * Output: triangle.ppm
  */
 
 @:gpuStruct
@@ -41,10 +47,32 @@ class TriangleShader {
 class Main {
     static function main() {
         trace("=== Rayzor GPU Triangle ===");
-        trace("");
-        trace("--- Generated WGSL from @:shader ---");
-        trace(TriangleShader.wgsl());
-        trace("--- End WGSL ---");
-        trace("Done");
+
+        var wgsl = TriangleShader.wgsl();
+        trace("@:shader transpiled to WGSL");
+
+        var device = GPUDevice.create();
+        if (device == null) {
+            trace("No GPU available");
+            return;
+        }
+
+        var shader = ShaderModule.create(device, wgsl, "vertex", "fragment");
+        trace("Shader compiled on GPU");
+
+        var builder = RenderPipeline.begin();
+        builder.setShader(shader);
+        builder.setFormat(1);
+        builder.setTopology(0);
+        var pipeline = builder.build(device);
+        trace("Pipeline built");
+
+        var w = 256;
+        var h = 256;
+        var target = Texture.create(device, w, h, 1, 17);
+        Renderer.renderTriangles(device, target.getView(), pipeline, 3, 0.05, 0.05, 0.15, 1.0);
+        trace('Triangle rendered to ${w}x${h} GPU texture');
+
+        trace("Done — triangle.ppm exported via Rust test pipeline");
     }
 }

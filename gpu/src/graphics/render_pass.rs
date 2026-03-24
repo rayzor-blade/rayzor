@@ -152,6 +152,74 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_render_submit(
     ctx.queue.submit(std::iter::once(encoder.finish()));
 }
 
+/// Haxe-friendly: render triangle(s) with clear color, no vertex buffer needed.
+/// Simpler than render_submit — covers the common @:shader procedural case.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_gfx_render_triangles(
+    ctx: *mut GraphicsContext,
+    color_view: *const wgpu::TextureView,
+    pipeline: *const GraphicsPipeline,
+    vertex_count: i32,
+    clear_r: f64,
+    clear_g: f64,
+    clear_b: f64,
+    clear_a: f64,
+) {
+    if ctx.is_null() || color_view.is_null() || pipeline.is_null() {
+        return;
+    }
+    rayzor_gpu_gfx_render_submit(
+        ctx,
+        color_view,
+        0, // Clear
+        clear_r,
+        clear_g,
+        clear_b,
+        clear_a,
+        std::ptr::null(),  // no depth
+        pipeline,
+        std::ptr::null(),  // no vertex buffer
+        vertex_count as u32,
+        1,                 // 1 instance
+        std::ptr::null(),  // no index buffer
+        0,
+        0,
+        0,
+        std::ptr::null(),  // no bind groups
+    );
+}
+
+/// Haxe-friendly: read texture pixels into a newly allocated buffer.
+/// Returns pointer to RGBA8 data (caller must free), sets out_len.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_gfx_texture_read_rgba(
+    ctx: *mut GraphicsContext,
+    tex: *mut super::texture::GraphicsTexture,
+    out_len: *mut usize,
+) -> *mut u8 {
+    if ctx.is_null() || tex.is_null() {
+        return std::ptr::null_mut();
+    }
+    let tex_ref = &*tex;
+    let byte_count = (tex_ref.width * tex_ref.height * 4) as usize;
+    let mut buf = vec![0u8; byte_count];
+    let read = super::texture::rayzor_gpu_gfx_texture_read_pixels(
+        ctx,
+        tex,
+        buf.as_mut_ptr(),
+        buf.len(),
+    );
+    if read == 0 {
+        return std::ptr::null_mut();
+    }
+    if !out_len.is_null() {
+        *out_len = read;
+    }
+    let ptr = buf.as_mut_ptr();
+    std::mem::forget(buf); // caller owns the memory
+    ptr
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_encoder_destroy(encoder: *mut GraphicsEncoder) {
     if !encoder.is_null() {

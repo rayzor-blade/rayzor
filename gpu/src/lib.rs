@@ -98,8 +98,8 @@ declare_native_methods! {
     "rayzor_gpu_GPUDevice", "destroy",      instance, "rayzor_gpu_gfx_device_destroy",     [Ptr]           => Void;
     "rayzor_gpu_GPUDevice", "isAvailable",  static,   "rayzor_gpu_gfx_is_available",       []              => I64;
 
-    // ShaderModule
-    "rayzor_gpu_ShaderModule", "create",    static,   "rayzor_gpu_gfx_shader_create",      [Ptr, Ptr, I64, Ptr, I64, Ptr, I64] => Ptr;
+    // ShaderModule (Haxe-friendly: accepts HaxeString* directly)
+    "rayzor_gpu_ShaderModule", "create",    static,   "rayzor_gpu_gfx_shader_create_hx",   [Ptr, Ptr, Ptr, Ptr] => Ptr;
     "rayzor_gpu_ShaderModule", "destroy",   instance, "rayzor_gpu_gfx_shader_destroy",     [Ptr]           => Void;
 
     // Buffer (graphics)
@@ -133,8 +133,9 @@ declare_native_methods! {
     "rayzor_gpu_BindGroupLayout", "destroy", instance, "rayzor_gpu_gfx_bind_group_layout_destroy", [Ptr]   => Void;
     "rayzor_gpu_BindGroup", "destroy",      instance, "rayzor_gpu_gfx_bind_group_destroy",  [Ptr]           => Void;
 
-    // Render submit — uses raw FFI (too many params for macro)
-    // Registered manually in the symbol table below
+    // Render (Haxe-friendly simplified APIs)
+    "rayzor_gpu_Renderer", "renderTriangles", static, "rayzor_gpu_gfx_render_triangles", [Ptr, Ptr, Ptr, I64, F64, F64, F64, F64] => Void;
+    "rayzor_gpu_Texture", "readRGBA",        instance, "rayzor_gpu_gfx_texture_read_rgba", [Ptr, Ptr, Ptr] => Ptr;
 
     // Surface
     "rayzor_gpu_Surface", "present",        instance, "rayzor_gpu_gfx_surface_present",    [Ptr]           => Void;
@@ -356,6 +357,7 @@ pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
             ("rayzor_gpu_gfx_buffer_write", graphics::rayzor_gpu_gfx_buffer_write as *const u8),
             ("rayzor_gpu_gfx_buffer_destroy", graphics::rayzor_gpu_gfx_buffer_destroy as *const u8),
             ("rayzor_gpu_gfx_shader_create", graphics::shader::rayzor_gpu_gfx_shader_create as *const u8),
+            ("rayzor_gpu_gfx_shader_create_hx", graphics::shader::rayzor_gpu_gfx_shader_create_hx as *const u8),
             ("rayzor_gpu_gfx_shader_destroy", graphics::shader::rayzor_gpu_gfx_shader_destroy as *const u8),
             ("rayzor_gpu_gfx_pipeline_begin", graphics::pipeline::rayzor_gpu_gfx_pipeline_begin as *const u8),
             ("rayzor_gpu_gfx_pipeline_set_shader", graphics::pipeline::rayzor_gpu_gfx_pipeline_set_shader as *const u8),
@@ -369,6 +371,8 @@ pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
             ("rayzor_gpu_gfx_texture_read_pixels", graphics::texture::rayzor_gpu_gfx_texture_read_pixels as *const u8),
             ("rayzor_gpu_gfx_texture_destroy", graphics::texture::rayzor_gpu_gfx_texture_destroy as *const u8),
             ("rayzor_gpu_gfx_render_submit", graphics::render_pass::rayzor_gpu_gfx_render_submit as *const u8),
+            ("rayzor_gpu_gfx_render_triangles", graphics::render_pass::rayzor_gpu_gfx_render_triangles as *const u8),
+            ("rayzor_gpu_gfx_texture_read_rgba", graphics::render_pass::rayzor_gpu_gfx_texture_read_rgba as *const u8),
         ];
         symbols.extend(gfx_symbols);
     }
