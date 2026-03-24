@@ -18,6 +18,7 @@
 
 pub mod install;
 pub mod pack;
+pub mod registry;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
