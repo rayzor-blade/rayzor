@@ -29,6 +29,9 @@ pub mod metal;
 #[cfg(feature = "webgpu-backend")]
 pub mod wgpu_backend;
 
+#[cfg(feature = "webgpu-backend")]
+pub mod graphics;
+
 #[cfg(feature = "cuda-backend")]
 pub mod cuda;
 
@@ -85,6 +88,55 @@ declare_native_methods! {
     // GpuBuffer instance methods
     "rayzor_gpu_GpuBuffer",  "numel",        instance, "rayzor_gpu_compute_buffer_numel",  [Ptr]           => I64;
     "rayzor_gpu_GpuBuffer",  "dtype",        instance, "rayzor_gpu_compute_buffer_dtype",  [Ptr]           => I64;
+
+    // ======================================================================
+    // GPU Graphics (render pipeline)
+    // ======================================================================
+
+    // GPUDevice lifecycle
+    "rayzor_gpu_GPUDevice", "create",       static,   "rayzor_gpu_gfx_device_create",      []              => Ptr;
+    "rayzor_gpu_GPUDevice", "destroy",      instance, "rayzor_gpu_gfx_device_destroy",     [Ptr]           => Void;
+    "rayzor_gpu_GPUDevice", "isAvailable",  static,   "rayzor_gpu_gfx_is_available",       []              => I64;
+
+    // ShaderModule
+    "rayzor_gpu_ShaderModule", "create",    static,   "rayzor_gpu_gfx_shader_create",      [Ptr, Ptr, I64, Ptr, I64, Ptr, I64] => Ptr;
+    "rayzor_gpu_ShaderModule", "destroy",   instance, "rayzor_gpu_gfx_shader_destroy",     [Ptr]           => Void;
+
+    // Buffer (graphics)
+    "rayzor_gpu_GfxBuffer", "create",       static,   "rayzor_gpu_gfx_buffer_create",      [Ptr, I64, I64] => Ptr;
+    "rayzor_gpu_GfxBuffer", "write",        instance, "rayzor_gpu_gfx_buffer_write",       [Ptr, Ptr, I64, Ptr, I64] => Void;
+    "rayzor_gpu_GfxBuffer", "destroy",      instance, "rayzor_gpu_gfx_buffer_destroy",     [Ptr]           => Void;
+
+    // Texture
+    "rayzor_gpu_Texture", "create",         static,   "rayzor_gpu_gfx_texture_create",     [Ptr, I64, I64, I64, I64] => Ptr;
+    "rayzor_gpu_Texture", "write",          instance, "rayzor_gpu_gfx_texture_write",      [Ptr, Ptr, Ptr, I64, I64] => Void;
+    "rayzor_gpu_Texture", "getView",        instance, "rayzor_gpu_gfx_texture_get_view",   [Ptr]           => Ptr;
+    "rayzor_gpu_Texture", "destroy",        instance, "rayzor_gpu_gfx_texture_destroy",    [Ptr]           => Void;
+
+    // Sampler
+    "rayzor_gpu_Sampler", "create",         static,   "rayzor_gpu_gfx_sampler_create",     [Ptr, I64, I64, I64] => Ptr;
+    "rayzor_gpu_Sampler", "destroy",        instance, "rayzor_gpu_gfx_sampler_destroy",    [Ptr]           => Void;
+
+    // RenderPipeline builder
+    "rayzor_gpu_RenderPipeline", "begin",   static,   "rayzor_gpu_gfx_pipeline_begin",     []              => Ptr;
+    "rayzor_gpu_RenderPipeline", "setShader", instance, "rayzor_gpu_gfx_pipeline_set_shader", [Ptr, Ptr]   => Void;
+    "rayzor_gpu_RenderPipeline", "setFormat", instance, "rayzor_gpu_gfx_pipeline_set_format", [Ptr, I64]   => Void;
+    "rayzor_gpu_RenderPipeline", "setTopology", instance, "rayzor_gpu_gfx_pipeline_set_topology", [Ptr, I64] => Void;
+    "rayzor_gpu_RenderPipeline", "setCull",   instance, "rayzor_gpu_gfx_pipeline_set_cull",   [Ptr, I64]   => Void;
+    "rayzor_gpu_RenderPipeline", "build",     instance, "rayzor_gpu_gfx_pipeline_build",     [Ptr, Ptr]    => Ptr;
+    "rayzor_gpu_RenderPipeline", "destroy",   instance, "rayzor_gpu_gfx_pipeline_destroy",   [Ptr]         => Void;
+
+    // BindGroup
+    "rayzor_gpu_BindGroupLayout", "create", static,   "rayzor_gpu_gfx_bind_group_layout_create", [Ptr, I64, Ptr, Ptr] => Ptr;
+    "rayzor_gpu_BindGroupLayout", "destroy", instance, "rayzor_gpu_gfx_bind_group_layout_destroy", [Ptr]   => Void;
+    "rayzor_gpu_BindGroup", "destroy",      instance, "rayzor_gpu_gfx_bind_group_destroy",  [Ptr]           => Void;
+
+    // Render submit — uses raw FFI (too many params for macro)
+    // Registered manually in the symbol table below
+
+    // Surface
+    "rayzor_gpu_Surface", "present",        instance, "rayzor_gpu_gfx_surface_present",    [Ptr]           => Void;
+    "rayzor_gpu_Surface", "destroy",        instance, "rayzor_gpu_gfx_surface_destroy",    [Ptr]           => Void;
 }
 
 // ============================================================================
