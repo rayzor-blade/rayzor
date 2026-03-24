@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Mon Mar 23 23:41:03 GMT 2026
+  Tue Mar 24 00:21:56 GMT 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -674,11 +674,11 @@ Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
 0
 1
 2
-world
 hello
-20
-10
+world
 30
+10
+20
 done
 
 --- test_forward [PASS] ---
@@ -694,7 +694,7 @@ Running compiler/tests/haxe/test_forward.hx [debug] [preset: Application]...
 --- test_future [PASS] ---
 Running compiler/tests/haxe/test_future.hx [debug] [preset: Application]...
 42
-30
+<unknown type 2853176290>
 100
 42
 99
@@ -847,12 +847,12 @@ Running compiler/tests/haxe/test_map_literal.hx [debug] [preset: Application]...
 
 --- test_map_literal2 [PASS] ---
 Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]...
-{hello => 42, world => 99}
+{world => 99, hello => 42}
 42
 99
 true
 false
-{1 => 100, 2 => 200}
+{2 => 200, 1 => 100}
 100
 200
 true
