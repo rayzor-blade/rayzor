@@ -6,6 +6,7 @@
 
 pub mod bind_group;
 pub mod command;
+pub mod haxe_api;
 pub mod pipeline;
 pub mod render_pass;
 pub mod shader;

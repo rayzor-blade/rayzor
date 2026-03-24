@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Tue Mar 24 18:55:25 GMT 2026
+  Tue Mar 24 20:45:28 GMT 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -676,8 +676,8 @@ Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
 2
 hello
 world
-10
 30
+10
 20
 done
 
@@ -852,7 +852,7 @@ Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]..
 99
 true
 false
-{2 => 200, 1 => 100}
+{1 => 100, 2 => 200}
 100
 200
 true
