@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Tue Mar 24 12:00:24 GMT 2026
+  Tue Mar 24 12:39:31 GMT 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -606,7 +606,7 @@ Running compiler/tests/haxe/test_ereg_map.hx [debug] [preset: Application]...
 hello world
 done
 
---- test_exception [CRASH(134/SIGABRT)] ---
+--- test_exception [PASS] ---
 Running compiler/tests/haxe/test_exception.hx [debug] [preset: Application]...
 basic error
 custom error
@@ -1202,7 +1202,7 @@ Done
 
 =========================================
   TOTAL:        118
-  PASSED:       117
+  PASSED:       118
   FAILED:       0
-  CRASHED:      1
+  CRASHED:      0
 =========================================

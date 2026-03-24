@@ -24,11 +24,13 @@ pub fn transpile_shader_from_hir(
     symbol_table: &SymbolTable,
     type_table: &TypeTable,
     interner: &StringInterner,
+    hir_types: &indexmap::IndexMap<crate::tast::TypeId, hir::HirTypeDecl>,
 ) -> Result<String, String> {
     let mut ctx = WgslCtx {
         st: symbol_table,
         tt: type_table,
         si: interner,
+        hir_types,
         out: String::new(),
         emitted_structs: BTreeSet::new(),
     };
@@ -56,9 +58,12 @@ pub fn transpile_shader_from_hir(
         ctx.out.push('\n');
     }
 
-    // 3. Emit entry point functions
+    // 3. Emit entry point functions (skip synthetic wgsl())
     for method in &hir_class.methods {
         let name = interner.get(method.function.name).unwrap_or("fn_unknown");
+        if name == "wgsl" {
+            continue; // Skip the synthetic method itself
+        }
 
         let stage = if name == "vertex" || name.starts_with("vs_") {
             Some("vertex")
@@ -98,9 +103,9 @@ pub fn transpile_shader_from_hir(
 
         ctx.out.push_str(" {\n");
 
-        // Transpile HIR function body
+        // Transpile HIR function body (trailing expression becomes return)
         if let Some(ref body) = method.function.body {
-            ctx.emit_hir_body(body, 1)?;
+            ctx.emit_hir_body_as_return(body, 1)?;
         }
         // Also check: body might be in the trailing expr
         if let Some(ref body) = method.function.body {
@@ -138,6 +143,7 @@ pub fn transpile_shader_class(
         st: symbol_table,
         tt: type_table,
         si: interner,
+        hir_types: &indexmap::IndexMap::new(),
         out: String::new(),
         emitted_structs: BTreeSet::new(),
     };
@@ -223,6 +229,7 @@ struct WgslCtx<'a> {
     st: &'a SymbolTable,
     tt: &'a TypeTable,
     si: &'a StringInterner,
+    hir_types: &'a indexmap::IndexMap<crate::tast::TypeId, hir::HirTypeDecl>,
     out: String,
     emitted_structs: BTreeSet<String>,
 }
@@ -309,20 +316,28 @@ impl<'a> WgslCtx<'a> {
         writeln!(self.out, "struct {} {{", name).unwrap();
         let mut loc = 0u32;
 
-        // Find fields by looking at symbols in the class scope
-        let scope_id = self
-            .st
-            .get_symbol(sym_id)
-            .map(|s| s.scope_id)
-            .unwrap_or_default();
-
-        for sym in self.st.all_symbols() {
-            if sym.kind != SymbolKind::Field || sym.scope_id != scope_id {
-                continue;
+        // Find fields by qualified name containing the class name,
+        // or by matching the class scope_id OR definition_location file.
+        // Get fields from the HIR class by matching class NAME (symbol_id may differ)
+        let mut fields: Vec<(String, String)> = Vec::new();
+        for (_tid, decl) in self.hir_types {
+            if let hir::HirTypeDecl::Class(c) = decl {
+                let cname = self.si.get(c.name).unwrap_or("");
+                if cname == name {
+                    for f in &c.fields {
+                        let fname = self.si.get(f.name).unwrap_or("f");
+                        if fname.starts_with("__") {
+                            continue;
+                        }
+                        let ftype = self.type_to_wgsl(f.ty);
+                        fields.push((fname.to_string(), ftype));
+                    }
+                    break;
+                }
             }
-            let fname = self.si.get(sym.name).unwrap_or("f");
-            let ftype = self.type_to_wgsl(sym.type_id);
+        }
 
+        for (fname, ftype) in &fields {
             let ann = if !is_input && fname == "position" && ftype == "vec4f" {
                 "@builtin(position) ".to_string()
             } else {
@@ -606,19 +621,43 @@ impl<'a> WgslCtx<'a> {
         let ind = self.ind(depth);
         match stmt {
             hir::HirStatement::Expr(expr) => {
-                // Expand nested blocks inline
-                if let hir::HirExprKind::Block(block) = &expr.kind {
-                    for s in &block.statements {
-                        self.emit_hir_stmt(s, depth)?;
+                match &expr.kind {
+                    // Expand nested blocks inline
+                    hir::HirExprKind::Block(block) => {
+                        self.emit_hir_body(block, depth)?;
                     }
-                    if let Some(ref trailing) = block.expr {
-                        let e = self.hir_expr_to_string(trailing)?;
-                        writeln!(self.out, "{}return {};", ind, e).unwrap();
+                    // If expression used as statement → emit WGSL if/else block
+                    hir::HirExprKind::If {
+                        condition,
+                        then_expr,
+                        else_expr,
+                    } => {
+                        let c = self.hir_expr_to_string(condition)?;
+                        writeln!(self.out, "{}if ({}) {{", ind, c).unwrap();
+                        if let hir::HirExprKind::Block(then_block) = &then_expr.kind {
+                            self.emit_hir_body(then_block, depth + 1)?;
+                        } else {
+                            let t = self.hir_expr_to_string(then_expr)?;
+                            writeln!(self.out, "{}    {};", ind, t).unwrap();
+                        }
+                        // Check else branch
+                        if let hir::HirExprKind::Block(else_block) = &else_expr.kind {
+                            if !else_block.statements.is_empty() || else_block.expr.is_some() {
+                                writeln!(self.out, "{}}} else {{", ind).unwrap();
+                                self.emit_hir_body(else_block, depth + 1)?;
+                            }
+                        } else if !matches!(else_expr.kind, hir::HirExprKind::Null) {
+                            writeln!(self.out, "{}}} else {{", ind).unwrap();
+                            let e = self.hir_expr_to_string(else_expr)?;
+                            writeln!(self.out, "{}    {};", ind, e).unwrap();
+                        }
+                        writeln!(self.out, "{}}}", ind).unwrap();
                     }
-                } else {
-                    let s = self.hir_expr_to_string(expr)?;
-                    if !s.is_empty() {
-                        writeln!(self.out, "{}{};", ind, s).unwrap();
+                    _ => {
+                        let s = self.hir_expr_to_string(expr)?;
+                        if !s.is_empty() {
+                            writeln!(self.out, "{}{};", ind, s).unwrap();
+                        }
                     }
                 }
             }
@@ -804,17 +843,36 @@ impl<'a> WgslCtx<'a> {
 
     /// Emit an HIR block body — handles nested Block expressions transparently.
     fn emit_hir_body(&mut self, body: &hir::HirBlock, depth: usize) -> Result<(), String> {
+        self.emit_hir_body_inner(body, depth, false)
+    }
+
+    fn emit_hir_body_as_return(&mut self, body: &hir::HirBlock, depth: usize) -> Result<(), String> {
+        self.emit_hir_body_inner(body, depth, true)
+    }
+
+    fn emit_hir_body_inner(
+        &mut self,
+        body: &hir::HirBlock,
+        depth: usize,
+        emit_return: bool,
+    ) -> Result<(), String> {
         for stmt in &body.statements {
             self.emit_hir_stmt(stmt, depth)?;
         }
         if let Some(ref trailing) = body.expr {
-            // Trailing expression might be a nested Block
             if let hir::HirExprKind::Block(inner) = &trailing.kind {
-                self.emit_hir_body(inner, depth)?;
-            } else {
+                self.emit_hir_body_inner(inner, depth, emit_return)?;
+            } else if emit_return {
                 let ind = self.ind(depth);
                 let e = self.hir_expr_to_string(trailing)?;
                 writeln!(self.out, "{}return {};", ind, e).unwrap();
+            } else {
+                // Just emit as expression statement (for if/else blocks)
+                let ind = self.ind(depth);
+                let e = self.hir_expr_to_string(trailing)?;
+                if !e.is_empty() {
+                    writeln!(self.out, "{}{};", ind, e).unwrap();
+                }
             }
         }
         Ok(())
