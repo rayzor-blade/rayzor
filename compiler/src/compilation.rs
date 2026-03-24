@@ -44,6 +44,9 @@ pub struct CompilationUnit {
     /// User source files
     pub user_files: Vec<HaxeFile>,
 
+    /// Macro expansion origins (for IDE hints showing expanded results)
+    pub macro_expansions: Vec<crate::macro_system::expander::ExpansionOrigin>,
+
     /// Shared string interner
     pub string_interner: StringInterner,
 
@@ -410,6 +413,7 @@ impl CompilationUnit {
             stdlib_files: Vec::new(),
             import_hx_files: Vec::new(),
             user_files: Vec::new(),
+            macro_expansions: Vec::new(),
             string_interner,
             symbol_table: SymbolTable::new(),
             type_table: Rc::new(RefCell::new(TypeTable::new())),
@@ -3674,6 +3678,8 @@ impl CompilationUnit {
                     expansion.expansions_count, filename
                 );
             }
+            // Store expansion origins for LSP macro hints
+            self.macro_expansions.extend(expansion.expansion_origins);
             ast_file_owned = expansion.file;
             &ast_file_owned
         } else {

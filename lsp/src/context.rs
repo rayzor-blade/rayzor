@@ -211,6 +211,39 @@ impl LspContext {
         // TODO: determine active parameter from cursor position (count commas before cursor)
         analysis::build_signature_help(sym_id, &unit.symbol_table, &unit.type_table, &unit.string_interner, 0)
     }
+
+    /// Get macro expansion hints for inlay hints display.
+    pub fn macro_expansion_hints(&self) -> Vec<MacroExpansionHint> {
+        let unit = match self.last_unit.as_ref() {
+            Some(u) => u,
+            None => return Vec::new(),
+        };
+
+        unit.macro_expansions
+            .iter()
+            .filter_map(|origin| {
+                let text = origin.expanded_text.as_ref()?;
+                let loc = &origin.call_site;
+                if !loc.is_valid() {
+                    return None;
+                }
+                Some(MacroExpansionHint {
+                    line: loc.line,
+                    column: loc.column,
+                    macro_name: origin.macro_name.clone(),
+                    expanded_text: text.clone(),
+                })
+            })
+            .collect()
+    }
+}
+
+/// A macro expansion hint for display as an inlay hint.
+pub struct MacroExpansionHint {
+    pub line: u32,
+    pub column: u32,
+    pub macro_name: String,
+    pub expanded_text: String,
 }
 
 /// A diagnostic ready for LSP conversion.

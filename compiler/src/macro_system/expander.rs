@@ -42,6 +42,8 @@ pub struct ExpansionOrigin {
     pub definition_site: Option<SourceLocation>,
     /// Byte span of the expanded output in the resulting AST
     pub expanded_span: parser::Span,
+    /// Human-readable representation of the expanded result
+    pub expanded_text: Option<String>,
 }
 
 /// Result of expanding macros in a file
@@ -880,6 +882,7 @@ impl MacroExpander {
             call_site,
             definition_site: None,
             expanded_span: expanded.span,
+            expanded_text: Some(compact_expr_string(&expanded)),
         });
 
         Ok(expanded)
@@ -1001,6 +1004,7 @@ impl MacroExpander {
             call_site: location,
             definition_site: Some(super::errors::span_to_location(macro_def.body.span)),
             expanded_span: expanded.span,
+            expanded_text: Some(compact_expr_string(&expanded)),
         });
 
         // Store in memoization cache for future identical calls
@@ -1023,6 +1027,51 @@ impl Default for MacroExpander {
 /// Hash a slice of expressions for memoization cache key.
 ///
 /// Hash expressions for memoization cache key. Uses both source spans AND
+/// Compact string representation of an expanded expression (for IDE hints).
+/// Shows the result value, truncated to 80 chars for readability.
+fn compact_expr_string(expr: &Expr) -> String {
+    let s = match &expr.kind {
+        ExprKind::Int(n) => n.to_string(),
+        ExprKind::Float(f) => f.to_string(),
+        ExprKind::String(s) => format!("\"{}\"", s),
+        ExprKind::Bool(b) => b.to_string(),
+        ExprKind::Ident(id) => id.clone(),
+        ExprKind::Null => "null".to_string(),
+        ExprKind::Array(elems) => {
+            let inner: Vec<String> = elems.iter().map(compact_expr_string).collect();
+            format!("[{}]", inner.join(", "))
+        }
+        ExprKind::Binary { left, op, right } => {
+            format!("{} {:?} {}", compact_expr_string(left), op, compact_expr_string(right))
+        }
+        ExprKind::Unary { op, expr: inner } => {
+            format!("{:?}{}", op, compact_expr_string(inner))
+        }
+        ExprKind::Paren(inner) => format!("({})", compact_expr_string(inner)),
+        ExprKind::Call { expr: callee, args } => {
+            let args_str: Vec<String> = args.iter().map(compact_expr_string).collect();
+            format!("{}({})", compact_expr_string(callee), args_str.join(", "))
+        }
+        ExprKind::Field { expr: obj, field, is_optional } => {
+            let op = if *is_optional { "?." } else { "." };
+            format!("{}{}{}", compact_expr_string(obj), op, field)
+        }
+        ExprKind::Block(stmts) => {
+            if stmts.len() == 1 {
+                format!("{:?}", stmts[0])
+            } else {
+                format!("{{ ... {} statements }}", stmts.len())
+            }
+        }
+        _ => format!("{:?}", expr.kind),
+    };
+    if s.len() > 80 {
+        format!("{}...", &s[..77])
+    } else {
+        s
+    }
+}
+
 /// a Debug representation of the expression kind, so expanded macro results
 /// with Span::default() (from nested macro calls) don't collide.
 fn hash_exprs(exprs: &[Expr]) -> u64 {

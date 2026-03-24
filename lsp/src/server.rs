@@ -11,14 +11,15 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, SemanticTokensFullRequest,
-    SignatureHelpRequest,
+    Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, InlayHintRequest,
+    SemanticTokensFullRequest, SignatureHelpRequest,
 };
 use lsp_types::{
     CompletionItem, CompletionItemKind, CompletionItemTag, CompletionOptions, CompletionParams,
     CompletionResponse, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    HoverProviderCapability, InitializeParams, InitializeResult, Location, MarkupContent,
+    HoverProviderCapability, InitializeParams, InitializeResult, InlayHint, InlayHintKind,
+    InlayHintLabel, InlayHintParams, Location, MarkupContent,
     MarkupKind, OneOf, Position, PublishDiagnosticsParams, Range, SemanticToken,
     SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
     SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
@@ -76,6 +77,7 @@ pub fn run_lsp() -> Result<(), String> {
             retrigger_characters: Some(vec![",".to_string()]),
             work_done_progress_options: Default::default(),
         }),
+        inlay_hint_provider: Some(OneOf::Left(true)),
         ..Default::default()
     };
 
@@ -142,6 +144,8 @@ fn handle_request(conn: &Connection, ctx: &LspContext, req: Request) {
         send_response(conn, id, handle_document_symbols(ctx, params));
     } else if let Some((id, params)) = cast_request::<SignatureHelpRequest>(&req) {
         send_response(conn, id, handle_signature_help(ctx, params));
+    } else if let Some((id, params)) = cast_request::<InlayHintRequest>(&req) {
+        send_response(conn, id, handle_inlay_hints(ctx, params));
     } else {
         send_response::<serde_json::Value>(conn, req.id, None);
     }
@@ -424,6 +428,54 @@ fn handle_signature_help(
         active_signature: Some(0),
         active_parameter: Some(sig.active_parameter),
     })
+}
+
+// ---------------------------------------------------------------------------
+// Inlay hints — macro expansion results + type annotations
+// ---------------------------------------------------------------------------
+
+fn handle_inlay_hints(ctx: &LspContext, params: InlayHintParams) -> Option<Vec<InlayHint>> {
+    let uri = params.text_document.uri.as_str();
+    let range = params.range;
+
+    let mut hints = Vec::new();
+
+    // Macro expansion hints: show expanded result after macro call sites
+    for hint in ctx.macro_expansion_hints() {
+        let line = hint.line.saturating_sub(1); // LSP is 0-based
+        let col = hint.column.saturating_sub(1);
+
+        // Filter to requested range
+        if line < range.start.line || line > range.end.line {
+            continue;
+        }
+
+        // Show as: `macroName(...)` → `expanded_result`
+        let label = format!(" → {}", hint.expanded_text);
+
+        hints.push(InlayHint {
+            position: Position::new(line, col + hint.macro_name.len() as u32 + 2),
+            label: InlayHintLabel::String(label),
+            kind: Some(InlayHintKind::PARAMETER),
+            text_edits: None,
+            tooltip: Some(lsp_types::InlayHintTooltip::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!(
+                    "**Macro expansion** `{}`\n\n```haxe\n{}\n```",
+                    hint.macro_name, hint.expanded_text
+                ),
+            })),
+            padding_left: Some(true),
+            padding_right: None,
+            data: None,
+        });
+    }
+
+    if hints.is_empty() {
+        None
+    } else {
+        Some(hints)
+    }
 }
 
 // ---------------------------------------------------------------------------
