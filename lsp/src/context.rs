@@ -1,10 +1,14 @@
 //! Compilation context for the LSP server.
 //!
-//! Maintains open file state and provides compilation for diagnostics.
+//! Maintains open file state and provides compilation for diagnostics,
+//! hover, goto-definition, and completions.
 
+use crate::analysis::{self, CompletionEntry, FileSymbolIndex};
 use compiler::compilation::{CompilationConfig, CompilationUnit};
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 
 /// Persistent compilation context shared across LSP requests.
 pub struct LspContext {
@@ -14,6 +18,10 @@ pub struct LspContext {
     pub open_files: HashMap<String, String>,
     /// Class paths from rayzor.toml.
     pub class_paths: Vec<PathBuf>,
+    /// Per-file symbol indices (URI → index).
+    file_indices: HashMap<String, FileSymbolIndex>,
+    /// Last compilation unit (reused for symbol lookups).
+    last_unit: Option<CompilationUnit>,
 }
 
 impl LspContext {
@@ -22,6 +30,8 @@ impl LspContext {
             root,
             open_files: HashMap::new(),
             class_paths: Vec::new(),
+            file_indices: HashMap::new(),
+            last_unit: None,
         }
     }
 
@@ -45,7 +55,7 @@ impl LspContext {
         }
     }
 
-    /// Compile a file and return diagnostics.
+    /// Compile a file and return diagnostics. Also builds the symbol index.
     pub fn compile_file(&mut self, uri: &str, source: &str) -> Vec<LspDiagnostic> {
         let filename = uri_to_path(uri);
 
@@ -67,10 +77,15 @@ impl LspContext {
         }
 
         if let Err(e) = unit.add_file(source, &filename) {
-            return vec![LspDiagnostic::error(&filename, 0, 0, format!("Parse: {}", e))];
+            return vec![LspDiagnostic::error(
+                &filename,
+                0,
+                0,
+                format!("Parse: {}", e),
+            )];
         }
 
-        match unit.lower_to_tast() {
+        let result = match unit.lower_to_tast() {
             Ok(_typed_files) => Vec::new(),
             Err(errors) => errors
                 .iter()
@@ -80,28 +95,86 @@ impl LspContext {
                     column: e.location.column,
                     end_line: e.location.line,
                     end_column: e.location.column + 1,
-                    severity: DiagSeverity::Error,
+                    severity: match e.category {
+                        compiler::pipeline::ErrorCategory::ParseError => DiagSeverity::Error,
+                        compiler::pipeline::ErrorCategory::TypeError => DiagSeverity::Error,
+                        compiler::pipeline::ErrorCategory::ConcurrencyError => DiagSeverity::Error,
+                        _ => DiagSeverity::Warning,
+                    },
                     message: e.message.clone(),
+                    suggestion: e.suggestion.clone(),
+                    related: e
+                        .related_errors
+                        .iter()
+                        .map(|r| r.clone())
+                        .collect(),
                 })
                 .collect(),
-        }
+        };
+
+        // Build symbol index for this file (file_id 0 for the main user file)
+        let index = FileSymbolIndex::build(&unit.symbol_table, 0);
+        self.file_indices.insert(uri.to_string(), index);
+        self.last_unit = Some(unit);
+
+        result
     }
 
     /// Look up type/doc info for a symbol at a given position.
-    pub fn hover_info(&self, _uri: &str, _line: u32, _col: u32) -> Option<String> {
-        // TODO: symbol lookup at position using symbol table
-        None
+    pub fn hover_info(&self, uri: &str, line: u32, col: u32) -> Option<String> {
+        let index = self.file_indices.get(uri)?;
+        let unit = self.last_unit.as_ref()?;
+
+        let sym_id =
+            index.find_symbol_at(line, col, &unit.symbol_table, &unit.string_interner)?;
+
+        analysis::format_hover(
+            sym_id,
+            &unit.symbol_table,
+            &unit.type_table,
+            &unit.string_interner,
+        )
     }
 
     /// Find definition location for a symbol at a given position.
     pub fn goto_definition(
         &self,
-        _uri: &str,
-        _line: u32,
-        _col: u32,
+        uri: &str,
+        line: u32,
+        col: u32,
     ) -> Option<(String, u32, u32)> {
-        // TODO: resolve symbol and return definition_location
-        None
+        let index = self.file_indices.get(uri)?;
+        let unit = self.last_unit.as_ref()?;
+
+        let sym_id =
+            index.find_symbol_at(line, col, &unit.symbol_table, &unit.string_interner)?;
+        let sym = unit.symbol_table.get_symbol(sym_id)?;
+        let loc = sym.definition_location;
+
+        if !loc.is_valid() {
+            return None;
+        }
+
+        // For now, file_id 0 = the current file. Cross-file navigation
+        // needs a file_id → path map (TODO: populate from compilation).
+        let file = if loc.file_id == 0 {
+            uri_to_path(uri)
+        } else {
+            // Try to find the file path from the URI
+            uri_to_path(uri)
+        };
+
+        Some((file, loc.line, loc.column))
+    }
+
+    /// Get completion entries for a position.
+    pub fn completions(&self, uri: &str) -> Vec<CompletionEntry> {
+        let unit = match self.last_unit.as_ref() {
+            Some(u) => u,
+            None => return Vec::new(),
+        };
+
+        analysis::collect_completions(&unit.symbol_table, &unit.type_table, &unit.string_interner, 0)
     }
 }
 
@@ -114,6 +187,8 @@ pub struct LspDiagnostic {
     pub end_column: u32,
     pub severity: DiagSeverity,
     pub message: String,
+    pub suggestion: Option<String>,
+    pub related: Vec<String>,
 }
 
 impl LspDiagnostic {
@@ -126,6 +201,8 @@ impl LspDiagnostic {
             end_column: col + 1,
             severity: DiagSeverity::Error,
             message,
+            suggestion: None,
+            related: Vec::new(),
         }
     }
 }

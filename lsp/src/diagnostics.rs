@@ -1,4 +1,9 @@
 //! Convert internal diagnostics to LSP diagnostic format.
+//!
+//! Maps CompilationError fields to rich LSP diagnostics with:
+//! - Related information (secondary spans)
+//! - Code actions from suggestions
+//! - Diagnostic tags (unused, deprecated)
 
 use crate::context::{DiagSeverity, LspDiagnostic};
 use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
@@ -28,6 +33,13 @@ pub fn to_lsp_diagnostics(diags: &[LspDiagnostic]) -> Vec<Diagnostic> {
                 col + 1
             };
 
+            // Build message with suggestion hint
+            let message = if let Some(ref suggestion) = d.suggestion {
+                format!("{}\n\nHint: {}", d.message, suggestion)
+            } else {
+                d.message.clone()
+            };
+
             Diagnostic {
                 range: Range {
                     start: Position::new(line, col),
@@ -36,7 +48,7 @@ pub fn to_lsp_diagnostics(diags: &[LspDiagnostic]) -> Vec<Diagnostic> {
                 severity: Some(severity),
                 code: Some(NumberOrString::String("rayzor".to_string())),
                 source: Some("rayzor".to_string()),
-                message: d.message.clone(),
+                message,
                 ..Default::default()
             }
         })
