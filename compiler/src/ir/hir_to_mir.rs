@@ -67,6 +67,9 @@ struct GpuStructFieldLayout {
     msl_type: String,
     /// Size in bytes on GPU
     size: u32,
+    /// WGSL vertex format code for use in vertex buffer layouts.
+    /// 0=Float32, 1=Float32x2, 2=Float32x3, 3=Float32x4, 4=Sint32, 5=Uint32
+    vertex_format: u32,
 }
 
 /// Precomputed GPU-compatible layout for a @:gpuStruct class
@@ -2001,6 +2004,16 @@ impl<'a> HirToMirContext<'a> {
                 max_align = align;
             }
 
+            // Map GPU type to WGSL vertex format code
+            let vertex_format = match (&gpu_ir_type, size) {
+                (IrType::F32, 4) => 0,   // Float32
+                (IrType::F32, 8) => 1,   // Float32x2
+                (IrType::F32, 12) => 2,  // Float32x3
+                (IrType::F32, 16) => 3,  // Float32x4
+                (IrType::I32, _) => 4,   // Sint32
+                _ => 0,                   // default Float32
+            };
+
             layout_fields.push(GpuStructFieldLayout {
                 symbol_id: *field_sym_id,
                 name: field_name,
@@ -2008,6 +2021,7 @@ impl<'a> HirToMirContext<'a> {
                 ir_type: gpu_ir_type,
                 msl_type,
                 size,
+                vertex_format,
             });
 
             byte_offset += size;
@@ -8245,7 +8259,7 @@ impl<'a> HirToMirContext<'a> {
                     // @:gpuStruct synthetic static methods: gpuDef/gpuSize/gpuAlignment
                     if matches!(
                         callee_name.as_deref(),
-                        Some("gpuDef") | Some("gpuSize") | Some("gpuAlignment")
+                        Some("gpuDef") | Some("gpuSize") | Some("gpuAlignment") | Some("gpuVertexLayout")
                     ) {
                         for (tid, decl) in self.current_hir_types.iter() {
                             if let crate::ir::hir::HirTypeDecl::Class(c) = decl {
@@ -8304,6 +8318,19 @@ impl<'a> HirToMirContext<'a> {
                                                     return self.builder.build_const(IrValue::I32(
                                                         layout.alignment as i32,
                                                     ));
+                                                }
+                                                "gpuVertexLayout" => {
+                                                    // Return "stride:offset1,fmt1,loc1;offset2,fmt2,loc2;..."
+                                                    // Parsed by pure Haxe VertexLayout class
+                                                    let mut parts = Vec::new();
+                                                    parts.push(format!("{}", layout.total_size));
+                                                    for (i, f) in layout.fields.iter().enumerate() {
+                                                        parts.push(format!("{},{},{}", f.byte_offset, f.vertex_format, i));
+                                                    }
+                                                    let encoded = parts.join(";");
+                                                    return self
+                                                        .builder
+                                                        .build_const(IrValue::String(encoded));
                                                 }
                                                 _ => {}
                                             }
