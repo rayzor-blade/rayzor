@@ -5,7 +5,8 @@ members = [
     "diagnostics",
     "source_map",
     "runtime",
-    "gpu"
+    "gpu",
+    "lsp"
 ]
 exclude = [
     "cranelift-fork",
@@ -33,6 +34,7 @@ libloading = "0.8"
 ratatui = "0.29"
 crossterm = "0.28"
 postcard = { version = "1.0", features = ["alloc"] }
+rayzor-lsp = { path = "lsp" }
 
 # Workaround for LLVM optimizer bug that causes infinite loops in release builds
 # when lowering TAST expressions. Using opt-level=2 instead of 3 prevents the bug.

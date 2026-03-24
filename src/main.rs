@@ -377,11 +377,14 @@ enum Commands {
         interactive: bool,
     },
 
-    /// Manage .rpkg packages (pack, inspect)
+    /// Manage .rpkg packages (pack, inspect, install, add, remove, list)
     Rpkg {
         #[command(subcommand)]
         action: RpkgAction,
     },
+
+    /// Start the Language Server Protocol server (for IDE integration)
+    Lsp,
 }
 
 #[derive(Subcommand)]
@@ -684,6 +687,7 @@ fn main() {
             RpkgAction::Remove { name } => cmd_rpkg_remove(name),
             RpkgAction::List => cmd_rpkg_list(),
         },
+        Commands::Lsp => rayzor_lsp::run_lsp(),
     };
 
     if let Err(e) = result {
