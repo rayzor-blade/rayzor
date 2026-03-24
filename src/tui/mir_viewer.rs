@@ -102,9 +102,7 @@ pub fn run_mir_viewer(mir_text: &str, module_name: &str, total_functions: usize)
                         }
                         KeyCode::Up | KeyCode::Char('k') => match app.active_panel {
                             Panel::FuncList => app.select_prev(),
-                            Panel::Code => {
-                                app.code_scroll = app.code_scroll.saturating_sub(1)
-                            }
+                            Panel::Code => app.code_scroll = app.code_scroll.saturating_sub(1),
                         },
                         KeyCode::Down | KeyCode::Char('j') => match app.active_panel {
                             Panel::FuncList => app.select_next(),
@@ -220,7 +218,7 @@ impl MirViewerApp {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(1), // Header
-                Constraint::Min(5),   // Content
+                Constraint::Min(5),    // Content
                 Constraint::Length(1), // Status bar
             ])
             .split(area);
@@ -250,7 +248,7 @@ impl MirViewerApp {
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Length(30), // Function list
-                Constraint::Min(40),   // Code
+                Constraint::Min(40),    // Code
             ])
             .split(main_chunks[1]);
 
@@ -284,7 +282,9 @@ impl MirViewerApp {
                 Block::default()
                     .title(Span::styled(
                         " functions ",
-                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD),
                     ))
                     .borders(Borders::ALL)
                     .border_style(func_border_style),
@@ -355,13 +355,19 @@ impl MirViewerApp {
                     .add_modifier(Modifier::BOLD),
             ))
             .title_bottom(
-                Line::from(Span::styled(scroll_info, Style::default().fg(Color::DarkGray)))
-                    .right_aligned(),
+                Line::from(Span::styled(
+                    scroll_info,
+                    Style::default().fg(Color::DarkGray),
+                ))
+                .right_aligned(),
             )
             .borders(Borders::ALL)
             .border_style(code_border_style);
 
-        frame.render_widget(Paragraph::new(code_lines).block(code_block), content_chunks[1]);
+        frame.render_widget(
+            Paragraph::new(code_lines).block(code_block),
+            content_chunks[1],
+        );
 
         // ── Status bar ───────────────────────────────────────
         let status = if self.search_mode {
@@ -372,7 +378,10 @@ impl MirViewerApp {
                         .fg(Color::Yellow)
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(self.search_query.as_str(), Style::default().fg(Color::White)),
+                Span::styled(
+                    self.search_query.as_str(),
+                    Style::default().fg(Color::White),
+                ),
                 Span::styled("▏", Style::default().fg(Color::Yellow)),
             ])
         } else {
@@ -456,7 +465,10 @@ fn parse_mir_functions(mir_text: &str) -> Vec<MirFunction> {
             if let Some(eq_pos) = line.find(" = ") {
                 current_id = line[2..eq_pos].to_string();
             }
-        } else if line.starts_with("fn @") || line.starts_with("; Module") || line.starts_with("; Functions") {
+        } else if line.starts_with("fn @")
+            || line.starts_with("; Module")
+            || line.starts_with("; Functions")
+        {
             // Function body start or module header — add to current lines
             current_lines.push(line.to_string());
         } else {
@@ -522,9 +534,7 @@ fn highlight_mir_line(line: &str) -> Vec<Span<'_>> {
         remaining = &rest[3..];
 
         // Highlight the opcode
-        let opcode_end = remaining
-            .find(' ')
-            .unwrap_or(remaining.len());
+        let opcode_end = remaining.find(' ').unwrap_or(remaining.len());
         let (opcode, rest) = remaining.split_at(opcode_end);
         let opcode_color = match opcode {
             "const" => Color::Magenta,

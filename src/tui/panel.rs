@@ -41,11 +41,7 @@ impl InfoRow {
 }
 
 /// Render an info panel with a title, rows, and optional footer.
-pub fn render_info_panel(
-    title: &str,
-    rows: &[InfoRow],
-    footer: Option<&str>,
-) -> io::Result<()> {
+pub fn render_info_panel(title: &str, rows: &[InfoRow], footer: Option<&str>) -> io::Result<()> {
     if !is_tty() {
         // Plain text fallback
         println!("{}", title);
@@ -104,11 +100,8 @@ pub fn render_info_panel(
             );
         }
 
-        let table = Table::new(
-            tui_rows,
-            [Constraint::Length(18), Constraint::Min(20)],
-        )
-        .block(block);
+        let table =
+            Table::new(tui_rows, [Constraint::Length(18), Constraint::Min(20)]).block(block);
 
         frame.render_widget(table, frame.area());
     })?;

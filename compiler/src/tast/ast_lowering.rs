@@ -6154,17 +6154,14 @@ impl<'a> AstLowering<'a> {
                             }
                         }
                         // Fallback: shared symbol table (cross-package classes)
-                        if let Some(class_sym) =
-                            self.context.symbol_table.get_symbol(class_symbol)
+                        if let Some(class_sym) = self.context.symbol_table.get_symbol(class_symbol)
                         {
                             if let Some(method_sym) = self
                                 .context
                                 .symbol_table
                                 .lookup_symbol(class_sym.scope_id, method_name)
                             {
-                                if method_sym.kind
-                                    == crate::tast::symbols::SymbolKind::Function
-                                {
+                                if method_sym.kind == crate::tast::symbols::SymbolKind::Function {
                                     return method_sym.id;
                                 }
                             }

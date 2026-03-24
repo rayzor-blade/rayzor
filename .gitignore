@@ -24,6 +24,7 @@ target
 /target/
 *.blade
 *.bsym
+*.mir.cache
 
 # Haxe platform-specific standard libraries (not needed for Rayzor target)
 compiler/haxe-std/cpp/

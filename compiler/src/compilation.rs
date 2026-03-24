@@ -525,15 +525,10 @@ impl CompilationUnit {
             &normalized[pos + 5..] // after "/src/"
         } else {
             // Use filename only
-            normalized
-                .rsplit('/')
-                .next()
-                .unwrap_or(&normalized)
+            normalized.rsplit('/').next().unwrap_or(&normalized)
         };
 
-        let module_name = module_part
-            .replace('/', ".")
-            .replace(".hx", "");
+        let module_name = module_part.replace('/', ".").replace(".hx", "");
 
         if module_name.is_empty() {
             return None;
@@ -2204,7 +2199,8 @@ impl CompilationUnit {
         let mut graph: BTreeMap<String, Vec<String>> = BTreeMap::new();
 
         // Build reverse map: bare class name → qualified name for same-package deps
-        let bare_to_qualified: BTreeMap<String, String> = all_files.keys()
+        let bare_to_qualified: BTreeMap<String, String> = all_files
+            .keys()
             .filter_map(|qn| {
                 let short = qn.rsplit('.').next()?;
                 Some((short.to_string(), qn.clone()))
@@ -2226,7 +2222,10 @@ impl CompilationUnit {
                 };
                 if let Some(resolved) = resolved_dep {
                     if resolved != *name {
-                        graph.entry(resolved.clone()).or_default().push(name.clone());
+                        graph
+                            .entry(resolved.clone())
+                            .or_default()
+                            .push(name.clone());
                         *in_degree.entry(name.clone()).or_insert(0) += 1;
                     }
                 }
@@ -2270,22 +2269,34 @@ impl CompilationUnit {
                 // whose deps (among remaining stuck files) are all already emitted.
                 let mut stuck: BTreeMap<String, Vec<String>> = BTreeMap::new();
                 for name in all_files.keys() {
-                    if in_order.contains(name) { continue; }
-                    let deps_in_stuck: Vec<String> = all_files.get(name)
-                        .map(|(_, _, deps)| deps.iter().filter_map(|d| {
-                            let resolved = if all_files.contains_key(d) {
-                                Some(d.clone())
-                            } else {
-                                bare_to_qualified.get(d).cloned()
-                            };
-                            resolved.filter(|r| r != name && !in_order.contains(r) && all_files.contains_key(r))
-                        }).collect())
+                    if in_order.contains(name) {
+                        continue;
+                    }
+                    let deps_in_stuck: Vec<String> = all_files
+                        .get(name)
+                        .map(|(_, _, deps)| {
+                            deps.iter()
+                                .filter_map(|d| {
+                                    let resolved = if all_files.contains_key(d) {
+                                        Some(d.clone())
+                                    } else {
+                                        bare_to_qualified.get(d).cloned()
+                                    };
+                                    resolved.filter(|r| {
+                                        r != name
+                                            && !in_order.contains(r)
+                                            && all_files.contains_key(r)
+                                    })
+                                })
+                                .collect()
+                        })
                         .unwrap_or_default();
                     stuck.insert(name.clone(), deps_in_stuck);
                 }
                 let mut emitted: HashSet<String> = HashSet::new();
                 loop {
-                    let ready: Vec<String> = stuck.iter()
+                    let ready: Vec<String> = stuck
+                        .iter()
                         .filter(|(_, deps)| deps.iter().all(|d| emitted.contains(d)))
                         .map(|(name, _)| name.clone())
                         .collect();
@@ -2372,7 +2383,9 @@ impl CompilationUnit {
             "EnumValue",
             "Any",
         ];
-        let is_loaded = self.namespace_resolver.is_file_loaded(&file_path.to_path_buf());
+        let is_loaded = self
+            .namespace_resolver
+            .is_file_loaded(&file_path.to_path_buf());
         if is_loaded {
             let base = std::path::Path::new(&filename)
                 .file_stem()
@@ -2409,7 +2422,12 @@ impl CompilationUnit {
         // Stdlib imports (EReg, StringTools, etc.) still need the merge because their Haxe
         // source has placeholder method bodies that must be replaced by MIR wrappers.
         let skip_stdlib_merge = !is_stdlib;
-        match self.compile_file_with_shared_state_ex(&filename, source, is_stdlib, skip_stdlib_merge) {
+        match self.compile_file_with_shared_state_ex(
+            &filename,
+            source,
+            is_stdlib,
+            skip_stdlib_merge,
+        ) {
             Ok(typed_file) => {
                 self.loaded_stdlib_typed_files.push(typed_file);
 
@@ -2436,7 +2454,8 @@ impl CompilationUnit {
                     let own_ids = self.last_compiled_own_func_ids.take().unwrap_or_default();
                     let is_user_package = !filename.contains("haxe-std");
                     if is_user_package {
-                        let import_base: u32 = 100_000 + (self.import_mir_modules.len() as u32 * 10_000);
+                        let import_base: u32 =
+                            100_000 + (self.import_mir_modules.len() as u32 * 10_000);
                         for old_id in &own_ids {
                             let new_id = crate::ir::IrFunctionId(old_id.0 + import_base);
                             self.import_own_func_ids.insert(new_id);
@@ -3949,8 +3968,7 @@ impl CompilationUnit {
         // not external ones that were passed in via import_constructor_name_map.
         for (class_name, func_id) in mir_result.constructor_name_map {
             if !external_constructor_keys.contains(&class_name) {
-                self.import_constructor_name_map
-                    .insert(class_name, func_id);
+                self.import_constructor_name_map.insert(class_name, func_id);
             }
         }
 
@@ -4021,7 +4039,9 @@ impl CompilationUnit {
             .union(&mir_result_ctor_ids)
             .copied()
             .filter(|func_id| {
-                mir_module.functions.get(func_id)
+                mir_module
+                    .functions
+                    .get(func_id)
                     .map(|f| !matches!(f.kind, crate::ir::FunctionKind::MirWrapper))
                     .unwrap_or(true)
             })
@@ -4203,8 +4223,10 @@ impl CompilationUnit {
                         if !merged_import_func_ids.contains(&existing_id) {
                             id_replacements.insert(existing_id, *func_id);
                         } else if func.name == "match" || func.name == "matched" {
-                            eprintln!("[MERGE_PROTECT] fn{}={} protected from fn{}",
-                                existing_id.0, func.name, func_id.0);
+                            eprintln!(
+                                "[MERGE_PROTECT] fn{}={} protected from fn{}",
+                                existing_id.0, func.name, func_id.0
+                            );
                         }
                     }
                 }
