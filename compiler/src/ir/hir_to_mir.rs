@@ -8267,13 +8267,37 @@ impl<'a> HirToMirContext<'a> {
                     ) {
                         for (tid, decl) in self.current_hir_types.iter() {
                             if let crate::ir::hir::HirTypeDecl::Class(c) = decl {
-                                let is_gpu_struct = self
+                                let sym_flags = self
                                     .symbol_table
                                     .get_symbol(c.symbol_id)
-                                    .map(|s| s.flags.is_gpu_struct())
-                                    .unwrap_or(false);
-                                if !is_gpu_struct {
+                                    .map(|s| s.flags)
+                                    .unwrap_or(SymbolFlags::NONE);
+                                let is_gpu_struct = sym_flags.is_gpu_struct();
+                                let is_shader = sym_flags.is_shader();
+                                if !is_gpu_struct && !is_shader {
                                     continue;
+                                }
+                                // @:shader wgsl() — handle before has_method check
+                                // (synthetic wgsl() may not be in HIR methods list)
+                                if is_shader && callee_name.as_deref() == Some("wgsl") {
+                                    let type_table = self.type_table;
+                                    match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
+                                        c,
+                                        self.symbol_table,
+                                        type_table,
+                                        self.string_interner,
+                                    ) {
+                                        Ok(wgsl_source) => {
+                                            return self.builder.build_const(
+                                                IrValue::String(wgsl_source),
+                                            );
+                                        }
+                                        Err(e) => {
+                                            return self.builder.build_const(
+                                                IrValue::String(format!("/* WGSL error: {} */", e)),
+                                            );
+                                        }
+                                    }
                                 }
                                 let has_method =
                                     c.methods.iter().any(|m| m.function.symbol_id == *symbol);
@@ -8298,6 +8322,28 @@ impl<'a> HirToMirContext<'a> {
                                             },
                                         )
                                     };
+                                    // Handle wgsl() on @:shader classes BEFORE layout check
+                                    if is_shader && callee_name.as_deref() == Some("wgsl") {
+                                        let type_table = self.type_table;
+                                        match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
+                                            c,
+                                            self.symbol_table,
+                                            type_table,
+                                            self.string_interner,
+                                        ) {
+                                            Ok(wgsl_source) => {
+                                                return self.builder.build_const(
+                                                    IrValue::String(wgsl_source),
+                                                );
+                                            }
+                                            Err(e) => {
+                                                return self.builder.build_const(
+                                                    IrValue::String(format!("/* WGSL error: {} */", e)),
+                                                );
+                                            }
+                                        }
+                                    }
+
                                     if let Some(real_tid) = canonical_tid {
                                         if let Some(layout) =
                                             self.get_or_compute_gpu_struct_layout(real_tid)
@@ -15092,6 +15138,38 @@ impl<'a> HirToMirContext<'a> {
                     let method_name_interned =
                         self.symbol_table.get_symbol(*symbol).map(|s| s.name);
                     let mut func_id_opt = self.get_function_id(symbol);
+
+                    // Intercept @:shader wgsl() calls — the stub function has
+                    // an empty body; redirect to the transpiler output.
+                    if func_id_opt.is_some() {
+                        let callee_is_wgsl = self
+                            .symbol_table
+                            .get_symbol(*symbol)
+                            .and_then(|s| self.string_interner.get(s.name))
+                            .map(|n| n == "wgsl")
+                            .unwrap_or(false);
+                        if callee_is_wgsl {
+                            // Find the @:shader class in current_hir_types
+                            for (_tid, decl) in self.current_hir_types.iter() {
+                                if let crate::ir::hir::HirTypeDecl::Class(c) = decl {
+                                    let is_shader = self
+                                        .symbol_table
+                                        .get_symbol(c.symbol_id)
+                                        .map(|s| s.flags.is_shader())
+                                        .unwrap_or(false);
+                                    if is_shader {
+                                        let type_table = self.type_table;
+                                        match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
+                                            c, self.symbol_table, type_table, self.string_interner,
+                                        ) {
+                                            Ok(wgsl) => return self.builder.build_const(IrValue::String(wgsl)),
+                                            Err(e) => return self.builder.build_const(IrValue::String(format!("/* WGSL error: {} */", e))),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     let has_synthetic_static_receiver =
                         *is_method && self.effective_static_call_args(args).len() != args.len();
