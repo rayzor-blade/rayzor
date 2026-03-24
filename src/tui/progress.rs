@@ -424,7 +424,11 @@ impl InteractiveApp {
                         } else {
                             0.0
                         };
-                        let bar_len = if p.duration_ms < 0.001 { 0 } else { (frac * bar_max as f64).round().max(1.0) as usize };
+                        let bar_len = if p.duration_ms < 0.001 {
+                            0
+                        } else {
+                            (frac * bar_max as f64).round().max(1.0) as usize
+                        };
                         Row::new(vec![
                             Line::from(Span::styled(
                                 format!(" {:>9} ", p.name),
@@ -777,7 +781,11 @@ fn render_final_frame(frame: &mut ratatui::Frame, state: &CompilationState, elap
                 } else {
                     0.0
                 };
-                let bar_len = if p.duration_ms < 0.5 { 0 } else { (frac * bar_max_width as f64).round().max(1.0) as usize };
+                let bar_len = if p.duration_ms < 0.5 {
+                    0
+                } else {
+                    (frac * bar_max_width as f64).round().max(1.0) as usize
+                };
                 let bar_str = "\u{2588}".repeat(bar_len);
                 let time_color = if p.duration_ms == max_ms {
                     Color::White

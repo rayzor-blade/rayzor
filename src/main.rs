@@ -640,7 +640,16 @@ fn main() {
             diff,
             format,
             interactive,
-        } => cmd_dump(file, output, opt_level, function, cfg_only, diff, format, interactive),
+        } => cmd_dump(
+            file,
+            output,
+            opt_level,
+            function,
+            cfg_only,
+            diff,
+            format,
+            interactive,
+        ),
         Commands::Rpkg { action } => match action {
             RpkgAction::Pack {
                 dylib,
@@ -1109,7 +1118,9 @@ fn run_file(
                 if data.len() >= 8 {
                     let cached_hash = u64::from_le_bytes(data[..8].try_into().unwrap());
                     if cached_hash == source_hash {
-                        if let Ok(module) = postcard::from_bytes::<compiler::ir::IrModule>(&data[8..]) {
+                        if let Ok(module) =
+                            postcard::from_bytes::<compiler::ir::IrModule>(&data[8..])
+                        {
                             break 'load_mir (module, true);
                         }
                     }
@@ -1499,11 +1510,15 @@ fn build_from_manifest(
             let progress = tui_instance.as_ref().map(|t| t.handle());
             let tui_thread = tui_instance.as_ref().map(|t| {
                 let t = t.clone();
-                std::thread::spawn(move || { let _ = t.run(); })
+                std::thread::spawn(move || {
+                    let _ = t.run();
+                })
             });
 
             // Compile
-            if let Some(ref h) = progress { h.begin_phase("compile"); }
+            if let Some(ref h) = progress {
+                h.begin_phase("compile");
+            }
             let t0 = std::time::Instant::now();
             let source = std::fs::read_to_string(&entry)
                 .map_err(|e| format!("Failed to read {}: {}", entry.display(), e))?;
@@ -1522,7 +1537,9 @@ fn build_from_manifest(
 
             // Produce output bundle (.rzb)
             if let Some(ref out) = output {
-                if let Some(ref h) = progress { h.begin_phase("bundle"); }
+                if let Some(ref h) = progress {
+                    h.begin_phase("bundle");
+                }
                 let t_bundle = std::time::Instant::now();
 
                 // Ensure output directory exists
@@ -1537,12 +1554,8 @@ fn build_from_manifest(
                     out.clone()
                 };
                 let module_name = mir_module.name.clone();
-                let bundle = compiler::ir::RayzorBundle::new(
-                    vec![mir_module],
-                    &module_name,
-                    "main",
-                    None,
-                );
+                let bundle =
+                    compiler::ir::RayzorBundle::new(vec![mir_module], &module_name, "main", None);
                 compiler::ir::save_bundle(&out_path, &bundle)
                     .map_err(|e| format!("Failed to save bundle: {}", e))?;
 
@@ -1552,7 +1565,9 @@ fn build_from_manifest(
             }
 
             // Stop spinner
-            if let Some(ref h) = progress { h.finish(); }
+            if let Some(ref h) = progress {
+                h.finish();
+            }
             if let Some(handle) = tui_thread {
                 let _ = handle.join();
             }
@@ -1567,9 +1582,14 @@ fn build_from_manifest(
                         out.clone()
                     };
                     let size = std::fs::metadata(&out_path).map(|m| m.len()).unwrap_or(0);
-                    tui.handle().add_output_line(format!("{} ({} bytes)", out_path.display(), size));
+                    tui.handle().add_output_line(format!(
+                        "{} ({} bytes)",
+                        out_path.display(),
+                        size
+                    ));
                 } else {
-                    tui.handle().add_output_line(format!("{} functions compiled", func_count));
+                    tui.handle()
+                        .add_output_line(format!("{} functions compiled", func_count));
                 }
                 let _ = tui.render_final();
             } else if let Some(ref out) = output {
@@ -1911,7 +1931,10 @@ fn show_info(_features: bool, _tiers: bool) {
     let info_rows = vec![
         Row::new(vec![
             Span::styled(" version", Style::default().fg(Color::DarkGray)),
-            Span::styled("0.1.0", Style::default().fg(orange).add_modifier(Modifier::BOLD)),
+            Span::styled(
+                "0.1.0",
+                Style::default().fg(orange).add_modifier(Modifier::BOLD),
+            ),
         ]),
         Row::new(vec![
             Span::styled("", Style::default()),
@@ -1933,27 +1956,45 @@ fn show_info(_features: bool, _tiers: bool) {
         ]),
         Row::new(vec![
             Span::styled(" compile", Style::default().fg(Color::DarkGray)),
-            Span::styled("50-200ms JIT vs 2-5s C++", Style::default().fg(Color::Green)),
+            Span::styled(
+                "50-200ms JIT vs 2-5s C++",
+                Style::default().fg(Color::Green),
+            ),
         ]),
         Row::new(vec![
             Span::styled(" safety", Style::default().fg(Color::DarkGray)),
-            Span::styled("Ownership and lifetimes safety model", Style::default().fg(Color::Green)),
+            Span::styled(
+                "Ownership and lifetimes safety model",
+                Style::default().fg(Color::Green),
+            ),
         ]),
         Row::new(vec![
             Span::styled(" concurrency", Style::default().fg(Color::DarkGray)),
-            Span::styled("Safe and fearless concurrency", Style::default().fg(Color::Green)),
+            Span::styled(
+                "Safe and fearless concurrency",
+                Style::default().fg(Color::Green),
+            ),
         ]),
         Row::new(vec![
             Span::styled(" simd", Style::default().fg(Color::DarkGray)),
-            Span::styled("First-class SIMD support", Style::default().fg(Color::Green)),
+            Span::styled(
+                "First-class SIMD support",
+                Style::default().fg(Color::Green),
+            ),
         ]),
         Row::new(vec![
             Span::styled(" embed", Style::default().fg(Color::DarkGray)),
-            Span::styled("Embeddable C code via TinyCC", Style::default().fg(Color::Green)),
+            Span::styled(
+                "Embeddable C code via TinyCC",
+                Style::default().fg(Color::Green),
+            ),
         ]),
         Row::new(vec![
             Span::styled(" cache", Style::default().fg(Color::DarkGray)),
-            Span::styled("BLADE incremental + .rzb bundles", Style::default().fg(Color::Green)),
+            Span::styled(
+                "BLADE incremental + .rzb bundles",
+                Style::default().fg(Color::Green),
+            ),
         ]),
     ];
 
@@ -1981,11 +2022,7 @@ fn show_info(_features: bool, _tiers: bool) {
 
             frame.render_widget(Paragraph::new(art_lines), chunks[0]);
 
-            let table = Table::new(
-                info_rows,
-                [Constraint::Length(10), Constraint::Min(40)],
-            )
-            .block(
+            let table = Table::new(info_rows, [Constraint::Length(10), Constraint::Min(40)]).block(
                 Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(Color::DarkGray))
@@ -2020,11 +2057,7 @@ fn cache_stats(cache_dir: Option<PathBuf>) -> Result<(), String> {
 
     let rows = vec![
         InfoRow::new("directory", &cache_path.display().to_string()),
-        InfoRow::colored(
-            "modules",
-            &stats.cached_modules.to_string(),
-            Color::Cyan,
-        ),
+        InfoRow::colored("modules", &stats.cached_modules.to_string(), Color::Cyan),
         InfoRow::colored(
             "total size",
             &format!("{:.2} MB", stats.total_size_mb()),
@@ -2038,8 +2071,7 @@ fn cache_stats(cache_dir: Option<PathBuf>) -> Result<(), String> {
         "incremental: ~30x faster for unchanged files"
     };
 
-    render_info_panel("cache stats", &rows, Some(footer))
-        .map_err(|e| e.to_string())?;
+    render_info_panel("cache stats", &rows, Some(footer)).map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -2137,10 +2169,7 @@ fn cache_list(cache_dir: Option<PathBuf>) -> Result<(), String> {
                 .iter()
                 .map(|(name, size, age)| {
                     Row::new(vec![
-                        Span::styled(
-                            format!(" {}", name),
-                            Style::default().fg(Color::White),
-                        ),
+                        Span::styled(format!(" {}", name), Style::default().fg(Color::White)),
                         Span::styled(
                             format!("{}KB", size / 1024),
                             Style::default().fg(Color::DarkGray),
@@ -2245,7 +2274,10 @@ fn cache_warm(cache_dir: Option<PathBuf>) -> Result<(), String> {
         eprintln!(
             "  {} {} modules cached ({})",
             "✓".with(crossterm::style::Color::Green),
-            stats.cached_modules.to_string().with(crossterm::style::Color::Cyan),
+            stats
+                .cached_modules
+                .to_string()
+                .with(crossterm::style::Color::Cyan),
             format!("{:.1}KB", stats.total_size_bytes as f64 / 1024.0)
                 .with(crossterm::style::Color::DarkGrey),
         );
@@ -2587,7 +2619,11 @@ fn cmd_init(
             tui::panel::InfoRow::new("files", "rayzor.toml, .rayzor/cache/, .gitignore"),
         ];
         if !member_list.is_empty() {
-            rows.push(tui::panel::InfoRow::colored("members", &member_list.join(", "), ratatui::style::Color::Green));
+            rows.push(tui::panel::InfoRow::colored(
+                "members",
+                &member_list.join(", "),
+                ratatui::style::Color::Green,
+            ));
         }
         let hint = if member_list.is_empty() {
             format!("cd {} && rayzor init --name my-app", project_name)
@@ -2597,13 +2633,18 @@ fn cmd_init(
         let _ = tui::panel::render_info_panel(&project_name, &rows, Some(&hint));
     } else {
         if let Some((entry, _)) = init::detect_existing_sources(&dir) {
-            let _ = tui::panel::render_message_panel("detected", &[&format!("Existing sources: {}", entry)]);
+            let _ = tui::panel::render_message_panel(
+                "detected",
+                &[&format!("Existing sources: {}", entry)],
+            );
         }
 
         init::init_project(&project_name, &dir, tmpl)?;
 
         let files = match tmpl {
-            ProjectTemplate::App | ProjectTemplate::Benchmark => "rayzor.toml, src/Main.hx, .gitignore",
+            ProjectTemplate::App | ProjectTemplate::Benchmark => {
+                "rayzor.toml, src/Main.hx, .gitignore"
+            }
             ProjectTemplate::Lib => "rayzor.toml, src/<Name>.hx, .gitignore",
             ProjectTemplate::Empty => "rayzor.toml, .gitignore",
         };
@@ -2612,7 +2653,11 @@ fn cmd_init(
             tui::panel::InfoRow::new("path", &dir.display().to_string()),
             tui::panel::InfoRow::new("files", files),
         ];
-        let _ = tui::panel::render_info_panel(&project_name, &rows, Some(&format!("cd {} && rayzor run", project_name)));
+        let _ = tui::panel::render_info_panel(
+            &project_name,
+            &rows,
+            Some(&format!("cd {} && rayzor run", project_name)),
+        );
     }
 
     Ok(())
@@ -2798,10 +2843,14 @@ fn cmd_dump(
 
     // Handle --format dot: emit Graphviz DOT
     if format == "dot" {
-        let mut dot = String::from("digraph MIR {\n  rankdir=TB;\n  node [shape=box, fontname=\"monospace\"];\n\n");
+        let mut dot = String::from(
+            "digraph MIR {\n  rankdir=TB;\n  node [shape=box, fontname=\"monospace\"];\n\n",
+        );
         for func in module.functions.values() {
             if let Some(ref filter) = function_filter {
-                if !func.name.contains(filter) { continue; }
+                if !func.name.contains(filter) {
+                    continue;
+                }
             }
             dot.push_str(&format!("  subgraph cluster_{} {{\n", func.id.0));
             dot.push_str(&format!("    label=\"{}\";\n", func.name));
@@ -2815,9 +2864,19 @@ fn cmd_dump(
                     compiler::ir::blocks::IrTerminator::Branch { target } => {
                         dot.push_str(&format!("    {} -> {};\n", block_id, target));
                     }
-                    compiler::ir::blocks::IrTerminator::CondBranch { true_target, false_target, .. } => {
-                        dot.push_str(&format!("    {} -> {} [label=\"T\"];\n", block_id, true_target));
-                        dot.push_str(&format!("    {} -> {} [label=\"F\"];\n", block_id, false_target));
+                    compiler::ir::blocks::IrTerminator::CondBranch {
+                        true_target,
+                        false_target,
+                        ..
+                    } => {
+                        dot.push_str(&format!(
+                            "    {} -> {} [label=\"T\"];\n",
+                            block_id, true_target
+                        ));
+                        dot.push_str(&format!(
+                            "    {} -> {} [label=\"F\"];\n",
+                            block_id, false_target
+                        ));
                     }
                     _ => {}
                 }
@@ -2827,9 +2886,11 @@ fn cmd_dump(
         dot.push_str("}\n");
 
         if let Some(output_path) = output {
-            std::fs::write(&output_path, &dot)
-                .map_err(|e| format!("Failed to write: {}", e))?;
-            println!("✓ DOT written to {} (pipe to: dot -Tpng -o graph.png)", output_path.display());
+            std::fs::write(&output_path, &dot).map_err(|e| format!("Failed to write: {}", e))?;
+            println!(
+                "✓ DOT written to {} (pipe to: dot -Tpng -o graph.png)",
+                output_path.display()
+            );
         } else {
             println!("{}", dot);
         }
@@ -2847,15 +2908,22 @@ fn cmd_dump(
         if interactive && tui::style::is_tty() {
             // Show diff in interactive TUI
             let diff_text = format_diff(&pre_lines, &post_lines);
-            tui::mir_viewer::run_mir_viewer(&diff_text, &format!("{} (diff)", module.name), module.functions.len())
-                .map_err(|e| format!("TUI error: {}", e))?;
+            tui::mir_viewer::run_mir_viewer(
+                &diff_text,
+                &format!("{} (diff)", module.name),
+                module.functions.len(),
+            )
+            .map_err(|e| format!("TUI error: {}", e))?;
         } else {
             // Print simple diff
             println!("; Before optimization (O0):");
             println!("; {} lines", pre_lines.len());
             println!("; After optimization (O{}):", opt_level);
             println!("; {} lines", post_lines.len());
-            println!("; Delta: {} lines", post_lines.len() as isize - pre_lines.len() as isize);
+            println!(
+                "; Delta: {} lines",
+                post_lines.len() as isize - pre_lines.len() as isize
+            );
             println!();
             println!("{}", post_opt_text);
         }
@@ -3017,7 +3085,11 @@ fn cmd_rpkg_inspect(file: PathBuf) -> Result<(), String> {
 fn format_diff(before: &[&str], after: &[&str]) -> String {
     let mut result = String::new();
     result.push_str("; === DIFF: before → after optimization ===\n");
-    result.push_str(&format!("; before: {} lines, after: {} lines\n\n", before.len(), after.len()));
+    result.push_str(&format!(
+        "; before: {} lines, after: {} lines\n\n",
+        before.len(),
+        after.len()
+    ));
 
     // Show the optimized output with markers for new function headers
     for line in after {

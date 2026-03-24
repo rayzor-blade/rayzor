@@ -438,55 +438,94 @@ pub fn dump_instruction(inst: &IrInstruction) -> String {
             format!("{} = fn_ref @fn{}", dest, func_id.0)
         }
         IrInstruction::VectorBinOp {
-            dest, op, left, right, vec_ty,
+            dest,
+            op,
+            left,
+            right,
+            vec_ty,
         } => {
             let prefix = vec_type_prefix(vec_ty);
-            format!("{} = {}.{} {}, {}", dest, prefix, format!("{:?}", op).to_lowercase(), left, right)
+            format!(
+                "{} = {}.{} {}, {}",
+                dest,
+                prefix,
+                format!("{:?}", op).to_lowercase(),
+                left,
+                right
+            )
         }
         IrInstruction::VectorUnaryOp {
-            dest, op, operand, vec_ty,
+            dest,
+            op,
+            operand,
+            vec_ty,
         } => {
             let prefix = vec_type_prefix(vec_ty);
-            format!("{} = {}.{} {}", dest, prefix, format!("{:?}", op).to_lowercase(), operand)
+            format!(
+                "{} = {}.{} {}",
+                dest,
+                prefix,
+                format!("{:?}", op).to_lowercase(),
+                operand
+            )
         }
         IrInstruction::VectorSplat {
-            dest, scalar, vec_ty,
+            dest,
+            scalar,
+            vec_ty,
         } => {
             let prefix = vec_type_prefix(vec_ty);
             format!("{} = {}.splat {}", dest, prefix, scalar)
         }
         IrInstruction::VectorExtract {
-            dest, vector, index,
+            dest,
+            vector,
+            index,
         } => {
             format!("{} = simd4f.extract {}[{}]", dest, vector, index)
         }
         IrInstruction::VectorInsert {
-            dest, vector, scalar, index,
+            dest,
+            vector,
+            scalar,
+            index,
         } => {
             format!("{} = simd4f.insert {}[{}], {}", dest, vector, index, scalar)
         }
         IrInstruction::VectorReduce {
             dest, op, vector, ..
         } => {
-            format!("{} = simd4f.reduce.{} {}", dest, format!("{:?}", op).to_lowercase(), vector)
+            format!(
+                "{} = simd4f.reduce.{} {}",
+                dest,
+                format!("{:?}", op).to_lowercase(),
+                vector
+            )
         }
-        IrInstruction::VectorLoad {
-            dest, ptr, vec_ty,
-        } => {
+        IrInstruction::VectorLoad { dest, ptr, vec_ty } => {
             let prefix = vec_type_prefix(vec_ty);
             format!("{} = {}.load {}", dest, prefix, ptr)
         }
-        IrInstruction::VectorStore {
-            ptr, value, vec_ty,
-        } => {
+        IrInstruction::VectorStore { ptr, value, vec_ty } => {
             let prefix = vec_type_prefix(vec_ty);
             format!("{}.store {}, {}", prefix, ptr, value)
         }
         IrInstruction::VectorMinMax {
-            dest, op, left, right, vec_ty,
+            dest,
+            op,
+            left,
+            right,
+            vec_ty,
         } => {
             let prefix = vec_type_prefix(vec_ty);
-            format!("{} = {}.{} {}, {}", dest, prefix, format!("{:?}", op).to_lowercase(), left, right)
+            format!(
+                "{} = {}.{} {}, {}",
+                dest,
+                prefix,
+                format!("{:?}", op).to_lowercase(),
+                left,
+                right
+            )
         }
         _ => format!("{:?}", inst),
     }
