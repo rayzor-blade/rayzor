@@ -1,7 +1,7 @@
 //! Surface creation from raw window handles.
 
-use super::GraphicsContext;
 use super::types::texture_format_from_int;
+use super::GraphicsContext;
 
 pub struct GraphicsSurface {
     pub surface: wgpu::Surface<'static>,
@@ -48,7 +48,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_surface_resize(
     width: u32,
     height: u32,
 ) {
-    if surface.is_null() { return; }
+    if surface.is_null() {
+        return;
+    }
     let surface = &mut *surface;
     surface.config.width = width;
     surface.config.height = height;
@@ -59,7 +61,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_surface_resize(
 pub unsafe extern "C" fn rayzor_gpu_gfx_surface_get_texture(
     surface: *mut GraphicsSurface,
 ) -> *mut wgpu::TextureView {
-    if surface.is_null() { return std::ptr::null_mut(); }
+    if surface.is_null() {
+        return std::ptr::null_mut();
+    }
     let surface = &mut *surface;
 
     let frame = match surface.surface.get_current_texture() {
@@ -67,7 +71,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_surface_get_texture(
         Err(_) => return std::ptr::null_mut(),
     };
 
-    let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let view = frame
+        .texture
+        .create_view(&wgpu::TextureViewDescriptor::default());
     surface.current_texture = Some(frame);
     Box::into_raw(Box::new(view))
 }
@@ -75,7 +81,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_surface_get_texture(
 /// Present the current frame.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_surface_present(surface: *mut GraphicsSurface) {
-    if surface.is_null() { return; }
+    if surface.is_null() {
+        return;
+    }
     let surface = &mut *surface;
     if let Some(texture) = surface.current_texture.take() {
         texture.present();

@@ -92,7 +92,11 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_device_destroy(ctx: *mut GraphicsContext
 
 #[no_mangle]
 pub extern "C" fn rayzor_gpu_gfx_is_available() -> i32 {
-    if GraphicsContext::is_available() { 1 } else { 0 }
+    if GraphicsContext::is_available() {
+        1
+    } else {
+        0
+    }
 }
 
 // ============================================================================
@@ -110,7 +114,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_buffer_create(
     size: u64,
     usage_flags: i32,
 ) -> *mut GraphicsBuffer {
-    if ctx.is_null() { return std::ptr::null_mut(); }
+    if ctx.is_null() {
+        return std::ptr::null_mut();
+    }
     let ctx = &*ctx;
     let usage = types::buffer_usages_from_flags(usage_flags) | wgpu::BufferUsages::COPY_DST;
 
@@ -132,7 +138,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_buffer_write(
     data_ptr: *const u8,
     data_len: usize,
 ) {
-    if ctx.is_null() || buf.is_null() || data_ptr.is_null() { return; }
+    if ctx.is_null() || buf.is_null() || data_ptr.is_null() {
+        return;
+    }
     let ctx = &*ctx;
     let buf = &*buf;
     let data = std::slice::from_raw_parts(data_ptr, data_len);
@@ -160,7 +168,10 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_buffer_create_with_data(
         usage,
         mapped_at_creation: true,
     });
-    buffer.slice(..).get_mapped_range_mut().copy_from_slice(data);
+    buffer
+        .slice(..)
+        .get_mapped_range_mut()
+        .copy_from_slice(data);
     buffer.unmap();
 
     Box::into_raw(Box::new(GraphicsBuffer {

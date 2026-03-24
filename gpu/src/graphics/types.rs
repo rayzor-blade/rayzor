@@ -83,21 +83,43 @@ pub fn address_mode_from_int(code: i32) -> wgpu::AddressMode {
 /// Buffer usage flags (bitfield matching Haxe enum indices).
 pub fn buffer_usages_from_flags(flags: i32) -> wgpu::BufferUsages {
     let mut usage = wgpu::BufferUsages::empty();
-    if flags & 1 != 0 { usage |= wgpu::BufferUsages::VERTEX; }
-    if flags & 2 != 0 { usage |= wgpu::BufferUsages::INDEX; }
-    if flags & 4 != 0 { usage |= wgpu::BufferUsages::UNIFORM; }
-    if flags & 8 != 0 { usage |= wgpu::BufferUsages::STORAGE; }
-    if flags & 16 != 0 { usage |= wgpu::BufferUsages::COPY_SRC; }
-    if flags & 32 != 0 { usage |= wgpu::BufferUsages::COPY_DST; }
+    if flags & 1 != 0 {
+        usage |= wgpu::BufferUsages::VERTEX;
+    }
+    if flags & 2 != 0 {
+        usage |= wgpu::BufferUsages::INDEX;
+    }
+    if flags & 4 != 0 {
+        usage |= wgpu::BufferUsages::UNIFORM;
+    }
+    if flags & 8 != 0 {
+        usage |= wgpu::BufferUsages::STORAGE;
+    }
+    if flags & 16 != 0 {
+        usage |= wgpu::BufferUsages::COPY_SRC;
+    }
+    if flags & 32 != 0 {
+        usage |= wgpu::BufferUsages::COPY_DST;
+    }
     usage
 }
 
 pub fn texture_usages_from_flags(flags: i32) -> wgpu::TextureUsages {
     let mut usage = wgpu::TextureUsages::empty();
-    if flags & 1 != 0 { usage |= wgpu::TextureUsages::COPY_SRC; }
-    if flags & 2 != 0 { usage |= wgpu::TextureUsages::COPY_DST; }
-    if flags & 4 != 0 { usage |= wgpu::TextureUsages::TEXTURE_BINDING; }
-    if flags & 8 != 0 { usage |= wgpu::TextureUsages::STORAGE_BINDING; }
-    if flags & 16 != 0 { usage |= wgpu::TextureUsages::RENDER_ATTACHMENT; }
+    if flags & 1 != 0 {
+        usage |= wgpu::TextureUsages::COPY_SRC;
+    }
+    if flags & 2 != 0 {
+        usage |= wgpu::TextureUsages::COPY_DST;
+    }
+    if flags & 4 != 0 {
+        usage |= wgpu::TextureUsages::TEXTURE_BINDING;
+    }
+    if flags & 8 != 0 {
+        usage |= wgpu::TextureUsages::STORAGE_BINDING;
+    }
+    if flags & 16 != 0 {
+        usage |= wgpu::TextureUsages::RENDER_ATTACHMENT;
+    }
     usage
 }

@@ -26,12 +26,18 @@ pub struct GraphicsRenderPass {
 pub unsafe extern "C" fn rayzor_gpu_gfx_encoder_create(
     ctx: *mut GraphicsContext,
 ) -> *mut GraphicsEncoder {
-    if ctx.is_null() { return std::ptr::null_mut(); }
+    if ctx.is_null() {
+        return std::ptr::null_mut();
+    }
     let ctx = &*ctx;
-    let encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("rayzor_encoder"),
-    });
-    Box::into_raw(Box::new(GraphicsEncoder { encoder: Some(encoder) }))
+    let encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("rayzor_encoder"),
+        });
+    Box::into_raw(Box::new(GraphicsEncoder {
+        encoder: Some(encoder),
+    }))
 }
 
 /// Begin a render pass. The pass borrows the encoder, so we use a simplified
@@ -46,7 +52,10 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_render_submit(
     ctx: *mut GraphicsContext,
     color_view: *const wgpu::TextureView,
     load_op: i32,
-    clear_r: f64, clear_g: f64, clear_b: f64, clear_a: f64,
+    clear_r: f64,
+    clear_g: f64,
+    clear_b: f64,
+    clear_a: f64,
     depth_view: *const wgpu::TextureView,
     pipeline: *const GraphicsPipeline,
     vertex_buffer: *const GraphicsBuffer,
@@ -89,9 +98,11 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_render_submit(
         None
     };
 
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("rayzor_render"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("rayzor_render"),
+        });
 
     {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

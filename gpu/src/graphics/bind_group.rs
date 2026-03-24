@@ -25,7 +25,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_bind_group_layout_create(
     entry_bindings: *const u32,
     entry_types: *const i32,
 ) -> *mut GraphicsBindGroupLayout {
-    if ctx.is_null() { return std::ptr::null_mut(); }
+    if ctx.is_null() {
+        return std::ptr::null_mut();
+    }
     let ctx = &*ctx;
 
     let visibility = wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT;
@@ -63,10 +65,12 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_bind_group_layout_create(
         });
     }
 
-    let layout = ctx.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("rayzor_bind_group_layout"),
-        entries: &entries,
-    });
+    let layout = ctx
+        .device
+        .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("rayzor_bind_group_layout"),
+            entries: &entries,
+        });
 
     Box::into_raw(Box::new(GraphicsBindGroupLayout { layout }))
 }
@@ -85,7 +89,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_bind_group_create(
     resource_ptrs: *const *const std::ffi::c_void,
     buffer_sizes: *const u64,
 ) -> *mut GraphicsBindGroup {
-    if ctx.is_null() || layout.is_null() { return std::ptr::null_mut(); }
+    if ctx.is_null() || layout.is_null() {
+        return std::ptr::null_mut();
+    }
     let ctx = &*ctx;
     let layout = &*layout;
 

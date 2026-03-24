@@ -1,9 +1,9 @@
 //! Render pipeline creation via builder pattern.
 
+use super::bind_group::GraphicsBindGroupLayout;
+use super::shader::GraphicsShader;
 use super::types::*;
 use super::GraphicsContext;
-use super::shader::GraphicsShader;
-use super::bind_group::GraphicsBindGroupLayout;
 
 pub struct GraphicsPipeline {
     pub pipeline: wgpu::RenderPipeline,
@@ -46,7 +46,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_set_shader(
     builder: *mut PipelineBuilder,
     shader: *const GraphicsShader,
 ) {
-    if builder.is_null() { return; }
+    if builder.is_null() {
+        return;
+    }
     (*builder).shader = Some(shader);
 }
 
@@ -59,7 +61,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_set_vertex_layout(
     offsets_ptr: *const u64,
     locations_ptr: *const i32,
 ) {
-    if builder.is_null() { return; }
+    if builder.is_null() {
+        return;
+    }
     let b = &mut *builder;
     b.vertex_stride = stride;
     b.vertex_attributes.clear();
@@ -81,7 +85,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_set_format(
     builder: *mut PipelineBuilder,
     format: i32,
 ) {
-    if builder.is_null() { return; }
+    if builder.is_null() {
+        return;
+    }
     (*builder).color_format = texture_format_from_int(format);
 }
 
@@ -90,7 +96,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_set_topology(
     builder: *mut PipelineBuilder,
     topology: i32,
 ) {
-    if builder.is_null() { return; }
+    if builder.is_null() {
+        return;
+    }
     (*builder).topology = primitive_topology_from_int(topology);
 }
 
@@ -99,7 +107,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_set_cull(
     builder: *mut PipelineBuilder,
     mode: i32,
 ) {
-    if builder.is_null() { return; }
+    if builder.is_null() {
+        return;
+    }
     (*builder).cull_mode = cull_mode_from_int(mode);
 }
 
@@ -109,7 +119,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_set_depth(
     format: i32,
     compare: i32,
 ) {
-    if builder.is_null() { return; }
+    if builder.is_null() {
+        return;
+    }
     (*builder).depth_format = Some(texture_format_from_int(format));
     (*builder).depth_compare = compare_function_from_int(compare);
 }
@@ -119,7 +131,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_add_bind_group_layout(
     builder: *mut PipelineBuilder,
     layout: *const GraphicsBindGroupLayout,
 ) {
-    if builder.is_null() || layout.is_null() { return; }
+    if builder.is_null() || layout.is_null() {
+        return;
+    }
     (*builder).bind_group_layouts.push(layout);
 }
 
@@ -128,7 +142,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_build(
     builder: *mut PipelineBuilder,
     ctx: *mut GraphicsContext,
 ) -> *mut GraphicsPipeline {
-    if builder.is_null() || ctx.is_null() { return std::ptr::null_mut(); }
+    if builder.is_null() || ctx.is_null() {
+        return std::ptr::null_mut();
+    }
     let b = Box::from_raw(builder);
     let ctx = &*ctx;
 
@@ -138,18 +154,29 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_build(
     };
 
     // Build bind group layouts
-    let bg_layouts: Vec<&wgpu::BindGroupLayout> = b.bind_group_layouts.iter()
-        .filter_map(|&l| if l.is_null() { None } else { Some(&(*l).layout) })
+    let bg_layouts: Vec<&wgpu::BindGroupLayout> = b
+        .bind_group_layouts
+        .iter()
+        .filter_map(|&l| {
+            if l.is_null() {
+                None
+            } else {
+                Some(&(*l).layout)
+            }
+        })
         .collect();
 
     let pipeline_layout = if bg_layouts.is_empty() {
         None
     } else {
-        Some(ctx.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("rayzor_pipeline_layout"),
-            bind_group_layouts: &bg_layouts,
-            push_constant_ranges: &[],
-        }))
+        Some(
+            ctx.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("rayzor_pipeline_layout"),
+                    bind_group_layouts: &bg_layouts,
+                    push_constant_ranges: &[],
+                }),
+        )
     };
 
     let vertex_buffers = if b.vertex_attributes.is_empty() {
@@ -170,39 +197,41 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_build(
         bias: wgpu::DepthBiasState::default(),
     });
 
-    let pipeline = ctx.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: Some("rayzor_render_pipeline"),
-        layout: pipeline_layout.as_ref(),
-        vertex: wgpu::VertexState {
-            module: &shader.module,
-            entry_point: Some(&shader.vertex_entry),
-            buffers: &vertex_buffers,
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module: &shader.module,
-            entry_point: Some(&shader.fragment_entry),
-            targets: &[Some(wgpu::ColorTargetState {
-                format: b.color_format,
-                blend: Some(wgpu::BlendState::REPLACE),
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: b.topology,
-            strip_index_format: None,
-            front_face: wgpu::FrontFace::Ccw,
-            cull_mode: b.cull_mode,
-            polygon_mode: wgpu::PolygonMode::Fill,
-            unclipped_depth: false,
-            conservative: false,
-        },
-        depth_stencil,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    });
+    let pipeline = ctx
+        .device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("rayzor_render_pipeline"),
+            layout: pipeline_layout.as_ref(),
+            vertex: wgpu::VertexState {
+                module: &shader.module,
+                entry_point: Some(&shader.vertex_entry),
+                buffers: &vertex_buffers,
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader.module,
+                entry_point: Some(&shader.fragment_entry),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: b.color_format,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: b.topology,
+                strip_index_format: None,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: b.cull_mode,
+                polygon_mode: wgpu::PolygonMode::Fill,
+                unclipped_depth: false,
+                conservative: false,
+            },
+            depth_stencil,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
 
     Box::into_raw(Box::new(GraphicsPipeline { pipeline }))
 }

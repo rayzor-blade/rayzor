@@ -5,11 +5,11 @@
 #[cfg(feature = "webgpu-backend")]
 #[test]
 fn test_render_triangle_to_texture() {
-    use rayzor_gpu::graphics::*;
-    use rayzor_gpu::graphics::shader::*;
     use rayzor_gpu::graphics::pipeline::*;
-    use rayzor_gpu::graphics::texture::*;
     use rayzor_gpu::graphics::render_pass::*;
+    use rayzor_gpu::graphics::shader::*;
+    use rayzor_gpu::graphics::texture::*;
+    use rayzor_gpu::graphics::*;
 
     // 1. Create device
     let ctx = unsafe { rayzor_gpu_gfx_device_create() };
@@ -58,9 +58,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         color: [f32; 3],
     }
     let vertices = [
-        Vertex { pos: [0.0, 0.5, 0.0], color: [1.0, 0.0, 0.0] },     // top - red
-        Vertex { pos: [-0.5, -0.5, 0.0], color: [0.0, 1.0, 0.0] },   // bottom-left - green
-        Vertex { pos: [0.5, -0.5, 0.0], color: [0.0, 0.0, 1.0] },    // bottom-right - blue
+        Vertex {
+            pos: [0.0, 0.5, 0.0],
+            color: [1.0, 0.0, 0.0],
+        }, // top - red
+        Vertex {
+            pos: [-0.5, -0.5, 0.0],
+            color: [0.0, 1.0, 0.0],
+        }, // bottom-left - green
+        Vertex {
+            pos: [0.5, -0.5, 0.0],
+            color: [0.0, 0.0, 1.0],
+        }, // bottom-right - blue
     ];
     let vertex_data = unsafe {
         std::slice::from_raw_parts(
@@ -88,8 +97,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         let offsets = [0u64, 12];
         let locations = [0i32, 1];
         rayzor_gpu_gfx_pipeline_set_vertex_layout(
-            builder, 24, 2,
-            formats.as_ptr(), offsets.as_ptr(), locations.as_ptr(),
+            builder,
+            24,
+            2,
+            formats.as_ptr(),
+            offsets.as_ptr(),
+            locations.as_ptr(),
         );
         rayzor_gpu_gfx_pipeline_set_format(builder, 1); // RGBA8Unorm
         rayzor_gpu_gfx_pipeline_set_topology(builder, 0); // TriangleList
@@ -100,8 +113,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     // 5. Create render target texture (64x64 RGBA8)
     let target = unsafe {
         rayzor_gpu_gfx_texture_create(
-            ctx, 64, 64,
-            1,  // RGBA8Unorm
+            ctx,
+            64,
+            64,
+            1,      // RGBA8Unorm
             16 | 1, // RENDER_ATTACHMENT | COPY_SRC
         )
     };
@@ -116,16 +131,21 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
         rayzor_gpu_gfx_render_submit(
             ctx,
             view,
-            0,                  // LoadOp::Clear
-            0.0, 0.0, 0.0, 1.0, // clear to black
-            std::ptr::null(),   // no depth
+            0, // LoadOp::Clear
+            0.0,
+            0.0,
+            0.0,
+            1.0,              // clear to black
+            std::ptr::null(), // no depth
             pipeline,
-            vb,                 // vertex buffer
-            3, 1,               // 3 vertices, 1 instance
-            std::ptr::null(),   // no index buffer
-            0, 0,               // no indices
-            0,                  // no bind groups
-            std::ptr::null(),   // no bind group array
+            vb, // vertex buffer
+            3,
+            1,                // 3 vertices, 1 instance
+            std::ptr::null(), // no index buffer
+            0,
+            0,                // no indices
+            0,                // no bind groups
+            std::ptr::null(), // no bind group array
         );
     }
 
@@ -133,11 +153,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     let pixel_count = 64 * 64;
     let mut pixels = vec![0u8; pixel_count * 4]; // RGBA8
     let bytes_read = unsafe {
-        rayzor_gpu_gfx_texture_read_pixels(
-            ctx, target,
-            pixels.as_mut_ptr(),
-            pixels.len(),
-        )
+        rayzor_gpu_gfx_texture_read_pixels(ctx, target, pixels.as_mut_ptr(), pixels.len())
     };
     assert!(bytes_read > 0, "Pixel readback failed");
 

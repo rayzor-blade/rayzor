@@ -26,7 +26,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_create(
     format: i32,
     usage_flags: i32,
 ) -> *mut GraphicsTexture {
-    if ctx.is_null() { return std::ptr::null_mut(); }
+    if ctx.is_null() {
+        return std::ptr::null_mut();
+    }
     let ctx = &*ctx;
 
     let tex_format = texture_format_from_int(format);
@@ -34,7 +36,11 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_create(
 
     let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("rayzor_texture"),
-        size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
@@ -45,7 +51,12 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_create(
 
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-    Box::into_raw(Box::new(GraphicsTexture { texture, view, width, height }))
+    Box::into_raw(Box::new(GraphicsTexture {
+        texture,
+        view,
+        width,
+        height,
+    }))
 }
 
 #[no_mangle]
@@ -56,7 +67,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_write(
     data_len: usize,
     bytes_per_row: u32,
 ) {
-    if ctx.is_null() || tex.is_null() || data_ptr.is_null() { return; }
+    if ctx.is_null() || tex.is_null() || data_ptr.is_null() {
+        return;
+    }
     let ctx = &*ctx;
     let tex = &*tex;
     let data = std::slice::from_raw_parts(data_ptr, data_len);
@@ -74,7 +87,11 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_write(
             bytes_per_row: Some(bytes_per_row),
             rows_per_image: Some(tex.height),
         },
-        wgpu::Extent3d { width: tex.width, height: tex.height, depth_or_array_layers: 1 },
+        wgpu::Extent3d {
+            width: tex.width,
+            height: tex.height,
+            depth_or_array_layers: 1,
+        },
     );
 }
 
@@ -82,7 +99,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_write(
 pub unsafe extern "C" fn rayzor_gpu_gfx_texture_get_view(
     tex: *const GraphicsTexture,
 ) -> *const wgpu::TextureView {
-    if tex.is_null() { return std::ptr::null(); }
+    if tex.is_null() {
+        return std::ptr::null();
+    }
     &(*tex).view as *const wgpu::TextureView
 }
 
@@ -122,9 +141,11 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_read_pixels(
     });
 
     // Copy texture → staging buffer
-    let mut encoder = ctx.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("rayzor_readback_encoder"),
-    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("rayzor_readback_encoder"),
+        });
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
             texture: &tex.texture,
@@ -188,7 +209,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_sampler_create(
     min_filter: i32,
     address_mode: i32,
 ) -> *mut GraphicsSampler {
-    if ctx.is_null() { return std::ptr::null_mut(); }
+    if ctx.is_null() {
+        return std::ptr::null_mut();
+    }
     let ctx = &*ctx;
 
     let addr = address_mode_from_int(address_mode);

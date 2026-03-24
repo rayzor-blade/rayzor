@@ -39,8 +39,7 @@ pub fn transpile_shader_class(
     }
 
     // 2. Emit uniform bindings from class fields
-    let mut binding_idx = 0u32;
-    for field in &class.fields {
+    for (binding_idx, field) in class.fields.iter().enumerate() {
         let name = interner.get(field.name).unwrap_or("u");
         let wtype = ctx.type_to_wgsl(field.field_type);
         writeln!(
@@ -49,7 +48,6 @@ pub fn transpile_shader_class(
             binding_idx, name, wtype
         )
         .unwrap();
-        binding_idx += 1;
     }
     if !class.fields.is_empty() {
         ctx.out.push('\n');
@@ -431,8 +429,7 @@ impl<'a> WgslCtx<'a> {
     }
 
     fn emit_args(&self, args: &[TypedExpression]) -> Result<String, String> {
-        let strs: Result<Vec<String>, String> =
-            args.iter().map(|a| self.emit_expr(a)).collect();
+        let strs: Result<Vec<String>, String> = args.iter().map(|a| self.emit_expr(a)).collect();
         Ok(strs?.join(", "))
     }
 
