@@ -8259,7 +8259,7 @@ impl<'a> HirToMirContext<'a> {
                     // @:gpuStruct synthetic static methods: gpuDef/gpuSize/gpuAlignment
                     if matches!(
                         callee_name.as_deref(),
-                        Some("gpuDef") | Some("gpuSize") | Some("gpuAlignment") | Some("gpuVertexLayout")
+                        Some("gpuDef") | Some("gpuSize") | Some("gpuAlignment") | Some("gpuVertexLayout") | Some("wgsl")
                     ) {
                         for (tid, decl) in self.current_hir_types.iter() {
                             if let crate::ir::hir::HirTypeDecl::Class(c) = decl {
@@ -8331,6 +8331,17 @@ impl<'a> HirToMirContext<'a> {
                                                     return self
                                                         .builder
                                                         .build_const(IrValue::String(encoded));
+                                                }
+                                                "wgsl" => {
+                                                    // @:shader class — transpile to WGSL
+                                                    // Find the TypedClass in compiled_files (stored in current_hir_types)
+                                                    // For now, return a placeholder — the transpiler needs
+                                                    // the TypedClass which is available in the compilation unit
+                                                    return self
+                                                        .builder
+                                                        .build_const(IrValue::String(
+                                                            "/* @:shader WGSL transpilation placeholder */".to_string()
+                                                        ));
                                                 }
                                                 _ => {}
                                             }

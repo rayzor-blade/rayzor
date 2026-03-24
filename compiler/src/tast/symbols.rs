@@ -327,6 +327,8 @@ impl SymbolFlags {
     pub const NOT_NULL: Self = Self(1 << 18);
     /// @:async - function returns a lazy Future<T>
     pub const ASYNC: Self = Self(1 << 19);
+    /// @:shader - class is a WGSL shader transpilation target
+    pub const SHADER: Self = Self(1 << 20);
 
     pub const fn empty() -> Self {
         Self::NONE
@@ -384,6 +386,11 @@ impl SymbolFlags {
     /// Check if this symbol has @:gpuStruct metadata
     pub const fn is_gpu_struct(self) -> bool {
         self.contains(Self::GPU_STRUCT)
+    }
+
+    /// Check if this symbol has @:shader metadata
+    pub const fn is_shader(self) -> bool {
+        self.contains(Self::SHADER)
     }
 
     /// Check if this symbol has @:keep metadata
