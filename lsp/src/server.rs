@@ -19,13 +19,13 @@ use lsp_types::{
     CompletionResponse, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     HoverProviderCapability, InitializeParams, InitializeResult, InlayHint, InlayHintKind,
-    InlayHintLabel, InlayHintParams, Location, MarkupContent,
-    MarkupKind, OneOf, Position, PublishDiagnosticsParams, Range, SemanticToken,
+    InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind, OneOf,
+    ParameterInformation, ParameterLabel, Position, PublishDiagnosticsParams, Range, SemanticToken,
     SemanticTokenModifier, SemanticTokenType, SemanticTokens, SemanticTokensFullOptions,
     SemanticTokensLegend, SemanticTokensOptions, SemanticTokensParams, SemanticTokensResult,
     SemanticTokensServerCapabilities, ServerCapabilities, SignatureHelp, SignatureHelpOptions,
-    SignatureHelpParams, SignatureInformation, ParameterInformation, ParameterLabel,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri,
+    SignatureHelpParams, SignatureInformation, TextDocumentSyncCapability, TextDocumentSyncKind,
+    Uri,
 };
 use std::path::PathBuf;
 
@@ -51,9 +51,7 @@ pub fn run_lsp() -> Result<(), String> {
         .collect();
 
     let capabilities = ServerCapabilities {
-        text_document_sync: Some(TextDocumentSyncCapability::Kind(
-            TextDocumentSyncKind::FULL,
-        )),
+        text_document_sync: Some(TextDocumentSyncCapability::Kind(TextDocumentSyncKind::FULL)),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
@@ -61,8 +59,8 @@ pub fn run_lsp() -> Result<(), String> {
             ..Default::default()
         }),
         document_symbol_provider: Some(OneOf::Left(true)),
-        semantic_tokens_provider: Some(
-            SemanticTokensServerCapabilities::SemanticTokensOptions(SemanticTokensOptions {
+        semantic_tokens_provider: Some(SemanticTokensServerCapabilities::SemanticTokensOptions(
+            SemanticTokensOptions {
                 legend: SemanticTokensLegend {
                     token_types,
                     token_modifiers,
@@ -70,8 +68,8 @@ pub fn run_lsp() -> Result<(), String> {
                 full: Some(SemanticTokensFullOptions::Bool(true)),
                 range: None,
                 work_done_progress_options: Default::default(),
-            }),
-        ),
+            },
+        )),
         signature_help_provider: Some(SignatureHelpOptions {
             trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
             retrigger_characters: Some(vec![",".to_string()]),
@@ -96,6 +94,7 @@ pub fn run_lsp() -> Result<(), String> {
         .initialize_finish(id, init_result_json)
         .map_err(|e| format!("Initialize finish failed: {}", e))?;
 
+    #[allow(deprecated)]
     let root = init_params
         .root_uri
         .as_ref()
@@ -109,7 +108,10 @@ pub fn run_lsp() -> Result<(), String> {
     for msg in &connection.receiver {
         match msg {
             Message::Request(req) => {
-                if connection.handle_shutdown(&req).map_err(|e| e.to_string())? {
+                if connection
+                    .handle_shutdown(&req)
+                    .map_err(|e| e.to_string())?
+                {
                     break;
                 }
                 handle_request(&connection, &ctx, req);
@@ -191,9 +193,11 @@ fn publish_diagnostics(conn: &Connection, ctx: &mut LspContext, uri: &str, sourc
     let diags = ctx.compile_file(uri, source);
     let lsp_diags = to_lsp_diagnostics(&diags);
 
-    let lsp_uri: Uri = uri
-        .parse()
-        .unwrap_or_else(|_| format!("file://{}", uri).parse().unwrap_or_else(|_| "file:///unknown".parse().unwrap()));
+    let lsp_uri: Uri = uri.parse().unwrap_or_else(|_| {
+        format!("file://{}", uri)
+            .parse()
+            .unwrap_or_else(|_| "file:///unknown".parse().unwrap())
+    });
 
     let params = PublishDiagnosticsParams {
         uri: lsp_uri,
@@ -216,7 +220,11 @@ where
 // ---------------------------------------------------------------------------
 
 fn handle_hover(ctx: &LspContext, params: HoverParams) -> Option<Hover> {
-    let uri = params.text_document_position_params.text_document.uri.as_str();
+    let uri = params
+        .text_document_position_params
+        .text_document
+        .uri
+        .as_str();
     let pos = params.text_document_position_params.position;
     let info = ctx.hover_info(uri, pos.line + 1, pos.character + 1)?;
 
@@ -237,7 +245,11 @@ fn handle_goto_definition(
     ctx: &LspContext,
     params: GotoDefinitionParams,
 ) -> Option<GotoDefinitionResponse> {
-    let uri = params.text_document_position_params.text_document.uri.as_str();
+    let uri = params
+        .text_document_position_params
+        .text_document
+        .uri
+        .as_str();
     let pos = params.text_document_position_params.position;
     let (file, line, col) = ctx.goto_definition(uri, pos.line + 1, pos.character + 1)?;
 
@@ -347,10 +359,7 @@ fn handle_document_symbols(
     let uri = params.text_document.uri.as_str();
     let entries = ctx.document_symbols(uri)?;
 
-    let symbols: Vec<DocumentSymbol> = entries
-        .into_iter()
-        .map(|e| doc_entry_to_lsp(e))
-        .collect();
+    let symbols: Vec<DocumentSymbol> = entries.into_iter().map(doc_entry_to_lsp).collect();
 
     Some(DocumentSymbolResponse::Nested(symbols))
 }
@@ -386,10 +395,7 @@ fn doc_entry_to_lsp(entry: analysis::DocumentSymbolEntry) -> DocumentSymbol {
 // Signature help — function parameter info
 // ---------------------------------------------------------------------------
 
-fn handle_signature_help(
-    ctx: &LspContext,
-    params: SignatureHelpParams,
-) -> Option<SignatureHelp> {
+fn handle_signature_help(ctx: &LspContext, params: SignatureHelpParams) -> Option<SignatureHelp> {
     let uri = params
         .text_document_position_params
         .text_document
@@ -435,7 +441,7 @@ fn handle_signature_help(
 // ---------------------------------------------------------------------------
 
 fn handle_inlay_hints(ctx: &LspContext, params: InlayHintParams) -> Option<Vec<InlayHint>> {
-    let uri = params.text_document.uri.as_str();
+    let _uri = params.text_document.uri.as_str();
     let range = params.range;
 
     let mut hints = Vec::new();

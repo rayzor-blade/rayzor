@@ -5,10 +5,8 @@
 
 use crate::analysis::{self, CompletionEntry, FileSymbolIndex};
 use compiler::compilation::{CompilationConfig, CompilationUnit};
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::rc::Rc;
 
 /// Persistent compilation context shared across LSP requests.
 pub struct LspContext {
@@ -38,19 +36,21 @@ impl LspContext {
     /// Load workspace configuration from rayzor.toml if present.
     pub fn load_workspace_config(&mut self) {
         let manifest_path = self.root.join("rayzor.toml");
-        if let Ok(content) = std::fs::read_to_string(&manifest_path) {
-            if let Ok(manifest) = compiler::workspace::manifest::parse_manifest(&content) {
-                if let compiler::workspace::manifest::RayzorManifest::SingleProject(project) =
-                    manifest
-                {
-                    if let Some(ref build) = project.build {
-                        self.class_paths = build
-                            .class_paths
-                            .iter()
-                            .map(|cp| self.root.join(cp))
-                            .collect();
-                    }
-                }
+        let content = match std::fs::read_to_string(&manifest_path) {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let manifest = match compiler::workspace::manifest::parse_manifest(&content) {
+            Ok(m) => m,
+            Err(_) => return,
+        };
+        if let compiler::workspace::manifest::RayzorManifest::SingleProject(project) = manifest {
+            if let Some(ref build) = project.build {
+                self.class_paths = build
+                    .class_paths
+                    .iter()
+                    .map(|cp| self.root.join(cp))
+                    .collect();
             }
         }
     }
@@ -73,7 +73,12 @@ impl LspContext {
         }
 
         if let Err(e) = unit.load_stdlib() {
-            return vec![LspDiagnostic::error(&filename, 0, 0, format!("Stdlib: {}", e))];
+            return vec![LspDiagnostic::error(
+                &filename,
+                0,
+                0,
+                format!("Stdlib: {}", e),
+            )];
         }
 
         if let Err(e) = unit.add_file(source, &filename) {
@@ -103,11 +108,7 @@ impl LspContext {
                     },
                     message: e.message.clone(),
                     suggestion: e.suggestion.clone(),
-                    related: e
-                        .related_errors
-                        .iter()
-                        .map(|r| r.clone())
-                        .collect(),
+                    related: e.related_errors.clone(),
                 })
                 .collect(),
         };
@@ -125,8 +126,7 @@ impl LspContext {
         let index = self.file_indices.get(uri)?;
         let unit = self.last_unit.as_ref()?;
 
-        let sym_id =
-            index.find_symbol_at(line, col, &unit.symbol_table, &unit.string_interner)?;
+        let sym_id = index.find_symbol_at(line, col, &unit.symbol_table, &unit.string_interner)?;
 
         analysis::format_hover(
             sym_id,
@@ -137,17 +137,11 @@ impl LspContext {
     }
 
     /// Find definition location for a symbol at a given position.
-    pub fn goto_definition(
-        &self,
-        uri: &str,
-        line: u32,
-        col: u32,
-    ) -> Option<(String, u32, u32)> {
+    pub fn goto_definition(&self, uri: &str, line: u32, col: u32) -> Option<(String, u32, u32)> {
         let index = self.file_indices.get(uri)?;
         let unit = self.last_unit.as_ref()?;
 
-        let sym_id =
-            index.find_symbol_at(line, col, &unit.symbol_table, &unit.string_interner)?;
+        let sym_id = index.find_symbol_at(line, col, &unit.symbol_table, &unit.string_interner)?;
         let sym = unit.symbol_table.get_symbol(sym_id)?;
         let loc = sym.definition_location;
 
@@ -168,13 +162,18 @@ impl LspContext {
     }
 
     /// Get completion entries for a position.
-    pub fn completions(&self, uri: &str) -> Vec<CompletionEntry> {
+    pub fn completions(&self, _uri: &str) -> Vec<CompletionEntry> {
         let unit = match self.last_unit.as_ref() {
             Some(u) => u,
             None => return Vec::new(),
         };
 
-        analysis::collect_completions(&unit.symbol_table, &unit.type_table, &unit.string_interner, 0)
+        analysis::collect_completions(
+            &unit.symbol_table,
+            &unit.type_table,
+            &unit.string_interner,
+            0,
+        )
     }
 
     /// Build semantic tokens for syntax highlighting.
@@ -201,7 +200,12 @@ impl LspContext {
     }
 
     /// Build signature help for a function call.
-    pub fn signature_help(&self, uri: &str, line: u32, col: u32) -> Option<analysis::SignatureInfo> {
+    pub fn signature_help(
+        &self,
+        uri: &str,
+        line: u32,
+        col: u32,
+    ) -> Option<analysis::SignatureInfo> {
         let index = self.file_indices.get(uri)?;
         let unit = self.last_unit.as_ref()?;
 
@@ -209,7 +213,13 @@ impl LspContext {
         let sym_id = index.find_symbol_at(line, col, &unit.symbol_table, &unit.string_interner)?;
 
         // TODO: determine active parameter from cursor position (count commas before cursor)
-        analysis::build_signature_help(sym_id, &unit.symbol_table, &unit.type_table, &unit.string_interner, 0)
+        analysis::build_signature_help(
+            sym_id,
+            &unit.symbol_table,
+            &unit.type_table,
+            &unit.string_interner,
+            0,
+        )
     }
 
     /// Get macro expansion hints for inlay hints display.
@@ -247,6 +257,7 @@ pub struct MacroExpansionHint {
 }
 
 /// A diagnostic ready for LSP conversion.
+#[allow(dead_code)]
 pub struct LspDiagnostic {
     pub file: String,
     pub line: u32,
@@ -275,6 +286,7 @@ impl LspDiagnostic {
     }
 }
 
+#[allow(dead_code)]
 pub enum DiagSeverity {
     Error,
     Warning,
