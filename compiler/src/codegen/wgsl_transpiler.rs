@@ -100,13 +100,24 @@ pub fn transpile_shader_from_hir(
 
         // Transpile HIR function body
         if let Some(ref body) = method.function.body {
-            for stmt in &body.statements {
-                ctx.emit_hir_stmt(stmt, 1)?;
-            }
-            if let Some(ref trailing) = body.expr {
-                let ind = ctx.ind(1);
-                let e = ctx.hir_expr_to_string(trailing)?;
-                writeln!(ctx.out, "{}return {};", ind, e).unwrap();
+            ctx.emit_hir_body(body, 1)?;
+        }
+        // Also check: body might be in the trailing expr
+        if let Some(ref body) = method.function.body {
+            if body.statements.is_empty() {
+                if let Some(ref trail) = body.expr {
+                    // The entire function body is a single expression (common in HIR)
+                    if let hir::HirExprKind::Block(inner) = &trail.kind {
+                        for stmt in &inner.statements {
+                            ctx.emit_hir_stmt(stmt, 1)?;
+                        }
+                        if let Some(ref inner_trail) = inner.expr {
+                            let ind = ctx.ind(1);
+                            let e = ctx.hir_expr_to_string(inner_trail)?;
+                            writeln!(ctx.out, "{}return {};", ind, e).unwrap();
+                        }
+                    }
+                }
             }
         }
 
@@ -595,9 +606,20 @@ impl<'a> WgslCtx<'a> {
         let ind = self.ind(depth);
         match stmt {
             hir::HirStatement::Expr(expr) => {
-                let s = self.hir_expr_to_string(expr)?;
-                if !s.is_empty() {
-                    writeln!(self.out, "{}{};", ind, s).unwrap();
+                // Expand nested blocks inline
+                if let hir::HirExprKind::Block(block) = &expr.kind {
+                    for s in &block.statements {
+                        self.emit_hir_stmt(s, depth)?;
+                    }
+                    if let Some(ref trailing) = block.expr {
+                        let e = self.hir_expr_to_string(trailing)?;
+                        writeln!(self.out, "{}return {};", ind, e).unwrap();
+                    }
+                } else {
+                    let s = self.hir_expr_to_string(expr)?;
+                    if !s.is_empty() {
+                        writeln!(self.out, "{}{};", ind, s).unwrap();
+                    }
                 }
             }
             hir::HirStatement::Let {
@@ -719,17 +741,24 @@ impl<'a> WgslCtx<'a> {
     }
 
     fn hir_block_to_string(&self, block: &hir::HirBlock) -> Result<String, String> {
-        // For simple blocks with just a trailing expression, return that
+        // For blocks used as expressions (e.g., if/else), return trailing expr
         if let Some(ref expr) = block.expr {
+            // Recursively unwrap nested blocks
+            if let hir::HirExprKind::Block(inner) = &expr.kind {
+                return self.hir_block_to_string(inner);
+            }
             return self.hir_expr_to_string(expr);
         }
-        // For multi-statement blocks, return last statement's expression
+        // Return last expression statement
         if let Some(last) = block.statements.last() {
             if let hir::HirStatement::Expr(e) = last {
                 return self.hir_expr_to_string(e);
             }
+            if let hir::HirStatement::Return(Some(e)) = last {
+                return self.hir_expr_to_string(e);
+            }
         }
-        Ok("/* empty block */".into())
+        Ok("".into())
     }
 
     fn hir_lit(&self, lit: &hir::HirLiteral) -> String {
@@ -771,6 +800,24 @@ impl<'a> WgslCtx<'a> {
             HirBinaryOp::Shr => ">>",
             _ => "/* op */",
         }
+    }
+
+    /// Emit an HIR block body — handles nested Block expressions transparently.
+    fn emit_hir_body(&mut self, body: &hir::HirBlock, depth: usize) -> Result<(), String> {
+        for stmt in &body.statements {
+            self.emit_hir_stmt(stmt, depth)?;
+        }
+        if let Some(ref trailing) = body.expr {
+            // Trailing expression might be a nested Block
+            if let hir::HirExprKind::Block(inner) = &trailing.kind {
+                self.emit_hir_body(inner, depth)?;
+            } else {
+                let ind = self.ind(depth);
+                let e = self.hir_expr_to_string(trailing)?;
+                writeln!(self.out, "{}return {};", ind, e).unwrap();
+            }
+        }
+        Ok(())
     }
 
     fn hir_lvalue_to_string(&self, lv: &hir::HirLValue) -> Result<String, String> {
