@@ -1079,54 +1079,17 @@ where
 // =============================================================================
 
 /// Reserved keywords
+/// All Haxe reserved keywords.
+pub const HAXE_KEYWORDS: &[&str] = &[
+    "abstract", "break", "case", "cast", "catch", "class", "continue", "default", "do",
+    "dynamic", "else", "enum", "extends", "extern", "false", "final", "for", "function",
+    "if", "implements", "import", "in", "inline", "interface", "macro", "new", "null",
+    "override", "package", "private", "public", "return", "static", "super", "switch",
+    "this", "throw", "true", "try", "typedef", "untyped", "using", "var", "while",
+];
+
 fn is_keyword(s: &str) -> bool {
-    matches!(
-        s,
-        "abstract"
-            | "break"
-            | "case"
-            | "cast"
-            | "catch"
-            | "class"
-            | "continue"
-            | "default"
-            | "do"
-            | "dynamic"
-            | "else"
-            | "enum"
-            | "extends"
-            | "extern"
-            | "false"
-            | "final"
-            | "for"
-            | "function"
-            | "if"
-            | "implements"
-            | "import"
-            | "in"
-            | "inline"
-            | "interface"
-            | "macro"
-            | "new"
-            | "null"
-            | "override"
-            | "package"
-            | "private"
-            | "public"
-            | "return"
-            | "static"
-            | "super"
-            | "switch"
-            | "this"
-            | "throw"
-            | "true"
-            | "try"
-            | "typedef"
-            | "untyped"
-            | "using"
-            | "var"
-            | "while"
-    )
+    HAXE_KEYWORDS.contains(&s)
 }
 
 /// Parse a keyword

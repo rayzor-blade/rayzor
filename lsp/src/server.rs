@@ -206,16 +206,11 @@ fn handle_completion(ctx: &LspContext, params: CompletionParams) -> Option<Compl
         .uri
         .as_str();
 
-    // Haxe keywords
-    let keywords = vec![
-        "var", "function", "class", "interface", "enum", "abstract", "typedef", "import", "using",
-        "if", "else", "for", "while", "do", "switch", "case", "default", "return", "break",
-        "continue", "throw", "try", "catch", "new", "this", "super", "null", "true", "false",
-        "public", "private", "static", "inline", "override", "dynamic", "extern",
-    ];
+    // Haxe keywords from the parser
+    let keywords = parser::HAXE_KEYWORDS;
 
     let mut items: Vec<CompletionItem> = keywords
-        .into_iter()
+        .iter()
         .map(|kw| CompletionItem {
             label: kw.to_string(),
             kind: Some(CompletionItemKind::KEYWORD),
