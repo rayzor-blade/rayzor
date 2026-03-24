@@ -8643,6 +8643,41 @@ impl<'a> HirToMirContext<'a> {
                         }
                     }
 
+                    // @:shader synthetic method — wgsl()
+                    if method_name == Some("wgsl") {
+                        // Find the @:shader class from the object type
+                        let obj_sym = {
+                            let type_table = self.type_table;
+                            type_table.get(object.ty).and_then(|t| {
+                                if let crate::tast::core::TypeKind::Class { symbol_id, .. } = &t.kind {
+                                    Some(*symbol_id)
+                                } else {
+                                    None
+                                }
+                            })
+                        };
+                        let is_shader = obj_sym
+                            .and_then(|sid| self.symbol_table.get_symbol(sid))
+                            .map(|s| s.flags.is_shader())
+                            .unwrap_or(false);
+                        if is_shader {
+                            // Find the HIR class and transpile
+                            for (_tid, decl) in self.current_hir_types.iter() {
+                                if let crate::ir::hir::HirTypeDecl::Class(c) = decl {
+                                    if Some(c.symbol_id) == obj_sym {
+                                        let type_table = self.type_table;
+                                        match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
+                                            c, self.symbol_table, type_table, self.string_interner,
+                                        ) {
+                                            Ok(wgsl) => return self.builder.build_const(IrValue::String(wgsl)),
+                                            Err(e) => return self.builder.build_const(IrValue::String(format!("/* WGSL error: {} */", e))),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     // @:gpuStruct synthetic methods — gpuDef/gpuSize/gpuAlignment
                     if matches!(
                         method_name,
