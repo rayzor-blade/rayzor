@@ -176,6 +176,41 @@ impl LspContext {
 
         analysis::collect_completions(&unit.symbol_table, &unit.type_table, &unit.string_interner, 0)
     }
+
+    /// Build semantic tokens for syntax highlighting.
+    pub fn semantic_tokens(&self, uri: &str) -> Option<Vec<analysis::SemanticToken>> {
+        let unit = self.last_unit.as_ref()?;
+        let index = self.file_indices.get(uri)?;
+        Some(analysis::build_semantic_tokens(
+            &unit.symbol_table,
+            &unit.string_interner,
+            index.file_id,
+        ))
+    }
+
+    /// Build document symbols for the outline panel.
+    pub fn document_symbols(&self, uri: &str) -> Option<Vec<analysis::DocumentSymbolEntry>> {
+        let unit = self.last_unit.as_ref()?;
+        let index = self.file_indices.get(uri)?;
+        Some(analysis::build_document_symbols(
+            &unit.symbol_table,
+            &unit.type_table,
+            &unit.string_interner,
+            index.file_id,
+        ))
+    }
+
+    /// Build signature help for a function call.
+    pub fn signature_help(&self, uri: &str, line: u32, col: u32) -> Option<analysis::SignatureInfo> {
+        let index = self.file_indices.get(uri)?;
+        let unit = self.last_unit.as_ref()?;
+
+        // Find the function symbol at or near the cursor
+        let sym_id = index.find_symbol_at(line, col, &unit.symbol_table, &unit.string_interner)?;
+
+        // TODO: determine active parameter from cursor position (count commas before cursor)
+        analysis::build_signature_help(sym_id, &unit.symbol_table, &unit.type_table, &unit.string_interner, 0)
+    }
 }
 
 /// A diagnostic ready for LSP conversion.
