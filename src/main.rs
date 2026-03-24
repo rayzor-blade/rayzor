@@ -74,10 +74,6 @@ enum Commands {
         #[arg(long)]
         release: bool,
 
-        /// Enable GPU compute support (loads rayzor-gpu dynamic library)
-        #[arg(long)]
-        compute: bool,
-
         /// Load .rpkg packages (repeatable)
         #[arg(long = "rpkg", value_name = "FILE")]
         rpkg_files: Vec<PathBuf>,
@@ -532,7 +528,6 @@ fn main() {
             no_cache,
             cache_dir,
             release,
-            compute,
             rpkg_files,
             safety_warnings,
             interactive,
@@ -547,7 +542,6 @@ fn main() {
             !no_cache,
             cache_dir,
             release,
-            compute,
             rpkg_files,
             safety_warnings != "off",
             interactive,
@@ -754,96 +748,6 @@ fn compile_haxe_to_mir(
     Ok(module)
 }
 
-/// Loaded GPU plugin — keeps the dylib alive and provides both runtime symbols
-/// and a compiler plugin for method registration.
-struct GpuPlugin {
-    _lib: libloading::Library,
-    symbols: Vec<(&'static str, *const u8)>,
-    compiler_plugin: Option<compiler::compiler_plugin::NativePlugin>,
-}
-
-/// Try to load the GPU compute plugin from the rayzor-gpu dynamic library.
-///
-/// On success, returns a GpuPlugin containing:
-/// - Runtime symbols for JIT linking
-/// - A NativePlugin for compiler-side method registration
-fn try_load_gpu_plugin() -> Option<GpuPlugin> {
-    let lib_name = if cfg!(target_os = "macos") {
-        "librayzor_gpu.dylib"
-    } else if cfg!(target_os = "linux") {
-        "librayzor_gpu.so"
-    } else {
-        return None;
-    };
-
-    // Try paths: next to executable, then current dir
-    let search_paths = [
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join(lib_name))),
-        Some(std::path::PathBuf::from(lib_name)),
-    ];
-
-    for path in search_paths.iter().flatten() {
-        if let Ok(lib) = unsafe { libloading::Library::new(path) } {
-            let mut symbols = Vec::new();
-
-            // Load runtime symbols for JIT linking
-            type InitFn = unsafe extern "C" fn(*mut usize) -> *const u8;
-            if let Ok(init_fn) = unsafe { lib.get::<InitFn>(b"rayzor_gpu_plugin_init") } {
-                let mut count: usize = 0;
-                let entries_ptr = unsafe { init_fn(&mut count) };
-                if !entries_ptr.is_null() && count > 0 {
-                    let entries = unsafe {
-                        std::slice::from_raw_parts(
-                            entries_ptr as *const (usize, usize, usize),
-                            count,
-                        )
-                    };
-                    for &(name_ptr, name_len, fn_ptr) in entries {
-                        let name = unsafe {
-                            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                                name_ptr as *const u8,
-                                name_len,
-                            ))
-                        };
-                        let name: &'static str = unsafe { std::mem::transmute(name) };
-                        symbols.push((name, fn_ptr as *const u8));
-                    }
-                }
-            }
-
-            // Load method descriptors for compiler-side registration
-            type DescribeFn =
-                unsafe extern "C" fn(*mut usize) -> *const rayzor_plugin::NativeMethodDesc;
-            let compiler_plugin = unsafe {
-                if let Ok(describe_fn) = lib.get::<DescribeFn>(b"rayzor_gpu_plugin_describe") {
-                    let mut count: usize = 0;
-                    let descs = describe_fn(&mut count);
-                    if !descs.is_null() && count > 0 {
-                        Some(compiler::compiler_plugin::NativePlugin::from_descriptors(
-                            "rayzor_gpu_compute",
-                            descs,
-                            count,
-                        ))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            };
-
-            return Some(GpuPlugin {
-                _lib: lib,
-                symbols,
-                compiler_plugin,
-            });
-        }
-    }
-    None
-}
-
 fn run_bundle(file: &Path, verbose: bool, stats: bool, preset: Preset) -> Result<(), String> {
     use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
     use compiler::ir::load_bundle;
@@ -912,7 +816,6 @@ fn run_file(
     cache_enabled: bool,
     _cache_dir: Option<PathBuf>,
     release: bool,
-    compute: bool,
     rpkg_files: Vec<PathBuf>,
     safety_warnings: bool,
     interactive: bool,
@@ -1011,33 +914,8 @@ fn run_file(
     let source =
         std::fs::read_to_string(&file).map_err(|e| format!("Failed to read file: {}", e))?;
 
-    // Always try to load the GPU plugin — silently skip if the dylib isn't found.
-    // The --compute flag upgrades a missing dylib from silent skip to a warning.
-    let mut gpu_plugin = match try_load_gpu_plugin() {
-        Some(gpu) => {
-            if verbose {
-                eprintln!(
-                    "  gpu      loaded {} symbols from rayzor-gpu plugin",
-                    gpu.symbols.len()
-                );
-            }
-            Some(gpu)
-        }
-        None => {
-            if compute {
-                eprintln!("warning: --compute flag set but rayzor-gpu library not found");
-            }
-            None
-        }
-    };
-
-    // Extract compiler plugin from GPU (moved into compiler during compilation)
+    // Compiler plugins (from rpkg packages with native libs)
     let mut compiler_plugins: Vec<Box<dyn compiler::compiler_plugin::CompilerPlugin>> = Vec::new();
-    if let Some(ref mut gpu) = gpu_plugin {
-        if let Some(cp) = gpu.compiler_plugin.take() {
-            compiler_plugins.push(Box::new(cp));
-        }
-    }
 
     // Load .rpkg packages
     let mut loaded_rpkgs: Vec<compiler::rpkg::install::RpkgPlugin> = Vec::new();
@@ -1258,11 +1136,6 @@ fn run_file(
     let plugin = rayzor_runtime::get_plugin();
     let mut symbols = plugin.runtime_symbols();
 
-    // Merge GPU runtime symbols for JIT linking
-    if let Some(ref gpu) = gpu_plugin {
-        symbols.extend_from_slice(&gpu.symbols);
-    }
-
     // Merge rpkg runtime symbols for JIT linking
     let rpkg_owned_symbols: Vec<(String, *const u8)> = loaded_rpkgs
         .iter()
@@ -1274,8 +1147,7 @@ fn run_file(
         symbols.push((name, *ptr));
     }
 
-    // Keep dylibs alive until backend is done
-    let _gpu_plugin = gpu_plugin;
+    // Keep rpkg dylibs alive until backend is done
     let _loaded_rpkgs = loaded_rpkgs;
 
     let symbols_ref: Vec<(&str, *const u8)> = symbols.iter().map(|(n, p)| (*n, *p)).collect();
@@ -1731,7 +1603,6 @@ fn build_from_hxml(
                     false,      // cache flag
                     None,       // cache_dir
                     false,      // release
-                    false,      // compute
                     Vec::new(), // rpkg_files
                     false,      // safety_warnings
                     false,      // interactive

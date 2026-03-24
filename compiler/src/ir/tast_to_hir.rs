@@ -154,6 +154,15 @@ impl<'a> TastToHirContext<'a> {
         self.semantic_graphs = Some(graphs);
     }
 
+    /// Seed inline var values from imported/loaded typed files so that
+    /// cross-file `static inline var` references (like TextureUsage.RENDER_ATTACHMENT)
+    /// can be resolved during HIR lowering of the current file.
+    pub fn seed_inline_vars_from_imports(&mut self, imported_files: &[&TypedFile]) {
+        for file in imported_files {
+            self.evaluate_inline_static_vars(file);
+        }
+    }
+
     /// Helper methods to get builtin types from type table
     fn get_void_type(&self) -> TypeId {
         self.type_table.borrow().void_type()
@@ -1470,7 +1479,24 @@ impl<'a> TastToHirContext<'a> {
             } => {
                 // First check pre-evaluated inline values (handles enum abstract fields and
                 // static inline vars that were pre-computed by evaluate_inline_static_vars)
-                if let Some(literal) = self.inline_var_values.get(field_symbol).cloned() {
+                let inline_literal = self.inline_var_values.get(field_symbol).cloned()
+                    .or_else(|| {
+                        // Fallback: match by resolved string name for cross-file inline vars.
+                        let field_name_str = self.symbol_table.get_symbol(*field_symbol)
+                            .and_then(|s| self.string_interner.get(s.name))
+                            .map(|s| s.to_string())?;
+                        for (sym_id, lit) in &self.inline_var_values {
+                            if let Some(sym) = self.symbol_table.get_symbol(*sym_id) {
+                                if let Some(name_str) = self.string_interner.get(sym.name) {
+                                    if name_str == field_name_str {
+                                        return Some(lit.clone());
+                                    }
+                                }
+                            }
+                        }
+                        None
+                    });
+                if let Some(literal) = inline_literal {
                     return HirExpr {
                         kind: HirExprKind::Literal(literal),
                         ty: expr.expr_type,
@@ -5036,6 +5062,17 @@ pub fn lower_tast_to_hir(
     string_interner: &mut StringInterner,
     semantic_graphs: Option<&SemanticGraphs>,
 ) -> Result<HirModule, Vec<LoweringError>> {
+    lower_tast_to_hir_with_imports(file, symbol_table, type_table, string_interner, semantic_graphs, &[])
+}
+
+pub fn lower_tast_to_hir_with_imports(
+    file: &TypedFile,
+    symbol_table: &SymbolTable,
+    type_table: &Rc<RefCell<TypeTable>>,
+    string_interner: &mut StringInterner,
+    semantic_graphs: Option<&SemanticGraphs>,
+    imported_files: &[&TypedFile],
+) -> Result<HirModule, Vec<LoweringError>> {
     let mut context = TastToHirContext::new(
         symbol_table,
         type_table,
@@ -5049,6 +5086,12 @@ pub fn lower_tast_to_hir(
 
     if let Some(graphs) = semantic_graphs {
         context.set_semantic_graphs(graphs);
+    }
+
+    // Seed inline var values from imported files so cross-file
+    // static inline var references can be resolved
+    if !imported_files.is_empty() {
+        context.seed_inline_vars_from_imports(imported_files);
     }
 
     context.lower_file(file)

@@ -1123,6 +1123,7 @@ impl<'a> AstLowering<'a> {
             collected_errors: Vec::new(),
             using_modules: Vec::new(),
             pending_usings: Vec::new(),
+            // (class_fields will be seeded below if global_class_fields provided)
             in_static_method: false,
             class_type_params: HashMap::new(),
             class_constructor_symbols: HashMap::new(),
@@ -1137,6 +1138,26 @@ impl<'a> AstLowering<'a> {
     /// Set whether to skip pre-registration pass (for CompilationUnit with two-pass compilation)
     pub fn set_skip_pre_registration(&mut self, skip: bool) {
         self.skip_pre_registration = skip;
+    }
+
+    /// Seed class_fields from previously compiled files so that cross-file
+    /// static field access (e.g., BufferUsage.VERTEX from GraphicsTypes.hx) works.
+    pub fn seed_class_fields(
+        &mut self,
+        fields: &HashMap<SymbolId, Vec<(InternedString, SymbolId, bool)>>,
+    ) {
+        for (class_sym, field_list) in fields {
+            self.class_fields
+                .entry(*class_sym)
+                .or_insert_with(|| field_list.clone());
+        }
+    }
+
+    /// Export class_fields for accumulation across file compilations.
+    pub fn export_class_fields(
+        &self,
+    ) -> &HashMap<SymbolId, Vec<(InternedString, SymbolId, bool)>> {
+        &self.class_fields
     }
 
     /// Get all collected errors from both context and collected_errors
@@ -3591,10 +3612,38 @@ impl<'a> AstLowering<'a> {
         self.context.push_type_parameters(type_param_map);
 
         // Now process target type (can reference type parameters)
-        let target_type = self.lower_type(&typedef_decl.type_def)?;
+        let mut target_type = self.lower_type(&typedef_decl.type_def)?;
 
         // Pop type parameters from stack
         self.context.pop_type_parameters();
+
+        // If the target resolved to a Placeholder, check if the existing symbol (from
+        // a prior compilation, e.g. rayzor.Bytes extern class) already has a valid Class type.
+        // This handles `typedef Bytes = rayzor.Bytes;` where rayzor.Bytes was compiled first
+        // and the symbol "Bytes" already exists as a Class in root scope.
+        {
+            let is_placeholder = {
+                let type_table = self.context.type_table.borrow();
+                matches!(
+                    type_table.get(target_type).map(|ti| &ti.kind),
+                    Some(crate::tast::core::TypeKind::Placeholder { .. })
+                )
+            };
+            if is_placeholder {
+                // The target couldn't be resolved by lower_type. Check if the existing symbol
+                // (which we're about to overwrite as TypeAlias) already has the right type.
+                if let Some(existing) =
+                    self.context.symbol_table.get_symbol(typedef_symbol)
+                {
+                    if existing.kind == crate::tast::SymbolKind::Class
+                        && existing.type_id.is_valid()
+                    {
+                        // The existing symbol IS the target class. Use its type directly.
+                        target_type = existing.type_id;
+                    }
+                }
+            }
+        }
 
         // Create the TypeAlias type in the type table and set it on the symbol
         let type_arg_ids: Vec<TypeId> = type_params
@@ -4950,6 +4999,57 @@ impl<'a> AstLowering<'a> {
                             )
                         })
                         .map(|s| (s.id, s.kind.clone()))
+                })
+                // For qualified names (e.g. "rayzor.Bytes"), also try looking up via
+                // the namespace resolver using package path + short name
+                .or_else(|| {
+                    if name.contains('.') {
+                        let parts: Vec<&str> = name.rsplitn(2, '.').collect();
+                        if parts.len() == 2 {
+                            let class_name = parts[0]; // "Bytes"
+                            let package_str = parts[1]; // "rayzor"
+                            let package_parts: Vec<InternedString> = package_str
+                                .split('.')
+                                .map(|p| self.context.intern_string(p))
+                                .collect();
+                            let class_interned = self.context.intern_string(class_name);
+                            let qp = crate::tast::namespace::QualifiedPath::new(
+                                package_parts,
+                                class_interned,
+                            );
+                            if let Some(sym_id) =
+                                self.context.namespace_resolver.lookup_symbol(&qp)
+                            {
+                                if let Some(sym) =
+                                    self.context.symbol_table.get_symbol(sym_id)
+                                {
+                                    return Some((sym.id, sym.kind.clone()));
+                                }
+                            }
+                            // Also try short name lookup in root scope
+                            if let Some(sym) = self.context.symbol_table.lookup_symbol(
+                                ScopeId::first(),
+                                class_interned,
+                            ) {
+                                // Verify the symbol's qualified name matches
+                                if let Some(qn) = sym.qualified_name {
+                                    if let Some(qn_str) =
+                                        self.context.string_interner.get(qn)
+                                    {
+                                        if qn_str == name {
+                                            return Some((sym.id, sym.kind.clone()));
+                                        }
+                                    }
+                                }
+                                // If no qualified name set, accept it as a match
+                                // (extern classes may not have qualified names set)
+                                return Some((sym.id, sym.kind.clone()));
+                            }
+                        }
+                        None
+                    } else {
+                        None
+                    }
                 });
 
                 if let Some((symbol_id, symbol_kind)) = symbol_info {
@@ -8198,8 +8298,41 @@ impl<'a> AstLowering<'a> {
                                         // TypeAlias target is unresolved — try to find
                                         // the class by the placeholder name in scope
                                         let ph_interned = self.context.intern_string(ph_name);
-                                        if let Some(target_sym_id) =
-                                            self.resolve_symbol_in_scope_hierarchy(ph_interned)
+                                        let target_sym_id_opt = self
+                                            .resolve_symbol_in_scope_hierarchy(ph_interned)
+                                            .or_else(|| {
+                                                // For qualified names (e.g. "rayzor.Bytes"), split
+                                                // into package + short name and look up via namespace
+                                                if ph_name.contains('.') {
+                                                    let parts: Vec<&str> =
+                                                        ph_name.rsplitn(2, '.').collect();
+                                                    if parts.len() == 2 {
+                                                        let class_name = parts[0];
+                                                        let package_str = parts[1];
+                                                        let pkg_parts: Vec<InternedString> =
+                                                            package_str
+                                                                .split('.')
+                                                                .map(|p| {
+                                                                    self.context.intern_string(p)
+                                                                })
+                                                                .collect();
+                                                        let class_int =
+                                                            self.context.intern_string(class_name);
+                                                        let qp = crate::tast::namespace::QualifiedPath::new(pkg_parts.clone(), class_int);
+                                                        if let Some(sid) = self.context.namespace_resolver.lookup_symbol(&qp) {
+                                                            return Some(sid);
+                                                        }
+                                                        // Also try short name in root scope
+                                                        if let Some(sym) = self.context.symbol_table.lookup_symbol(ScopeId::first(), class_int) {
+                                                            return Some(sym.id);
+                                                        }
+                                                    }
+                                                    None
+                                                } else {
+                                                    None
+                                                }
+                                            });
+                                        if let Some(target_sym_id) = target_sym_id_opt
                                         {
                                             if let Some(target_sym) =
                                                 self.context.symbol_table.get_symbol(target_sym_id)
