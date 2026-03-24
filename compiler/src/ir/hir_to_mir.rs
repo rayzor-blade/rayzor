@@ -8340,15 +8340,25 @@ impl<'a> HirToMirContext<'a> {
                                                         .build_const(IrValue::String(encoded));
                                                 }
                                                 "wgsl" => {
-                                                    // @:shader class — transpile to WGSL
-                                                    // Find the TypedClass in compiled_files (stored in current_hir_types)
-                                                    // For now, return a placeholder — the transpiler needs
-                                                    // the TypedClass which is available in the compilation unit
-                                                    return self
-                                                        .builder
-                                                        .build_const(IrValue::String(
-                                                            "/* @:shader WGSL transpilation placeholder */".to_string()
-                                                        ));
+                                                    // @:shader class — transpile HIR to WGSL
+                                                    let type_table = self.type_table;
+                                                    match crate::codegen::wgsl_transpiler::transpile_shader_from_hir(
+                                                        c,
+                                                        self.symbol_table,
+                                                        type_table,
+                                                        self.string_interner,
+                                                    ) {
+                                                        Ok(wgsl_source) => {
+                                                            return self.builder.build_const(
+                                                                IrValue::String(wgsl_source),
+                                                            );
+                                                        }
+                                                        Err(e) => {
+                                                            return self.builder.build_const(
+                                                                IrValue::String(format!("/* WGSL error: {} */", e)),
+                                                            );
+                                                        }
+                                                    }
                                                 }
                                                 _ => {}
                                             }
