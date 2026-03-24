@@ -21,6 +21,10 @@ extern class Texture {
     @:native("rayzor_gpu_gfx_texture_get_view")
     public function getView():Dynamic;
 
+    /** Read pixel data back from GPU to CPU. Returns RGBA8 bytes (4 bytes per pixel). */
+    @:native("rayzor_gpu_gfx_texture_read_pixels")
+    public function readPixels(device:GPUDevice, outPtr:Dynamic, outLen:Int):Int;
+
     /** Destroy this texture. */
     @:native("rayzor_gpu_gfx_texture_destroy")
     public function destroy():Void;
