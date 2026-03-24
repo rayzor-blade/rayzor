@@ -138,6 +138,36 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_buffer_write(
     ctx.queue.write_buffer(&buf.buffer, offset, data);
 }
 
+/// Create a buffer and upload data in one call. Convenience for vertex/index data.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_gfx_buffer_create_with_data(
+    ctx: *mut GraphicsContext,
+    data_ptr: *const u8,
+    data_len: usize,
+    usage_flags: i32,
+) -> *mut GraphicsBuffer {
+    if ctx.is_null() || data_ptr.is_null() || data_len == 0 {
+        return std::ptr::null_mut();
+    }
+    let ctx = &*ctx;
+    let data = std::slice::from_raw_parts(data_ptr, data_len);
+    let usage = types::buffer_usages_from_flags(usage_flags) | wgpu::BufferUsages::COPY_DST;
+
+    let buffer = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("rayzor_buffer_init"),
+        size: data_len as u64,
+        usage,
+        mapped_at_creation: true,
+    });
+    buffer.slice(..).get_mapped_range_mut().copy_from_slice(data);
+    buffer.unmap();
+
+    Box::into_raw(Box::new(GraphicsBuffer {
+        buffer,
+        size: data_len as u64,
+    }))
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_buffer_destroy(buf: *mut GraphicsBuffer) {
     if !buf.is_null() {
