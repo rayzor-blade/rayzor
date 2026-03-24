@@ -6,6 +6,7 @@
 //! Automatically detects `@:gpuStruct` types used in shader method parameters
 //! and generates the corresponding WGSL struct definitions with `@location(N)`.
 
+use crate::ir::hir;
 use crate::tast::node::{
     BinaryOperator, LiteralValue, TypedClass, TypedExpression, TypedExpressionKind, TypedField,
     TypedFunction, TypedStatement, UnaryOperator,
@@ -15,7 +16,107 @@ use crate::tast::{StringInterner, SymbolId, SymbolTable, TypeId, TypeKind, TypeT
 use std::collections::BTreeSet;
 use std::fmt::Write;
 
-/// Transpile a @:shader class to WGSL source code.
+/// Transpile a @:shader class from HIR (available during MIR lowering).
+/// Generates WGSL struct definitions for @:gpuStruct parameters and
+/// entry point functions for methods.
+pub fn transpile_shader_from_hir(
+    hir_class: &hir::HirClass,
+    symbol_table: &SymbolTable,
+    type_table: &TypeTable,
+    interner: &StringInterner,
+) -> Result<String, String> {
+    let mut ctx = WgslCtx {
+        st: symbol_table,
+        tt: type_table,
+        si: interner,
+        out: String::new(),
+        emitted_structs: BTreeSet::new(),
+    };
+
+    // 1. Emit struct dependencies from method params/returns
+    for method in &hir_class.methods {
+        for param in &method.function.params {
+            ctx.maybe_emit_struct(param.ty, true)?;
+        }
+        ctx.maybe_emit_struct(method.function.return_type, false)?;
+    }
+
+    // 2. Emit uniform bindings from class fields
+    for (binding_idx, field) in hir_class.fields.iter().enumerate() {
+        let name = interner.get(field.name).unwrap_or("u");
+        let wtype = ctx.type_to_wgsl(field.ty);
+        writeln!(
+            ctx.out,
+            "@group(0) @binding({}) var<uniform> {}: {};",
+            binding_idx, name, wtype
+        )
+        .unwrap();
+    }
+    if !hir_class.fields.is_empty() {
+        ctx.out.push('\n');
+    }
+
+    // 3. Emit entry point functions
+    for method in &hir_class.methods {
+        let name = interner.get(method.function.name).unwrap_or("fn_unknown");
+
+        let stage = if name == "vertex" || name.starts_with("vs_") {
+            Some("vertex")
+        } else if name == "fragment" || name.starts_with("fs_") {
+            Some("fragment")
+        } else if name == "compute" || name.starts_with("cs_") {
+            Some("compute")
+        } else {
+            None
+        };
+
+        if let Some(s) = stage {
+            writeln!(ctx.out, "@{}", s).unwrap();
+        }
+
+        write!(ctx.out, "fn {}(", name).unwrap();
+        for (i, param) in method.function.params.iter().enumerate() {
+            if i > 0 {
+                ctx.out.push_str(", ");
+            }
+            let pname = interner.get(param.name).unwrap_or("p");
+            let ptype = ctx.type_to_wgsl(param.ty);
+            write!(ctx.out, "{}: {}", pname, ptype).unwrap();
+        }
+        ctx.out.push_str(") -> ");
+
+        let ret = ctx.type_to_wgsl(method.function.return_type);
+        if ctx.is_gpu_struct(method.function.return_type) {
+            write!(ctx.out, "{}", ret).unwrap();
+        } else if stage == Some("vertex") && ret == "vec4f" {
+            write!(ctx.out, "@builtin(position) {}", ret).unwrap();
+        } else if stage == Some("fragment") {
+            write!(ctx.out, "@location(0) {}", ret).unwrap();
+        } else {
+            write!(ctx.out, "{}", ret).unwrap();
+        }
+
+        ctx.out.push_str(" {\n");
+
+        // Transpile HIR function body
+        if let Some(ref body) = method.function.body {
+            for stmt in &body.statements {
+                ctx.emit_hir_stmt(stmt, 1)?;
+            }
+            if let Some(ref trailing) = body.expr {
+                let ind = ctx.ind(1);
+                let e = ctx.hir_expr_to_string(trailing)?;
+                writeln!(ctx.out, "{}return {};", ind, e).unwrap();
+            }
+        }
+
+        ctx.out.push_str("}\n\n");
+    }
+
+    Ok(ctx.out)
+}
+
+/// Transpile a @:shader class to WGSL source code (from TAST).
 pub fn transpile_shader_class(
     class: &TypedClass,
     symbol_table: &SymbolTable,
@@ -482,6 +583,218 @@ impl<'a> WgslCtx<'a> {
             UnaryOperator::Neg => "-",
             UnaryOperator::Not => "!",
             UnaryOperator::BitNot => "~",
+            _ => "",
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // HIR expression/statement transpilation (used by transpile_shader_from_hir)
+    // -----------------------------------------------------------------------
+
+    fn emit_hir_stmt(&mut self, stmt: &hir::HirStatement, depth: usize) -> Result<(), String> {
+        let ind = self.ind(depth);
+        match stmt {
+            hir::HirStatement::Expr(expr) => {
+                let s = self.hir_expr_to_string(expr)?;
+                if !s.is_empty() {
+                    writeln!(self.out, "{}{};", ind, s).unwrap();
+                }
+            }
+            hir::HirStatement::Let {
+                pattern,
+                type_hint,
+                init,
+                ..
+            } => {
+                let name = match pattern {
+                    hir::HirPattern::Variable { symbol, .. } => {
+                        self.sym_name(*symbol).to_string()
+                    }
+                    _ => "_".to_string(),
+                };
+                let ty = type_hint
+                    .map(|t| self.type_to_wgsl(t))
+                    .unwrap_or_else(|| "f32".into());
+                if let Some(init_expr) = init {
+                    let val = self.hir_expr_to_string(init_expr)?;
+                    writeln!(self.out, "{}var {}: {} = {};", ind, name, ty, val).unwrap();
+                } else {
+                    writeln!(self.out, "{}var {}: {};", ind, name, ty).unwrap();
+                }
+            }
+            hir::HirStatement::Assign { lhs, rhs, .. } => {
+                let t = self.hir_lvalue_to_string(lhs)?;
+                let v = self.hir_expr_to_string(rhs)?;
+                writeln!(self.out, "{}{} = {};", ind, t, v).unwrap();
+            }
+            hir::HirStatement::Return(value) => {
+                if let Some(val) = value {
+                    let v = self.hir_expr_to_string(val)?;
+                    writeln!(self.out, "{}return {};", ind, v).unwrap();
+                } else {
+                    writeln!(self.out, "{}return;", ind).unwrap();
+                }
+            }
+            hir::HirStatement::If {
+                condition,
+                then_branch,
+                else_branch,
+            } => {
+                let c = self.hir_expr_to_string(condition)?;
+                writeln!(self.out, "{}if ({}) {{", ind, c).unwrap();
+                for s in &then_branch.statements {
+                    self.emit_hir_stmt(s, depth + 1)?;
+                }
+                if let Some(eb) = else_branch {
+                    writeln!(self.out, "{}}} else {{", ind).unwrap();
+                    for s in &eb.statements {
+                        self.emit_hir_stmt(s, depth + 1)?;
+                    }
+                }
+                writeln!(self.out, "{}}}", ind).unwrap();
+            }
+            _ => {
+                writeln!(self.out, "{}/* unsupported HIR statement */", ind).unwrap();
+            }
+        }
+        Ok(())
+    }
+
+    fn hir_expr_to_string(&self, expr: &hir::HirExpr) -> Result<String, String> {
+        use hir::HirExprKind;
+        match &expr.kind {
+            HirExprKind::Literal(lit) => Ok(self.hir_lit(lit)),
+            HirExprKind::Variable { symbol, .. } => Ok(self.sym_name(*symbol).to_string()),
+            HirExprKind::Field { object, field } => {
+                let o = self.hir_expr_to_string(object)?;
+                let f = self.sym_name(*field);
+                Ok(format!("{}.{}", o, f))
+            }
+            HirExprKind::Index { object, index } => {
+                let o = self.hir_expr_to_string(object)?;
+                let i = self.hir_expr_to_string(index)?;
+                Ok(format!("{}[{}]", o, i))
+            }
+            HirExprKind::Call { callee, args, .. } => {
+                let f = self.hir_expr_to_string(callee)?;
+                let arg_strs: Result<Vec<String>, String> =
+                    args.iter().map(|a| self.hir_expr_to_string(a)).collect();
+                Ok(format!("{}({})", f, arg_strs?.join(", ")))
+            }
+            HirExprKind::New { class_type, args, .. } => {
+                let t = self.type_to_wgsl(*class_type);
+                let arg_strs: Result<Vec<String>, String> =
+                    args.iter().map(|a| self.hir_expr_to_string(a)).collect();
+                Ok(format!("{}({})", t, arg_strs?.join(", ")))
+            }
+            HirExprKind::Binary { op, lhs, rhs } => {
+                let l = self.hir_expr_to_string(lhs)?;
+                let r = self.hir_expr_to_string(rhs)?;
+                Ok(format!("({} {} {})", l, self.hir_binop(op), r))
+            }
+            HirExprKind::Unary { op, operand } => {
+                let e = self.hir_expr_to_string(operand)?;
+                Ok(format!("({}{})", self.hir_unop(op), e))
+            }
+            HirExprKind::Cast { expr, target, .. } => {
+                let e = self.hir_expr_to_string(expr)?;
+                let t = self.type_to_wgsl(*target);
+                Ok(format!("{}({})", t, e))
+            }
+            HirExprKind::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                let c = self.hir_expr_to_string(condition)?;
+                let t = self.hir_expr_to_string(then_expr)?;
+                let e = self.hir_expr_to_string(else_expr)?;
+                Ok(format!("select({}, {}, {})", e, t, c))
+            }
+            HirExprKind::Block(block) => self.hir_block_to_string(block),
+            HirExprKind::This => Ok("self".into()),
+            HirExprKind::Null => Ok("0".into()),
+            _ => Ok("/* unsupported HIR expr */".into()),
+        }
+    }
+
+    fn hir_block_to_string(&self, block: &hir::HirBlock) -> Result<String, String> {
+        // For simple blocks with just a trailing expression, return that
+        if let Some(ref expr) = block.expr {
+            return self.hir_expr_to_string(expr);
+        }
+        // For multi-statement blocks, return last statement's expression
+        if let Some(last) = block.statements.last() {
+            if let hir::HirStatement::Expr(e) = last {
+                return self.hir_expr_to_string(e);
+            }
+        }
+        Ok("/* empty block */".into())
+    }
+
+    fn hir_lit(&self, lit: &hir::HirLiteral) -> String {
+        match lit {
+            hir::HirLiteral::Int(n) => format!("{}i", n),
+            hir::HirLiteral::Float(f) => {
+                let s = format!("{}", f);
+                if s.contains('.') { format!("{}f", s) } else { format!("{}.0f", s) }
+            }
+            hir::HirLiteral::Bool(b) => b.to_string(),
+            hir::HirLiteral::String(s) => {
+                let val = self.si.get(*s).unwrap_or("");
+                format!("/* \"{}\" */", val)
+            }
+            _ => "0".into(),
+        }
+    }
+
+    fn hir_binop(&self, op: &hir::HirBinaryOp) -> &'static str {
+        use hir::HirBinaryOp;
+        match op {
+            HirBinaryOp::Add => "+",
+            HirBinaryOp::Sub => "-",
+            HirBinaryOp::Mul => "*",
+            HirBinaryOp::Div => "/",
+            HirBinaryOp::Mod => "%",
+            HirBinaryOp::Eq => "==",
+            HirBinaryOp::Ne => "!=",
+            HirBinaryOp::Lt => "<",
+            HirBinaryOp::Le => "<=",
+            HirBinaryOp::Gt => ">",
+            HirBinaryOp::Ge => ">=",
+            HirBinaryOp::And => "&&",
+            HirBinaryOp::Or => "||",
+            HirBinaryOp::BitAnd => "&",
+            HirBinaryOp::BitOr => "|",
+            HirBinaryOp::BitXor => "^",
+            HirBinaryOp::Shl => "<<",
+            HirBinaryOp::Shr => ">>",
+            _ => "/* op */",
+        }
+    }
+
+    fn hir_lvalue_to_string(&self, lv: &hir::HirLValue) -> Result<String, String> {
+        match lv {
+            hir::HirLValue::Variable(sym) => Ok(self.sym_name(*sym).to_string()),
+            hir::HirLValue::Field { object, field } => {
+                let o = self.hir_expr_to_string(object)?;
+                let f = self.sym_name(*field);
+                Ok(format!("{}.{}", o, f))
+            }
+            hir::HirLValue::Index { object, index } => {
+                let o = self.hir_expr_to_string(object)?;
+                let i = self.hir_expr_to_string(index)?;
+                Ok(format!("{}[{}]", o, i))
+            }
+        }
+    }
+
+    fn hir_unop(&self, op: &hir::HirUnaryOp) -> &'static str {
+        use hir::HirUnaryOp;
+        match op {
+            HirUnaryOp::Neg => "-",
+            HirUnaryOp::Not => "!",
+            HirUnaryOp::BitNot => "~",
             _ => "",
         }
     }
