@@ -199,7 +199,14 @@ fn handle_goto_definition(
     }))
 }
 
-fn handle_completion(_ctx: &LspContext, _params: CompletionParams) -> Option<CompletionResponse> {
+fn handle_completion(ctx: &LspContext, params: CompletionParams) -> Option<CompletionResponse> {
+    let uri = params
+        .text_document_position
+        .text_document
+        .uri
+        .as_str();
+
+    // Haxe keywords
     let keywords = vec![
         "var", "function", "class", "interface", "enum", "abstract", "typedef", "import", "using",
         "if", "else", "for", "while", "do", "switch", "case", "default", "return", "break",
@@ -207,14 +214,32 @@ fn handle_completion(_ctx: &LspContext, _params: CompletionParams) -> Option<Com
         "public", "private", "static", "inline", "override", "dynamic", "extern",
     ];
 
-    let items: Vec<CompletionItem> = keywords
+    let mut items: Vec<CompletionItem> = keywords
         .into_iter()
         .map(|kw| CompletionItem {
             label: kw.to_string(),
             kind: Some(CompletionItemKind::KEYWORD),
+            sort_text: Some(format!("2_{}", kw)), // Keywords sort after symbols
             ..Default::default()
         })
         .collect();
+
+    // Symbol completions from the last compilation
+    for entry in ctx.completions(uri) {
+        items.push(CompletionItem {
+            label: entry.label.clone(),
+            kind: Some(entry.kind.to_lsp()),
+            detail: Some(entry.detail),
+            documentation: entry.documentation.map(|d| {
+                lsp_types::Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: d,
+                })
+            }),
+            sort_text: Some(format!("1_{}", entry.label)), // Symbols sort before keywords
+            ..Default::default()
+        });
+    }
 
     Some(CompletionResponse::Array(items))
 }
