@@ -44,6 +44,12 @@ extern class RenderPipeline {
     @:native("rayzor_gpu_gfx_pipeline_build")
     public function build(device:GPUDevice):RenderPipeline;
 
+    /** Add an additional color target for MRT (Multiple Render Targets).
+     *  First target is set via setFormat(); this adds @location(1), @location(2), etc.
+     */
+    @:native("rayzor_gpu_gfx_pipeline_add_color_target")
+    public function addColorTarget(format:Int):Void;
+
     /** Destroy this pipeline. */
     @:native("rayzor_gpu_gfx_pipeline_destroy")
     public function destroy():Void;

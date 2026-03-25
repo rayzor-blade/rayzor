@@ -1936,6 +1936,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-metal",
  "pollster",
+ "raw-window-handle",
  "rayzor-plugin",
  "rayzor-runtime",
  "wgpu",

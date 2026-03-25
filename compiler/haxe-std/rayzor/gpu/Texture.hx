@@ -15,7 +15,7 @@ extern class Texture {
 
     /** Get the default view for this texture. */
     @:native("rayzor_gpu_gfx_texture_get_view")
-    public function getView():Dynamic;
+    public function getView():TextureView;
 
     /** Read pixel data from GPU to CPU as haxe.io.Bytes (RGBA8, 4 bytes/pixel). */
     @:native("rayzor_gpu_gfx_texture_to_bytes")

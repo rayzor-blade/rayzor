@@ -15,6 +15,21 @@ pub fn texture_format_from_int(code: i32) -> wgpu::TextureFormat {
     }
 }
 
+/// Convert a wgpu TextureFormat to its integer code.
+pub fn texture_format_to_int(fmt: wgpu::TextureFormat) -> i32 {
+    match fmt {
+        wgpu::TextureFormat::Bgra8Unorm => 0,
+        wgpu::TextureFormat::Rgba8Unorm => 1,
+        wgpu::TextureFormat::Depth24PlusStencil8 => 2,
+        wgpu::TextureFormat::Depth32Float => 3,
+        wgpu::TextureFormat::Rgba16Float => 4,
+        wgpu::TextureFormat::Rgba32Float => 5,
+        wgpu::TextureFormat::Bgra8UnormSrgb => 6,
+        wgpu::TextureFormat::Rgba8UnormSrgb => 7,
+        _ => 0,
+    }
+}
+
 pub fn primitive_topology_from_int(code: i32) -> wgpu::PrimitiveTopology {
     match code {
         0 => wgpu::PrimitiveTopology::TriangleList,

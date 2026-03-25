@@ -9,7 +9,7 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 metal-backend = ["dep:objc2", "dep:objc2-metal", "dep:objc2-foundation"]
-webgpu-backend = ["dep:wgpu", "dep:pollster"]
+webgpu-backend = ["dep:wgpu", "dep:pollster", "dep:raw-window-handle"]
 cuda-backend = []
 
 [dependencies]
@@ -29,3 +29,4 @@ objc2-foundation = { version = "0.3", optional = true }
 # WebGPU backend (cross-platform)
 wgpu = { version = "24", optional = true }
 pollster = { version = "0.4", optional = true }
+raw-window-handle = { version = "0.6", optional = true }

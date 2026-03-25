@@ -34,9 +34,9 @@ extern class CommandEncoder {
     /** Begin a render pass. loadOp: 0=Clear, 1=Load. */
     @:native("rayzor_gpu_gfx_cmd_begin_pass")
     public function beginPass(
-        colorView:Dynamic, loadOp:Int,
+        colorView:TextureView, loadOp:Int,
         clearR:Float, clearG:Float, clearB:Float, clearA:Float,
-        depthView:Dynamic
+        depthView:TextureView
     ):Void;
 
     /** Set the active render pipeline. */
@@ -70,6 +70,16 @@ extern class CommandEncoder {
     /** Set the scissor rectangle. */
     @:native("rayzor_gpu_gfx_cmd_set_scissor")
     public function setScissor(x:Int, y:Int, w:Int, h:Int):Void;
+
+    /** Begin a render pass with multiple color targets (MRT).
+     *  clearColors is a packed array of RGBA f64: [r0,g0,b0,a0, r1,g1,b1,a1, ...].
+     */
+    @:native("rayzor_gpu_gfx_cmd_begin_pass_mrt")
+    public function beginPassMRT(
+        colorViewCount:Int, colorViews:Dynamic,
+        loadOps:Dynamic, clearColors:Dynamic,
+        depthView:TextureView
+    ):Void;
 
     /** End the current render pass. */
     @:native("rayzor_gpu_gfx_cmd_end_pass")

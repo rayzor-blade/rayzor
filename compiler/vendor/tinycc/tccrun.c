@@ -83,6 +83,11 @@ static int protect_pages(void *ptr, unsigned long length, int mode);
 static int tcc_relocate_ex(TCCState *s1, void *ptr, unsigned ptr_diff);
 static void st_link(TCCState *s1);
 static void st_unlink(TCCState *s1);
+#if defined(__APPLE__) && defined(TCC_TARGET_ARM64)
+#include <pthread.h>
+#include <sys/mman.h>
+extern void pthread_jit_write_protect_np(int enabled);
+#endif
 #ifdef CONFIG_TCC_BACKTRACE
 static int _tcc_backtrace(rt_frame *f, const char *fmt, va_list ap);
 #endif
@@ -96,6 +101,8 @@ static void win64_del_function_table(void *);
 #  define PAGESIZE sysconf(_SC_PAGESIZE)
 # elif defined __APPLE__
 #  include <libkern/OSCacheControl.h>
+#  include <pthread.h>
+#  include <sys/mman.h>
 #  define PAGESIZE getpagesize()
 # else
 #  define PAGESIZE 4096
@@ -129,6 +136,15 @@ static int rt_mem(TCCState *s1, int size)
     ptr_diff = (char*)prw - (char*)ptr; /* = size; */
     //printf("map %p %p %p\n", ptr, prw, (void*)ptr_diff);
     size *= 2;
+#elif defined(__APPLE__) && defined(TCC_TARGET_ARM64)
+    /* macOS ARM64: malloc memory cannot be mprotect'd to executable.
+       Use mmap(MAP_JIT) for W^X JIT memory. */
+    size = PAGEALIGN(size + PAGESIZE);
+    ptr = mmap(NULL, size, PROT_READ | PROT_WRITE | PROT_EXEC,
+               MAP_PRIVATE | MAP_ANONYMOUS | MAP_JIT, -1, 0);
+    if (ptr == MAP_FAILED)
+        return tcc_error_noabort("tccrun: could not mmap JIT memory");
+    pthread_jit_write_protect_np(0); /* writable for code generation */
 #else
     ptr = tcc_malloc(size += PAGESIZE); /* one extra page to align malloc memory */
 #endif
@@ -160,6 +176,11 @@ LIBTCCAPI int tcc_relocate(TCCState *s1)
     ret = tcc_relocate_ex(s1, s1->run_ptr, ptr_diff);
     if (ret == 0)
         st_link(s1);
+#if defined(__APPLE__) && defined(TCC_TARGET_ARM64)
+    /* Switch MAP_JIT memory from writable to executable */
+    pthread_jit_write_protect_np(1);
+    __builtin___clear_cache(s1->run_ptr, (char*)s1->run_ptr + s1->run_size);
+#endif
     return ret;
 }
 
@@ -451,7 +472,11 @@ redo:
 
 static int protect_pages(void *ptr, unsigned long length, int mode)
 {
-#ifdef _WIN32
+#if defined(__APPLE__) && defined(TCC_TARGET_ARM64)
+    /* MAP_JIT: protection managed via pthread_jit_write_protect_np, not mprotect */
+    (void)ptr; (void)length; (void)mode;
+    return 0;
+#elif defined _WIN32
     static const unsigned char protect[] = {
         PAGE_EXECUTE_READ,
         PAGE_READONLY,

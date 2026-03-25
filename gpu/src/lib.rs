@@ -138,7 +138,11 @@ declare_native_methods! {
     "rayzor_gpu_Texture", "toBytes",          instance, "rayzor_gpu_gfx_texture_to_bytes", [Ptr, Ptr] => Ptr;
 
     // Surface
+    "rayzor_gpu_Surface", "create",         static,   "rayzor_gpu_gfx_surface_create",     [Ptr, Ptr, Ptr, I64, I64] => Ptr;
+    "rayzor_gpu_Surface", "getTexture",     instance, "rayzor_gpu_gfx_surface_get_texture",[Ptr]           => Ptr;
     "rayzor_gpu_Surface", "present",        instance, "rayzor_gpu_gfx_surface_present",    [Ptr]           => Void;
+    "rayzor_gpu_Surface", "resize",         instance, "rayzor_gpu_gfx_surface_resize",     [Ptr, Ptr, I64, I64] => Void;
+    "rayzor_gpu_Surface", "getFormat",      instance, "rayzor_gpu_gfx_surface_get_format", [Ptr]           => I64;
     "rayzor_gpu_Surface", "destroy",        instance, "rayzor_gpu_gfx_surface_destroy",    [Ptr]           => Void;
 
     // CommandEncoder (multi-pass)
@@ -151,6 +155,10 @@ declare_native_methods! {
     "rayzor_gpu_CommandEncoder", "setBindGroup",    instance, "rayzor_gpu_gfx_cmd_set_bind_group",   [Ptr, I64, Ptr]     => Void;
     "rayzor_gpu_CommandEncoder", "setViewport",     instance, "rayzor_gpu_gfx_cmd_set_viewport",     [Ptr, F64, F64, F64, F64, F64, F64] => Void;
     "rayzor_gpu_CommandEncoder", "setScissor",      instance, "rayzor_gpu_gfx_cmd_set_scissor",      [Ptr, I64, I64, I64, I64]           => Void;
+    "rayzor_gpu_CommandEncoder", "beginPassMRT",   instance, "rayzor_gpu_gfx_cmd_begin_pass_mrt",  [Ptr, I64, Ptr, Ptr, Ptr, Ptr]      => Void;
+
+    // Pipeline MRT
+    "rayzor_gpu_RenderPipeline", "addColorTarget", instance, "rayzor_gpu_gfx_pipeline_add_color_target", [Ptr, I64] => Void;
 }
 
 // ============================================================================
@@ -386,6 +394,9 @@ pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
             ("rayzor_gpu_gfx_cmd_set_scissor", graphics::command::rayzor_gpu_gfx_cmd_set_scissor as *const u8),
             ("rayzor_gpu_gfx_cmd_end_pass", graphics::command::rayzor_gpu_gfx_cmd_end_pass as *const u8),
             ("rayzor_gpu_gfx_cmd_submit", graphics::command::rayzor_gpu_gfx_cmd_submit as *const u8),
+            ("rayzor_gpu_gfx_cmd_begin_pass_mrt", graphics::command::rayzor_gpu_gfx_cmd_begin_pass_mrt as *const u8),
+            // Pipeline MRT
+            ("rayzor_gpu_gfx_pipeline_add_color_target", graphics::pipeline::rayzor_gpu_gfx_pipeline_add_color_target as *const u8),
             // Haxe-friendly wrappers
             ("rayzor_gpu_gfx_render_with_vb", graphics::haxe_api::rayzor_gpu_gfx_render_with_vb as *const u8),
             ("rayzor_gpu_gfx_render_indexed", graphics::haxe_api::rayzor_gpu_gfx_render_indexed as *const u8),
@@ -401,6 +412,13 @@ pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
             ("rayzor_gpu_gfx_depth_texture_create", graphics::haxe_api::rayzor_gpu_gfx_depth_texture_create as *const u8),
             ("rayzor_gpu_gfx_sampler_linear", graphics::haxe_api::rayzor_gpu_gfx_sampler_linear as *const u8),
             ("rayzor_gpu_gfx_texture_upload", graphics::haxe_api::rayzor_gpu_gfx_texture_upload as *const u8),
+            // Surface
+            ("rayzor_gpu_gfx_surface_create", graphics::surface::rayzor_gpu_gfx_surface_create as *const u8),
+            ("rayzor_gpu_gfx_surface_get_texture", graphics::surface::rayzor_gpu_gfx_surface_get_texture as *const u8),
+            ("rayzor_gpu_gfx_surface_present", graphics::surface::rayzor_gpu_gfx_surface_present as *const u8),
+            ("rayzor_gpu_gfx_surface_resize", graphics::surface::rayzor_gpu_gfx_surface_resize as *const u8),
+            ("rayzor_gpu_gfx_surface_get_format", graphics::surface::rayzor_gpu_gfx_surface_get_format as *const u8),
+            ("rayzor_gpu_gfx_surface_destroy", graphics::surface::rayzor_gpu_gfx_surface_destroy as *const u8),
         ];
         symbols.extend(gfx_symbols);
     }
