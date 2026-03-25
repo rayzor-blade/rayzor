@@ -1,0 +1,13 @@
+[package]
+name = "rayzor-window"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+rayzor-plugin = { path = "../plugin" }
+rayzor-runtime = { path = "../runtime" }
+libc = "0.2"
+# Zero third-party windowing deps — system frameworks linked via build.rs
