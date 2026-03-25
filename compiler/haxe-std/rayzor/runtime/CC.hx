@@ -147,23 +147,23 @@ extern class CC {
      * @return Function return value as Int
      */
     @:native("call0")
-    public static function call0(fnAddr:Dynamic):Int;
+    public static function call0(fnAddr:Int):Int;
 
     /**
      * Call a JIT-compiled function (1 arg) by its address.
      */
     @:native("call1")
-    public static function call1(fnAddr:Dynamic, arg0:Int):Int;
+    public static function call1(fnAddr:Int, arg0:Int):Int;
 
     /**
      * Call a JIT-compiled function (2 args) by its address.
      */
     @:native("call2")
-    public static function call2(fnAddr:Dynamic, arg0:Int, arg1:Int):Int;
+    public static function call2(fnAddr:Int, arg0:Int, arg1:Int):Int;
 
     /**
      * Call a JIT-compiled function (3 args) by its address.
      */
     @:native("call3")
-    public static function call3(fnAddr:Dynamic, arg0:Int, arg1:Int, arg2:Int):Int;
+    public static function call3(fnAddr:Int, arg0:Int, arg1:Int, arg2:Int):Int;
 }

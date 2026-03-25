@@ -3374,18 +3374,18 @@ impl StdlibMapping {
             map_method!(instance "rayzor_runtime_CC", "delete" => "rayzor_tcc_delete", params: 0, returns: void,
                 types: &[PtrVoid]),
             // CC.call0(fnAddr): Int — call JIT function with 0 args
-            // fnAddr is Dynamic (pointer-sized) to avoid 32-bit truncation
+            // CC.call0(fnAddr): Int — call JIT function with 0 args
             map_method!(static "rayzor_runtime_CC", "call0" => "rayzor_tcc_call0", params: 1, returns: primitive,
-                types: &[PtrVoid] => I64),
+                types: &[I64] => I64),
             // CC.call1(fnAddr, arg0): Int — call JIT function with 1 arg
             map_method!(static "rayzor_runtime_CC", "call1" => "rayzor_tcc_call1", params: 2, returns: primitive,
-                types: &[PtrVoid, I64] => I64),
+                types: &[I64, I64] => I64),
             // CC.call2(fnAddr, arg0, arg1): Int — call JIT function with 2 args
             map_method!(static "rayzor_runtime_CC", "call2" => "rayzor_tcc_call2", params: 3, returns: primitive,
-                types: &[PtrVoid, I64, I64] => I64),
+                types: &[I64, I64, I64] => I64),
             // CC.call3(fnAddr, arg0, arg1, arg2): Int — call JIT function with 3 args
             map_method!(static "rayzor_runtime_CC", "call3" => "rayzor_tcc_call3", params: 4, returns: primitive,
-                types: &[PtrVoid, I64, I64, I64] => I64),
+                types: &[I64, I64, I64, I64] => I64),
         ];
 
         self.register_from_tuples(mappings);
