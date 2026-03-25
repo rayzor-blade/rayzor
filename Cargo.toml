@@ -6,6 +6,7 @@ members = [
     "source_map",
     "runtime",
     "gpu",
+    "window",
     "lsp"
 ]
 exclude = [
