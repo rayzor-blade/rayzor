@@ -9955,8 +9955,71 @@ impl<'a> HirToMirContext<'a> {
                         }
                         return Some(call_result);
                     } else {
-                        // Method not found by direct symbol lookup
-                        // Check if this is a Dynamic method call or stdlib method
+                        // Method not found by direct symbol lookup.
+                        // First: try rpkg/plugin extern dispatch via direct mapping lookup.
+                        // This bypasses get_stdlib_runtime_info's guard which rejects rpkg classes.
+                        {
+                            let method_name_str = self.symbol_table.get_symbol(*field)
+                                .and_then(|s| self.string_interner.get(s.name))
+                                .map(|s| s.to_string());
+                            let receiver_class = self.find_receiver_class_name(object);
+
+                            if let (Some(ref cls), Some(ref mn)) = (&receiver_class, &method_name_str) {
+                                let plugin_match = self.stdlib_mapping
+                                    .find_by_name_and_params(cls, mn, args.len())
+                                    .or_else(|| self.stdlib_mapping.find_by_name(cls, mn));
+
+                                if let Some((sig, runtime_call)) = plugin_match {
+                                    let runtime_func = runtime_call.runtime_name;
+                                    let is_mir_wrapper = runtime_call.is_mir_wrapper;
+                                    let explicit_return_type = runtime_call.return_type.map(|rt| rt.to_ir_type());
+                                    let is_static_call = sig.is_static;
+
+                                    let (expected_param_types, actual_return_type) = self
+                                        .get_stdlib_mir_wrapper_signature(runtime_func)
+                                        .unwrap_or_else(|| {
+                                            let mut params = if is_static_call {
+                                                Vec::new()
+                                            } else {
+                                                vec![IrType::Ptr(Box::new(IrType::U8))]
+                                            };
+                                            for arg in args {
+                                                params.push(self.convert_type(arg.ty));
+                                            }
+                                            let ret = explicit_return_type.clone()
+                                                .unwrap_or_else(|| self.convert_type(expr.ty));
+                                            (params, ret)
+                                        });
+
+                                    let mut arg_regs = if is_static_call {
+                                        Vec::new()
+                                    } else {
+                                        let obj_reg = self.lower_expression(object)?;
+                                        vec![obj_reg]
+                                    };
+                                    for arg in args {
+                                        if let Some(reg) = self.lower_expression(arg) {
+                                            arg_regs.push(reg);
+                                        }
+                                    }
+
+                                    let call_result = if is_mir_wrapper {
+                                        let fid = self.register_stdlib_mir_forward_ref(
+                                            runtime_func, expected_param_types, actual_return_type.clone(),
+                                        );
+                                        self.builder.build_call_direct(fid, arg_regs, actual_return_type)?
+                                    } else {
+                                        let fid = self.get_or_register_extern_function(
+                                            runtime_func, expected_param_types, actual_return_type.clone(),
+                                        );
+                                        self.builder.build_call_direct(fid, arg_regs, actual_return_type)?
+                                    };
+                                    return Some(call_result);
+                                }
+                            }
+                        }
+
+                        // Fallback: Dynamic method call or stdlib method
                         let object_type = object.ty;
 
                         // Check if the object is a stdlib class (including extern abstracts like Ptr, Ref, Box, Usize)
