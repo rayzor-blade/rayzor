@@ -1919,6 +1919,7 @@ dependencies = [
  "clap",
  "compiler",
  "crossterm",
+ "diagnostics",
  "libloading",
  "parser",
  "postcard",

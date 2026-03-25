@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Tue Mar 24 20:45:28 GMT 2026
+  Wed Mar 25 02:36:11 GMT 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -627,28 +627,6 @@ hasStack=false
 
 --- test_exhaustive_switch [PASS] ---
 Running compiler/tests/haxe/test_exhaustive_switch.hx [debug] [preset: Application]...
-[33mWarning:[0m [W0006] non-exhaustive switch on enum 'Color'
-    [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0mcompiler/tests/haxe/test_exhaustive_switch.hx:23:21[38;5;246m][0m
-    [38;5;246m│[0m
- [38;5;246m23 │[0m [38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249ms[0m[38;5;249mw[0m[38;5;249mi[0m[38;5;249mt[0m[38;5;249mc[0m[38;5;249mh[0m[38;5;249m [0m[38;5;249m([0m[38;5;249mc[0m[38;5;249m)[0m[38;5;249m [0m[38;5;249m{[0m
- [38;5;240m   │[0m                     [31m┬[0m  
- [38;5;240m   │[0m                     [31m╰[0m[31m─[0m[31m─[0m missing variants: Blue
- [38;5;240m   │[0m 
- [38;5;240m   │[0m [38;5;115mHelp[0m: consider adding a default case with `default:`
- [38;5;240m   │[0m 
- [38;5;240m   │[0m [38;5;115mNote[0m: add case for `Blue`
-[38;5;246m────╯[0m
-[33mWarning:[0m [W0006] non-exhaustive switch on enum 'Option'
-    [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0mcompiler/tests/haxe/test_exhaustive_switch.hx:43:6[38;5;246m][0m
-    [38;5;246m│[0m
- [38;5;246m43 │[0m [38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[31m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249mc[0m[38;5;249ma[0m[38;5;249ms[0m[38;5;249me[0m[38;5;249m [0m[38;5;249mS[0m[38;5;249mo[0m[38;5;249mm[0m[38;5;249me[0m[38;5;249m([0m[38;5;249mv[0m[38;5;249m)[0m[38;5;249m:[0m[38;5;249m [0m[38;5;249mt[0m[38;5;249mr[0m[38;5;249ma[0m[38;5;249mc[0m[38;5;249me[0m[38;5;249m([0m[38;5;249mv[0m[38;5;249m)[0m[38;5;249m;[0m
- [38;5;240m   │[0m      [31m┬[0m  
- [38;5;240m   │[0m      [31m╰[0m[31m─[0m[31m─[0m missing variants: None
- [38;5;240m   │[0m 
- [38;5;240m   │[0m [38;5;115mHelp[0m: consider adding a default case with `default:`
- [38;5;240m   │[0m 
- [38;5;240m   │[0m [38;5;115mNote[0m: add case for `None`
-[38;5;246m────╯[0m
 red
 red
 red
@@ -847,7 +825,7 @@ Running compiler/tests/haxe/test_map_literal.hx [debug] [preset: Application]...
 
 --- test_map_literal2 [PASS] ---
 Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]...
-{hello => 42, world => 99}
+{world => 99, hello => 42}
 42
 99
 true
@@ -996,18 +974,6 @@ done
 
 --- test_safety_use_after_move [PASS] ---
 Running compiler/tests/haxe/test_safety_use_after_move.hx [debug] [preset: Application]...
-[33mWarning:[0m [E0382] use of moved value: `r`
-    [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0mcompiler/tests/haxe/test_safety_use_after_move.hx:16:15[38;5;246m][0m
-    [38;5;246m│[0m
- [38;5;246m15 │[0m [38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249mc[0m[38;5;249mo[0m[38;5;249mn[0m[38;5;249ms[0m[38;5;249mu[0m[38;5;249mm[0m[38;5;249me[0m[38;5;249m([0m[34mr[0m[38;5;249m)[0m[38;5;249m;[0m
- [38;5;240m   │[0m                 [34m┬[0m  
- [38;5;240m   │[0m                 [34m╰[0m[34m─[0m[34m─[0m value moved here
- [38;5;246m16 │[0m [38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249mt[0m[38;5;249mr[0m[38;5;249ma[0m[38;5;249mc[0m[38;5;249me[0m[38;5;249m([0m[31mr[0m[38;5;249m.[0m[38;5;249md[0m[38;5;249ma[0m[38;5;249mt[0m[38;5;249ma[0m[38;5;249m)[0m[38;5;249m;[0m[38;5;249m [0m[38;5;249m [0m[38;5;249m/[0m[38;5;249m/[0m[38;5;249m [0m[38;5;249mu[0m[38;5;249ms[0m[38;5;249me[0m[38;5;249m [0m[38;5;249ma[0m[38;5;249mf[0m[38;5;249mt[0m[38;5;249me[0m[38;5;249mr[0m[38;5;249m [0m[38;5;249mm[0m[38;5;249mo[0m[38;5;249mv[0m[38;5;249me[0m[38;5;249m [0m[38;5;249m—[0m[38;5;249m [0m[38;5;249ms[0m[38;5;249mh[0m[38;5;249mo[0m[38;5;249mu[0m[38;5;249ml[0m[38;5;249md[0m[38;5;249m [0m[38;5;249mw[0m[38;5;249ma[0m[38;5;249mr[0m[38;5;249mn[0m
- [38;5;240m   │[0m               [31m┬[0m  
- [38;5;240m   │[0m               [31m╰[0m[31m─[0m[31m─[0m value used here after move
- [38;5;240m   │[0m 
- [38;5;240m   │[0m [38;5;115mHelp[0m: Consider cloning: `var copy = r.clone();`
-[38;5;246m────╯[0m
 42
 42
 
