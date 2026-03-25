@@ -90,10 +90,10 @@ extern class CC {
      * Must be called after relocate().
      *
      * @param name Symbol name to look up
-     * @return Address as integer (castable to function pointer)
+     * @return Function pointer (pass to call0/call1/call2/call3)
      */
     @:native("getSymbol")
-    public function getSymbol(name:String):Int;
+    public function getSymbol(name:String):Dynamic;
 
     /**
      * Load a macOS framework or shared library so its symbols and headers
@@ -143,27 +143,27 @@ extern class CC {
 
     /**
      * Call a JIT-compiled function (0 args) by its address.
-     * @param fnAddr Address from getSymbol()
+     * @param fnAddr Function pointer from getSymbol()
      * @return Function return value as Int
      */
     @:native("call0")
-    public static function call0(fnAddr:Int):Int;
+    public static function call0(fnAddr:Dynamic):Int;
 
     /**
      * Call a JIT-compiled function (1 arg) by its address.
      */
     @:native("call1")
-    public static function call1(fnAddr:Int, arg0:Int):Int;
+    public static function call1(fnAddr:Dynamic, arg0:Int):Int;
 
     /**
      * Call a JIT-compiled function (2 args) by its address.
      */
     @:native("call2")
-    public static function call2(fnAddr:Int, arg0:Int, arg1:Int):Int;
+    public static function call2(fnAddr:Dynamic, arg0:Int, arg1:Int):Int;
 
     /**
      * Call a JIT-compiled function (3 args) by its address.
      */
     @:native("call3")
-    public static function call3(fnAddr:Int, arg0:Int, arg1:Int, arg2:Int):Int;
+    public static function call3(fnAddr:Dynamic, arg0:Int, arg1:Int, arg2:Int):Int;
 }
