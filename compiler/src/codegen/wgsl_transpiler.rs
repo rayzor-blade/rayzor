@@ -110,12 +110,14 @@ pub fn transpile_shader_from_hir(
         ctx.out.push_str(") -> ");
 
         let ret = ctx.type_to_wgsl(method.function.return_type);
-        if ctx.is_gpu_struct(method.function.return_type) {
-            write!(ctx.out, "{}", ret).unwrap();
-        } else if stage == Some("vertex") && ret == "vec4f" {
+        if stage == Some("vertex") && ret == "vec4f" {
+            // Vec4 return from vertex → @builtin(position)
             write!(ctx.out, "@builtin(position) {}", ret).unwrap();
-        } else if stage == Some("fragment") {
+        } else if stage == Some("fragment") && (ret == "vec4f" || !ctx.is_gpu_struct(method.function.return_type)) {
+            // Fragment returning vec4f or non-struct → @location(0)
             write!(ctx.out, "@location(0) {}", ret).unwrap();
+        } else if ctx.is_gpu_struct(method.function.return_type) {
+            write!(ctx.out, "{}", ret).unwrap();
         } else {
             write!(ctx.out, "{}", ret).unwrap();
         }

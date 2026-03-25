@@ -5,16 +5,34 @@ import rayzor.gpu.Surface;
 import rayzor.gpu.ShaderModule;
 import rayzor.gpu.RenderPipeline;
 import rayzor.gpu.CommandEncoder;
+import rayzor.gpu.Vec4;
 
 /**
  * GPU Window Rendering — renders a triangle to a native window.
  *
- * Uses rayzor-window rpkg for native windowing and rayzor-gpu rpkg
- * for GPU rendering. No TCC, no inline C — pure Haxe.
+ * Shaders are written in Haxe and transpiled to WGSL at compile time
+ * via @:shader. Uses rayzor-window and rayzor-gpu rpkgs.
  *
  * Run:
  *   rayzor run --rpkg rayzor-window.rpkg --rpkg rayzor-gpu.rpkg examples/gpu-window/Main.hx
  */
+
+@:shader
+class WindowShader {
+    function vertex(vertexIndex:Int):Vec4 {
+        var px = 0.0;
+        var py = 0.0;
+        if (vertexIndex == 0) { px = 0.0; py = 0.5; }
+        if (vertexIndex == 1) { px = -0.5; py = -0.5; }
+        if (vertexIndex == 2) { px = 0.5; py = -0.5; }
+        return new Vec4(px, py, 0.0, 1.0);
+    }
+
+    function fragment():Vec4 {
+        return new Vec4(1.0, 0.4, 0.1, 1.0);
+    }
+}
+
 class Main {
     static function main() {
         // Window
@@ -25,9 +43,9 @@ class Main {
         var device = GPUDevice.create();
         var surface = Surface.create(device, win.getHandle(), win.getDisplayHandle(), 800, 600);
 
-        // Shader + Pipeline
-        var wgsl = "@vertex fn vs(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4f { var pos = array<vec2f, 3>(vec2f(0.0, 0.5), vec2f(-0.5, -0.5), vec2f(0.5, -0.5)); return vec4f(pos[vi], 0.0, 1.0); } @fragment fn fs() -> @location(0) vec4f { return vec4f(1.0, 0.4, 0.1, 1.0); }";
-        var shader = ShaderModule.create(device, wgsl, "vs", "fs");
+        // Shader + Pipeline (Haxe → WGSL at compile time)
+        var wgsl = WindowShader.wgsl();
+        var shader = ShaderModule.create(device, wgsl, "vertex", "fragment");
         var pipe = RenderPipeline.begin();
         pipe.setShader(shader);
         pipe.setFormat(surface.getFormat());
