@@ -1528,23 +1528,28 @@ impl<'a> TastToHirContext<'a> {
             } => {
                 // First check pre-evaluated inline values (handles enum abstract fields and
                 // static inline vars that were pre-computed by evaluate_inline_static_vars)
-                let inline_literal = self.inline_var_values.get(field_symbol).cloned()
-                    .or_else(|| {
-                        // Fallback: match by resolved string name for cross-file inline vars.
-                        let field_name_str = self.symbol_table.get_symbol(*field_symbol)
-                            .and_then(|s| self.string_interner.get(s.name))
-                            .map(|s| s.to_string())?;
-                        for (sym_id, lit) in &self.inline_var_values {
-                            if let Some(sym) = self.symbol_table.get_symbol(*sym_id) {
-                                if let Some(name_str) = self.string_interner.get(sym.name) {
-                                    if name_str == field_name_str {
-                                        return Some(lit.clone());
+                let inline_literal =
+                    self.inline_var_values
+                        .get(field_symbol)
+                        .cloned()
+                        .or_else(|| {
+                            // Fallback: match by resolved string name for cross-file inline vars.
+                            let field_name_str = self
+                                .symbol_table
+                                .get_symbol(*field_symbol)
+                                .and_then(|s| self.string_interner.get(s.name))
+                                .map(|s| s.to_string())?;
+                            for (sym_id, lit) in &self.inline_var_values {
+                                if let Some(sym) = self.symbol_table.get_symbol(*sym_id) {
+                                    if let Some(name_str) = self.string_interner.get(sym.name) {
+                                        if name_str == field_name_str {
+                                            return Some(lit.clone());
+                                        }
                                     }
                                 }
                             }
-                        }
-                        None
-                    });
+                            None
+                        });
                 if let Some(literal) = inline_literal {
                     return HirExpr {
                         kind: HirExprKind::Literal(literal),
@@ -5111,7 +5116,15 @@ pub fn lower_tast_to_hir(
     string_interner: &mut StringInterner,
     semantic_graphs: Option<&SemanticGraphs>,
 ) -> Result<HirModule, Vec<LoweringError>> {
-    lower_tast_to_hir_with_imports(file, symbol_table, type_table, string_interner, semantic_graphs, &[], &HashMap::new())
+    lower_tast_to_hir_with_imports(
+        file,
+        symbol_table,
+        type_table,
+        string_interner,
+        semantic_graphs,
+        &[],
+        &HashMap::new(),
+    )
 }
 
 pub fn lower_tast_to_hir_with_imports(

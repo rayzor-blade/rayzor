@@ -1,6 +1,6 @@
 //! Bind groups for resource binding (uniforms, textures, samplers).
 
-use super::texture::{GraphicsSampler, GraphicsTexture};
+use super::texture::GraphicsSampler;
 use super::GraphicsContext;
 
 pub struct GraphicsBindGroupLayout {
@@ -111,7 +111,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_bind_group_create(
                     buffer,
                     offset: 0,
                     size: if size > 0 {
-                        std::num::NonZeroU64::new(size).map(wgpu::BufferSize::from)
+                        std::num::NonZeroU64::new(size)
                     } else {
                         None
                     },

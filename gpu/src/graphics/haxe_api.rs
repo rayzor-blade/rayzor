@@ -7,8 +7,6 @@
 
 use super::bind_group::{GraphicsBindGroup, GraphicsBindGroupLayout};
 use super::pipeline::{GraphicsPipeline, PipelineBuilder};
-use super::render_pass::GraphicsEncoder;
-use super::shader::GraphicsShader;
 use super::texture::{GraphicsSampler, GraphicsTexture};
 use super::GraphicsBuffer;
 use super::GraphicsContext;
@@ -16,7 +14,7 @@ use rayzor_runtime::haxe_string::HaxeString;
 use rayzor_runtime::haxe_sys::HaxeBytes;
 use std::ffi::c_void;
 
-unsafe fn hs(s: *const HaxeString) -> &'static str {
+unsafe fn _hs(s: *const HaxeString) -> &'static str {
     if s.is_null() || (*s).ptr.is_null() || (*s).len == 0 {
         return "";
     }
@@ -277,13 +275,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_bind_group_single(
     let rptr = &(*buffer).buffer as *const wgpu::Buffer as *const c_void;
     let size = buffer_size as u64;
     super::bind_group::rayzor_gpu_gfx_bind_group_create(
-        ctx,
-        layout,
-        1,
-        &binding,
-        &rtype,
-        &rptr,
-        &size,
+        ctx, layout, 1, &binding, &rtype, &rptr, &size,
     )
 }
 
@@ -332,7 +324,8 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_set_depth_simple(
     if builder.is_null() {
         return;
     }
-    super::pipeline::rayzor_gpu_gfx_pipeline_set_depth(builder, depth_format, 1); // 1 = Less
+    super::pipeline::rayzor_gpu_gfx_pipeline_set_depth(builder, depth_format, 1);
+    // 1 = Less
 }
 
 // ============================================================================

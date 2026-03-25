@@ -4,7 +4,6 @@
 //! and creates a wgpu Surface for real-time frame presentation.
 
 use super::GraphicsContext;
-use std::num::NonZeroU32;
 
 pub struct GraphicsSurface {
     pub surface: wgpu::Surface<'static>,
@@ -29,14 +28,18 @@ unsafe impl Send for RawSurfaceTarget {}
 unsafe impl Sync for RawSurfaceTarget {}
 
 impl raw_window_handle::HasWindowHandle for RawSurfaceTarget {
-    fn window_handle(&self) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
+    fn window_handle(
+        &self,
+    ) -> Result<raw_window_handle::WindowHandle<'_>, raw_window_handle::HandleError> {
         // SAFETY: caller guarantees the handle is valid for the surface's lifetime
         Ok(unsafe { raw_window_handle::WindowHandle::borrow_raw(self.window) })
     }
 }
 
 impl raw_window_handle::HasDisplayHandle for RawSurfaceTarget {
-    fn display_handle(&self) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
+    fn display_handle(
+        &self,
+    ) -> Result<raw_window_handle::DisplayHandle<'_>, raw_window_handle::HandleError> {
         Ok(unsafe { raw_window_handle::DisplayHandle::borrow_raw(self.display) })
     }
 }
@@ -54,6 +57,7 @@ fn make_raw_handles(
 
     #[cfg(target_os = "macos")]
     {
+        let _ = display_handle;
         if window_handle.is_null() {
             return None;
         }
@@ -210,9 +214,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_surface_get_texture(
 
 /// Get the surface's preferred texture format (as int code).
 #[no_mangle]
-pub unsafe extern "C" fn rayzor_gpu_gfx_surface_get_format(
-    surface: *mut GraphicsSurface,
-) -> i32 {
+pub unsafe extern "C" fn rayzor_gpu_gfx_surface_get_format(surface: *mut GraphicsSurface) -> i32 {
     if surface.is_null() {
         return 0;
     }

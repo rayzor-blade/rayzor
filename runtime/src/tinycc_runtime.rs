@@ -280,6 +280,7 @@ pub extern "C" fn rayzor_tcc_get_symbol(state: *mut TCCState, name: *const HaxeS
 /// writing to statics causes SIGBUS. We toggle write protection around
 /// each JIT call so the code can both execute and write to its statics.
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+#[allow(dead_code)]
 unsafe fn jit_write_protect(enabled: bool) {
     extern "C" {
         fn pthread_jit_write_protect_np(enabled: i32);
@@ -288,6 +289,7 @@ unsafe fn jit_write_protect(enabled: bool) {
 }
 
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[allow(dead_code)]
 unsafe fn jit_write_protect(_enabled: bool) {}
 
 /// `fn_addr` is the address returned by `rayzor_tcc_get_symbol`.

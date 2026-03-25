@@ -168,12 +168,7 @@ extern "system" {
     fn IsWindowVisible(hWnd: *mut c_void) -> i32;
     fn IsIconic(hWnd: *mut c_void) -> i32;
     fn GetForegroundWindow() -> *mut c_void;
-    fn SetLayeredWindowAttributes(
-        hWnd: *mut c_void,
-        crKey: u32,
-        bAlpha: u8,
-        dwFlags: u32,
-    ) -> i32;
+    fn SetLayeredWindowAttributes(hWnd: *mut c_void, crKey: u32, bAlpha: u8, dwFlags: u32) -> i32;
     fn SetWindowLongW(hWnd: *mut c_void, nIndex: i32, dwNewLong: i32) -> i32;
     fn GetWindowLongW(hWnd: *mut c_void, nIndex: i32) -> i32;
     fn LoadCursorW(hInstance: *mut c_void, lpCursorName: *const u16) -> *mut c_void;
@@ -342,8 +337,7 @@ pub struct Win32Window {
     pub events: crate::event::EventQueue,
 }
 
-static CLASS_REGISTERED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static CLASS_REGISTERED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 const RAYZOR_CLASS_NAME: &str = "RayzorWindowClass";
 
@@ -377,14 +371,7 @@ impl Win32Window {
     }
 
     /// Create a window at an explicit position.
-    pub unsafe fn create(
-        title: &str,
-        x: i32,
-        y: i32,
-        w: i32,
-        h: i32,
-        _style: i32,
-    ) -> Option<Self> {
+    pub unsafe fn create(title: &str, x: i32, y: i32, w: i32, h: i32, _style: i32) -> Option<Self> {
         let hinstance = GetModuleHandleW(std::ptr::null());
         if hinstance.is_null() {
             return None;
@@ -512,28 +499,12 @@ impl Win32Window {
 
     /// Move the window to a screen position.
     pub unsafe fn set_position(&self, x: i32, y: i32) {
-        SetWindowPos(
-            self.hwnd,
-            HWND_TOP,
-            x,
-            y,
-            0,
-            0,
-            SWP_NOSIZE | SWP_NOZORDER,
-        );
+        SetWindowPos(self.hwnd, HWND_TOP, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
     }
 
     /// Resize the window (outer dimensions).
     pub unsafe fn set_size(&self, w: i32, h: i32) {
-        SetWindowPos(
-            self.hwnd,
-            HWND_TOP,
-            0,
-            0,
-            w,
-            h,
-            SWP_NOMOVE | SWP_NOZORDER,
-        );
+        SetWindowPos(self.hwnd, HWND_TOP, 0, 0, w, h, SWP_NOMOVE | SWP_NOZORDER);
     }
 
     /// Show or hide the window.
@@ -643,7 +614,12 @@ impl Win32Window {
     }
 
     pub unsafe fn get_position(&self) -> (i32, i32) {
-        let mut rect = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        let mut rect = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
         GetWindowRect(self.hwnd, &mut rect);
         (rect.left, rect.top)
     }
@@ -657,8 +633,20 @@ impl Win32Window {
     }
 
     pub unsafe fn set_floating(&self, on_top: bool) {
-        let insert_after = if on_top { -1isize as *mut c_void } else { -2isize as *mut c_void }; // HWND_TOPMOST / HWND_NOTOPMOST
-        SetWindowPos(self.hwnd, insert_after, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0040); // SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
+        let insert_after = if on_top {
+            -1isize as *mut c_void
+        } else {
+            -2isize as *mut c_void
+        }; // HWND_TOPMOST / HWND_NOTOPMOST
+        SetWindowPos(
+            self.hwnd,
+            insert_after,
+            0,
+            0,
+            0,
+            0,
+            0x0001 | 0x0002 | 0x0040,
+        ); // SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
     }
 
     pub fn is_fullscreen(&self) -> bool {

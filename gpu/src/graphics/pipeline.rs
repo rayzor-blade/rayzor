@@ -262,7 +262,9 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_add_color_target(
     if builder.is_null() {
         return;
     }
-    (*builder).color_targets.push(texture_format_from_int(format));
+    (*builder)
+        .color_targets
+        .push(texture_format_from_int(format));
 }
 
 /// Get the number of color targets configured on this pipeline builder.

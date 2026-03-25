@@ -8149,13 +8149,21 @@ impl<'a> HirToMirContext<'a> {
             } => {
                 // @:shader wgsl() — intercept at Call entry point
                 if let HirExprKind::Field { object, field } = &callee.kind {
-                    let field_name_check = self.symbol_table.get_symbol(*field)
+                    let field_name_check = self
+                        .symbol_table
+                        .get_symbol(*field)
                         .and_then(|s| self.string_interner.get(s.name));
                     let is_wgsl = field_name_check == Some("wgsl");
                     if is_wgsl {
-                        if let HirExprKind::Variable { symbol: class_sym, .. } = &object.kind {
-                            let is_shader = self.symbol_table.get_symbol(*class_sym)
-                                .map(|s| s.flags.is_shader()).unwrap_or(false);
+                        if let HirExprKind::Variable {
+                            symbol: class_sym, ..
+                        } = &object.kind
+                        {
+                            let is_shader = self
+                                .symbol_table
+                                .get_symbol(*class_sym)
+                                .map(|s| s.flags.is_shader())
+                                .unwrap_or(false);
                             if is_shader {
                                 for (_tid, decl) in self.current_hir_types.iter() {
                                     if let crate::ir::hir::HirTypeDecl::Class(c) = decl {
@@ -8317,14 +8325,14 @@ impl<'a> HirToMirContext<'a> {
                                         self.current_hir_types,
                                     ) {
                                         Ok(wgsl_source) => {
-                                            return self.builder.build_const(
-                                                IrValue::String(wgsl_source),
-                                            );
+                                            return self
+                                                .builder
+                                                .build_const(IrValue::String(wgsl_source));
                                         }
                                         Err(e) => {
-                                            return self.builder.build_const(
-                                                IrValue::String(format!("/* WGSL error: {} */", e)),
-                                            );
+                                            return self.builder.build_const(IrValue::String(
+                                                format!("/* WGSL error: {} */", e),
+                                            ));
                                         }
                                     }
                                 }
@@ -8680,7 +8688,9 @@ impl<'a> HirToMirContext<'a> {
                         let obj_sym = {
                             let type_table = self.type_table;
                             type_table.get(object.ty).and_then(|t| {
-                                if let crate::tast::core::TypeKind::Class { symbol_id, .. } = &t.kind {
+                                if let crate::tast::core::TypeKind::Class { symbol_id, .. } =
+                                    &t.kind
+                                {
                                     Some(*symbol_id)
                                 } else {
                                     None
@@ -9584,7 +9594,9 @@ impl<'a> HirToMirContext<'a> {
                                     if let Some(native) = sym.native_name {
                                         if let Some(ns) = self.string_interner.get(native) {
                                             // "rayzor::runtime::CC" → "rayzor_runtime_CC"
-                                            return Some(ns.split("::").collect::<Vec<_>>().join("_"));
+                                            return Some(
+                                                ns.split("::").collect::<Vec<_>>().join("_"),
+                                            );
                                         }
                                     }
                                     // 2) qualified_name  (e.g. "sys.net.Host" → "sys_net_Host")
@@ -9959,20 +9971,26 @@ impl<'a> HirToMirContext<'a> {
                         // First: try rpkg/plugin extern dispatch via direct mapping lookup.
                         // This bypasses get_stdlib_runtime_info's guard which rejects rpkg classes.
                         {
-                            let method_name_str = self.symbol_table.get_symbol(*field)
+                            let method_name_str = self
+                                .symbol_table
+                                .get_symbol(*field)
                                 .and_then(|s| self.string_interner.get(s.name))
                                 .map(|s| s.to_string());
                             let receiver_class = self.find_receiver_class_name(object);
 
-                            if let (Some(ref cls), Some(ref mn)) = (&receiver_class, &method_name_str) {
-                                let plugin_match = self.stdlib_mapping
+                            if let (Some(ref cls), Some(ref mn)) =
+                                (&receiver_class, &method_name_str)
+                            {
+                                let plugin_match = self
+                                    .stdlib_mapping
                                     .find_by_name_and_params(cls, mn, args.len())
                                     .or_else(|| self.stdlib_mapping.find_by_name(cls, mn));
 
                                 if let Some((sig, runtime_call)) = plugin_match {
                                     let runtime_func = runtime_call.runtime_name;
                                     let is_mir_wrapper = runtime_call.is_mir_wrapper;
-                                    let explicit_return_type = runtime_call.return_type.map(|rt| rt.to_ir_type());
+                                    let explicit_return_type =
+                                        runtime_call.return_type.map(|rt| rt.to_ir_type());
                                     let is_static_call = sig.is_static;
 
                                     let (expected_param_types, actual_return_type) = self
@@ -9986,7 +10004,8 @@ impl<'a> HirToMirContext<'a> {
                                             for arg in args {
                                                 params.push(self.convert_type(arg.ty));
                                             }
-                                            let ret = explicit_return_type.clone()
+                                            let ret = explicit_return_type
+                                                .clone()
                                                 .unwrap_or_else(|| self.convert_type(expr.ty));
                                             (params, ret)
                                         });
@@ -10005,14 +10024,26 @@ impl<'a> HirToMirContext<'a> {
 
                                     let call_result = if is_mir_wrapper {
                                         let fid = self.register_stdlib_mir_forward_ref(
-                                            runtime_func, expected_param_types, actual_return_type.clone(),
+                                            runtime_func,
+                                            expected_param_types,
+                                            actual_return_type.clone(),
                                         );
-                                        self.builder.build_call_direct(fid, arg_regs, actual_return_type)?
+                                        self.builder.build_call_direct(
+                                            fid,
+                                            arg_regs,
+                                            actual_return_type,
+                                        )?
                                     } else {
                                         let fid = self.get_or_register_extern_function(
-                                            runtime_func, expected_param_types, actual_return_type.clone(),
+                                            runtime_func,
+                                            expected_param_types,
+                                            actual_return_type.clone(),
                                         );
-                                        self.builder.build_call_direct(fid, arg_regs, actual_return_type)?
+                                        self.builder.build_call_direct(
+                                            fid,
+                                            arg_regs,
+                                            actual_return_type,
+                                        )?
                                     };
                                     return Some(call_result);
                                 }

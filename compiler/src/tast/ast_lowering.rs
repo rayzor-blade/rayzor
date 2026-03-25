@@ -1154,9 +1154,7 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Export class_fields for accumulation across file compilations.
-    pub fn export_class_fields(
-        &self,
-    ) -> &HashMap<SymbolId, Vec<(InternedString, SymbolId, bool)>> {
+    pub fn export_class_fields(&self) -> &HashMap<SymbolId, Vec<(InternedString, SymbolId, bool)>> {
         &self.class_fields
     }
 
@@ -3632,9 +3630,7 @@ impl<'a> AstLowering<'a> {
             if is_placeholder {
                 // The target couldn't be resolved by lower_type. Check if the existing symbol
                 // (which we're about to overwrite as TypeAlias) already has the right type.
-                if let Some(existing) =
-                    self.context.symbol_table.get_symbol(typedef_symbol)
-                {
+                if let Some(existing) = self.context.symbol_table.get_symbol(typedef_symbol) {
                     if existing.kind == crate::tast::SymbolKind::Class
                         && existing.type_id.is_valid()
                     {
@@ -4988,69 +4984,68 @@ impl<'a> AstLowering<'a> {
                     .map(|s| (s.id, s.kind.clone()));
 
                 // If import resolution found a symbol, use it. Otherwise fall back to scope lookup.
-                let symbol_info = import_resolved_symbol.or_else(|| {
-                    self.context
-                        .symbol_table
-                        .lookup_symbol(self.context.current_scope, interned_name)
-                        .or_else(|| {
-                            self.context.symbol_table.lookup_symbol(
-                                ScopeId::first(), // Root scope contains imports and top-level types
-                                interned_name,
-                            )
-                        })
-                        .map(|s| (s.id, s.kind.clone()))
-                })
-                // For qualified names (e.g. "rayzor.Bytes"), also try looking up via
-                // the namespace resolver using package path + short name
-                .or_else(|| {
-                    if name.contains('.') {
-                        let parts: Vec<&str> = name.rsplitn(2, '.').collect();
-                        if parts.len() == 2 {
-                            let class_name = parts[0]; // "Bytes"
-                            let package_str = parts[1]; // "rayzor"
-                            let package_parts: Vec<InternedString> = package_str
-                                .split('.')
-                                .map(|p| self.context.intern_string(p))
-                                .collect();
-                            let class_interned = self.context.intern_string(class_name);
-                            let qp = crate::tast::namespace::QualifiedPath::new(
-                                package_parts,
-                                class_interned,
-                            );
-                            if let Some(sym_id) =
-                                self.context.namespace_resolver.lookup_symbol(&qp)
-                            {
-                                if let Some(sym) =
-                                    self.context.symbol_table.get_symbol(sym_id)
+                let symbol_info = import_resolved_symbol
+                    .or_else(|| {
+                        self.context
+                            .symbol_table
+                            .lookup_symbol(self.context.current_scope, interned_name)
+                            .or_else(|| {
+                                self.context.symbol_table.lookup_symbol(
+                                    ScopeId::first(), // Root scope contains imports and top-level types
+                                    interned_name,
+                                )
+                            })
+                            .map(|s| (s.id, s.kind.clone()))
+                    })
+                    // For qualified names (e.g. "rayzor.Bytes"), also try looking up via
+                    // the namespace resolver using package path + short name
+                    .or_else(|| {
+                        if name.contains('.') {
+                            let parts: Vec<&str> = name.rsplitn(2, '.').collect();
+                            if parts.len() == 2 {
+                                let class_name = parts[0]; // "Bytes"
+                                let package_str = parts[1]; // "rayzor"
+                                let package_parts: Vec<InternedString> = package_str
+                                    .split('.')
+                                    .map(|p| self.context.intern_string(p))
+                                    .collect();
+                                let class_interned = self.context.intern_string(class_name);
+                                let qp = crate::tast::namespace::QualifiedPath::new(
+                                    package_parts,
+                                    class_interned,
+                                );
+                                if let Some(sym_id) =
+                                    self.context.namespace_resolver.lookup_symbol(&qp)
                                 {
+                                    if let Some(sym) = self.context.symbol_table.get_symbol(sym_id)
+                                    {
+                                        return Some((sym.id, sym.kind.clone()));
+                                    }
+                                }
+                                // Also try short name lookup in root scope
+                                if let Some(sym) = self
+                                    .context
+                                    .symbol_table
+                                    .lookup_symbol(ScopeId::first(), class_interned)
+                                {
+                                    // Verify the symbol's qualified name matches
+                                    if let Some(qn) = sym.qualified_name {
+                                        if let Some(qn_str) = self.context.string_interner.get(qn) {
+                                            if qn_str == name {
+                                                return Some((sym.id, sym.kind.clone()));
+                                            }
+                                        }
+                                    }
+                                    // If no qualified name set, accept it as a match
+                                    // (extern classes may not have qualified names set)
                                     return Some((sym.id, sym.kind.clone()));
                                 }
                             }
-                            // Also try short name lookup in root scope
-                            if let Some(sym) = self.context.symbol_table.lookup_symbol(
-                                ScopeId::first(),
-                                class_interned,
-                            ) {
-                                // Verify the symbol's qualified name matches
-                                if let Some(qn) = sym.qualified_name {
-                                    if let Some(qn_str) =
-                                        self.context.string_interner.get(qn)
-                                    {
-                                        if qn_str == name {
-                                            return Some((sym.id, sym.kind.clone()));
-                                        }
-                                    }
-                                }
-                                // If no qualified name set, accept it as a match
-                                // (extern classes may not have qualified names set)
-                                return Some((sym.id, sym.kind.clone()));
-                            }
+                            None
+                        } else {
+                            None
                         }
-                        None
-                    } else {
-                        None
-                    }
-                });
+                    });
 
                 if let Some((symbol_id, symbol_kind)) = symbol_info {
                     // Process type arguments if present (now the symbol borrow is dropped)
@@ -8332,8 +8327,7 @@ impl<'a> AstLowering<'a> {
                                                     None
                                                 }
                                             });
-                                        if let Some(target_sym_id) = target_sym_id_opt
-                                        {
+                                        if let Some(target_sym_id) = target_sym_id_opt {
                                             if let Some(target_sym) =
                                                 self.context.symbol_table.get_symbol(target_sym_id)
                                             {

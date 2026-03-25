@@ -2371,7 +2371,6 @@ impl CraneliftBackend {
                             format!("Argument register {:?} not found in value_map", arg_reg)
                         })?;
 
-
                         // Check if this C extern function parameter needs extension
                         // On ARM64/Apple Silicon, C ABI requires i32 values to be extended to i64
                         if !cfg!(target_os = "windows")

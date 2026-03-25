@@ -46,9 +46,12 @@ fn fs(in: VOut) -> @location(0) vec4f {
     let shader = unsafe {
         rayzor_gpu_gfx_shader_create(
             ctx,
-            wgsl_b.as_ptr(), wgsl_b.len(),
-            vs.as_ptr(), vs.len(),
-            fs.as_ptr(), fs.len(),
+            wgsl_b.as_ptr(),
+            wgsl_b.len(),
+            vs.as_ptr(),
+            vs.len(),
+            fs.as_ptr(),
+            fs.len(),
         )
     };
     assert!(!shader.is_null(), "Shader compile failed");
@@ -72,14 +75,23 @@ fn fs(in: VOut) -> @location(0) vec4f {
     // 5. Render
     unsafe {
         rayzor_gpu_gfx_render_submit(
-            ctx, view,
-            0, 0.05, 0.05, 0.15, 1.0,    // clear dark navy
-            std::ptr::null(),               // no depth
+            ctx,
+            view,
+            0,
+            0.05,
+            0.05,
+            0.15,
+            1.0,              // clear dark navy
+            std::ptr::null(), // no depth
             pipeline,
-            std::ptr::null(),               // no vertex buffer
-            3, 1,                           // 3 vertices, 1 instance
-            std::ptr::null(), 0, 0,         // no index
-            0, std::ptr::null(),            // no bind groups
+            std::ptr::null(), // no vertex buffer
+            3,
+            1, // 3 vertices, 1 instance
+            std::ptr::null(),
+            0,
+            0, // no index
+            0,
+            std::ptr::null(), // no bind groups
         );
     }
 
@@ -95,7 +107,10 @@ fn fs(in: VOut) -> @location(0) vec4f {
     let cx = (h / 2 * w + w / 2) as usize * 4;
     let (r, g, b, a) = (pixels[cx], pixels[cx + 1], pixels[cx + 2], pixels[cx + 3]);
     eprintln!("Center pixel: RGBA({}, {}, {}, {})", r, g, b, a);
-    assert!(a > 0 && (r > 20 || g > 20 || b > 20), "Triangle should cover center");
+    assert!(
+        a > 0 && (r > 20 || g > 20 || b > 20),
+        "Triangle should cover center"
+    );
 
     // 8. Save as PPM
     let path = "triangle_output.ppm";
@@ -104,7 +119,7 @@ fn fs(in: VOut) -> @location(0) vec4f {
     for y in 0..h {
         for x in 0..w {
             let i = ((y * w + x) * 4) as usize;
-            rgb_data.push(pixels[i]);     // R
+            rgb_data.push(pixels[i]); // R
             rgb_data.push(pixels[i + 1]); // G
             rgb_data.push(pixels[i + 2]); // B
         }
@@ -112,7 +127,13 @@ fn fs(in: VOut) -> @location(0) vec4f {
     let mut file_data = ppm.into_bytes();
     file_data.extend(rgb_data);
     std::fs::write(path, &file_data).unwrap();
-    eprintln!("Saved {} ({}x{} PPM, {} bytes)", path, w, h, file_data.len());
+    eprintln!(
+        "Saved {} ({}x{} PPM, {} bytes)",
+        path,
+        w,
+        h,
+        file_data.len()
+    );
 
     // Verify file exists and has content
     let meta = std::fs::metadata(path).unwrap();

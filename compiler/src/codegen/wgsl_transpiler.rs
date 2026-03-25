@@ -113,7 +113,9 @@ pub fn transpile_shader_from_hir(
         if stage == Some("vertex") && ret == "vec4f" {
             // Vec4 return from vertex → @builtin(position)
             write!(ctx.out, "@builtin(position) {}", ret).unwrap();
-        } else if stage == Some("fragment") && (ret == "vec4f" || !ctx.is_gpu_struct(method.function.return_type)) {
+        } else if stage == Some("fragment")
+            && (ret == "vec4f" || !ctx.is_gpu_struct(method.function.return_type))
+        {
             // Fragment returning vec4f or non-struct → @location(0)
             write!(ctx.out, "@location(0) {}", ret).unwrap();
         } else if ctx.is_gpu_struct(method.function.return_type) {
@@ -700,9 +702,7 @@ impl<'a> WgslCtx<'a> {
                 ..
             } => {
                 let name = match pattern {
-                    hir::HirPattern::Variable { symbol, .. } => {
-                        self.sym_name(*symbol).to_string()
-                    }
+                    hir::HirPattern::Variable { symbol, .. } => self.sym_name(*symbol).to_string(),
                     _ => "_".to_string(),
                 };
                 let ty = type_hint
@@ -774,7 +774,9 @@ impl<'a> WgslCtx<'a> {
                     args.iter().map(|a| self.hir_expr_to_string(a)).collect();
                 Ok(format!("{}({})", f, arg_strs?.join(", ")))
             }
-            HirExprKind::New { class_type, args, .. } => {
+            HirExprKind::New {
+                class_type, args, ..
+            } => {
                 let t = self.type_to_wgsl(*class_type);
                 let arg_strs: Result<Vec<String>, String> =
                     args.iter().map(|a| self.hir_expr_to_string(a)).collect();
@@ -837,7 +839,11 @@ impl<'a> WgslCtx<'a> {
             hir::HirLiteral::Int(n) => n.to_string(),
             hir::HirLiteral::Float(f) => {
                 let s = format!("{}", f);
-                if s.contains('.') { format!("{}f", s) } else { format!("{}.0f", s) }
+                if s.contains('.') {
+                    format!("{}f", s)
+                } else {
+                    format!("{}.0f", s)
+                }
             }
             hir::HirLiteral::Bool(b) => b.to_string(),
             hir::HirLiteral::String(s) => {
@@ -878,7 +884,11 @@ impl<'a> WgslCtx<'a> {
         self.emit_hir_body_inner(body, depth, false)
     }
 
-    fn emit_hir_body_as_return(&mut self, body: &hir::HirBlock, depth: usize) -> Result<(), String> {
+    fn emit_hir_body_as_return(
+        &mut self,
+        body: &hir::HirBlock,
+        depth: usize,
+    ) -> Result<(), String> {
         self.emit_hir_body_inner(body, depth, true)
     }
 

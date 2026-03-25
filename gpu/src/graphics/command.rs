@@ -6,7 +6,6 @@
 
 use super::bind_group::GraphicsBindGroup;
 use super::pipeline::GraphicsPipeline;
-use super::texture::GraphicsTexture;
 use super::GraphicsBuffer;
 use super::GraphicsContext;
 
@@ -250,7 +249,11 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_begin_pass_mrt(
         if view.is_null() {
             continue;
         }
-        let op = if !load_ops.is_null() { *load_ops.add(i) } else { 0 };
+        let op = if !load_ops.is_null() {
+            *load_ops.add(i)
+        } else {
+            0
+        };
         let load = if op == 0 {
             let base = i * 4;
             let (r, g, b, a) = if !clear_colors.is_null() {
@@ -268,7 +271,10 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_begin_pass_mrt(
             wgpu::LoadOp::Load
         };
 
-        attachments.push(ColorAttachment { view, load_op: load });
+        attachments.push(ColorAttachment {
+            view,
+            load_op: load,
+        });
     }
 
     cmd.current_pass = Some(RecordedRenderPass {

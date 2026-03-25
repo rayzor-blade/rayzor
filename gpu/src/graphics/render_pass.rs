@@ -176,16 +176,16 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_render_triangles(
         clear_g,
         clear_b,
         clear_a,
-        std::ptr::null(),  // no depth
+        std::ptr::null(), // no depth
         pipeline,
-        std::ptr::null(),  // no vertex buffer
+        std::ptr::null(), // no vertex buffer
         vertex_count as u32,
-        1,                 // 1 instance
-        std::ptr::null(),  // no index buffer
+        1,                // 1 instance
+        std::ptr::null(), // no index buffer
         0,
         0,
         0,
-        std::ptr::null(),  // no bind groups
+        std::ptr::null(), // no bind groups
     );
 }
 
@@ -203,12 +203,8 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_read_rgba(
     let tex_ref = &*tex;
     let byte_count = (tex_ref.width * tex_ref.height * 4) as usize;
     let mut buf = vec![0u8; byte_count];
-    let read = super::texture::rayzor_gpu_gfx_texture_read_pixels(
-        ctx,
-        tex,
-        buf.as_mut_ptr(),
-        buf.len(),
-    );
+    let read =
+        super::texture::rayzor_gpu_gfx_texture_read_pixels(ctx, tex, buf.as_mut_ptr(), buf.len());
     if read == 0 {
         return std::ptr::null_mut();
     }
@@ -227,7 +223,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_to_bytes(
     tex: *mut super::texture::GraphicsTexture,
     ctx: *mut GraphicsContext,
 ) -> *mut rayzor_runtime::haxe_sys::HaxeBytes {
-    use rayzor_runtime::haxe_sys::{haxe_bytes_alloc, HaxeBytes};
+    use rayzor_runtime::haxe_sys::haxe_bytes_alloc;
 
     if ctx.is_null() || tex.is_null() {
         return std::ptr::null_mut();
@@ -239,12 +235,8 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_to_bytes(
         return std::ptr::null_mut();
     }
 
-    let read = super::texture::rayzor_gpu_gfx_texture_read_pixels(
-        ctx,
-        tex,
-        (*bytes).ptr,
-        (*bytes).len,
-    );
+    let read =
+        super::texture::rayzor_gpu_gfx_texture_read_pixels(ctx, tex, (*bytes).ptr, (*bytes).len);
     if read == 0 {
         // Failed — free and return null
         return std::ptr::null_mut();
@@ -293,7 +285,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_save_texture_ppm(
     for y in 0..h {
         for x in 0..w {
             let i = ((y * w + x) * 4) as usize;
-            data.push(pixels[i]);     // R
+            data.push(pixels[i]); // R
             data.push(pixels[i + 1]); // G
             data.push(pixels[i + 2]); // B
         }
