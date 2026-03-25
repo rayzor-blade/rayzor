@@ -344,3 +344,56 @@ macro_rules! _param_array {
         ]
     };
 }
+
+// ============================================================================
+// Universal rpkg entry point
+// ============================================================================
+
+/// C-compatible plugin descriptor returned by `rayzor_rpkg_entry`.
+/// Single entry point — no more guessing function names.
+#[repr(C)]
+pub struct RpkgPluginInfo {
+    /// Runtime symbols: array of (name_ptr, name_len, fn_ptr) triples
+    pub symbols_ptr: *const u8,
+    pub symbols_count: usize,
+    /// Method descriptors for compiler registration
+    pub methods_ptr: *const NativeMethodDesc,
+    pub methods_count: usize,
+}
+
+unsafe impl Send for RpkgPluginInfo {}
+unsafe impl Sync for RpkgPluginInfo {}
+
+/// Generate the universal `rayzor_rpkg_entry` export for an rpkg dylib.
+///
+/// Takes a method table name (from `declare_native_methods!`) and a
+/// function that returns `Vec<(&'static str, *const u8)>` for runtime symbols.
+///
+/// ```rust,ignore
+/// declare_native_methods! { MY_METHODS; ... }
+/// fn get_symbols() -> Vec<(&'static str, *const u8)> { vec![...] }
+/// rpkg_entry!(MY_METHODS, get_symbols);
+/// ```
+#[macro_export]
+macro_rules! rpkg_entry {
+    ($methods:ident, $symbols_fn:path) => {
+        #[no_mangle]
+        pub unsafe extern "C" fn rayzor_rpkg_entry() -> $crate::RpkgPluginInfo {
+            // Build symbol entries as (name_ptr, name_len, fn_ptr) triples
+            let symbols = $symbols_fn();
+            let entries: Vec<(usize, usize, usize)> = symbols
+                .iter()
+                .map(|(name, ptr)| (name.as_ptr() as usize, name.len(), *ptr as usize))
+                .collect();
+            let count = entries.len();
+            let leaked = Box::leak(entries.into_boxed_slice());
+
+            $crate::RpkgPluginInfo {
+                symbols_ptr: leaked.as_ptr() as *const u8,
+                symbols_count: count,
+                methods_ptr: $methods.as_ptr(),
+                methods_count: $methods.len(),
+            }
+        }
+    };
+}

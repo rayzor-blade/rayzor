@@ -385,11 +385,21 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum RpkgAction {
-    /// Pack Haxe sources (and optionally a native dylib) into an .rpkg file
+    /// Pack Haxe sources (and optionally native dylibs) into an .rpkg file
     Pack {
-        /// Path to a native library (.dylib/.so/.dll) — optional for pure Haxe packages
-        #[arg(long)]
-        dylib: Option<PathBuf>,
+        /// Native library to embed (repeatable for multi-platform).
+        /// Each --dylib may be followed by --os and --arch to tag the platform.
+        /// If --os/--arch are omitted, the current platform is assumed.
+        #[arg(long, value_name = "FILE")]
+        dylib: Vec<PathBuf>,
+
+        /// OS for the preceding --dylib (macos, linux, windows). Repeatable.
+        #[arg(long, value_name = "OS")]
+        os: Vec<String>,
+
+        /// Architecture for the preceding --dylib (aarch64, x86_64). Repeatable.
+        #[arg(long, value_name = "ARCH")]
+        arch: Vec<String>,
 
         /// Directory containing .hx source files to bundle
         #[arg(long)]
@@ -430,6 +440,24 @@ enum RpkgAction {
 
     /// List installed packages in the local registry
     List,
+
+    /// Strip an .rpkg to keep only the native lib for a specific platform
+    Strip {
+        /// Input .rpkg file
+        input: PathBuf,
+
+        /// Target OS (defaults to current platform)
+        #[arg(long)]
+        os: Option<String>,
+
+        /// Target architecture (defaults to current platform)
+        #[arg(long)]
+        arch: Option<String>,
+
+        /// Output .rpkg path
+        #[arg(short, long)]
+        output: PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -671,15 +699,23 @@ fn main() {
         Commands::Rpkg { action } => match action {
             RpkgAction::Pack {
                 dylib,
+                os,
+                arch,
                 haxe_dir,
                 output,
                 name,
-            } => cmd_rpkg_pack(dylib, haxe_dir, output, name),
+            } => cmd_rpkg_pack(dylib, os, arch, haxe_dir, output, name),
             RpkgAction::Inspect { file } => cmd_rpkg_inspect(file),
             RpkgAction::Install { file } => cmd_rpkg_install(file),
             RpkgAction::Add { name } => cmd_rpkg_add(name),
             RpkgAction::Remove { name } => cmd_rpkg_remove(name),
             RpkgAction::List => cmd_rpkg_list(),
+            RpkgAction::Strip {
+                input,
+                os,
+                arch,
+                output,
+            } => cmd_rpkg_strip(input, os, arch, output),
         },
         Commands::Lsp => rayzor_lsp::run_lsp(),
     };
@@ -2922,7 +2958,9 @@ fn cmd_dump(
 // ---------------------------------------------------------------------------
 
 fn cmd_rpkg_pack(
-    dylib: Option<PathBuf>,
+    dylibs: Vec<PathBuf>,
+    os_tags: Vec<String>,
+    arch_tags: Vec<String>,
     haxe_dir: PathBuf,
     output: PathBuf,
     name: Option<String>,
@@ -2934,21 +2972,55 @@ fn cmd_rpkg_pack(
             .unwrap_or_else(|| "unnamed".to_string())
     });
 
-    if let Some(ref dylib_path) = dylib {
-        println!(
-            "Packing rpkg '{}' from {} + {}",
-            package_name,
-            dylib_path.display(),
-            haxe_dir.display()
-        );
-        compiler::rpkg::pack::build_from_dylib(&package_name, dylib_path, &haxe_dir, &output)?;
-    } else {
+    if dylibs.is_empty() {
         println!(
             "Packing rpkg '{}' from {} (pure Haxe)",
             package_name,
             haxe_dir.display()
         );
         compiler::rpkg::pack::build_from_haxe_dir(&package_name, &haxe_dir, &output)?;
+    } else {
+        // Build platform entries: pair each dylib with its os/arch tag
+        let current_os = if cfg!(target_os = "macos") {
+            "macos"
+        } else if cfg!(target_os = "linux") {
+            "linux"
+        } else if cfg!(target_os = "windows") {
+            "windows"
+        } else {
+            "unknown"
+        };
+        let current_arch = if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else if cfg!(target_arch = "x86_64") {
+            "x86_64"
+        } else {
+            "unknown"
+        };
+
+        let mut platform_dylibs = Vec::new();
+        for (i, dylib_path) in dylibs.iter().enumerate() {
+            let os = os_tags.get(i).map(|s| s.as_str()).unwrap_or(current_os);
+            let arch = arch_tags.get(i).map(|s| s.as_str()).unwrap_or(current_arch);
+            platform_dylibs.push((dylib_path.as_path(), os, arch));
+        }
+
+        println!(
+            "Packing rpkg '{}' with {} native lib(s) + {}",
+            package_name,
+            platform_dylibs.len(),
+            haxe_dir.display()
+        );
+        for (path, os, arch) in &platform_dylibs {
+            println!("  {}-{}: {}", os, arch, path.display());
+        }
+
+        compiler::rpkg::pack::build_from_dylibs(
+            &package_name,
+            &platform_dylibs,
+            &haxe_dir,
+            &output,
+        )?;
     }
 
     let size = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
@@ -2957,6 +3029,48 @@ fn cmd_rpkg_pack(
         output.display(),
         size as f64 / 1024.0
     );
+
+    Ok(())
+}
+
+fn cmd_rpkg_strip(
+    input: PathBuf,
+    os: Option<String>,
+    arch: Option<String>,
+    output: PathBuf,
+) -> Result<(), String> {
+    let target_os = os.unwrap_or_else(|| {
+        if cfg!(target_os = "macos") {
+            "macos"
+        } else if cfg!(target_os = "linux") {
+            "linux"
+        } else {
+            "windows"
+        }
+        .to_string()
+    });
+    let target_arch = arch.unwrap_or_else(|| {
+        if cfg!(target_arch = "aarch64") {
+            "aarch64"
+        } else {
+            "x86_64"
+        }
+        .to_string()
+    });
+
+    println!(
+        "Stripping {} → {} (target: {}-{})",
+        input.display(),
+        output.display(),
+        target_os,
+        target_arch
+    );
+
+    compiler::rpkg::strip_rpkg(&input, &target_os, &target_arch, &output)
+        .map_err(|e| format!("strip failed: {}", e))?;
+
+    let size = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
+    println!("  wrote {} ({:.1} KB)", output.display(), size as f64 / 1024.0);
 
     Ok(())
 }

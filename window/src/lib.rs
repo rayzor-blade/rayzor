@@ -171,17 +171,10 @@ rayzor_plugin::declare_native_methods! {
 }
 
 // ============================================================================
-// Plugin exports (called by host via dlopen)
+// Plugin exports — universal entry point
 // ============================================================================
 
-#[repr(C)]
-pub struct SymbolEntry {
-    pub name: *const u8,
-    pub name_len: usize,
-    pub ptr: *const c_void,
-}
-
-pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
+fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
     vec![
         ("rayzor_window_create", rayzor_window_create as *const u8),
         ("rayzor_window_create_centered", rayzor_window_create_centered as *const u8),
@@ -197,23 +190,5 @@ pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
     ]
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_plugin_init(count: *mut usize) -> *const u8 {
-    let symbols = get_runtime_symbols();
-    let entries: Vec<(usize, usize, usize)> = symbols
-        .iter()
-        .map(|(name, ptr)| (name.as_ptr() as usize, name.len(), *ptr as usize))
-        .collect();
-
-    *count = entries.len();
-    let leaked = Box::leak(entries.into_boxed_slice());
-    leaked.as_ptr() as *const u8
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_plugin_describe(
-    count: *mut usize,
-) -> *const NativeMethodDesc {
-    *count = RAYZOR_WINDOW_METHODS.len();
-    RAYZOR_WINDOW_METHODS.as_ptr()
-}
+// Single universal entry point — no more hardcoded function name guessing
+rayzor_plugin::rpkg_entry!(RAYZOR_WINDOW_METHODS, get_runtime_symbols);

@@ -1,41 +1,75 @@
 #!/bin/bash
-# Build the rayzor-gpu crate and package it as an rpkg.
+# Build rayzor-gpu for all supported platforms and package as a single rpkg.
 #
 # Usage:
-#   cd gpu && ./pack-rpkg.sh
+#   cd gpu && ./pack-rpkg.sh              # current platform only (fast)
+#   cd gpu && ./pack-rpkg.sh --cross      # all platforms via cross
 #   rayzor rpkg install rayzor-gpu.rpkg
-#
-# This builds librayzor_gpu.dylib (or .so) with the webgpu backend,
-# then bundles it with the Haxe stdlib files into rayzor-gpu.rpkg.
 
 set -e
+cd "$(dirname "$0")"
 
-# Determine platform
-case "$(uname -s)" in
-    Darwin*) LIB_EXT="dylib" ;;
-    Linux*)  LIB_EXT="so" ;;
-    *)       echo "Unsupported platform"; exit 1 ;;
-esac
+RAYZOR="../target/release/rayzor"
+HAXE_DIR="../compiler/haxe-std/rayzor/gpu"
+FEATURES="webgpu-backend"
 
-# Build the GPU dylib
-echo "Building rayzor-gpu with webgpu backend..."
-cargo build -p rayzor-gpu --features webgpu-backend --release
+if [ "$1" = "--cross" ]; then
+    echo "=== Cross-building rayzor-gpu for all platforms ==="
 
-DYLIB_PATH="../target/release/librayzor_gpu.${LIB_EXT}"
-if [ ! -f "$DYLIB_PATH" ]; then
-    echo "Error: $DYLIB_PATH not found"
-    exit 1
+    # macOS aarch64 (native — cross can't do macOS)
+    echo "[1/4] macOS aarch64..."
+    cargo build -p rayzor-gpu --features "$FEATURES" --release --target aarch64-apple-darwin
+    MACOS_ARM="../target/aarch64-apple-darwin/release/librayzor_gpu.dylib"
+
+    # macOS x86_64
+    echo "[2/4] macOS x86_64..."
+    cargo build -p rayzor-gpu --features "$FEATURES" --release --target x86_64-apple-darwin
+    MACOS_X64="../target/x86_64-apple-darwin/release/librayzor_gpu.dylib"
+
+    # Linux x86_64
+    echo "[3/4] Linux x86_64..."
+    cross build -p rayzor-gpu --features "$FEATURES" --release --target x86_64-unknown-linux-gnu
+    LINUX_X64="../target/x86_64-unknown-linux-gnu/release/librayzor_gpu.so"
+
+    # Windows x86_64
+    echo "[4/4] Windows x86_64..."
+    cross build -p rayzor-gpu --features "$FEATURES" --release --target x86_64-pc-windows-gnu
+    WIN_X64="../target/x86_64-pc-windows-gnu/release/rayzor_gpu.dll"
+
+    echo ""
+    echo "Packaging rayzor-gpu.rpkg (all platforms)..."
+    DYLIB_ARGS=""
+    [ -f "$MACOS_ARM" ] && DYLIB_ARGS="$DYLIB_ARGS --dylib $MACOS_ARM --os macos --arch aarch64"
+    [ -f "$MACOS_X64" ] && DYLIB_ARGS="$DYLIB_ARGS --dylib $MACOS_X64 --os macos --arch x86_64"
+    [ -f "$LINUX_X64" ] && DYLIB_ARGS="$DYLIB_ARGS --dylib $LINUX_X64 --os linux --arch x86_64"
+    [ -f "$WIN_X64" ]   && DYLIB_ARGS="$DYLIB_ARGS --dylib $WIN_X64 --os windows --arch x86_64"
+
+    $RAYZOR rpkg pack \
+        --name rayzor-gpu \
+        $DYLIB_ARGS \
+        --haxe-dir "$HAXE_DIR" \
+        --output rayzor-gpu.rpkg
+else
+    echo "=== Building rayzor-gpu (current platform) ==="
+    cargo build -p rayzor-gpu --features "$FEATURES" --release
+
+    case "$(uname -s)" in
+        Darwin*) LIB_EXT="dylib" ;;
+        Linux*)  LIB_EXT="so" ;;
+        *)       echo "Unsupported platform"; exit 1 ;;
+    esac
+
+    DYLIB_PATH="../target/release/librayzor_gpu.${LIB_EXT}"
+    [ ! -f "$DYLIB_PATH" ] && echo "Error: $DYLIB_PATH not found" && exit 1
+
+    echo "Packaging rayzor-gpu.rpkg..."
+    $RAYZOR rpkg pack \
+        --name rayzor-gpu \
+        --dylib "$DYLIB_PATH" \
+        --haxe-dir "$HAXE_DIR" \
+        --output rayzor-gpu.rpkg
 fi
 
-echo "Packaging rayzor-gpu.rpkg..."
-# Use rayzor rpkg pack to create the package
-../target/release/rayzor rpkg pack \
-    --name rayzor-gpu \
-    --dylib "$DYLIB_PATH" \
-    --haxe-dir ../compiler/haxe-std/rayzor/gpu \
-    --output rayzor-gpu.rpkg
-
-echo "Done: rayzor-gpu.rpkg"
 echo ""
-echo "Install with:"
-echo "  rayzor rpkg install rayzor-gpu.rpkg"
+echo "Done: rayzor-gpu.rpkg"
+echo "Install: rayzor rpkg install rayzor-gpu.rpkg"

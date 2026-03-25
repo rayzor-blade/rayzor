@@ -153,6 +153,11 @@ pub struct CompilationUnit {
     /// Set of already-loaded HDLL library names to avoid duplicate loading
     loaded_hdlls: HashSet<String>,
 
+    /// Global inline var constants (name-keyed: "ClassName.fieldName" → value).
+    /// Populated from both fresh compilation and BLADE cache restore.
+    /// Passed to HIR lowering for cross-file static inline var resolution.
+    global_inline_vars: HashMap<String, crate::ir::blade::BladeInlineValue>,
+
     /// Type info extracted from the last compiled file (for BLADE cache save)
     last_compiled_type_info: Option<BladeTypeInfo>,
 
@@ -452,6 +457,7 @@ impl CompilationUnit {
             compiler_plugin_registry: CompilerPluginRegistry::new(),
             hdll_symbols: Vec::new(),
             loaded_hdlls: HashSet::new(),
+            global_inline_vars: HashMap::new(),
             last_compiled_type_info: None,
             last_compiled_cached_maps: None,
             last_compiled_own_func_ids: None,
@@ -809,6 +815,7 @@ impl CompilationUnit {
             fields,
             class_sizes,
             properties,
+            inline_vars: Vec::new(), // populated separately in try_compile_import
         }
     }
 
@@ -830,6 +837,145 @@ impl CompilationUnit {
             }
         }
         None
+    }
+
+    /// Extract static inline var constants from a TypedFile for BLADE cache storage.
+    fn extract_inline_vars_from_typed_file(
+        typed_file: &TypedFile,
+        symbol_table: &crate::tast::SymbolTable,
+        string_interner: &crate::tast::StringInterner,
+    ) -> Vec<crate::ir::blade::BladeInlineVarEntry> {
+        use crate::ir::blade::{BladeInlineValue, BladeInlineVarEntry};
+        use crate::tast::node::LiteralValue;
+
+        let mut entries = Vec::new();
+
+        for class in &typed_file.classes {
+            let class_name = symbol_table
+                .get_symbol(class.symbol_id)
+                .and_then(|sym| {
+                    sym.qualified_name
+                        .and_then(|n| string_interner.get(n))
+                        .or_else(|| string_interner.get(sym.name))
+                })
+                .unwrap_or("")
+                .to_string();
+            if class_name.is_empty() {
+                continue;
+            }
+
+            for field in &class.fields {
+                if !field.is_static {
+                    continue;
+                }
+                // Only inline/final fields
+                let is_inline = symbol_table
+                    .get_symbol(field.symbol_id)
+                    .map(|s| s.is_inline())
+                    .unwrap_or(false);
+                if !is_inline
+                    && field.mutability == crate::tast::symbols::Mutability::Mutable
+                {
+                    continue;
+                }
+                let Some(init) = &field.initializer else {
+                    continue;
+                };
+
+                let field_name = string_interner
+                    .get(
+                        symbol_table
+                            .get_symbol(field.symbol_id)
+                            .map(|s| s.name)
+                            .unwrap_or(unsafe { crate::tast::InternedString::from_raw(0) }),
+                    )
+                    .unwrap_or("")
+                    .to_string();
+
+                // Try to evaluate the initializer to a constant
+                let value = match &init.kind {
+                    crate::tast::node::TypedExpressionKind::Literal { value: lit } => match lit {
+                        LiteralValue::Int(v) => Some(BladeInlineValue::Int(*v)),
+                        LiteralValue::Float(v) => Some(BladeInlineValue::Float(*v)),
+                        LiteralValue::Bool(v) => Some(BladeInlineValue::Bool(*v)),
+                        LiteralValue::String(v) => Some(BladeInlineValue::String(v.clone())),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+
+                if let Some(value) = value {
+                    entries.push(BladeInlineVarEntry {
+                        class_name: class_name.clone(),
+                        field_name,
+                        value,
+                    });
+                }
+            }
+        }
+
+        // Also handle abstract fields (enum abstract constants)
+        for abs in &typed_file.abstracts {
+            let abs_name = symbol_table
+                .get_symbol(abs.symbol_id)
+                .and_then(|sym| {
+                    sym.qualified_name
+                        .and_then(|n| string_interner.get(n))
+                        .or_else(|| string_interner.get(sym.name))
+                })
+                .unwrap_or("")
+                .to_string();
+            if abs_name.is_empty() {
+                continue;
+            }
+
+            for field in &abs.fields {
+                if !field.is_static {
+                    continue;
+                }
+                let Some(init) = &field.initializer else {
+                    continue;
+                };
+                let field_name = string_interner
+                    .get(
+                        symbol_table
+                            .get_symbol(field.symbol_id)
+                            .map(|s| s.name)
+                            .unwrap_or(unsafe { crate::tast::InternedString::from_raw(0) }),
+                    )
+                    .unwrap_or("")
+                    .to_string();
+
+                let value = match &init.kind {
+                    crate::tast::node::TypedExpressionKind::Literal { value: lit } => match lit {
+                        LiteralValue::Int(v) => Some(BladeInlineValue::Int(*v)),
+                        LiteralValue::Float(v) => Some(BladeInlineValue::Float(*v)),
+                        LiteralValue::Bool(v) => Some(BladeInlineValue::Bool(*v)),
+                        LiteralValue::String(v) => Some(BladeInlineValue::String(v.clone())),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+
+                if let Some(value) = value {
+                    entries.push(BladeInlineVarEntry {
+                        class_name: abs_name.clone(),
+                        field_name,
+                        value,
+                    });
+                }
+            }
+        }
+
+        entries
+    }
+
+    /// Store inline vars from BladeInlineVarEntry into the global map.
+    fn store_inline_vars(&mut self, entries: &[crate::ir::blade::BladeInlineVarEntry]) {
+        for entry in entries {
+            let key = format!("{}.{}", entry.class_name, entry.field_name);
+            self.global_inline_vars.insert(key, entry.value.clone());
+        }
     }
 
     // === BLADE Symbol Loading Methods ===
@@ -2470,6 +2616,16 @@ impl CompilationUnit {
             skip_stdlib_merge,
         ) {
             Ok(typed_file) => {
+                // Extract inline var constants before consuming the TypedFile.
+                // These are stored in BLADE cache and in global_inline_vars for
+                // cross-file static inline var resolution (e.g., Key.ESCAPE).
+                let inline_vars = Self::extract_inline_vars_from_typed_file(
+                    &typed_file,
+                    &self.symbol_table,
+                    &self.string_interner,
+                );
+                self.store_inline_vars(&inline_vars);
+
                 self.loaded_stdlib_typed_files.push(typed_file);
 
                 // Move the MIR from mir_modules to import_mir_modules.
@@ -2477,7 +2633,11 @@ impl CompilationUnit {
                     // Save to BLADE cache before renumbering
                     if self.config.enable_cache {
                         let type_info = self.last_compiled_type_info.take();
-                        let cached_maps = self.last_compiled_cached_maps.take();
+                        let mut cached_maps = self.last_compiled_cached_maps.take();
+                        // Append inline vars to cached maps for cache persistence
+                        if let Some(ref mut maps) = cached_maps {
+                            maps.inline_vars = inline_vars;
+                        }
                         self.save_blade_cached(
                             &filename,
                             source,
@@ -2566,7 +2726,12 @@ impl CompilationUnit {
             }
         }
 
-        // Step 4: Renumber and push to import_mir_modules
+        // Step 4: Restore inline var constants from cache
+        if !cached_maps.inline_vars.is_empty() {
+            self.store_inline_vars(&cached_maps.inline_vars);
+        }
+
+        // Step 5: Renumber and push to import_mir_modules
         self.renumber_and_push_import_mir(mir);
 
         true
@@ -3845,6 +4010,7 @@ impl CompilationUnit {
             &mut self.string_interner,
             None, // No semantic graphs for now
             &import_refs,
+            &self.global_inline_vars,
         )
         .map_err(|errors| {
             errors

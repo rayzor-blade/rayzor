@@ -112,20 +112,13 @@ impl RpkgBuilder {
 
 /// Build an `.rpkg` from a compiled native dylib and a directory of `.hx` files.
 ///
-/// This convenience function:
-/// 1. Reads the dylib and adds it as a NativeLib for the current platform
-/// 2. Loads method descriptors from the dylib's `plugin_describe()` export
-/// 3. Collects all `.hx` files from `haxe_dir` as HaxeSource entries
-/// 4. Writes the final `.rpkg`
+/// Single-dylib convenience wrapper — tags the dylib with the current platform.
 pub fn build_from_dylib(
     package_name: &str,
     dylib_path: &Path,
     haxe_dir: &Path,
     output: &Path,
 ) -> Result<(), String> {
-    let mut builder = RpkgBuilder::new(package_name);
-
-    // 1. Add native lib for current platform
     let os = if cfg!(target_os = "macos") {
         "macos"
     } else if cfg!(target_os = "linux") {
@@ -143,14 +136,36 @@ pub fn build_from_dylib(
         return Err("unsupported architecture".to_string());
     };
 
-    builder
-        .add_native_lib_from_file(dylib_path, os, arch)
-        .map_err(|e| format!("failed to read dylib: {}", e))?;
+    build_from_dylibs(package_name, &[(dylib_path, os, arch)], haxe_dir, output)
+}
 
-    // 2. Load method descriptors from dylib
-    let methods = extract_method_table_from_dylib(dylib_path)?;
-    if !methods.is_empty() {
-        builder.add_method_table(package_name, &methods);
+/// Build an `.rpkg` from multiple platform dylibs and a directory of `.hx` files.
+///
+/// Each entry in `dylibs` is `(path, os, arch)`. Method descriptors are extracted
+/// from the first dylib that has a `rayzor_rpkg_entry` or `plugin_describe` export.
+pub fn build_from_dylibs(
+    package_name: &str,
+    dylibs: &[(&Path, &str, &str)],
+    haxe_dir: &Path,
+    output: &Path,
+) -> Result<(), String> {
+    let mut builder = RpkgBuilder::new(package_name);
+
+    // 1. Add each native lib tagged with its platform
+    let mut method_table_extracted = false;
+    for &(dylib_path, os, arch) in dylibs {
+        builder
+            .add_native_lib_from_file(dylib_path, os, arch)
+            .map_err(|e| format!("failed to read dylib {}: {}", dylib_path.display(), e))?;
+
+        // 2. Extract method descriptors from the first dylib that has them
+        if !method_table_extracted {
+            let methods = extract_method_table_from_dylib(dylib_path)?;
+            if !methods.is_empty() {
+                builder.add_method_table(package_name, &methods);
+                method_table_extracted = true;
+            }
+        }
     }
 
     // 3. Collect .hx files
@@ -216,74 +231,112 @@ fn collect_haxe_sources(
     Ok(())
 }
 
-/// Load the dylib, call its `plugin_describe()` export, and convert to MethodDescEntry.
+/// Load the dylib and extract its method descriptor table.
+///
+/// First tries the universal `rayzor_rpkg_entry` export (preferred).
+/// Falls back to legacy `plugin_describe` names for backward compatibility.
 fn extract_method_table_from_dylib(dylib_path: &Path) -> Result<Vec<MethodDescEntry>, String> {
-    type DescribeFn = unsafe extern "C" fn(*mut usize) -> *const rayzor_plugin::NativeMethodDesc;
-
     let lib = unsafe { libloading::Library::new(dylib_path) }
         .map_err(|e| format!("failed to load dylib {}: {}", dylib_path.display(), e))?;
 
-    // Try common describe function names
-    let describe_names = [
-        b"rayzor_gpu_plugin_describe" as &[u8],
+    // Try universal entry point first
+    if let Some(methods) = extract_methods_via_rpkg_entry(&lib) {
+        return Ok(methods);
+    }
+
+    // Legacy fallback: try old-style plugin_describe exports
+    type DescribeFn = unsafe extern "C" fn(*mut usize) -> *const rayzor_plugin::NativeMethodDesc;
+
+    let describe_names: &[&[u8]] = &[
         b"plugin_describe",
         b"rayzor_plugin_describe",
     ];
 
-    for name in &describe_names {
+    for name in describe_names {
         if let Ok(describe_fn) = unsafe { lib.get::<DescribeFn>(name) } {
-            let mut count: usize = 0;
-            let descs = unsafe { describe_fn(&mut count) };
-            if descs.is_null() || count == 0 {
-                continue;
+            let methods = read_method_descs_from_ptr(&describe_fn);
+            if !methods.is_empty() {
+                return Ok(methods);
             }
-
-            let slice = unsafe { std::slice::from_raw_parts(descs, count) };
-            let mut methods = Vec::with_capacity(count);
-
-            for desc in slice {
-                let symbol_name = unsafe {
-                    std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                        desc.symbol_name,
-                        desc.symbol_name_len,
-                    ))
-                    .to_string()
-                };
-                let class_name = unsafe {
-                    std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                        desc.class_name,
-                        desc.class_name_len,
-                    ))
-                    .to_string()
-                };
-                let method_name = unsafe {
-                    std::str::from_utf8_unchecked(std::slice::from_raw_parts(
-                        desc.method_name,
-                        desc.method_name_len,
-                    ))
-                    .to_string()
-                };
-                let param_types = desc.param_types[..desc.param_count as usize].to_vec();
-
-                methods.push(MethodDescEntry {
-                    symbol_name,
-                    class_name,
-                    method_name,
-                    is_static: desc.is_static != 0,
-                    param_count: desc.param_count,
-                    return_type: desc.return_type,
-                    param_types,
-                });
-            }
-
-            // Keep library alive until we're done reading (it's on stack, will be dropped)
-            // The data is now owned strings, so dropping lib is safe.
-            return Ok(methods);
         }
     }
 
     // No describe function found — that's OK, might be a plain dylib
     Ok(Vec::new())
+}
+
+/// Extract method descriptors via the universal `rayzor_rpkg_entry` export.
+fn extract_methods_via_rpkg_entry(lib: &libloading::Library) -> Option<Vec<MethodDescEntry>> {
+    type EntryFn = unsafe extern "C" fn() -> rayzor_plugin::RpkgPluginInfo;
+
+    let entry_fn = unsafe { lib.get::<EntryFn>(b"rayzor_rpkg_entry") }.ok()?;
+    let info = unsafe { entry_fn() };
+
+    if info.methods_count == 0 || info.methods_ptr.is_null() {
+        return Some(Vec::new());
+    }
+
+    let slice = unsafe {
+        std::slice::from_raw_parts(info.methods_ptr, info.methods_count)
+    };
+
+    Some(read_native_method_descs(slice))
+}
+
+/// Read method descriptors from a `plugin_describe` function pointer.
+fn read_method_descs_from_ptr(
+    describe_fn: &unsafe extern "C" fn(*mut usize) -> *const rayzor_plugin::NativeMethodDesc,
+) -> Vec<MethodDescEntry> {
+    let mut count: usize = 0;
+    let descs = unsafe { describe_fn(&mut count) };
+    if descs.is_null() || count == 0 {
+        return Vec::new();
+    }
+
+    let slice = unsafe { std::slice::from_raw_parts(descs, count) };
+    read_native_method_descs(slice)
+}
+
+/// Convert a slice of NativeMethodDesc into MethodDescEntry values.
+fn read_native_method_descs(slice: &[rayzor_plugin::NativeMethodDesc]) -> Vec<MethodDescEntry> {
+    let mut methods = Vec::with_capacity(slice.len());
+
+    for desc in slice {
+        let symbol_name = unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                desc.symbol_name,
+                desc.symbol_name_len,
+            ))
+            .to_string()
+        };
+        let class_name = unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                desc.class_name,
+                desc.class_name_len,
+            ))
+            .to_string()
+        };
+        let method_name = unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                desc.method_name,
+                desc.method_name_len,
+            ))
+            .to_string()
+        };
+        let param_types = desc.param_types[..desc.param_count as usize].to_vec();
+
+        methods.push(MethodDescEntry {
+            symbol_name,
+            class_name,
+            method_name,
+            is_static: desc.is_static != 0,
+            param_count: desc.param_count,
+            return_type: desc.return_type,
+            param_types,
+        });
+    }
+
+    methods
 }
 
 #[cfg(test)]

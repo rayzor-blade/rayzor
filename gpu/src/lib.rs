@@ -422,6 +422,15 @@ pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
             ("rayzor_gpu_gfx_surface_resize", graphics::surface::rayzor_gpu_gfx_surface_resize as *const u8),
             ("rayzor_gpu_gfx_surface_get_format", graphics::surface::rayzor_gpu_gfx_surface_get_format as *const u8),
             ("rayzor_gpu_gfx_surface_destroy", graphics::surface::rayzor_gpu_gfx_surface_destroy as *const u8),
+            // Texture write
+            ("rayzor_gpu_gfx_texture_write", graphics::texture::rayzor_gpu_gfx_texture_write as *const u8),
+            // Sampler
+            ("rayzor_gpu_gfx_sampler_create", graphics::texture::rayzor_gpu_gfx_sampler_create as *const u8),
+            ("rayzor_gpu_gfx_sampler_destroy", graphics::texture::rayzor_gpu_gfx_sampler_destroy as *const u8),
+            // BindGroup
+            ("rayzor_gpu_gfx_bind_group_layout_create", graphics::bind_group::rayzor_gpu_gfx_bind_group_layout_create as *const u8),
+            ("rayzor_gpu_gfx_bind_group_layout_destroy", graphics::bind_group::rayzor_gpu_gfx_bind_group_layout_destroy as *const u8),
+            ("rayzor_gpu_gfx_bind_group_destroy", graphics::bind_group::rayzor_gpu_gfx_bind_group_destroy as *const u8),
         ];
         symbols.extend(gfx_symbols);
     }
@@ -439,6 +448,9 @@ fn collect_symbols() -> Vec<SymbolEntry> {
         })
         .collect()
 }
+
+// Universal rpkg entry point — single export for both symbols and method descriptors
+rayzor_plugin::rpkg_entry!(GPU_METHODS, get_runtime_symbols);
 
 /// GPU compute plugin implementing RuntimePlugin trait
 pub struct GpuComputePlugin;

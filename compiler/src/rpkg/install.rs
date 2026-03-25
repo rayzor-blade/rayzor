@@ -87,7 +87,7 @@ impl RpkgPlugin {
                 .map_err(|e| format!("failed to load native lib: {}", e))?;
 
             // Load runtime symbols via plugin_init()
-            runtime_symbols = load_runtime_symbols(&library);
+            runtime_symbols = load_runtime_symbols(&library, &loaded.package_name);
 
             temp_lib_path = Some(temp_path);
             lib = Some(library);
@@ -115,14 +115,22 @@ impl RpkgPlugin {
     }
 }
 
-/// Load runtime symbols from a dlopen'd library via the `plugin_init` export.
+/// Load runtime symbols from a dlopen'd library.
 ///
-/// Tries several common export names. Returns empty vec if none found.
-fn load_runtime_symbols(lib: &libloading::Library) -> Vec<(String, *const u8)> {
+/// First tries the universal `rayzor_rpkg_entry` export (preferred).
+/// Falls back to legacy `plugin_init` names for backward compatibility.
+fn load_runtime_symbols(lib: &libloading::Library, _package_name: &str) -> Vec<(String, *const u8)> {
+    // Try universal entry point first
+    if let Some(symbols) = load_symbols_via_rpkg_entry(lib) {
+        return symbols;
+    }
+
+    // Legacy fallback: try old-style plugin_init exports
     type InitFn = unsafe extern "C" fn(*mut usize) -> *const u8;
 
     let init_names: &[&[u8]] = &[
         b"rayzor_gpu_plugin_init",
+        b"rayzor_window_plugin_init",
         b"plugin_init",
         b"rayzor_plugin_init",
     ];
@@ -155,4 +163,38 @@ fn load_runtime_symbols(lib: &libloading::Library) -> Vec<(String, *const u8)> {
     }
 
     Vec::new()
+}
+
+/// Load runtime symbols via the universal `rayzor_rpkg_entry` export.
+///
+/// Returns `Some(symbols)` if the export exists and has valid data.
+fn load_symbols_via_rpkg_entry(lib: &libloading::Library) -> Option<Vec<(String, *const u8)>> {
+    type EntryFn = unsafe extern "C" fn() -> rayzor_plugin::RpkgPluginInfo;
+
+    let entry_fn = unsafe { lib.get::<EntryFn>(b"rayzor_rpkg_entry") }.ok()?;
+    let info = unsafe { entry_fn() };
+
+    if info.symbols_count == 0 || info.symbols_ptr.is_null() {
+        return Some(Vec::new());
+    }
+
+    let entries = unsafe {
+        std::slice::from_raw_parts(
+            info.symbols_ptr as *const (usize, usize, usize),
+            info.symbols_count,
+        )
+    };
+
+    let mut symbols = Vec::with_capacity(info.symbols_count);
+    for &(name_ptr, name_len, fn_ptr) in entries {
+        let name = unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                name_ptr as *const u8,
+                name_len,
+            ))
+        };
+        symbols.push((name.to_string(), fn_ptr as *const u8));
+    }
+
+    Some(symbols)
 }
