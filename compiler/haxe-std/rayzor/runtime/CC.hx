@@ -3,45 +3,94 @@ package rayzor.runtime;
 /**
  * TinyCC runtime compiler — compile and execute C code at runtime.
  *
- * Standard C library functions (strlen, printf, malloc, sin, etc.) are
- * available automatically. System headers like `<string.h>`, `<stdio.h>`,
- * and `<math.h>` can be used via `#include`.
+ * Gives Haxe programs direct access to platform APIs (Cocoa, X11, Win32),
+ * system libraries, and C code without building an rpkg. Ideal for light
+ * programs that need quick native access.
  *
- * ## System Requirements
+ * ## Quick Start
  *
- * System headers require platform SDK headers to be installed:
- *   - **macOS**: Install CommandLineTools via `xcode-select --install` (~1GB).
- *     Full Xcode.app also works but is not required.
- *   - **Linux**: Install build-essential (or equivalent) for `/usr/include`.
+ * ```haxe
+ * var cc = CC.create();
+ * cc.compile('long add(long a, long b) { return a + b; }');
+ * cc.relocate();
+ * var fn = cc.getSymbol("add");
+ * trace(CC.call2(fn, 3, 4)); // 7
+ * ```
  *
- * Pure C code (no `#include`) and `@:cstruct` interop work without any SDK.
+ * ## Shared Environment (Heap Memory Bridge)
  *
- * ## Usage
+ * On ARM64 macOS, JIT code cannot use C `static` variables (W^X
+ * restriction — code and data share the same page with mutually
+ * exclusive write/execute permissions).
  *
- * Explicit CC API:
+ * Instead, allocate state on the **heap** via `calloc` and pass the
+ * pointer between Haxe and C. Heap memory is always writable.
+ *
  * ```haxe
  * var cc = CC.create();
  * cc.compile('
- *     #include <string.h>
- *     long my_strlen(long addr) {
- *         return (long)strlen((const char*)addr);
- *     }
+ *     #include <stdlib.h>
+ *     // Allocate shared env on heap (outside JIT W^X region)
+ *     long alloc_env(void) { return (long)calloc(8, sizeof(long)); }
+ *
+ *     // Store a value — C writes to heap, Haxe can read later
+ *     void set_handle(long env, long value) { ((long*)env)[0] = value; }
+ *
+ *     // Read a value — C reads what Haxe (or another C fn) stored
+ *     long get_handle(long env) { return ((long*)env)[0]; }
  * ');
  * cc.relocate();
- * var fn = cc.getSymbol("my_strlen");
- * trace(CC.call1(fn, cs.raw()));
- * cc.delete();
+ *
+ * var env = CC.call0(cc.getSymbol("alloc_env"));
+ * CC.call2(cc.getSymbol("set_handle"), env, somePtr);
+ * var handle = CC.call1(cc.getSymbol("get_handle"), env);
  * ```
  *
- * Inline `__c__()` syntax (auto-manages TCC lifecycle):
+ * For platform APIs that need persistent state (e.g., a window handle
+ * shared between creation and event polling), use multiple CC contexts
+ * with the env pointer passed as a function argument:
+ *
  * ```haxe
- * var len = untyped __c__('
- *     #include <string.h>
- *     long __entry__() {
- *         return (long)strlen((const char*){0});
- *     }
- * ', cs.raw());
+ * // CC 1: create window, store handle in env
+ * var cc1 = CC.create();
+ * cc1.addFramework("Cocoa");
+ * cc1.compile('... long create_window(long env) { *((long*)env) = window; ... }');
+ * cc1.relocate();
+ * var env = CC.call0(cc1.getSymbol("alloc_env"));
+ * var view = CC.call1(cc1.getSymbol("create_window"), env);
+ *
+ * // CC 2: poll events, read window from env
+ * var cc2 = CC.create();
+ * cc2.addFramework("Cocoa");
+ * cc2.compile('... long poll(long env) { id win = (id)(*((long*)env)); ... }');
+ * cc2.relocate();
+ * var pollFn = cc2.getSymbol("poll");
+ *
+ * while (CC.call1(pollFn, env) != null) { /* render */ }
  * ```
+ *
+ * ## Platform Frameworks
+ *
+ * ```haxe
+ * cc.addFramework("Cocoa");      // macOS — NSWindow, NSApplication
+ * cc.addFramework("Accelerate"); // macOS — vDSP, BLAS, LAPACK
+ * cc.addFramework("Metal");      // macOS — GPU compute
+ * ```
+ *
+ * ## System Requirements
+ *
+ * System headers require platform SDK:
+ *   - **macOS**: `xcode-select --install` (CommandLineTools)
+ *   - **Linux**: `apt install build-essential`
+ *
+ * Pure C code (no `#include`) works without any SDK.
+ *
+ * ## ARM64 macOS Notes
+ *
+ * - JIT memory uses MAP_JIT with W^X protection
+ * - C `static` variables in JIT code cause SIGBUS (write to execute-only page)
+ * - Use heap-allocated env (calloc) instead of C statics
+ * - Split large C into multiple CC contexts if TCC ARM64 codegen fails
  */
 @:native("rayzor::runtime::CC")
 extern class CC {
@@ -112,8 +161,6 @@ extern class CC {
 
     /**
      * Add a directory to the include search path.
-     * Allows `#include "header.h"` and `#include <header.h>` to find
-     * headers in the specified directory.
      *
      * @param path Absolute or relative directory path
      * @return true if path was added successfully
@@ -123,9 +170,7 @@ extern class CC {
 
     /**
      * Add a C source file, object file, archive, or shared library.
-     * Supports `.c` (compiled into context), `.o`, `.a` (linked),
-     * and `.dylib`/`.so`/`.dll` (dynamically loaded).
-     *
+     * Supports `.c`, `.o`, `.a`, `.dylib`/`.so`/`.dll`.
      * Must be called before relocate().
      *
      * @param path Path to the file
@@ -135,35 +180,25 @@ extern class CC {
     public function addFile(path:String):Bool;
 
     /**
-     * Free the TCC compilation context and all associated resources.
-     * Note: relocated code memory remains valid (intentional leak for JIT use).
+     * Free the TCC compilation context.
+     * Relocated code memory remains valid (intentional leak for JIT use).
      */
     @:native("delete")
     public function delete():Void;
 
-    /**
-     * Call a JIT-compiled function (0 args) by its address.
-     * @param fnAddr Function pointer from getSymbol()
-     * @return Function return value as Int
-     */
+    /** Call a JIT function (0 args). All values are pointer-sized (i64). */
     @:native("call0")
     public static function call0(fnAddr:rayzor.Ptr<Void>):rayzor.Ptr<Void>;
 
-    /**
-     * Call a JIT-compiled function (1 arg) by its address.
-     */
+    /** Call a JIT function (1 arg). */
     @:native("call1")
     public static function call1(fnAddr:rayzor.Ptr<Void>, arg0:rayzor.Ptr<Void>):rayzor.Ptr<Void>;
 
-    /**
-     * Call a JIT-compiled function (2 args) by its address.
-     */
+    /** Call a JIT function (2 args). */
     @:native("call2")
     public static function call2(fnAddr:rayzor.Ptr<Void>, arg0:rayzor.Ptr<Void>, arg1:rayzor.Ptr<Void>):rayzor.Ptr<Void>;
 
-    /**
-     * Call a JIT-compiled function (3 args) by its address.
-     */
+    /** Call a JIT function (3 args). */
     @:native("call3")
     public static function call3(fnAddr:rayzor.Ptr<Void>, arg0:rayzor.Ptr<Void>, arg1:rayzor.Ptr<Void>, arg2:rayzor.Ptr<Void>):rayzor.Ptr<Void>;
 }
