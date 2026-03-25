@@ -7,12 +7,6 @@ package rayzor;
  * Unlike Arc<T>, there is no reference counting overhead.
  * The owner is responsible for calling free() when done.
  *
- * **Note:** In Rayzor, `Int` is always 64-bit (i64) at the MIR/codegen
- * level. All pointer abstracts (Ptr, Ref, Box, Usize) share this
- * 64-bit underlying representation.
- *
- * Lowers to i64 (heap pointer) at MIR level — zero-cost abstract.
- *
  * Example:
  * ```haxe
  * var boxed = Box.init(42);
@@ -22,7 +16,7 @@ package rayzor;
  * ```
  */
 @:native("rayzor::Box")
-extern abstract Box<T>(Int) {
+extern abstract Box<T> {
     /** Allocate a value on the heap */
     @:native("init")
     public static function init<T>(value:T):Box<T>;
@@ -41,7 +35,7 @@ extern abstract Box<T>(Int) {
 
     /** Get the raw heap address */
     @:native("raw")
-    public function raw():Int;
+    public function raw():Usize;
 
     /** Free the box and its contents */
     @:native("free")

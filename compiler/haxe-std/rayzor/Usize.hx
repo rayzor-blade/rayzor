@@ -3,19 +3,14 @@ package rayzor;
 /**
  * Unsigned pointer-sized integer.
  *
- * Usize is a zero-cost abstract over Int that represents an unsigned
- * machine word. It is the natural type for memory addresses, sizes,
- * offsets, and array indices.
+ * Usize is a pointer-sized unsigned integer — the natural type for
+ * memory addresses, sizes, offsets, and array indices.
  *
- * **Note:** In Rayzor, `Int` is always 64-bit (i64) at the MIR level,
- * regardless of the standard Haxe 32-bit `Int` semantics.
- * All rayzor abstract types (Ptr, Ref, Box, Usize) use `Int` as their
- * underlying representation. The codegen backends (Cranelift, LLVM)
- * support both 32-bit and 64-bit targets — pointer sizes adapt
- * automatically via the target's pointer type.
+ * On rayzor's baremetal target, Usize is always 64-bit. It is a
+ * first-class type, NOT an abstract over Int (which is 32-bit).
  *
- * Implicitly convertible from/to Int. Use `.toPtr()` and `.toRef()`
- * for typed pointer conversions.
+ * Convertible from/to Int via fromInt()/toInt(). Use `.toPtr()` and
+ * `.toRef()` for typed pointer conversions.
  *
  * Example:
  * ```haxe
@@ -25,7 +20,7 @@ package rayzor;
  * ```
  */
 @:native("rayzor::Usize")
-extern abstract Usize(Int) {
+extern abstract Usize {
     /** Create from an Int value */
     @:native("from_int")
     @:from
