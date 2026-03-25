@@ -692,14 +692,14 @@ fn main() {
 
 /// Helper function to compile Haxe source through the full pipeline to MIR
 /// Uses CompilationUnit for proper multi-file, stdlib-aware compilation
-/// Returns the primary MIR module (user code)
+/// Returns the primary MIR module (user code) and any diagnostics (warnings)
 fn compile_haxe_to_mir(
     source: &str,
     filename: &str,
     plugins: Vec<Box<dyn compiler::compiler_plugin::CompilerPlugin>>,
     extra_source_dirs: &[PathBuf],
     safety_warnings: bool,
-) -> Result<compiler::ir::IrModule, String> {
+) -> Result<(compiler::ir::IrModule, Vec<diagnostics::Diagnostic>), String> {
     use compiler::compilation::{CompilationConfig, CompilationUnit};
 
     // Create compilation unit with stdlib support
@@ -745,7 +745,8 @@ fn compile_haxe_to_mir(
     // Return the last module (user code). Import MIR modules are merged during
     // compilation (in compile_file_with_shared_state_ex's stdlib renumbering pass).
     let module = (**mir_modules.last().unwrap()).clone();
-    Ok(module)
+    let diagnostics = unit.collected_diagnostics.clone();
+    Ok((module, diagnostics))
 }
 
 fn run_bundle(file: &Path, verbose: bool, stats: bool, preset: Preset) -> Result<(), String> {
@@ -1020,14 +1021,27 @@ fn run_file(
 
     let (mir_module, _cache_hit) = 'load_mir: {
         // Try loading from MIR cache (source hash must match)
+        // Cache includes pre-rendered diagnostic strings for replay.
         if cache_enabled {
             if let Ok(data) = std::fs::read(&mir_cache_path) {
-                if data.len() >= 8 {
+                if data.len() >= 12 {
                     let cached_hash = u64::from_le_bytes(data[..8].try_into().unwrap());
-                    if cached_hash == source_hash {
-                        if let Ok(module) =
-                            postcard::from_bytes::<compiler::ir::IrModule>(&data[8..])
-                        {
+                    let diag_len = u32::from_le_bytes(data[8..12].try_into().unwrap()) as usize;
+                    if cached_hash == source_hash && data.len() >= 12 + diag_len {
+                        // Replay cached diagnostic strings
+                        if diag_len > 0 {
+                            if let Ok(diag_strings) =
+                                postcard::from_bytes::<Vec<String>>(&data[12..12 + diag_len])
+                            {
+                                for s in &diag_strings {
+                                    eprint!("{}", s);
+                                }
+                            }
+                        }
+                        // Load MIR module
+                        if let Ok(module) = postcard::from_bytes::<compiler::ir::IrModule>(
+                            &data[12 + diag_len..],
+                        ) {
                             break 'load_mir (module, true);
                         }
                     }
@@ -1040,7 +1054,7 @@ fn run_file(
             h.begin_phase("compile");
         }
         let t_compile = std::time::Instant::now();
-        let mut mir_module = compile_haxe_to_mir(
+        let (mut mir_module, compile_diagnostics) = compile_haxe_to_mir(
             &source,
             file.to_str().unwrap_or("unknown"),
             compiler_plugins,
@@ -1094,9 +1108,27 @@ fn run_file(
             h.set_functions(mir_module.functions.len());
         }
 
-        // Save MIR cache for next run
+        // Save MIR cache with pre-rendered diagnostic strings
         if cache_enabled {
+            // Render diagnostics to strings for cache replay
+            let diag_strings: Vec<String> = if !compile_diagnostics.is_empty() {
+                let mut source_map = diagnostics::SourceMap::new();
+                source_map.add_file(
+                    file.to_str().unwrap_or("unknown").to_string(),
+                    source.clone(),
+                );
+                let formatter = diagnostics::ErrorFormatter::with_colors();
+                compile_diagnostics
+                    .iter()
+                    .map(|d| formatter.format_diagnostic(d, &source_map))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            let diag_bytes = postcard::to_allocvec(&diag_strings).unwrap_or_default();
             let mut cache_data = source_hash.to_le_bytes().to_vec();
+            cache_data.extend((diag_bytes.len() as u32).to_le_bytes());
+            cache_data.extend(&diag_bytes);
             if let Ok(serialized) = postcard::to_allocvec(&mir_module) {
                 cache_data.extend(serialized);
                 let _ = std::fs::write(&mir_cache_path, &cache_data);
@@ -1423,7 +1455,7 @@ fn build_from_manifest(
             let t0 = std::time::Instant::now();
             let source = std::fs::read_to_string(&entry)
                 .map_err(|e| format!("Failed to read {}: {}", entry.display(), e))?;
-            let mir_module = compile_haxe_to_mir(
+            let (mir_module, _compile_diags) = compile_haxe_to_mir(
                 &source,
                 entry.to_str().unwrap_or("unknown"),
                 vec![],
@@ -1716,7 +1748,7 @@ fn compile_file(
             cached
         } else {
             println!("  cache    miss, compiling...");
-            let module = compile_haxe_to_mir(
+            let (module, _compile_diags) = compile_haxe_to_mir(
                 &source,
                 file.to_str().unwrap_or("unknown"),
                 vec![],
@@ -1733,7 +1765,7 @@ fn compile_file(
             vec![],
             &[],
             true,
-        )?
+        )?.0
     };
 
     println!("  mir      {} functions", mir_module.functions.len());

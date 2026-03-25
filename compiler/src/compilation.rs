@@ -94,6 +94,10 @@ pub struct CompilationUnit {
     /// Stdlib typed files loaded on-demand (typedefs, etc. that need to be in HIR)
     loaded_stdlib_typed_files: Vec<TypedFile>,
 
+    /// Diagnostics collected during compilation (warnings, non-exhaustive switches, etc.)
+    /// These are printed during compilation AND stored here for cache replay.
+    pub collected_diagnostics: Vec<diagnostics::Diagnostic>,
+
     /// Accumulated class_fields from all compiled files.
     /// Allows cross-file static field access (e.g., BufferUsage.VERTEX from imported GraphicsTypes.hx).
     global_class_fields:
@@ -433,6 +437,7 @@ impl CompilationUnit {
             import_mir_modules: Vec::new(),
             import_own_func_ids: std::collections::HashSet::new(),
             loaded_stdlib_typed_files: Vec::new(),
+            collected_diagnostics: Vec::new(),
             global_class_fields: HashMap::new(),
             stdlib_function_map: BTreeMap::new(),
             stdlib_function_name_map: BTreeMap::new(),
@@ -5188,8 +5193,11 @@ impl CompilationUnit {
     /// Print diagnostics from MIR lowering using the diagnostics formatter.
     /// The source map is built with the user file at FileId 0 to match the
     /// compiler's SourceLocation.file_id convention (user file = 0).
-    fn print_mir_diagnostics(&self, mir_diagnostics: &[diagnostics::Diagnostic]) {
+    fn print_mir_diagnostics(&mut self, mir_diagnostics: &[diagnostics::Diagnostic]) {
         use diagnostics::{ErrorFormatter, SourceMap};
+
+        // Store for cache replay
+        self.collected_diagnostics.extend_from_slice(mir_diagnostics);
 
         let mut source_map = SourceMap::new();
 
