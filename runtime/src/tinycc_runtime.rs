@@ -275,6 +275,21 @@ pub extern "C" fn rayzor_tcc_get_symbol(state: *mut TCCState, name: *const HaxeS
 }
 
 /// Call a JIT-compiled function that takes no arguments and returns an i64.
+/// On macOS ARM64 with MAP_JIT, TCC places static variables in the same
+/// mmap region as code. After relocate() switches to executable mode,
+/// writing to statics causes SIGBUS. We toggle write protection around
+/// each JIT call so the code can both execute and write to its statics.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+unsafe fn jit_write_protect(enabled: bool) {
+    extern "C" {
+        fn pthread_jit_write_protect_np(enabled: i32);
+    }
+    pthread_jit_write_protect_np(if enabled { 1 } else { 0 });
+}
+
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+unsafe fn jit_write_protect(_enabled: bool) {}
+
 /// `fn_addr` is the address returned by `rayzor_tcc_get_symbol`.
 #[no_mangle]
 pub extern "C" fn rayzor_tcc_call0(fn_addr: i64) -> i64 {
@@ -282,8 +297,11 @@ pub extern "C" fn rayzor_tcc_call0(fn_addr: i64) -> i64 {
         return 0;
     }
     unsafe {
+        jit_write_protect(false); // allow writes to JIT statics
         let f: extern "C" fn() -> i64 = std::mem::transmute(fn_addr as usize);
-        f()
+        let result = f();
+        jit_write_protect(true); // restore execute-only
+        result
     }
 }
 
@@ -294,8 +312,11 @@ pub extern "C" fn rayzor_tcc_call1(fn_addr: i64, arg0: i64) -> i64 {
         return 0;
     }
     unsafe {
+        jit_write_protect(false);
         let f: extern "C" fn(i64) -> i64 = std::mem::transmute(fn_addr as usize);
-        f(arg0)
+        let result = f(arg0);
+        jit_write_protect(true);
+        result
     }
 }
 
@@ -306,8 +327,11 @@ pub extern "C" fn rayzor_tcc_call2(fn_addr: i64, arg0: i64, arg1: i64) -> i64 {
         return 0;
     }
     unsafe {
+        jit_write_protect(false);
         let f: extern "C" fn(i64, i64) -> i64 = std::mem::transmute(fn_addr as usize);
-        f(arg0, arg1)
+        let result = f(arg0, arg1);
+        jit_write_protect(true);
+        result
     }
 }
 
@@ -318,8 +342,11 @@ pub extern "C" fn rayzor_tcc_call3(fn_addr: i64, arg0: i64, arg1: i64, arg2: i64
         return 0;
     }
     unsafe {
+        jit_write_protect(false);
         let f: extern "C" fn(i64, i64, i64) -> i64 = std::mem::transmute(fn_addr as usize);
-        f(arg0, arg1, arg2)
+        let result = f(arg0, arg1, arg2);
+        jit_write_protect(true);
+        result
     }
 }
 
