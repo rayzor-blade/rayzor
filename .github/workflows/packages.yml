@@ -1,0 +1,220 @@
+name: Build & Publish rpkg Packages
+
+on:
+  push:
+    tags:
+      - 'rpkg-*'  # e.g., rpkg-v0.1.0
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Package version (e.g., 0.1.0)'
+        required: true
+        default: '0.1.0'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # =========================================================================
+  # Build native dylibs per platform
+  # =========================================================================
+  build-window:
+    strategy:
+      matrix:
+        include:
+          - os: macos-14        # ARM64
+            target: aarch64-apple-darwin
+            rpkg_os: macos
+            rpkg_arch: aarch64
+            lib: librayzor_window.dylib
+          - os: macos-13        # x86_64
+            target: x86_64-apple-darwin
+            rpkg_os: macos
+            rpkg_arch: x86_64
+            lib: librayzor_window.dylib
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            rpkg_os: linux
+            rpkg_arch: x86_64
+            lib: librayzor_window.so
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rpkg_os: windows
+            rpkg_arch: x86_64
+            lib: rayzor_window.dll
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build rayzor-window
+        run: cargo build -p rayzor-window --release --target ${{ matrix.target }}
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: window-${{ matrix.rpkg_os }}-${{ matrix.rpkg_arch }}
+          path: target/${{ matrix.target }}/release/${{ matrix.lib }}
+
+  build-gpu:
+    strategy:
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+            rpkg_os: macos
+            rpkg_arch: aarch64
+            lib: librayzor_gpu.dylib
+          - os: macos-13
+            target: x86_64-apple-darwin
+            rpkg_os: macos
+            rpkg_arch: x86_64
+            lib: librayzor_gpu.dylib
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            rpkg_os: linux
+            rpkg_arch: x86_64
+            lib: librayzor_gpu.so
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            rpkg_os: windows
+            rpkg_arch: x86_64
+            lib: rayzor_gpu.dll
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build rayzor-gpu
+        run: cargo build -p rayzor-gpu --features webgpu-backend --release --target ${{ matrix.target }}
+      - name: Upload dylib
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-${{ matrix.rpkg_os }}-${{ matrix.rpkg_arch }}
+          path: target/${{ matrix.target }}/release/${{ matrix.lib }}
+
+  # =========================================================================
+  # Build rayzor CLI (needed for rpkg pack)
+  # =========================================================================
+  build-cli:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build rayzor CLI
+        run: cargo build -p rayzor --release
+      - name: Upload CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: rayzor-cli
+          path: target/release/rayzor
+
+  # =========================================================================
+  # Pack multi-platform rpkg files and create GitHub release
+  # =========================================================================
+  package:
+    needs: [build-window, build-gpu, build-cli]
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Make CLI executable
+        run: chmod +x artifacts/rayzor-cli/rayzor
+
+      # Pack rayzor-window.rpkg (all platforms)
+      - name: Pack rayzor-window.rpkg
+        run: |
+          CLI=artifacts/rayzor-cli/rayzor
+          ARGS=""
+          for platform in macos-aarch64 macos-x86_64 linux-x86_64 windows-x86_64; do
+            OS=$(echo $platform | cut -d- -f1)
+            ARCH=$(echo $platform | cut -d- -f2)
+            DIR="artifacts/window-${platform}"
+            if [ -d "$DIR" ]; then
+              LIB=$(ls "$DIR"/* 2>/dev/null | head -1)
+              if [ -n "$LIB" ]; then
+                ARGS="$ARGS --dylib $LIB --os $OS --arch $ARCH"
+              fi
+            fi
+          done
+          $CLI rpkg pack \
+            --name rayzor-window \
+            $ARGS \
+            --haxe-dir compiler/haxe-std/rayzor/window \
+            -o rayzor-window.rpkg
+          ls -la rayzor-window.rpkg
+
+      # Pack rayzor-gpu.rpkg (all platforms)
+      - name: Pack rayzor-gpu.rpkg
+        run: |
+          CLI=artifacts/rayzor-cli/rayzor
+          ARGS=""
+          for platform in macos-aarch64 macos-x86_64 linux-x86_64 windows-x86_64; do
+            OS=$(echo $platform | cut -d- -f1)
+            ARCH=$(echo $platform | cut -d- -f2)
+            DIR="artifacts/gpu-${platform}"
+            if [ -d "$DIR" ]; then
+              LIB=$(ls "$DIR"/* 2>/dev/null | head -1)
+              if [ -n "$LIB" ]; then
+                ARGS="$ARGS --dylib $LIB --os $OS --arch $ARCH"
+              fi
+            fi
+          done
+          $CLI rpkg pack \
+            --name rayzor-gpu \
+            $ARGS \
+            --haxe-dir compiler/haxe-std/rayzor/gpu \
+            -o rayzor-gpu.rpkg
+          ls -la rayzor-gpu.rpkg
+
+      # Inspect packages
+      - name: Inspect packages
+        run: |
+          CLI=artifacts/rayzor-cli/rayzor
+          echo "=== rayzor-window.rpkg ==="
+          $CLI rpkg inspect rayzor-window.rpkg
+          echo ""
+          echo "=== rayzor-gpu.rpkg ==="
+          $CLI rpkg inspect rayzor-gpu.rpkg
+
+      # Create GitHub release with rpkg files
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name || format('rpkg-v{0}', github.event.inputs.version) }}
+          name: "Rayzor Packages ${{ github.ref_name || github.event.inputs.version }}"
+          body: |
+            ## Official Rayzor Packages
+
+            Cross-platform rpkg packages for rayzor-window and rayzor-gpu.
+
+            ### Installation
+
+            ```bash
+            # Download and install
+            rayzor rpkg install rayzor-window.rpkg
+            rayzor rpkg install rayzor-gpu.rpkg
+
+            # Or strip to current platform for smaller size
+            rayzor rpkg strip rayzor-gpu.rpkg -o rayzor-gpu-slim.rpkg
+            ```
+
+            ### Platforms included
+            - macOS aarch64 (Apple Silicon)
+            - macOS x86_64 (Intel)
+            - Linux x86_64
+            - Windows x86_64
+          files: |
+            rayzor-window.rpkg
+            rayzor-gpu.rpkg
+          draft: false
+          prerelease: false
