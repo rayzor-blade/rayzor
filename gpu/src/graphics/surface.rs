@@ -195,7 +195,10 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_surface_get_texture(
 
     let frame = match surface.surface.get_current_texture() {
         Ok(f) => f,
-        Err(_) => return std::ptr::null_mut(),
+        Err(e) => {
+            eprintln!("[GPU] surface.get_current_texture() failed: {}", e);
+            return std::ptr::null_mut();
+        }
     };
 
     let view = frame
