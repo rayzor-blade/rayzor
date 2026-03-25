@@ -29,7 +29,7 @@ extern class Surface {
      *  windowing system (via TinyCC, native libraries, etc.).
      */
     @:native("rayzor_gpu_gfx_surface_create")
-    public static function create(device:GPUDevice, windowHandle:Int, displayHandle:Int, width:Int, height:Int):Surface;
+    public static function create(device:GPUDevice, windowHandle:rayzor.Usize, displayHandle:rayzor.Usize, width:Int, height:Int):Surface;
 
     /** Get the current frame's texture view for rendering into. */
     @:native("rayzor_gpu_gfx_surface_get_texture")

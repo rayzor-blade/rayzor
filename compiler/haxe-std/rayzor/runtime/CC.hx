@@ -90,10 +90,10 @@ extern class CC {
      * Must be called after relocate().
      *
      * @param name Symbol name to look up
-     * @return Function pointer (pass to call0/call1/call2/call3)
+     * @return Function pointer as Usize (pass to call0/call1/call2/call3)
      */
     @:native("getSymbol")
-    public function getSymbol(name:String):Dynamic;
+    public function getSymbol(name:String):rayzor.Usize;
 
     /**
      * Load a macOS framework or shared library so its symbols and headers
@@ -147,23 +147,23 @@ extern class CC {
      * @return Function return value as Int
      */
     @:native("call0")
-    public static function call0(fnAddr:Int):Int;
+    public static function call0(fnAddr:rayzor.Usize):rayzor.Usize;
 
     /**
      * Call a JIT-compiled function (1 arg) by its address.
      */
     @:native("call1")
-    public static function call1(fnAddr:Int, arg0:Int):Int;
+    public static function call1(fnAddr:rayzor.Usize, arg0:rayzor.Usize):rayzor.Usize;
 
     /**
      * Call a JIT-compiled function (2 args) by its address.
      */
     @:native("call2")
-    public static function call2(fnAddr:Int, arg0:Int, arg1:Int):Int;
+    public static function call2(fnAddr:rayzor.Usize, arg0:rayzor.Usize, arg1:rayzor.Usize):rayzor.Usize;
 
     /**
      * Call a JIT-compiled function (3 args) by its address.
      */
     @:native("call3")
-    public static function call3(fnAddr:Int, arg0:Int, arg1:Int, arg2:Int):Int;
+    public static function call3(fnAddr:rayzor.Usize, arg0:rayzor.Usize, arg1:rayzor.Usize, arg2:rayzor.Usize):rayzor.Usize;
 }

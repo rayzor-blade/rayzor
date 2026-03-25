@@ -1,4 +1,5 @@
 import rayzor.runtime.CC;
+import rayzor.Usize;
 import rayzor.gpu.GPUDevice;
 import rayzor.gpu.Surface;
 import rayzor.gpu.ShaderModule;
@@ -52,10 +53,10 @@ class VOut {
 }
 
 class Main {
-    static var pollFn:Int = 0;
-    static var destroyFn:Int = 0;
+    static var pollFn:Usize;
+    static var destroyFn:Usize;
 
-    static function createCocoaWindow(width:Int, height:Int):Int {
+    static function createCocoaWindow(width:Int, height:Int):Usize {
         var cc = CC.create();
         cc.addFramework("Cocoa");
         cc.compile('

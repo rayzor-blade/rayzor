@@ -19952,6 +19952,18 @@ impl<'a> HirToMirContext<'a> {
                 symbol_id,
                 ..
             }) => {
+                // First check: pointer-sized abstracts (Usize, Ptr, Ref, Box)
+                // must always be I64 regardless of their declared underlying type.
+                // These represent machine addresses and must never be truncated.
+                let name_str = self
+                    .symbol_table
+                    .get_symbol(*symbol_id)
+                    .and_then(|sym| self.string_interner.get(sym.name))
+                    .unwrap_or("");
+                if matches!(name_str, "Usize" | "Ptr" | "Ref" | "Box") {
+                    return IrType::I64;
+                }
+
                 if let Some(underlying_type) = underlying {
                     // If underlying type is specified, use it
                     self.convert_type(*underlying_type)
@@ -22369,14 +22381,11 @@ impl<'a> HirToMirContext<'a> {
                     .build_call_direct(box_func_id, vec![extended], ptr_u8)
             }
             IrType::I64 => {
-                debug!("[EXTERN BOXING] Boxing I64 to Ptr(U8) for extern call");
-                let box_func_id = self.get_or_register_extern_function(
-                    "haxe_box_int_ptr",
-                    vec![IrType::I64],
-                    ptr_u8.clone(),
-                );
+                // I64 values are already pointer-sized — cast directly to Ptr
+                // without boxing. This handles Usize/pointer values passed to
+                // extern functions expecting Ptr params.
                 self.builder
-                    .build_call_direct(box_func_id, vec![value], ptr_u8)
+                    .build_cast(value, IrType::I64, expected_ty.clone())
             }
             IrType::Bool => {
                 debug!("[EXTERN BOXING] Boxing Bool to Ptr(U8) for extern call");
