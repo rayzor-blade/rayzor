@@ -68,5 +68,11 @@ class Main {
         cmd.submit(device);
         surface.present();
         trace("Rendered!");
+
+        // Cleanup
+        built.destroy();
+        shader.destroy();
+        surface.destroy();
+        device.destroy();
     }
 }
