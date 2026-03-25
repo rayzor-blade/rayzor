@@ -9583,7 +9583,8 @@ impl<'a> HirToMirContext<'a> {
                                     // 1) native_name  (e.g. "sys::net::Host" → "sys_net_Host")
                                     if let Some(native) = sym.native_name {
                                         if let Some(ns) = self.string_interner.get(native) {
-                                            return Some(ns.replace("::", "_"));
+                                            // "rayzor::runtime::CC" → "rayzor_runtime_CC"
+                                            return Some(ns.split("::").collect::<Vec<_>>().join("_"));
                                         }
                                     }
                                     // 2) qualified_name  (e.g. "sys.net.Host" → "sys_net_Host")
