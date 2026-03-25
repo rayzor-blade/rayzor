@@ -132,6 +132,54 @@ extern class Window {
     @:native("rayzor_window_is_mouse_down")
     public function isMouseDown(button:Int):Bool;
 
+    // === Event Queue ===
+    // Call after pollEvents(). Events are cleared each frame.
+    // Use EventType constants to identify event types.
+
+    /** Number of events this frame. */
+    @:native("rayzor_window_event_count")
+    public function eventCount():Int;
+
+    /** Type of event at index (see EventType). */
+    @:native("rayzor_window_event_type")
+    public function eventType(index:Int):Int;
+
+    /** X coordinate for mouse/move events. */
+    @:native("rayzor_window_event_x")
+    public function eventX(index:Int):Float;
+
+    /** Y coordinate for mouse/move events. */
+    @:native("rayzor_window_event_y")
+    public function eventY(index:Int):Float;
+
+    /** Key code for key events (see Key). */
+    @:native("rayzor_window_event_key")
+    public function eventKey(index:Int):Int;
+
+    /** Mouse button for mouse events (0=left, 1=right, 2=middle). */
+    @:native("rayzor_window_event_button")
+    public function eventButton(index:Int):Int;
+
+    /** Modifier keys bitmask (1=shift, 2=ctrl, 4=alt, 8=cmd). */
+    @:native("rayzor_window_event_modifiers")
+    public function eventModifiers(index:Int):Int;
+
+    /** Width for resize events. */
+    @:native("rayzor_window_event_width")
+    public function eventWidth(index:Int):Int;
+
+    /** Height for resize events. */
+    @:native("rayzor_window_event_height")
+    public function eventHeight(index:Int):Int;
+
+    /** Horizontal scroll delta for wheel events. */
+    @:native("rayzor_window_event_scroll_x")
+    public function eventScrollX(index:Int):Float;
+
+    /** Vertical scroll delta for wheel events. */
+    @:native("rayzor_window_event_scroll_y")
+    public function eventScrollY(index:Int):Float;
+
     // === Cleanup ===
 
     @:native("rayzor_window_destroy")

@@ -309,6 +309,7 @@ pub struct X11Window {
     visible: bool,
     pos_x: i32,
     pos_y: i32,
+    pub events: crate::event::EventQueue,
 }
 
 impl X11Window {
@@ -386,6 +387,7 @@ impl X11Window {
             visible: true,
             pos_x: x,
             pos_y: y,
+            events: crate::event::EventQueue::new(),
         })
     }
 
@@ -413,6 +415,7 @@ impl X11Window {
     /// Drain all pending X11 events. Returns true if the window should remain open.
     pub unsafe fn poll_events(&mut self) -> bool {
         self.resized = false;
+        self.events.clear();
 
         let x11 = match x11() {
             Some(x) => x,
