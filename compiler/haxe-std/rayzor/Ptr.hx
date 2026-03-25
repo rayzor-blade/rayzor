@@ -3,12 +3,11 @@ package rayzor;
 /**
  * Raw mutable pointer to a value of type T.
  *
- * Ptr<T> is a zero-cost abstract over Int that provides
- * typed pointer semantics. Passable to C code via `.raw()`.
+ * Ptr<T> is a pointer-sized type that provides typed pointer semantics.
+ * Passable to C code via `.raw()`.
  *
- * **Note:** In Rayzor, `Int` is always 64-bit (i64) at the MIR/codegen
- * level. All pointer abstracts (Ptr, Ref, Box, Usize) share this
- * 64-bit underlying representation.
+ * Ptr, Ref, Box, and Usize are first-class 64-bit types on rayzor's
+ * baremetal target. They do NOT abstract over Int (which is 32-bit).
  *
  * With `@:cstruct` classes, the memory layout matches C exactly,
  * so pointers are directly interoperable.
@@ -21,14 +20,14 @@ package rayzor;
  * ```
  */
 @:native("rayzor::Ptr")
-extern abstract Ptr<T>(Int) {
+extern abstract Ptr<T> {
     /** Create a Ptr from a raw address */
     @:native("from_raw")
-    public static function fromRaw<T>(address:Int):Ptr<T>;
+    public static function fromRaw<T>(address:Usize):Ptr<T>;
 
-    /** Get the raw address as Int */
+    /** Get the raw address */
     @:native("raw")
-    public function raw():Int;
+    public function raw():Usize;
 
     /** Dereference — read the value at this pointer */
     @:native("deref")
