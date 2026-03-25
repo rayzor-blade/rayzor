@@ -3752,9 +3752,21 @@ impl CompilationUnit {
         // cached path, which changes bundle contents and breaks DeltaBlue parity.
         lowering.set_skip_stdlib_loading(true);
 
-        // Seed class_fields from previously compiled files
+        // Seed class_fields from previously compiled files.
+        // Only seed classes that have actual fields — empty entries interfere with
+        // static method resolution by making the class "exist" in class_fields but
+        // with no matching field, causing the static method to fall through to a
+        // generic path instead of the stdlib dispatch.
         if !self.global_class_fields.is_empty() {
-            lowering.seed_class_fields(&self.global_class_fields);
+            let non_empty: HashMap<_, _> = self
+                .global_class_fields
+                .iter()
+                .filter(|(_, fields)| !fields.is_empty())
+                .map(|(k, v)| (*k, v.clone()))
+                .collect();
+            if !non_empty.is_empty() {
+                lowering.seed_class_fields(&non_empty);
+            }
         }
 
         lowering.initialize_span_converter_with_filename(
