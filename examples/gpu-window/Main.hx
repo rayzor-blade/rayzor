@@ -1,5 +1,5 @@
 import rayzor.runtime.CC;
-import rayzor.Usize;
+import rayzor.Ptr;
 import rayzor.gpu.GPUDevice;
 import rayzor.gpu.Surface;
 import rayzor.gpu.ShaderModule;
@@ -41,13 +41,12 @@ class Main {
             }
         ');
         cc.relocate();
-        var viewPtr:Usize = CC.call0(cc.getSymbol("create_window"));
+        var viewPtr = CC.call0(cc.getSymbol("create_window"));
         trace("Window created");
 
-        // 2. GPU device + surface
+        // 2. GPU device + surface — cast raw C pointer to Ptr<Void> for GPU API
         var device = GPUDevice.create();
-        var zero:Usize = 0;
-        var surface = Surface.create(device, viewPtr, zero, 800, 600);
+        var surface = Surface.create(device, viewPtr, untyped cast 0, 800, 600);
         trace("Surface ready");
 
         // 3. Shader + pipeline
