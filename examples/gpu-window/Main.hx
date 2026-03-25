@@ -12,14 +12,19 @@ import rayzor.gpu.CommandEncoder;
  * Uses TinyCC for window creation (Cocoa on macOS) and rayzor GPU
  * for rendering. Everything written in Haxe.
  *
+ * Note: On ARM64 macOS, JIT code and data share the same W^X region.
+ * Static C variables in JIT code cause SIGBUS. We split window creation
+ * and event polling into separate CC contexts, passing the window handle
+ * via addSymbol.
+ *
  * Run: rayzor run --rpkg rayzor-gpu.rpkg examples/gpu-window/Main.hx
  */
 class Main {
     static function main() {
-        // 1. Create native window via TinyCC + Cocoa
-        var cc = CC.create();
-        cc.addFramework("Cocoa");
-        cc.compile('
+        // 1. Create window (CC context 1 — no statics needed)
+        var cc1 = CC.create();
+        cc1.addFramework("Cocoa");
+        cc1.compile('
             #include <objc/runtime.h>
             #include <objc/message.h>
             typedef unsigned long NSUInteger;
@@ -40,8 +45,8 @@ class Main {
                 return (long)view;
             }
         ');
-        cc.relocate();
-        var viewPtr = CC.call0(cc.getSymbol("create_window"));
+        cc1.relocate();
+        var viewPtr = CC.call0(cc1.getSymbol("create_window"));
         trace("Window created");
 
         // 2. GPU device + surface
