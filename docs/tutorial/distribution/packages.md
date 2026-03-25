@@ -37,7 +37,10 @@ method table (serialized function signatures), and the compiled dylib.
 rayzor-gpu.rpkg
   rayzor/gpu/GPUCompute.hx      (extern class)
   rayzor/gpu/GpuBuffer.hx       (extern class)
-  librayzor_gpu.dylib            (native library)
+  macos-aarch64/librayzor_gpu.dylib
+  macos-x86_64/librayzor_gpu.dylib
+  linux-x86_64/librayzor_gpu.so
+  windows-x86_64/rayzor_gpu.dll
   method_table                   (serialized FFI descriptors)
 ```
 
@@ -52,7 +55,8 @@ rayzor-gpu.rpkg
   rayzor/gpu/GpuBuffer.hx       (extern class — low-level FFI)
   rayzor/gpu/Tensor.hx          (pure Haxe — high-level API)
   rayzor/gpu/nn/Linear.hx       (pure Haxe — neural net layer)
-  librayzor_gpu.dylib            (native library)
+  macos-aarch64/librayzor_gpu.dylib
+  linux-x86_64/librayzor_gpu.so
   method_table                   (serialized FFI descriptors)
 ```
 
@@ -89,7 +93,7 @@ rayzor rpkg pack \
 This:
 
 1. Reads the dylib and embeds it for the current platform (e.g. macos-aarch64)
-2. Calls the dylib's `plugin_describe()` export to extract the method table
+2. Calls the dylib's `rayzor_rpkg_entry()` export to extract the method table
 3. Collects all `.hx` files under the haxe directory
 4. Writes everything into a single `.rpkg` archive
 
@@ -108,10 +112,19 @@ rayzor rpkg pack --haxe-dir src/ -o my-lib.rpkg --name "my-awesome-lib"
 rayzor rpkg pack [OPTIONS] --haxe-dir <DIR> --output <PATH>
 
 Options:
-      --dylib <FILE>       Native library to embed (optional)
+      --dylib <FILE>       Native library to embed (repeatable for multi-platform)
+      --os <OS>            OS for preceding --dylib (macos, linux, windows)
+      --arch <ARCH>        Architecture for preceding --dylib (aarch64, x86_64)
       --haxe-dir <DIR>     Directory of .hx files to bundle (required)
   -o, --output <PATH>      Output .rpkg path (required)
       --name <NAME>        Package name (defaults to output filename)
+
+rayzor rpkg strip <INPUT> [OPTIONS] --output <PATH>
+
+Options:
+      --os <OS>            Target OS (defaults to current)
+      --arch <ARCH>        Target architecture (defaults to current)
+  -o, --output <PATH>      Output stripped .rpkg path (required)
 ```
 
 ## Inspecting a Package
@@ -270,22 +283,60 @@ class Tensor {
 
 ### Multi-Platform Packages
 
-The `.rpkg` format supports embedding native libraries for multiple platforms.
-Currently, `rayzor rpkg pack` embeds the dylib for the platform it runs on.
-For cross-platform distribution, build on each target and combine:
+A single `.rpkg` file embeds native libraries for **all target platforms**.
+At load time, Rayzor picks the dylib matching the current OS and architecture.
+
+We recommend [cross](https://github.com/cross-rs/cross) for cross-compiling
+native rpkg libraries. `cross` uses pre-built Docker images with the correct
+toolchains — no manual sysroot setup needed:
 
 ```bash
-# On macOS ARM
-rayzor rpkg pack --dylib target/release/librayzor_gpu.dylib \
-  --haxe-dir haxe/ -o gpu-macos-arm.rpkg
-
-# On Linux x64
-rayzor rpkg pack --dylib target/release/librayzor_gpu.so \
-  --haxe-dir haxe/ -o gpu-linux-x64.rpkg
+cargo install cross --git https://github.com/cross-rs/cross
 ```
 
-Future tooling will support merging multiple single-platform rpkg files into one
-multi-platform package.
+Build for each platform, then pack into one rpkg:
+
+```bash
+# macOS targets (native — cross doesn't support macOS as a target)
+cargo build -p rayzor-gpu --features webgpu-backend --release --target aarch64-apple-darwin
+cargo build -p rayzor-gpu --features webgpu-backend --release --target x86_64-apple-darwin
+
+# Linux and Windows targets via cross
+cross build -p rayzor-gpu --features webgpu-backend --release --target x86_64-unknown-linux-gnu
+cross build -p rayzor-gpu --features webgpu-backend --release --target x86_64-pc-windows-gnu
+
+# Pack all platforms into one rpkg
+rayzor rpkg pack \
+  --dylib target/aarch64-apple-darwin/release/librayzor_gpu.dylib --os macos --arch aarch64 \
+  --dylib target/x86_64-apple-darwin/release/librayzor_gpu.dylib --os macos --arch x86_64 \
+  --dylib target/x86_64-unknown-linux-gnu/release/librayzor_gpu.so --os linux --arch x86_64 \
+  --dylib target/x86_64-pc-windows-gnu/release/rayzor_gpu.dll --os windows --arch x86_64 \
+  --haxe-dir haxe/ \
+  -o rayzor-gpu.rpkg
+```
+
+The built-in pack scripts support this out of the box:
+
+```bash
+cd gpu && ./pack-rpkg.sh --cross    # builds all platforms + packs
+cd gpu && ./pack-rpkg.sh            # current platform only (fast)
+```
+
+### Stripping for Distribution
+
+A universal rpkg containing all platform dylibs can be large. Use `--strip` to
+produce a platform-specific rpkg by removing unused native libraries:
+
+```bash
+# Strip to current platform only
+rayzor rpkg strip rayzor-gpu.rpkg -o rayzor-gpu-slim.rpkg
+
+# Strip to a specific platform
+rayzor rpkg strip rayzor-gpu.rpkg --os linux --arch x86_64 -o rayzor-gpu-linux.rpkg
+```
+
+This is useful for deployment — ship the universal rpkg to CI, then strip per
+target before bundling into your application.
 
 ## Package Format Reference
 

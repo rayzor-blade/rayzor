@@ -163,6 +163,55 @@ impl<'a> TastToHirContext<'a> {
         }
     }
 
+    /// Seed inline var values from the global name-keyed map (populated from BLADE cache).
+    /// This resolves constants like Key.ESCAPE when the defining file was loaded from cache
+    /// (no TypedFile available). Looks up SymbolIds by matching class+field names.
+    pub fn seed_inline_vars_from_global(
+        &mut self,
+        global_vars: &HashMap<String, crate::ir::blade::BladeInlineValue>,
+    ) {
+        if global_vars.is_empty() {
+            return;
+        }
+        let symbol_table = &self.symbol_table;
+        let string_interner = &self.string_interner;
+
+        for (key, value) in global_vars {
+            // key is "ClassName.fieldName" or "package.ClassName.fieldName"
+            let dot_pos = key.rfind('.').unwrap_or(0);
+            let field_name = &key[dot_pos + 1..];
+
+            let literal = match value {
+                crate::ir::blade::BladeInlineValue::Int(v) => HirLiteral::Int(*v),
+                crate::ir::blade::BladeInlineValue::Float(v) => HirLiteral::Float(*v),
+                crate::ir::blade::BladeInlineValue::Bool(v) => HirLiteral::Bool(*v),
+                crate::ir::blade::BladeInlineValue::String(_) => continue,
+            };
+
+            for i in 0..symbol_table.len() {
+                let sym_id = crate::tast::SymbolId::from_raw(i as u32);
+                if let Some(sym) = symbol_table.get_symbol(sym_id) {
+                    if !matches!(sym.kind, crate::tast::SymbolKind::Variable) {
+                        continue;
+                    }
+                    let sym_name = string_interner.get(sym.name).unwrap_or("");
+                    if sym_name != field_name {
+                        continue;
+                    }
+                    let qualified = sym
+                        .qualified_name
+                        .and_then(|n| string_interner.get(n))
+                        .unwrap_or("");
+                    if qualified == key || sym_name == field_name {
+                        if !self.inline_var_values.contains_key(&sym_id) {
+                            self.inline_var_values.insert(sym_id, literal.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Helper methods to get builtin types from type table
     fn get_void_type(&self) -> TypeId {
         self.type_table.borrow().void_type()
@@ -5062,7 +5111,7 @@ pub fn lower_tast_to_hir(
     string_interner: &mut StringInterner,
     semantic_graphs: Option<&SemanticGraphs>,
 ) -> Result<HirModule, Vec<LoweringError>> {
-    lower_tast_to_hir_with_imports(file, symbol_table, type_table, string_interner, semantic_graphs, &[])
+    lower_tast_to_hir_with_imports(file, symbol_table, type_table, string_interner, semantic_graphs, &[], &HashMap::new())
 }
 
 pub fn lower_tast_to_hir_with_imports(
@@ -5072,6 +5121,7 @@ pub fn lower_tast_to_hir_with_imports(
     string_interner: &mut StringInterner,
     semantic_graphs: Option<&SemanticGraphs>,
     imported_files: &[&TypedFile],
+    global_inline_vars: &HashMap<String, crate::ir::blade::BladeInlineValue>,
 ) -> Result<HirModule, Vec<LoweringError>> {
     let mut context = TastToHirContext::new(
         symbol_table,
@@ -5093,6 +5143,9 @@ pub fn lower_tast_to_hir_with_imports(
     if !imported_files.is_empty() {
         context.seed_inline_vars_from_imports(imported_files);
     }
+
+    // Seed from global inline vars (includes BLADE cache-restored constants)
+    context.seed_inline_vars_from_global(global_inline_vars);
 
     context.lower_file(file)
 }

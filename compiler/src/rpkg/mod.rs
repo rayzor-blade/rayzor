@@ -267,6 +267,99 @@ pub fn load_rpkg(path: &Path) -> Result<LoadedRpkg, RpkgError> {
     })
 }
 
+/// Strip an rpkg to keep only the native lib matching a specific platform.
+///
+/// Copies all non-NativeLib entries unchanged and only includes the NativeLib
+/// entry matching (target_os, target_arch). Produces a smaller platform-specific rpkg.
+pub fn strip_rpkg(
+    input: &Path,
+    target_os: &str,
+    target_arch: &str,
+    output: &Path,
+) -> Result<(), RpkgError> {
+    use std::io::Write;
+
+    let data = std::fs::read(input)?;
+
+    if data.len() < FOOTER_SIZE {
+        return Err(RpkgError::InvalidMagic);
+    }
+
+    let footer_start = data.len() - FOOTER_SIZE;
+    let toc_size =
+        u32::from_le_bytes(data[footer_start..footer_start + 4].try_into().unwrap()) as usize;
+    let version = u32::from_le_bytes(data[footer_start + 4..footer_start + 8].try_into().unwrap());
+    let magic = &data[footer_start + 8..footer_start + 12];
+
+    if magic != RPKG_MAGIC {
+        return Err(RpkgError::InvalidMagic);
+    }
+    if version != RPKG_VERSION {
+        return Err(RpkgError::UnsupportedVersion(version));
+    }
+    if toc_size > footer_start {
+        return Err(RpkgError::TocTooLarge(toc_size as u64));
+    }
+
+    let toc_start = footer_start - toc_size;
+    let toc: RpkgToc = postcard::from_bytes(&data[toc_start..footer_start])
+        .map_err(RpkgError::DeserializationFailed)?;
+
+    // Rebuild with only matching NativeLib entries
+    let mut file = std::fs::File::create(output)?;
+    let mut new_entries = Vec::new();
+    let mut offset: u64 = 0;
+
+    for entry in &toc.entries {
+        let start = entry.offset as usize;
+        let end = start + entry.size as usize;
+        let entry_data = &data[start..end];
+
+        match &entry.meta {
+            EntryMeta::NativeLib {
+                os: lib_os,
+                arch: lib_arch,
+            } => {
+                // Only keep the matching platform
+                if lib_os == target_os && lib_arch == target_arch {
+                    file.write_all(entry_data)?;
+                    new_entries.push(RpkgEntry {
+                        kind: entry.kind,
+                        offset,
+                        size: entry.size,
+                        meta: entry.meta.clone(),
+                    });
+                    offset += entry.size;
+                }
+            }
+            _ => {
+                // Keep all non-NativeLib entries
+                file.write_all(entry_data)?;
+                new_entries.push(RpkgEntry {
+                    kind: entry.kind,
+                    offset,
+                    size: entry.size,
+                    meta: entry.meta.clone(),
+                });
+                offset += entry.size;
+            }
+        }
+    }
+
+    let new_toc = RpkgToc {
+        package_name: toc.package_name,
+        entries: new_entries,
+    };
+    let toc_bytes = postcard::to_allocvec(&new_toc).map_err(RpkgError::DeserializationFailed)?;
+    let toc_size = toc_bytes.len() as u32;
+    file.write_all(&toc_bytes)?;
+    file.write_all(&toc_size.to_le_bytes())?;
+    file.write_all(&RPKG_VERSION.to_le_bytes())?;
+    file.write_all(RPKG_MAGIC)?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

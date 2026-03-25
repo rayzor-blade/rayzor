@@ -19433,12 +19433,22 @@ impl<'a> HirToMirContext<'a> {
         // (short-circuit operators like && create additional blocks)
         // When there's a continue_update block, continue should jump there (not cond_block)
         // so the loop counter increment always executes.
+        //
+        // For plain while loops (no update block), continue jumps to cond_block.
+        // The cond_block has phi nodes for loop variables — continue must add incoming
+        // edges to these phis, otherwise cranelift sees missing block arguments → SIGILL.
+        let loop_continue_phi_nodes = if update_block.is_some() {
+            continue_phi_nodes.clone()
+        } else {
+            // Plain while: continue targets cond_block, so use cond_block's phi nodes
+            phi_nodes.clone()
+        };
         self.loop_stack.push(LoopContext {
             continue_block: update_block.unwrap_or(cond_block),
             break_block: exit_block,
             label: label.cloned(),
             exit_phi_nodes: BTreeMap::new(), // Will be populated after condition eval
-            continue_phi_nodes: continue_phi_nodes.clone(),
+            continue_phi_nodes: loop_continue_phi_nodes,
         });
 
         // Evaluate condition - this may create additional blocks for short-circuit operators!

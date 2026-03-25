@@ -89,6 +89,30 @@ pub struct BladeCachedMaps {
     /// Property access entries: (class_name, field_name, getter, setter)
     #[serde(default)]
     pub properties: Vec<BladePropertyEntry>,
+    /// Static inline var constants: (class_name, field_name, value)
+    /// These are compile-time constants that consumers need for cross-file resolution.
+    #[serde(default)]
+    pub inline_vars: Vec<BladeInlineVarEntry>,
+}
+
+/// A static inline var constant stored in the cache
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BladeInlineVarEntry {
+    /// Qualified class name (e.g., "rayzor.window.Key")
+    pub class_name: String,
+    /// Field name (e.g., "ESCAPE")
+    pub field_name: String,
+    /// Constant value
+    pub value: BladeInlineValue,
+}
+
+/// Serializable inline constant value
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum BladeInlineValue {
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    String(String),
 }
 
 /// A function entry in the cached maps
