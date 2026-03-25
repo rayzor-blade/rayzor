@@ -60,8 +60,16 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_shader_create_hx(
     let wgsl_str = hs_to_str(wgsl);
     let vert_str = hs_to_str(vert_entry);
     let frag_str = hs_to_str(frag_entry);
-    let vert = if vert_str.is_empty() { "vs_main" } else { vert_str };
-    let frag = if frag_str.is_empty() { "fs_main" } else { frag_str };
+    let vert = if vert_str.is_empty() {
+        "vs_main"
+    } else {
+        vert_str
+    };
+    let frag = if frag_str.is_empty() {
+        "fs_main"
+    } else {
+        frag_str
+    };
 
     create_shader_impl(ctx, wgsl_str, vert, frag)
 }

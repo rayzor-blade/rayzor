@@ -100,8 +100,10 @@ pub struct CompilationUnit {
 
     /// Accumulated class_fields from all compiled files.
     /// Allows cross-file static field access (e.g., BufferUsage.VERTEX from imported GraphicsTypes.hx).
-    global_class_fields:
-        HashMap<crate::tast::SymbolId, Vec<(crate::tast::InternedString, crate::tast::SymbolId, bool)>>,
+    global_class_fields: HashMap<
+        crate::tast::SymbolId,
+        Vec<(crate::tast::InternedString, crate::tast::SymbolId, bool)>,
+    >,
 
     /// Mapping from HIR function symbols to MIR function IDs for stdlib functions
     /// This allows user code to call pure Haxe stdlib functions (like StringTools)
@@ -873,9 +875,7 @@ impl CompilationUnit {
                     .get_symbol(field.symbol_id)
                     .map(|s| s.is_inline())
                     .unwrap_or(false);
-                if !is_inline
-                    && field.mutability == crate::tast::symbols::Mutability::Mutable
-                {
+                if !is_inline && field.mutability == crate::tast::symbols::Mutability::Mutable {
                     continue;
                 }
                 let Some(init) = &field.initializer else {
@@ -1869,7 +1869,12 @@ impl CompilationUnit {
                     // e.g. haxe.io.Bytes.ofString(...) → "haxe.io.Bytes"
                     // We check the full chain including current field — if the last
                     // component is uppercase, it's a package.Class pattern
-                    if field.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                    if field
+                        .chars()
+                        .next()
+                        .map(|c| c.is_uppercase())
+                        .unwrap_or(false)
+                    {
                         // Current field is uppercase (e.g. "Bytes" in haxe.io.Bytes)
                         // Try to build full qualified path from the expression chain + this field
                         let mut parts = Vec::new();
@@ -5375,7 +5380,8 @@ impl CompilationUnit {
         use diagnostics::{ErrorFormatter, SourceMap};
 
         // Store for cache replay
-        self.collected_diagnostics.extend_from_slice(mir_diagnostics);
+        self.collected_diagnostics
+            .extend_from_slice(mir_diagnostics);
 
         let mut source_map = SourceMap::new();
 

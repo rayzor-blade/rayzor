@@ -1075,9 +1075,9 @@ fn run_file(
                             }
                         }
                         // Load MIR module
-                        if let Ok(module) = postcard::from_bytes::<compiler::ir::IrModule>(
-                            &data[12 + diag_len..],
-                        ) {
+                        if let Ok(module) =
+                            postcard::from_bytes::<compiler::ir::IrModule>(&data[12 + diag_len..])
+                        {
                             break 'load_mir (module, true);
                         }
                     }
@@ -1801,7 +1801,8 @@ fn compile_file(
             vec![],
             &[],
             true,
-        )?.0
+        )?
+        .0
     };
 
     println!("  mir      {} functions", mir_module.functions.len());
@@ -3070,7 +3071,11 @@ fn cmd_rpkg_strip(
         .map_err(|e| format!("strip failed: {}", e))?;
 
     let size = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
-    println!("  wrote {} ({:.1} KB)", output.display(), size as f64 / 1024.0);
+    println!(
+        "  wrote {} ({:.1} KB)",
+        output.display(),
+        size as f64 / 1024.0
+    );
 
     Ok(())
 }

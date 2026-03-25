@@ -119,7 +119,10 @@ impl RpkgPlugin {
 ///
 /// First tries the universal `rayzor_rpkg_entry` export (preferred).
 /// Falls back to legacy `plugin_init` names for backward compatibility.
-fn load_runtime_symbols(lib: &libloading::Library, _package_name: &str) -> Vec<(String, *const u8)> {
+fn load_runtime_symbols(
+    lib: &libloading::Library,
+    _package_name: &str,
+) -> Vec<(String, *const u8)> {
     // Try universal entry point first
     if let Some(symbols) = load_symbols_via_rpkg_entry(lib) {
         return symbols;

@@ -30,11 +30,13 @@ extern "C" {
 }
 
 fn sel(name: &str) -> Sel {
-    unsafe { sel_registerName(format!("{}\0", name).as_ptr() as *const c_char) }
+    let cstr = std::ffi::CString::new(name).unwrap();
+    unsafe { sel_registerName(cstr.as_ptr()) }
 }
 
 fn cls(name: &str) -> Class {
-    unsafe { objc_getClass(format!("{}\0", name).as_ptr() as *const c_char) }
+    let cstr = std::ffi::CString::new(name).unwrap();
+    unsafe { objc_getClass(cstr.as_ptr()) }
 }
 
 // Typed objc_msgSend casts — ARM64 ABI requires non-variadic prototypes
@@ -54,8 +56,6 @@ type MsgSendU16 = unsafe extern "C" fn(Id, Sel) -> u16;
 type MsgSendNSUInt = unsafe extern "C" fn(Id, Sel) -> NSUInteger;
 type MsgSendRect = unsafe extern "C" fn(Id, Sel) -> CGRect;
 type MsgSendNSPoint = unsafe extern "C" fn(Id, Sel) -> [f64; 2];
-type MsgSendCGFloat = unsafe extern "C" fn(Id, Sel) -> CGFloat;
-
 fn msg_fn() -> *const c_void {
     objc_msgSend as *const c_void
 }
@@ -73,6 +73,7 @@ pub struct CocoaWindow {
     pub width: u32,
     pub height: u32,
     pub resized: bool,
+    #[allow(dead_code)]
     pub should_close: bool,
     key_states: [bool; 256],
     pub events: crate::event::EventQueue,
@@ -92,7 +93,9 @@ impl CocoaWindow {
 
         // [NSApplication sharedApplication]
         let app = send0(cls("NSApplication") as Id, sel("sharedApplication"));
-        if app.is_null() { return None; }
+        if app.is_null() {
+            return None;
+        }
 
         // [app setActivationPolicy:0]
         send1int(app, sel("setActivationPolicy:"), 0);
@@ -115,11 +118,17 @@ impl CocoaWindow {
             2, // NSBackingStoreBuffered
             0, // defer: NO
         );
-        if window.is_null() { return None; }
+        if window.is_null() {
+            return None;
+        }
 
         // [window setTitle:@"..."]
         let title_cstr = std::ffi::CString::new(title).ok()?;
-        let ns_title = send1str(cls("NSString") as Id, sel("stringWithUTF8String:"), title_cstr.as_ptr());
+        let ns_title = send1str(
+            cls("NSString") as Id,
+            sel("stringWithUTF8String:"),
+            title_cstr.as_ptr(),
+        );
         send1ptr(window, sel("setTitle:"), ns_title);
 
         // [window makeKeyAndOrderFront:nil]
@@ -187,17 +196,25 @@ impl CocoaWindow {
         let mode = send1str(
             cls("NSString") as Id,
             sel("stringWithUTF8String:"),
-            "kCFRunLoopDefaultMode\0".as_ptr() as *const c_char,
+            c"kCFRunLoopDefaultMode".as_ptr(),
         );
 
         // Helper: get cocoa modifier flags as our bitmask
         let get_mods = |evt: Id| -> i32 {
             let flags = send_nsuint(evt, sel("modifierFlags"));
             let mut m = 0i32;
-            if flags & (1 << 17) != 0 { m |= 1; } // shift
-            if flags & (1 << 18) != 0 { m |= 2; } // ctrl
-            if flags & (1 << 19) != 0 { m |= 4; } // alt/option
-            if flags & (1 << 20) != 0 { m |= 8; } // cmd
+            if flags & (1 << 17) != 0 {
+                m |= 1;
+            } // shift
+            if flags & (1 << 18) != 0 {
+                m |= 2;
+            } // ctrl
+            if flags & (1 << 19) != 0 {
+                m |= 4;
+            } // alt/option
+            if flags & (1 << 20) != 0 {
+                m |= 8;
+            } // cmd
             m
         };
 
@@ -210,7 +227,9 @@ impl CocoaWindow {
                 mode,
                 1,
             );
-            if event.is_null() { break; }
+            if event.is_null() {
+                break;
+            }
 
             let et = send_nsuint(event, sel("type"));
 
@@ -220,7 +239,9 @@ impl CocoaWindow {
                     let keycode = send_u16(event, sel("keyCode"));
                     let vk = cocoa_keycode_to_key(keycode);
                     let mods = get_mods(event);
-                    if vk < 256 { self.key_states[vk] = et == 10; }
+                    if vk < 256 {
+                        self.key_states[vk] = et == 10;
+                    }
                     if et == 10 {
                         self.events.push(WindowEvent::key_down(vk as i32, mods));
                     } else {
@@ -229,24 +250,36 @@ impl CocoaWindow {
                 }
                 // Mouse down: 1=left, 3=right, 25=other
                 1 | 3 | 25 => {
-                    let btn = match et { 1 => 0, 3 => 1, _ => 2 };
+                    let btn = match et {
+                        1 => 0,
+                        3 => 1,
+                        _ => 2,
+                    };
                     let loc = send_nspoint(event, sel("locationInWindow"));
-                    self.mouse_x = loc[0]; self.mouse_y = loc[1];
+                    self.mouse_x = loc[0];
+                    self.mouse_y = loc[1];
                     self.mouse_buttons[btn as usize] = true;
-                    self.events.push(WindowEvent::mouse_down(btn, loc[0], loc[1]));
+                    self.events
+                        .push(WindowEvent::mouse_down(btn, loc[0], loc[1]));
                 }
                 // Mouse up: 2=left, 4=right, 26=other
                 2 | 4 | 26 => {
-                    let btn = match et { 2 => 0, 4 => 1, _ => 2 };
+                    let btn = match et {
+                        2 => 0,
+                        4 => 1,
+                        _ => 2,
+                    };
                     let loc = send_nspoint(event, sel("locationInWindow"));
-                    self.mouse_x = loc[0]; self.mouse_y = loc[1];
+                    self.mouse_x = loc[0];
+                    self.mouse_y = loc[1];
                     self.mouse_buttons[btn as usize] = false;
                     self.events.push(WindowEvent::mouse_up(btn, loc[0], loc[1]));
                 }
                 // Mouse moved / dragged
                 5 | 6 | 7 | 27 => {
                     let loc = send_nspoint(event, sel("locationInWindow"));
-                    self.mouse_x = loc[0]; self.mouse_y = loc[1];
+                    self.mouse_x = loc[0];
+                    self.mouse_y = loc[1];
                     self.events.push(WindowEvent::mouse_move(loc[0], loc[1]));
                 }
                 // Scroll wheel (22)
@@ -268,7 +301,8 @@ impl CocoaWindow {
         let new_w = frame.width as u32;
         let new_h = frame.height as u32;
         if new_w != self.width || new_h != self.height {
-            self.events.push(WindowEvent::resize(new_w as i32, new_h as i32));
+            self.events
+                .push(WindowEvent::resize(new_w as i32, new_h as i32));
             self.width = new_w;
             self.height = new_h;
             self.resized = true;
@@ -282,7 +316,7 @@ impl CocoaWindow {
     // ========================================================================
 
     pub fn is_key_down(&self, key: i32) -> bool {
-        (key >= 0 && key < 256) && self.key_states[key as usize]
+        (0..256).contains(&key) && self.key_states[key as usize]
     }
 
     // ========================================================================
@@ -384,7 +418,11 @@ impl CocoaWindow {
         if self.is_fullscreen() != fs {
             let send1ptr: MsgSend1Ptr = std::mem::transmute(msg_fn());
             // [window toggleFullScreen:nil]
-            send1ptr(self.ns_window, sel("toggleFullScreen:"), std::ptr::null_mut());
+            send1ptr(
+                self.ns_window,
+                sel("toggleFullScreen:"),
+                std::ptr::null_mut(),
+            );
         }
     }
 
@@ -393,7 +431,11 @@ impl CocoaWindow {
         if visible {
             let send1ptr: MsgSend1Ptr = std::mem::transmute(msg_fn());
             // [window makeKeyAndOrderFront:nil]
-            send1ptr(self.ns_window, sel("makeKeyAndOrderFront:"), std::ptr::null_mut());
+            send1ptr(
+                self.ns_window,
+                sel("makeKeyAndOrderFront:"),
+                std::ptr::null_mut(),
+            );
         } else {
             let send1ptr: MsgSend1Ptr = std::mem::transmute(msg_fn());
             // [window orderOut:nil]
@@ -404,7 +446,11 @@ impl CocoaWindow {
     /// Sets the window to float above all other windows (or restores normal level).
     pub unsafe fn set_floating(&self, on_top: bool) {
         let send1nsuint: MsgSend1NSUInt = std::mem::transmute(msg_fn());
-        let level = if on_top { NS_FLOATING_WINDOW_LEVEL } else { NS_NORMAL_WINDOW_LEVEL };
+        let level = if on_top {
+            NS_FLOATING_WINDOW_LEVEL
+        } else {
+            NS_NORMAL_WINDOW_LEVEL
+        };
         // [window setLevel:level]
         send1nsuint(self.ns_window, sel("setLevel:"), level);
     }
@@ -453,7 +499,11 @@ impl CocoaWindow {
         let send1str: MsgSend1Str = std::mem::transmute(msg_fn());
         let send1ptr: MsgSend1Ptr = std::mem::transmute(msg_fn());
         if let Ok(cstr) = std::ffi::CString::new(title) {
-            let ns_title = send1str(cls("NSString") as Id, sel("stringWithUTF8String:"), cstr.as_ptr());
+            let ns_title = send1str(
+                cls("NSString") as Id,
+                sel("stringWithUTF8String:"),
+                cstr.as_ptr(),
+            );
             send1ptr(self.ns_window, sel("setTitle:"), ns_title);
         }
     }
@@ -468,26 +518,73 @@ impl CocoaWindow {
 
 fn style_to_cocoa_mask(style: i32) -> NSUInteger {
     let mut mask: NSUInteger = 0;
-    if style & 1 != 0 { mask |= 1; }   // titled
-    if style & 2 != 0 { mask |= 2; }   // closable
-    if style & 4 != 0 { mask |= 8; }   // resizable
-    if style & 8 != 0 { mask |= 4; }   // miniaturizable
-    if style & 32 != 0 { mask = 0; }   // frameless
+    if style & 1 != 0 {
+        mask |= 1;
+    } // titled
+    if style & 2 != 0 {
+        mask |= 2;
+    } // closable
+    if style & 4 != 0 {
+        mask |= 8;
+    } // resizable
+    if style & 8 != 0 {
+        mask |= 4;
+    } // miniaturizable
+    if style & 32 != 0 {
+        mask = 0;
+    } // frameless
     mask
 }
 
 fn cocoa_keycode_to_key(keycode: u16) -> usize {
     match keycode {
-        53 => 27, 49 => 32, 36 => 13, 48 => 9, 51 => 8,
-        123 => 37, 126 => 38, 124 => 39, 125 => 40,
-        0 => 65, 11 => 66, 8 => 67, 2 => 68, 14 => 69, 3 => 70,
-        5 => 71, 4 => 72, 34 => 73, 38 => 74, 40 => 75, 37 => 76,
-        46 => 77, 45 => 78, 31 => 79, 35 => 80, 12 => 81, 15 => 82,
-        1 => 83, 17 => 84, 32 => 85, 9 => 86, 13 => 87, 7 => 88,
-        16 => 89, 6 => 90,
-        122 => 112, 120 => 113, 99 => 114, 118 => 115,
-        96 => 116, 97 => 117, 98 => 118, 100 => 119,
-        101 => 120, 109 => 121, 103 => 122, 111 => 123,
+        53 => 27,
+        49 => 32,
+        36 => 13,
+        48 => 9,
+        51 => 8,
+        123 => 37,
+        126 => 38,
+        124 => 39,
+        125 => 40,
+        0 => 65,
+        11 => 66,
+        8 => 67,
+        2 => 68,
+        14 => 69,
+        3 => 70,
+        5 => 71,
+        4 => 72,
+        34 => 73,
+        38 => 74,
+        40 => 75,
+        37 => 76,
+        46 => 77,
+        45 => 78,
+        31 => 79,
+        35 => 80,
+        12 => 81,
+        15 => 82,
+        1 => 83,
+        17 => 84,
+        32 => 85,
+        9 => 86,
+        13 => 87,
+        7 => 88,
+        16 => 89,
+        6 => 90,
+        122 => 112,
+        120 => 113,
+        99 => 114,
+        118 => 115,
+        96 => 116,
+        97 => 117,
+        98 => 118,
+        100 => 119,
+        101 => 120,
+        109 => 121,
+        103 => 122,
+        111 => 123,
         _ => 0,
     }
 }

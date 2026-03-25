@@ -247,10 +247,7 @@ fn extract_method_table_from_dylib(dylib_path: &Path) -> Result<Vec<MethodDescEn
     // Legacy fallback: try old-style plugin_describe exports
     type DescribeFn = unsafe extern "C" fn(*mut usize) -> *const rayzor_plugin::NativeMethodDesc;
 
-    let describe_names: &[&[u8]] = &[
-        b"plugin_describe",
-        b"rayzor_plugin_describe",
-    ];
+    let describe_names: &[&[u8]] = &[b"plugin_describe", b"rayzor_plugin_describe"];
 
     for name in describe_names {
         if let Ok(describe_fn) = unsafe { lib.get::<DescribeFn>(name) } {
@@ -276,9 +273,7 @@ fn extract_methods_via_rpkg_entry(lib: &libloading::Library) -> Option<Vec<Metho
         return Some(Vec::new());
     }
 
-    let slice = unsafe {
-        std::slice::from_raw_parts(info.methods_ptr, info.methods_count)
-    };
+    let slice = unsafe { std::slice::from_raw_parts(info.methods_ptr, info.methods_count) };
 
     Some(read_native_method_descs(slice))
 }

@@ -296,7 +296,12 @@ impl NamespaceResolver {
             for split_at in (1..segments.len()).rev() {
                 let sub_type = segments[split_at];
                 // Sub-type must start with uppercase (class/enum/typedef name)
-                if !sub_type.chars().next().map(|c| c.is_uppercase()).unwrap_or(false) {
+                if !sub_type
+                    .chars()
+                    .next()
+                    .map(|c| c.is_uppercase())
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 let module_path = segments[..split_at].join("/") + ".hx";

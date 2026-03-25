@@ -36,42 +36,101 @@ pub struct WindowEvent {
 
 impl WindowEvent {
     pub fn mouse_move(x: f64, y: f64) -> Self {
-        Self { event_type: event_type::MOUSE_MOVE, x, y, ..Self::ZERO }
+        Self {
+            event_type: event_type::MOUSE_MOVE,
+            x,
+            y,
+            ..Self::ZERO
+        }
     }
     pub fn mouse_down(button: i32, x: f64, y: f64) -> Self {
-        Self { event_type: event_type::MOUSE_DOWN, button, x, y, ..Self::ZERO }
+        Self {
+            event_type: event_type::MOUSE_DOWN,
+            button,
+            x,
+            y,
+            ..Self::ZERO
+        }
     }
     pub fn mouse_up(button: i32, x: f64, y: f64) -> Self {
-        Self { event_type: event_type::MOUSE_UP, button, x, y, ..Self::ZERO }
+        Self {
+            event_type: event_type::MOUSE_UP,
+            button,
+            x,
+            y,
+            ..Self::ZERO
+        }
     }
     pub fn mouse_wheel(dx: f64, dy: f64) -> Self {
-        Self { event_type: event_type::MOUSE_WHEEL, scroll_x: dx, scroll_y: dy, ..Self::ZERO }
+        Self {
+            event_type: event_type::MOUSE_WHEEL,
+            scroll_x: dx,
+            scroll_y: dy,
+            ..Self::ZERO
+        }
     }
     pub fn key_down(key: i32, modifiers: i32) -> Self {
-        Self { event_type: event_type::KEY_DOWN, key, modifiers, ..Self::ZERO }
+        Self {
+            event_type: event_type::KEY_DOWN,
+            key,
+            modifiers,
+            ..Self::ZERO
+        }
     }
     pub fn key_up(key: i32, modifiers: i32) -> Self {
-        Self { event_type: event_type::KEY_UP, key, modifiers, ..Self::ZERO }
+        Self {
+            event_type: event_type::KEY_UP,
+            key,
+            modifiers,
+            ..Self::ZERO
+        }
     }
     pub fn resize(w: i32, h: i32) -> Self {
-        Self { event_type: event_type::RESIZE, width: w, height: h, ..Self::ZERO }
+        Self {
+            event_type: event_type::RESIZE,
+            width: w,
+            height: h,
+            ..Self::ZERO
+        }
     }
     pub fn window_move(x: i32, y: i32) -> Self {
-        Self { event_type: event_type::MOVE, x: x as f64, y: y as f64, ..Self::ZERO }
+        Self {
+            event_type: event_type::MOVE,
+            x: x as f64,
+            y: y as f64,
+            ..Self::ZERO
+        }
     }
     pub fn focus() -> Self {
-        Self { event_type: event_type::FOCUS, ..Self::ZERO }
+        Self {
+            event_type: event_type::FOCUS,
+            ..Self::ZERO
+        }
     }
     pub fn blur() -> Self {
-        Self { event_type: event_type::BLUR, ..Self::ZERO }
+        Self {
+            event_type: event_type::BLUR,
+            ..Self::ZERO
+        }
     }
     pub fn close() -> Self {
-        Self { event_type: event_type::CLOSE, ..Self::ZERO }
+        Self {
+            event_type: event_type::CLOSE,
+            ..Self::ZERO
+        }
     }
 
     const ZERO: Self = Self {
-        event_type: 0, x: 0.0, y: 0.0, button: 0, key: 0,
-        modifiers: 0, width: 0, height: 0, scroll_x: 0.0, scroll_y: 0.0,
+        event_type: 0,
+        x: 0.0,
+        y: 0.0,
+        button: 0,
+        key: 0,
+        modifiers: 0,
+        width: 0,
+        height: 0,
+        scroll_x: 0.0,
+        scroll_y: 0.0,
     };
 }
 
@@ -80,9 +139,17 @@ pub struct EventQueue {
     events: Vec<WindowEvent>,
 }
 
+impl Default for EventQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventQueue {
     pub fn new() -> Self {
-        Self { events: Vec::with_capacity(32) }
+        Self {
+            events: Vec::with_capacity(32),
+        }
     }
 
     pub fn push(&mut self, event: WindowEvent) {
@@ -95,6 +162,10 @@ impl EventQueue {
 
     pub fn len(&self) -> usize {
         self.events.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
     }
 
     pub fn get(&self, index: usize) -> Option<&WindowEvent> {

@@ -79,15 +79,27 @@ impl XEvent {
     //                data.l[0] (long) at offset 56
     fn client_message_type(&self) -> Atom {
         u64::from_ne_bytes([
-            self.data[40], self.data[41], self.data[42], self.data[43],
-            self.data[44], self.data[45], self.data[46], self.data[47],
+            self.data[40],
+            self.data[41],
+            self.data[42],
+            self.data[43],
+            self.data[44],
+            self.data[45],
+            self.data[46],
+            self.data[47],
         ])
     }
 
     fn client_data_l0(&self) -> u64 {
         u64::from_ne_bytes([
-            self.data[56], self.data[57], self.data[58], self.data[59],
-            self.data[60], self.data[61], self.data[62], self.data[63],
+            self.data[56],
+            self.data[57],
+            self.data[58],
+            self.data[59],
+            self.data[60],
+            self.data[61],
+            self.data[62],
+            self.data[63],
         ])
     }
 }
@@ -131,9 +143,8 @@ struct X11Lib {
     _lib: *mut c_void,
     XOpenDisplay: unsafe extern "C" fn(*const c_char) -> Display,
     XCloseDisplay: unsafe extern "C" fn(Display) -> i32,
-    XCreateSimpleWindow: unsafe extern "C" fn(
-        Display, Window, i32, i32, u32, u32, u32, u64, u64,
-    ) -> Window,
+    XCreateSimpleWindow:
+        unsafe extern "C" fn(Display, Window, i32, i32, u32, u32, u32, u64, u64) -> Window,
     XMapWindow: unsafe extern "C" fn(Display, Window) -> i32,
     XUnmapWindow: unsafe extern "C" fn(Display, Window) -> i32,
     XDestroyWindow: unsafe extern "C" fn(Display, Window) -> i32,
@@ -202,16 +213,10 @@ fn x11() -> Option<&'static X11Lib> {
             return X11.as_ref();
         }
 
-        let lib = libc::dlopen(
-            b"libX11.so.6\0".as_ptr() as *const c_char,
-            libc::RTLD_LAZY,
-        );
+        let lib = libc::dlopen(b"libX11.so.6\0".as_ptr() as *const c_char, libc::RTLD_LAZY);
         if lib.is_null() {
             // Fallback: try without version suffix
-            let lib2 = libc::dlopen(
-                b"libX11.so\0".as_ptr() as *const c_char,
-                libc::RTLD_LAZY,
-            );
+            let lib2 = libc::dlopen(b"libX11.so\0".as_ptr() as *const c_char, libc::RTLD_LAZY);
             if lib2.is_null() {
                 return None;
             }
@@ -224,9 +229,15 @@ fn x11() -> Option<&'static X11Lib> {
 unsafe fn load_x11_symbols(lib: *mut c_void) -> Option<&'static X11Lib> {
     macro_rules! load_sym {
         ($name:ident, $ty:ty) => {{
-            let sym = libc::dlsym(lib, concat!(stringify!($name), "\0").as_ptr() as *const c_char);
+            let sym = libc::dlsym(
+                lib,
+                concat!(stringify!($name), "\0").as_ptr() as *const c_char,
+            );
             if sym.is_null() {
-                eprintln!("[rayzor-window] Failed to load X11 symbol: {}", stringify!($name));
+                eprintln!(
+                    "[rayzor-window] Failed to load X11 symbol: {}",
+                    stringify!($name)
+                );
                 return None;
             }
             std::mem::transmute::<*mut c_void, $ty>(sym)
@@ -244,19 +255,37 @@ unsafe fn load_x11_symbols(lib: *mut c_void) -> Option<&'static X11Lib> {
         XMapWindow: load_sym!(XMapWindow, unsafe extern "C" fn(Display, Window) -> i32),
         XUnmapWindow: load_sym!(XUnmapWindow, unsafe extern "C" fn(Display, Window) -> i32),
         XDestroyWindow: load_sym!(XDestroyWindow, unsafe extern "C" fn(Display, Window) -> i32),
-        XStoreName: load_sym!(XStoreName, unsafe extern "C" fn(Display, Window, *const c_char) -> i32),
+        XStoreName: load_sym!(
+            XStoreName,
+            unsafe extern "C" fn(Display, Window, *const c_char) -> i32
+        ),
         XMoveResizeWindow: load_sym!(
             XMoveResizeWindow,
             unsafe extern "C" fn(Display, Window, i32, i32, u32, u32) -> i32
         ),
-        XMoveWindow: load_sym!(XMoveWindow, unsafe extern "C" fn(Display, Window, i32, i32) -> i32),
-        XResizeWindow: load_sym!(XResizeWindow, unsafe extern "C" fn(Display, Window, u32, u32) -> i32),
-        XNextEvent: load_sym!(XNextEvent, unsafe extern "C" fn(Display, *mut XEvent) -> i32),
+        XMoveWindow: load_sym!(
+            XMoveWindow,
+            unsafe extern "C" fn(Display, Window, i32, i32) -> i32
+        ),
+        XResizeWindow: load_sym!(
+            XResizeWindow,
+            unsafe extern "C" fn(Display, Window, u32, u32) -> i32
+        ),
+        XNextEvent: load_sym!(
+            XNextEvent,
+            unsafe extern "C" fn(Display, *mut XEvent) -> i32
+        ),
         XPending: load_sym!(XPending, unsafe extern "C" fn(Display) -> i32),
-        XSelectInput: load_sym!(XSelectInput, unsafe extern "C" fn(Display, Window, i64) -> i32),
+        XSelectInput: load_sym!(
+            XSelectInput,
+            unsafe extern "C" fn(Display, Window, i64) -> i32
+        ),
         XDefaultScreen: load_sym!(XDefaultScreen, unsafe extern "C" fn(Display) -> i32),
         XRootWindow: load_sym!(XRootWindow, unsafe extern "C" fn(Display, i32) -> Window),
-        XDefaultGC: load_sym!(XDefaultGC, unsafe extern "C" fn(Display, i32) -> *mut c_void),
+        XDefaultGC: load_sym!(
+            XDefaultGC,
+            unsafe extern "C" fn(Display, i32) -> *mut c_void
+        ),
         XBlackPixel: load_sym!(XBlackPixel, unsafe extern "C" fn(Display, i32) -> u64),
         XWhitePixel: load_sym!(XWhitePixel, unsafe extern "C" fn(Display, i32) -> u64),
         XDisplayWidth: load_sym!(XDisplayWidth, unsafe extern "C" fn(Display, i32) -> i32),
@@ -293,8 +322,8 @@ unsafe fn load_x11_symbols(lib: *mut c_void) -> Option<&'static X11Lib> {
 // ============================================================================
 
 pub struct X11Window {
-    display: *mut c_void,   // X11 Display*
-    window: u64,            // X11 Window (XID)
+    display: *mut c_void, // X11 Display*
+    window: u64,          // X11 Window (XID)
     screen: i32,
     width: u32,
     height: u32,
@@ -330,13 +359,7 @@ impl X11Window {
         let white = (x11.XWhitePixel)(display, screen);
 
         let window = (x11.XCreateSimpleWindow)(
-            display,
-            root,
-            x,
-            y,
-            w as u32,
-            h as u32,
-            0,     // border_width
+            display, root, x, y, w as u32, h as u32, 0,     // border_width
             black, // border color
             white, // background color
         );
@@ -359,11 +382,8 @@ impl X11Window {
             b"WM_PROTOCOLS\0".as_ptr() as *const c_char,
             0, // False — create if needed
         );
-        let mut wm_delete_window = (x11.XInternAtom)(
-            display,
-            b"WM_DELETE_WINDOW\0".as_ptr() as *const c_char,
-            0,
-        );
+        let mut wm_delete_window =
+            (x11.XInternAtom)(display, b"WM_DELETE_WINDOW\0".as_ptr() as *const c_char, 0);
         (x11.XSetWMProtocols)(display, window, &mut wm_delete_window, 1);
 
         // Map (show) the window
@@ -614,9 +634,15 @@ impl X11Window {
         // TODO: _NET_WM_WINDOW_OPACITY via XChangeProperty
     }
 
-    pub fn is_fullscreen(&self) -> bool { false }
-    pub fn is_minimized(&self) -> bool { false }
-    pub fn is_focused(&self) -> bool { true }
+    pub fn is_fullscreen(&self) -> bool {
+        false
+    }
+    pub fn is_minimized(&self) -> bool {
+        false
+    }
+    pub fn is_focused(&self) -> bool {
+        true
+    }
 
     /// Destroy the window and close the display connection.
     pub unsafe fn destroy(&mut self) {
@@ -682,11 +708,11 @@ fn x11_keysym_to_key(keysym: KeySym) -> usize {
         0xffc9 => 123, // XK_F12
 
         // Navigation keys
-        0xff50 => 36,  // XK_Home
-        0xff57 => 35,  // XK_End
-        0xff55 => 33,  // XK_Page_Up
-        0xff56 => 34,  // XK_Page_Down
-        0xff63 => 45,  // XK_Insert
+        0xff50 => 36, // XK_Home
+        0xff57 => 35, // XK_End
+        0xff55 => 33, // XK_Page_Up
+        0xff56 => 34, // XK_Page_Down
+        0xff63 => 45, // XK_Insert
 
         // Caps Lock, Num Lock, Scroll Lock
         0xffe5 => 20,  // XK_Caps_Lock
@@ -695,7 +721,7 @@ fn x11_keysym_to_key(keysym: KeySym) -> usize {
 
         // Letters a-z / A-Z → uppercase ASCII (65-90)
         sym if (0x0061..=0x007a).contains(&sym) => (sym - 0x0061 + 65) as usize, // a-z
-        sym if (0x0041..=0x005a).contains(&sym) => sym as usize,                  // A-Z
+        sym if (0x0041..=0x005a).contains(&sym) => sym as usize,                 // A-Z
 
         // Digits 0-9
         sym if (0x0030..=0x0039).contains(&sym) => sym as usize,
@@ -717,13 +743,13 @@ mod tests {
 
     #[test]
     fn test_keysym_mapping() {
-        assert_eq!(x11_keysym_to_key(0xff1b), 27);  // Escape
-        assert_eq!(x11_keysym_to_key(0xff0d), 13);  // Return
-        assert_eq!(x11_keysym_to_key(0x0061), 65);   // 'a' -> 'A'
-        assert_eq!(x11_keysym_to_key(0x0041), 65);   // 'A' -> 65
-        assert_eq!(x11_keysym_to_key(0x0030), 48);   // '0'
-        assert_eq!(x11_keysym_to_key(0xff51), 37);   // Left arrow
-        assert_eq!(x11_keysym_to_key(0xffbe), 112);  // F1
+        assert_eq!(x11_keysym_to_key(0xff1b), 27); // Escape
+        assert_eq!(x11_keysym_to_key(0xff0d), 13); // Return
+        assert_eq!(x11_keysym_to_key(0x0061), 65); // 'a' -> 'A'
+        assert_eq!(x11_keysym_to_key(0x0041), 65); // 'A' -> 65
+        assert_eq!(x11_keysym_to_key(0x0030), 48); // '0'
+        assert_eq!(x11_keysym_to_key(0xff51), 37); // Left arrow
+        assert_eq!(x11_keysym_to_key(0xffbe), 112); // F1
     }
 
     #[test]
