@@ -22,10 +22,16 @@ enum RenderCommand {
     SetScissor(u32, u32, u32, u32),       // x, y, w, h
 }
 
-/// A recorded render pass — stores attachment config + commands.
-pub struct RecordedRenderPass {
-    color_view: *const wgpu::TextureView,
+/// A single color attachment configuration.
+struct ColorAttachment {
+    view: *const wgpu::TextureView,
     load_op: wgpu::LoadOp<wgpu::Color>,
+}
+
+/// A recorded render pass — stores attachment config + commands.
+/// Supports multiple color attachments for MRT.
+pub struct RecordedRenderPass {
+    color_attachments: Vec<ColorAttachment>,
     depth_view: Option<*const wgpu::TextureView>,
     commands: Vec<RenderCommand>,
 }
@@ -81,8 +87,10 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_begin_pass(
     };
 
     cmd.current_pass = Some(RecordedRenderPass {
-        color_view,
-        load_op: load,
+        color_attachments: vec![ColorAttachment {
+            view: color_view,
+            load_op: load,
+        }],
         depth_view: if depth_view.is_null() {
             None
         } else {
@@ -210,6 +218,70 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_set_scissor(
     }
 }
 
+/// Begin a render pass with multiple color targets (MRT).
+///
+/// `color_views` is a pointer to an array of `count` TextureView pointers.
+/// `load_ops` is a pointer to an array of `count` i32 load ops (0=Clear, 1=Load).
+/// `clear_colors` is a pointer to an array of `count * 4` f64 RGBA values.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_begin_pass_mrt(
+    cmd: *mut CommandRecorder,
+    count: i32,
+    color_views: *const *const wgpu::TextureView,
+    load_ops: *const i32,
+    clear_colors: *const f64, // packed RGBA: [r0,g0,b0,a0, r1,g1,b1,a1, ...]
+    depth_view: *const wgpu::TextureView,
+) {
+    if cmd.is_null() || count <= 0 || color_views.is_null() {
+        return;
+    }
+    let cmd = &mut *cmd;
+
+    // End current pass if any
+    if let Some(pass) = cmd.current_pass.take() {
+        cmd.passes.push(pass);
+    }
+
+    let count = count as usize;
+    let mut attachments = Vec::with_capacity(count);
+
+    for i in 0..count {
+        let view = *color_views.add(i);
+        if view.is_null() {
+            continue;
+        }
+        let op = if !load_ops.is_null() { *load_ops.add(i) } else { 0 };
+        let load = if op == 0 {
+            let base = i * 4;
+            let (r, g, b, a) = if !clear_colors.is_null() {
+                (
+                    *clear_colors.add(base),
+                    *clear_colors.add(base + 1),
+                    *clear_colors.add(base + 2),
+                    *clear_colors.add(base + 3),
+                )
+            } else {
+                (0.0, 0.0, 0.0, 1.0)
+            };
+            wgpu::LoadOp::Clear(wgpu::Color { r, g, b, a })
+        } else {
+            wgpu::LoadOp::Load
+        };
+
+        attachments.push(ColorAttachment { view, load_op: load });
+    }
+
+    cmd.current_pass = Some(RecordedRenderPass {
+        color_attachments: attachments,
+        depth_view: if depth_view.is_null() {
+            None
+        } else {
+            Some(depth_view)
+        },
+        commands: Vec::new(),
+    });
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_end_pass(cmd: *mut CommandRecorder) {
     if cmd.is_null() {
@@ -258,16 +330,24 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_submit(
                 });
 
         {
+            let color_attachments: Vec<Option<wgpu::RenderPassColorAttachment>> = recorded_pass
+                .color_attachments
+                .iter()
+                .map(|ca| {
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &*ca.view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: ca.load_op,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })
+                })
+                .collect();
+
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("rayzor_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &*recorded_pass.color_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: recorded_pass.load_op,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
+                color_attachments: &color_attachments,
                 depth_stencil_attachment: depth_attachment,
                 timestamp_writes: None,
                 occlusion_query_set: None,

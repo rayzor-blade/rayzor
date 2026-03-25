@@ -10,11 +10,13 @@ pub struct GraphicsPipeline {
 }
 
 /// Builder for constructing a RenderPipeline incrementally.
+/// Supports multiple color targets for MRT (Multiple Render Targets).
 pub struct PipelineBuilder {
     shader: Option<*const GraphicsShader>,
     topology: wgpu::PrimitiveTopology,
     cull_mode: Option<wgpu::Face>,
-    color_format: wgpu::TextureFormat,
+    /// Color targets — supports MRT. First target set via setFormat(), additional via addColorTarget().
+    color_targets: Vec<wgpu::TextureFormat>,
     depth_format: Option<wgpu::TextureFormat>,
     depth_compare: wgpu::CompareFunction,
     vertex_stride: u64,
@@ -32,7 +34,7 @@ pub extern "C" fn rayzor_gpu_gfx_pipeline_begin() -> *mut PipelineBuilder {
         shader: None,
         topology: wgpu::PrimitiveTopology::TriangleList,
         cull_mode: None,
-        color_format: wgpu::TextureFormat::Bgra8Unorm,
+        color_targets: vec![wgpu::TextureFormat::Bgra8Unorm],
         depth_format: None,
         depth_compare: wgpu::CompareFunction::Less,
         vertex_stride: 0,
@@ -88,7 +90,13 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_set_format(
     if builder.is_null() {
         return;
     }
-    (*builder).color_format = texture_format_from_int(format);
+    let b = &mut *builder;
+    let fmt = texture_format_from_int(format);
+    if b.color_targets.is_empty() {
+        b.color_targets.push(fmt);
+    } else {
+        b.color_targets[0] = fmt;
+    }
 }
 
 #[no_mangle]
@@ -197,6 +205,18 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_build(
         bias: wgpu::DepthBiasState::default(),
     });
 
+    let color_targets: Vec<Option<wgpu::ColorTargetState>> = b
+        .color_targets
+        .iter()
+        .map(|&fmt| {
+            Some(wgpu::ColorTargetState {
+                format: fmt,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })
+        })
+        .collect();
+
     let pipeline = ctx
         .device
         .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -211,11 +231,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_build(
             fragment: Some(wgpu::FragmentState {
                 module: &shader.module,
                 entry_point: Some(&shader.fragment_entry),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: b.color_format,
-                    blend: Some(wgpu::BlendState::REPLACE),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
+                targets: &color_targets,
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState {
@@ -234,6 +250,30 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_build(
         });
 
     Box::into_raw(Box::new(GraphicsPipeline { pipeline }))
+}
+
+/// Add an additional color target for MRT (Multiple Render Targets).
+/// The first target is set via setFormat(); this adds targets at @location(1), @location(2), etc.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_add_color_target(
+    builder: *mut PipelineBuilder,
+    format: i32,
+) {
+    if builder.is_null() {
+        return;
+    }
+    (*builder).color_targets.push(texture_format_from_int(format));
+}
+
+/// Get the number of color targets configured on this pipeline builder.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_get_color_target_count(
+    builder: *mut PipelineBuilder,
+) -> i32 {
+    if builder.is_null() {
+        return 0;
+    }
+    (*builder).color_targets.len() as i32
 }
 
 #[no_mangle]
