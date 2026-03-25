@@ -297,11 +297,8 @@ pub extern "C" fn rayzor_tcc_call0(fn_addr: i64) -> i64 {
         return 0;
     }
     unsafe {
-        jit_write_protect(false); // allow writes to JIT statics
         let f: extern "C" fn() -> i64 = std::mem::transmute(fn_addr as usize);
-        let result = f();
-        jit_write_protect(true); // restore execute-only
-        result
+        f()
     }
 }
 
@@ -312,11 +309,8 @@ pub extern "C" fn rayzor_tcc_call1(fn_addr: i64, arg0: i64) -> i64 {
         return 0;
     }
     unsafe {
-        jit_write_protect(false);
         let f: extern "C" fn(i64) -> i64 = std::mem::transmute(fn_addr as usize);
-        let result = f(arg0);
-        jit_write_protect(true);
-        result
+        f(arg0)
     }
 }
 
@@ -327,11 +321,8 @@ pub extern "C" fn rayzor_tcc_call2(fn_addr: i64, arg0: i64, arg1: i64) -> i64 {
         return 0;
     }
     unsafe {
-        jit_write_protect(false);
         let f: extern "C" fn(i64, i64) -> i64 = std::mem::transmute(fn_addr as usize);
-        let result = f(arg0, arg1);
-        jit_write_protect(true);
-        result
+        f(arg0, arg1)
     }
 }
 
@@ -342,11 +333,8 @@ pub extern "C" fn rayzor_tcc_call3(fn_addr: i64, arg0: i64, arg1: i64, arg2: i64
         return 0;
     }
     unsafe {
-        jit_write_protect(false);
         let f: extern "C" fn(i64, i64, i64) -> i64 = std::mem::transmute(fn_addr as usize);
-        let result = f(arg0, arg1, arg2);
-        jit_write_protect(true);
-        result
+        f(arg0, arg1, arg2)
     }
 }
 

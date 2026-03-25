@@ -70,10 +70,10 @@ extern class CC {
      * pointer-sized integers and can be passed directly.
      *
      * @param name Symbol name visible to C code
-     * @param value Raw value or pointer address
+     * @param value Raw value or pointer address (i64)
      */
     @:native("addSymbol")
-    public function addSymbol(name:String, value:rayzor.Ptr<Void>):Void;
+    public function addSymbol(name:String, value:Int):Void;
 
     /**
      * Relocate all compiled code into executable memory.
