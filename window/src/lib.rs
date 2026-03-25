@@ -7,6 +7,8 @@
 
 use std::ffi::c_void;
 
+pub mod event;
+
 #[cfg(target_os = "macos")]
 mod cocoa;
 
@@ -96,6 +98,54 @@ macro_rules! platform_create {
 #[no_mangle] pub unsafe extern "C" fn rayzor_window_get_mouse_y(win: *mut NativeWindow) -> f64 { if win.is_null() { return 0.0; } (*win).inner.get_mouse_y() }
 #[no_mangle] pub unsafe extern "C" fn rayzor_window_is_mouse_down(win: *mut NativeWindow, button: i32) -> i32 { if win.is_null() { return 0; } if (*win).inner.is_mouse_down(button) { 1 } else { 0 } }
 
+// --- Event Queue ---
+
+#[no_mangle] pub unsafe extern "C" fn rayzor_window_event_count(win: *mut NativeWindow) -> i32 {
+    if win.is_null() { return 0; } (*win).inner.events.len() as i32
+}
+#[no_mangle] pub unsafe extern "C" fn rayzor_window_event_type(win: *mut NativeWindow, index: i32) -> i32 {
+    if win.is_null() { return 0; }
+    (*win).inner.events.get(index as usize).map(|e| e.event_type).unwrap_or(0)
+}
+#[no_mangle] pub unsafe extern "C" fn rayzor_window_event_x(win: *mut NativeWindow, index: i32) -> f64 {
+    if win.is_null() { return 0.0; }
+    (*win).inner.events.get(index as usize).map(|e| e.x).unwrap_or(0.0)
+}
+#[no_mangle] pub unsafe extern "C" fn rayzor_window_event_y(win: *mut NativeWindow, index: i32) -> f64 {
+    if win.is_null() { return 0.0; }
+    (*win).inner.events.get(index as usize).map(|e| e.y).unwrap_or(0.0)
+}
+#[no_mangle] pub unsafe extern "C" fn rayzor_window_event_key(win: *mut NativeWindow, index: i32) -> i32 {
+    if win.is_null() { return 0; }
+    (*win).inner.events.get(index as usize).map(|e| e.key).unwrap_or(0)
+}
+#[no_mangle] pub unsafe extern "C" fn rayzor_window_event_button(win: *mut NativeWindow, index: i32) -> i32 {
+    if win.is_null() { return 0; }
+    (*win).inner.events.get(index as usize).map(|e| e.button).unwrap_or(0)
+}
+#[no_mangle] pub unsafe extern "C" fn rayzor_window_event_modifiers(win: *mut NativeWindow, index: i32) -> i32 {
+    if win.is_null() { return 0; }
+    (*win).inner.events.get(index as usize).map(|e| e.modifiers).unwrap_or(0)
+}
+#[no_mangle] pub unsafe extern "C" fn rayzor_window_event_width(win: *mut NativeWindow, index: i32) -> i32 {
+    if win.is_null() { return 0; }
+    (*win).inner.events.get(index as usize).map(|e| e.width).unwrap_or(0)
+}
+#[no_mangle] pub unsafe extern "C" fn rayzor_window_event_height(win: *mut NativeWindow, index: i32) -> i32 {
+    if win.is_null() { return 0; }
+    (*win).inner.events.get(index as usize).map(|e| e.height).unwrap_or(0)
+}
+#[no_mangle] pub unsafe extern "C" fn rayzor_window_event_scroll_x(win: *mut NativeWindow, index: i32) -> f64 {
+    if win.is_null() { return 0.0; }
+    (*win).inner.events.get(index as usize).map(|e| e.scroll_x).unwrap_or(0.0)
+}
+#[no_mangle] pub unsafe extern "C" fn rayzor_window_event_scroll_y(win: *mut NativeWindow, index: i32) -> f64 {
+    if win.is_null() { return 0.0; }
+    (*win).inner.events.get(index as usize).map(|e| e.scroll_y).unwrap_or(0.0)
+}
+
+// --- Cleanup ---
+
 #[no_mangle] pub unsafe extern "C" fn rayzor_window_destroy(win: *mut NativeWindow) {
     if !win.is_null() { (*win).inner.destroy(); drop(Box::from_raw(win)); }
 }
@@ -145,6 +195,19 @@ rayzor_plugin::declare_native_methods! {
     "rayzor_window_Window", "getMouseX",        instance, "rayzor_window_get_mouse_x",         [Ptr]           => F64;
     "rayzor_window_Window", "getMouseY",        instance, "rayzor_window_get_mouse_y",         [Ptr]           => F64;
     "rayzor_window_Window", "isMouseDown",      instance, "rayzor_window_is_mouse_down",       [Ptr, I64]      => I64;
+    // Event queue
+    "rayzor_window_Window", "eventCount",       instance, "rayzor_window_event_count",         [Ptr]           => I64;
+    "rayzor_window_Window", "eventType",        instance, "rayzor_window_event_type",          [Ptr, I64]      => I64;
+    "rayzor_window_Window", "eventX",           instance, "rayzor_window_event_x",             [Ptr, I64]      => F64;
+    "rayzor_window_Window", "eventY",           instance, "rayzor_window_event_y",             [Ptr, I64]      => F64;
+    "rayzor_window_Window", "eventKey",         instance, "rayzor_window_event_key",           [Ptr, I64]      => I64;
+    "rayzor_window_Window", "eventButton",      instance, "rayzor_window_event_button",        [Ptr, I64]      => I64;
+    "rayzor_window_Window", "eventModifiers",   instance, "rayzor_window_event_modifiers",     [Ptr, I64]      => I64;
+    "rayzor_window_Window", "eventWidth",       instance, "rayzor_window_event_width",         [Ptr, I64]      => I64;
+    "rayzor_window_Window", "eventHeight",      instance, "rayzor_window_event_height",        [Ptr, I64]      => I64;
+    "rayzor_window_Window", "eventScrollX",     instance, "rayzor_window_event_scroll_x",      [Ptr, I64]      => F64;
+    "rayzor_window_Window", "eventScrollY",     instance, "rayzor_window_event_scroll_y",      [Ptr, I64]      => F64;
+    // Cleanup
     "rayzor_window_Window", "destroy",          instance, "rayzor_window_destroy",             [Ptr]           => Void;
 }
 
@@ -177,6 +240,18 @@ fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
         ("rayzor_window_get_mouse_x", rayzor_window_get_mouse_x as *const u8),
         ("rayzor_window_get_mouse_y", rayzor_window_get_mouse_y as *const u8),
         ("rayzor_window_is_mouse_down", rayzor_window_is_mouse_down as *const u8),
+        // Event queue
+        ("rayzor_window_event_count", rayzor_window_event_count as *const u8),
+        ("rayzor_window_event_type", rayzor_window_event_type as *const u8),
+        ("rayzor_window_event_x", rayzor_window_event_x as *const u8),
+        ("rayzor_window_event_y", rayzor_window_event_y as *const u8),
+        ("rayzor_window_event_key", rayzor_window_event_key as *const u8),
+        ("rayzor_window_event_button", rayzor_window_event_button as *const u8),
+        ("rayzor_window_event_modifiers", rayzor_window_event_modifiers as *const u8),
+        ("rayzor_window_event_width", rayzor_window_event_width as *const u8),
+        ("rayzor_window_event_height", rayzor_window_event_height as *const u8),
+        ("rayzor_window_event_scroll_x", rayzor_window_event_scroll_x as *const u8),
+        ("rayzor_window_event_scroll_y", rayzor_window_event_scroll_y as *const u8),
         ("rayzor_window_destroy", rayzor_window_destroy as *const u8),
     ]
 }

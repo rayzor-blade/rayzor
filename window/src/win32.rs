@@ -339,6 +339,7 @@ pub struct Win32Window {
     pre_fullscreen_style: u32,
     pre_fullscreen_rect: RECT,
     is_fullscreen: bool,
+    pub events: crate::event::EventQueue,
 }
 
 static CLASS_REGISTERED: std::sync::atomic::AtomicBool =
@@ -434,6 +435,7 @@ impl Win32Window {
                 bottom: 0,
             },
             is_fullscreen: false,
+            events: crate::event::EventQueue::new(),
         };
 
         // Store pointer to self as GWLP_USERDATA so the window proc can access it.
@@ -472,6 +474,7 @@ impl Win32Window {
     /// (not closed, not destroyed).
     pub unsafe fn poll_events(&mut self) -> bool {
         self.resized = false;
+        self.events.clear();
 
         // Re-register our pointer in case the struct was moved (e.g., Box realloc).
         SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, self as *mut Win32Window as isize);

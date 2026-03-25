@@ -75,6 +75,7 @@ pub struct CocoaWindow {
     pub resized: bool,
     pub should_close: bool,
     key_states: [bool; 256],
+    pub events: crate::event::EventQueue,
     pub mouse_x: f64,
     pub mouse_y: f64,
     pub mouse_buttons: [bool; 5],
@@ -142,6 +143,7 @@ impl CocoaWindow {
             resized: false,
             should_close: false,
             key_states: [false; 256],
+            events: crate::event::EventQueue::new(),
             mouse_x: 0.0,
             mouse_y: 0.0,
             mouse_buttons: [false; 5],
@@ -166,7 +168,10 @@ impl CocoaWindow {
     // ========================================================================
 
     pub unsafe fn poll_events(&mut self) -> bool {
+        use crate::event::WindowEvent;
+
         self.resized = false;
+        self.events.clear();
 
         let send0: MsgSend0 = std::mem::transmute(msg_fn());
         let send1str: MsgSend1Str = std::mem::transmute(msg_fn());
@@ -185,6 +190,17 @@ impl CocoaWindow {
             "kCFRunLoopDefaultMode\0".as_ptr() as *const c_char,
         );
 
+        // Helper: get cocoa modifier flags as our bitmask
+        let get_mods = |evt: Id| -> i32 {
+            let flags = send_nsuint(evt, sel("modifierFlags"));
+            let mut m = 0i32;
+            if flags & (1 << 17) != 0 { m |= 1; } // shift
+            if flags & (1 << 18) != 0 { m |= 2; } // ctrl
+            if flags & (1 << 19) != 0 { m |= 4; } // alt/option
+            if flags & (1 << 20) != 0 { m |= 8; } // cmd
+            m
+        };
+
         loop {
             let event = send_event(
                 app,
@@ -192,69 +208,54 @@ impl CocoaWindow {
                 NSUInteger::MAX,
                 std::ptr::null_mut(),
                 mode,
-                1, // dequeue: YES
+                1,
             );
             if event.is_null() { break; }
 
-            let event_type = send_nsuint(event, sel("type"));
+            let et = send_nsuint(event, sel("type"));
 
-            // Track key events (10 = keyDown, 11 = keyUp)
-            if event_type == 10 || event_type == 11 {
-                let keycode = send_u16(event, sel("keyCode"));
-                let vk = cocoa_keycode_to_key(keycode);
-                if vk < 256 { self.key_states[vk] = event_type == 10; }
-            }
-
-            // Track mouse button events
-            match event_type {
-                // 1 = NSLeftMouseDown
-                1 => {
-                    self.mouse_buttons[0] = true;
-                    let loc = send_nspoint(event, sel("locationInWindow"));
-                    self.mouse_x = loc[0];
-                    self.mouse_y = loc[1];
+            match et {
+                // Key down/up
+                10 | 11 => {
+                    let keycode = send_u16(event, sel("keyCode"));
+                    let vk = cocoa_keycode_to_key(keycode);
+                    let mods = get_mods(event);
+                    if vk < 256 { self.key_states[vk] = et == 10; }
+                    if et == 10 {
+                        self.events.push(WindowEvent::key_down(vk as i32, mods));
+                    } else {
+                        self.events.push(WindowEvent::key_up(vk as i32, mods));
+                    }
                 }
-                // 2 = NSLeftMouseUp
-                2 => {
-                    self.mouse_buttons[0] = false;
+                // Mouse down: 1=left, 3=right, 25=other
+                1 | 3 | 25 => {
+                    let btn = match et { 1 => 0, 3 => 1, _ => 2 };
                     let loc = send_nspoint(event, sel("locationInWindow"));
-                    self.mouse_x = loc[0];
-                    self.mouse_y = loc[1];
+                    self.mouse_x = loc[0]; self.mouse_y = loc[1];
+                    self.mouse_buttons[btn as usize] = true;
+                    self.events.push(WindowEvent::mouse_down(btn, loc[0], loc[1]));
                 }
-                // 3 = NSRightMouseDown
-                3 => {
-                    self.mouse_buttons[1] = true;
+                // Mouse up: 2=left, 4=right, 26=other
+                2 | 4 | 26 => {
+                    let btn = match et { 2 => 0, 4 => 1, _ => 2 };
                     let loc = send_nspoint(event, sel("locationInWindow"));
-                    self.mouse_x = loc[0];
-                    self.mouse_y = loc[1];
+                    self.mouse_x = loc[0]; self.mouse_y = loc[1];
+                    self.mouse_buttons[btn as usize] = false;
+                    self.events.push(WindowEvent::mouse_up(btn, loc[0], loc[1]));
                 }
-                // 4 = NSRightMouseUp
-                4 => {
-                    self.mouse_buttons[1] = false;
-                    let loc = send_nspoint(event, sel("locationInWindow"));
-                    self.mouse_x = loc[0];
-                    self.mouse_y = loc[1];
-                }
-                // 25 = NSOtherMouseDown (middle button)
-                25 => {
-                    self.mouse_buttons[2] = true;
-                    let loc = send_nspoint(event, sel("locationInWindow"));
-                    self.mouse_x = loc[0];
-                    self.mouse_y = loc[1];
-                }
-                // 26 = NSOtherMouseUp (middle button)
-                26 => {
-                    self.mouse_buttons[2] = false;
-                    let loc = send_nspoint(event, sel("locationInWindow"));
-                    self.mouse_x = loc[0];
-                    self.mouse_y = loc[1];
-                }
-                // 5 = NSMouseMoved, 6 = NSLeftMouseDragged, 7 = NSRightMouseDragged,
-                // 27 = NSOtherMouseMoved
+                // Mouse moved / dragged
                 5 | 6 | 7 | 27 => {
                     let loc = send_nspoint(event, sel("locationInWindow"));
-                    self.mouse_x = loc[0];
-                    self.mouse_y = loc[1];
+                    self.mouse_x = loc[0]; self.mouse_y = loc[1];
+                    self.events.push(WindowEvent::mouse_move(loc[0], loc[1]));
+                }
+                // Scroll wheel (22)
+                22 => {
+                    type MsgSendCGFloat = unsafe extern "C" fn(Id, Sel) -> CGFloat;
+                    let send_cgf: MsgSendCGFloat = std::mem::transmute(msg_fn());
+                    let dx = send_cgf(event, sel("scrollingDeltaX"));
+                    let dy = send_cgf(event, sel("scrollingDeltaY"));
+                    self.events.push(WindowEvent::mouse_wheel(dx, dy));
                 }
                 _ => {}
             }
@@ -262,11 +263,12 @@ impl CocoaWindow {
             send1ptr(app, sel("sendEvent:"), event);
         }
 
-        // Detect window resize by comparing current frame to stored size
+        // Detect window resize
         let frame = send_rect(self.ns_view, sel("frame"));
         let new_w = frame.width as u32;
         let new_h = frame.height as u32;
         if new_w != self.width || new_h != self.height {
+            self.events.push(WindowEvent::resize(new_w as i32, new_h as i32));
             self.width = new_w;
             self.height = new_h;
             self.resized = true;
