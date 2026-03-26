@@ -7,11 +7,14 @@ members = [
     "runtime",
     "gpu",
     "window",
-    "lsp"
+    "lsp",
+    "plugin"
 ]
+# runtime-wasm is excluded from workspace — built separately for wasm32-wasip1
 exclude = [
     "cranelift-fork",
-    "ci/macro-e2e"
+    "ci/macro-e2e",
+    "runtime-wasm"
 ]
 
 [package]
