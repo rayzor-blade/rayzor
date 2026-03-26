@@ -211,6 +211,8 @@ impl CompileCtx {
                     continue;
                 }
                 if self.ir_func_to_idx.contains_key(func_id) {
+                    let existing_idx = *self.ir_func_to_idx.get(func_id).unwrap();
+                    self.func_name_to_idx.insert(func.name.clone(), existing_idx);
                     continue;
                 }
                 let (params, results) = Self::sig_to_wasm(&func.signature);
@@ -236,6 +238,17 @@ impl CompileCtx {
                 }
                 if let Some(&idx) = self.func_name_to_idx.get(&ext.name) {
                     self.ir_func_to_idx.insert(*ext_id, idx);
+                }
+            }
+        }
+
+        // Ensure ALL functions with code get name mappings.
+        for module in modules {
+            for (func_id, func) in &module.functions {
+                if !func.cfg.blocks.is_empty() {
+                    if let Some(&idx) = self.ir_func_to_idx.get(func_id) {
+                        self.func_name_to_idx.entry(func.name.clone()).or_insert(idx);
+                    }
                 }
             }
         }
@@ -396,11 +409,33 @@ impl CompileCtx {
         let mut export_section = ExportSection::new();
         export_section.export("memory", ExportKind::Memory, 0);
         if let Some(entry_name) = entry_function {
-            if let Some(&idx) = self
+            // Search by name in func_name_to_idx
+            let idx = self
                 .func_name_to_idx
                 .get(entry_name)
-                .or_else(|| self.import_name_to_idx.get(entry_name))
-            {
+                .or_else(|| self.func_name_to_idx.get(&format!("@{}", entry_name)))
+                .or_else(|| {
+                    self.func_name_to_idx
+                        .iter()
+                        .find(|(k, _)| k.ends_with(entry_name) || k.as_str() == entry_name)
+                        .map(|(_, v)| v)
+                })
+                .copied()
+                .or_else(|| {
+                    // Search internal functions by scanning the MIR directly
+                    for internal in &self.internals {
+                        let func = modules
+                            .get(internal.module_idx)
+                            .and_then(|m| m.functions.get(&internal.ir_id));
+                        if let Some(func) = func {
+                            if func.name == entry_name || func.name.ends_with(entry_name) {
+                                return Some(internal.func_idx);
+                            }
+                        }
+                    }
+                    None
+                });
+            if let Some(idx) = idx {
                 export_section.export("_start", ExportKind::Func, idx);
             }
         }
