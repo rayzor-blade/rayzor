@@ -172,13 +172,31 @@ impl CompileCtx {
     }
 
     // ------------------------------------------------------------------
-    // Phase 1a -- imports (extern functions)
+    // Phase 1a -- imports (extern functions that have NO internal body)
     // ------------------------------------------------------------------
 
     fn collect_imports(&mut self, modules: &[&IrModule]) {
+        // First, build a set of IrFunctionIds that have actual code bodies.
+        // These are internal functions and should NOT be imported.
+        let mut has_code: BTreeSet<IrFunctionId> = BTreeSet::new();
+        let mut has_code_name: BTreeSet<String> = BTreeSet::new();
+        for module in modules {
+            for (func_id, func) in &module.functions {
+                if !func.cfg.blocks.is_empty() {
+                    has_code.insert(*func_id);
+                    has_code_name.insert(func.name.clone());
+                }
+            }
+        }
+
         let mut seen: BTreeSet<String> = BTreeSet::new();
+
+        // Import declared externs that have no internal body.
         for module in modules {
             for (_id, ext) in &module.extern_functions {
+                if has_code.contains(&ext.id) || has_code_name.contains(&ext.name) {
+                    continue;
+                }
                 if seen.contains(&ext.name) {
                     if let Some(&idx) = self.import_name_to_idx.get(&ext.name) {
                         self.ir_func_to_idx.insert(ext.id, idx);
@@ -198,6 +216,31 @@ impl CompileCtx {
                 self.ir_func_to_idx.insert(ext.id, func_idx);
             }
         }
+
+        // Also import empty-body functions from module.functions — these are
+        // MIR wrappers for runtime functions (like haxe_trace_string_struct).
+        // In native mode, the cranelift backend links them to runtime symbols.
+        // In WASM mode, they become host imports.
+        for module in modules {
+            for (func_id, func) in &module.functions {
+                if func.cfg.blocks.is_empty()
+                    && !self.ir_func_to_idx.contains_key(func_id)
+                    && !seen.contains(&func.name)
+                {
+                    seen.insert(func.name.clone());
+                    let (params, results) = Self::sig_to_wasm(&func.signature);
+                    let type_idx = self.intern_type(params, results);
+                    let func_idx = self.next_func_idx;
+                    self.next_func_idx += 1;
+                    self.imports.push(ImportedFunc {
+                        name: func.name.clone(),
+                        type_idx,
+                    });
+                    self.import_name_to_idx.insert(func.name.clone(), func_idx);
+                    self.ir_func_to_idx.insert(*func_id, func_idx);
+                }
+            }
+        }
     }
 
     // ------------------------------------------------------------------
@@ -207,12 +250,15 @@ impl CompileCtx {
     fn collect_functions(&mut self, modules: &[&IrModule]) {
         for (mod_idx, module) in modules.iter().enumerate() {
             for (func_id, func) in &module.functions {
-                if func.cfg.blocks.is_empty() {
+                // Skip functions already registered as imports (by ID or name).
+                if self.ir_func_to_idx.contains_key(func_id) {
+                    let idx = *self.ir_func_to_idx.get(func_id).unwrap();
+                    self.func_name_to_idx.insert(func.name.clone(), idx);
                     continue;
                 }
-                if self.ir_func_to_idx.contains_key(func_id) {
-                    let existing_idx = *self.ir_func_to_idx.get(func_id).unwrap();
-                    self.func_name_to_idx.insert(func.name.clone(), existing_idx);
+                if let Some(&idx) = self.import_name_to_idx.get(&func.name) {
+                    self.ir_func_to_idx.insert(*func_id, idx);
+                    self.func_name_to_idx.insert(func.name.clone(), idx);
                     continue;
                 }
                 let (params, results) = Self::sig_to_wasm(&func.signature);
@@ -513,6 +559,11 @@ impl<'a> FunctionLowerer<'a> {
             block_index: HashMap::new(),
         };
 
+        // Early return for empty-body functions (extern stubs).
+        if ir_func.cfg.blocks.is_empty() {
+            return low.build_body();
+        }
+
         // Map parameter registers.
         for (i, param) in ir_func.signature.parameters.iter().enumerate() {
             low.reg_to_local.insert(param.reg, i as u32);
@@ -621,7 +672,11 @@ impl<'a> FunctionLowerer<'a> {
         let n = self.block_order.len();
 
         if n == 0 {
+            // Empty stub — return default value if non-void, otherwise just end.
             let mut f = Function::new(self.local_types.iter().map(|t| (1, *t)));
+            if !matches!(self.ir_func.signature.return_type, IrType::Void) {
+                emit_zero(&mut f, ir_type_to_wasm(&self.ir_func.signature.return_type));
+            }
             f.instruction(&Instruction::End);
             return Ok(f);
         }

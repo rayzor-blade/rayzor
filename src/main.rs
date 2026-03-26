@@ -3076,6 +3076,16 @@ const rayzor = {{
     }}
   }},
 
+  // haxe_trace_string_struct — MIR wrapper for trace (takes string pointer)
+  haxe_trace_string_struct: (ptr) => {{
+    try {{
+      const str = readString(ptr);
+      console.log(str);
+    }} catch (e) {{
+      console.log("[trace: ptr=" + ptr + "]");
+    }}
+  }},
+
   // String operations
   haxe_string_alloc: (len) => writeString("\0".repeat(Number(len))),
   haxe_string_concat: (a, b) => {{
