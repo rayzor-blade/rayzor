@@ -469,6 +469,31 @@ impl LinkerCtx {
             let user_orig_idx = i as u32;
             if imp.module == "rayzor" {
                 if let Some(&merged_idx) = rt_export_to_merged.get(imp.name.as_str()) {
+                    // Verify signature compatibility
+                    let user_type = self.user_type_remap.get(&imp.type_idx).copied().unwrap_or(0);
+                    let rt_func_idx_in_merged = merged_idx as usize;
+                    let rt_internal_idx = if merged_idx >= self.n_wasi_imports {
+                        (merged_idx - self.n_wasi_imports) as usize
+                    } else { 0 };
+                    let rt_type = if rt_internal_idx < rt.functions.len() {
+                        self.rt_type_remap.get(&rt.functions[rt_internal_idx].type_idx).copied().unwrap_or(0)
+                    } else { 0 };
+                    if user_type != rt_type {
+                        // Signature mismatch — generate stub instead of linking
+                        // to avoid WASM validation errors. The runtime function
+                        // has a different ABI (e.g., sret vs return).
+                        let stub_merged_idx = next_func_idx;
+                        next_func_idx += 1;
+                        self.user_func_remap.insert(user_orig_idx, stub_merged_idx);
+                        let merged_type_idx = self
+                            .user_type_remap
+                            .get(&imp.type_idx)
+                            .copied()
+                            .unwrap_or(0);
+                        self.stub_type_indices.push(merged_type_idx);
+                        self.unresolved_imports.push(format!("{}(sig mismatch)", imp.name));
+                        continue;
+                    }
                     // Resolved: user import points to runtime function.
                     self.user_func_remap.insert(user_orig_idx, merged_idx);
                 } else {
