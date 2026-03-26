@@ -181,6 +181,10 @@ enum Commands {
         /// Show what would be built without building
         #[arg(long)]
         dry_run: bool,
+
+        /// Target platform: native (default), wasm, wasm-wasi
+        #[arg(long, default_value = "native")]
+        target: String,
     },
 
     /// Show information about the compiler
@@ -603,7 +607,14 @@ fn main() {
             strip,
             opt_level,
             dry_run,
-        } => build_hxml(file, verbose, output, strip, opt_level, dry_run),
+            target,
+        } => {
+            if target == "wasm" || target == "wasm-wasi" || target == "wasm32" {
+                cmd_build_wasm(file, output, target)
+            } else {
+                build_hxml(file, verbose, output, strip, opt_level, dry_run)
+            }
+        }
         Commands::Info { features, tiers } => {
             show_info(features, tiers);
             Ok(())
@@ -2950,6 +2961,63 @@ fn cmd_dump(
         println!();
         println!("{}", mir_text);
     }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// build command (AOT compilation to WASM, C, etc.)
+// ---------------------------------------------------------------------------
+
+fn cmd_build_wasm(
+    file: Option<PathBuf>,
+    output: Option<PathBuf>,
+    target: String,
+) -> Result<(), String> {
+    let file = file.ok_or_else(|| "file path required for WASM build".to_string())?;
+    let source = std::fs::read_to_string(&file)
+        .map_err(|e| format!("failed to read {}: {}", file.display(), e))?;
+    let filename = file.to_string_lossy().to_string();
+
+    println!("Building {} [target: {}]...", file.display(), target);
+
+    // Compile Haxe → MIR using the standard pipeline
+    let config = compiler::compilation::CompilationConfig::default();
+    let mut unit = compiler::compilation::CompilationUnit::new(config);
+    unit.set_source_paths(vec![PathBuf::from("compiler/haxe-std")]);
+
+    unit.add_file(&filename, &source)
+        .map_err(|e| format!("parse error: {:?}", e))?;
+
+    let _typed_files = unit.lower_to_tast().map_err(|errors| {
+        for e in &errors {
+            eprintln!("Error: {}", e.message);
+        }
+        format!("{} compilation error(s)", errors.len())
+    })?;
+
+    let mir_modules = unit.get_mir_modules();
+    if mir_modules.is_empty() {
+        return Err("no MIR modules produced".to_string());
+    }
+    let mir_module = (**mir_modules.last().unwrap()).clone();
+
+    // MIR → WASM via wasm-encoder
+    let wasm_bytes = compiler::codegen::wasm_backend::WasmBackend::compile(
+        &[&mir_module],
+        Some("main"),
+    )?;
+
+    let out_path = output.unwrap_or_else(|| file.with_extension("wasm"));
+    std::fs::write(&out_path, &wasm_bytes)
+        .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
+
+    println!(
+        "  wrote {} ({:.1} KB, {} functions)",
+        out_path.display(),
+        wasm_bytes.len() as f64 / 1024.0,
+        mir_module.functions.len()
+    );
 
     Ok(())
 }

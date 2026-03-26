@@ -5,7 +5,7 @@
 /// - MIR Interpreter (instant startup, Phase 0)
 /// - Cranelift (JIT with tiered compilation, Phases 1-3)
 /// - LLVM (maximum optimization, Phase 4)
-/// - WebAssembly (cross-platform AOT - future)
+/// - WebAssembly (cross-platform AOT, browser + WASI)
 pub mod aot_compiler;
 pub mod c_backend;
 pub mod cranelift_backend;
@@ -15,6 +15,7 @@ pub mod llvm_jit_backend;
 pub mod mir_interpreter;
 pub mod profiling;
 pub mod tiered_backend;
+pub mod wasm_backend;
 pub mod wgsl_transpiler;
 
 // Apple Silicon-specific JIT memory management

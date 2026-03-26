@@ -36,6 +36,9 @@ cranelift-frontend = { git = "https://github.com/darmie/wasmtime", branch = "fix
 cranelift-native = { git = "https://github.com/darmie/wasmtime", branch = "fix-plt-aarch64", package = "cranelift-native" }
 target-lexicon = "0.12"
 
+# WASM backend — direct MIR → WebAssembly via wasm-encoder
+wasm-encoder = "0.245"
+
 # LLVM backend (optional, for Tier 3 optimization and AOT)
 inkwell = { version = "0.5", features = ["llvm18-0"], optional = true}
 llvm-sys = { version = "180", optional = true }
