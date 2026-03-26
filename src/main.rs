@@ -3172,8 +3172,48 @@ async function run() {{
     wasmBytes = await resp.arrayBuffer();
   }}
 
+  // WASI polyfill (minimal — just fd_write for stdout)
+  const wasi_snapshot_preview1 = {{
+    fd_write: (fd, iovs_ptr, iovs_len, nwritten_ptr) => {{
+      if (!memory) return 0;
+      try {{
+        const mem = new Uint8Array(memory.buffer);
+        const view = new DataView(memory.buffer);
+        let written = 0;
+        for (let i = 0; i < iovs_len; i++) {{
+          const base = iovs_ptr + i * 8;
+          if (base + 8 > mem.length) break;
+          const ptr = view.getUint32(base, true);
+          const len = view.getUint32(base + 4, true);
+          if (len === 0 || ptr + len > mem.length) continue;
+          const bytes = mem.slice(ptr, ptr + len);
+          if (fd === 1 || fd === 2) {{
+            if (isNode) {{ process.stdout.write(Buffer.from(bytes)); }}
+            else {{ console.log(new TextDecoder().decode(bytes)); }}
+          }}
+          written += len;
+        }}
+        if (nwritten_ptr + 4 <= mem.length) {{
+          view.setUint32(nwritten_ptr, written, true);
+        }}
+        return 0;
+      }} catch(e) {{ return 0; }}
+    }},
+    environ_get: () => 0,
+    environ_sizes_get: (count_ptr, buf_size_ptr) => {{
+      if (memory) {{
+        const view = new DataView(memory.buffer);
+        view.setUint32(count_ptr, 0, true);
+        view.setUint32(buf_size_ptr, 0, true);
+      }}
+      return 0;
+    }},
+    proc_exit: (code) => {{ if (isNode) process.exit(code); }},
+  }};
+
   const {{ instance }} = await WebAssembly.instantiate(wasmBytes, {{
     rayzor: rayzorProxy,
+    wasi_snapshot_preview1,
   }});
 
   memory = instance.exports.memory;
