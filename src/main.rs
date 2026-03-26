@@ -2989,16 +2989,28 @@ fn cmd_build_wasm(
         false,
     )?;
 
-    let wasm_bytes = compiler::codegen::wasm_backend::WasmBackend::compile(
+    let user_wasm = compiler::codegen::wasm_backend::WasmBackend::compile(
         &[&mir_module],
         Some("main"),
     )?;
 
+    // Link with pre-built WASM runtime (if available)
+    let runtime_wasm_path = find_wasm_runtime();
+    let linked_wasm = if let Some(rt_path) = &runtime_wasm_path {
+        let rt_bytes = std::fs::read(rt_path)
+            .map_err(|e| format!("failed to read runtime WASM: {}", e))?;
+        println!("  linking with {} ({:.1} KB)", rt_path.display(), rt_bytes.len() as f64 / 1024.0);
+        compiler::codegen::wasm_linker::WasmLinker::link(&user_wasm, &rt_bytes)?
+    } else {
+        println!("  warning: WASM runtime not found, output needs JS harness");
+        user_wasm
+    };
+
     let out_path = output.unwrap_or_else(|| file.with_extension("wasm"));
-    std::fs::write(&out_path, &wasm_bytes)
+    std::fs::write(&out_path, &linked_wasm)
         .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
 
-    // Generate JS runtime harness alongside .wasm
+    // Generate JS harness (optional, for browser use)
     let js_path = out_path.with_extension("js");
     let wasm_filename = out_path.file_name().unwrap().to_string_lossy();
     let js_harness = generate_wasm_js_harness(&wasm_filename);
@@ -3006,15 +3018,39 @@ fn cmd_build_wasm(
         .map_err(|e| format!("failed to write {}: {}", js_path.display(), e))?;
 
     println!(
-        "  wrote {} ({:.1} KB, {} functions)",
+        "  wrote {} ({:.1} KB)",
         out_path.display(),
-        wasm_bytes.len() as f64 / 1024.0,
-        mir_module.functions.len()
+        linked_wasm.len() as f64 / 1024.0,
     );
-    println!("  wrote {} (runtime harness)", js_path.display());
-    println!("\n  Run: node {}", js_path.display());
+    if runtime_wasm_path.is_some() {
+        println!("\n  Run: wasmtime {}", out_path.display());
+    }
+    println!("  Run: node {}", js_path.display());
 
     Ok(())
+}
+
+/// Find the pre-built WASM runtime library.
+/// Searches: ./runtime-wasm/target/..., ~/.rayzor/lib/, alongside the rayzor binary.
+fn find_wasm_runtime() -> Option<PathBuf> {
+    let candidates = [
+        // Development: built from source
+        PathBuf::from("runtime-wasm/target/wasm32-wasip1/release/rayzor_runtime_wasm.wasm"),
+        // Installed: alongside rayzor binary
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("rayzor_runtime_wasm.wasm")))
+            .unwrap_or_default(),
+        // User home
+        dirs_next().join("lib/rayzor_runtime_wasm.wasm"),
+    ];
+    candidates.into_iter().find(|p| p.exists())
+}
+
+fn dirs_next() -> PathBuf {
+    std::env::var("HOME")
+        .map(|h| PathBuf::from(h).join(".rayzor"))
+        .unwrap_or_else(|_| PathBuf::from(".rayzor"))
 }
 
 fn generate_wasm_js_harness(wasm_filename: &str) -> String {

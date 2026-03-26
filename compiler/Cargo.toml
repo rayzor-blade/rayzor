@@ -38,6 +38,7 @@ target-lexicon = "0.12"
 
 # WASM backend — direct MIR → WebAssembly via wasm-encoder
 wasm-encoder = "0.245"
+wasmparser = "0.245"  # WASM linker — parse runtime .wasm for merging
 
 # LLVM backend (optional, for Tier 3 optimization and AOT)
 inkwell = { version = "0.5", features = ["llvm18-0"], optional = true}
