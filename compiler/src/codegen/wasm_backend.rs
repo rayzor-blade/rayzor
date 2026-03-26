@@ -553,7 +553,19 @@ impl<'a> FunctionLowerer<'a> {
             for inst in &block.instructions {
                 if let Some(dest) = inst.dest() {
                     if seen.insert(dest) {
-                        let vt = self.reg_wasm_type(dest);
+                        // Use the instruction's own type hint when available (e.g., Undef/Const
+                        // carry their type explicitly), falling back to register_types.
+                        let vt = match inst {
+                            IrInstruction::Undef { ty, .. } => ir_type_to_wasm(ty),
+                            IrInstruction::Const { value, .. } => {
+                                match value {
+                                    IrValue::F32(_) => ValType::F32,
+                                    IrValue::F64(_) => ValType::F64,
+                                    _ => self.reg_wasm_type(dest),
+                                }
+                            }
+                            _ => self.reg_wasm_type(dest),
+                        };
                         self.alloc_local(dest, vt);
                     }
                 }
@@ -717,6 +729,14 @@ impl<'a> FunctionLowerer<'a> {
         f.instruction(&Instruction::End);
         // Close $exit.
         f.instruction(&Instruction::End);
+
+        // If function returns a value, push a default (unreachable path safety).
+        // All real returns use `return` inside the dispatch loop.
+        let ret_ty = ir_type_to_wasm(&self.ir_func.signature.return_type);
+        if !matches!(self.ir_func.signature.return_type, IrType::Void) {
+            emit_zero(&mut f, ret_ty);
+        }
+
         // Function end.
         f.instruction(&Instruction::End);
 
@@ -814,8 +834,8 @@ impl<'a> FunctionLowerer<'a> {
 
                 for (case_val, case_target) in cases {
                     self.get_reg(f, *value);
-                    f.instruction(&Instruction::I64Const(*case_val));
-                    f.instruction(&Instruction::I64Eq);
+                    f.instruction(&Instruction::I32Const(*case_val as i32));
+                    f.instruction(&Instruction::I32Eq);
                     f.instruction(&Instruction::If(BlockType::Empty));
                     {
                         self.emit_phi_set(f, current_bid, *case_target);
@@ -1255,8 +1275,10 @@ impl<'a> FunctionLowerer<'a> {
             }
 
             // === Undef ===
-            IrInstruction::Undef { dest, ty } => {
-                emit_zero(f, ir_type_to_wasm(ty));
+            IrInstruction::Undef { dest, .. } => {
+                // Use the local's actual WASM type, not the IR type, to avoid
+                // mismatches where F32/F64 register is allocated as I32 local.
+                emit_zero(f, self.reg_wasm_type(*dest));
                 self.set_reg(f, *dest);
             }
 
@@ -1421,11 +1443,11 @@ impl<'a> FunctionLowerer<'a> {
             IrValue::I8(v) => { f.instruction(&Instruction::I32Const(*v as i32)); }
             IrValue::I16(v) => { f.instruction(&Instruction::I32Const(*v as i32)); }
             IrValue::I32(v) => { f.instruction(&Instruction::I32Const(*v)); }
-            IrValue::I64(v) => { f.instruction(&Instruction::I64Const(*v)); }
+            IrValue::I64(v) => { f.instruction(&Instruction::I32Const(*v as i32)); }
             IrValue::U8(v) => { f.instruction(&Instruction::I32Const(*v as i32)); }
             IrValue::U16(v) => { f.instruction(&Instruction::I32Const(*v as i32)); }
             IrValue::U32(v) => { f.instruction(&Instruction::I32Const(*v as i32)); }
-            IrValue::U64(v) => { f.instruction(&Instruction::I64Const(*v as i64)); }
+            IrValue::U64(v) => { f.instruction(&Instruction::I32Const(*v as i32)); }
             IrValue::F32(v) => { f.instruction(&Instruction::F32Const(Ieee32::from(*v))); }
             IrValue::F64(v) => { f.instruction(&Instruction::F64Const(Ieee64::from(*v))); }
             IrValue::String(s) => {
@@ -1675,20 +1697,19 @@ impl<'a> FunctionLowerer<'a> {
 // ===========================================================================
 
 /// Map an IR type to a WASM value type.
+/// Map an IR type to a WASM value type.
+///
+/// WASM32 mode: ALL integers (including I64/U64) map to i32.
+/// Rayzor's `Int` is i64 in native but i32 in WASM32 — same as how
+/// Haxe targets JavaScript with 32-bit integers. Only F64 stays 64-bit.
+/// This eliminates the pointer width mismatch entirely.
 fn ir_type_to_wasm(ty: &IrType) -> ValType {
     match ty {
-        IrType::Bool | IrType::I8 | IrType::I16 | IrType::I32 | IrType::U8 | IrType::U16
-        | IrType::U32 => ValType::I32,
-        IrType::I64 | IrType::U64 => ValType::I64,
         IrType::F32 => ValType::F32,
         IrType::F64 => ValType::F64,
-        IrType::Ptr(_) | IrType::Ref(_) => ValType::I32, // wasm32
-        IrType::Void => ValType::I32, // when used as a value placeholder
-        IrType::String | IrType::Array(..) | IrType::Slice(_) | IrType::Struct { .. }
-        | IrType::Union { .. } | IrType::Opaque { .. } | IrType::Any | IrType::Generic { .. }
-        | IrType::TypeVar(_) => ValType::I32, // pointer
-        IrType::Function { .. } => ValType::I32, // table index
-        IrType::Vector { .. } => ValType::I32, // unsupported, placeholder
+        // Everything else is i32 in WASM32: integers, pointers, booleans,
+        // strings, arrays, structs, unions, opaques, function refs.
+        _ => ValType::I32,
     }
 }
 
