@@ -938,6 +938,7 @@ pub extern "C" fn haxe_float_to_string(out: i32, value: f64) {
 }
 
 /// Internal: format an f64 into a byte buffer. Returns number of bytes written.
+#[allow(clippy::manual_range_contains)]
 fn float_to_buf(value: f64, buf: &mut [u8; 32]) -> usize {
     if value.is_nan() {
         let s = b"NaN";
@@ -1005,4 +1006,861 @@ fn float_to_buf(value: f64, buf: &mut [u8; 32]) -> usize {
     }
 
     pos
+}
+
+// ============================================================================
+// Section 9: Memory — malloc / free / realloc
+// ============================================================================
+//
+// NOTE: On wasm32-wasip1, libc's malloc/free symbols are provided by dlmalloc
+// (linked into every WASI binary). Exporting our own `malloc`/`free` would
+// cause duplicate-symbol conflicts. Instead we expose them under prefixed names.
+// The compiler's WASM backend should map to these when needed.
+
+/// Allocate `size` bytes via `rt_alloc`. Prefixed to avoid libc collision.
+#[no_mangle]
+pub extern "C" fn rayzor_malloc(size: i32) -> i32 {
+    rt_alloc(size as usize)
+}
+
+/// Free — no-op in Phase 1 (bump allocator). Prefixed to avoid libc collision.
+#[no_mangle]
+pub extern "C" fn rayzor_free(_ptr: i32) {
+    // Intentional no-op. A proper GC will replace this.
+}
+
+/// Reallocate: allocate new block + copy old data. Prefixed to avoid libc collision.
+#[no_mangle]
+pub extern "C" fn rayzor_realloc(ptr: i32, new_size: i32) -> i32 {
+    if new_size <= 0 {
+        return 0;
+    }
+    let new_ptr = rt_alloc(new_size as usize);
+    if new_ptr == 0 {
+        return 0;
+    }
+    if ptr != 0 {
+        unsafe {
+            // Copy min(new_size, old data). We don't track old_size, so copy new_size
+            // bytes (safe because new allocation is at least new_size).
+            ptr::copy_nonoverlapping(ptr as *const u8, new_ptr as *mut u8, new_size as usize);
+        }
+    }
+    new_ptr
+}
+
+// ============================================================================
+// Section 10: Additional String Functions
+// ============================================================================
+
+/// Concatenate two HaxeStrings, write result to `out`.
+#[no_mangle]
+pub extern "C" fn haxe_string_concat(out: i32, a: i32, b: i32) {
+    // Delegate to existing concat implementation.
+    haxe_string_concat_sret(out, a, b);
+}
+
+/// Convert an int to a HaxeString, write to `out`.
+#[no_mangle]
+pub extern "C" fn haxe_string_from_int(out: i32, val: i32) {
+    haxe_int_to_string(out, val);
+}
+
+/// Convert a float to a HaxeString, write to `out`.
+#[no_mangle]
+pub extern "C" fn haxe_string_from_float(out: i32, val: f64) {
+    haxe_float_to_string(out, val);
+}
+
+/// Convert a bool to a HaxeString ("true"/"false"), write to `out`.
+#[no_mangle]
+pub extern "C" fn haxe_string_from_bool(out: i32, val: i32) {
+    if val != 0 {
+        let s = b"true";
+        haxe_string_from_bytes(out, s.as_ptr() as i32, s.len() as i32);
+    } else {
+        let s = b"false";
+        haxe_string_from_bytes(out, s.as_ptr() as i32, s.len() as i32);
+    }
+}
+
+/// Copy a HaxeString to `out`.
+#[no_mangle]
+pub extern "C" fn haxe_string_from_string(out: i32, s: i32) {
+    if s == 0 {
+        haxe_string_from_bytes(out, 0, 0);
+        return;
+    }
+    unsafe {
+        let (data_ptr, len, _) = read_haxe_string(s);
+        haxe_string_from_bytes(out, data_ptr as i32, len as i32);
+    }
+}
+
+/// Return a new HaxeString* containing the single character at `idx`.
+/// Returns pointer to a newly allocated HaxeString struct.
+#[no_mangle]
+pub extern "C" fn haxe_string_char_at_ptr(s: i32, idx: i32) -> i32 {
+    // Allocate a HaxeString struct (12 bytes)
+    let out = rt_alloc(12);
+    if out == 0 {
+        return 0;
+    }
+    if s == 0 || idx < 0 {
+        haxe_string_from_bytes(out, 0, 0);
+        return out;
+    }
+    unsafe {
+        let (data_ptr, len, _) = read_haxe_string(s);
+        let index = idx as u32;
+        if index >= len {
+            haxe_string_from_bytes(out, 0, 0);
+            return out;
+        }
+        let byte_ptr = (data_ptr as *const u8).add(index as usize);
+        haxe_string_from_bytes(out, byte_ptr as i32, 1);
+    }
+    out
+}
+
+/// Find substring `sub` in `s` starting at `start`. Returns index (i32) or -1.
+/// Pointer-returning variant (same value, different name for ABI consistency).
+#[no_mangle]
+pub extern "C" fn haxe_string_index_of_ptr(s: i32, sub: i32, start: i32) -> i32 {
+    haxe_string_index_of(s, sub, start)
+}
+
+/// Find last occurrence of `sub` in `s` searching backwards from `start`.
+/// Returns byte index or -1.
+#[no_mangle]
+pub extern "C" fn haxe_string_last_index_of_ptr(s: i32, sub: i32, start: i32) -> i32 {
+    if s == 0 || sub == 0 {
+        return -1;
+    }
+    unsafe {
+        let (s_ptr, s_len, _) = read_haxe_string(s);
+        let (sub_ptr, sub_len, _) = read_haxe_string(sub);
+
+        if sub_len == 0 || s_len < sub_len {
+            return -1;
+        }
+
+        let haystack = slice::from_raw_parts(s_ptr as *const u8, s_len as usize);
+        let needle = slice::from_raw_parts(sub_ptr as *const u8, sub_len as usize);
+
+        // start == -1 or start >= s_len means search from end
+        let max_start = (s_len - sub_len) as usize;
+        let search_from = if start < 0 || (start as usize) > max_start {
+            max_start
+        } else {
+            start as usize
+        };
+
+        let mut i = search_from as isize;
+        while i >= 0 {
+            let idx = i as usize;
+            if &haystack[idx..idx + sub_len as usize] == needle {
+                return idx as i32;
+            }
+            i -= 1;
+        }
+
+        -1
+    }
+}
+
+/// Extract substring [start, end). Returns new HaxeString*.
+#[no_mangle]
+pub extern "C" fn haxe_string_substring_ptr(s: i32, start: i32, end: i32) -> i32 {
+    let out = rt_alloc(12);
+    if out == 0 {
+        return 0;
+    }
+    haxe_string_substring(out, s, start, end);
+    out
+}
+
+/// Extract `len` characters starting at `pos`. Returns new HaxeString*.
+/// Follows Haxe semantics: negative pos counts from end, negative len means to-end.
+#[no_mangle]
+pub extern "C" fn haxe_string_substr_ptr(s: i32, pos: i32, len: i32) -> i32 {
+    let out = rt_alloc(12);
+    if out == 0 {
+        return 0;
+    }
+    if s == 0 {
+        haxe_string_from_bytes(out, 0, 0);
+        return out;
+    }
+    unsafe {
+        let (_, s_len, _) = read_haxe_string(s);
+        let slen = s_len as i32;
+
+        // Resolve negative pos
+        let actual_pos = if pos < 0 {
+            (slen + pos).max(0)
+        } else {
+            pos.min(slen)
+        };
+
+        // Resolve len
+        let actual_len = if len < 0 {
+            slen - actual_pos
+        } else {
+            len.min(slen - actual_pos)
+        };
+
+        if actual_len <= 0 {
+            haxe_string_from_bytes(out, 0, 0);
+            return out;
+        }
+
+        let end = actual_pos + actual_len;
+        haxe_string_substring(out, s, actual_pos, end);
+    }
+    out
+}
+
+/// Split string `s` by `delimiter`. Returns a HaxeArray* of HaxeString*.
+#[no_mangle]
+pub extern "C" fn haxe_string_split_array(s: i32, delimiter: i32) -> i32 {
+    let arr = haxe_array_new();
+    if arr == 0 {
+        return 0;
+    }
+    if s == 0 {
+        return arr;
+    }
+    unsafe {
+        let (s_ptr, s_len, _) = read_haxe_string(s);
+        let (d_ptr, d_len, _) = if delimiter != 0 {
+            read_haxe_string(delimiter)
+        } else {
+            // null delimiter: return array with original string
+            let str_out = rt_alloc(12);
+            if str_out != 0 {
+                haxe_string_from_bytes(str_out, s_ptr as i32, s_len as i32);
+                haxe_array_push_i64(arr, str_out);
+            }
+            return arr;
+        };
+
+        if d_len == 0 {
+            // Empty delimiter: split into individual characters
+            let data = s_ptr as *const u8;
+            for i in 0..s_len {
+                let ch_out = rt_alloc(12);
+                if ch_out != 0 {
+                    let ch_ptr = data.add(i as usize);
+                    haxe_string_from_bytes(ch_out, ch_ptr as i32, 1);
+                    haxe_array_push_i64(arr, ch_out);
+                }
+            }
+            return arr;
+        }
+
+        let haystack = slice::from_raw_parts(s_ptr as *const u8, s_len as usize);
+        let needle = slice::from_raw_parts(d_ptr as *const u8, d_len as usize);
+
+        let mut start = 0usize;
+        while start <= s_len as usize {
+            // Find next occurrence of delimiter
+            let remaining = &haystack[start..];
+            let found = remaining
+                .windows(d_len as usize)
+                .position(|w| w == needle);
+
+            match found {
+                Some(offset) => {
+                    let part_len = offset;
+                    let part_out = rt_alloc(12);
+                    if part_out != 0 {
+                        let part_ptr = (s_ptr as *const u8).add(start);
+                        haxe_string_from_bytes(part_out, part_ptr as i32, part_len as i32);
+                        haxe_array_push_i64(arr, part_out);
+                    }
+                    start += offset + d_len as usize;
+                }
+                None => {
+                    // No more delimiters — add remaining
+                    let part_len = s_len as usize - start;
+                    let part_out = rt_alloc(12);
+                    if part_out != 0 {
+                        let part_ptr = (s_ptr as *const u8).add(start);
+                        haxe_string_from_bytes(part_out, part_ptr as i32, part_len as i32);
+                        haxe_array_push_i64(arr, part_out);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    arr
+}
+
+// ============================================================================
+// Section 11: Additional Array Functions
+// ============================================================================
+
+/// Set an i32 element at index.
+#[no_mangle]
+pub extern "C" fn haxe_array_set_i64(arr: i32, idx: i32, val: i32) {
+    if arr == 0 || idx < 0 {
+        return;
+    }
+    unsafe {
+        let (data_ptr, len, _, _) = read_array(arr);
+        let index = idx as u32;
+        if index >= len {
+            return;
+        }
+        *(data_ptr as *mut i32).add(index as usize) = val;
+    }
+}
+
+/// Get an f64 element at index. Reads 8 bytes (two i32 slots).
+/// NOTE: f64 values occupy 2 consecutive i32 slots in the array.
+#[no_mangle]
+pub extern "C" fn haxe_array_get_f64(arr: i32, idx: i32) -> f64 {
+    if arr == 0 || idx < 0 {
+        return 0.0;
+    }
+    unsafe {
+        let (data_ptr, len, _, _) = read_array(arr);
+        let index = idx as u32;
+        if index >= len {
+            return 0.0;
+        }
+        // Read i32 from slot, reinterpret bits as f32, then promote to f64.
+        // For proper f64 storage, the compiler stores as two slots or uses i32-punned values.
+        // Simple approach: read the i32 slot value and convert to f64.
+        let val = *(data_ptr as *const i32).add(index as usize);
+        val as f64
+    }
+}
+
+/// Set an f64 element at index. Stores as i32 (truncated bits).
+#[no_mangle]
+pub extern "C" fn haxe_array_set_f64(arr: i32, idx: i32, val: f64) {
+    if arr == 0 || idx < 0 {
+        return;
+    }
+    unsafe {
+        let (data_ptr, len, _, _) = read_array(arr);
+        let index = idx as u32;
+        if index >= len {
+            return;
+        }
+        // Store f64 as i32 (matching get_f64 convention).
+        *(data_ptr as *mut i32).add(index as usize) = val as i32;
+    }
+}
+
+/// Set array element at index to null (0).
+#[no_mangle]
+pub extern "C" fn haxe_array_set_null(arr: i32, idx: i32) {
+    haxe_array_set_i64(arr, idx, 0);
+}
+
+/// Pop the last i32 element. Returns 0 if empty.
+#[no_mangle]
+pub extern "C" fn haxe_array_pop_i64(arr: i32) -> i32 {
+    if arr == 0 {
+        return 0;
+    }
+    unsafe {
+        let (data_ptr, len, _, _) = read_array(arr);
+        if len == 0 {
+            return 0;
+        }
+        let val = *(data_ptr as *const i32).add((len - 1) as usize);
+        // Decrement length
+        let h = arr as *mut u32;
+        *h.add(1) = len - 1;
+        val
+    }
+}
+
+/// Pop the last element as a boxed pointer. Returns 0 if empty.
+#[no_mangle]
+pub extern "C" fn haxe_array_pop_ptr(arr: i32) -> i32 {
+    haxe_array_pop_i64(arr)
+}
+
+/// Remove and return the first element. Returns 0 if empty.
+#[no_mangle]
+pub extern "C" fn haxe_array_shift(arr: i32) -> i32 {
+    if arr == 0 {
+        return 0;
+    }
+    unsafe {
+        let (data_ptr, len, _, _) = read_array(arr);
+        if len == 0 {
+            return 0;
+        }
+        let data = data_ptr as *mut i32;
+        let val = *data;
+        // Shift remaining elements left
+        if len > 1 {
+            ptr::copy(data.add(1), data, (len - 1) as usize);
+        }
+        let h = arr as *mut u32;
+        *h.add(1) = len - 1;
+        val
+    }
+}
+
+/// Shift returning a pointer value.
+#[no_mangle]
+pub extern "C" fn haxe_array_shift_ptr(arr: i32) -> i32 {
+    haxe_array_shift(arr)
+}
+
+/// Insert an element at the beginning of the array.
+#[no_mangle]
+pub extern "C" fn haxe_array_unshift(arr: i32, val: i32) {
+    if arr == 0 {
+        return;
+    }
+    unsafe {
+        array_ensure_capacity(arr);
+        let (data_ptr, len, _, _) = read_array(arr);
+        let data = data_ptr as *mut i32;
+        // Shift existing elements right
+        if len > 0 {
+            ptr::copy(data, data.add(1), len as usize);
+        }
+        *data = val;
+        let h = arr as *mut u32;
+        *h.add(1) = len + 1;
+    }
+}
+
+/// Find first index of `val` in array. Returns -1 if not found.
+#[no_mangle]
+pub extern "C" fn haxe_array_index_of(arr: i32, val: i32) -> i32 {
+    if arr == 0 {
+        return -1;
+    }
+    unsafe {
+        let (data_ptr, len, _, _) = read_array(arr);
+        let data = data_ptr as *const i32;
+        for i in 0..len {
+            if *data.add(i as usize) == val {
+                return i as i32;
+            }
+        }
+        -1
+    }
+}
+
+/// Find last index of `val` in array. Returns -1 if not found.
+#[no_mangle]
+pub extern "C" fn haxe_array_last_index_of(arr: i32, val: i32) -> i32 {
+    if arr == 0 {
+        return -1;
+    }
+    unsafe {
+        let (data_ptr, len, _, _) = read_array(arr);
+        if len == 0 {
+            return -1;
+        }
+        let data = data_ptr as *const i32;
+        let mut i = (len - 1) as isize;
+        while i >= 0 {
+            if *data.add(i as usize) == val {
+                return i as i32;
+            }
+            i -= 1;
+        }
+        -1
+    }
+}
+
+/// Check if array contains `val`. Returns 1 (true) or 0 (false).
+#[no_mangle]
+pub extern "C" fn haxe_array_contains(arr: i32, val: i32) -> i32 {
+    if haxe_array_index_of(arr, val) >= 0 { 1 } else { 0 }
+}
+
+/// Return a new array containing elements from `start` to `end` (exclusive).
+#[no_mangle]
+pub extern "C" fn haxe_array_slice(arr: i32, start: i32, end: i32) -> i32 {
+    let result = haxe_array_new();
+    if result == 0 || arr == 0 {
+        return result;
+    }
+    unsafe {
+        let (data_ptr, len, _, _) = read_array(arr);
+        let slen = len as i32;
+
+        // Resolve negative indices
+        let s = if start < 0 { (slen + start).max(0) } else { start.min(slen) };
+        let e = if end < 0 { (slen + end).max(0) } else { end.min(slen) };
+
+        if s >= e {
+            return result;
+        }
+
+        let data = data_ptr as *const i32;
+        for i in s..e {
+            haxe_array_push_i64(result, *data.add(i as usize));
+        }
+    }
+    result
+}
+
+/// Return a shallow copy of the array.
+#[no_mangle]
+pub extern "C" fn haxe_array_copy(arr: i32) -> i32 {
+    let result = haxe_array_new();
+    if result == 0 || arr == 0 {
+        return result;
+    }
+    unsafe {
+        let (data_ptr, len, _, _) = read_array(arr);
+        let data = data_ptr as *const i32;
+        for i in 0..len {
+            haxe_array_push_i64(result, *data.add(i as usize));
+        }
+    }
+    result
+}
+
+/// Concatenate two arrays, returning a new array.
+#[no_mangle]
+pub extern "C" fn haxe_array_concat(arr: i32, other: i32) -> i32 {
+    let result = haxe_array_copy(arr);
+    if result == 0 || other == 0 {
+        return result;
+    }
+    unsafe {
+        let (data_ptr, len, _, _) = read_array(other);
+        let data = data_ptr as *const i32;
+        for i in 0..len {
+            haxe_array_push_i64(result, *data.add(i as usize));
+        }
+    }
+    result
+}
+
+/// Resize the array to `new_len`. Truncates if shorter, zero-fills if longer.
+#[no_mangle]
+pub extern "C" fn haxe_array_resize(arr: i32, new_len: i32) {
+    if arr == 0 || new_len < 0 {
+        return;
+    }
+    unsafe {
+        let (data_ptr, len, cap, elem_size) = read_array(arr);
+        let nl = new_len as u32;
+
+        if nl <= len {
+            // Truncate
+            let h = arr as *mut u32;
+            *h.add(1) = nl;
+            return;
+        }
+
+        // Need to grow — ensure capacity
+        if nl > cap {
+            let new_cap = nl.max(cap * 2);
+            let old_size = (cap * elem_size) as usize;
+            let new_size = (new_cap * elem_size) as usize;
+            let old_layout = Layout::from_size_align_unchecked(old_size, 4);
+            let new_data = if data_ptr == 0 {
+                alloc(Layout::from_size_align_unchecked(new_size, 4))
+            } else {
+                realloc(data_ptr as *mut u8, old_layout, new_size)
+            };
+            if new_data.is_null() {
+                return;
+            }
+            let h = arr as *mut u32;
+            *h = new_data as u32;
+            *h.add(2) = new_cap;
+        }
+
+        // Zero-fill new elements
+        let (data_ptr2, _, _, _) = read_array(arr);
+        let fill_start = (len * elem_size) as usize;
+        let fill_end = (nl * elem_size) as usize;
+        ptr::write_bytes((data_ptr2 as *mut u8).add(fill_start), 0, fill_end - fill_start);
+
+        let h = arr as *mut u32;
+        *h.add(1) = nl;
+    }
+}
+
+/// Convert array to string representation "[elem0, elem1, ...]".
+/// Elements are treated as i32 values. Returns new HaxeString*.
+#[no_mangle]
+pub extern "C" fn haxe_array_to_string(arr: i32) -> i32 {
+    let out = rt_alloc(12);
+    if out == 0 {
+        return 0;
+    }
+    if arr == 0 {
+        let s = b"[]";
+        haxe_string_from_bytes(out, s.as_ptr() as i32, s.len() as i32);
+        return out;
+    }
+    unsafe {
+        let (data_ptr, len, _, _) = read_array(arr);
+        if len == 0 {
+            let s = b"[]";
+            haxe_string_from_bytes(out, s.as_ptr() as i32, s.len() as i32);
+            return out;
+        }
+
+        // Build string: "[v0, v1, v2]"
+        // Estimate: ~12 chars per int + separators
+        let est_size = (len * 14 + 4) as usize;
+        let buf = rt_alloc(est_size);
+        if buf == 0 {
+            let s = b"[]";
+            haxe_string_from_bytes(out, s.as_ptr() as i32, s.len() as i32);
+            return out;
+        }
+
+        let buf_ptr = buf as *mut u8;
+        let mut pos = 0usize;
+        *buf_ptr = b'[';
+        pos += 1;
+
+        let data = data_ptr as *const i32;
+        for i in 0..len {
+            if i > 0 {
+                *buf_ptr.add(pos) = b',';
+                pos += 1;
+                *buf_ptr.add(pos) = b' ';
+                pos += 1;
+            }
+            let val = *data.add(i as usize);
+            let mut ibuf = [0u8; 12];
+            let s = int_to_buf(val, &mut ibuf);
+            ptr::copy_nonoverlapping(s.as_ptr(), buf_ptr.add(pos), s.len());
+            pos += s.len();
+        }
+
+        *buf_ptr.add(pos) = b']';
+        pos += 1;
+
+        haxe_string_from_bytes(out, buf, pos as i32);
+    }
+    out
+}
+
+/// Join array elements with a separator string. Returns new HaxeString*.
+#[no_mangle]
+pub extern "C" fn haxe_array_join(arr: i32, sep: i32) -> i32 {
+    let out = rt_alloc(12);
+    if out == 0 {
+        return 0;
+    }
+    if arr == 0 {
+        haxe_string_from_bytes(out, 0, 0);
+        return out;
+    }
+    unsafe {
+        let (data_ptr, len, _, _) = read_array(arr);
+        if len == 0 {
+            haxe_string_from_bytes(out, 0, 0);
+            return out;
+        }
+
+        let (sep_ptr, sep_len) = if sep != 0 {
+            let (p, l, _) = read_haxe_string(sep);
+            (p as *const u8, l)
+        } else {
+            (b",".as_ptr(), 1u32)
+        };
+
+        // Estimate buffer size
+        let est_size = (len * 14 + len * sep_len + 4) as usize;
+        let buf = rt_alloc(est_size);
+        if buf == 0 {
+            haxe_string_from_bytes(out, 0, 0);
+            return out;
+        }
+
+        let buf_ptr = buf as *mut u8;
+        let mut pos = 0usize;
+        let data = data_ptr as *const i32;
+
+        for i in 0..len {
+            if i > 0 && sep_len > 0 {
+                ptr::copy_nonoverlapping(sep_ptr, buf_ptr.add(pos), sep_len as usize);
+                pos += sep_len as usize;
+            }
+            let val = *data.add(i as usize);
+            let mut ibuf = [0u8; 12];
+            let s = int_to_buf(val, &mut ibuf);
+            ptr::copy_nonoverlapping(s.as_ptr(), buf_ptr.add(pos), s.len());
+            pos += s.len();
+        }
+
+        haxe_string_from_bytes(out, buf, pos as i32);
+    }
+    out
+}
+
+/// Remove `len` elements starting at `pos`. Returns a new array of removed elements.
+#[no_mangle]
+pub extern "C" fn haxe_array_splice(arr: i32, pos: i32, len: i32) -> i32 {
+    let removed = haxe_array_new();
+    if removed == 0 || arr == 0 || len <= 0 {
+        return removed;
+    }
+    unsafe {
+        let (data_ptr, arr_len, _, _) = read_array(arr);
+        let slen = arr_len as i32;
+
+        let actual_pos = if pos < 0 { (slen + pos).max(0) } else { pos.min(slen) };
+        let actual_len = len.min(slen - actual_pos);
+
+        if actual_len <= 0 {
+            return removed;
+        }
+
+        let data = data_ptr as *mut i32;
+
+        // Copy removed elements to result array
+        for i in 0..actual_len {
+            haxe_array_push_i64(removed, *data.add((actual_pos + i) as usize));
+        }
+
+        // Shift remaining elements left
+        let remaining = slen - actual_pos - actual_len;
+        if remaining > 0 {
+            ptr::copy(
+                data.add((actual_pos + actual_len) as usize),
+                data.add(actual_pos as usize),
+                remaining as usize,
+            );
+        }
+
+        let h = arr as *mut u32;
+        *h.add(1) = (slen - actual_len) as u32;
+    }
+    removed
+}
+
+/// Sort array using a comparator function pointer. Stub — not yet implemented for WASM.
+#[no_mangle]
+pub extern "C" fn haxe_array_sort(_arr: i32, _cmp: i32) {
+    // Stub: would require call_indirect with a comparator function table index.
+    // Phase 1: no-op.
+}
+
+/// Map array elements through a function. Stub — not yet implemented for WASM.
+#[no_mangle]
+pub extern "C" fn haxe_array_map(_arr: i32, _fn_ptr: i32) -> i32 {
+    // Stub: would require call_indirect.
+    haxe_array_new()
+}
+
+/// Filter array elements through a predicate. Stub — not yet implemented for WASM.
+#[no_mangle]
+pub extern "C" fn haxe_array_filter(_arr: i32, _fn_ptr: i32) -> i32 {
+    // Stub: would require call_indirect.
+    haxe_array_new()
+}
+
+// ============================================================================
+// Section 12: Additional Box/Unbox Functions
+// ============================================================================
+
+const TYPE_REFERENCE: u32 = 5;
+
+/// Box a pointer (reference type) as DynamicValue.
+#[no_mangle]
+pub extern "C" fn haxe_box_reference_ptr(val: i32) -> i32 {
+    unsafe { alloc_dynamic(TYPE_REFERENCE, val as u32) }
+}
+
+/// Unbox an Int from DynamicValue pointer (ptr-returning variant).
+#[no_mangle]
+pub extern "C" fn haxe_unbox_int_ptr(ptr: i32) -> i32 {
+    haxe_unbox_int(ptr)
+}
+
+/// Unbox a Float from DynamicValue pointer (ptr-returning variant).
+#[no_mangle]
+pub extern "C" fn haxe_unbox_float_ptr(ptr: i32) -> f64 {
+    haxe_unbox_float(ptr)
+}
+
+/// Unbox a Bool from DynamicValue pointer (ptr-returning variant).
+#[no_mangle]
+pub extern "C" fn haxe_unbox_bool_ptr(ptr: i32) -> i32 {
+    haxe_unbox_bool(ptr)
+}
+
+// ============================================================================
+// Section 13: Anonymous Object Functions
+// ============================================================================
+
+/// Allocate an anonymous object with `n_fields` slots, each 8 bytes (zeroed).
+/// Returns pointer to allocated memory.
+#[no_mangle]
+pub extern "C" fn rayzor_anon_new(n_fields: i32) -> i32 {
+    if n_fields <= 0 {
+        return rt_alloc(8); // minimum allocation
+    }
+    let size = (n_fields as u32) * 8;
+    unsafe {
+        let layout = Layout::from_size_align_unchecked(size as usize, 4);
+        let ptr = alloc(layout);
+        if ptr.is_null() {
+            return 0;
+        }
+        ptr::write_bytes(ptr, 0, size as usize);
+        ptr as i32
+    }
+}
+
+/// Ensure an object matches a given shape. Stub — returns the object unchanged.
+#[no_mangle]
+pub extern "C" fn rayzor_ensure_shape(obj: i32, _shape: i32) -> i32 {
+    obj
+}
+
+/// Set a field by index on an anonymous object (8-byte slot stride).
+#[no_mangle]
+pub extern "C" fn rayzor_anon_set_field_by_index(obj: i32, idx: i32, val: i32) {
+    if obj == 0 || idx < 0 {
+        return;
+    }
+    unsafe {
+        let slot = (obj as *mut i32).add((idx * 2) as usize); // 8-byte stride, i32 ptr offset
+        *slot = val;
+    }
+}
+
+// ============================================================================
+// Section 14: File I/O Stubs
+// ============================================================================
+
+/// Read a file. Stub — returns 0 (not supported in WASM Phase 1).
+#[no_mangle]
+pub extern "C" fn haxe_file_read(_path: i32) -> i32 {
+    0
+}
+
+/// Write data to a file. Stub — returns 0.
+#[no_mangle]
+pub extern "C" fn haxe_file_write(_path: i32, _data: i32) -> i32 {
+    0
+}
+
+/// Append data to a file. Stub — returns 0.
+#[no_mangle]
+pub extern "C" fn haxe_file_append(_path: i32, _data: i32) -> i32 {
+    0
+}
+
+/// Update (overwrite) a file. Stub — returns 0.
+#[no_mangle]
+pub extern "C" fn haxe_file_update(_path: i32, _data: i32) -> i32 {
+    0
 }
