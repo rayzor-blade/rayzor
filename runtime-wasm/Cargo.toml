@@ -1,0 +1,16 @@
+[package]
+name = "rayzor-runtime-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "Rayzor runtime for WebAssembly — pure Rust, no platform deps"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+libm = "0.2"  # Pure-Rust math functions (sin, cos, sqrt, etc.) for wasm32
+
+[profile.release]
+opt-level = "s"      # Optimize for size (WASM binaries should be small)
+lto = true
+strip = true
