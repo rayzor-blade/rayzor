@@ -329,27 +329,47 @@ impl CompileCtx {
         }
     }
 
-    /// Add a string to the data section. Returns its linear-memory offset.
-    /// Layout: [len: i32 LE] [utf8 bytes...]
+    /// Add a string to the data section. Returns a pointer to a HaxeString struct.
+    ///
+    /// Layout in linear memory:
+    ///   [utf8 bytes...NUL]           at data_ptr
+    ///   [HaxeString { ptr, len, cap }]  at struct_ptr  (returned)
+    ///
+    /// HaxeString struct (12 bytes on WASM32):
+    ///   { ptr: u32, len: u32, cap: u32 }
     fn intern_string(&mut self, s: &str) -> u32 {
         if let Some(&off) = self.string_offsets.get(s) {
             return off;
         }
         let bytes = s.as_bytes();
-        let total = 4 + bytes.len() as u32;
-        // Align to 4 bytes.
+
+        // 1. Store raw UTF-8 bytes + NUL terminator
         self.data_offset = (self.data_offset + 3) & !3;
-        let offset = self.data_offset;
-        let mut payload = Vec::with_capacity(total as usize);
-        payload.extend_from_slice(&(bytes.len() as i32).to_le_bytes());
-        payload.extend_from_slice(bytes);
+        let data_ptr = self.data_offset;
+        let mut data_payload = Vec::with_capacity(bytes.len() + 1);
+        data_payload.extend_from_slice(bytes);
+        data_payload.push(0); // NUL terminator
         self.string_entries.push(DataString {
-            offset,
-            bytes: payload,
+            offset: data_ptr,
+            bytes: data_payload,
         });
-        self.string_offsets.insert(s.to_owned(), offset);
-        self.data_offset += total;
-        offset
+        self.data_offset += bytes.len() as u32 + 1;
+
+        // 2. Store HaxeString struct: { ptr: u32, len: u32, cap: u32 }
+        self.data_offset = (self.data_offset + 3) & !3;
+        let struct_ptr = self.data_offset;
+        let mut struct_payload = Vec::with_capacity(12);
+        struct_payload.extend_from_slice(&(data_ptr as u32).to_le_bytes()); // ptr
+        struct_payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes()); // len
+        struct_payload.extend_from_slice(&(bytes.len() as u32).to_le_bytes()); // cap
+        self.string_entries.push(DataString {
+            offset: struct_ptr,
+            bytes: struct_payload,
+        });
+        self.data_offset += 12;
+
+        self.string_offsets.insert(s.to_owned(), struct_ptr);
+        struct_ptr
     }
 
     // ------------------------------------------------------------------
