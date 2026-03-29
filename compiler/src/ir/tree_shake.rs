@@ -11,7 +11,13 @@ use std::collections::HashSet;
 
 fn is_keep_function(func: &crate::ir::functions::IrFunction) -> bool {
     // @:keep attribute
-    if func.attributes.custom.get("keep").map(|v| v == "true").unwrap_or(false) {
+    if func
+        .attributes
+        .custom
+        .get("keep")
+        .map(|v| v == "true")
+        .unwrap_or(false)
+    {
         return true;
     }
     // @:export — WASM exports must survive DCE
