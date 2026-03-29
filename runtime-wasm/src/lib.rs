@@ -1928,28 +1928,84 @@ pub extern "C" fn rayzor_anon_set_field_by_index(obj: i32, idx: i32, val: i32) {
 // Section 14: File I/O Stubs
 // ============================================================================
 
-/// Read a file. Stub — returns 0 (not supported in WASM Phase 1).
+/// Read a file's contents via WASI. Returns HaxeString pointer, 0 on error.
 #[no_mangle]
-pub extern "C" fn haxe_file_read(_path: i32, _dummy: i32) -> i32 {
-    0
+pub extern "C" fn haxe_file_read(path: i32, _dummy: i32) -> i32 {
+    unsafe {
+        let (p, plen, _) = read_haxe_string(path);
+        if p == 0 || plen == 0 { return 0; }
+        let path_bytes = core::slice::from_raw_parts(p as *const u8, plen as usize);
+        let path_str = match core::str::from_utf8(path_bytes) {
+            Ok(s) => s, Err(_) => return 0,
+        };
+        match std::fs::read(path_str) {
+            Ok(contents) => {
+                let str_data = rt_alloc(contents.len() + 1);
+                if str_data == 0 { return 0; }
+                core::ptr::copy_nonoverlapping(
+                    contents.as_ptr(), str_data as *mut u8, contents.len());
+                *((str_data as usize + contents.len()) as *mut u8) = 0;
+                let hs = rt_alloc(12);
+                if hs == 0 { return 0; }
+                let h = hs as *mut u32;
+                *h = str_data as u32;
+                *h.add(1) = contents.len() as u32;
+                *h.add(2) = contents.len() as u32;
+                hs
+            }
+            Err(_) => 0,
+        }
+    }
 }
 
-/// Write data to a file. Stub — returns 0.
+/// Write content to a file via WASI. Returns 0 on success.
 #[no_mangle]
-pub extern "C" fn haxe_file_write(_path: i32, _data: i32) -> i32 {
-    0
+pub extern "C" fn haxe_file_write(path: i32, data: i32) -> i32 {
+    unsafe {
+        let (pp, plen, _) = read_haxe_string(path);
+        let (dp, dlen, _) = read_haxe_string(data);
+        if pp == 0 || dp == 0 { return -1; }
+        let ps = core::slice::from_raw_parts(pp as *const u8, plen as usize);
+        let ds = core::slice::from_raw_parts(dp as *const u8, dlen as usize);
+        let path_str = match core::str::from_utf8(ps) { Ok(s) => s, Err(_) => return -1 };
+        match std::fs::write(path_str, ds) { Ok(()) => 0, Err(_) => -1 }
+    }
 }
 
-/// Append data to a file. Stub — returns 0.
+/// Append content to a file via WASI.
 #[no_mangle]
-pub extern "C" fn haxe_file_append(_path: i32, _data: i32) -> i32 {
-    0
+pub extern "C" fn haxe_file_append(path: i32, data: i32) -> i32 {
+    unsafe {
+        let (pp, plen, _) = read_haxe_string(path);
+        let (dp, dlen, _) = read_haxe_string(data);
+        if pp == 0 || dp == 0 { return -1; }
+        let ps = core::slice::from_raw_parts(pp as *const u8, plen as usize);
+        let ds = core::slice::from_raw_parts(dp as *const u8, dlen as usize);
+        let path_str = match core::str::from_utf8(ps) { Ok(s) => s, Err(_) => return -1 };
+        use std::io::Write;
+        match std::fs::OpenOptions::new().append(true).create(true).open(path_str) {
+            Ok(mut f) => { let _ = f.write_all(ds); 0 }
+            Err(_) => -1,
+        }
+    }
 }
 
-/// Update (overwrite) a file. Stub — returns 0.
+/// Update (overwrite) a file — same as write.
 #[no_mangle]
-pub extern "C" fn haxe_file_update(_path: i32, _data: i32) -> i32 {
-    0
+pub extern "C" fn haxe_file_update(path: i32, data: i32) -> i32 {
+    haxe_file_write(path, data)
+}
+
+/// sys.io.File.saveContent(path, content) — Haxe stdlib wrapper.
+#[no_mangle]
+pub extern "C" fn haxe_file_save_content(path: i32, content: i32) {
+    haxe_file_write(path, content);
+}
+
+/// sys.io.File.getContent(path) — Haxe stdlib wrapper. Returns HaxeString*.
+#[no_mangle]
+pub extern "C" fn haxe_file_get_content(path: i32) -> i32 {
+    haxe_file_read(path, 0)
 }
 
 // ============================================================================

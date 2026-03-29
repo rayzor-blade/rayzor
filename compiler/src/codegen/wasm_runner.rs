@@ -12,11 +12,21 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
     let module = Module::new(&engine, wasm_bytes)
         .map_err(|e| format!("WASM compilation failed: {}", e))?;
 
-    // Build WASI P1 context with inherited stdio
-    let wasi_ctx = wasi_common::WasiCtxBuilder::new()
-        .inherit_stdio()
-        .inherit_env()
-        .build_p1();
+    // Build WASI P1 context with inherited stdio + current directory access
+    let mut builder = wasi_common::WasiCtxBuilder::new();
+    builder.inherit_stdio().inherit_env();
+
+    // Grant access to current directory for file I/O
+    if let Ok(cwd) = std::env::current_dir() {
+        let _ = builder.preopened_dir(
+            &cwd,
+            ".",
+            wasi_common::DirPerms::all(),
+            wasi_common::FilePerms::all(),
+        );
+    }
+
+    let wasi_ctx = builder.build_p1();
 
     let mut store = Store::new(&engine, wasi_ctx);
 
