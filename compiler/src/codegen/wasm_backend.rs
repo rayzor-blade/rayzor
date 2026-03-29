@@ -624,17 +624,37 @@ impl<'a> FunctionLowerer<'a> {
             for inst in &block.instructions {
                 if let Some(dest) = inst.dest() {
                     if seen.insert(dest) {
-                        // Use the instruction's own type hint when available (e.g., Undef/Const
-                        // carry their type explicitly), falling back to register_types.
+                        // Infer the correct WASM type from the instruction.
+                        // Critical: register_types may be missing entries, causing
+                        // defaults to I32 even for float operations.
                         let vt = match inst {
                             IrInstruction::Undef { ty, .. } => ir_type_to_wasm(ty),
-                            IrInstruction::Const { value, .. } => {
-                                match value {
-                                    IrValue::F32(_) => ValType::F32,
-                                    IrValue::F64(_) => ValType::F64,
-                                    _ => self.reg_wasm_type(dest),
-                                }
+                            IrInstruction::Load { ty, .. } => {
+                                let wt = ir_type_to_wasm(ty);
+                                wt
                             }
+                            IrInstruction::Cast { to_ty, .. } => ir_type_to_wasm(to_ty),
+                            IrInstruction::Const { value, .. } => match value {
+                                IrValue::F32(_) => ValType::F32,
+                                IrValue::F64(_) => ValType::F64,
+                                _ => self.reg_wasm_type(dest),
+                            },
+                            // For BinOp/UnOp/Cmp: infer from operand types
+                            IrInstruction::BinOp { left, .. } => {
+                                let lt = self.reg_wasm_type(*left);
+                                let local_lt = self.reg_to_local.get(left).and_then(|&idx| self.local_types.get((idx - self.param_count) as usize)).copied();
+                                let vt = if lt == ValType::F64 || local_lt == Some(ValType::F64) { ValType::F64 }
+                                else if lt == ValType::F32 || local_lt == Some(ValType::F32) { ValType::F32 }
+                                else { self.reg_wasm_type(dest) };
+                                vt
+                            }
+                            IrInstruction::UnOp { operand, .. } => {
+                                let ot = self.reg_wasm_type(*operand);
+                                if ot == ValType::F64 { ValType::F64 }
+                                else if ot == ValType::F32 { ValType::F32 }
+                                else { self.reg_wasm_type(dest) }
+                            }
+                            IrInstruction::Cmp { .. } => ValType::I32, // comparisons always return i32
                             _ => self.reg_wasm_type(dest),
                         };
                         self.alloc_local(dest, vt);
@@ -660,11 +680,23 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn reg_wasm_type(&self, id: IrId) -> ValType {
-        self.ir_func
+        // First check the allocated local type (set during allocate_locals with
+        // instruction-aware type inference). This is more reliable than register_types
+        // which may be missing or have types that map differently in WASM32.
+        if let Some(&local_idx) = self.reg_to_local.get(&id) {
+            if local_idx >= self.param_count {
+                let type_idx = (local_idx - self.param_count) as usize;
+                if let Some(&vt) = self.local_types.get(type_idx) {
+                    return vt;
+                }
+            }
+        }
+        let result = self.ir_func
             .register_types
             .get(&id)
             .map(ir_type_to_wasm)
-            .unwrap_or(ValType::I32)
+            .unwrap_or(ValType::I32);
+        result
     }
 
     // ------------------------------------------------------------------
@@ -978,7 +1010,18 @@ impl<'a> FunctionLowerer<'a> {
             } => {
                 self.get_reg(f, *left);
                 self.get_reg(f, *right);
-                self.emit_binop(f, *op, self.reg_wasm_type(*dest));
+                // Use operand type to determine instruction variant (more reliable
+                // than dest type which may be missing from register_types).
+                let op_ty = self.reg_wasm_type(*left);
+                let dest_ty = self.reg_wasm_type(*dest);
+                let ty = if op_ty == ValType::F64 || dest_ty == ValType::F64 {
+                    ValType::F64
+                } else if op_ty == ValType::F32 || dest_ty == ValType::F32 {
+                    ValType::F32
+                } else {
+                    dest_ty
+                };
+                self.emit_binop(f, *op, ty);
                 self.set_reg(f, *dest);
             }
 
@@ -997,7 +1040,16 @@ impl<'a> FunctionLowerer<'a> {
             } => {
                 self.get_reg(f, *left);
                 self.get_reg(f, *right);
-                self.emit_cmp(f, *op, self.reg_wasm_type(*left));
+                let op_ty = self.reg_wasm_type(*left);
+                let rhs_ty = self.reg_wasm_type(*right);
+                let ty = if op_ty == ValType::F64 || rhs_ty == ValType::F64 {
+                    ValType::F64
+                } else if op_ty == ValType::F32 || rhs_ty == ValType::F32 {
+                    ValType::F32
+                } else {
+                    op_ty
+                };
+                self.emit_cmp(f, *op, ty);
                 self.set_reg(f, *dest);
             }
 
@@ -1549,6 +1601,17 @@ impl<'a> FunctionLowerer<'a> {
 
     fn emit_binop(&self, f: &mut Function, op: BinaryOp, dest_ty: ValType) {
         match (op, dest_ty) {
+            // When MIR uses Add/Sub/Mul/Div on floats (not FAdd/FSub/FMul/FDiv),
+            // we detect via operand type and emit the float variant.
+            (BinaryOp::Add, ValType::F64) | (BinaryOp::FAdd, ValType::F64) => { f.instruction(&Instruction::F64Add); }
+            (BinaryOp::Sub, ValType::F64) | (BinaryOp::FSub, ValType::F64) => { f.instruction(&Instruction::F64Sub); }
+            (BinaryOp::Mul, ValType::F64) | (BinaryOp::FMul, ValType::F64) => { f.instruction(&Instruction::F64Mul); }
+            (BinaryOp::Div, ValType::F64) | (BinaryOp::FDiv, ValType::F64) => { f.instruction(&Instruction::F64Div); }
+            (BinaryOp::Add, ValType::F32) | (BinaryOp::FAdd, ValType::F32) => { f.instruction(&Instruction::F32Add); }
+            (BinaryOp::Sub, ValType::F32) | (BinaryOp::FSub, ValType::F32) => { f.instruction(&Instruction::F32Sub); }
+            (BinaryOp::Mul, ValType::F32) | (BinaryOp::FMul, ValType::F32) => { f.instruction(&Instruction::F32Mul); }
+            (BinaryOp::Div, ValType::F32) | (BinaryOp::FDiv, ValType::F32) => { f.instruction(&Instruction::F32Div); }
+
             (BinaryOp::Add, ValType::I32) => { f.instruction(&Instruction::I32Add); }
             (BinaryOp::Sub, ValType::I32) => { f.instruction(&Instruction::I32Sub); }
             (BinaryOp::Mul, ValType::I32) => { f.instruction(&Instruction::I32Mul); }
