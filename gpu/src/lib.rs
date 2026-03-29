@@ -13,17 +13,20 @@
 // All extern "C" functions in this crate are FFI entry points called by the JIT runtime.
 #![allow(clippy::missing_safety_doc)]
 
-// Compute modules — native only (use libc, rayzor_runtime for FFI)
-#[cfg(feature = "native")]
-pub mod buffer;
+// Compute modules — core logic uses buffer/lazy/backend types (native-only)
 #[cfg(feature = "native")]
 pub mod codegen;
-#[cfg(feature = "native")]
-pub mod device;
 #[cfg(feature = "native")]
 pub mod kernel_cache;
 #[cfg(feature = "native")]
 pub mod kernel_ir;
+
+// These modules have extern "C" FFI mixed with core logic —
+// gate them on native, provide wasm alternatives via wasm_exports.rs
+#[cfg(feature = "native")]
+pub mod buffer;
+#[cfg(feature = "native")]
+pub mod device;
 #[cfg(feature = "native")]
 pub mod lazy;
 #[cfg(feature = "native")]
@@ -188,498 +191,499 @@ declare_native_methods! {
 // ============================================================================
 #[cfg(feature = "native")]
 mod native_plugin {
-use super::*;
-use std::ffi::c_void;
+    use super::*;
+    use std::ffi::c_void;
 
-/// Symbol table entry for plugin registration
-#[repr(C)]
-pub struct SymbolEntry {
-    pub name: *const u8,
-    pub name_len: usize,
-    pub ptr: *const c_void,
-}
-
-/// Plugin initialization — returns a flat symbol table for JIT linking.
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_gpu_plugin_init(out_count: *mut usize) -> *const SymbolEntry {
-    let symbols = collect_symbols();
-    let count = symbols.len();
-    let ptr = symbols.as_ptr();
-    std::mem::forget(symbols); // caller does not free — lives for process lifetime
-    if !out_count.is_null() {
-        unsafe {
-            *out_count = count;
-        }
+    /// Symbol table entry for plugin registration
+    #[repr(C)]
+    pub struct SymbolEntry {
+        pub name: *const u8,
+        pub name_len: usize,
+        pub ptr: *const c_void,
     }
-    ptr
-}
 
-/// Returns method descriptors for compiler-side registration.
-///
-/// The compiler reads these to auto-generate method mappings and extern
-/// declarations — no manual MIR wrappers or compiler core changes needed.
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_gpu_plugin_describe(
-    out_count: *mut usize,
-) -> *const NativeMethodDesc {
-    if !out_count.is_null() {
-        unsafe {
-            *out_count = GPU_METHODS.len();
+    /// Plugin initialization — returns a flat symbol table for JIT linking.
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_gpu_plugin_init(out_count: *mut usize) -> *const SymbolEntry {
+        let symbols = collect_symbols();
+        let count = symbols.len();
+        let ptr = symbols.as_ptr();
+        std::mem::forget(symbols); // caller does not free — lives for process lifetime
+        if !out_count.is_null() {
+            unsafe {
+                *out_count = count;
+            }
         }
+        ptr
     }
-    GPU_METHODS.as_ptr()
-}
 
-/// Rust-callable API returning runtime symbols.
-#[allow(unused_mut)]
-pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
-    let mut symbols = vec![
-        // Device lifecycle
-        (
-            "rayzor_gpu_compute_create",
-            device::rayzor_gpu_compute_create as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_destroy",
-            device::rayzor_gpu_compute_destroy as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_is_available",
-            device::rayzor_gpu_compute_is_available as *const u8,
-        ),
-        // Buffer management
-        (
-            "rayzor_gpu_compute_create_buffer",
-            buffer::rayzor_gpu_compute_create_buffer as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_alloc_buffer",
-            buffer::rayzor_gpu_compute_alloc_buffer as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_to_tensor",
-            buffer::rayzor_gpu_compute_to_tensor as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_free_buffer",
-            buffer::rayzor_gpu_compute_free_buffer as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_buffer_numel",
-            buffer::rayzor_gpu_compute_buffer_numel as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_buffer_dtype",
-            buffer::rayzor_gpu_compute_buffer_dtype as *const u8,
-        ),
-        // Binary elementwise ops
-        (
-            "rayzor_gpu_compute_add",
-            ops::rayzor_gpu_compute_add as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_sub",
-            ops::rayzor_gpu_compute_sub as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_mul",
-            ops::rayzor_gpu_compute_mul as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_div",
-            ops::rayzor_gpu_compute_div as *const u8,
-        ),
-        // Unary elementwise ops
-        (
-            "rayzor_gpu_compute_neg",
-            ops::rayzor_gpu_compute_neg as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_abs",
-            ops::rayzor_gpu_compute_abs as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_sqrt",
-            ops::rayzor_gpu_compute_sqrt as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_exp",
-            ops::rayzor_gpu_compute_exp as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_log",
-            ops::rayzor_gpu_compute_log as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_relu",
-            ops::rayzor_gpu_compute_relu as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_sigmoid",
-            ops::rayzor_gpu_compute_sigmoid as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_tanh",
-            ops::rayzor_gpu_compute_tanh as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_gelu",
-            ops::rayzor_gpu_compute_gelu as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_silu",
-            ops::rayzor_gpu_compute_silu as *const u8,
-        ),
-        // Reductions
-        (
-            "rayzor_gpu_compute_sum",
-            ops::rayzor_gpu_compute_sum as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_mean",
-            ops::rayzor_gpu_compute_mean as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_max",
-            ops::rayzor_gpu_compute_max as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_min",
-            ops::rayzor_gpu_compute_min as *const u8,
-        ),
-        // Dot product
-        (
-            "rayzor_gpu_compute_dot",
-            ops::rayzor_gpu_compute_dot as *const u8,
-        ),
-        // Matmul
-        (
-            "rayzor_gpu_compute_matmul",
-            ops::rayzor_gpu_compute_matmul as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_batch_matmul",
-            ops::rayzor_gpu_compute_batch_matmul as *const u8,
-        ),
-        // Structured buffer ops
-        (
-            "rayzor_gpu_compute_create_struct_buffer",
-            buffer::rayzor_gpu_compute_create_struct_buffer as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_alloc_struct_buffer",
-            buffer::rayzor_gpu_compute_alloc_struct_buffer as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_read_struct_float",
-            buffer::rayzor_gpu_compute_read_struct_float as *const u8,
-        ),
-        (
-            "rayzor_gpu_compute_read_struct_int",
-            buffer::rayzor_gpu_compute_read_struct_int as *const u8,
-        ),
-    ];
+    /// Returns method descriptors for compiler-side registration.
+    ///
+    /// The compiler reads these to auto-generate method mappings and extern
+    /// declarations — no manual MIR wrappers or compiler core changes needed.
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_gpu_plugin_describe(
+        out_count: *mut usize,
+    ) -> *const NativeMethodDesc {
+        if !out_count.is_null() {
+            unsafe {
+                *out_count = GPU_METHODS.len();
+            }
+        }
+        GPU_METHODS.as_ptr()
+    }
 
-    // Graphics rendering symbols (only when webgpu-backend is compiled)
-    #[cfg(feature = "webgpu-backend")]
-    {
-        let gfx_symbols: Vec<(&'static str, *const u8)> = vec![
+    /// Rust-callable API returning runtime symbols.
+    #[allow(unused_mut)]
+    pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
+        let mut symbols = vec![
+            // Device lifecycle
             (
-                "rayzor_gpu_gfx_device_create",
-                graphics::rayzor_gpu_gfx_device_create as *const u8,
+                "rayzor_gpu_compute_create",
+                device::rayzor_gpu_compute_create as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_device_destroy",
-                graphics::rayzor_gpu_gfx_device_destroy as *const u8,
+                "rayzor_gpu_compute_destroy",
+                device::rayzor_gpu_compute_destroy as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_is_available",
-                graphics::rayzor_gpu_gfx_is_available as *const u8,
+                "rayzor_gpu_compute_is_available",
+                device::rayzor_gpu_compute_is_available as *const u8,
+            ),
+            // Buffer management
+            (
+                "rayzor_gpu_compute_create_buffer",
+                buffer::rayzor_gpu_compute_create_buffer as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_buffer_create",
-                graphics::rayzor_gpu_gfx_buffer_create as *const u8,
+                "rayzor_gpu_compute_alloc_buffer",
+                buffer::rayzor_gpu_compute_alloc_buffer as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_buffer_create_with_data",
-                graphics::rayzor_gpu_gfx_buffer_create_with_data as *const u8,
+                "rayzor_gpu_compute_to_tensor",
+                buffer::rayzor_gpu_compute_to_tensor as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_buffer_write",
-                graphics::rayzor_gpu_gfx_buffer_write as *const u8,
+                "rayzor_gpu_compute_free_buffer",
+                buffer::rayzor_gpu_compute_free_buffer as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_buffer_destroy",
-                graphics::rayzor_gpu_gfx_buffer_destroy as *const u8,
+                "rayzor_gpu_compute_buffer_numel",
+                buffer::rayzor_gpu_compute_buffer_numel as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_shader_create",
-                graphics::shader::rayzor_gpu_gfx_shader_create as *const u8,
+                "rayzor_gpu_compute_buffer_dtype",
+                buffer::rayzor_gpu_compute_buffer_dtype as *const u8,
+            ),
+            // Binary elementwise ops
+            (
+                "rayzor_gpu_compute_add",
+                ops::rayzor_gpu_compute_add as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_shader_create_hx",
-                graphics::shader::rayzor_gpu_gfx_shader_create_hx as *const u8,
+                "rayzor_gpu_compute_sub",
+                ops::rayzor_gpu_compute_sub as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_shader_destroy",
-                graphics::shader::rayzor_gpu_gfx_shader_destroy as *const u8,
+                "rayzor_gpu_compute_mul",
+                ops::rayzor_gpu_compute_mul as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_pipeline_begin",
-                graphics::pipeline::rayzor_gpu_gfx_pipeline_begin as *const u8,
+                "rayzor_gpu_compute_div",
+                ops::rayzor_gpu_compute_div as *const u8,
+            ),
+            // Unary elementwise ops
+            (
+                "rayzor_gpu_compute_neg",
+                ops::rayzor_gpu_compute_neg as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_pipeline_set_shader",
-                graphics::pipeline::rayzor_gpu_gfx_pipeline_set_shader as *const u8,
+                "rayzor_gpu_compute_abs",
+                ops::rayzor_gpu_compute_abs as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_pipeline_set_format",
-                graphics::pipeline::rayzor_gpu_gfx_pipeline_set_format as *const u8,
+                "rayzor_gpu_compute_sqrt",
+                ops::rayzor_gpu_compute_sqrt as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_pipeline_set_topology",
-                graphics::pipeline::rayzor_gpu_gfx_pipeline_set_topology as *const u8,
+                "rayzor_gpu_compute_exp",
+                ops::rayzor_gpu_compute_exp as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_pipeline_set_cull",
-                graphics::pipeline::rayzor_gpu_gfx_pipeline_set_cull as *const u8,
+                "rayzor_gpu_compute_log",
+                ops::rayzor_gpu_compute_log as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_pipeline_build",
-                graphics::pipeline::rayzor_gpu_gfx_pipeline_build as *const u8,
+                "rayzor_gpu_compute_relu",
+                ops::rayzor_gpu_compute_relu as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_pipeline_destroy",
-                graphics::pipeline::rayzor_gpu_gfx_pipeline_destroy as *const u8,
+                "rayzor_gpu_compute_sigmoid",
+                ops::rayzor_gpu_compute_sigmoid as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_texture_create",
-                graphics::texture::rayzor_gpu_gfx_texture_create as *const u8,
+                "rayzor_gpu_compute_tanh",
+                ops::rayzor_gpu_compute_tanh as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_texture_get_view",
-                graphics::texture::rayzor_gpu_gfx_texture_get_view as *const u8,
+                "rayzor_gpu_compute_gelu",
+                ops::rayzor_gpu_compute_gelu as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_texture_read_pixels",
-                graphics::texture::rayzor_gpu_gfx_texture_read_pixels as *const u8,
+                "rayzor_gpu_compute_silu",
+                ops::rayzor_gpu_compute_silu as *const u8,
+            ),
+            // Reductions
+            (
+                "rayzor_gpu_compute_sum",
+                ops::rayzor_gpu_compute_sum as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_texture_destroy",
-                graphics::texture::rayzor_gpu_gfx_texture_destroy as *const u8,
+                "rayzor_gpu_compute_mean",
+                ops::rayzor_gpu_compute_mean as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_render_submit",
-                graphics::render_pass::rayzor_gpu_gfx_render_submit as *const u8,
+                "rayzor_gpu_compute_max",
+                ops::rayzor_gpu_compute_max as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_render_triangles",
-                graphics::render_pass::rayzor_gpu_gfx_render_triangles as *const u8,
+                "rayzor_gpu_compute_min",
+                ops::rayzor_gpu_compute_min as *const u8,
+            ),
+            // Dot product
+            (
+                "rayzor_gpu_compute_dot",
+                ops::rayzor_gpu_compute_dot as *const u8,
+            ),
+            // Matmul
+            (
+                "rayzor_gpu_compute_matmul",
+                ops::rayzor_gpu_compute_matmul as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_texture_to_bytes",
-                graphics::render_pass::rayzor_gpu_gfx_texture_to_bytes as *const u8,
+                "rayzor_gpu_compute_batch_matmul",
+                ops::rayzor_gpu_compute_batch_matmul as *const u8,
             ),
-            // Command encoder (multi-pass)
+            // Structured buffer ops
             (
-                "rayzor_gpu_gfx_cmd_create",
-                graphics::command::rayzor_gpu_gfx_cmd_create as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_cmd_begin_pass",
-                graphics::command::rayzor_gpu_gfx_cmd_begin_pass as *const u8,
+                "rayzor_gpu_compute_create_struct_buffer",
+                buffer::rayzor_gpu_compute_create_struct_buffer as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_cmd_set_pipeline",
-                graphics::command::rayzor_gpu_gfx_cmd_set_pipeline as *const u8,
+                "rayzor_gpu_compute_alloc_struct_buffer",
+                buffer::rayzor_gpu_compute_alloc_struct_buffer as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_cmd_set_vertex_buffer",
-                graphics::command::rayzor_gpu_gfx_cmd_set_vertex_buffer as *const u8,
+                "rayzor_gpu_compute_read_struct_float",
+                buffer::rayzor_gpu_compute_read_struct_float as *const u8,
             ),
             (
-                "rayzor_gpu_gfx_cmd_set_index_buffer",
-                graphics::command::rayzor_gpu_gfx_cmd_set_index_buffer as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_cmd_set_bind_group",
-                graphics::command::rayzor_gpu_gfx_cmd_set_bind_group as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_cmd_draw",
-                graphics::command::rayzor_gpu_gfx_cmd_draw as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_cmd_draw_indexed",
-                graphics::command::rayzor_gpu_gfx_cmd_draw_indexed as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_cmd_set_viewport",
-                graphics::command::rayzor_gpu_gfx_cmd_set_viewport as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_cmd_set_scissor",
-                graphics::command::rayzor_gpu_gfx_cmd_set_scissor as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_cmd_end_pass",
-                graphics::command::rayzor_gpu_gfx_cmd_end_pass as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_cmd_submit",
-                graphics::command::rayzor_gpu_gfx_cmd_submit as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_cmd_begin_pass_mrt",
-                graphics::command::rayzor_gpu_gfx_cmd_begin_pass_mrt as *const u8,
-            ),
-            // Pipeline MRT
-            (
-                "rayzor_gpu_gfx_pipeline_add_color_target",
-                graphics::pipeline::rayzor_gpu_gfx_pipeline_add_color_target as *const u8,
-            ),
-            // Haxe-friendly wrappers
-            (
-                "rayzor_gpu_gfx_render_with_vb",
-                graphics::haxe_api::rayzor_gpu_gfx_render_with_vb as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_render_indexed",
-                graphics::haxe_api::rayzor_gpu_gfx_render_indexed as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_render_with_depth",
-                graphics::haxe_api::rayzor_gpu_gfx_render_with_depth as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_render_with_bindings",
-                graphics::haxe_api::rayzor_gpu_gfx_render_with_bindings as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_buffer_from_bytes",
-                graphics::haxe_api::rayzor_gpu_gfx_buffer_from_bytes as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_buffer_write_bytes",
-                graphics::haxe_api::rayzor_gpu_gfx_buffer_write_bytes as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_bind_group_layout_uniform",
-                graphics::haxe_api::rayzor_gpu_gfx_bind_group_layout_uniform as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_bind_group_single",
-                graphics::haxe_api::rayzor_gpu_gfx_bind_group_single as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_pipeline_set_vertex_layout_simple",
-                graphics::haxe_api::rayzor_gpu_gfx_pipeline_set_vertex_layout_simple as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_pipeline_set_depth_simple",
-                graphics::haxe_api::rayzor_gpu_gfx_pipeline_set_depth_simple as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_pipeline_add_layout",
-                graphics::haxe_api::rayzor_gpu_gfx_pipeline_add_layout as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_depth_texture_create",
-                graphics::haxe_api::rayzor_gpu_gfx_depth_texture_create as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_sampler_linear",
-                graphics::haxe_api::rayzor_gpu_gfx_sampler_linear as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_texture_upload",
-                graphics::haxe_api::rayzor_gpu_gfx_texture_upload as *const u8,
-            ),
-            // Surface
-            (
-                "rayzor_gpu_gfx_surface_create",
-                graphics::surface::rayzor_gpu_gfx_surface_create as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_surface_get_texture",
-                graphics::surface::rayzor_gpu_gfx_surface_get_texture as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_surface_present",
-                graphics::surface::rayzor_gpu_gfx_surface_present as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_surface_resize",
-                graphics::surface::rayzor_gpu_gfx_surface_resize as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_surface_get_format",
-                graphics::surface::rayzor_gpu_gfx_surface_get_format as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_surface_destroy",
-                graphics::surface::rayzor_gpu_gfx_surface_destroy as *const u8,
-            ),
-            // Texture write
-            (
-                "rayzor_gpu_gfx_texture_write",
-                graphics::texture::rayzor_gpu_gfx_texture_write as *const u8,
-            ),
-            // Sampler
-            (
-                "rayzor_gpu_gfx_sampler_create",
-                graphics::texture::rayzor_gpu_gfx_sampler_create as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_sampler_destroy",
-                graphics::texture::rayzor_gpu_gfx_sampler_destroy as *const u8,
-            ),
-            // BindGroup
-            (
-                "rayzor_gpu_gfx_bind_group_layout_create",
-                graphics::bind_group::rayzor_gpu_gfx_bind_group_layout_create as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_bind_group_layout_destroy",
-                graphics::bind_group::rayzor_gpu_gfx_bind_group_layout_destroy as *const u8,
-            ),
-            (
-                "rayzor_gpu_gfx_bind_group_destroy",
-                graphics::bind_group::rayzor_gpu_gfx_bind_group_destroy as *const u8,
+                "rayzor_gpu_compute_read_struct_int",
+                buffer::rayzor_gpu_compute_read_struct_int as *const u8,
             ),
         ];
-        symbols.extend(gfx_symbols);
+
+        // Graphics rendering symbols (only when webgpu-backend is compiled)
+        #[cfg(feature = "webgpu-backend")]
+        {
+            let gfx_symbols: Vec<(&'static str, *const u8)> = vec![
+                (
+                    "rayzor_gpu_gfx_device_create",
+                    graphics::rayzor_gpu_gfx_device_create as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_device_destroy",
+                    graphics::rayzor_gpu_gfx_device_destroy as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_is_available",
+                    graphics::rayzor_gpu_gfx_is_available as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_buffer_create",
+                    graphics::rayzor_gpu_gfx_buffer_create as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_buffer_create_with_data",
+                    graphics::rayzor_gpu_gfx_buffer_create_with_data as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_buffer_write",
+                    graphics::rayzor_gpu_gfx_buffer_write as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_buffer_destroy",
+                    graphics::rayzor_gpu_gfx_buffer_destroy as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_shader_create",
+                    graphics::shader::rayzor_gpu_gfx_shader_create as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_shader_create_hx",
+                    graphics::shader::rayzor_gpu_gfx_shader_create_hx as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_shader_destroy",
+                    graphics::shader::rayzor_gpu_gfx_shader_destroy as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_pipeline_begin",
+                    graphics::pipeline::rayzor_gpu_gfx_pipeline_begin as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_pipeline_set_shader",
+                    graphics::pipeline::rayzor_gpu_gfx_pipeline_set_shader as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_pipeline_set_format",
+                    graphics::pipeline::rayzor_gpu_gfx_pipeline_set_format as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_pipeline_set_topology",
+                    graphics::pipeline::rayzor_gpu_gfx_pipeline_set_topology as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_pipeline_set_cull",
+                    graphics::pipeline::rayzor_gpu_gfx_pipeline_set_cull as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_pipeline_build",
+                    graphics::pipeline::rayzor_gpu_gfx_pipeline_build as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_pipeline_destroy",
+                    graphics::pipeline::rayzor_gpu_gfx_pipeline_destroy as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_texture_create",
+                    graphics::texture::rayzor_gpu_gfx_texture_create as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_texture_get_view",
+                    graphics::texture::rayzor_gpu_gfx_texture_get_view as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_texture_read_pixels",
+                    graphics::texture::rayzor_gpu_gfx_texture_read_pixels as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_texture_destroy",
+                    graphics::texture::rayzor_gpu_gfx_texture_destroy as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_render_submit",
+                    graphics::render_pass::rayzor_gpu_gfx_render_submit as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_render_triangles",
+                    graphics::render_pass::rayzor_gpu_gfx_render_triangles as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_texture_to_bytes",
+                    graphics::render_pass::rayzor_gpu_gfx_texture_to_bytes as *const u8,
+                ),
+                // Command encoder (multi-pass)
+                (
+                    "rayzor_gpu_gfx_cmd_create",
+                    graphics::command::rayzor_gpu_gfx_cmd_create as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_cmd_begin_pass",
+                    graphics::command::rayzor_gpu_gfx_cmd_begin_pass as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_cmd_set_pipeline",
+                    graphics::command::rayzor_gpu_gfx_cmd_set_pipeline as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_cmd_set_vertex_buffer",
+                    graphics::command::rayzor_gpu_gfx_cmd_set_vertex_buffer as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_cmd_set_index_buffer",
+                    graphics::command::rayzor_gpu_gfx_cmd_set_index_buffer as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_cmd_set_bind_group",
+                    graphics::command::rayzor_gpu_gfx_cmd_set_bind_group as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_cmd_draw",
+                    graphics::command::rayzor_gpu_gfx_cmd_draw as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_cmd_draw_indexed",
+                    graphics::command::rayzor_gpu_gfx_cmd_draw_indexed as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_cmd_set_viewport",
+                    graphics::command::rayzor_gpu_gfx_cmd_set_viewport as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_cmd_set_scissor",
+                    graphics::command::rayzor_gpu_gfx_cmd_set_scissor as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_cmd_end_pass",
+                    graphics::command::rayzor_gpu_gfx_cmd_end_pass as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_cmd_submit",
+                    graphics::command::rayzor_gpu_gfx_cmd_submit as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_cmd_begin_pass_mrt",
+                    graphics::command::rayzor_gpu_gfx_cmd_begin_pass_mrt as *const u8,
+                ),
+                // Pipeline MRT
+                (
+                    "rayzor_gpu_gfx_pipeline_add_color_target",
+                    graphics::pipeline::rayzor_gpu_gfx_pipeline_add_color_target as *const u8,
+                ),
+                // Haxe-friendly wrappers
+                (
+                    "rayzor_gpu_gfx_render_with_vb",
+                    graphics::haxe_api::rayzor_gpu_gfx_render_with_vb as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_render_indexed",
+                    graphics::haxe_api::rayzor_gpu_gfx_render_indexed as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_render_with_depth",
+                    graphics::haxe_api::rayzor_gpu_gfx_render_with_depth as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_render_with_bindings",
+                    graphics::haxe_api::rayzor_gpu_gfx_render_with_bindings as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_buffer_from_bytes",
+                    graphics::haxe_api::rayzor_gpu_gfx_buffer_from_bytes as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_buffer_write_bytes",
+                    graphics::haxe_api::rayzor_gpu_gfx_buffer_write_bytes as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_bind_group_layout_uniform",
+                    graphics::haxe_api::rayzor_gpu_gfx_bind_group_layout_uniform as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_bind_group_single",
+                    graphics::haxe_api::rayzor_gpu_gfx_bind_group_single as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_pipeline_set_vertex_layout_simple",
+                    graphics::haxe_api::rayzor_gpu_gfx_pipeline_set_vertex_layout_simple
+                        as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_pipeline_set_depth_simple",
+                    graphics::haxe_api::rayzor_gpu_gfx_pipeline_set_depth_simple as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_pipeline_add_layout",
+                    graphics::haxe_api::rayzor_gpu_gfx_pipeline_add_layout as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_depth_texture_create",
+                    graphics::haxe_api::rayzor_gpu_gfx_depth_texture_create as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_sampler_linear",
+                    graphics::haxe_api::rayzor_gpu_gfx_sampler_linear as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_texture_upload",
+                    graphics::haxe_api::rayzor_gpu_gfx_texture_upload as *const u8,
+                ),
+                // Surface
+                (
+                    "rayzor_gpu_gfx_surface_create",
+                    graphics::surface::rayzor_gpu_gfx_surface_create as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_surface_get_texture",
+                    graphics::surface::rayzor_gpu_gfx_surface_get_texture as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_surface_present",
+                    graphics::surface::rayzor_gpu_gfx_surface_present as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_surface_resize",
+                    graphics::surface::rayzor_gpu_gfx_surface_resize as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_surface_get_format",
+                    graphics::surface::rayzor_gpu_gfx_surface_get_format as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_surface_destroy",
+                    graphics::surface::rayzor_gpu_gfx_surface_destroy as *const u8,
+                ),
+                // Texture write
+                (
+                    "rayzor_gpu_gfx_texture_write",
+                    graphics::texture::rayzor_gpu_gfx_texture_write as *const u8,
+                ),
+                // Sampler
+                (
+                    "rayzor_gpu_gfx_sampler_create",
+                    graphics::texture::rayzor_gpu_gfx_sampler_create as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_sampler_destroy",
+                    graphics::texture::rayzor_gpu_gfx_sampler_destroy as *const u8,
+                ),
+                // BindGroup
+                (
+                    "rayzor_gpu_gfx_bind_group_layout_create",
+                    graphics::bind_group::rayzor_gpu_gfx_bind_group_layout_create as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_bind_group_layout_destroy",
+                    graphics::bind_group::rayzor_gpu_gfx_bind_group_layout_destroy as *const u8,
+                ),
+                (
+                    "rayzor_gpu_gfx_bind_group_destroy",
+                    graphics::bind_group::rayzor_gpu_gfx_bind_group_destroy as *const u8,
+                ),
+            ];
+            symbols.extend(gfx_symbols);
+        }
+
+        symbols
     }
 
-    symbols
-}
-
-fn collect_symbols() -> Vec<SymbolEntry> {
-    get_runtime_symbols()
-        .into_iter()
-        .map(|(name, ptr)| SymbolEntry {
-            name: name.as_ptr(),
-            name_len: name.len(),
-            ptr: ptr as *const c_void,
-        })
-        .collect()
-}
-
-// Universal rpkg entry point — single export for both symbols and method descriptors
-rayzor_plugin::rpkg_entry!(GPU_METHODS, get_runtime_symbols);
-
-/// GPU compute plugin implementing RuntimePlugin trait
-pub struct GpuComputePlugin;
-
-impl rayzor_plugin::RuntimePlugin for GpuComputePlugin {
-    fn name(&self) -> &str {
-        "rayzor_gpu_compute"
-    }
-
-    fn runtime_symbols(&self) -> Vec<(&'static str, *const u8)> {
+    fn collect_symbols() -> Vec<SymbolEntry> {
         get_runtime_symbols()
+            .into_iter()
+            .map(|(name, ptr)| SymbolEntry {
+                name: name.as_ptr(),
+                name_len: name.len(),
+                ptr: ptr as *const c_void,
+            })
+            .collect()
     }
-}
+
+    // Universal rpkg entry point — single export for both symbols and method descriptors
+    rayzor_plugin::rpkg_entry!(GPU_METHODS, get_runtime_symbols);
+
+    /// GPU compute plugin implementing RuntimePlugin trait
+    pub struct GpuComputePlugin;
+
+    impl rayzor_plugin::RuntimePlugin for GpuComputePlugin {
+        fn name(&self) -> &str {
+            "rayzor_gpu_compute"
+        }
+
+        fn runtime_symbols(&self) -> Vec<(&'static str, *const u8)> {
+            get_runtime_symbols()
+        }
+    }
 } // mod native_plugin
 #[cfg(feature = "native")]
 pub use native_plugin::*;
