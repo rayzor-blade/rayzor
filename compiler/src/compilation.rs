@@ -2633,10 +2633,9 @@ impl CompilationUnit {
             return true;
         }
 
-        // Cache miss or caching disabled - compile normally
-        // Only skip pre-registration for stdlib files (types registered via bsym).
-        // User package files need full pre-registration for correct type resolution.
-        let is_stdlib = file_path.to_string_lossy().contains("haxe-std");
+        // Never skip pre-registration for import files — they always need
+        // full type registration to make extern class fields visible.
+        let is_stdlib = false;
         // User package imports skip the stdlib merge — it happens once in the main file's
         // compilation. This prevents stdlib functions from overwriting user functions by bare name.
         // Stdlib imports (EReg, StringTools, etc.) still need the merge because their Haxe
