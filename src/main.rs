@@ -418,6 +418,11 @@ enum RpkgAction {
         #[arg(long, value_name = "FILE", num_args = 0..=1, default_missing_value = "__auto__")]
         wasm: Option<PathBuf>,
 
+        /// JS host module for WASM @:jsImport (repeatable).
+        /// Format: MODULE=FILE, e.g. --js-host rayzor-gpu=wasm/gpu_host.js
+        #[arg(long, value_name = "MODULE=FILE")]
+        js_host: Vec<String>,
+
         /// Directory containing .hx source files to bundle
         #[arg(long)]
         haxe_dir: PathBuf,
@@ -734,10 +739,11 @@ fn main() {
                 os,
                 arch,
                 wasm,
+                js_host,
                 haxe_dir,
                 output,
                 name,
-            } => cmd_rpkg_pack(dylib, os, arch, wasm, haxe_dir, output, name),
+            } => cmd_rpkg_pack(dylib, os, arch, wasm, js_host, haxe_dir, output, name),
             RpkgAction::Inspect { file } => cmd_rpkg_inspect(file),
             RpkgAction::Install { file } => cmd_rpkg_install(file),
             RpkgAction::Add { name } => cmd_rpkg_add(name),
@@ -3538,6 +3544,7 @@ fn cmd_rpkg_pack(
     os_tags: Vec<String>,
     arch_tags: Vec<String>,
     wasm: Option<PathBuf>,
+    js_host_args: Vec<String>,
     haxe_dir: PathBuf,
     output: PathBuf,
     name: Option<String>,
@@ -3632,6 +3639,86 @@ fn cmd_rpkg_pack(
             &haxe_dir,
             &output,
         )?;
+    }
+
+    // Collect JS host modules from CLI args + rayzor.toml [wasm] config
+    let mut js_hosts: Vec<(String, String)> = Vec::new();
+
+    // Source 1: CLI --js-host MODULE=FILE args
+    for arg in &js_host_args {
+        if let Some((module_name, file_path)) = arg.split_once('=') {
+            let base = haxe_dir.parent().unwrap_or(&haxe_dir);
+            let path = base.join(file_path);
+            match std::fs::read_to_string(&path) {
+                Ok(source) => {
+                    println!(
+                        "  js-host: {} ({:.1} KB)",
+                        module_name,
+                        source.len() as f64 / 1024.0
+                    );
+                    js_hosts.push((module_name.to_string(), source));
+                }
+                Err(e) => eprintln!("  warning: JS host {} not found: {}", path.display(), e),
+            }
+        }
+    }
+
+    // Source 2: rayzor.toml [wasm] hosts (if no CLI args provided)
+    if js_hosts.is_empty() {
+        let manifest_root = haxe_dir.parent().and_then(|p| {
+            let abs = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(p)
+            };
+            compiler::workspace::find_project_root(&abs)
+        });
+        if let Some(root) = manifest_root {
+            if let Ok(project) = compiler::workspace::load_project(&root) {
+                for (module_name, abs_path) in project.resolved_wasm_hosts() {
+                    match std::fs::read_to_string(&abs_path) {
+                        Ok(source) => {
+                            println!(
+                                "  js-host: {} ({:.1} KB)",
+                                module_name,
+                                source.len() as f64 / 1024.0
+                            );
+                            js_hosts.push((module_name, source));
+                        }
+                        Err(e) => {
+                            eprintln!("  warning: JS host {} not found: {}", abs_path.display(), e)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Inject JS hosts into the rpkg if any were found
+    if !js_hosts.is_empty() {
+        let loaded = compiler::rpkg::load_rpkg(&output)
+            .map_err(|e| format!("failed to reload rpkg: {}", e))?;
+        let mut builder = compiler::rpkg::pack::RpkgBuilder::new(&loaded.package_name);
+        for (module_path, source) in &loaded.haxe_sources {
+            builder.add_haxe_source(module_path, source);
+        }
+        if !loaded.methods.is_empty() {
+            let plugin = loaded
+                .plugin_name
+                .as_deref()
+                .unwrap_or(&loaded.package_name);
+            builder.add_method_table(plugin, &loaded.methods);
+        }
+        if let Some(ref wasm_bytes) = loaded.wasm_component_bytes {
+            builder.add_wasm_component(&loaded.package_name, wasm_bytes);
+        }
+        for (module_name, js_source) in &js_hosts {
+            builder.add_js_host(module_name, js_source);
+        }
+        // Rewrite with JS hosts included
+        builder
+            .write(&output)
+            .map_err(|e| format!("failed to write rpkg: {}", e))?;
     }
 
     let size = std::fs::metadata(&output).map(|m| m.len()).unwrap_or(0);
