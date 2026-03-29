@@ -43,8 +43,8 @@ unsafe fn wasi_write(fd: i32, data: *const u8, len: usize) {
 // Section 1: Memory Allocator
 // ============================================================================
 
-/// Internal allocator wrapper — uses std::alloc.
-/// The WASM module uses libc's malloc/free (from wasm32-wasip1 dlmalloc).
+/// Internal allocator wrapper — uses std::alloc (dlmalloc on wasm32-wasip1).
+/// All runtime allocations MUST go through this function for consistency.
 fn rt_alloc(size: usize) -> i32 {
     if size == 0 {
         return 0;
@@ -682,19 +682,16 @@ const ARRAY_ELEM_SIZE: u32 = 4; // i32 elements for basic array
 #[no_mangle]
 pub extern "C" fn haxe_array_new() -> i32 {
     unsafe {
-        // Allocate the HaxeArray header (16 bytes)
-        let header_layout = Layout::from_size_align_unchecked(16, 4);
-        let header = alloc(header_layout);
-        if header.is_null() {
+        // Allocate the HaxeArray header (16 bytes) via rt_alloc
+        let header = rt_alloc(16);
+        if header == 0 {
             return 0;
         }
 
-        // Allocate data buffer
+        // Allocate data buffer via rt_alloc
         let data_size = (ARRAY_INITIAL_CAP * ARRAY_ELEM_SIZE) as usize;
-        let data_layout = Layout::from_size_align_unchecked(data_size, 4);
-        let data = alloc(data_layout);
-        if data.is_null() {
-            dealloc(header, header_layout);
+        let data = rt_alloc(data_size);
+        if data == 0 {
             return 0;
         }
 
@@ -737,18 +734,27 @@ unsafe fn array_ensure_capacity(arr: i32) {
     let old_size = (cap * elem_size) as usize;
     let new_size = (new_cap * elem_size) as usize;
 
-    let old_layout = Layout::from_size_align_unchecked(old_size, 4);
-    let new_data = if data_ptr == 0 {
-        alloc(Layout::from_size_align_unchecked(new_size, 4))
-    } else {
-        realloc(data_ptr as *mut u8, old_layout, new_size)
-    };
-
-    if !new_data.is_null() {
-        let h = arr as *mut u32;
-        *h = new_data as u32;    // ptr
-        *h.add(2) = new_cap;    // cap
+    // Allocate new buffer via rt_alloc (consistent with all other allocations)
+    let new_data = rt_alloc(new_size);
+    if new_data == 0 {
+        return;
     }
+
+    // Copy old data to new buffer
+    if data_ptr != 0 && old_size > 0 {
+        core::ptr::copy_nonoverlapping(
+            data_ptr as *const u8,
+            new_data as *mut u8,
+            old_size,
+        );
+    }
+
+    // Zero the new portion
+    core::ptr::write_bytes((new_data as *mut u8).add(old_size), 0, new_size - old_size);
+
+    let h = arr as *mut u32;
+    *h = new_data as u32;    // ptr
+    *h.add(2) = new_cap;    // cap
 }
 
 /// Push an i32 value onto the array.
