@@ -30948,27 +30948,45 @@ impl<'a> HirToMirContext<'a> {
         let mut js_mod: Option<String> = None;
         let mut js_func: Option<String> = None;
 
-        // Check method's own @:jsImport
-        if let Some(sym) = self.symbol_table.get_symbol(symbol_id) {
-            if let Some((mod_is, func_is)) = sym.js_import {
-                js_mod = Some(self.string_interner.get(mod_is).unwrap_or("").to_string());
-                js_func = Some(self.string_interner.get(func_is).unwrap_or("").to_string());
-            }
-        }
-
-        // Check owning class for @:jsImport (via this_type, explicit class_symbol, or current_class)
-        if js_mod.is_none() {
+        // Resolve the owning class's JS module (for @:jsMethod/@:jsGet/@:jsSet)
+        let class_js_module: Option<String> = {
             let csid = class_symbol
                 .or(self.current_class_symbol)
                 .or_else(|| this_type.and_then(|t| self.class_type_to_symbol.get(&t).copied()));
-            if let Some(csid) = csid {
-                if let Some(class_sym) = self.symbol_table.get_symbol(csid) {
-                    if let Some((mod_is, _)) = class_sym.js_import {
-                        js_mod = Some(self.string_interner.get(mod_is).unwrap_or("").to_string());
-                        if let Some(f) = self.builder.module.functions.get(&func_id) {
-                            js_func = Some(f.name.clone());
-                        }
-                    }
+            csid.and_then(|csid| {
+                self.symbol_table.get_symbol(csid).and_then(|class_sym| {
+                    class_sym.js_import.and_then(|(mod_is, _)| {
+                        self.string_interner.get(mod_is).map(|s| s.to_string())
+                    })
+                })
+            })
+        };
+
+        // Check method's own JS metadata (@:jsMethod, @:jsGet, @:jsSet, @:jsFunction)
+        if let Some(sym) = self.symbol_table.get_symbol(symbol_id) {
+            if let Some((mod_is, func_is)) = sym.js_import {
+                let mod_str = self.string_interner.get(mod_is).unwrap_or("").to_string();
+                let func_str = self.string_interner.get(func_is).unwrap_or("").to_string();
+
+                if mod_str == "__jsMethod__" {
+                    // @:jsMethod/@:jsGet/@:jsSet — inherit module from class's @:jsImport
+                    js_mod = class_js_module.clone();
+                    js_func = Some(func_str);
+                } else {
+                    // @:jsFunction or @:jsImport with explicit module
+                    js_mod = Some(mod_str);
+                    js_func = Some(func_str);
+                }
+            }
+        }
+
+        // If method has no JS metadata, check if the class has @:jsImport
+        // and use the method's MIR name as the import name (fallback)
+        if js_mod.is_none() {
+            if let Some(ref class_mod) = class_js_module {
+                js_mod = Some(class_mod.clone());
+                if let Some(f) = self.builder.module.functions.get(&func_id) {
+                    js_func = Some(f.name.clone());
                 }
             }
         }

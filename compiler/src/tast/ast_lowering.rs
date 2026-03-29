@@ -702,37 +702,78 @@ impl<'a> AstLowering<'a> {
                     }
                 }
                 "jsImport" => {
-                    // @:jsImport("module-name") on a class/extern class
-                    // Sets the WASM import module for all methods in this class.
-                    // Method import names come from @:native or the method name.
-                    //
-                    // @:jsImport("module-name", "function-name") on a method
-                    // Explicitly sets both module and function name.
+                    // @:jsImport("module") on a class — sets JS host module for all methods.
+                    // Methods inherit the module and use @:jsMethod for their import name.
                     if let Some(first_param) = meta.params.first() {
                         if let parser::haxe_ast::ExprKind::String(module_name) = &first_param.kind {
                             let module_interned = self.context.string_interner.intern(module_name);
-                            if meta.params.len() >= 2 {
-                                // Two-arg form: @:jsImport("module", "function")
-                                if let parser::haxe_ast::ExprKind::String(func_name) =
-                                    &meta.params[1].kind
-                                {
-                                    let func_interned =
-                                        self.context.string_interner.intern(func_name);
-                                    if let Some(sym) =
-                                        self.context.symbol_table.get_symbol_mut(symbol_id)
-                                    {
-                                        sym.js_import = Some((module_interned, func_interned));
-                                    }
-                                }
-                            } else {
-                                // One-arg form: @:jsImport("module") — on a class
-                                // Store module name; methods inherit it and use their @:native name
-                                if let Some(sym) =
-                                    self.context.symbol_table.get_symbol_mut(symbol_id)
-                                {
-                                    // Use a sentinel for the function name — methods will override
-                                    sym.js_import = Some((module_interned, module_interned));
-                                }
+                            if let Some(sym) = self.context.symbol_table.get_symbol_mut(symbol_id) {
+                                // Store module name; methods inherit via propagate_js_import
+                                sym.js_import = Some((module_interned, module_interned));
+                            }
+                        }
+                    }
+                }
+                "jsMethod" => {
+                    // @:jsMethod("function-name") on a method in a @:jsImport class.
+                    // Sets the JS function name within the class's module.
+                    // The module is inherited from the owning class's @:jsImport.
+                    if let Some(first_param) = meta.params.first() {
+                        if let parser::haxe_ast::ExprKind::String(func_name) = &first_param.kind {
+                            let func_interned = self.context.string_interner.intern(func_name);
+                            if let Some(sym) = self.context.symbol_table.get_symbol_mut(symbol_id) {
+                                // Store function name with a placeholder module —
+                                // propagate_js_import will fill in the real module from the class.
+                                let placeholder =
+                                    self.context.string_interner.intern("__jsMethod__");
+                                sym.js_import = Some((placeholder, func_interned));
+                            }
+                        }
+                    }
+                }
+                "jsFunction" => {
+                    // @:jsFunction("module", "function") on a standalone extern function.
+                    // Sets both the JS module and function name directly.
+                    if meta.params.len() >= 2 {
+                        if let (
+                            parser::haxe_ast::ExprKind::String(module_name),
+                            parser::haxe_ast::ExprKind::String(func_name),
+                        ) = (&meta.params[0].kind, &meta.params[1].kind)
+                        {
+                            let module_interned = self.context.string_interner.intern(module_name);
+                            let func_interned = self.context.string_interner.intern(func_name);
+                            if let Some(sym) = self.context.symbol_table.get_symbol_mut(symbol_id) {
+                                sym.js_import = Some((module_interned, func_interned));
+                            }
+                        }
+                    }
+                }
+                "jsGet" => {
+                    // @:jsGet("property") on a field getter — maps to JS property read.
+                    // Generates: module.get-property(handle) → value
+                    if let Some(first_param) = meta.params.first() {
+                        if let parser::haxe_ast::ExprKind::String(prop_name) = &first_param.kind {
+                            let getter_name = format!("get-{}", prop_name);
+                            let func_interned = self.context.string_interner.intern(&getter_name);
+                            if let Some(sym) = self.context.symbol_table.get_symbol_mut(symbol_id) {
+                                let placeholder =
+                                    self.context.string_interner.intern("__jsMethod__");
+                                sym.js_import = Some((placeholder, func_interned));
+                            }
+                        }
+                    }
+                }
+                "jsSet" => {
+                    // @:jsSet("property") on a field setter — maps to JS property write.
+                    // Generates: module.set-property(handle, value) → void
+                    if let Some(first_param) = meta.params.first() {
+                        if let parser::haxe_ast::ExprKind::String(prop_name) = &first_param.kind {
+                            let setter_name = format!("set-{}", prop_name);
+                            let func_interned = self.context.string_interner.intern(&setter_name);
+                            if let Some(sym) = self.context.symbol_table.get_symbol_mut(symbol_id) {
+                                let placeholder =
+                                    self.context.string_interner.intern("__jsMethod__");
+                                sym.js_import = Some((placeholder, func_interned));
                             }
                         }
                     }
