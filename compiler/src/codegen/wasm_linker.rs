@@ -465,6 +465,19 @@ impl LinkerCtx {
             }
         }
 
+        // Alias mappings: user imports these names, runtime exports prefixed versions.
+        // This avoids libc symbol collisions in the runtime crate.
+        let aliases: &[(&str, &str)] = &[
+            ("malloc", "rayzor_malloc"),
+            ("free", "rayzor_free"),
+            ("realloc", "rayzor_realloc"),
+        ];
+        for &(user_name, rt_name) in aliases {
+            if let Some(&idx) = rt_export_to_merged.get(rt_name) {
+                rt_export_to_merged.insert(user_name, idx);
+            }
+        }
+
         for (i, imp) in user.func_imports.iter().enumerate() {
             let user_orig_idx = i as u32;
             if imp.module == "rayzor" {
