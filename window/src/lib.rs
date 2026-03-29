@@ -463,6 +463,26 @@ mod native_ffi {
             .unwrap_or(0.0)
     }
 
+    // --- Run Loop ---
+
+    /// Run a frame-driven loop. On native, this is a blocking while loop
+    /// that calls pollEvents() + the callback each iteration.
+    /// `callback` is a function pointer (fn() -> i32) where 1=continue, 0=stop.
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_run_loop(
+        win: *mut NativeWindow,
+        callback: extern "C" fn() -> i32,
+    ) {
+        if win.is_null() {
+            return;
+        }
+        while (*win).inner.poll_events() {
+            if callback() == 0 {
+                break;
+            }
+        }
+    }
+
     // --- Cleanup ---
 
     #[no_mangle]
@@ -538,6 +558,8 @@ rayzor_plugin::declare_native_methods! {
     "rayzor_window_Window", "eventHeight",      instance, "rayzor_window_event_height",        [Ptr, I64]      => I64;
     "rayzor_window_Window", "eventScrollX",     instance, "rayzor_window_event_scroll_x",      [Ptr, I64]      => F64;
     "rayzor_window_Window", "eventScrollY",     instance, "rayzor_window_event_scroll_y",      [Ptr, I64]      => F64;
+    // Run loop
+    "rayzor_window_Window", "runLoop",          static,   "rayzor_window_run_loop",            [Ptr, Ptr]      => Void;
     // Cleanup
     "rayzor_window_Window", "destroy",          instance, "rayzor_window_destroy",             [Ptr]           => Void;
 }
@@ -682,6 +704,10 @@ fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
         (
             "rayzor_window_event_scroll_y",
             rayzor_window_event_scroll_y as *const u8,
+        ),
+        (
+            "rayzor_window_run_loop",
+            rayzor_window_run_loop as *const u8,
         ),
         ("rayzor_window_destroy", rayzor_window_destroy as *const u8),
     ]

@@ -441,3 +441,54 @@ pub fn window_event_scroll_y(h: i32, idx: i32) -> f64 {
         .map(|e| e.scroll_y)
         .unwrap_or(0.0)
 }
+
+// ============================================================================
+// Run loop — requestAnimationFrame on WASM
+// ============================================================================
+
+/// Run a frame-driven render loop using requestAnimationFrame.
+/// `callback` is a JS function that returns true to continue, false to stop.
+/// On each frame: poll events → call callback → request next frame.
+#[wasm_bindgen(js_name = "rayzor_window_run_loop")]
+pub fn window_run_loop(win_h: i32, callback: js_sys::Function) {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use wasm_bindgen::JsCast;
+
+    let f: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+    let g = f.clone();
+
+    *g.borrow_mut() = Some(Closure::wrap(Box::new(move || {
+        // Poll events for this frame
+        {
+            let mut wt = WINDOWS.lock().unwrap();
+            if let Some(w) = wt.get_mut(win_h) {
+                w.poll_events();
+            }
+        }
+
+        // Call user callback — returns true (continue) or false (stop)
+        let result = callback.call0(&JsValue::NULL);
+        let should_continue = match result {
+            Ok(val) => val.as_bool().unwrap_or(true),
+            Err(_) => false,
+        };
+
+        if should_continue {
+            // Schedule next frame
+            request_animation_frame(f.borrow().as_ref().unwrap());
+        } else {
+            // Stop — drop the closure
+            let _ = f.borrow_mut().take();
+        }
+    }) as Box<dyn FnMut()>));
+
+    request_animation_frame(g.borrow().as_ref().unwrap());
+}
+
+fn request_animation_frame(f: &Closure<dyn FnMut()>) {
+    web_sys::window()
+        .unwrap()
+        .request_animation_frame(f.as_ref().unchecked_ref())
+        .unwrap();
+}
