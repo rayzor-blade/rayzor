@@ -139,6 +139,9 @@ declare_native_methods! {
 
     // Surface
     "rayzor_gpu_Surface", "create",         static,   "rayzor_gpu_gfx_surface_create",     [Ptr, Ptr, Ptr, I64, I64] => Ptr;
+    // Surface.createCanvas is available on all platforms — on WASM the host provides it,
+    // on native it's a no-op (use Surface.create with raw window handles instead).
+    "rayzor_gpu_Surface", "createCanvas",   static,   "rayzor_gpu_gfx_surface_create_canvas", [Ptr, Ptr, I64, I64] => Ptr;
     "rayzor_gpu_Surface", "getTexture",     instance, "rayzor_gpu_gfx_surface_get_texture",[Ptr]           => Ptr;
     "rayzor_gpu_Surface", "present",        instance, "rayzor_gpu_gfx_surface_present",    [Ptr]           => Void;
     "rayzor_gpu_Surface", "resize",         instance, "rayzor_gpu_gfx_surface_resize",     [Ptr, Ptr, I64, I64] => Void;

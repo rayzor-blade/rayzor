@@ -1,0 +1,127 @@
+/// Rayzor GPU interface — non-standard WASI extension.
+///
+/// Provides GPU compute and graphics rendering capabilities.
+/// Host implementations:
+///   - Browser: WebGPU API (navigator.gpu) with WebGL2 fallback
+///   - Native (rayzor run --wasm): wgpu crate (Metal/Vulkan/DX12)
+///   - Headless: stub (returns unavailable)
+
+package rayzor:gpu;
+
+/// GPU compute operations on tensor-like buffers.
+interface compute {
+    /// Opaque handle to a GPU compute context.
+    type device = s32;
+    /// Opaque handle to a GPU buffer.
+    type buffer = s32;
+
+    /// Create a GPU compute device. Returns 0 if unavailable.
+    create-device: func() -> device;
+    /// Check if GPU compute is available on this host.
+    is-available: func() -> bool;
+    /// Destroy a compute device.
+    destroy-device: func(dev: device);
+
+    /// Allocate a GPU buffer with `numel` elements of `dtype`.
+    alloc-buffer: func(dev: device, numel: s32, dtype: s32) -> buffer;
+    /// Free a GPU buffer.
+    free-buffer: func(dev: device, buf: buffer);
+    /// Get buffer element count.
+    buffer-numel: func(buf: buffer) -> s32;
+
+    /// Binary elementwise: a OP b → result.
+    add: func(dev: device, a: buffer, b: buffer) -> buffer;
+    sub: func(dev: device, a: buffer, b: buffer) -> buffer;
+    mul: func(dev: device, a: buffer, b: buffer) -> buffer;
+    div: func(dev: device, a: buffer, b: buffer) -> buffer;
+
+    /// Unary elementwise: OP(a) → result.
+    neg: func(dev: device, a: buffer) -> buffer;
+    abs: func(dev: device, a: buffer) -> buffer;
+    sqrt: func(dev: device, a: buffer) -> buffer;
+    exp: func(dev: device, a: buffer) -> buffer;
+    log: func(dev: device, a: buffer) -> buffer;
+    relu: func(dev: device, a: buffer) -> buffer;
+    sigmoid: func(dev: device, a: buffer) -> buffer;
+    gpu-tanh: func(dev: device, a: buffer) -> buffer;
+
+    /// Reductions: buffer → scalar.
+    sum: func(dev: device, buf: buffer) -> f64;
+    mean: func(dev: device, buf: buffer) -> f64;
+    reduce-max: func(dev: device, buf: buffer) -> f64;
+    reduce-min: func(dev: device, buf: buffer) -> f64;
+
+    /// Dot product.
+    dot: func(dev: device, a: buffer, b: buffer) -> f64;
+    /// Matrix multiply: (m×k) @ (k×n) → (m×n).
+    matmul: func(dev: device, a: buffer, b: buffer, m: s32, k: s32, n: s32) -> buffer;
+}
+
+/// GPU graphics rendering (mirrors WebGPU API).
+interface graphics {
+    /// Opaque handle types — host manages the actual GPU objects.
+    type gfx-device = s32;
+    type surface = s32;
+    type texture-view = s32;
+    type shader-module = s32;
+    type render-pipeline = s32;
+    type gfx-buffer = s32;
+    type bind-group = s32;
+    type bind-group-layout = s32;
+    type sampler = s32;
+    type command-encoder = s32;
+
+    /// Device lifecycle.
+    create-device: func() -> gfx-device;
+    destroy-device: func(dev: gfx-device);
+    is-available: func() -> bool;
+
+    /// Surface — presentation target.
+    /// On browser: creates/finds an HTML <canvas>. On native: wraps raw window handle.
+    create-surface-canvas: func(dev: gfx-device, canvas-id: s32, width: s32, height: s32) -> surface;
+    create-surface: func(dev: gfx-device, window-handle: s32, display-handle: s32, width: s32, height: s32) -> surface;
+    surface-get-texture: func(surf: surface) -> texture-view;
+    surface-present: func(surf: surface);
+    surface-resize: func(surf: surface, dev: gfx-device, width: s32, height: s32);
+    surface-get-format: func(surf: surface) -> s32;
+    surface-destroy: func(surf: surface);
+
+    /// Shader modules (WGSL source).
+    create-shader: func(dev: gfx-device, wgsl-source: s32, vs-entry: s32, fs-entry: s32) -> shader-module;
+    destroy-shader: func(shader: shader-module);
+
+    /// Buffers (vertex, index, uniform, storage).
+    create-buffer: func(dev: gfx-device, size: s32, usage-flags: s32) -> gfx-buffer;
+    create-buffer-with-data: func(dev: gfx-device, data: s32, size: s32, usage-flags: s32) -> gfx-buffer;
+    buffer-write: func(buf: gfx-buffer, dev: gfx-device, offset: s32, data: s32, size: s32);
+    buffer-destroy: func(buf: gfx-buffer);
+
+    /// Textures.
+    create-texture: func(dev: gfx-device, width: s32, height: s32, format: s32, usage-flags: s32) -> s32;
+    texture-write: func(tex: s32, dev: gfx-device, data: s32, bytes-per-row: s32, height: s32);
+    texture-get-view: func(tex: s32) -> texture-view;
+    texture-destroy: func(tex: s32);
+
+    /// Render pipeline.
+    pipeline-begin: func() -> s32;
+    pipeline-set-shader: func(pipe: s32, shader: shader-module);
+    pipeline-set-format: func(pipe: s32, format: s32);
+    pipeline-set-topology: func(pipe: s32, topology: s32);
+    pipeline-set-cull: func(pipe: s32, cull-mode: s32);
+    pipeline-build: func(pipe: s32, dev: gfx-device) -> render-pipeline;
+    pipeline-destroy: func(pipe: render-pipeline);
+
+    /// Command encoder — records draw commands.
+    cmd-create: func() -> command-encoder;
+    cmd-begin-pass: func(cmd: command-encoder, color-view: texture-view, load-op: s32, r: f64, g: f64, b: f64, a: f64, depth-view: texture-view);
+    cmd-end-pass: func(cmd: command-encoder);
+    cmd-submit: func(cmd: command-encoder, dev: gfx-device);
+    cmd-set-pipeline: func(cmd: command-encoder, pipe: render-pipeline);
+    cmd-draw: func(cmd: command-encoder, vertex-count: s32, instance-count: s32, first-vertex: s32, first-instance: s32);
+    cmd-draw-indexed: func(cmd: command-encoder, index-count: s32, instance-count: s32, first-index: s32, base-vertex: s32, first-instance: s32);
+    cmd-set-vertex-buffer: func(cmd: command-encoder, slot: s32, buf: gfx-buffer);
+    cmd-set-index-buffer: func(cmd: command-encoder, buf: gfx-buffer, format: s32);
+    cmd-set-bind-group: func(cmd: command-encoder, group-index: s32, bg: bind-group);
+    cmd-set-viewport: func(cmd: command-encoder, x: f64, y: f64, w: f64, h: f64, min-depth: f64, max-depth: f64);
+    cmd-set-scissor: func(cmd: command-encoder, x: s32, y: s32, w: s32, h: s32);
+}

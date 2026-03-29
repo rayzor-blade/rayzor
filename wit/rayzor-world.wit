@@ -1,0 +1,20 @@
+/// Rayzor application world — imports GPU + Window from host.
+///
+/// A Rayzor WASM component that uses GPU and/or Window capabilities
+/// targets this world. The host provides implementations:
+///   - Browser: WebGPU/WebGL2 + DOM canvas/events
+///   - Native:  wgpu (Metal/Vulkan/DX12) + OS windows (Cocoa/X11/Win32)
+
+package rayzor:app;
+
+world rayzor-app {
+    /// Standard WASI imports (filesystem, stdio, clocks, etc.)
+    /// These are provided by the P1→P2 adapter automatically.
+
+    /// Rayzor GPU — compute + graphics rendering
+    import rayzor:gpu/compute;
+    import rayzor:gpu/graphics;
+
+    /// Rayzor Window — windowing + input events
+    import rayzor:window/window;
+}
