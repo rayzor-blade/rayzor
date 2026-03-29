@@ -445,7 +445,8 @@ impl Symbol {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None, js_import: None,
+            c_libs: None,
+            js_import: None,
         }
     }
 
@@ -913,7 +914,8 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None, js_import: None,
+            c_libs: None,
+            js_import: None,
         };
 
         // Add the symbol to the table
@@ -952,7 +954,8 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None, js_import: None,
+            c_libs: None,
+            js_import: None,
         };
 
         // Add the symbol to the table
@@ -995,7 +998,8 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None, js_import: None,
+            c_libs: None,
+            js_import: None,
         };
 
         // Add the symbol to the table
@@ -1037,7 +1041,8 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None, js_import: None,
+            c_libs: None,
+            js_import: None,
         };
 
         self.add_symbol(symbol);
@@ -1077,7 +1082,8 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None, js_import: None,
+            c_libs: None,
+            js_import: None,
         };
 
         self.add_symbol(symbol);
@@ -1127,7 +1133,8 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None, js_import: None,
+            c_libs: None,
+            js_import: None,
         };
 
         self.add_symbol(symbol);
@@ -1158,7 +1165,8 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None, js_import: None,
+            c_libs: None,
+            js_import: None,
         };
 
         self.add_symbol(symbol);
@@ -1193,7 +1201,8 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None, js_import: None,
+            c_libs: None,
+            js_import: None,
         };
 
         self.add_symbol(symbol);
@@ -1228,7 +1237,8 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None, js_import: None,
+            c_libs: None,
+            js_import: None,
         };
 
         self.add_symbol(symbol);
@@ -1264,7 +1274,8 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None, js_import: None,
+            c_libs: None,
+            js_import: None,
         };
 
         self.add_symbol(symbol);

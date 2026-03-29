@@ -63,7 +63,13 @@ pub fn parse_haxe_file_with_debug(
     recovery: bool,
     debug: bool,
 ) -> Result<HaxeFile, String> {
-    parse_haxe_file_with_config(file_name, input, recovery, debug, &crate::preprocessor::PreprocessorConfig::default())
+    parse_haxe_file_with_config(
+        file_name,
+        input,
+        recovery,
+        debug,
+        &crate::preprocessor::PreprocessorConfig::default(),
+    )
 }
 
 /// Parse a Haxe file with explicit preprocessor defines (e.g., "wasm" for WASM targets).

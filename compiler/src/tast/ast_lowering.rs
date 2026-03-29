@@ -713,16 +713,23 @@ impl<'a> AstLowering<'a> {
                             let module_interned = self.context.string_interner.intern(module_name);
                             if meta.params.len() >= 2 {
                                 // Two-arg form: @:jsImport("module", "function")
-                                if let parser::haxe_ast::ExprKind::String(func_name) = &meta.params[1].kind {
-                                    let func_interned = self.context.string_interner.intern(func_name);
-                                    if let Some(sym) = self.context.symbol_table.get_symbol_mut(symbol_id) {
+                                if let parser::haxe_ast::ExprKind::String(func_name) =
+                                    &meta.params[1].kind
+                                {
+                                    let func_interned =
+                                        self.context.string_interner.intern(func_name);
+                                    if let Some(sym) =
+                                        self.context.symbol_table.get_symbol_mut(symbol_id)
+                                    {
                                         sym.js_import = Some((module_interned, func_interned));
                                     }
                                 }
                             } else {
                                 // One-arg form: @:jsImport("module") — on a class
                                 // Store module name; methods inherit it and use their @:native name
-                                if let Some(sym) = self.context.symbol_table.get_symbol_mut(symbol_id) {
+                                if let Some(sym) =
+                                    self.context.symbol_table.get_symbol_mut(symbol_id)
+                                {
                                     // Use a sentinel for the function name — methods will override
                                     sym.js_import = Some((module_interned, module_interned));
                                 }
@@ -1765,7 +1772,8 @@ impl<'a> AstLowering<'a> {
                 frameworks: None,
                 c_includes: None,
                 c_sources: None,
-                c_libs: None, js_import: None,
+                c_libs: None,
+                js_import: None,
             };
 
             // Add symbol to symbol table
@@ -1942,7 +1950,8 @@ impl<'a> AstLowering<'a> {
                 frameworks: None,
                 c_includes: None,
                 c_sources: None,
-                c_libs: None, js_import: None,
+                c_libs: None,
+                js_import: None,
             };
 
             self.context.symbol_table.add_symbol(func_symbol);
@@ -3330,7 +3339,8 @@ impl<'a> AstLowering<'a> {
                     frameworks: None,
                     c_includes: None,
                     c_sources: None,
-                    c_libs: None, js_import: None,
+                    c_libs: None,
+                    js_import: None,
                 };
                 self.context.symbol_table.add_symbol(func_symbol);
 

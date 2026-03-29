@@ -793,7 +793,14 @@ fn compile_haxe_to_mir_full(
     extra_source_dirs: &[PathBuf],
     safety_warnings: bool,
 ) -> Result<MirCompilationResult, String> {
-    compile_haxe_to_mir_with_defines(source, filename, plugins, extra_source_dirs, safety_warnings, &[])
+    compile_haxe_to_mir_with_defines(
+        source,
+        filename,
+        plugins,
+        extra_source_dirs,
+        safety_warnings,
+        &[],
+    )
 }
 
 fn compile_haxe_to_mir_with_defines(

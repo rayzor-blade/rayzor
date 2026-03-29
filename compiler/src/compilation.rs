@@ -3689,7 +3689,9 @@ impl CompilationUnit {
             for define in &self.config.extra_defines {
                 pp_config.defines.insert(define.clone());
             }
-            parser::haxe_parser::parse_haxe_file_with_config(file_path, source, true, true, &pp_config)
+            parser::haxe_parser::parse_haxe_file_with_config(
+                file_path, source, true, true, &pp_config,
+            )
         }
         .map_err(|e| format!("Parse error in {}: {}", file_path, e))?;
 
