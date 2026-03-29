@@ -231,6 +231,7 @@ pub unsafe extern "C" fn rayzor_gpu_plugin_describe(
 }
 
 /// Rust-callable API returning runtime symbols.
+#[allow(unused_mut)]
 pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
     let mut symbols = vec![
         // Device lifecycle
