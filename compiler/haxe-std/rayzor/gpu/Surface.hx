@@ -1,59 +1,66 @@
 package rayzor.gpu;
 
 /**
- * Window surface for real-time frame presentation.
+ * GPU surface for real-time frame presentation.
  *
- * Created from opaque window/display handles obtained from the OS.
- * Use TinyCC (`rayzor.runtime.CC`) or any native binding to request
- * a window from the system, then pass the handles here.
+ * On native: created from raw OS window handles (via Window.getHandle()).
+ * On WASM: created from an HTML `<canvas>` element ID.
  *
- * Example:
+ * Example (native):
  * ```haxe
- * // Get window handle from the system (via CC, native lib, etc.)
- * var handles = NativeWindow.create(1280, 720);
- * var surface = Surface.create(device, handles.window, handles.display, 1280, 720);
+ * var surface = Surface.create(device, win.getHandle(), win.getDisplayHandle(), 1280, 720);
+ * ```
  *
- * // Render loop
- * var view = surface.getTexture();
- * cmd.beginPass(view, 0, 0.0, 0.0, 0.0, 1.0, null);
- * // ... draw ...
- * cmd.endPass();
- * cmd.submit(device);
- * surface.present();
+ * Example (WASM):
+ * ```haxe
+ * var surface = Surface.createCanvas(device, "gpu-canvas", 1280, 720);
  * ```
  */
+#if wasm
+@:jsImport("rayzor-gpu")
+#else
 @:native("rayzor::gpu::Surface")
+#end
 extern class Surface {
-    /** Create a surface from opaque window and display handles.
-     *  The handles are platform-specific pointers obtained from the OS
-     *  windowing system (via TinyCC, native libraries, etc.).
-     */
+    #if wasm
+    @:jsMethod("create-surface-canvas")
+    public static function createCanvas(device:GPUDevice, canvasId:String, width:Int, height:Int):Surface;
+
+    @:jsMethod("create-surface")
+    public static function create(device:GPUDevice, windowHandle:rayzor.Ptr<Void>, displayHandle:rayzor.Ptr<Void>, width:Int, height:Int):Surface;
+    #else
+    /** Create a surface from opaque window and display handles. */
     @:native("rayzor_gpu_gfx_surface_create")
     public static function create(device:GPUDevice, windowHandle:rayzor.Ptr<Void>, displayHandle:rayzor.Ptr<Void>, width:Int, height:Int):Surface;
 
-    /** Create a surface from an HTML canvas element (WASM/browser only).
-     *  Pass the canvas element's DOM ID (e.g., "my-canvas"), or null to auto-create one.
-     */
+    /** Create a surface from an HTML canvas element (WASM only — no-op on native). */
     @:native("rayzor_gpu_gfx_surface_create_canvas")
     public static function createCanvas(device:GPUDevice, canvasId:String, width:Int, height:Int):Surface;
+    #end
 
-    /** Get the current frame's texture view for rendering into. */
+    // Common methods — same on all platforms
+
+    #if wasm
+    @:jsMethod("surface-get-texture")
+    public function getTexture():TextureView;
+    @:jsMethod("surface-present")
+    public function present():Void;
+    @:jsMethod("surface-resize")
+    public function resize(device:GPUDevice, width:Int, height:Int):Void;
+    @:jsMethod("surface-get-format")
+    public function getFormat():Int;
+    @:jsMethod("surface-destroy")
+    public function destroy():Void;
+    #else
     @:native("rayzor_gpu_gfx_surface_get_texture")
     public function getTexture():TextureView;
-
-    /** Present the rendered frame to the window. */
     @:native("rayzor_gpu_gfx_surface_present")
     public function present():Void;
-
-    /** Resize the surface (call when window size changes). */
     @:native("rayzor_gpu_gfx_surface_resize")
     public function resize(device:GPUDevice, width:Int, height:Int):Void;
-
-    /** Get the surface's preferred texture format (as TextureFormat int code). */
     @:native("rayzor_gpu_gfx_surface_get_format")
     public function getFormat():Int;
-
-    /** Destroy this surface. */
     @:native("rayzor_gpu_gfx_surface_destroy")
     public function destroy():Void;
+    #end
 }
