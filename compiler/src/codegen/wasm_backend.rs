@@ -1238,7 +1238,18 @@ impl<'a> FunctionLowerer<'a> {
 
             // === UnOp ===
             IrInstruction::UnOp { dest, op, operand } => {
-                self.emit_unop(f, *op, *operand, self.reg_wasm_type(*dest));
+                let dest_ty = self.reg_wasm_type(*dest);
+                let operand_ty = self.reg_wasm_type(*operand);
+                // Promote: if operand is float, use float op even if dest was inferred as i32
+                let op_ty = if operand_ty == ValType::F64 || dest_ty == ValType::F64 {
+                    ValType::F64
+                } else if operand_ty == ValType::F32 || dest_ty == ValType::F32 {
+                    ValType::F32
+                } else {
+                    dest_ty
+                };
+                self.emit_unop(f, *op, *operand, op_ty);
+                self.emit_type_coerce(f, op_ty, dest_ty);
                 self.set_reg(f, *dest);
             }
 
@@ -1902,6 +1913,16 @@ impl<'a> FunctionLowerer<'a> {
 
     fn emit_unop(&self, f: &mut Function, op: UnaryOp, operand: IrId, dest_ty: ValType) {
         match (op, dest_ty) {
+            (UnaryOp::Neg, ValType::F64) => {
+                self.get_reg(f, operand);
+                self.emit_type_coerce(f, self.reg_wasm_type(operand), ValType::F64);
+                f.instruction(&Instruction::F64Neg);
+            }
+            (UnaryOp::Neg, ValType::F32) => {
+                self.get_reg(f, operand);
+                self.emit_type_coerce(f, self.reg_wasm_type(operand), ValType::F32);
+                f.instruction(&Instruction::F32Neg);
+            }
             (UnaryOp::Neg, ValType::I32) => {
                 f.instruction(&Instruction::I32Const(0));
                 self.get_reg(f, operand);
