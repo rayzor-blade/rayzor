@@ -3021,12 +3021,28 @@ fn cmd_run_wasm(
 
     eprintln!("Compiling {} [wasm]...", file.display());
 
+    // Resolve workspace class-paths from rayzor.toml
+    let extra_source_dirs: Vec<PathBuf> = {
+        let file_dir = file.parent().and_then(|p| {
+            let abs = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(p)
+            };
+            compiler::workspace::find_project_root(&abs)
+        });
+        file_dir
+            .and_then(|root| compiler::workspace::load_project(&root).ok())
+            .map(|p| p.resolved_class_paths())
+            .unwrap_or_default()
+    };
+
     // Compile Haxe → MIR → WASM
     let (mir_module, _diagnostics) = compile_haxe_to_mir(
         &source,
         file.to_str().unwrap_or("unknown"),
         Vec::new(),
-        &[],
+        &extra_source_dirs,
         safety_warnings,
     )?;
 
@@ -3061,6 +3077,33 @@ fn cmd_build_wasm(
     let source = std::fs::read_to_string(&file)
         .map_err(|e| format!("failed to read {}: {}", file.display(), e))?;
 
+    // Resolve workspace project for class-paths and default output directory
+    let project = {
+        let file_dir = file.parent().and_then(|p| {
+            let abs = if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                std::env::current_dir().unwrap_or_default().join(p)
+            };
+            compiler::workspace::find_project_root(&abs)
+        });
+        file_dir.and_then(|root| compiler::workspace::load_project(&root).ok())
+    };
+
+    let extra_source_dirs: Vec<PathBuf> = project
+        .as_ref()
+        .map(|p| p.resolved_class_paths())
+        .unwrap_or_default();
+
+    // Default output: .rayzor/build/<name>.wasm (relative to project root or cwd)
+    let output = output.or_else(|| {
+        let stem = file.file_stem()?.to_string_lossy().to_string();
+        let build_dir = project.as_ref()
+            .map(|p| p.root.join(".rayzor/build"))
+            .unwrap_or_else(|| PathBuf::from(".rayzor/build"));
+        Some(build_dir.join(format!("{}.wasm", stem)))
+    });
+
     println!("Building {} [target: {}]...", file.display(), target);
 
     // Use the full compile pipeline (same as `rayzor run`) to get merged MIR
@@ -3068,7 +3111,7 @@ fn cmd_build_wasm(
         &source,
         file.to_str().unwrap_or("unknown"),
         Vec::new(),
-        &[],
+        &extra_source_dirs,
         false,
     )?;
 
@@ -3099,6 +3142,10 @@ fn cmd_build_wasm(
         linked_wasm.len() as f64 / 1024.0);
 
     let out_path = output.unwrap_or_else(|| file.with_extension("wasm"));
+    // Ensure output directory exists
+    if let Some(parent) = out_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
     std::fs::write(&out_path, &component_bytes)
         .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
 
@@ -3216,17 +3263,25 @@ fn cmd_build_wasm(
 /// Find the pre-built WASM runtime library.
 /// Searches: ./runtime-wasm/target/..., ~/.rayzor/lib/, alongside the rayzor binary.
 fn find_wasm_runtime() -> Option<PathBuf> {
-    let candidates = [
-        // Development: built from source
+    let mut candidates = vec![
+        // Development: built from source (cwd-relative)
         PathBuf::from("runtime-wasm/target/wasm32-wasip1/release/rayzor_runtime_wasm.wasm"),
-        // Installed: alongside rayzor binary
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|d| d.join("rayzor_runtime_wasm.wasm")))
-            .unwrap_or_default(),
-        // User home
-        dirs_next().join("lib/rayzor_runtime_wasm.wasm"),
     ];
+
+    // Development: relative to the rayzor binary (works from any cwd)
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(bin_dir) = exe.parent() {
+            // binary is in target/release/, repo root is ../../
+            let repo_root = bin_dir.join("../../runtime-wasm/target/wasm32-wasip1/release/rayzor_runtime_wasm.wasm");
+            candidates.push(repo_root);
+            // Installed: alongside rayzor binary
+            candidates.push(bin_dir.join("rayzor_runtime_wasm.wasm"));
+        }
+    }
+
+    // User home
+    candidates.push(dirs_next().join("lib/rayzor_runtime_wasm.wasm"));
+
     candidates.into_iter().find(|p| p.exists())
 }
 
