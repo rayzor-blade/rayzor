@@ -472,6 +472,27 @@ impl CompilationUnit {
         }
     }
 
+    /// Build the preprocessor config with extra_defines from compilation config.
+    /// All file parsing should use this to ensure #if wasm etc. work consistently.
+    fn preprocessor_config(&self) -> parser::preprocessor::PreprocessorConfig {
+        let mut config = parser::preprocessor::PreprocessorConfig::default();
+        for define in &self.config.extra_defines {
+            config.defines.insert(define.clone());
+        }
+        config
+    }
+
+    /// Parse a file with the compilation unit's preprocessor defines.
+    fn parse_file(&self, filename: &str, source: &str) -> Result<parser::HaxeFile, String> {
+        parser::haxe_parser::parse_haxe_file_with_config(
+            filename,
+            source,
+            true,
+            true,
+            &self.preprocessor_config(),
+        )
+    }
+
     /// Load standard library files
     /// This should be called FIRST, before any user files are added
     pub fn load_stdlib(&mut self) -> Result<(), String> {
@@ -485,6 +506,7 @@ impl CompilationUnit {
         loader_config.default_imports = self.config.default_stdlib_imports.clone();
 
         let mut loader = StdLibLoader::new(loader_config);
+        loader.set_preprocessor_config(self.preprocessor_config());
 
         // Configure namespace resolver with stdlib paths for on-demand loading
         self.namespace_resolver
@@ -3529,13 +3551,10 @@ impl CompilationUnit {
     /// so they can be referenced by other files during full compilation
     fn pre_register_file_types(&mut self, filename: &str, source: &str) -> Result<(), String> {
         use crate::tast::ast_lowering::AstLowering;
-        use parser::parse_haxe_file_with_diagnostics;
 
-        // Parse the file
-        let parse_result = parse_haxe_file_with_diagnostics(filename, source)
+        let ast_file = self
+            .parse_file(filename, source)
             .map_err(|e| format!("Parse error in {}: {}", filename, e))?;
-
-        let ast_file = parse_result.file;
 
         // Create a temporary AstLowering instance just for pre-registration
         let dummy_interner_rc = Rc::new(RefCell::new(StringInterner::new()));
@@ -3565,14 +3584,11 @@ impl CompilationUnit {
     /// can resolve imported enum types and their variants.
     fn register_enums_from_source(&mut self, filename: &str, source: &str) {
         use crate::tast::ast_lowering::AstLowering;
-        use parser::parse_haxe_file_with_diagnostics;
 
-        let parse_result = match parse_haxe_file_with_diagnostics(filename, source) {
-            Ok(r) => r,
+        let ast_file = match self.parse_file(filename, source) {
+            Ok(f) => f,
             Err(_) => return,
         };
-
-        let ast_file = parse_result.file;
         let dummy_interner_rc = Rc::new(RefCell::new(StringInterner::new()));
 
         let mut lowering = AstLowering::new(
@@ -3617,12 +3633,10 @@ impl CompilationUnit {
         source: &str,
     ) -> Result<(), String> {
         use crate::tast::ast_lowering::AstLowering;
-        use parser::parse_haxe_file_with_diagnostics;
 
-        let parse_result = parse_haxe_file_with_diagnostics(filename, source)
+        let ast_file = self
+            .parse_file(filename, source)
             .map_err(|e| format!("Parse error in {}: {}", filename, e))?;
-
-        let ast_file = parse_result.file;
         let dummy_interner_rc = Rc::new(RefCell::new(StringInterner::new()));
 
         let mut lowering = AstLowering::new(
@@ -3669,9 +3683,9 @@ impl CompilationUnit {
             let source = fs::read_to_string(import_path)
                 .map_err(|e| format!("Failed to read import.hx at {:?}: {}", import_path, e))?;
 
-            let haxe_file =
-                parse_haxe_file(import_path.to_str().unwrap_or("import.hx"), &source, true)
-                    .map_err(|e| format!("Parse error in {:?}: {}", import_path, e))?;
+            let haxe_file = self
+                .parse_file(import_path.to_str().unwrap_or("import.hx"), &source)
+                .map_err(|e| format!("Parse error in {:?}: {}", import_path, e))?;
 
             self.import_hx_files.push(haxe_file);
         }
@@ -3681,19 +3695,9 @@ impl CompilationUnit {
 
     /// Add a user source file to the compilation unit
     pub fn add_file(&mut self, source: &str, file_path: &str) -> Result<(), String> {
-        // Build preprocessor config with extra defines (e.g., "wasm" for WASM target)
-        let haxe_file = if self.config.extra_defines.is_empty() {
-            parse_haxe_file_with_debug(file_path, source, true, true)
-        } else {
-            let mut pp_config = parser::preprocessor::PreprocessorConfig::default();
-            for define in &self.config.extra_defines {
-                pp_config.defines.insert(define.clone());
-            }
-            parser::haxe_parser::parse_haxe_file_with_config(
-                file_path, source, true, true, &pp_config,
-            )
-        }
-        .map_err(|e| format!("Parse error in {}: {}", file_path, e))?;
+        let haxe_file = self
+            .parse_file(file_path, source)
+            .map_err(|e| format!("Parse error in {}: {}", file_path, e))?;
 
         self.user_files.push(haxe_file);
         Ok(())
@@ -3846,7 +3850,7 @@ impl CompilationUnit {
         }
 
         // Parse the file
-        let parse_result = parse_haxe_file_with_diagnostics(filename, source).map_err(|e| {
+        let haxe_file = self.parse_file(filename, source).map_err(|e| {
             vec![CompilationError {
                 message: format!("Parse error: {}", e),
                 location: SourceLocation::unknown(),
@@ -3855,6 +3859,11 @@ impl CompilationUnit {
                 related_errors: Vec::new(),
             }]
         })?;
+        // Wrap in ParseResult-like struct for compatibility
+        struct ParseResultShim {
+            file: parser::HaxeFile,
+        }
+        let parse_result = ParseResultShim { file: haxe_file };
 
         self.compile_ast_with_shared_state(
             filename,
