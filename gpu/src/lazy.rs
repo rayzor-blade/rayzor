@@ -18,7 +18,9 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
+#[cfg(feature = "native")]
 use crate::backend::NativeBuffer;
+#[cfg(feature = "native")]
 use crate::kernel_ir::KernelOp;
 
 /// A node in the lazy computation DAG.
