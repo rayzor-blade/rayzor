@@ -103,7 +103,6 @@ extern class CmdEncoder {
 }
 #else
 import rayzor.window.Window;
-import rayzor.window.Key;
 import rayzor.gpu.GPUDevice;
 import rayzor.gpu.Surface;
 import rayzor.gpu.ShaderModule;
@@ -208,7 +207,7 @@ struct VertexOutput {
         var cmd = CommandEncoder.create();
         var frames = 0;
         while (win.pollEvents()) {
-            if (win.isKeyDown(Key.ESCAPE)) break;
+            if (win.isKeyDown(27)) break; // 27 = ESC
             if (win.wasResized()) surface.resize(device, win.getWidth(), win.getHeight());
             var view = surface.getTexture();
             if (view == null) continue;
