@@ -17,6 +17,7 @@ pub mod profiling;
 pub mod tiered_backend;
 pub mod wasm_backend;
 pub mod wasm_bindgen;
+pub mod wasm_component;
 pub mod wasm_linker;
 pub mod wasm_runner;
 pub mod wgsl_transpiler;

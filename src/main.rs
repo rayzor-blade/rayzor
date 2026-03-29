@@ -761,6 +761,13 @@ fn main() {
 /// Helper function to compile Haxe source through the full pipeline to MIR
 /// Uses CompilationUnit for proper multi-file, stdlib-aware compilation
 /// Returns the primary MIR module (user code) and any diagnostics (warnings)
+/// Result of compiling Haxe source to MIR, including metadata needed for codegen.
+struct MirCompilationResult {
+    module: compiler::ir::IrModule,
+    diagnostics: Vec<diagnostics::Diagnostic>,
+    class_alloc_sizes: std::collections::BTreeMap<String, u64>,
+}
+
 fn compile_haxe_to_mir(
     source: &str,
     filename: &str,
@@ -768,6 +775,17 @@ fn compile_haxe_to_mir(
     extra_source_dirs: &[PathBuf],
     safety_warnings: bool,
 ) -> Result<(compiler::ir::IrModule, Vec<diagnostics::Diagnostic>), String> {
+    let result = compile_haxe_to_mir_full(source, filename, plugins, extra_source_dirs, safety_warnings)?;
+    Ok((result.module, result.diagnostics))
+}
+
+fn compile_haxe_to_mir_full(
+    source: &str,
+    filename: &str,
+    plugins: Vec<Box<dyn compiler::compiler_plugin::CompilerPlugin>>,
+    extra_source_dirs: &[PathBuf],
+    safety_warnings: bool,
+) -> Result<MirCompilationResult, String> {
     use compiler::compilation::{CompilationConfig, CompilationUnit};
 
     // Create compilation unit with stdlib support
@@ -814,7 +832,8 @@ fn compile_haxe_to_mir(
     // compilation (in compile_file_with_shared_state_ex's stdlib renumbering pass).
     let module = (**mir_modules.last().unwrap()).clone();
     let diagnostics = unit.collected_diagnostics.clone();
-    Ok((module, diagnostics))
+    let class_alloc_sizes = unit.get_class_alloc_sizes_by_name().clone();
+    Ok(MirCompilationResult { module, diagnostics, class_alloc_sizes })
 }
 
 fn run_bundle(file: &Path, verbose: bool, stats: bool, preset: Preset) -> Result<(), String> {
@@ -3044,7 +3063,7 @@ fn cmd_build_wasm(
     println!("Building {} [target: {}]...", file.display(), target);
 
     // Use the full compile pipeline (same as `rayzor run`) to get merged MIR
-    let (mir_module, _diagnostics) = compile_haxe_to_mir(
+    let mir_result = compile_haxe_to_mir_full(
         &source,
         file.to_str().unwrap_or("unknown"),
         Vec::new(),
@@ -3053,7 +3072,7 @@ fn cmd_build_wasm(
     )?;
 
     let user_wasm = compiler::codegen::wasm_backend::WasmBackend::compile(
-        &[&mir_module],
+        &[&mir_result.module],
         Some("main"),
     )?;
 
@@ -3069,16 +3088,61 @@ fn cmd_build_wasm(
         user_wasm
     };
 
+    // Wrap as WASI P2 Component
+    let component_bytes = compiler::codegen::wasm_component::wrap_as_component(
+        &linked_wasm,
+        compiler::codegen::wasm_component::ComponentKind::Command,
+    )?;
+    println!("  component: {:.1} KB (core: {:.1} KB)",
+        component_bytes.len() as f64 / 1024.0,
+        linked_wasm.len() as f64 / 1024.0);
+
     let out_path = output.unwrap_or_else(|| file.with_extension("wasm"));
-    std::fs::write(&out_path, &linked_wasm)
+    std::fs::write(&out_path, &component_bytes)
         .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
 
-    // Generate JS harness (optional, for browser use)
+    // Also write core module for JS/browser use (WebAssembly.instantiate needs core modules)
+    let core_path = out_path.with_extension("core.wasm");
+    std::fs::write(&core_path, &linked_wasm)
+        .map_err(|e| format!("failed to write {}: {}", core_path.display(), e))?;
+
+    // Collect exported class metadata for JS bindings
+    let modules_ref = [&mir_result.module];
+    let exported_classes = compiler::codegen::wasm_bindgen::collect_exported_classes(
+        &modules_ref,
+        &mir_result.class_alloc_sizes,
+    );
+
+    // Generate JS bindings (ES6 module with class wrappers if @:export classes exist)
     let js_path = out_path.with_extension("js");
-    let wasm_filename = out_path.file_name().unwrap().to_string_lossy();
-    let js_harness = generate_wasm_js_harness(&wasm_filename);
-    std::fs::write(&js_path, &js_harness)
+    // JS bindings use the core module (not the Component — browsers can't instantiate Components yet)
+    let core_wasm_filename = core_path.file_name().unwrap().to_string_lossy();
+    let js_content = if !exported_classes.is_empty() {
+        // Generate ES6 class wrappers
+        println!("  exports: {}", exported_classes.iter()
+            .map(|c| {
+                let methods: Vec<&str> = c.instance_methods.iter().map(|m| m.name.as_str())
+                    .chain(c.static_methods.iter().map(|m| m.name.as_str()))
+                    .collect();
+                format!("{} ({})", c.name, methods.join(", "))
+            })
+            .collect::<Vec<_>>()
+            .join(", "));
+        compiler::codegen::wasm_bindgen::generate_es6_bindings(&exported_classes, &core_wasm_filename)
+    } else {
+        // Fall back to basic JS harness
+        generate_wasm_js_harness(&core_wasm_filename)
+    };
+    std::fs::write(&js_path, &js_content)
         .map_err(|e| format!("failed to write {}: {}", js_path.display(), e))?;
+
+    // Generate .d.ts if there are exported classes
+    if !exported_classes.is_empty() {
+        let dts_path = out_path.with_extension("d.ts");
+        let dts = compiler::codegen::wasm_bindgen::generate_typescript_defs(&exported_classes);
+        std::fs::write(&dts_path, &dts)
+            .map_err(|e| format!("failed to write {}: {}", dts_path.display(), e))?;
+    }
 
     // Generate HTML if --browser
     if browser {
@@ -3119,7 +3183,7 @@ fn cmd_build_wasm(
         println!(
             "  wrote {} ({:.1} KB)",
             out_path.display(),
-            linked_wasm.len() as f64 / 1024.0,
+            component_bytes.len() as f64 / 1024.0,
         );
         println!("  wrote {}", js_path.display());
         println!("  wrote {}", html_path.display());
@@ -3128,7 +3192,7 @@ fn cmd_build_wasm(
         println!(
             "  wrote {} ({:.1} KB)",
             out_path.display(),
-            linked_wasm.len() as f64 / 1024.0,
+            component_bytes.len() as f64 / 1024.0,
         );
         if runtime_wasm_path.is_some() {
             println!("\n  Run: wasmtime {}", out_path.display());

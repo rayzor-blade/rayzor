@@ -5429,6 +5429,12 @@ impl CompilationUnit {
         self.mir_modules.clone()
     }
 
+    /// Get class allocation sizes keyed by class name.
+    /// Used by WASM bindgen to generate JS constructors that call malloc(size).
+    pub fn get_class_alloc_sizes_by_name(&self) -> &BTreeMap<String, u64> {
+        &self.import_class_alloc_sizes_by_name
+    }
+
     /// Get HDLL function pointers for JIT linking.
     ///
     /// Returns symbol name and pointer pairs collected from all loaded HDLL plugins.

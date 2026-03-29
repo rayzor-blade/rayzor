@@ -39,6 +39,7 @@ target-lexicon = "0.12"
 # WASM backend — direct MIR → WebAssembly via wasm-encoder
 wasm-encoder = "0.245"
 wasmparser = "0.245"  # WASM linker — parse runtime .wasm for merging
+wit-component = "0.245"  # WASI P2 Component wrapping (core module → component)
 
 # WASM runtime — embedded wasmtime for `rayzor run --wasm`
 wasmtime = { git = "https://github.com/darmie/wasmtime", branch = "fix-plt-aarch64", package = "wasmtime", optional = true }

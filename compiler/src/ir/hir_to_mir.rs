@@ -2440,12 +2440,14 @@ impl<'a> HirToMirContext<'a> {
                                 method.function.symbol_id,
                                 &method.function,
                                 None,
+                                Some(class.symbol_id),
                             );
                         } else {
                             self.lower_function_body(
                                 method.function.symbol_id,
                                 &method.function,
                                 Some(*type_id),
+                                Some(class.symbol_id),
                             );
                         }
                     }
@@ -2536,6 +2538,7 @@ impl<'a> HirToMirContext<'a> {
                             method.function.symbol_id,
                             &method.function,
                             this_type,
+                            Some(abstract_decl.symbol_id),
                         );
                     }
                 }
@@ -2545,7 +2548,7 @@ impl<'a> HirToMirContext<'a> {
 
         // Pass 2b: Lower module function bodies
         for (symbol_id, hir_func) in &hir_module.functions {
-            self.lower_function_body(*symbol_id, hir_func, None);
+            self.lower_function_body(*symbol_id, hir_func, None, None);
         }
 
         // Lower globals
@@ -2860,14 +2863,6 @@ impl<'a> HirToMirContext<'a> {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("param_{}", param.symbol_id.as_raw()));
             let ir_type = self.convert_type(param.ty);
-            let kind = self
-                .type_table
-                .get(param.ty)
-                .map(|t| format!("{:?}", t.kind));
-            eprintln!(
-                "[CTOR_REG] {}.new({}) ty={:?} kind={:?} → {:?}",
-                class_name, param_name, param.ty, kind, ir_type
-            );
             sig_builder = sig_builder.param(param_name, ir_type);
         }
 
@@ -2915,6 +2910,7 @@ impl<'a> HirToMirContext<'a> {
         symbol_id: SymbolId,
         hir_func: &HirFunction,
         this_type: Option<TypeId>,
+        class_symbol: Option<SymbolId>,
     ) {
         // The function already exists from Pass 1, we just need to fill in the body
         let func_id = self
@@ -2979,13 +2975,21 @@ impl<'a> HirToMirContext<'a> {
                     should_export = true;
                 }
             }
-            // Check owning class for @:export
+            // Check owning class for @:export (instance methods via this_type)
             if let Some(class_type) = this_type {
                 if let Some(&class_sym_id) = self.class_type_to_symbol.get(&class_type) {
                     if let Some(class_sym) = self.symbol_table.get_symbol(class_sym_id) {
                         if class_sym.flags.is_wasm_export() {
                             should_export = true;
                         }
+                    }
+                }
+            }
+            // Check owning class for @:export (static methods via class_symbol)
+            if let Some(class_sym_id) = class_symbol {
+                if let Some(class_sym) = self.symbol_table.get_symbol(class_sym_id) {
+                    if class_sym.flags.is_wasm_export() {
+                        should_export = true;
                     }
                 }
             }
@@ -3512,16 +3516,21 @@ impl<'a> HirToMirContext<'a> {
         // Constructor implicitly returns void
         self.builder.build_return(None);
 
-        // debug!("===== FINISHING FUNCTION =====");
-        // if let Some(func) = self.builder.current_function() {
-        //     eprintln!(
-        //         "DEBUG   Function '{}' entry block terminator: {:?}",
-        //         func.name,
-        //         func.cfg
-        //             .get_block(func.entry_block())
-        //             .map(|b| &b.terminator)
-        //     );
-        // }
+        // Set qualified name and @:export flag for constructor
+        if let Some(func_mut) = self.builder.module.functions.get_mut(&func_id) {
+            if let Some(class_sym) = self.symbol_table.get_symbol(class_symbol) {
+                let class_name = class_sym
+                    .qualified_name
+                    .and_then(|n| self.string_interner.get(n))
+                    .or_else(|| self.string_interner.get(class_sym.name))
+                    .unwrap_or("Unknown");
+                func_mut.qualified_name = Some(format!("{}.new", class_name));
+                if class_sym.flags.is_wasm_export() {
+                    func_mut.wasm_export = true;
+                }
+            }
+        }
+
         self.builder.finish_function();
         // debug!("  Function finished, context cleared");
 
@@ -3875,10 +3884,6 @@ impl<'a> HirToMirContext<'a> {
                 .type_table
                 .get(param.ty)
                 .map(|t| format!("{:?}", t.kind));
-            eprintln!(
-                "[CTOR] {}.new param={} ty={:?} kind={:?} ir={:?}",
-                self.builder.module.source_file, param_name, param.ty, type_kind, ir_type
-            );
             sig_builder = sig_builder.param(param_name, ir_type);
         }
 
@@ -3979,8 +3984,22 @@ impl<'a> HirToMirContext<'a> {
         //             .map(|b| &b.terminator)
         //     );
         // }
+        // Set qualified name and @:export flag for constructor BEFORE finish
+        if let Some(func_mut) = self.builder.module.functions.get_mut(&func_id) {
+            if let Some(class_sym) = self.symbol_table.get_symbol(class_symbol) {
+                let class_name = class_sym
+                    .qualified_name
+                    .and_then(|n| self.string_interner.get(n))
+                    .or_else(|| self.string_interner.get(class_sym.name))
+                    .unwrap_or("Unknown");
+                func_mut.qualified_name = Some(format!("{}.new", class_name));
+                if class_sym.flags.is_wasm_export() {
+                    func_mut.wasm_export = true;
+                }
+            }
+        }
+
         self.builder.finish_function();
-        // debug!("  Function finished, context cleared");
 
         // Clear per-function state
         self.symbol_map.clear();
@@ -20450,7 +20469,10 @@ impl<'a> HirToMirContext<'a> {
 
         for param in &func.params {
             let param_type = self.convert_type(param.ty);
-            builder = builder.param(param.name.to_string(), param_type);
+            let param_name = self.string_interner.get(param.name)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("arg{}", param.name.as_raw()));
+            builder = builder.param(param_name, param_type);
         }
 
         let return_type = self.convert_type(func.return_type);
@@ -20498,7 +20520,10 @@ impl<'a> HirToMirContext<'a> {
 
         for param in &func.params {
             let param_type = self.convert_type(param.ty);
-            builder = builder.param(param.name.to_string(), param_type);
+            let param_name = self.string_interner.get(param.name)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("arg{}", param.name.as_raw()));
+            builder = builder.param(param_name, param_type);
         }
 
         // Use TypeVar only for return type so the monomorphizer and call-site

@@ -81,6 +81,18 @@ impl WasmBackend {
         ctx.collect_functions(modules);
         ctx.collect_strings(modules);
         ctx.collect_globals(modules);
+        // Build set of exported class names from @:export functions
+        for m in modules {
+            for func in m.functions.values() {
+                if func.wasm_export {
+                    if let Some(ref qn) = func.qualified_name {
+                        if let Some(dot) = qn.rfind('.') {
+                            ctx.exported_classes.insert(qn[..dot].to_string());
+                        }
+                    }
+                }
+            }
+        }
         ctx.encode_with_exports(modules, entry_function, extra_exports)
     }
 }
@@ -144,6 +156,8 @@ struct CompileCtx {
     func_return_types: HashMap<IrFunctionId, ValType>,
     /// IrFunctionId -> WASM parameter types. Used for CallDirect arg coercion.
     func_param_types: HashMap<IrFunctionId, Vec<ValType>>,
+    /// Class names that have @:export (for constructor detection).
+    exported_classes: std::collections::HashSet<String>,
 }
 
 impl CompileCtx {
@@ -164,6 +178,7 @@ impl CompileCtx {
             user_globals: Vec::new(),
             func_return_types: HashMap::new(),
             func_param_types: HashMap::new(),
+            exported_classes: std::collections::HashSet::new(),
         }
     }
 
@@ -558,17 +573,49 @@ impl CompileCtx {
         // AND functions marked with @:export (use qualified_name as ClassName_method)
         for module in modules {
             for (func_id, func) in &module.functions {
-                if let Some(&idx) = self.ir_func_to_idx.get(func_id) {
+                // Find WASM function index — try func_id first, then qualified_name lookup
+                let idx = self.ir_func_to_idx.get(func_id).copied()
+                    .or_else(|| func.qualified_name.as_ref()
+                        .and_then(|qn| self.func_name_to_idx.get(qn).copied()));
+
+                if let Some(idx) = idx {
                     if func.name.starts_with("export_") {
                         let export_name = &func.name["export_".len()..];
                         export_section.export(export_name, ExportKind::Func, idx);
                     } else if func.wasm_export {
-                        // Use qualified_name (ClassName.method) → ClassName_method
                         let export_name = func.qualified_name.as_deref()
                             .unwrap_or(&func.name)
                             .replace('.', "_");
                         export_section.export(&export_name, ExportKind::Func, idx);
+                    } else if func.name == "new" {
+                        // Constructor: export if class is in exported_classes
+                        if let Some(ref qn) = func.qualified_name {
+                            if let Some(dot) = qn.rfind('.') {
+                                let class = &qn[..dot];
+                                if self.exported_classes.contains(class) {
+                                    let export_name = qn.replace('.', "_");
+                                    export_section.export(&export_name, ExportKind::Func, idx);
+                                }
+                            }
+                        }
                     }
+                }
+            }
+        }
+
+        // Export malloc/free for JS class constructors (needed by bindgen)
+        if !self.exported_classes.is_empty() {
+            // Try rayzor_malloc first (runtime naming), then malloc
+            for name in &["rayzor_malloc", "malloc", "rt_alloc"] {
+                if let Some(&idx) = self.func_name_to_idx.get(*name) {
+                    export_section.export("malloc", ExportKind::Func, idx);
+                    break;
+                }
+            }
+            for name in &["rayzor_free", "free", "_rt_free"] {
+                if let Some(&idx) = self.func_name_to_idx.get(*name) {
+                    export_section.export("free", ExportKind::Func, idx);
+                    break;
                 }
             }
         }
