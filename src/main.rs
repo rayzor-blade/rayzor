@@ -3513,11 +3513,44 @@ async function run() {{
       return 0;
     }},
     proc_exit: (code) => {{ if (isNode) process.exit(code); }},
+    fd_close: () => 0,
+    fd_read: () => 0,
+    fd_seek: () => 0,
+    fd_fdstat_get: () => 0,
+    fd_filestat_get: () => 0,
+    fd_prestat_get: () => 8,
+    fd_prestat_dir_name: () => 8,
+    path_open: () => 44,
+    args_get: () => 0,
+    args_sizes_get: (argc, buf) => {{
+      if (memory) {{
+        const v = new DataView(memory.buffer);
+        v.setUint32(argc, 0, true);
+        v.setUint32(buf, 0, true);
+      }}
+      return 0;
+    }},
+    clock_time_get: (id, prec, out) => {{
+      if (memory) {{
+        const v = new DataView(memory.buffer);
+        v.setBigUint64(out, BigInt(Math.round(performance.now() * 1e6)), true);
+      }}
+      return 0;
+    }},
+    random_get: (buf, len) => {{
+      if (memory) crypto.getRandomValues(new Uint8Array(memory.buffer, buf, len));
+      return 0;
+    }},
   }};
+
+  // Proxy: catch any missing WASI calls gracefully
+  const wasiProxy = new Proxy(wasi_snapshot_preview1, {{
+    get: (target, prop) => target[prop] ?? ((...args) => 0),
+  }});
 
   const {{ instance }} = await WebAssembly.instantiate(wasmBytes, {{
     rayzor: rayzorProxy,
-    wasi_snapshot_preview1,
+    wasi_snapshot_preview1: wasiProxy,
   }});
 
   memory = instance.exports.memory;
@@ -3529,7 +3562,7 @@ async function run() {{
   }}
 }}
 
-run().catch(e => {{ console.error("WASM error:", e); process.exitCode = 1; }});
+run().catch(e => {{ console.error("WASM error:", e); if (typeof process !== "undefined") process.exitCode = 1; }});
 "#,
         filename = wasm_filename
     )
