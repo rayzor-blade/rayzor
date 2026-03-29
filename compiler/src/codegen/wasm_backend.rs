@@ -128,6 +128,10 @@ struct CompileCtx {
     ir_global_to_idx: HashMap<IrGlobalId, u32>,
     /// User globals (excluding __stack_pointer which is always index 0).
     user_globals: Vec<(IrGlobalId, ValType, i64)>,
+
+    // ----- Function return types -----
+    /// IrFunctionId -> WASM return type. Used for CallDirect dest type inference.
+    func_return_types: HashMap<IrFunctionId, ValType>,
 }
 
 impl CompileCtx {
@@ -146,6 +150,7 @@ impl CompileCtx {
             data_offset: DATA_SECTION_BASE,
             ir_global_to_idx: HashMap::new(),
             user_globals: Vec::new(),
+            func_return_types: HashMap::new(),
         }
     }
 
@@ -251,6 +256,10 @@ impl CompileCtx {
         for (mod_idx, module) in modules.iter().enumerate() {
             for (func_id, func) in &module.functions {
                 // Skip functions already registered as imports (by ID or name).
+                // Always register return type for CallDirect type inference
+                let ret_vt = ir_type_to_wasm(&func.signature.return_type);
+                self.func_return_types.insert(*func_id, ret_vt);
+
                 if self.ir_func_to_idx.contains_key(func_id) {
                     let idx = *self.ir_func_to_idx.get(func_id).unwrap();
                     self.func_name_to_idx.insert(func.name.clone(), idx);
@@ -273,6 +282,9 @@ impl CompileCtx {
                 });
                 self.ir_func_to_idx.insert(*func_id, func_idx);
                 self.func_name_to_idx.insert(func.name.clone(), func_idx);
+                // Store return type for CallDirect type inference
+                let ret_ty = ir_type_to_wasm(&func.signature.return_type);
+                self.func_return_types.insert(*func_id, ret_ty);
             }
         }
 
@@ -655,6 +667,12 @@ impl<'a> FunctionLowerer<'a> {
                                 else { self.reg_wasm_type(dest) }
                             }
                             IrInstruction::Cmp { .. } => ValType::I32, // comparisons always return i32
+                            IrInstruction::CallDirect { func_id, .. } => {
+                                // Use callee's return type
+                                self.ctx.func_return_types.get(func_id)
+                                    .copied()
+                                    .unwrap_or_else(|| self.reg_wasm_type(dest))
+                            }
                             _ => self.reg_wasm_type(dest),
                         };
                         self.alloc_local(dest, vt);
