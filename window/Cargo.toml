@@ -23,6 +23,7 @@ web-sys = { version = "0.3", optional = true, features = [
     "Document", "Window", "Element", "DomRect",
     "KeyboardEvent", "MouseEvent", "WheelEvent", "FocusEvent",
     "EventTarget", "AddEventListenerOptions",
+    "Window",
 ] }
 js-sys = { version = "0.3", optional = true }
 once_cell = "1"

@@ -47,11 +47,20 @@ extern class Window {
     public function pollEvents():Bool;
     @:jsMethod("is-key-down")
     public function isKeyDown(keyCode:Int):Bool;
+    /** Run a frame-driven render loop. The callback is called once per frame
+     *  via requestAnimationFrame (browser) or while loop (native).
+     *  Return true from the callback to continue, false to stop.
+     *  On WASM: non-blocking, yields to browser each frame.
+     *  On native: blocking, returns when callback returns false. */
+    @:jsMethod("run-loop")
+    public static function runLoop(win:Window, callback:Dynamic):Void;
     #else
     @:native("rayzor_window_poll_events")
     public function pollEvents():Bool;
     @:native("rayzor_window_is_key_down")
     public function isKeyDown(keyCode:Int):Bool;
+    @:native("rayzor_window_run_loop")
+    public static function runLoop(win:Window, callback:Dynamic):Void;
     #end
 
     // === Native Handles ===
