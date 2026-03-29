@@ -17,6 +17,7 @@ use crate::graphics::surface::GraphicsSurface;
 use crate::graphics::texture::{GraphicsSampler, GraphicsTexture};
 use crate::graphics::types;
 use crate::graphics::GraphicsContext;
+use crate::wgpu_backend::buffer_ops::WgpuBuffer;
 
 // ============================================================================
 // Handle table
@@ -47,6 +48,13 @@ enum GpuObject {
         vs_entry: String,
         fs_entry: String,
     },
+    ComputeBuffer(Box<ComputeBufferInfo>),
+}
+
+struct ComputeBufferInfo {
+    buffer: WgpuBuffer,
+    numel: u32,
+    dtype: u8,
 }
 
 // SAFETY: WASM is single-threaded. The handle table is only accessed from the main thread.
@@ -686,4 +694,637 @@ pub async fn compute_create() -> i32 {
 #[wasm_bindgen(js_name = "rayzor_gpu_compute_destroy")]
 pub fn compute_destroy(h: i32) {
     gfx_device_destroy(h);
+}
+
+// ============================================================================
+// Compute buffer operations
+// ============================================================================
+
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_alloc_buffer")]
+pub fn compute_alloc_buffer(dev_h: i32, numel: i32, dtype: i32) -> i32 {
+    let mut ht = HANDLES.lock().unwrap();
+    let ctx = match ht.get(dev_h) {
+        Some(GpuObject::GfxContext(c)) => c,
+        _ => return 0,
+    };
+    let elem_size: usize = match dtype {
+        2 => 8,
+        _ => 4,
+    }; // F64=8, else 4
+    let byte_size = (numel as usize) * elem_size;
+    let wgpu_ctx = crate::wgpu_backend::device_init::WgpuContext {
+        device: (*ctx.device).clone(),
+        queue: (*ctx.queue).clone(),
+    };
+    match WgpuBuffer::allocate(&wgpu_ctx, byte_size) {
+        Some(buf) => ht.alloc(GpuObject::ComputeBuffer(Box::new(ComputeBufferInfo {
+            buffer: buf,
+            numel: numel as u32,
+            dtype: dtype as u8,
+        }))),
+        None => 0,
+    }
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_free_buffer")]
+pub fn compute_free_buffer(_dev_h: i32, buf_h: i32) {
+    HANDLES.lock().unwrap().free(buf_h);
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_buffer_numel")]
+pub fn compute_buffer_numel(buf_h: i32) -> i32 {
+    let ht = HANDLES.lock().unwrap();
+    match ht.get(buf_h) {
+        Some(GpuObject::ComputeBuffer(b)) => b.numel as i32,
+        _ => 0,
+    }
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_buffer_dtype")]
+pub fn compute_buffer_dtype(buf_h: i32) -> i32 {
+    let ht = HANDLES.lock().unwrap();
+    match ht.get(buf_h) {
+        Some(GpuObject::ComputeBuffer(b)) => b.dtype as i32,
+        _ => 0,
+    }
+}
+
+// ============================================================================
+// Compute elementwise ops — compile WGSL + dispatch
+// ============================================================================
+
+fn compute_binary_op(dev_h: i32, a_h: i32, b_h: i32, op: &str) -> i32 {
+    let mut ht = HANDLES.lock().unwrap();
+    let ctx = match ht.get(dev_h) {
+        Some(GpuObject::GfxContext(c)) => c,
+        _ => return 0,
+    };
+    let (a_buf, a_numel) = match ht.get(a_h) {
+        Some(GpuObject::ComputeBuffer(b)) => (&b.buffer.buffer, b.numel),
+        _ => return 0,
+    };
+    let b_buf = match ht.get(b_h) {
+        Some(GpuObject::ComputeBuffer(b)) => &b.buffer.buffer,
+        _ => return 0,
+    };
+
+    let wgsl = format!(
+        "@group(0) @binding(0) var<storage,read> a: array<f32>;\n\
+         @group(0) @binding(1) var<storage,read> b: array<f32>;\n\
+         @group(0) @binding(2) var<storage,read_write> out: array<f32>;\n\
+         @compute @workgroup_size(256) fn main(@builtin(global_invocation_id) id: vec3u) {{\n\
+           let i = id.x;\n\
+           if (i < arrayLength(&a)) {{ out[i] = a[i] {} b[i]; }}\n\
+         }}",
+        op
+    );
+
+    let module = ctx
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+        });
+    let pipeline = ctx
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let out_size = (a_numel as usize) * 4;
+    let out_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: out_size as u64,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: a_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: b_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: out_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = ctx.device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, Some(&bg), &[]);
+        pass.dispatch_workgroups(((a_numel + 255) / 256) as u32, 1, 1);
+    }
+    ctx.queue.submit(std::iter::once(encoder.finish()));
+
+    let wgpu_buf = WgpuBuffer {
+        buffer: out_buf,
+        byte_size: out_size,
+        device: &*ctx.device as *const _,
+        queue: &*ctx.queue as *const _,
+    };
+    ht.alloc(GpuObject::ComputeBuffer(Box::new(ComputeBufferInfo {
+        buffer: wgpu_buf,
+        numel: a_numel,
+        dtype: 1,
+    })))
+}
+
+fn compute_unary_op(dev_h: i32, a_h: i32, expr: &str) -> i32 {
+    let mut ht = HANDLES.lock().unwrap();
+    let ctx = match ht.get(dev_h) {
+        Some(GpuObject::GfxContext(c)) => c,
+        _ => return 0,
+    };
+    let (a_buf, a_numel) = match ht.get(a_h) {
+        Some(GpuObject::ComputeBuffer(b)) => (&b.buffer.buffer, b.numel),
+        _ => return 0,
+    };
+
+    let wgsl = format!(
+        "@group(0) @binding(0) var<storage,read> a: array<f32>;\n\
+         @group(0) @binding(1) var<storage,read_write> out: array<f32>;\n\
+         @compute @workgroup_size(256) fn main(@builtin(global_invocation_id) id: vec3u) {{\n\
+           let i = id.x;\n\
+           if (i < arrayLength(&a)) {{ out[i] = {}; }}\n\
+         }}",
+        expr
+    );
+
+    let module = ctx
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+        });
+    let pipeline = ctx
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let out_size = (a_numel as usize) * 4;
+    let out_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: out_size as u64,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: a_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: out_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = ctx.device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, Some(&bg), &[]);
+        pass.dispatch_workgroups(((a_numel + 255) / 256) as u32, 1, 1);
+    }
+    ctx.queue.submit(std::iter::once(encoder.finish()));
+
+    let wgpu_buf = WgpuBuffer {
+        buffer: out_buf,
+        byte_size: out_size,
+        device: &*ctx.device as *const _,
+        queue: &*ctx.queue as *const _,
+    };
+    ht.alloc(GpuObject::ComputeBuffer(Box::new(ComputeBufferInfo {
+        buffer: wgpu_buf,
+        numel: a_numel,
+        dtype: 1,
+    })))
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_add")]
+pub fn compute_add(dev: i32, a: i32, b: i32) -> i32 {
+    compute_binary_op(dev, a, b, "+")
+}
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_sub")]
+pub fn compute_sub(dev: i32, a: i32, b: i32) -> i32 {
+    compute_binary_op(dev, a, b, "-")
+}
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_mul")]
+pub fn compute_mul(dev: i32, a: i32, b: i32) -> i32 {
+    compute_binary_op(dev, a, b, "*")
+}
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_div")]
+pub fn compute_div(dev: i32, a: i32, b: i32) -> i32 {
+    compute_binary_op(dev, a, b, "/")
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_neg")]
+pub fn compute_neg(dev: i32, a: i32) -> i32 {
+    compute_unary_op(dev, a, "-a[i]")
+}
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_abs")]
+pub fn compute_abs(dev: i32, a: i32) -> i32 {
+    compute_unary_op(dev, a, "abs(a[i])")
+}
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_sqrt")]
+pub fn compute_sqrt(dev: i32, a: i32) -> i32 {
+    compute_unary_op(dev, a, "sqrt(a[i])")
+}
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_exp")]
+pub fn compute_exp(dev: i32, a: i32) -> i32 {
+    compute_unary_op(dev, a, "exp(a[i])")
+}
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_log")]
+pub fn compute_log(dev: i32, a: i32) -> i32 {
+    compute_unary_op(dev, a, "log(a[i])")
+}
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_relu")]
+pub fn compute_relu(dev: i32, a: i32) -> i32 {
+    compute_unary_op(dev, a, "max(a[i], 0.0)")
+}
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_sigmoid")]
+pub fn compute_sigmoid(dev: i32, a: i32) -> i32 {
+    compute_unary_op(dev, a, "1.0 / (1.0 + exp(-a[i]))")
+}
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_tanh")]
+pub fn compute_tanh(dev: i32, a: i32) -> i32 {
+    compute_unary_op(dev, a, "tanh(a[i])")
+}
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_gelu")]
+pub fn compute_gelu(dev: i32, a: i32) -> i32 {
+    compute_unary_op(
+        dev,
+        a,
+        "a[i] * 0.5 * (1.0 + tanh(0.7978845608 * (a[i] + 0.044715 * a[i] * a[i] * a[i])))",
+    )
+}
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_silu")]
+pub fn compute_silu(dev: i32, a: i32) -> i32 {
+    compute_unary_op(dev, a, "a[i] / (1.0 + exp(-a[i]))")
+}
+
+// ============================================================================
+// Compute reductions
+// ============================================================================
+
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_sum")]
+pub fn compute_sum(dev_h: i32, buf_h: i32) -> f64 {
+    compute_reduce(dev_h, buf_h, "s += a[i]", "0.0")
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_mean")]
+pub fn compute_mean(dev_h: i32, buf_h: i32) -> f64 {
+    let ht = HANDLES.lock().unwrap();
+    let numel = match ht.get(buf_h) {
+        Some(GpuObject::ComputeBuffer(b)) => b.numel as f64,
+        _ => return 0.0,
+    };
+    drop(ht);
+    let sum = compute_sum(dev_h, buf_h);
+    if numel > 0.0 {
+        sum / numel
+    } else {
+        0.0
+    }
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_max")]
+pub fn compute_max(dev_h: i32, buf_h: i32) -> f64 {
+    compute_reduce(dev_h, buf_h, "s = max(s, a[i])", "-1e38")
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_min")]
+pub fn compute_min(dev_h: i32, buf_h: i32) -> f64 {
+    compute_reduce(dev_h, buf_h, "s = min(s, a[i])", "1e38")
+}
+
+fn compute_reduce(dev_h: i32, buf_h: i32, op: &str, init: &str) -> f64 {
+    let ht = HANDLES.lock().unwrap();
+    let ctx = match ht.get(dev_h) {
+        Some(GpuObject::GfxContext(c)) => c,
+        _ => return 0.0,
+    };
+    let (a_buf, _numel) = match ht.get(buf_h) {
+        Some(GpuObject::ComputeBuffer(b)) => (&b.buffer.buffer, b.numel),
+        _ => return 0.0,
+    };
+
+    let wgsl = format!(
+        "@group(0) @binding(0) var<storage,read> a: array<f32>;\n\
+         @group(0) @binding(1) var<storage,read_write> out: array<f32>;\n\
+         @compute @workgroup_size(1) fn main() {{\n\
+           var s: f32 = {init};\n\
+           for (var i = 0u; i < arrayLength(&a); i++) {{ {op}; }}\n\
+           out[0] = s;\n\
+         }}"
+    );
+
+    let module = ctx
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+        });
+    let pipeline = ctx
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let out_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 4,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let read_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 4,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+
+    let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: a_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: out_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = ctx.device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, Some(&bg), &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&out_buf, 0, &read_buf, 0, 4);
+    ctx.queue.submit(std::iter::once(encoder.finish()));
+
+    // Synchronous readback (works in WASM because wgpu handles it)
+    let slice = read_buf.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    ctx.device.poll(wgpu::Maintain::Wait);
+    let data = slice.get_mapped_range();
+    let result = f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64;
+    drop(data);
+    read_buf.unmap();
+
+    result
+}
+
+// ============================================================================
+// Compute dot product + matmul
+// ============================================================================
+
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_dot")]
+pub fn compute_dot(dev_h: i32, a_h: i32, b_h: i32) -> f64 {
+    let ht = HANDLES.lock().unwrap();
+    let ctx = match ht.get(dev_h) {
+        Some(GpuObject::GfxContext(c)) => c,
+        _ => return 0.0,
+    };
+    let (a_buf, a_numel) = match ht.get(a_h) {
+        Some(GpuObject::ComputeBuffer(b)) => (&b.buffer.buffer, b.numel),
+        _ => return 0.0,
+    };
+    let b_buf = match ht.get(b_h) {
+        Some(GpuObject::ComputeBuffer(b)) => &b.buffer.buffer,
+        _ => return 0.0,
+    };
+
+    let wgsl = "@group(0) @binding(0) var<storage,read> a: array<f32>;\n\
+         @group(0) @binding(1) var<storage,read> b: array<f32>;\n\
+         @group(0) @binding(2) var<storage,read_write> out: array<f32>;\n\
+         @compute @workgroup_size(1) fn main() {\n\
+           var s: f32 = 0.0;\n\
+           for (var i = 0u; i < arrayLength(&a); i++) { s += a[i] * b[i]; }\n\
+           out[0] = s;\n\
+         }";
+
+    let module = ctx
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+        });
+    let pipeline = ctx
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let out_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 4,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let read_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 4,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: a_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: b_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: out_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = ctx.device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, Some(&bg), &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&out_buf, 0, &read_buf, 0, 4);
+    ctx.queue.submit(std::iter::once(encoder.finish()));
+
+    let slice = read_buf.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    ctx.device.poll(wgpu::Maintain::Wait);
+    let data = slice.get_mapped_range();
+    let result = f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64;
+    drop(data);
+    read_buf.unmap();
+    result
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_matmul")]
+pub fn compute_matmul(dev_h: i32, a_h: i32, b_h: i32, m: i32, k: i32, n: i32) -> i32 {
+    let mut ht = HANDLES.lock().unwrap();
+    let ctx = match ht.get(dev_h) {
+        Some(GpuObject::GfxContext(c)) => c,
+        _ => return 0,
+    };
+    let a_buf = match ht.get(a_h) {
+        Some(GpuObject::ComputeBuffer(b)) => &b.buffer.buffer,
+        _ => return 0,
+    };
+    let b_buf = match ht.get(b_h) {
+        Some(GpuObject::ComputeBuffer(b)) => &b.buffer.buffer,
+        _ => return 0,
+    };
+
+    let wgsl = format!(
+        "struct Params {{ m: u32, k: u32, n: u32 }}\n\
+         @group(0) @binding(0) var<uniform> params: Params;\n\
+         @group(0) @binding(1) var<storage,read> a: array<f32>;\n\
+         @group(0) @binding(2) var<storage,read> b: array<f32>;\n\
+         @group(0) @binding(3) var<storage,read_write> out: array<f32>;\n\
+         @compute @workgroup_size(16,16) fn main(@builtin(global_invocation_id) id: vec3u) {{\n\
+           let row = id.x; let col = id.y;\n\
+           if (row >= params.m || col >= params.n) {{ return; }}\n\
+           var sum: f32 = 0.0;\n\
+           for (var i = 0u; i < params.k; i++) {{\n\
+             sum += a[row * params.k + i] * b[i * params.n + col];\n\
+           }}\n\
+           out[row * params.n + col] = sum;\n\
+         }}"
+    );
+
+    let module = ctx
+        .device
+        .create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: None,
+            source: wgpu::ShaderSource::Wgsl(wgsl.into()),
+        });
+    let pipeline = ctx
+        .device
+        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: None,
+            layout: None,
+            module: &module,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+    let out_size = (m * n) as usize * 4;
+    let out_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: out_size as u64,
+        usage: wgpu::BufferUsages::STORAGE
+            | wgpu::BufferUsages::COPY_SRC
+            | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let params_data = [m as u32, k as u32, n as u32];
+    let params_bytes: &[u8] = bytemuck_cast_slice(&params_data);
+    use wgpu::util::DeviceExt;
+    let params_buf = ctx
+        .device
+        .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: params_bytes,
+            usage: wgpu::BufferUsages::UNIFORM,
+        });
+
+    let bg = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: params_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: a_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: b_buf.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: out_buf.as_entire_binding(),
+            },
+        ],
+    });
+
+    let mut encoder = ctx.device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, Some(&bg), &[]);
+        pass.dispatch_workgroups((m as u32 + 15) / 16, (n as u32 + 15) / 16, 1);
+    }
+    ctx.queue.submit(std::iter::once(encoder.finish()));
+
+    let wgpu_buf = WgpuBuffer {
+        buffer: out_buf,
+        byte_size: out_size,
+        device: &*ctx.device as *const _,
+        queue: &*ctx.queue as *const _,
+    };
+    ht.alloc(GpuObject::ComputeBuffer(Box::new(ComputeBufferInfo {
+        buffer: wgpu_buf,
+        numel: (m * n) as u32,
+        dtype: 1,
+    })))
+}
+
+/// Safe cast for uniform buffer data
+fn bytemuck_cast_slice(data: &[u32]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) }
 }
