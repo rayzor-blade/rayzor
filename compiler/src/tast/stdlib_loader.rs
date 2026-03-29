@@ -70,6 +70,8 @@ pub struct StdLibLoader {
     config: StdLibConfig,
     /// Cache of loaded files to avoid re-parsing
     loaded_files: HashMap<PathBuf, HaxeFile>,
+    /// Preprocessor config for conditional compilation (#if wasm, etc.)
+    pp_config: parser::preprocessor::PreprocessorConfig,
 }
 
 impl StdLibLoader {
@@ -77,7 +79,13 @@ impl StdLibLoader {
         Self {
             config,
             loaded_files: HashMap::new(),
+            pp_config: parser::preprocessor::PreprocessorConfig::default(),
         }
+    }
+
+    /// Set extra preprocessor defines (e.g., "wasm" for WASM targets).
+    pub fn set_preprocessor_config(&mut self, pp_config: parser::preprocessor::PreprocessorConfig) {
+        self.pp_config = pp_config;
     }
 
     /// Load a standard library file by name
@@ -120,15 +128,18 @@ impl StdLibLoader {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
 
-        let parse_result =
-            parse_haxe_file_with_diagnostics(path.to_str().unwrap_or("unknown.hx"), &content)
-                .map_err(|e| {
-                    // Strip ANSI color codes from error message for cleaner output
-                    let clean_error = strip_ansi_codes(&e);
-                    format!("Failed to parse {}: {}", path.display(), clean_error)
-                })?;
-
-        let mut haxe_file = parse_result.file;
+        // Parse with preprocessor config to handle #if wasm etc.
+        let mut haxe_file = parser::haxe_parser::parse_haxe_file_with_config(
+            path.to_str().unwrap_or("unknown.hx"),
+            &content,
+            true,
+            true,
+            &self.pp_config,
+        )
+        .map_err(|e| {
+            let clean_error = strip_ansi_codes(&e);
+            format!("Failed to parse {}: {}", path.display(), clean_error)
+        })?;
 
         // IMPORTANT: Preserve the source code so it can be compiled later
         // The parser doesn't preserve source by default to save memory,
