@@ -10,8 +10,11 @@ use super::pipeline::{GraphicsPipeline, PipelineBuilder};
 use super::texture::{GraphicsSampler, GraphicsTexture};
 use super::GraphicsBuffer;
 use super::GraphicsContext;
+#[cfg(feature = "native")]
 use rayzor_runtime::haxe_string::HaxeString;
+#[cfg(feature = "native")]
 use rayzor_runtime::haxe_sys::HaxeBytes;
+#[cfg(feature = "native")]
 use std::ffi::c_void;
 
 unsafe fn _hs(s: *const HaxeString) -> &'static str {

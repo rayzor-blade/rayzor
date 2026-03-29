@@ -6,9 +6,11 @@
 
 pub mod bind_group;
 pub mod command;
+#[cfg(feature = "native")]
 pub mod haxe_api;
 pub mod pipeline;
 pub mod render_pass;
+#[cfg(feature = "native")]
 pub mod shader;
 pub mod surface;
 pub mod texture;
@@ -27,6 +29,8 @@ pub struct GraphicsContext {
 
 impl GraphicsContext {
     /// Create a new graphics context (headless — no surface required).
+    /// Native only — on WASM, use the async version in wasm_exports.rs.
+    #[cfg(feature = "native")]
     pub fn new() -> Option<Self> {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -58,6 +62,7 @@ impl GraphicsContext {
         })
     }
 
+    #[cfg(feature = "native")]
     pub fn is_available() -> bool {
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
@@ -73,9 +78,10 @@ impl GraphicsContext {
 }
 
 // ============================================================================
-// Extern "C" entry points for Haxe FFI
+// Extern "C" entry points for Haxe FFI (native only)
 // ============================================================================
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub extern "C" fn rayzor_gpu_gfx_device_create() -> *mut GraphicsContext {
     match GraphicsContext::new() {
@@ -84,6 +90,7 @@ pub extern "C" fn rayzor_gpu_gfx_device_create() -> *mut GraphicsContext {
     }
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_device_destroy(ctx: *mut GraphicsContext) {
     if !ctx.is_null() {
@@ -91,6 +98,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_device_destroy(ctx: *mut GraphicsContext
     }
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub extern "C" fn rayzor_gpu_gfx_is_available() -> i32 {
     if GraphicsContext::is_available() {

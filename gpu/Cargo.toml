@@ -7,15 +7,17 @@ edition = "2021"
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
+default = ["native"]
+native = ["dep:rayzor-plugin", "dep:rayzor-runtime", "dep:libc"]
 metal-backend = ["dep:objc2", "dep:objc2-metal", "dep:objc2-foundation"]
 webgpu-backend = ["dep:wgpu", "dep:pollster", "dep:raw-window-handle"]
+wasm-host = ["dep:wgpu", "dep:wasm-bindgen", "dep:web-sys", "dep:wasm-bindgen-futures"]
 cuda-backend = []
 
 [dependencies]
-rayzor-plugin = { path = "../plugin" }
-rayzor-runtime = { path = "../runtime" }
-libc = "0.2"
+rayzor-plugin = { path = "../plugin", optional = true }
+rayzor-runtime = { path = "../runtime", optional = true }
+libc = { version = "0.2", optional = true }
 
 # Metal backend (macOS only)
 objc2 = { version = "0.6", optional = true }
@@ -30,4 +32,9 @@ objc2-foundation = { version = "0.3", optional = true }
 wgpu = { version = "24", optional = true }
 pollster = { version = "0.4", optional = true }
 raw-window-handle = { version = "0.6", optional = true }
+
+# WASM host (wasm-bindgen + web-sys for browser WebGPU)
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+web-sys = { version = "0.3", optional = true, features = ["HtmlCanvasElement", "Document", "Window", "Element"] }
 

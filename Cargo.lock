@@ -2656,6 +2656,9 @@ dependencies = [
  "raw-window-handle",
  "rayzor-plugin",
  "rayzor-runtime",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
  "wgpu",
 ]
 

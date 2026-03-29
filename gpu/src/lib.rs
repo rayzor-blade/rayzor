@@ -13,33 +13,49 @@
 // All extern "C" functions in this crate are FFI entry points called by the JIT runtime.
 #![allow(clippy::missing_safety_doc)]
 
+// Compute modules — native only (use libc, rayzor_runtime for FFI)
+#[cfg(feature = "native")]
 pub mod buffer;
+#[cfg(feature = "native")]
 pub mod codegen;
+#[cfg(feature = "native")]
 pub mod device;
+#[cfg(feature = "native")]
 pub mod kernel_cache;
+#[cfg(feature = "native")]
 pub mod kernel_ir;
+#[cfg(feature = "native")]
 pub mod lazy;
+#[cfg(feature = "native")]
 pub mod ops;
 
+#[cfg(feature = "native")]
 pub mod backend;
 
 #[cfg(feature = "metal-backend")]
 pub mod metal;
 
-#[cfg(feature = "webgpu-backend")]
+#[cfg(any(feature = "webgpu-backend", feature = "wasm-host"))]
 pub mod wgpu_backend;
 
-#[cfg(feature = "webgpu-backend")]
+#[cfg(any(feature = "webgpu-backend", feature = "wasm-host"))]
 pub mod graphics;
 
 #[cfg(feature = "cuda-backend")]
 pub mod cuda;
 
+#[cfg(feature = "wasm-host")]
+pub mod wasm_exports;
+
+#[cfg(feature = "native")]
 use rayzor_plugin::{declare_native_methods, NativeMethodDesc};
+#[cfg(feature = "native")]
 use std::ffi::c_void;
 
 // ============================================================================
 // Method descriptor table (read by compiler at plugin load time)
+// Only compiled for native targets (not wasm-host)
+#[cfg(feature = "native")]
 // ============================================================================
 
 declare_native_methods! {
@@ -168,8 +184,12 @@ declare_native_methods! {
 }
 
 // ============================================================================
-// Plugin exports (called by host via dlopen/dlsym)
+// Plugin exports (called by host via dlopen/dlsym) — native only
 // ============================================================================
+#[cfg(feature = "native")]
+mod native_plugin {
+use super::*;
+use std::ffi::c_void;
 
 /// Symbol table entry for plugin registration
 #[repr(C)]
@@ -212,7 +232,7 @@ pub unsafe extern "C" fn rayzor_gpu_plugin_describe(
 
 /// Rust-callable API returning runtime symbols.
 pub fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
-    let symbols = vec![
+    let mut symbols = vec![
         // Device lifecycle
         (
             "rayzor_gpu_compute_create",
@@ -659,3 +679,6 @@ impl rayzor_plugin::RuntimePlugin for GpuComputePlugin {
         get_runtime_symbols()
     }
 }
+} // mod native_plugin
+#[cfg(feature = "native")]
+pub use native_plugin::*;

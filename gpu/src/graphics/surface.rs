@@ -14,8 +14,13 @@ pub struct GraphicsSurface {
 }
 
 // ============================================================================
-// Platform handle wrappers for raw-window-handle 0.6
+// Native-only: platform handle wrappers + extern "C" entry points.
+// On wasm-host, surface creation is handled by wasm_exports.rs instead.
 // ============================================================================
+#[cfg(feature = "native")]
+mod native_surface {
+use super::*;
+use crate::graphics::types;
 
 /// Wraps raw platform pointers into the traits wgpu::Surface needs.
 struct RawSurfaceTarget {
@@ -225,7 +230,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_surface_get_format(surface: *mut Graphic
         return 0;
     }
     let surface = &*surface;
-    super::types::texture_format_to_int(surface.format)
+    types::texture_format_to_int(surface.format)
 }
 
 /// Present the current frame.
@@ -247,3 +252,6 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_surface_destroy(surface: *mut GraphicsSu
         drop(Box::from_raw(surface));
     }
 }
+} // mod native_surface
+#[cfg(feature = "native")]
+pub use native_surface::*;
