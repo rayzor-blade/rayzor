@@ -133,6 +133,7 @@ impl CommandRecorder {
 // Extern "C" entry points
 // ============================================================================
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub extern "C" fn rayzor_gpu_gfx_cmd_create() -> *mut CommandRecorder {
     Box::into_raw(Box::new(CommandRecorder {
@@ -141,6 +142,7 @@ pub extern "C" fn rayzor_gpu_gfx_cmd_create() -> *mut CommandRecorder {
     }))
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_begin_pass(
     cmd: *mut CommandRecorder,
@@ -187,6 +189,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_begin_pass(
     });
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_set_pipeline(
     cmd: *mut CommandRecorder,
@@ -197,6 +200,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_set_pipeline(
     }
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_set_vertex_buffer(
     cmd: *mut CommandRecorder,
@@ -209,6 +213,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_set_vertex_buffer(
     }
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_set_index_buffer(
     cmd: *mut CommandRecorder,
@@ -226,6 +231,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_set_index_buffer(
     }
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_set_bind_group(
     cmd: *mut CommandRecorder,
@@ -238,6 +244,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_set_bind_group(
     }
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_draw(
     cmd: *mut CommandRecorder,
@@ -256,6 +263,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_draw(
     }
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_draw_indexed(
     cmd: *mut CommandRecorder,
@@ -276,6 +284,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_draw_indexed(
     }
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_set_viewport(
     cmd: *mut CommandRecorder,
@@ -292,6 +301,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_set_viewport(
     }
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_set_scissor(
     cmd: *mut CommandRecorder,
@@ -310,6 +320,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_set_scissor(
 /// `color_views` is a pointer to an array of `count` TextureView pointers.
 /// `load_ops` is a pointer to an array of `count` i32 load ops (0=Clear, 1=Load).
 /// `clear_colors` is a pointer to an array of `count * 4` f64 RGBA values.
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_begin_pass_mrt(
     cmd: *mut CommandRecorder,
@@ -376,6 +387,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_begin_pass_mrt(
     });
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_end_pass(cmd: *mut CommandRecorder) {
     if cmd.is_null() {
@@ -388,6 +400,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_end_pass(cmd: *mut CommandRecorder) 
 }
 
 /// Submit all recorded passes. Consumes the recorder.
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_submit(
     cmd: *mut CommandRecorder,
@@ -484,6 +497,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_submit(
     ctx.queue.submit(std::iter::once(encoder.finish()));
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_cmd_destroy(cmd: *mut CommandRecorder) {
     if !cmd.is_null() {

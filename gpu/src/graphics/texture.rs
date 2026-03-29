@@ -18,6 +18,7 @@ pub struct GraphicsSampler {
 // Extern "C" entry points
 // ============================================================================
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_texture_create(
     ctx: *mut GraphicsContext,
@@ -59,6 +60,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_create(
     }))
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_texture_write(
     ctx: *mut GraphicsContext,
@@ -95,6 +97,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_write(
     );
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_texture_get_view(
     tex: *const GraphicsTexture,
@@ -105,6 +108,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_get_view(
     &(*tex).view as *const wgpu::TextureView
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_texture_destroy(tex: *mut GraphicsTexture) {
     if !tex.is_null() {
@@ -115,6 +119,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_destroy(tex: *mut GraphicsTextur
 /// Read pixel data from a texture into a CPU buffer.
 /// The texture must have COPY_SRC usage. Returns the number of bytes written,
 /// or 0 on failure. Output is RGBA8 (4 bytes per pixel).
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_texture_read_pixels(
     ctx: *mut GraphicsContext,
@@ -202,6 +207,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_read_pixels(
     needed
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_sampler_create(
     ctx: *mut GraphicsContext,
@@ -228,6 +234,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_sampler_create(
     Box::into_raw(Box::new(GraphicsSampler { sampler }))
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_sampler_destroy(sampler: *mut GraphicsSampler) {
     if !sampler.is_null() {

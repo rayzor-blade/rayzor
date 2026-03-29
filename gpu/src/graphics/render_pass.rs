@@ -22,6 +22,7 @@ pub struct GraphicsRenderPass {
 // Extern "C" entry points
 // ============================================================================
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_encoder_create(
     ctx: *mut GraphicsContext,
@@ -47,6 +48,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_encoder_create(
 /// that handles the full lifecycle: begin pass → record commands → end → submit.
 ///
 /// This avoids the complex lifetime issues of exposing wgpu::RenderPass across FFI.
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_render_submit(
     ctx: *mut GraphicsContext,
@@ -154,6 +156,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_render_submit(
 
 /// Haxe-friendly: render triangle(s) with clear color, no vertex buffer needed.
 /// Simpler than render_submit — covers the common @:shader procedural case.
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_render_triangles(
     ctx: *mut GraphicsContext,
@@ -191,6 +194,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_render_triangles(
 
 /// Haxe-friendly: read texture pixels into a newly allocated buffer.
 /// Returns pointer to RGBA8 data (caller must free), sets out_len.
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_texture_read_rgba(
     ctx: *mut GraphicsContext,
@@ -299,6 +303,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_save_texture_ppm(
     }
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_encoder_destroy(encoder: *mut GraphicsEncoder) {
     if !encoder.is_null() {
