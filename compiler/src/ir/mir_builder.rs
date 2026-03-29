@@ -896,6 +896,7 @@ impl<'a> FunctionBuilder<'a> {
             next_reg_id,
             type_param_tag_fixups: Vec::new(),
             wasm_export: false,
+            js_import: None,
         };
 
         self.builder.module.functions.insert(func_id, function);

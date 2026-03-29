@@ -793,12 +793,24 @@ fn compile_haxe_to_mir_full(
     extra_source_dirs: &[PathBuf],
     safety_warnings: bool,
 ) -> Result<MirCompilationResult, String> {
+    compile_haxe_to_mir_with_defines(source, filename, plugins, extra_source_dirs, safety_warnings, &[])
+}
+
+fn compile_haxe_to_mir_with_defines(
+    source: &str,
+    filename: &str,
+    plugins: Vec<Box<dyn compiler::compiler_plugin::CompilerPlugin>>,
+    extra_source_dirs: &[PathBuf],
+    safety_warnings: bool,
+    extra_defines: &[&str],
+) -> Result<MirCompilationResult, String> {
     use compiler::compilation::{CompilationConfig, CompilationUnit};
 
     // Create compilation unit with stdlib support
     let mut config = CompilationConfig {
-        load_stdlib: true, // Enable stdlib for full Haxe compatibility
+        load_stdlib: true,
         emit_safety_warnings: safety_warnings,
+        extra_defines: extra_defines.iter().map(|s| s.to_string()).collect(),
         ..Default::default()
     };
     config.pipeline_config = config.pipeline_config.skip_analysis();
@@ -3115,13 +3127,14 @@ fn cmd_build_wasm(
 
     println!("Building {} [target: {}]...", file.display(), target);
 
-    // Use the full compile pipeline (same as `rayzor run`) to get merged MIR
-    let mir_result = compile_haxe_to_mir_full(
+    // Use the full compile pipeline with "wasm" define for conditional compilation
+    let mir_result = compile_haxe_to_mir_with_defines(
         &source,
         file.to_str().unwrap_or("unknown"),
         Vec::new(),
         &extra_source_dirs,
         false,
+        &["wasm"],
     )?;
 
     let user_wasm =

@@ -63,11 +63,21 @@ pub fn parse_haxe_file_with_debug(
     recovery: bool,
     debug: bool,
 ) -> Result<HaxeFile, String> {
+    parse_haxe_file_with_config(file_name, input, recovery, debug, &crate::preprocessor::PreprocessorConfig::default())
+}
+
+/// Parse a Haxe file with explicit preprocessor defines (e.g., "wasm" for WASM targets).
+pub fn parse_haxe_file_with_config(
+    file_name: &str,
+    input: &str,
+    recovery: bool,
+    debug: bool,
+    preprocessor_config: &crate::preprocessor::PreprocessorConfig,
+) -> Result<HaxeFile, String> {
     let is_import_file = is_import_hx_file(file_name);
 
     // Preprocess to handle conditional compilation directives
-    let preprocessor_config = crate::preprocessor::PreprocessorConfig::default();
-    let preprocessed = crate::preprocessor::preprocess(input, &preprocessor_config);
+    let preprocessed = crate::preprocessor::preprocess(input, preprocessor_config);
 
     // Try the recursive descent parser first (15x faster than nom)
     match crate::rd::rd_parse(&preprocessed, file_name, is_import_file, debug) {

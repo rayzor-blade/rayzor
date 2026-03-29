@@ -155,6 +155,9 @@ struct CompileCtx {
     func_param_types: HashMap<IrFunctionId, Vec<ValType>>,
     /// Class names that have @:export (for constructor detection).
     exported_classes: std::collections::HashSet<String>,
+    /// @:jsImport function name → (js_module, js_import_name).
+    /// Used to emit WASM imports from named JS modules instead of the default "rayzor" module.
+    js_import_modules: HashMap<String, (String, String)>,
 }
 
 impl CompileCtx {
@@ -176,6 +179,7 @@ impl CompileCtx {
             func_return_types: HashMap::new(),
             func_param_types: HashMap::new(),
             exported_classes: std::collections::HashSet::new(),
+            js_import_modules: HashMap::new(),
         }
     }
 
@@ -219,6 +223,18 @@ impl CompileCtx {
                 if !func.cfg.blocks.is_empty() {
                     has_code.insert(*func_id);
                     has_code_name.insert(func.name.clone());
+                }
+            }
+        }
+
+        // Pre-scan: collect @:jsImport mappings from module.functions
+        for module in modules {
+            for (_id, func) in &module.functions {
+                if let Some((ref js_mod, ref js_name)) = func.js_import {
+                    self.js_import_modules.insert(
+                        func.name.clone(),
+                        (js_mod.clone(), js_name.clone()),
+                    );
                 }
             }
         }
@@ -299,6 +315,24 @@ impl CompileCtx {
                 if self.ir_func_to_idx.contains_key(func_id) {
                     let idx = *self.ir_func_to_idx.get(func_id).unwrap();
                     self.func_name_to_idx.insert(func.name.clone(), idx);
+                    continue;
+                }
+
+                // @:jsImport functions become WASM imports from a named JS module
+                if let Some((ref js_module, ref js_name)) = func.js_import {
+                    let (params, results) = Self::sig_to_wasm(&func.signature);
+                    let type_idx = self.intern_type(params, results);
+                    let func_idx = self.next_func_idx;
+                    self.next_func_idx += 1;
+                    self.imports.push(ImportedFunc {
+                        name: func.name.clone(),
+                        type_idx,
+                    });
+                    // Store the JS module name for this import (used in import section encoding)
+                    self.js_import_modules.insert(func.name.clone(), (js_module.clone(), js_name.clone()));
+                    self.import_name_to_idx.insert(func.name.clone(), func_idx);
+                    self.ir_func_to_idx.insert(*func_id, func_idx);
+                    self.func_name_to_idx.insert(func.name.clone(), func_idx);
                     continue;
                 }
                 if let Some(&idx) = self.import_name_to_idx.get(&func.name) {
@@ -474,7 +508,13 @@ impl CompileCtx {
         // --- Import section ---
         let mut import_section = ImportSection::new();
         for imp in &self.imports {
-            import_section.import("rayzor", &imp.name, EntityType::Function(imp.type_idx));
+            // @:jsImport functions import from their declared JS module name
+            let (module, import_name) = if let Some((js_mod, js_name)) = self.js_import_modules.get(&imp.name) {
+                (js_mod.as_str(), js_name.as_str())
+            } else {
+                ("rayzor", imp.name.as_str())
+            };
+            import_section.import(module, import_name, EntityType::Function(imp.type_idx));
         }
         wasm_module.section(&import_section);
 

@@ -61,6 +61,13 @@ pub struct IrFunction {
     /// When true, the WASM backend exports it with its qualified_name.
     #[serde(default)]
     pub wasm_export: bool,
+
+    /// JS import binding from @:jsImport("module", "function") metadata.
+    /// When set, the WASM backend emits a WASM import from the specified JS module
+    /// instead of generating a function body or linking to a native symbol.
+    /// First element is the module name, second is the import name.
+    #[serde(default)]
+    pub js_import: Option<(String, String)>,
 }
 
 /// Unique identifier for functions
@@ -249,7 +256,7 @@ impl IrFunction {
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
             type_param_tag_fixups: Vec::new(),
-            wasm_export: false,
+            wasm_export: false, js_import: None,
         };
 
         // Allocate registers for parameters and register their types
