@@ -6,8 +6,23 @@ edition = "2021"
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+default = ["native"]
+native = ["dep:rayzor-plugin", "dep:rayzor-runtime", "dep:libc"]
+wasm-host = ["dep:wasm-bindgen", "dep:web-sys", "dep:js-sys"]
+
 [dependencies]
-rayzor-plugin = { path = "../plugin" }
-rayzor-runtime = { path = "../runtime" }
-libc = "0.2"
-# Zero third-party windowing deps — system frameworks linked via build.rs
+rayzor-plugin = { path = "../plugin", optional = true }
+rayzor-runtime = { path = "../runtime", optional = true }
+libc = { version = "0.2", optional = true }
+
+# WASM host (wasm-bindgen + web-sys for DOM canvas/events)
+wasm-bindgen = { version = "0.2", optional = true }
+web-sys = { version = "0.3", optional = true, features = [
+    "HtmlCanvasElement", "HtmlElement", "CssStyleDeclaration",
+    "Document", "Window", "Element", "DomRect",
+    "KeyboardEvent", "MouseEvent", "WheelEvent", "FocusEvent",
+    "EventTarget", "AddEventListenerOptions",
+] }
+js-sys = { version = "0.3", optional = true }
+once_cell = "1"
