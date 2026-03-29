@@ -58,7 +58,8 @@ impl RpkgPlugin {
         let mut lib = None;
         let mut temp_lib_path = None;
 
-        // Extract and load native library if present
+        // Extract and load native library if present.
+        // If no native lib matches the current platform, fall back to WASM component.
         if let Some(lib_bytes) = &loaded.native_lib_bytes {
             let ext = if cfg!(target_os = "macos") {
                 "dylib"
@@ -91,6 +92,14 @@ impl RpkgPlugin {
 
             temp_lib_path = Some(temp_path);
             lib = Some(library);
+        }
+
+        // WASM Component fallback notice: if no native lib matched but WASM is available
+        if lib.is_none() && loaded.wasm_component_bytes.is_some() {
+            eprintln!(
+                "  rpkg '{}': no native lib for this platform — WASM component available for `rayzor build --target wasm`",
+                loaded.package_name,
+            );
         }
 
         // Create compiler plugin from method table

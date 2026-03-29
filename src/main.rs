@@ -413,8 +413,9 @@ enum RpkgAction {
         #[arg(long, value_name = "ARCH")]
         arch: Vec<String>,
 
-        /// WASM component to embed (universal fallback for all platforms)
-        #[arg(long, value_name = "FILE")]
+        /// WASM component to embed (universal fallback for all platforms).
+        /// Pass a .wasm file path, or use --wasm alone to auto-compile from --haxe-dir.
+        #[arg(long, value_name = "FILE", num_args = 0..=1, default_missing_value = "__auto__")]
         wasm: Option<PathBuf>,
 
         /// Directory containing .hx source files to bundle
@@ -3440,12 +3441,22 @@ fn cmd_rpkg_pack(
         if haxe_dir.is_dir() {
             compiler::rpkg::pack::collect_haxe_sources(&mut builder, &haxe_dir, &haxe_dir)?;
         }
-        if let Some(wasm_path) = &wasm {
-            let wasm_bytes = std::fs::read(wasm_path)
-                .map_err(|e| format!("failed to read WASM: {}", e))?;
-            builder.add_wasm_component(&package_name, &wasm_bytes);
-            println!("  wasm: {} ({:.1} KB)", wasm_path.display(), wasm_bytes.len() as f64 / 1024.0);
-        }
+
+        let wasm_bytes = match &wasm {
+            Some(path) if path.to_string_lossy() != "__auto__" => {
+                // Use pre-built WASM file
+                let bytes = std::fs::read(path)
+                    .map_err(|e| format!("failed to read WASM: {}", e))?;
+                println!("  wasm: {} ({:.1} KB)", path.display(), bytes.len() as f64 / 1024.0);
+                bytes
+            }
+            _ => {
+                // Auto-compile Haxe sources to WASM component
+                println!("  compiling Haxe sources to WASM component...");
+                build_wasm_component_from_haxe_dir(&haxe_dir)?
+            }
+        };
+        builder.add_wasm_component(&package_name, &wasm_bytes);
         builder.write(&output).map_err(|e| format!("failed to write rpkg: {}", e))?;
     } else {
         // Build platform entries: pair each dylib with its os/arch tag
@@ -3498,6 +3509,95 @@ fn cmd_rpkg_pack(
         size as f64 / 1024.0
     );
 
+    Ok(())
+}
+
+/// Auto-compile Haxe sources in a directory to a WASM P2 Component.
+///
+/// Finds .hx files, compiles them through the full pipeline (parse → TAST → HIR → MIR → WASM),
+/// links with the WASM runtime, and wraps as a P2 Component.
+fn build_wasm_component_from_haxe_dir(haxe_dir: &Path) -> Result<Vec<u8>, String> {
+    // Find all .hx files
+    let mut hx_files: Vec<PathBuf> = Vec::new();
+    collect_hx_files(haxe_dir, &mut hx_files)?;
+
+    if hx_files.is_empty() {
+        return Err(format!("no .hx files found in {}", haxe_dir.display()));
+    }
+
+    // Find the primary file (one with Main class, or first file)
+    let primary = hx_files
+        .iter()
+        .find(|p| {
+            p.file_stem()
+                .map(|s| {
+                    let name = s.to_string_lossy();
+                    name.contains("Main") || name.contains("main")
+                })
+                .unwrap_or(false)
+        })
+        .unwrap_or(&hx_files[0])
+        .clone();
+
+    let source = std::fs::read_to_string(&primary)
+        .map_err(|e| format!("failed to read {}: {}", primary.display(), e))?;
+
+    // Compile to MIR (don't pass haxe_dir as extra source — it's already the primary file)
+    let (mir_module, _diagnostics) = compile_haxe_to_mir(
+        &source,
+        primary.to_str().unwrap_or("unknown"),
+        Vec::new(),
+        &[],
+        false,
+    )?;
+
+    // MIR → WASM
+    let user_wasm = compiler::codegen::wasm_backend::WasmBackend::compile(
+        &[&mir_module],
+        Some("main"),
+    )?;
+
+    // Link with runtime
+    let runtime_path = find_wasm_runtime();
+    let linked = if let Some(rt_path) = &runtime_path {
+        let rt_bytes = std::fs::read(rt_path)
+            .map_err(|e| format!("failed to read runtime: {}", e))?;
+        compiler::codegen::wasm_linker::WasmLinker::link(&user_wasm, &rt_bytes)?
+    } else {
+        user_wasm
+    };
+
+    // Wrap as P2 Component (command — has _start from Main.main)
+    let component = compiler::codegen::wasm_component::wrap_as_component(
+        &linked,
+        compiler::codegen::wasm_component::ComponentKind::Command,
+    )?;
+
+    println!(
+        "  wasm component: {:.1} KB (core: {:.1} KB)",
+        component.len() as f64 / 1024.0,
+        linked.len() as f64 / 1024.0
+    );
+
+    Ok(component)
+}
+
+/// Recursively collect .hx files from a directory.
+fn collect_hx_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<(), String> {
+    if !dir.is_dir() {
+        return Ok(());
+    }
+    let entries = std::fs::read_dir(dir)
+        .map_err(|e| format!("failed to read dir {}: {}", dir.display(), e))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("dir entry error: {}", e))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_hx_files(&path, files)?;
+        } else if path.extension().map(|e| e == "hx").unwrap_or(false) {
+            files.push(path);
+        }
+    }
     Ok(())
 }
 
@@ -3752,6 +3852,13 @@ fn cmd_rpkg_inspect(file: PathBuf) -> Result<(), String> {
         );
     } else {
         println!("  Native Library: not available for current platform");
+    }
+
+    if let Some(ref wasm_bytes) = loaded.wasm_component_bytes {
+        println!(
+            "  WASM Component: present ({:.1} KB) — universal fallback",
+            wasm_bytes.len() as f64 / 1024.0,
+        );
     }
 
     Ok(())
