@@ -132,6 +132,8 @@ struct CompileCtx {
     // ----- Function return types -----
     /// IrFunctionId -> WASM return type. Used for CallDirect dest type inference.
     func_return_types: HashMap<IrFunctionId, ValType>,
+    /// IrFunctionId -> WASM parameter types. Used for CallDirect arg coercion.
+    func_param_types: HashMap<IrFunctionId, Vec<ValType>>,
 }
 
 impl CompileCtx {
@@ -151,6 +153,7 @@ impl CompileCtx {
             ir_global_to_idx: HashMap::new(),
             user_globals: Vec::new(),
             func_return_types: HashMap::new(),
+            func_param_types: HashMap::new(),
         }
     }
 
@@ -259,6 +262,9 @@ impl CompileCtx {
                 // Always register return type for CallDirect type inference
                 let ret_vt = ir_type_to_wasm(&func.signature.return_type);
                 self.func_return_types.insert(*func_id, ret_vt);
+                let param_vts: Vec<ValType> = func.signature.parameters.iter()
+                    .map(|p| ir_type_to_wasm(&p.ty)).collect();
+                self.func_param_types.insert(*func_id, param_vts);
 
                 if self.ir_func_to_idx.contains_key(func_id) {
                     let idx = *self.ir_func_to_idx.get(func_id).unwrap();
@@ -616,67 +622,156 @@ impl<'a> FunctionLowerer<'a> {
     // ------------------------------------------------------------------
 
     fn allocate_locals(&mut self) {
+        // Step 1: Allocate all locals as I32 (default WASM32 type).
         let mut seen = BTreeSet::new();
         for p in &self.ir_func.signature.parameters {
             seen.insert(p.reg);
         }
-
-        // Phi node destinations.
         for block in self.ir_func.cfg.blocks.values() {
             for phi in &block.phi_nodes {
                 if seen.insert(phi.dest) {
-                    let vt = ir_type_to_wasm(&phi.ty);
-                    self.alloc_local(phi.dest, vt);
+                    self.alloc_local(phi.dest, ValType::I32);
+                }
+            }
+            for inst in &block.instructions {
+                if let Some(dest) = inst.dest() {
+                    if seen.insert(dest) {
+                        self.alloc_local(dest, ValType::I32);
+                    }
                 }
             }
         }
 
-        // Instruction destinations.
-        for block in self.ir_func.cfg.blocks.values() {
-            for inst in &block.instructions {
-                if let Some(dest) = inst.dest() {
-                    if seen.insert(dest) {
-                        // Infer the correct WASM type from the instruction.
-                        // Critical: register_types may be missing entries, causing
-                        // defaults to I32 even for float operations.
-                        let vt = match inst {
-                            IrInstruction::Undef { ty, .. } => ir_type_to_wasm(ty),
-                            IrInstruction::Load { ty, .. } => {
-                                let wt = ir_type_to_wasm(ty);
-                                wt
-                            }
-                            IrInstruction::Cast { to_ty, .. } => ir_type_to_wasm(to_ty),
-                            IrInstruction::Const { value, .. } => match value {
-                                IrValue::F32(_) => ValType::F32,
-                                IrValue::F64(_) => ValType::F64,
-                                _ => self.reg_wasm_type(dest),
-                            },
-                            // For BinOp/UnOp/Cmp: infer from operand types
-                            IrInstruction::BinOp { left, .. } => {
-                                let lt = self.reg_wasm_type(*left);
-                                let local_lt = self.reg_to_local.get(left).and_then(|&idx| self.local_types.get((idx - self.param_count) as usize)).copied();
-                                let vt = if lt == ValType::F64 || local_lt == Some(ValType::F64) { ValType::F64 }
-                                else if lt == ValType::F32 || local_lt == Some(ValType::F32) { ValType::F32 }
-                                else { self.reg_wasm_type(dest) };
-                                vt
-                            }
-                            IrInstruction::UnOp { operand, .. } => {
-                                let ot = self.reg_wasm_type(*operand);
-                                if ot == ValType::F64 { ValType::F64 }
-                                else if ot == ValType::F32 { ValType::F32 }
-                                else { self.reg_wasm_type(dest) }
-                            }
-                            IrInstruction::Cmp { .. } => ValType::I32, // comparisons always return i32
-                            IrInstruction::CallDirect { func_id, .. } => {
-                                // Use callee's return type
-                                self.ctx.func_return_types.get(func_id)
-                                    .copied()
-                                    .unwrap_or_else(|| self.reg_wasm_type(dest))
-                            }
-                            _ => self.reg_wasm_type(dest),
-                        };
-                        self.alloc_local(dest, vt);
+        // Step 2: Producer-based type inference.
+        // Determine each register's type from what PRODUCES the value.
+        // Iterate to fixpoint (needed for BinOp depending on other BinOp).
+        // Only UPGRADE from I32 to F32/F64 — never downgrade.
+        loop {
+            let mut changed = false;
+            for block in self.ir_func.cfg.blocks.values() {
+                // Phi: type from phi.ty annotation
+                for phi in &block.phi_nodes {
+                    let ty = ir_type_to_wasm(&phi.ty);
+                    if ty != ValType::I32 && self.local_type_of(phi.dest) != Some(ty) {
+                        self.set_local_type(phi.dest, ty);
+                        changed = true;
                     }
+                }
+
+                for inst in &block.instructions {
+                    let produced_ty = match inst {
+                        // Instructions with explicit type annotations
+                        IrInstruction::Load { ty, .. } => Some(ir_type_to_wasm(ty)),
+                        IrInstruction::Undef { ty, .. } => Some(ir_type_to_wasm(ty)),
+                        IrInstruction::Cast { to_ty, .. } => Some(ir_type_to_wasm(to_ty)),
+
+                        // Constants carry their type
+                        IrInstruction::Const { value, .. } => Some(match value {
+                            IrValue::F32(_) => ValType::F32,
+                            IrValue::F64(_) => ValType::F64,
+                            _ => ValType::I32,
+                        }),
+
+                        // Comparisons always produce i32 (boolean)
+                        IrInstruction::Cmp { .. } => Some(ValType::I32),
+
+                        // CallDirect: use callee return type
+                        IrInstruction::CallDirect { func_id, .. } => {
+                            self.ctx.func_return_types.get(func_id).copied()
+                        }
+
+                        // BinOp: float if any operand is float
+                        IrInstruction::BinOp { op, left, right, .. } => {
+                            let is_fop = matches!(op,
+                                BinaryOp::FAdd | BinaryOp::FSub |
+                                BinaryOp::FMul | BinaryOp::FDiv | BinaryOp::FRem);
+                            let lt = self.local_type_of(*left).unwrap_or(ValType::I32);
+                            let rt = self.local_type_of(*right).unwrap_or(ValType::I32);
+                            if is_fop || lt == ValType::F64 || rt == ValType::F64 {
+                                Some(ValType::F64)
+                            } else if lt == ValType::F32 || rt == ValType::F32 {
+                                Some(ValType::F32)
+                            } else {
+                                None // keep I32
+                            }
+                        }
+
+                        // UnOp: inherit operand type
+                        IrInstruction::UnOp { op, operand, .. } => {
+                            let is_fop = matches!(op, UnaryOp::FNeg);
+                            let ot = self.local_type_of(*operand).unwrap_or(ValType::I32);
+                            if is_fop || ot == ValType::F64 { Some(ValType::F64) }
+                            else if ot == ValType::F32 { Some(ValType::F32) }
+                            else { None }
+                        }
+
+                        // GEP, PtrAdd, Alloc: always i32 (pointer)
+                        IrInstruction::GetElementPtr { .. }
+                        | IrInstruction::PtrAdd { .. }
+                        | IrInstruction::Alloc { .. }
+                        | IrInstruction::FunctionRef { .. }
+                        | IrInstruction::MakeClosure { .. }
+                        | IrInstruction::ClosureFunc { .. }
+                        | IrInstruction::ClosureEnv { .. }
+                        | IrInstruction::CreateStruct { .. }
+                        | IrInstruction::CreateUnion { .. }
+                        | IrInstruction::ExtractDiscriminant { .. } => Some(ValType::I32),
+
+                        // Copy/Move: inherit SOURCE type (not register_types)
+                        IrInstruction::Copy { src, .. }
+                        | IrInstruction::Move { src, .. }
+                        | IrInstruction::Clone { src, .. }
+                        | IrInstruction::BorrowImmutable { src, .. }
+                        | IrInstruction::BorrowMutable { src, .. } => {
+                            self.local_type_of(*src)
+                        }
+
+                        // Select: float if either branch is float
+                        IrInstruction::Select { true_val, false_val, .. } => {
+                            let tv = self.local_type_of(*true_val).unwrap_or(ValType::I32);
+                            let fv = self.local_type_of(*false_val).unwrap_or(ValType::I32);
+                            if tv == ValType::F64 || fv == ValType::F64 { Some(ValType::F64) }
+                            else if tv == ValType::F32 || fv == ValType::F32 { Some(ValType::F32) }
+                            else { None }
+                        }
+
+                        _ => None,
+                    };
+
+                    if let Some(ty) = produced_ty {
+                        if let Some(dest) = inst.dest() {
+                            if ty != ValType::I32 && self.local_type_of(dest) != Some(ty) {
+                                self.set_local_type(dest, ty);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if !changed { break; }
+        }
+    }
+
+    /// Get the WASM type of an IrId's allocated local.
+    fn local_type_of(&self, id: IrId) -> Option<ValType> {
+        let &local_idx = self.reg_to_local.get(&id)?;
+        if local_idx < self.param_count {
+            let param_idx = local_idx as usize;
+            self.ir_func.signature.parameters.get(param_idx)
+                .map(|p| ir_type_to_wasm(&p.ty))
+        } else {
+            let type_idx = (local_idx - self.param_count) as usize;
+            self.local_types.get(type_idx).copied()
+        }
+    }
+
+    /// Update an allocated local's type.
+    fn set_local_type(&mut self, id: IrId, ty: ValType) {
+        if let Some(&local_idx) = self.reg_to_local.get(&id) {
+            if local_idx >= self.param_count {
+                let type_idx = (local_idx - self.param_count) as usize;
+                if type_idx < self.local_types.len() {
+                    self.local_types[type_idx] = ty;
                 }
             }
         }
@@ -698,23 +793,10 @@ impl<'a> FunctionLowerer<'a> {
     }
 
     fn reg_wasm_type(&self, id: IrId) -> ValType {
-        // First check the allocated local type (set during allocate_locals with
-        // instruction-aware type inference). This is more reliable than register_types
-        // which may be missing or have types that map differently in WASM32.
-        if let Some(&local_idx) = self.reg_to_local.get(&id) {
-            if local_idx >= self.param_count {
-                let type_idx = (local_idx - self.param_count) as usize;
-                if let Some(&vt) = self.local_types.get(type_idx) {
-                    return vt;
-                }
-            }
-        }
-        let result = self.ir_func
-            .register_types
-            .get(&id)
-            .map(ir_type_to_wasm)
-            .unwrap_or(ValType::I32);
-        result
+        // Use the producer-inferred type from allocate_locals.
+        // This is the authoritative source — it reflects what the
+        // instruction that PRODUCES this value actually generates.
+        self.local_type_of(id).unwrap_or(ValType::I32)
     }
 
     // ------------------------------------------------------------------
@@ -990,6 +1072,9 @@ impl<'a> FunctionLowerer<'a> {
                 for (pred_bid, val) in &phi.incoming {
                     if *pred_bid == from_bid {
                         self.get_reg(f, *val);
+                        let val_ty = self.reg_wasm_type(*val);
+                        let dest_ty = self.reg_wasm_type(phi.dest);
+                        self.emit_type_coerce(f, val_ty, dest_ty);
                         self.set_reg(f, phi.dest);
                     }
                 }
@@ -1016,6 +1101,7 @@ impl<'a> FunctionLowerer<'a> {
             | IrInstruction::BorrowMutable { dest, src, .. }
             | IrInstruction::Clone { dest, src } => {
                 self.get_reg(f, *src);
+                self.emit_type_coerce(f, self.reg_wasm_type(*src), self.reg_wasm_type(*dest));
                 self.set_reg(f, *dest);
             }
 
@@ -1026,20 +1112,30 @@ impl<'a> FunctionLowerer<'a> {
                 left,
                 right,
             } => {
-                self.get_reg(f, *left);
-                self.get_reg(f, *right);
-                // Use operand type to determine instruction variant (more reliable
-                // than dest type which may be missing from register_types).
-                let op_ty = self.reg_wasm_type(*left);
+                let left_ty = self.reg_wasm_type(*left);
+                let right_ty = self.reg_wasm_type(*right);
                 let dest_ty = self.reg_wasm_type(*dest);
-                let ty = if op_ty == ValType::F64 || dest_ty == ValType::F64 {
+
+                // Determine the operation type
+                let is_fop = matches!(op, BinaryOp::FAdd | BinaryOp::FSub | BinaryOp::FMul | BinaryOp::FDiv | BinaryOp::FRem);
+                let op_ty = if is_fop || dest_ty == ValType::F64 || left_ty == ValType::F64 || right_ty == ValType::F64 {
                     ValType::F64
-                } else if op_ty == ValType::F32 || dest_ty == ValType::F32 {
+                } else if dest_ty == ValType::F32 || left_ty == ValType::F32 || right_ty == ValType::F32 {
                     ValType::F32
                 } else {
-                    dest_ty
+                    ValType::I32
                 };
-                self.emit_binop(f, *op, ty);
+
+                // Load with coercion
+                self.get_reg(f, *left);
+                self.emit_type_coerce(f, left_ty, op_ty);
+                self.get_reg(f, *right);
+                self.emit_type_coerce(f, right_ty, op_ty);
+
+                self.emit_binop(f, *op, op_ty);
+
+                // Coerce result to dest type
+                self.emit_type_coerce(f, op_ty, dest_ty);
                 self.set_reg(f, *dest);
             }
 
@@ -1056,19 +1152,24 @@ impl<'a> FunctionLowerer<'a> {
                 left,
                 right,
             } => {
-                self.get_reg(f, *left);
-                self.get_reg(f, *right);
-                let op_ty = self.reg_wasm_type(*left);
-                let rhs_ty = self.reg_wasm_type(*right);
-                let ty = if op_ty == ValType::F64 || rhs_ty == ValType::F64 {
+                let left_ty = self.reg_wasm_type(*left);
+                let right_ty = self.reg_wasm_type(*right);
+                let is_fcmp = matches!(op, CompareOp::FEq | CompareOp::FNe | CompareOp::FLt | CompareOp::FLe | CompareOp::FGt | CompareOp::FGe);
+                let cmp_ty = if is_fcmp || left_ty == ValType::F64 || right_ty == ValType::F64 {
                     ValType::F64
-                } else if op_ty == ValType::F32 || rhs_ty == ValType::F32 {
+                } else if left_ty == ValType::F32 || right_ty == ValType::F32 {
                     ValType::F32
                 } else {
-                    op_ty
+                    left_ty
                 };
-                self.emit_cmp(f, *op, ty);
-                self.set_reg(f, *dest);
+
+                self.get_reg(f, *left);
+                self.emit_type_coerce(f, left_ty, cmp_ty);
+                self.get_reg(f, *right);
+                self.emit_type_coerce(f, right_ty, cmp_ty);
+
+                self.emit_cmp(f, *op, cmp_ty);
+                self.set_reg(f, *dest); // Cmp always produces i32
             }
 
             // === Cast ===
@@ -1079,7 +1180,11 @@ impl<'a> FunctionLowerer<'a> {
                 to_ty,
             } => {
                 self.get_reg(f, *src);
-                self.emit_cast(f, from_ty, to_ty);
+                // Use the actual local type for cast source, not MIR's from_ty
+                // (the inference pass may have changed the local's type)
+                let actual_src_ty = self.reg_wasm_type(*src);
+                let target_ty = ir_type_to_wasm(to_ty);
+                self.emit_type_coerce(f, actual_src_ty, target_ty);
                 self.set_reg(f, *dest);
             }
 
@@ -1244,8 +1349,16 @@ impl<'a> FunctionLowerer<'a> {
                 args,
                 ..
             } => {
-                for arg in args {
+                // Load args with type coercion to match callee signature
+                let callee_params = self.ctx.func_param_types.get(func_id);
+                for (i, arg) in args.iter().enumerate() {
                     self.get_reg(f, *arg);
+                    let arg_ty = self.reg_wasm_type(*arg);
+                    if let Some(params) = callee_params {
+                        if let Some(&expected) = params.get(i) as Option<&ValType> {
+                            self.emit_type_coerce(f, arg_ty, expected);
+                        }
+                    }
                 }
                 if let Some(&idx) = self.ctx.ir_func_to_idx.get(func_id) {
                     f.instruction(&Instruction::Call(idx));
@@ -1851,6 +1964,20 @@ impl<'a> FunctionLowerer<'a> {
     // ------------------------------------------------------------------
     // Register get/set helpers
     // ------------------------------------------------------------------
+
+    /// Emit a type conversion instruction if `from` != `to`.
+    fn emit_type_coerce(&self, f: &mut Function, from: ValType, to: ValType) {
+        if from == to { return; }
+        match (from, to) {
+            (ValType::I32, ValType::F64) => { f.instruction(&Instruction::F64ConvertI32S); }
+            (ValType::F64, ValType::I32) => { f.instruction(&Instruction::I32TruncF64S); }
+            (ValType::I32, ValType::F32) => { f.instruction(&Instruction::F32ConvertI32S); }
+            (ValType::F32, ValType::I32) => { f.instruction(&Instruction::I32TruncF32S); }
+            (ValType::F32, ValType::F64) => { f.instruction(&Instruction::F64PromoteF32); }
+            (ValType::F64, ValType::F32) => { f.instruction(&Instruction::F32DemoteF64); }
+            _ => {}
+        }
+    }
 
     fn get_reg(&self, f: &mut Function, id: IrId) {
         let idx = self.reg_to_local.get(&id).copied().unwrap_or(0);
