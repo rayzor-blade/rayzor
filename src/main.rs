@@ -3187,12 +3187,23 @@ fn cmd_build_wasm(
     std::fs::write(&core_path, &linked_wasm)
         .map_err(|e| format!("failed to write {}: {}", core_path.display(), e))?;
 
-    // Collect exported class metadata for JS bindings
+    // Collect exported class metadata and @:jsImport mappings for JS bindings
     let modules_ref = [&mir_result.module];
     let exported_classes = compiler::codegen::wasm_bindgen::collect_exported_classes(
         &modules_ref,
         &mir_result.class_alloc_sizes,
     );
+    let js_imports = compiler::codegen::wasm_bindgen::collect_js_imports(&modules_ref);
+    if !js_imports.is_empty() {
+        println!(
+            "  js imports: {}",
+            js_imports
+                .iter()
+                .map(|(module, funcs)| format!("{} ({} functions)", module, funcs.len()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
 
     // Generate JS bindings (ES6 module with class wrappers if @:export classes exist)
     let js_path = out_path.with_extension("js");
