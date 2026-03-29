@@ -2,6 +2,7 @@
 //!
 //! Accepts platform-native window pointers (NSView*, HWND, X11 Window)
 //! and creates a wgpu Surface for real-time frame presentation.
+//! On WASM, GPU surfaces are provided by the host via `rayzor:gpu` WIT interface.
 
 use super::GraphicsContext;
 
@@ -94,7 +95,7 @@ fn make_raw_handles(
         Some(RawSurfaceTarget { window, display })
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows", target_arch = "wasm32")))]
     {
         let _ = (window_handle, display_handle);
         None

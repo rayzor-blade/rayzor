@@ -31,6 +31,12 @@ extern class Surface {
     @:native("rayzor_gpu_gfx_surface_create")
     public static function create(device:GPUDevice, windowHandle:rayzor.Ptr<Void>, displayHandle:rayzor.Ptr<Void>, width:Int, height:Int):Surface;
 
+    /** Create a surface from an HTML canvas element (WASM/browser only).
+     *  Pass the canvas element's DOM ID (e.g., "my-canvas"), or null to auto-create one.
+     */
+    @:native("rayzor_gpu_gfx_surface_create_canvas")
+    public static function createCanvas(device:GPUDevice, canvasId:String, width:Int, height:Int):Surface;
+
     /** Get the current frame's texture view for rendering into. */
     @:native("rayzor_gpu_gfx_surface_get_texture")
     public function getTexture():TextureView;

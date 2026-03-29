@@ -1,0 +1,78 @@
+/// Rayzor Window interface — non-standard WASI extension.
+///
+/// Provides window creation, input handling, and event dispatch.
+/// Host implementations:
+///   - Browser: DOM <canvas> element with addEventListener for events
+///   - Native (rayzor run --wasm): Cocoa (macOS), X11 (Linux), Win32 (Windows)
+///   - Headless: stub (no window)
+
+package rayzor:window;
+
+/// Window management and input handling.
+interface window {
+    /// Opaque handle to a native or browser window.
+    type window-handle = s32;
+
+    /// Window style flags (bitmask).
+    /// TITLED=1, CLOSABLE=2, RESIZABLE=4, MINIMIZABLE=8,
+    /// MAXIMIZABLE=16, FRAMELESS=32, FLOATING=64, FULLSCREEN=128.
+
+    /// Create a window at (x, y) with given dimensions and style flags.
+    create: func(title: s32, x: s32, y: s32, width: s32, height: s32, style: s32) -> window-handle;
+    /// Create a centered window with given dimensions.
+    create-centered: func(title: s32, width: s32, height: s32) -> window-handle;
+    /// Destroy a window.
+    destroy: func(win: window-handle);
+
+    /// Poll events. Returns 0 if window should close, 1 if still open.
+    poll-events: func(win: window-handle) -> s32;
+
+    /// Geometry.
+    get-width: func(win: window-handle) -> s32;
+    get-height: func(win: window-handle) -> s32;
+    get-x: func(win: window-handle) -> s32;
+    get-y: func(win: window-handle) -> s32;
+    was-resized: func(win: window-handle) -> s32;
+    set-position: func(win: window-handle, x: s32, y: s32);
+    set-size: func(win: window-handle, width: s32, height: s32);
+    set-min-size: func(win: window-handle, width: s32, height: s32);
+    set-max-size: func(win: window-handle, width: s32, height: s32);
+
+    /// Appearance.
+    set-title: func(win: window-handle, title: s32);
+    set-fullscreen: func(win: window-handle, fullscreen: s32);
+    set-visible: func(win: window-handle, visible: s32);
+    set-floating: func(win: window-handle, always-on-top: s32);
+    set-opacity: func(win: window-handle, opacity: f64);
+
+    /// State queries.
+    is-fullscreen: func(win: window-handle) -> s32;
+    is-visible: func(win: window-handle) -> s32;
+    is-minimized: func(win: window-handle) -> s32;
+    is-focused: func(win: window-handle) -> s32;
+
+    /// Keyboard input.
+    is-key-down: func(win: window-handle, key-code: s32) -> s32;
+
+    /// Mouse input.
+    get-mouse-x: func(win: window-handle) -> f64;
+    get-mouse-y: func(win: window-handle) -> f64;
+    is-mouse-down: func(win: window-handle, button: s32) -> s32;
+
+    /// Native window handle (for GPU surface creation).
+    get-handle: func(win: window-handle) -> s32;
+    get-display-handle: func(win: window-handle) -> s32;
+
+    /// Event queue — call after poll-events(), cleared each frame.
+    event-count: func(win: window-handle) -> s32;
+    event-type: func(win: window-handle, index: s32) -> s32;
+    event-x: func(win: window-handle, index: s32) -> f64;
+    event-y: func(win: window-handle, index: s32) -> f64;
+    event-key: func(win: window-handle, index: s32) -> s32;
+    event-button: func(win: window-handle, index: s32) -> s32;
+    event-modifiers: func(win: window-handle, index: s32) -> s32;
+    event-width: func(win: window-handle, index: s32) -> s32;
+    event-height: func(win: window-handle, index: s32) -> s32;
+    event-scroll-x: func(win: window-handle, index: s32) -> f64;
+    event-scroll-y: func(win: window-handle, index: s32) -> f64;
+}
