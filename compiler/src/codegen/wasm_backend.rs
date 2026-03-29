@@ -66,12 +66,22 @@ impl WasmBackend {
         modules: &[&IrModule],
         entry_function: Option<&str>,
     ) -> Result<Vec<u8>, String> {
+        Self::compile_with_exports(modules, entry_function, &[])
+    }
+
+    /// Compile with additional function exports (for JS interop).
+    /// `extra_exports` is a list of function names to export from WASM.
+    pub fn compile_with_exports(
+        modules: &[&IrModule],
+        entry_function: Option<&str>,
+        extra_exports: &[&str],
+    ) -> Result<Vec<u8>, String> {
         let mut ctx = CompileCtx::new();
         ctx.collect_imports(modules);
         ctx.collect_functions(modules);
         ctx.collect_strings(modules);
         ctx.collect_globals(modules);
-        ctx.encode(modules, entry_function)
+        ctx.encode_with_exports(modules, entry_function, extra_exports)
     }
 }
 
@@ -418,10 +428,11 @@ impl CompileCtx {
     // Phase 4 -- encode the WASM module
     // ------------------------------------------------------------------
 
-    fn encode(
+    fn encode_with_exports(
         &self,
         modules: &[&IrModule],
         entry_function: Option<&str>,
+        extra_exports: &[&str],
     ) -> Result<Vec<u8>, String> {
         let mut wasm_module = Module::new();
 
@@ -523,6 +534,34 @@ impl CompileCtx {
                 export_section.export("_start", ExportKind::Func, idx);
             }
         }
+
+        // Export additional functions (for JS interop / @:export)
+        for &export_name in extra_exports {
+            if let Some(&idx) = self.func_name_to_idx.get(export_name) {
+                export_section.export(export_name, ExportKind::Func, idx);
+            } else {
+                // Try suffix match
+                for (name, &idx) in &self.func_name_to_idx {
+                    if name.ends_with(export_name) {
+                        export_section.export(export_name, ExportKind::Func, idx);
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Also auto-export functions with "export_" prefix
+        for module in modules {
+            for (func_id, func) in &module.functions {
+                if func.name.starts_with("export_") {
+                    if let Some(&idx) = self.ir_func_to_idx.get(func_id) {
+                        let export_name = &func.name["export_".len()..];
+                        export_section.export(export_name, ExportKind::Func, idx);
+                    }
+                }
+            }
+        }
+
         wasm_module.section(&export_section);
 
         // --- Code section ---
