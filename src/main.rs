@@ -3137,12 +3137,21 @@ fn cmd_build_wasm(
     std::fs::write(&js_path, &js_content)
         .map_err(|e| format!("failed to write {}: {}", js_path.display(), e))?;
 
-    // Generate .d.ts if there are exported classes
+    // Generate .d.ts and .wit if there are exported classes
     if !exported_classes.is_empty() {
         let dts_path = out_path.with_extension("d.ts");
         let dts = compiler::codegen::wasm_bindgen::generate_typescript_defs(&exported_classes);
         std::fs::write(&dts_path, &dts)
             .map_err(|e| format!("failed to write {}: {}", dts_path.display(), e))?;
+
+        // Generate WIT (WebAssembly Interface Types) for Component Model interop
+        let wit_path = out_path.with_extension("wit");
+        let package_name = out_path.file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "module".to_string());
+        let wit = compiler::codegen::wasm_wit::generate_wit(&package_name, &exported_classes);
+        std::fs::write(&wit_path, &wit)
+            .map_err(|e| format!("failed to write {}: {}", wit_path.display(), e))?;
     }
 
     // Generate HTML if --browser
