@@ -3199,7 +3199,16 @@ fn cmd_build_wasm(
         &modules_ref,
         &mir_result.class_alloc_sizes,
     );
-    let js_imports = compiler::codegen::wasm_bindgen::collect_js_imports(&modules_ref);
+    let mut js_imports = compiler::codegen::wasm_bindgen::collect_js_imports(&modules_ref);
+
+    // Also detect host modules from rayzor.toml [wasm] hosts config
+    // (extern class methods go through StdlibMapping, not IrFunction.js_import)
+    if let Some(ref proj) = project {
+        for module_name in proj.resolved_wasm_hosts().keys() {
+            js_imports.entry(module_name.clone()).or_default();
+        }
+    }
+
     if !js_imports.is_empty() {
         println!(
             "  js imports: {}",
@@ -3210,6 +3219,10 @@ fn cmd_build_wasm(
                 .join(", ")
         );
     }
+
+    // Resolve and copy host modules to build output directory
+    let build_dir = out_path.parent().unwrap_or(std::path::Path::new("."));
+    let resolved_hosts = resolve_and_copy_host_modules(&js_imports, &project, build_dir);
 
     // Generate JS bindings (ES6 module with class wrappers if @:export classes exist)
     let js_path = out_path.with_extension("js");
@@ -3239,7 +3252,7 @@ fn cmd_build_wasm(
         )
     } else {
         // Fall back to basic JS harness (with host module auto-wiring)
-        generate_wasm_js_harness(&core_wasm_filename, &js_imports)
+        generate_wasm_js_harness(&core_wasm_filename, &js_imports, &resolved_hosts)
     };
     std::fs::write(&js_path, &js_content)
         .map_err(|e| format!("failed to write {}: {}", js_path.display(), e))?;
@@ -3354,6 +3367,55 @@ fn dirs_next() -> PathBuf {
     std::env::var("HOME")
         .map(|h| PathBuf::from(h).join(".rayzor"))
         .unwrap_or_else(|_| PathBuf::from(".rayzor"))
+}
+
+/// Resolve host module files for @:jsImport modules and copy them to the build directory.
+/// Returns a map of module_name → relative filename in build dir (for JS import statements).
+fn resolve_and_copy_host_modules(
+    js_imports: &std::collections::BTreeMap<String, Vec<(String, String)>>,
+    project: &Option<compiler::workspace::Project>,
+    build_dir: &std::path::Path,
+) -> std::collections::BTreeMap<String, String> {
+    let mut resolved: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+
+    if js_imports.is_empty() {
+        return resolved;
+    }
+
+    // Collect host paths from rayzor.toml [wasm] hosts
+    let config_hosts: std::collections::HashMap<String, PathBuf> = project
+        .as_ref()
+        .map(|p| p.resolved_wasm_hosts())
+        .unwrap_or_default();
+
+    for module_name in js_imports.keys() {
+        // Try rayzor.toml config first
+        if let Some(host_path) = config_hosts.get(module_name) {
+            if host_path.exists() {
+                let js_filename = host_path.file_name().unwrap().to_string_lossy().to_string();
+                let dest = build_dir.join(&js_filename);
+                if let Err(e) = std::fs::copy(host_path, &dest) {
+                    eprintln!("  warning: failed to copy host {}: {}", host_path.display(), e);
+                    continue;
+                }
+
+                // Also copy companion .wasm file if it exists (wasm-bindgen output)
+                let bg_wasm = host_path.with_file_name(
+                    host_path.file_stem().unwrap().to_string_lossy().to_string() + "_bg.wasm"
+                );
+                if bg_wasm.exists() {
+                    let bg_dest = build_dir.join(bg_wasm.file_name().unwrap());
+                    let _ = std::fs::copy(&bg_wasm, &bg_dest);
+                }
+
+                println!("  host: {} → {}", module_name, js_filename);
+                resolved.insert(module_name.clone(), js_filename);
+            }
+        }
+        // TODO: also check rpkg JsHost entries
+    }
+
+    resolved
 }
 
 /// Generate JS host module code for detected @:jsImport modules.
@@ -3573,14 +3635,30 @@ fn generate_host_module_code(
 fn generate_wasm_js_harness(
     wasm_filename: &str,
     js_imports: &std::collections::BTreeMap<String, Vec<(String, String)>>,
+    resolved_hosts: &std::collections::BTreeMap<String, String>,
 ) -> String {
-    // Generate host module code for detected @:jsImport modules
-    let host_code = generate_host_module_code(js_imports);
+    // Generate import statements for resolved host modules
+    let mut host_imports = String::new();
+    for (module_name, filename) in resolved_hosts {
+        host_imports.push_str(&format!(
+            "import * as _{} from './{}';\n",
+            module_name.replace('-', "_"),
+            filename,
+        ));
+    }
+
+    // Generate host init code — each resolved host module's init is called before WASM start
+    let host_code = if resolved_hosts.is_empty() {
+        generate_host_module_code(js_imports) // fallback inline stubs
+    } else {
+        String::new() // hosts are loaded from co-located files
+    };
     format!(
         r#"// Rayzor WASM Runtime Harness
 // Generated by `rayzor build --target wasm`
 // Run: node {filename}  |  Open in browser with a local server
 
+{host_imports}
 const isNode = typeof process !== "undefined" && process.versions?.node;
 
 // Linear memory (shared with WASM module)
@@ -3795,7 +3873,8 @@ async function run() {{
 run().catch(e => {{ console.error("WASM error:", e); if (typeof process !== "undefined") process.exitCode = 1; }});
 "#,
         filename = wasm_filename,
-        host_code = host_code
+        host_code = host_code,
+        host_imports = host_imports
     )
 }
 

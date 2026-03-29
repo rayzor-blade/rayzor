@@ -4,3 +4,6 @@ entry = "Main.hx"
 
 [build]
 class-paths = [".", "../../compiler/haxe-std"]
+
+[wasm]
+hosts = { "rayzor-gpu" = "../../gpu/pkg/rayzor_gpu.js" }
