@@ -95,7 +95,12 @@ fn make_raw_handles(
         Some(RawSurfaceTarget { window, display })
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows", target_arch = "wasm32")))]
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows",
+        target_arch = "wasm32"
+    )))]
     {
         let _ = (window_handle, display_handle);
         None

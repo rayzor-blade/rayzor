@@ -54,6 +54,23 @@ pub struct ExportedMethod {
     pub returns_class: Option<String>,
 }
 
+/// Collect @:jsImport mappings from MIR modules.
+/// Returns a map of (js_module_name → Vec<(wasm_function_name, js_import_name)>).
+pub fn collect_js_imports(modules: &[&IrModule]) -> BTreeMap<String, Vec<(String, String)>> {
+    let mut result: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for module in modules {
+        for func in module.functions.values() {
+            if let Some((ref js_module, ref js_name)) = func.js_import {
+                result
+                    .entry(js_module.clone())
+                    .or_default()
+                    .push((func.name.clone(), js_name.clone()));
+            }
+        }
+    }
+    result
+}
+
 /// Collect exported class metadata from MIR modules.
 pub fn collect_exported_classes(
     modules: &[&IrModule],

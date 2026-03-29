@@ -231,10 +231,8 @@ impl CompileCtx {
         for module in modules {
             for (_id, func) in &module.functions {
                 if let Some((ref js_mod, ref js_name)) = func.js_import {
-                    self.js_import_modules.insert(
-                        func.name.clone(),
-                        (js_mod.clone(), js_name.clone()),
-                    );
+                    self.js_import_modules
+                        .insert(func.name.clone(), (js_mod.clone(), js_name.clone()));
                 }
             }
         }
@@ -329,7 +327,8 @@ impl CompileCtx {
                         type_idx,
                     });
                     // Store the JS module name for this import (used in import section encoding)
-                    self.js_import_modules.insert(func.name.clone(), (js_module.clone(), js_name.clone()));
+                    self.js_import_modules
+                        .insert(func.name.clone(), (js_module.clone(), js_name.clone()));
                     self.import_name_to_idx.insert(func.name.clone(), func_idx);
                     self.ir_func_to_idx.insert(*func_id, func_idx);
                     self.func_name_to_idx.insert(func.name.clone(), func_idx);
@@ -506,15 +505,12 @@ impl CompileCtx {
         wasm_module.section(&type_section);
 
         // --- Import section ---
+        // All imports use "rayzor" module — the linker resolves them against runtime exports.
+        // @:jsImport functions get stub implementations from the linker; the JS harness
+        // overrides stubs with real host implementations based on js_import_modules mapping.
         let mut import_section = ImportSection::new();
         for imp in &self.imports {
-            // @:jsImport functions import from their declared JS module name
-            let (module, import_name) = if let Some((js_mod, js_name)) = self.js_import_modules.get(&imp.name) {
-                (js_mod.as_str(), js_name.as_str())
-            } else {
-                ("rayzor", imp.name.as_str())
-            };
-            import_section.import(module, import_name, EntityType::Function(imp.type_idx));
+            import_section.import("rayzor", &imp.name, EntityType::Function(imp.type_idx));
         }
         wasm_module.section(&import_section);
 

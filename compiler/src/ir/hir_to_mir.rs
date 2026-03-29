@@ -3021,7 +3021,12 @@ impl<'a> HirToMirContext<'a> {
             // Check method's own @:jsImport
             if let Some(sym) = self.symbol_table.get_symbol(symbol_id) {
                 if let Some((module_is, func_is)) = sym.js_import {
-                    js_mod = Some(self.string_interner.get(module_is).unwrap_or("").to_string());
+                    js_mod = Some(
+                        self.string_interner
+                            .get(module_is)
+                            .unwrap_or("")
+                            .to_string(),
+                    );
                     js_func = Some(self.string_interner.get(func_is).unwrap_or("").to_string());
                 }
             }
@@ -3029,13 +3034,12 @@ impl<'a> HirToMirContext<'a> {
             // Check owning class for @:jsImport (via this_type or class_symbol)
             if js_mod.is_none() {
                 let class_sym_id = class_symbol
-                    .or_else(|| {
-                        this_type.and_then(|t| self.class_type_to_symbol.get(&t).copied())
-                    });
+                    .or_else(|| this_type.and_then(|t| self.class_type_to_symbol.get(&t).copied()));
                 if let Some(csid) = class_sym_id {
                     if let Some(class_sym) = self.symbol_table.get_symbol(csid) {
                         if let Some((mod_is, _)) = class_sym.js_import {
-                            js_mod = Some(self.string_interner.get(mod_is).unwrap_or("").to_string());
+                            js_mod =
+                                Some(self.string_interner.get(mod_is).unwrap_or("").to_string());
                             // Use the function's native name or bare name as import name
                             if let Some(func_ref) = self.builder.module.functions.get(&func_id) {
                                 js_func = Some(func_ref.name.clone());
@@ -6233,7 +6237,8 @@ impl<'a> HirToMirContext<'a> {
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
             type_param_tag_fixups: Vec::new(),
-            wasm_export: false, js_import: None,
+            wasm_export: false,
+            js_import: None,
         };
 
         self.builder.module.functions.insert(func_id, function);
@@ -6424,7 +6429,8 @@ impl<'a> HirToMirContext<'a> {
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
             type_param_tag_fixups: Vec::new(),
-            wasm_export: false, js_import: None,
+            wasm_export: false,
+            js_import: None,
         };
 
         // Add to both functions and extern_functions maps

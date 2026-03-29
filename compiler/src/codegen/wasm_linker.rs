@@ -497,17 +497,23 @@ impl LinkerCtx {
             }
         }
 
-        for (i, imp) in user.func_imports.iter().enumerate() {
-            let user_orig_idx = i as u32;
+        // Two-pass user import resolution:
+        // Pass A: classify each user import as resolved, stubbed, or preserved.
+        enum UserImportKind {
+            Resolved(u32),                  // Points to runtime function (merged_idx)
+            Stub(u32),                      // Stub type index
+            Preserved(String, String, u32), // (module, name, type_idx)
+        }
+        let mut user_import_kinds: Vec<UserImportKind> = Vec::new();
+
+        for (_i, imp) in user.func_imports.iter().enumerate() {
             if imp.module == "rayzor" {
                 if let Some(&merged_idx) = rt_export_to_merged.get(imp.name.as_str()) {
-                    // Verify signature compatibility
                     let user_type = self
                         .user_type_remap
                         .get(&imp.type_idx)
                         .copied()
                         .unwrap_or(0);
-                    let rt_func_idx_in_merged = merged_idx as usize;
                     let rt_internal_idx = if merged_idx >= self.n_wasi_imports {
                         (merged_idx - self.n_wasi_imports) as usize
                     } else {
@@ -522,49 +528,92 @@ impl LinkerCtx {
                         0
                     };
                     if user_type != rt_type {
-                        // Signature mismatch — generate stub instead of linking
-                        // to avoid WASM validation errors. The runtime function
-                        // has a different ABI (e.g., sret vs return).
-                        let stub_merged_idx = next_func_idx;
-                        next_func_idx += 1;
-                        self.user_func_remap.insert(user_orig_idx, stub_merged_idx);
                         let merged_type_idx = self
                             .user_type_remap
                             .get(&imp.type_idx)
                             .copied()
                             .unwrap_or(0);
-                        self.stub_type_indices.push(merged_type_idx);
                         self.unresolved_imports
                             .push(format!("{}(sig mismatch)", imp.name));
-                        continue;
+                        user_import_kinds.push(UserImportKind::Stub(merged_type_idx));
+                    } else {
+                        user_import_kinds.push(UserImportKind::Resolved(merged_idx));
                     }
-                    // Resolved: user import points to runtime function.
-                    self.user_func_remap.insert(user_orig_idx, merged_idx);
                 } else {
-                    // Unresolved: generate a stub.
-                    let stub_merged_idx = next_func_idx;
-                    next_func_idx += 1;
-                    self.user_func_remap.insert(user_orig_idx, stub_merged_idx);
                     let merged_type_idx = self
                         .user_type_remap
                         .get(&imp.type_idx)
                         .copied()
                         .unwrap_or(0);
-                    self.stub_type_indices.push(merged_type_idx);
                     self.unresolved_imports.push(imp.name.clone());
+                    user_import_kinds.push(UserImportKind::Stub(merged_type_idx));
                 }
             } else {
-                // Non-rayzor import in user module.
-                // Preserve as a real WASM import (for @:jsImport host modules).
-                // The JS harness will provide these at instantiation time.
-                self.preserved_imports.push(PreservedImport {
-                    module: imp.module.clone(),
-                    name: imp.name.clone(),
-                    type_idx: self.user_type_remap.get(&imp.type_idx).copied().unwrap_or(0),
-                    merged_func_idx: next_func_idx,
-                });
-                self.user_func_remap.insert(user_orig_idx, next_func_idx);
-                next_func_idx += 1;
+                let type_idx = self
+                    .user_type_remap
+                    .get(&imp.type_idx)
+                    .copied()
+                    .unwrap_or(0);
+                user_import_kinds.push(UserImportKind::Preserved(
+                    imp.module.clone(),
+                    imp.name.clone(),
+                    type_idx,
+                ));
+            }
+        }
+
+        // Count preserved imports — they go in the import section after WASI imports.
+        let n_preserved = user_import_kinds
+            .iter()
+            .filter(|k| matches!(k, UserImportKind::Preserved(..)))
+            .count() as u32;
+
+        // Shift ALL internal function indices to make room for preserved imports.
+        // Imports: [WASI: 0..n_wasi] [Preserved: n_wasi..n_wasi+n_preserved]
+        // Internals: [n_wasi+n_preserved..]
+        if n_preserved > 0 {
+            // Shift RT function remap
+            for (_k, v) in self.rt_func_remap.iter_mut() {
+                if *v >= self.n_wasi_imports {
+                    *v += n_preserved;
+                }
+            }
+            // Also shift rt_export_to_merged
+            for (_k, v) in rt_export_to_merged.iter_mut() {
+                if *v >= self.n_wasi_imports {
+                    *v += n_preserved;
+                }
+            }
+            next_func_idx += n_preserved;
+        }
+
+        // Pass B: assign final indices.
+        let mut preserved_slot = self.n_wasi_imports; // preserved imports start right after WASI
+        for (i, kind) in user_import_kinds.into_iter().enumerate() {
+            let user_orig_idx = i as u32;
+            match kind {
+                UserImportKind::Resolved(mut merged_idx) => {
+                    // Shift if needed (resolved points to RT function which was shifted)
+                    if n_preserved > 0 && merged_idx >= self.n_wasi_imports {
+                        merged_idx += n_preserved;
+                    }
+                    self.user_func_remap.insert(user_orig_idx, merged_idx);
+                }
+                UserImportKind::Stub(type_idx) => {
+                    self.user_func_remap.insert(user_orig_idx, next_func_idx);
+                    self.stub_type_indices.push(type_idx);
+                    next_func_idx += 1;
+                }
+                UserImportKind::Preserved(module, name, type_idx) => {
+                    self.preserved_imports.push(PreservedImport {
+                        module,
+                        name,
+                        type_idx,
+                        merged_func_idx: preserved_slot,
+                    });
+                    self.user_func_remap.insert(user_orig_idx, preserved_slot);
+                    preserved_slot += 1;
+                }
             }
         }
 
@@ -614,7 +663,10 @@ impl LinkerCtx {
         module.section(&type_section);
 
         // --- Import section (WASI imports from runtime only) ---
+        // Build import section: WASI imports first, then preserved @:jsImport imports.
         let mut import_section = ImportSection::new();
+
+        // WASI imports (indices 0..n_wasi)
         for imp in &rt.func_imports {
             let merged_type_idx = self.rt_type_remap.get(&imp.type_idx).copied().unwrap_or(0);
             import_section.import(
@@ -623,14 +675,9 @@ impl LinkerCtx {
                 EntityType::Function(merged_type_idx),
             );
         }
-        // Preserved @:jsImport imports — emitted as real WASM imports for JS host modules
-        for imp in &self.preserved_imports {
-            import_section.import(
-                &imp.module,
-                &imp.name,
-                EntityType::Function(imp.type_idx),
-            );
-        }
+
+        // Preserved @:jsImport imports (indices n_wasi..n_wasi+n_preserved)
+        let n_preserved = self.preserved_imports.len();
         module.section(&import_section);
 
         // --- Function section ---
