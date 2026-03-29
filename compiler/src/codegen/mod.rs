@@ -17,6 +17,7 @@ pub mod profiling;
 pub mod tiered_backend;
 pub mod wasm_backend;
 pub mod wasm_linker;
+pub mod wasm_runner;
 pub mod wgsl_transpiler;
 
 // Apple Silicon-specific JIT memory management
