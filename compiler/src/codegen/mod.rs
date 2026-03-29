@@ -20,6 +20,7 @@ pub mod wasm_bindgen;
 pub mod wasm_component;
 pub mod wasm_linker;
 pub mod wasm_runner;
+pub mod wasm_wit;
 pub mod wgsl_transpiler;
 
 // Apple Silicon-specific JIT memory management

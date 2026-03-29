@@ -47,6 +47,8 @@ pub struct ExportedMethod {
     pub name: String,
     /// Parameter names (excluding 'this' for instance methods/constructors)
     pub params: Vec<String>,
+    /// Parameter types (excluding 'this'), parallel to params
+    pub param_types: Vec<IrType>,
     pub return_type: IrType,
     /// Whether return type is a class pointer that should be wrapped
     pub returns_class: Option<String>,
@@ -136,10 +138,15 @@ pub fn collect_exported_classes(
                     }
                 })
                 .collect();
+            let param_types: Vec<IrType> = params[skip..]
+                .iter()
+                .map(|p| p.ty.clone())
+                .collect();
 
             let method = ExportedMethod {
                 name: method_name.to_string(),
                 params: param_names,
+                param_types,
                 return_type: func.signature.return_type.clone(),
                 returns_class,
             };
