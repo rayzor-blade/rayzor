@@ -18,6 +18,7 @@ pub struct GraphicsBindGroup {
 /// Create a bind group layout.
 /// `entry_types` array: 0=UniformBuffer, 1=StorageBuffer, 2=Texture, 3=Sampler
 /// `entry_bindings` array: binding index for each entry
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_bind_group_layout_create(
     ctx: *mut GraphicsContext,
@@ -79,6 +80,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_bind_group_layout_create(
 /// `resource_types`: 0=Buffer, 1=TextureView, 2=Sampler
 /// `resource_ptrs`: pointer to the resource
 /// `buffer_offsets` / `buffer_sizes`: only used for buffer resources
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_bind_group_create(
     ctx: *mut GraphicsContext,
@@ -142,6 +144,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_bind_group_create(
     Box::into_raw(Box::new(GraphicsBindGroup { bind_group }))
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_bind_group_destroy(bg: *mut GraphicsBindGroup) {
     if !bg.is_null() {
@@ -149,6 +152,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_bind_group_destroy(bg: *mut GraphicsBind
     }
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_bind_group_layout_destroy(
     layout: *mut GraphicsBindGroupLayout,
