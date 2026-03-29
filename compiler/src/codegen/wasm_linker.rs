@@ -252,8 +252,7 @@ impl ParsedModule {
 
                 Payload::GlobalSection(reader) => {
                     for global in reader {
-                        let global =
-                            global.map_err(|e| format!("{label}: global error: {e}"))?;
+                        let global = global.map_err(|e| format!("{label}: global error: {e}"))?;
                         let vt = convert_val_type(global.ty.content_type);
                         let init = parse_const_expr(&global.init_expr);
                         globals.push(ParsedGlobal {
@@ -266,8 +265,7 @@ impl ParsedModule {
 
                 Payload::ExportSection(reader) => {
                     for export in reader {
-                        let export =
-                            export.map_err(|e| format!("{label}: export error: {e}"))?;
+                        let export = export.map_err(|e| format!("{label}: export error: {e}"))?;
                         let kind = match export.kind {
                             wasmparser::ExternalKind::Func => ExportItemKind::Func,
                             wasmparser::ExternalKind::Memory => ExportItemKind::Memory,
@@ -276,8 +274,7 @@ impl ParsedModule {
                             _ => continue,
                         };
                         if kind == ExportItemKind::Func {
-                            export_func_map
-                                .insert(export.name.to_string(), export.index);
+                            export_func_map.insert(export.name.to_string(), export.index);
                         }
                         exports.push(ParsedExport {
                             name: export.name.to_string(),
@@ -290,7 +287,10 @@ impl ParsedModule {
                 Payload::TableSection(reader) => {
                     for table in reader {
                         let table = table.map_err(|e| format!("{label}: table error: {e}"))?;
-                        eprintln!("[wasm-linker] {label}: parsed table initial={}, max={:?}", table.ty.initial, table.ty.maximum);
+                        eprintln!(
+                            "[wasm-linker] {label}: parsed table initial={}, max={:?}",
+                            table.ty.initial, table.ty.maximum
+                        );
                         tables.push((table.ty.initial as u32, table.ty.maximum.map(|m| m as u32)));
                     }
                 }
@@ -298,7 +298,11 @@ impl ParsedModule {
                 Payload::ElementSection(reader) => {
                     for elem in reader {
                         let elem = elem.map_err(|e| format!("{label}: element error: {e}"))?;
-                        if let wasmparser::ElementKind::Active { table_index, offset_expr } = elem.kind {
+                        if let wasmparser::ElementKind::Active {
+                            table_index,
+                            offset_expr,
+                        } = elem.kind
+                        {
                             let offset = match parse_const_expr(&offset_expr) {
                                 GlobalInit::I32(v) => v as u32,
                                 _ => 0,
@@ -306,7 +310,8 @@ impl ParsedModule {
                             let mut func_indices = Vec::new();
                             if let wasmparser::ElementItems::Functions(reader) = elem.items {
                                 for idx in reader {
-                                    func_indices.push(idx.map_err(|e| format!("{label}: elem func: {e}"))?);
+                                    func_indices
+                                        .push(idx.map_err(|e| format!("{label}: elem func: {e}"))?);
                                 }
                             }
                             elements.push((table_index.unwrap_or(0), offset, func_indices));
@@ -483,14 +488,25 @@ impl LinkerCtx {
             if imp.module == "rayzor" {
                 if let Some(&merged_idx) = rt_export_to_merged.get(imp.name.as_str()) {
                     // Verify signature compatibility
-                    let user_type = self.user_type_remap.get(&imp.type_idx).copied().unwrap_or(0);
+                    let user_type = self
+                        .user_type_remap
+                        .get(&imp.type_idx)
+                        .copied()
+                        .unwrap_or(0);
                     let rt_func_idx_in_merged = merged_idx as usize;
                     let rt_internal_idx = if merged_idx >= self.n_wasi_imports {
                         (merged_idx - self.n_wasi_imports) as usize
-                    } else { 0 };
+                    } else {
+                        0
+                    };
                     let rt_type = if rt_internal_idx < rt.functions.len() {
-                        self.rt_type_remap.get(&rt.functions[rt_internal_idx].type_idx).copied().unwrap_or(0)
-                    } else { 0 };
+                        self.rt_type_remap
+                            .get(&rt.functions[rt_internal_idx].type_idx)
+                            .copied()
+                            .unwrap_or(0)
+                    } else {
+                        0
+                    };
                     if user_type != rt_type {
                         // Signature mismatch — generate stub instead of linking
                         // to avoid WASM validation errors. The runtime function
@@ -504,7 +520,8 @@ impl LinkerCtx {
                             .copied()
                             .unwrap_or(0);
                         self.stub_type_indices.push(merged_type_idx);
-                        self.unresolved_imports.push(format!("{}(sig mismatch)", imp.name));
+                        self.unresolved_imports
+                            .push(format!("{}(sig mismatch)", imp.name));
                         continue;
                     }
                     // Resolved: user import points to runtime function.
@@ -616,7 +633,11 @@ impl LinkerCtx {
         module.section(&func_section);
 
         // --- Table section (from runtime, needed for call_indirect) ---
-        eprintln!("[wasm-linker] encode: rt.tables.len()={}, rt.elements.len()={}", rt.tables.len(), rt.elements.len());
+        eprintln!(
+            "[wasm-linker] encode: rt.tables.len()={}, rt.elements.len()={}",
+            rt.tables.len(),
+            rt.elements.len()
+        );
         if !rt.tables.is_empty() {
             let mut table_section = wasm_encoder::TableSection::new();
             for (initial, maximum) in &rt.tables {
@@ -817,7 +838,7 @@ fn reencode_function_body(
         local_groups.push((count, convert_val_type(vt)));
     }
 
-    let mut func = Function::new(local_groups.into_iter());
+    let mut func = Function::new(local_groups);
 
     // Parse and re-emit operators.
     let ops_reader = body
@@ -866,7 +887,10 @@ fn translate_operator<'a>(
 
         // ----- Calls (index rewriting) -----
         Op::Call { function_index } => {
-            let merged = func_remap.get(function_index).copied().unwrap_or(*function_index);
+            let merged = func_remap
+                .get(function_index)
+                .copied()
+                .unwrap_or(*function_index);
             Instruction::Call(merged)
         }
         Op::CallIndirect {
@@ -880,7 +904,10 @@ fn translate_operator<'a>(
             }
         }
         Op::ReturnCall { function_index } => {
-            let merged = func_remap.get(function_index).copied().unwrap_or(*function_index);
+            let merged = func_remap
+                .get(function_index)
+                .copied()
+                .unwrap_or(*function_index);
             Instruction::ReturnCall(merged)
         }
         Op::ReturnCallIndirect {
@@ -894,7 +921,10 @@ fn translate_operator<'a>(
             }
         }
         Op::RefFunc { function_index } => {
-            let merged = func_remap.get(function_index).copied().unwrap_or(*function_index);
+            let merged = func_remap
+                .get(function_index)
+                .copied()
+                .unwrap_or(*function_index);
             Instruction::RefFunc(merged)
         }
 
@@ -905,11 +935,17 @@ fn translate_operator<'a>(
 
         // ----- Globals (index rewriting) -----
         Op::GlobalGet { global_index } => {
-            let merged = global_remap.get(global_index).copied().unwrap_or(*global_index);
+            let merged = global_remap
+                .get(global_index)
+                .copied()
+                .unwrap_or(*global_index);
             Instruction::GlobalGet(merged)
         }
         Op::GlobalSet { global_index } => {
-            let merged = global_remap.get(global_index).copied().unwrap_or(*global_index);
+            let merged = global_remap
+                .get(global_index)
+                .copied()
+                .unwrap_or(*global_index);
             Instruction::GlobalSet(merged)
         }
 
@@ -957,12 +993,8 @@ fn translate_operator<'a>(
         // ----- Constants -----
         Op::I32Const { value } => Instruction::I32Const(*value),
         Op::I64Const { value } => Instruction::I64Const(*value),
-        Op::F32Const { value } => {
-            Instruction::F32Const(wasm_encoder::Ieee32::new(value.bits()))
-        }
-        Op::F64Const { value } => {
-            Instruction::F64Const(wasm_encoder::Ieee64::new(value.bits()))
-        }
+        Op::F32Const { value } => Instruction::F32Const(wasm_encoder::Ieee32::new(value.bits())),
+        Op::F64Const { value } => Instruction::F64Const(wasm_encoder::Ieee64::new(value.bits())),
 
         // ----- Comparison i32 -----
         Op::I32Eqz => Instruction::I32Eqz,
@@ -1147,10 +1179,7 @@ fn translate_operator<'a>(
             src_table: *src_table,
             dst_table: *dst_table,
         },
-        Op::TableInit {
-            elem_index,
-            table,
-        } => Instruction::TableInit {
+        Op::TableInit { elem_index, table } => Instruction::TableInit {
             elem_index: *elem_index,
             table: *table,
         },
@@ -1174,48 +1203,28 @@ fn translate_operator<'a>(
         Op::I32AtomicLoad { memarg } => Instruction::I32AtomicLoad(convert_memarg(memarg)),
         Op::I64AtomicLoad { memarg } => Instruction::I64AtomicLoad(convert_memarg(memarg)),
         Op::I32AtomicLoad8U { memarg } => Instruction::I32AtomicLoad8U(convert_memarg(memarg)),
-        Op::I32AtomicLoad16U { memarg } => {
-            Instruction::I32AtomicLoad16U(convert_memarg(memarg))
-        }
+        Op::I32AtomicLoad16U { memarg } => Instruction::I32AtomicLoad16U(convert_memarg(memarg)),
         Op::I64AtomicLoad8U { memarg } => Instruction::I64AtomicLoad8U(convert_memarg(memarg)),
-        Op::I64AtomicLoad16U { memarg } => {
-            Instruction::I64AtomicLoad16U(convert_memarg(memarg))
-        }
-        Op::I64AtomicLoad32U { memarg } => {
-            Instruction::I64AtomicLoad32U(convert_memarg(memarg))
-        }
+        Op::I64AtomicLoad16U { memarg } => Instruction::I64AtomicLoad16U(convert_memarg(memarg)),
+        Op::I64AtomicLoad32U { memarg } => Instruction::I64AtomicLoad32U(convert_memarg(memarg)),
 
         // ----- Atomic stores -----
         Op::I32AtomicStore { memarg } => Instruction::I32AtomicStore(convert_memarg(memarg)),
         Op::I64AtomicStore { memarg } => Instruction::I64AtomicStore(convert_memarg(memarg)),
-        Op::I32AtomicStore8 { memarg } => {
-            Instruction::I32AtomicStore8(convert_memarg(memarg))
-        }
-        Op::I32AtomicStore16 { memarg } => {
-            Instruction::I32AtomicStore16(convert_memarg(memarg))
-        }
-        Op::I64AtomicStore8 { memarg } => {
-            Instruction::I64AtomicStore8(convert_memarg(memarg))
-        }
-        Op::I64AtomicStore16 { memarg } => {
-            Instruction::I64AtomicStore16(convert_memarg(memarg))
-        }
-        Op::I64AtomicStore32 { memarg } => {
-            Instruction::I64AtomicStore32(convert_memarg(memarg))
-        }
+        Op::I32AtomicStore8 { memarg } => Instruction::I32AtomicStore8(convert_memarg(memarg)),
+        Op::I32AtomicStore16 { memarg } => Instruction::I32AtomicStore16(convert_memarg(memarg)),
+        Op::I64AtomicStore8 { memarg } => Instruction::I64AtomicStore8(convert_memarg(memarg)),
+        Op::I64AtomicStore16 { memarg } => Instruction::I64AtomicStore16(convert_memarg(memarg)),
+        Op::I64AtomicStore32 { memarg } => Instruction::I64AtomicStore32(convert_memarg(memarg)),
 
         // ----- Atomic RMW add -----
         Op::I32AtomicRmwAdd { memarg } => Instruction::I32AtomicRmwAdd(convert_memarg(memarg)),
         Op::I64AtomicRmwAdd { memarg } => Instruction::I64AtomicRmwAdd(convert_memarg(memarg)),
-        Op::I32AtomicRmw8AddU { memarg } => {
-            Instruction::I32AtomicRmw8AddU(convert_memarg(memarg))
-        }
+        Op::I32AtomicRmw8AddU { memarg } => Instruction::I32AtomicRmw8AddU(convert_memarg(memarg)),
         Op::I32AtomicRmw16AddU { memarg } => {
             Instruction::I32AtomicRmw16AddU(convert_memarg(memarg))
         }
-        Op::I64AtomicRmw8AddU { memarg } => {
-            Instruction::I64AtomicRmw8AddU(convert_memarg(memarg))
-        }
+        Op::I64AtomicRmw8AddU { memarg } => Instruction::I64AtomicRmw8AddU(convert_memarg(memarg)),
         Op::I64AtomicRmw16AddU { memarg } => {
             Instruction::I64AtomicRmw16AddU(convert_memarg(memarg))
         }
@@ -1226,15 +1235,11 @@ fn translate_operator<'a>(
         // ----- Atomic RMW sub -----
         Op::I32AtomicRmwSub { memarg } => Instruction::I32AtomicRmwSub(convert_memarg(memarg)),
         Op::I64AtomicRmwSub { memarg } => Instruction::I64AtomicRmwSub(convert_memarg(memarg)),
-        Op::I32AtomicRmw8SubU { memarg } => {
-            Instruction::I32AtomicRmw8SubU(convert_memarg(memarg))
-        }
+        Op::I32AtomicRmw8SubU { memarg } => Instruction::I32AtomicRmw8SubU(convert_memarg(memarg)),
         Op::I32AtomicRmw16SubU { memarg } => {
             Instruction::I32AtomicRmw16SubU(convert_memarg(memarg))
         }
-        Op::I64AtomicRmw8SubU { memarg } => {
-            Instruction::I64AtomicRmw8SubU(convert_memarg(memarg))
-        }
+        Op::I64AtomicRmw8SubU { memarg } => Instruction::I64AtomicRmw8SubU(convert_memarg(memarg)),
         Op::I64AtomicRmw16SubU { memarg } => {
             Instruction::I64AtomicRmw16SubU(convert_memarg(memarg))
         }
@@ -1245,15 +1250,11 @@ fn translate_operator<'a>(
         // ----- Atomic RMW and -----
         Op::I32AtomicRmwAnd { memarg } => Instruction::I32AtomicRmwAnd(convert_memarg(memarg)),
         Op::I64AtomicRmwAnd { memarg } => Instruction::I64AtomicRmwAnd(convert_memarg(memarg)),
-        Op::I32AtomicRmw8AndU { memarg } => {
-            Instruction::I32AtomicRmw8AndU(convert_memarg(memarg))
-        }
+        Op::I32AtomicRmw8AndU { memarg } => Instruction::I32AtomicRmw8AndU(convert_memarg(memarg)),
         Op::I32AtomicRmw16AndU { memarg } => {
             Instruction::I32AtomicRmw16AndU(convert_memarg(memarg))
         }
-        Op::I64AtomicRmw8AndU { memarg } => {
-            Instruction::I64AtomicRmw8AndU(convert_memarg(memarg))
-        }
+        Op::I64AtomicRmw8AndU { memarg } => Instruction::I64AtomicRmw8AndU(convert_memarg(memarg)),
         Op::I64AtomicRmw16AndU { memarg } => {
             Instruction::I64AtomicRmw16AndU(convert_memarg(memarg))
         }
@@ -1264,34 +1265,20 @@ fn translate_operator<'a>(
         // ----- Atomic RMW or -----
         Op::I32AtomicRmwOr { memarg } => Instruction::I32AtomicRmwOr(convert_memarg(memarg)),
         Op::I64AtomicRmwOr { memarg } => Instruction::I64AtomicRmwOr(convert_memarg(memarg)),
-        Op::I32AtomicRmw8OrU { memarg } => {
-            Instruction::I32AtomicRmw8OrU(convert_memarg(memarg))
-        }
-        Op::I32AtomicRmw16OrU { memarg } => {
-            Instruction::I32AtomicRmw16OrU(convert_memarg(memarg))
-        }
-        Op::I64AtomicRmw8OrU { memarg } => {
-            Instruction::I64AtomicRmw8OrU(convert_memarg(memarg))
-        }
-        Op::I64AtomicRmw16OrU { memarg } => {
-            Instruction::I64AtomicRmw16OrU(convert_memarg(memarg))
-        }
-        Op::I64AtomicRmw32OrU { memarg } => {
-            Instruction::I64AtomicRmw32OrU(convert_memarg(memarg))
-        }
+        Op::I32AtomicRmw8OrU { memarg } => Instruction::I32AtomicRmw8OrU(convert_memarg(memarg)),
+        Op::I32AtomicRmw16OrU { memarg } => Instruction::I32AtomicRmw16OrU(convert_memarg(memarg)),
+        Op::I64AtomicRmw8OrU { memarg } => Instruction::I64AtomicRmw8OrU(convert_memarg(memarg)),
+        Op::I64AtomicRmw16OrU { memarg } => Instruction::I64AtomicRmw16OrU(convert_memarg(memarg)),
+        Op::I64AtomicRmw32OrU { memarg } => Instruction::I64AtomicRmw32OrU(convert_memarg(memarg)),
 
         // ----- Atomic RMW xor -----
         Op::I32AtomicRmwXor { memarg } => Instruction::I32AtomicRmwXor(convert_memarg(memarg)),
         Op::I64AtomicRmwXor { memarg } => Instruction::I64AtomicRmwXor(convert_memarg(memarg)),
-        Op::I32AtomicRmw8XorU { memarg } => {
-            Instruction::I32AtomicRmw8XorU(convert_memarg(memarg))
-        }
+        Op::I32AtomicRmw8XorU { memarg } => Instruction::I32AtomicRmw8XorU(convert_memarg(memarg)),
         Op::I32AtomicRmw16XorU { memarg } => {
             Instruction::I32AtomicRmw16XorU(convert_memarg(memarg))
         }
-        Op::I64AtomicRmw8XorU { memarg } => {
-            Instruction::I64AtomicRmw8XorU(convert_memarg(memarg))
-        }
+        Op::I64AtomicRmw8XorU { memarg } => Instruction::I64AtomicRmw8XorU(convert_memarg(memarg)),
         Op::I64AtomicRmw16XorU { memarg } => {
             Instruction::I64AtomicRmw16XorU(convert_memarg(memarg))
         }
@@ -1300,12 +1287,8 @@ fn translate_operator<'a>(
         }
 
         // ----- Atomic RMW xchg -----
-        Op::I32AtomicRmwXchg { memarg } => {
-            Instruction::I32AtomicRmwXchg(convert_memarg(memarg))
-        }
-        Op::I64AtomicRmwXchg { memarg } => {
-            Instruction::I64AtomicRmwXchg(convert_memarg(memarg))
-        }
+        Op::I32AtomicRmwXchg { memarg } => Instruction::I32AtomicRmwXchg(convert_memarg(memarg)),
+        Op::I64AtomicRmwXchg { memarg } => Instruction::I64AtomicRmwXchg(convert_memarg(memarg)),
         Op::I32AtomicRmw8XchgU { memarg } => {
             Instruction::I32AtomicRmw8XchgU(convert_memarg(memarg))
         }
@@ -1592,54 +1575,38 @@ fn translate_operator<'a>(
         Op::V128Load16x4U { memarg } => Instruction::V128Load16x4U(convert_memarg(memarg)),
         Op::V128Load32x2S { memarg } => Instruction::V128Load32x2S(convert_memarg(memarg)),
         Op::V128Load32x2U { memarg } => Instruction::V128Load32x2U(convert_memarg(memarg)),
-        Op::V128Load8Lane { memarg, lane } => {
-            Instruction::V128Load8Lane {
-                memarg: convert_memarg(memarg),
-                lane: *lane,
-            }
-        }
-        Op::V128Load16Lane { memarg, lane } => {
-            Instruction::V128Load16Lane {
-                memarg: convert_memarg(memarg),
-                lane: *lane,
-            }
-        }
-        Op::V128Load32Lane { memarg, lane } => {
-            Instruction::V128Load32Lane {
-                memarg: convert_memarg(memarg),
-                lane: *lane,
-            }
-        }
-        Op::V128Load64Lane { memarg, lane } => {
-            Instruction::V128Load64Lane {
-                memarg: convert_memarg(memarg),
-                lane: *lane,
-            }
-        }
-        Op::V128Store8Lane { memarg, lane } => {
-            Instruction::V128Store8Lane {
-                memarg: convert_memarg(memarg),
-                lane: *lane,
-            }
-        }
-        Op::V128Store16Lane { memarg, lane } => {
-            Instruction::V128Store16Lane {
-                memarg: convert_memarg(memarg),
-                lane: *lane,
-            }
-        }
-        Op::V128Store32Lane { memarg, lane } => {
-            Instruction::V128Store32Lane {
-                memarg: convert_memarg(memarg),
-                lane: *lane,
-            }
-        }
-        Op::V128Store64Lane { memarg, lane } => {
-            Instruction::V128Store64Lane {
-                memarg: convert_memarg(memarg),
-                lane: *lane,
-            }
-        }
+        Op::V128Load8Lane { memarg, lane } => Instruction::V128Load8Lane {
+            memarg: convert_memarg(memarg),
+            lane: *lane,
+        },
+        Op::V128Load16Lane { memarg, lane } => Instruction::V128Load16Lane {
+            memarg: convert_memarg(memarg),
+            lane: *lane,
+        },
+        Op::V128Load32Lane { memarg, lane } => Instruction::V128Load32Lane {
+            memarg: convert_memarg(memarg),
+            lane: *lane,
+        },
+        Op::V128Load64Lane { memarg, lane } => Instruction::V128Load64Lane {
+            memarg: convert_memarg(memarg),
+            lane: *lane,
+        },
+        Op::V128Store8Lane { memarg, lane } => Instruction::V128Store8Lane {
+            memarg: convert_memarg(memarg),
+            lane: *lane,
+        },
+        Op::V128Store16Lane { memarg, lane } => Instruction::V128Store16Lane {
+            memarg: convert_memarg(memarg),
+            lane: *lane,
+        },
+        Op::V128Store32Lane { memarg, lane } => Instruction::V128Store32Lane {
+            memarg: convert_memarg(memarg),
+            lane: *lane,
+        },
+        Op::V128Store64Lane { memarg, lane } => Instruction::V128Store64Lane {
+            memarg: convert_memarg(memarg),
+            lane: *lane,
+        },
 
         // ----- Catch-all for any unhandled operator -----
         // The Operator enum is #[non_exhaustive] with 627+ variants.
@@ -1711,9 +1678,7 @@ fn convert_block_type(
 ) -> wasm_encoder::BlockType {
     match bt {
         wasmparser::BlockType::Empty => wasm_encoder::BlockType::Empty,
-        wasmparser::BlockType::Type(vt) => {
-            wasm_encoder::BlockType::Result(convert_val_type(*vt))
-        }
+        wasmparser::BlockType::Type(vt) => wasm_encoder::BlockType::Result(convert_val_type(*vt)),
         wasmparser::BlockType::FuncType(idx) => {
             let merged = type_remap.get(idx).copied().unwrap_or(*idx);
             wasm_encoder::BlockType::FunctionType(merged)

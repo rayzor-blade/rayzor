@@ -124,10 +124,7 @@ fn generate_interface(wit: &mut String, class: &ExportedClass) {
             "\n  /// Allocation size for {} instances (bytes).\n",
             class.name
         ));
-        wit.push_str(&format!(
-            "  {}-alloc-size: func() -> u32;\n",
-            class_lower
-        ));
+        wit.push_str(&format!("  {}-alloc-size: func() -> u32;\n", class_lower));
     }
 
     wit.push_str("}\n");

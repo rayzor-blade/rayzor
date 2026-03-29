@@ -776,7 +776,13 @@ fn compile_haxe_to_mir(
     extra_source_dirs: &[PathBuf],
     safety_warnings: bool,
 ) -> Result<(compiler::ir::IrModule, Vec<diagnostics::Diagnostic>), String> {
-    let result = compile_haxe_to_mir_full(source, filename, plugins, extra_source_dirs, safety_warnings)?;
+    let result = compile_haxe_to_mir_full(
+        source,
+        filename,
+        plugins,
+        extra_source_dirs,
+        safety_warnings,
+    )?;
     Ok((result.module, result.diagnostics))
 }
 
@@ -834,7 +840,11 @@ fn compile_haxe_to_mir_full(
     let module = (**mir_modules.last().unwrap()).clone();
     let diagnostics = unit.collected_diagnostics.clone();
     let class_alloc_sizes = unit.get_class_alloc_sizes_by_name().clone();
-    Ok(MirCompilationResult { module, diagnostics, class_alloc_sizes })
+    Ok(MirCompilationResult {
+        module,
+        diagnostics,
+        class_alloc_sizes,
+    })
 }
 
 fn run_bundle(file: &Path, verbose: bool, stats: bool, preset: Preset) -> Result<(), String> {
@@ -3012,7 +3022,7 @@ fn cmd_dump(
 
 fn cmd_run_wasm(
     file: Option<PathBuf>,
-    rpkg_files: Vec<PathBuf>,
+    _rpkg_files: Vec<PathBuf>,
     safety_warnings: bool,
 ) -> Result<(), String> {
     let file = file.ok_or_else(|| "file path required for --wasm".to_string())?;
@@ -3046,16 +3056,14 @@ fn cmd_run_wasm(
         safety_warnings,
     )?;
 
-    let user_wasm = compiler::codegen::wasm_backend::WasmBackend::compile(
-        &[&mir_module],
-        Some("main"),
-    )?;
+    let user_wasm =
+        compiler::codegen::wasm_backend::WasmBackend::compile(&[&mir_module], Some("main"))?;
 
     // Link with runtime
     let runtime_path = find_wasm_runtime();
     let linked_wasm = if let Some(rt_path) = &runtime_path {
-        let rt_bytes = std::fs::read(rt_path)
-            .map_err(|e| format!("failed to read runtime: {}", e))?;
+        let rt_bytes =
+            std::fs::read(rt_path).map_err(|e| format!("failed to read runtime: {}", e))?;
         compiler::codegen::wasm_linker::WasmLinker::link(&user_wasm, &rt_bytes)?
     } else {
         user_wasm
@@ -3098,7 +3106,8 @@ fn cmd_build_wasm(
     // Default output: .rayzor/build/<name>.wasm (relative to project root or cwd)
     let output = output.or_else(|| {
         let stem = file.file_stem()?.to_string_lossy().to_string();
-        let build_dir = project.as_ref()
+        let build_dir = project
+            .as_ref()
             .map(|p| p.root.join(".rayzor/build"))
             .unwrap_or_else(|| PathBuf::from(".rayzor/build"));
         Some(build_dir.join(format!("{}.wasm", stem)))
@@ -3115,17 +3124,19 @@ fn cmd_build_wasm(
         false,
     )?;
 
-    let user_wasm = compiler::codegen::wasm_backend::WasmBackend::compile(
-        &[&mir_result.module],
-        Some("main"),
-    )?;
+    let user_wasm =
+        compiler::codegen::wasm_backend::WasmBackend::compile(&[&mir_result.module], Some("main"))?;
 
     // Link with pre-built WASM runtime (if available)
     let runtime_wasm_path = find_wasm_runtime();
     let linked_wasm = if let Some(rt_path) = &runtime_wasm_path {
-        let rt_bytes = std::fs::read(rt_path)
-            .map_err(|e| format!("failed to read runtime WASM: {}", e))?;
-        println!("  linking with {} ({:.1} KB)", rt_path.display(), rt_bytes.len() as f64 / 1024.0);
+        let rt_bytes =
+            std::fs::read(rt_path).map_err(|e| format!("failed to read runtime WASM: {}", e))?;
+        println!(
+            "  linking with {} ({:.1} KB)",
+            rt_path.display(),
+            rt_bytes.len() as f64 / 1024.0
+        );
         compiler::codegen::wasm_linker::WasmLinker::link(&user_wasm, &rt_bytes)?
     } else {
         println!("  warning: WASM runtime not found, output needs JS harness");
@@ -3137,9 +3148,11 @@ fn cmd_build_wasm(
         &linked_wasm,
         compiler::codegen::wasm_component::ComponentKind::Command,
     )?;
-    println!("  component: {:.1} KB (core: {:.1} KB)",
+    println!(
+        "  component: {:.1} KB (core: {:.1} KB)",
         component_bytes.len() as f64 / 1024.0,
-        linked_wasm.len() as f64 / 1024.0);
+        linked_wasm.len() as f64 / 1024.0
+    );
 
     let out_path = output.unwrap_or_else(|| file.with_extension("wasm"));
     // Ensure output directory exists
@@ -3167,16 +3180,26 @@ fn cmd_build_wasm(
     let core_wasm_filename = core_path.file_name().unwrap().to_string_lossy();
     let js_content = if !exported_classes.is_empty() {
         // Generate ES6 class wrappers
-        println!("  exports: {}", exported_classes.iter()
-            .map(|c| {
-                let methods: Vec<&str> = c.instance_methods.iter().map(|m| m.name.as_str())
-                    .chain(c.static_methods.iter().map(|m| m.name.as_str()))
-                    .collect();
-                format!("{} ({})", c.name, methods.join(", "))
-            })
-            .collect::<Vec<_>>()
-            .join(", "));
-        compiler::codegen::wasm_bindgen::generate_es6_bindings(&exported_classes, &core_wasm_filename)
+        println!(
+            "  exports: {}",
+            exported_classes
+                .iter()
+                .map(|c| {
+                    let methods: Vec<&str> = c
+                        .instance_methods
+                        .iter()
+                        .map(|m| m.name.as_str())
+                        .chain(c.static_methods.iter().map(|m| m.name.as_str()))
+                        .collect();
+                    format!("{} ({})", c.name, methods.join(", "))
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+        compiler::codegen::wasm_bindgen::generate_es6_bindings(
+            &exported_classes,
+            &core_wasm_filename,
+        )
     } else {
         // Fall back to basic JS harness
         generate_wasm_js_harness(&core_wasm_filename)
@@ -3193,7 +3216,8 @@ fn cmd_build_wasm(
 
         // Generate WIT (WebAssembly Interface Types) for Component Model interop
         let wit_path = out_path.with_extension("wit");
-        let package_name = out_path.file_stem()
+        let package_name = out_path
+            .file_stem()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| "module".to_string());
         let wit = compiler::codegen::wasm_wit::generate_wit(&package_name, &exported_classes);
@@ -3244,7 +3268,10 @@ fn cmd_build_wasm(
         );
         println!("  wrote {}", js_path.display());
         println!("  wrote {}", html_path.display());
-        println!("\n  Serve: npx serve . && open http://localhost:3000/{}", html_path.file_name().unwrap().to_string_lossy());
+        println!(
+            "\n  Serve: npx serve . && open http://localhost:3000/{}",
+            html_path.file_name().unwrap().to_string_lossy()
+        );
     } else {
         println!(
             "  wrote {} ({:.1} KB)",
@@ -3272,7 +3299,8 @@ fn find_wasm_runtime() -> Option<PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         if let Some(bin_dir) = exe.parent() {
             // binary is in target/release/, repo root is ../../
-            let repo_root = bin_dir.join("../../runtime-wasm/target/wasm32-wasip1/release/rayzor_runtime_wasm.wasm");
+            let repo_root = bin_dir
+                .join("../../runtime-wasm/target/wasm32-wasip1/release/rayzor_runtime_wasm.wasm");
             candidates.push(repo_root);
             // Installed: alongside rayzor binary
             candidates.push(bin_dir.join("rayzor_runtime_wasm.wasm"));
@@ -3292,7 +3320,8 @@ fn dirs_next() -> PathBuf {
 }
 
 fn generate_wasm_js_harness(wasm_filename: &str) -> String {
-    format!(r#"// Rayzor WASM Runtime Harness
+    format!(
+        r#"// Rayzor WASM Runtime Harness
 // Generated by `rayzor build --target wasm`
 // Run: node {filename}  |  Open in browser with a local server
 
@@ -3464,7 +3493,9 @@ async function run() {{
 }}
 
 run().catch(e => {{ console.error("WASM error:", e); process.exitCode = 1; }});
-"#, filename = wasm_filename)
+"#,
+        filename = wasm_filename
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -3509,9 +3540,13 @@ fn cmd_rpkg_pack(
         let wasm_bytes = match &wasm {
             Some(path) if path.to_string_lossy() != "__auto__" => {
                 // Use pre-built WASM file
-                let bytes = std::fs::read(path)
-                    .map_err(|e| format!("failed to read WASM: {}", e))?;
-                println!("  wasm: {} ({:.1} KB)", path.display(), bytes.len() as f64 / 1024.0);
+                let bytes =
+                    std::fs::read(path).map_err(|e| format!("failed to read WASM: {}", e))?;
+                println!(
+                    "  wasm: {} ({:.1} KB)",
+                    path.display(),
+                    bytes.len() as f64 / 1024.0
+                );
                 bytes
             }
             _ => {
@@ -3521,7 +3556,9 @@ fn cmd_rpkg_pack(
             }
         };
         builder.add_wasm_component(&package_name, &wasm_bytes);
-        builder.write(&output).map_err(|e| format!("failed to write rpkg: {}", e))?;
+        builder
+            .write(&output)
+            .map_err(|e| format!("failed to write rpkg: {}", e))?;
     } else {
         // Build platform entries: pair each dylib with its os/arch tag
         let current_os = if cfg!(target_os = "macos") {
@@ -3616,16 +3653,14 @@ fn build_wasm_component_from_haxe_dir(haxe_dir: &Path) -> Result<Vec<u8>, String
     )?;
 
     // MIR → WASM
-    let user_wasm = compiler::codegen::wasm_backend::WasmBackend::compile(
-        &[&mir_module],
-        Some("main"),
-    )?;
+    let user_wasm =
+        compiler::codegen::wasm_backend::WasmBackend::compile(&[&mir_module], Some("main"))?;
 
     // Link with runtime
     let runtime_path = find_wasm_runtime();
     let linked = if let Some(rt_path) = &runtime_path {
-        let rt_bytes = std::fs::read(rt_path)
-            .map_err(|e| format!("failed to read runtime: {}", e))?;
+        let rt_bytes =
+            std::fs::read(rt_path).map_err(|e| format!("failed to read runtime: {}", e))?;
         compiler::codegen::wasm_linker::WasmLinker::link(&user_wasm, &rt_bytes)?
     } else {
         user_wasm

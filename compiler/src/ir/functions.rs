@@ -248,7 +248,8 @@ impl IrFunction {
             kind: FunctionKind::UserDefined,
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
-            type_param_tag_fixups: Vec::new(), wasm_export: false,
+            type_param_tag_fixups: Vec::new(),
+            wasm_export: false,
         };
 
         // Allocate registers for parameters and register their types

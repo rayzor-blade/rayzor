@@ -6180,7 +6180,8 @@ impl<'a> HirToMirContext<'a> {
             kind: FunctionKind::MirWrapper, // Stdlib MIR function
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
-            type_param_tag_fixups: Vec::new(), wasm_export: false,
+            type_param_tag_fixups: Vec::new(),
+            wasm_export: false,
         };
 
         self.builder.module.functions.insert(func_id, function);
@@ -6370,7 +6371,8 @@ impl<'a> HirToMirContext<'a> {
             kind: crate::ir::functions::FunctionKind::ExternC, // Extern C function
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
-            type_param_tag_fixups: Vec::new(), wasm_export: false,
+            type_param_tag_fixups: Vec::new(),
+            wasm_export: false,
         };
 
         // Add to both functions and extern_functions maps
@@ -20469,7 +20471,9 @@ impl<'a> HirToMirContext<'a> {
 
         for param in &func.params {
             let param_type = self.convert_type(param.ty);
-            let param_name = self.string_interner.get(param.name)
+            let param_name = self
+                .string_interner
+                .get(param.name)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("arg{}", param.name.as_raw()));
             builder = builder.param(param_name, param_type);
@@ -20520,7 +20524,9 @@ impl<'a> HirToMirContext<'a> {
 
         for param in &func.params {
             let param_type = self.convert_type(param.ty);
-            let param_name = self.string_interner.get(param.name)
+            let param_name = self
+                .string_interner
+                .get(param.name)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("arg{}", param.name.as_raw()));
             builder = builder.param(param_name, param_type);

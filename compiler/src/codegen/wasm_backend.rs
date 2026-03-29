@@ -62,10 +62,7 @@ impl WasmBackend {
     ///
     /// `entry_function` -- if provided, the named function is exported as `_start`.
     /// Returns raw `.wasm` bytes on success.
-    pub fn compile(
-        modules: &[&IrModule],
-        entry_function: Option<&str>,
-    ) -> Result<Vec<u8>, String> {
+    pub fn compile(modules: &[&IrModule], entry_function: Option<&str>) -> Result<Vec<u8>, String> {
         Self::compile_with_exports(modules, entry_function, &[])
     }
 
@@ -195,7 +192,11 @@ impl CompileCtx {
     }
 
     fn sig_to_wasm(sig: &IrFunctionSignature) -> (Vec<ValType>, Vec<ValType>) {
-        let params: Vec<ValType> = sig.parameters.iter().map(|p| ir_type_to_wasm(&p.ty)).collect();
+        let params: Vec<ValType> = sig
+            .parameters
+            .iter()
+            .map(|p| ir_type_to_wasm(&p.ty))
+            .collect();
         let results = if matches!(sig.return_type, IrType::Void) {
             vec![]
         } else {
@@ -287,8 +288,12 @@ impl CompileCtx {
                 // Always register return type for CallDirect type inference
                 let ret_vt = ir_type_to_wasm(&func.signature.return_type);
                 self.func_return_types.insert(*func_id, ret_vt);
-                let param_vts: Vec<ValType> = func.signature.parameters.iter()
-                    .map(|p| ir_type_to_wasm(&p.ty)).collect();
+                let param_vts: Vec<ValType> = func
+                    .signature
+                    .parameters
+                    .iter()
+                    .map(|p| ir_type_to_wasm(&p.ty))
+                    .collect();
                 self.func_param_types.insert(*func_id, param_vts);
 
                 if self.ir_func_to_idx.contains_key(func_id) {
@@ -340,7 +345,9 @@ impl CompileCtx {
             for (func_id, func) in &module.functions {
                 if !func.cfg.blocks.is_empty() {
                     if let Some(&idx) = self.ir_func_to_idx.get(func_id) {
-                        self.func_name_to_idx.entry(func.name.clone()).or_insert(idx);
+                        self.func_name_to_idx
+                            .entry(func.name.clone())
+                            .or_insert(idx);
                     }
                 }
             }
@@ -574,16 +581,20 @@ impl CompileCtx {
         for module in modules {
             for (func_id, func) in &module.functions {
                 // Find WASM function index — try func_id first, then qualified_name lookup
-                let idx = self.ir_func_to_idx.get(func_id).copied()
-                    .or_else(|| func.qualified_name.as_ref()
-                        .and_then(|qn| self.func_name_to_idx.get(qn).copied()));
+                let idx = self.ir_func_to_idx.get(func_id).copied().or_else(|| {
+                    func.qualified_name
+                        .as_ref()
+                        .and_then(|qn| self.func_name_to_idx.get(qn).copied())
+                });
 
                 if let Some(idx) = idx {
                     if func.name.starts_with("export_") {
                         let export_name = &func.name["export_".len()..];
                         export_section.export(export_name, ExportKind::Func, idx);
                     } else if func.wasm_export {
-                        let export_name = func.qualified_name.as_deref()
+                        let export_name = func
+                            .qualified_name
+                            .as_deref()
                             .unwrap_or(&func.name)
                             .replace('.', "_");
                         export_section.export(&export_name, ExportKind::Func, idx);
@@ -778,10 +789,17 @@ impl<'a> FunctionLowerer<'a> {
                         }
 
                         // BinOp: float if any operand is float
-                        IrInstruction::BinOp { op, left, right, .. } => {
-                            let is_fop = matches!(op,
-                                BinaryOp::FAdd | BinaryOp::FSub |
-                                BinaryOp::FMul | BinaryOp::FDiv | BinaryOp::FRem);
+                        IrInstruction::BinOp {
+                            op, left, right, ..
+                        } => {
+                            let is_fop = matches!(
+                                op,
+                                BinaryOp::FAdd
+                                    | BinaryOp::FSub
+                                    | BinaryOp::FMul
+                                    | BinaryOp::FDiv
+                                    | BinaryOp::FRem
+                            );
                             let lt = self.local_type_of(*left).unwrap_or(ValType::I32);
                             let rt = self.local_type_of(*right).unwrap_or(ValType::I32);
                             if is_fop || lt == ValType::F64 || rt == ValType::F64 {
@@ -797,9 +815,13 @@ impl<'a> FunctionLowerer<'a> {
                         IrInstruction::UnOp { op, operand, .. } => {
                             let is_fop = matches!(op, UnaryOp::FNeg);
                             let ot = self.local_type_of(*operand).unwrap_or(ValType::I32);
-                            if is_fop || ot == ValType::F64 { Some(ValType::F64) }
-                            else if ot == ValType::F32 { Some(ValType::F32) }
-                            else { None }
+                            if is_fop || ot == ValType::F64 {
+                                Some(ValType::F64)
+                            } else if ot == ValType::F32 {
+                                Some(ValType::F32)
+                            } else {
+                                None
+                            }
                         }
 
                         // GEP, PtrAdd, Alloc: always i32 (pointer)
@@ -819,17 +841,23 @@ impl<'a> FunctionLowerer<'a> {
                         | IrInstruction::Move { src, .. }
                         | IrInstruction::Clone { src, .. }
                         | IrInstruction::BorrowImmutable { src, .. }
-                        | IrInstruction::BorrowMutable { src, .. } => {
-                            self.local_type_of(*src)
-                        }
+                        | IrInstruction::BorrowMutable { src, .. } => self.local_type_of(*src),
 
                         // Select: float if either branch is float
-                        IrInstruction::Select { true_val, false_val, .. } => {
+                        IrInstruction::Select {
+                            true_val,
+                            false_val,
+                            ..
+                        } => {
                             let tv = self.local_type_of(*true_val).unwrap_or(ValType::I32);
                             let fv = self.local_type_of(*false_val).unwrap_or(ValType::I32);
-                            if tv == ValType::F64 || fv == ValType::F64 { Some(ValType::F64) }
-                            else if tv == ValType::F32 || fv == ValType::F32 { Some(ValType::F32) }
-                            else { None }
+                            if tv == ValType::F64 || fv == ValType::F64 {
+                                Some(ValType::F64)
+                            } else if tv == ValType::F32 || fv == ValType::F32 {
+                                Some(ValType::F32)
+                            } else {
+                                None
+                            }
                         }
 
                         _ => None,
@@ -845,7 +873,9 @@ impl<'a> FunctionLowerer<'a> {
                     }
                 }
             }
-            if !changed { break; }
+            if !changed {
+                break;
+            }
         }
     }
 
@@ -854,7 +884,10 @@ impl<'a> FunctionLowerer<'a> {
         let &local_idx = self.reg_to_local.get(&id)?;
         if local_idx < self.param_count {
             let param_idx = local_idx as usize;
-            self.ir_func.signature.parameters.get(param_idx)
+            self.ir_func
+                .signature
+                .parameters
+                .get(param_idx)
                 .map(|p| ir_type_to_wasm(&p.ty))
         } else {
             let type_idx = (local_idx - self.param_count) as usize;
@@ -1214,10 +1247,24 @@ impl<'a> FunctionLowerer<'a> {
                 let dest_ty = self.reg_wasm_type(*dest);
 
                 // Determine the operation type
-                let is_fop = matches!(op, BinaryOp::FAdd | BinaryOp::FSub | BinaryOp::FMul | BinaryOp::FDiv | BinaryOp::FRem);
-                let op_ty = if is_fop || dest_ty == ValType::F64 || left_ty == ValType::F64 || right_ty == ValType::F64 {
+                let is_fop = matches!(
+                    op,
+                    BinaryOp::FAdd
+                        | BinaryOp::FSub
+                        | BinaryOp::FMul
+                        | BinaryOp::FDiv
+                        | BinaryOp::FRem
+                );
+                let op_ty = if is_fop
+                    || dest_ty == ValType::F64
+                    || left_ty == ValType::F64
+                    || right_ty == ValType::F64
+                {
                     ValType::F64
-                } else if dest_ty == ValType::F32 || left_ty == ValType::F32 || right_ty == ValType::F32 {
+                } else if dest_ty == ValType::F32
+                    || left_ty == ValType::F32
+                    || right_ty == ValType::F32
+                {
                     ValType::F32
                 } else {
                     ValType::I32
@@ -1262,7 +1309,15 @@ impl<'a> FunctionLowerer<'a> {
             } => {
                 let left_ty = self.reg_wasm_type(*left);
                 let right_ty = self.reg_wasm_type(*right);
-                let is_fcmp = matches!(op, CompareOp::FEq | CompareOp::FNe | CompareOp::FLt | CompareOp::FLe | CompareOp::FGt | CompareOp::FGe);
+                let is_fcmp = matches!(
+                    op,
+                    CompareOp::FEq
+                        | CompareOp::FNe
+                        | CompareOp::FLt
+                        | CompareOp::FLe
+                        | CompareOp::FGt
+                        | CompareOp::FGe
+                );
                 let cmp_ty = if is_fcmp || left_ty == ValType::F64 || right_ty == ValType::F64 {
                     ValType::F64
                 } else if left_ty == ValType::F32 || right_ty == ValType::F32 {
@@ -1315,16 +1370,34 @@ impl<'a> FunctionLowerer<'a> {
                 };
                 match ir_type_to_wasm(ty) {
                     ValType::I32 => match ty {
-                        IrType::I8 => { f.instruction(&Instruction::I32Load8S(ma)); }
-                        IrType::U8 | IrType::Bool => { f.instruction(&Instruction::I32Load8U(ma)); }
-                        IrType::I16 => { f.instruction(&Instruction::I32Load16S(ma)); }
-                        IrType::U16 => { f.instruction(&Instruction::I32Load16U(ma)); }
-                        _ => { f.instruction(&Instruction::I32Load(ma)); }
+                        IrType::I8 => {
+                            f.instruction(&Instruction::I32Load8S(ma));
+                        }
+                        IrType::U8 | IrType::Bool => {
+                            f.instruction(&Instruction::I32Load8U(ma));
+                        }
+                        IrType::I16 => {
+                            f.instruction(&Instruction::I32Load16S(ma));
+                        }
+                        IrType::U16 => {
+                            f.instruction(&Instruction::I32Load16U(ma));
+                        }
+                        _ => {
+                            f.instruction(&Instruction::I32Load(ma));
+                        }
                     },
-                    ValType::I64 => { f.instruction(&Instruction::I64Load(ma)); }
-                    ValType::F32 => { f.instruction(&Instruction::F32Load(ma)); }
-                    ValType::F64 => { f.instruction(&Instruction::F64Load(ma)); }
-                    _ => { f.instruction(&Instruction::I32Load(ma)); }
+                    ValType::I64 => {
+                        f.instruction(&Instruction::I64Load(ma));
+                    }
+                    ValType::F32 => {
+                        f.instruction(&Instruction::F32Load(ma));
+                    }
+                    ValType::F64 => {
+                        f.instruction(&Instruction::F64Load(ma));
+                    }
+                    _ => {
+                        f.instruction(&Instruction::I32Load(ma));
+                    }
                 };
                 self.set_reg(f, *dest);
             }
@@ -1357,12 +1430,22 @@ impl<'a> FunctionLowerer<'a> {
                         IrType::I16 | IrType::U16 => {
                             f.instruction(&Instruction::I32Store16(ma));
                         }
-                        _ => { f.instruction(&Instruction::I32Store(ma)); }
+                        _ => {
+                            f.instruction(&Instruction::I32Store(ma));
+                        }
                     },
-                    ValType::I64 => { f.instruction(&Instruction::I64Store(ma)); }
-                    ValType::F32 => { f.instruction(&Instruction::F32Store(ma)); }
-                    ValType::F64 => { f.instruction(&Instruction::F64Store(ma)); }
-                    _ => { f.instruction(&Instruction::I32Store(ma)); }
+                    ValType::I64 => {
+                        f.instruction(&Instruction::I64Store(ma));
+                    }
+                    ValType::F32 => {
+                        f.instruction(&Instruction::F32Store(ma));
+                    }
+                    ValType::F64 => {
+                        f.instruction(&Instruction::F64Store(ma));
+                    }
+                    _ => {
+                        f.instruction(&Instruction::I32Store(ma));
+                    }
                 };
             }
 
@@ -1370,7 +1453,12 @@ impl<'a> FunctionLowerer<'a> {
             IrInstruction::LoadGlobal {
                 dest, global_id, ..
             } => {
-                let gidx = self.ctx.ir_global_to_idx.get(global_id).copied().unwrap_or(0);
+                let gidx = self
+                    .ctx
+                    .ir_global_to_idx
+                    .get(global_id)
+                    .copied()
+                    .unwrap_or(0);
                 f.instruction(&Instruction::GlobalGet(gidx));
                 self.set_reg(f, *dest);
             }
@@ -1378,7 +1466,12 @@ impl<'a> FunctionLowerer<'a> {
             // === StoreGlobal ===
             IrInstruction::StoreGlobal { global_id, value } => {
                 self.get_reg(f, *value);
-                let gidx = self.ctx.ir_global_to_idx.get(global_id).copied().unwrap_or(0);
+                let gidx = self
+                    .ctx
+                    .ir_global_to_idx
+                    .get(global_id)
+                    .copied()
+                    .unwrap_or(0);
                 f.instruction(&Instruction::GlobalSet(gidx));
             }
 
@@ -1412,7 +1505,9 @@ impl<'a> FunctionLowerer<'a> {
             }
 
             // === PtrAdd ===
-            IrInstruction::PtrAdd { dest, ptr, offset, .. } => {
+            IrInstruction::PtrAdd {
+                dest, ptr, offset, ..
+            } => {
                 self.get_reg(f, *ptr);
                 self.get_reg(f, *offset);
                 f.instruction(&Instruction::I32Add);
@@ -1747,7 +1842,9 @@ impl<'a> FunctionLowerer<'a> {
             }
 
             // === ExtractUnionValue ===
-            IrInstruction::ExtractUnionValue { dest, union_val, .. } => {
+            IrInstruction::ExtractUnionValue {
+                dest, union_val, ..
+            } => {
                 self.get_reg(f, *union_val);
                 emit_typed_load_offset(f, self.reg_wasm_type(*dest), 8);
                 self.set_reg(f, *dest);
@@ -1806,18 +1903,43 @@ impl<'a> FunctionLowerer<'a> {
             IrValue::Bool(b) => {
                 f.instruction(&Instruction::I32Const(if *b { 1 } else { 0 }));
             }
-            IrValue::I8(v) => { f.instruction(&Instruction::I32Const(*v as i32)); }
-            IrValue::I16(v) => { f.instruction(&Instruction::I32Const(*v as i32)); }
-            IrValue::I32(v) => { f.instruction(&Instruction::I32Const(*v)); }
-            IrValue::I64(v) => { f.instruction(&Instruction::I32Const(*v as i32)); }
-            IrValue::U8(v) => { f.instruction(&Instruction::I32Const(*v as i32)); }
-            IrValue::U16(v) => { f.instruction(&Instruction::I32Const(*v as i32)); }
-            IrValue::U32(v) => { f.instruction(&Instruction::I32Const(*v as i32)); }
-            IrValue::U64(v) => { f.instruction(&Instruction::I32Const(*v as i32)); }
-            IrValue::F32(v) => { f.instruction(&Instruction::F32Const(Ieee32::from(*v))); }
-            IrValue::F64(v) => { f.instruction(&Instruction::F64Const(Ieee64::from(*v))); }
+            IrValue::I8(v) => {
+                f.instruction(&Instruction::I32Const(*v as i32));
+            }
+            IrValue::I16(v) => {
+                f.instruction(&Instruction::I32Const(*v as i32));
+            }
+            IrValue::I32(v) => {
+                f.instruction(&Instruction::I32Const(*v));
+            }
+            IrValue::I64(v) => {
+                f.instruction(&Instruction::I32Const(*v as i32));
+            }
+            IrValue::U8(v) => {
+                f.instruction(&Instruction::I32Const(*v as i32));
+            }
+            IrValue::U16(v) => {
+                f.instruction(&Instruction::I32Const(*v as i32));
+            }
+            IrValue::U32(v) => {
+                f.instruction(&Instruction::I32Const(*v as i32));
+            }
+            IrValue::U64(v) => {
+                f.instruction(&Instruction::I32Const(*v as i32));
+            }
+            IrValue::F32(v) => {
+                f.instruction(&Instruction::F32Const(Ieee32::from(*v)));
+            }
+            IrValue::F64(v) => {
+                f.instruction(&Instruction::F64Const(Ieee64::from(*v)));
+            }
             IrValue::String(s) => {
-                let off = self.ctx.string_offsets.get(s.as_str()).copied().unwrap_or(0);
+                let off = self
+                    .ctx
+                    .string_offsets
+                    .get(s.as_str())
+                    .copied()
+                    .unwrap_or(0);
                 f.instruction(&Instruction::I32Const(off as i32));
             }
             IrValue::Function(fid) => {
@@ -1842,68 +1964,176 @@ impl<'a> FunctionLowerer<'a> {
         match (op, dest_ty) {
             // When MIR uses Add/Sub/Mul/Div on floats (not FAdd/FSub/FMul/FDiv),
             // we detect via operand type and emit the float variant.
-            (BinaryOp::Add, ValType::F64) | (BinaryOp::FAdd, ValType::F64) => { f.instruction(&Instruction::F64Add); }
-            (BinaryOp::Sub, ValType::F64) | (BinaryOp::FSub, ValType::F64) => { f.instruction(&Instruction::F64Sub); }
-            (BinaryOp::Mul, ValType::F64) | (BinaryOp::FMul, ValType::F64) => { f.instruction(&Instruction::F64Mul); }
-            (BinaryOp::Div, ValType::F64) | (BinaryOp::FDiv, ValType::F64) => { f.instruction(&Instruction::F64Div); }
-            (BinaryOp::Add, ValType::F32) | (BinaryOp::FAdd, ValType::F32) => { f.instruction(&Instruction::F32Add); }
-            (BinaryOp::Sub, ValType::F32) | (BinaryOp::FSub, ValType::F32) => { f.instruction(&Instruction::F32Sub); }
-            (BinaryOp::Mul, ValType::F32) | (BinaryOp::FMul, ValType::F32) => { f.instruction(&Instruction::F32Mul); }
-            (BinaryOp::Div, ValType::F32) | (BinaryOp::FDiv, ValType::F32) => { f.instruction(&Instruction::F32Div); }
+            (BinaryOp::Add, ValType::F64) | (BinaryOp::FAdd, ValType::F64) => {
+                f.instruction(&Instruction::F64Add);
+            }
+            (BinaryOp::Sub, ValType::F64) | (BinaryOp::FSub, ValType::F64) => {
+                f.instruction(&Instruction::F64Sub);
+            }
+            (BinaryOp::Mul, ValType::F64) | (BinaryOp::FMul, ValType::F64) => {
+                f.instruction(&Instruction::F64Mul);
+            }
+            (BinaryOp::Div, ValType::F64) | (BinaryOp::FDiv, ValType::F64) => {
+                f.instruction(&Instruction::F64Div);
+            }
+            (BinaryOp::Add, ValType::F32) | (BinaryOp::FAdd, ValType::F32) => {
+                f.instruction(&Instruction::F32Add);
+            }
+            (BinaryOp::Sub, ValType::F32) | (BinaryOp::FSub, ValType::F32) => {
+                f.instruction(&Instruction::F32Sub);
+            }
+            (BinaryOp::Mul, ValType::F32) | (BinaryOp::FMul, ValType::F32) => {
+                f.instruction(&Instruction::F32Mul);
+            }
+            (BinaryOp::Div, ValType::F32) | (BinaryOp::FDiv, ValType::F32) => {
+                f.instruction(&Instruction::F32Div);
+            }
 
-            (BinaryOp::Add, ValType::I32) => { f.instruction(&Instruction::I32Add); }
-            (BinaryOp::Sub, ValType::I32) => { f.instruction(&Instruction::I32Sub); }
-            (BinaryOp::Mul, ValType::I32) => { f.instruction(&Instruction::I32Mul); }
-            (BinaryOp::Div, ValType::I32) => { f.instruction(&Instruction::I32DivS); }
-            (BinaryOp::Rem, ValType::I32) => { f.instruction(&Instruction::I32RemS); }
-            (BinaryOp::And, ValType::I32) => { f.instruction(&Instruction::I32And); }
-            (BinaryOp::Or, ValType::I32) => { f.instruction(&Instruction::I32Or); }
-            (BinaryOp::Xor, ValType::I32) => { f.instruction(&Instruction::I32Xor); }
-            (BinaryOp::Shl, ValType::I32) => { f.instruction(&Instruction::I32Shl); }
-            (BinaryOp::Shr, ValType::I32) => { f.instruction(&Instruction::I32ShrS); }
-            (BinaryOp::Ushr, ValType::I32) => { f.instruction(&Instruction::I32ShrU); }
+            (BinaryOp::Add, ValType::I32) => {
+                f.instruction(&Instruction::I32Add);
+            }
+            (BinaryOp::Sub, ValType::I32) => {
+                f.instruction(&Instruction::I32Sub);
+            }
+            (BinaryOp::Mul, ValType::I32) => {
+                f.instruction(&Instruction::I32Mul);
+            }
+            (BinaryOp::Div, ValType::I32) => {
+                f.instruction(&Instruction::I32DivS);
+            }
+            (BinaryOp::Rem, ValType::I32) => {
+                f.instruction(&Instruction::I32RemS);
+            }
+            (BinaryOp::And, ValType::I32) => {
+                f.instruction(&Instruction::I32And);
+            }
+            (BinaryOp::Or, ValType::I32) => {
+                f.instruction(&Instruction::I32Or);
+            }
+            (BinaryOp::Xor, ValType::I32) => {
+                f.instruction(&Instruction::I32Xor);
+            }
+            (BinaryOp::Shl, ValType::I32) => {
+                f.instruction(&Instruction::I32Shl);
+            }
+            (BinaryOp::Shr, ValType::I32) => {
+                f.instruction(&Instruction::I32ShrS);
+            }
+            (BinaryOp::Ushr, ValType::I32) => {
+                f.instruction(&Instruction::I32ShrU);
+            }
 
-            (BinaryOp::Add, ValType::I64) => { f.instruction(&Instruction::I64Add); }
-            (BinaryOp::Sub, ValType::I64) => { f.instruction(&Instruction::I64Sub); }
-            (BinaryOp::Mul, ValType::I64) => { f.instruction(&Instruction::I64Mul); }
-            (BinaryOp::Div, ValType::I64) => { f.instruction(&Instruction::I64DivS); }
-            (BinaryOp::Rem, ValType::I64) => { f.instruction(&Instruction::I64RemS); }
-            (BinaryOp::And, ValType::I64) => { f.instruction(&Instruction::I64And); }
-            (BinaryOp::Or, ValType::I64) => { f.instruction(&Instruction::I64Or); }
-            (BinaryOp::Xor, ValType::I64) => { f.instruction(&Instruction::I64Xor); }
-            (BinaryOp::Shl, ValType::I64) => { f.instruction(&Instruction::I64Shl); }
-            (BinaryOp::Shr, ValType::I64) => { f.instruction(&Instruction::I64ShrS); }
-            (BinaryOp::Ushr, ValType::I64) => { f.instruction(&Instruction::I64ShrU); }
+            (BinaryOp::Add, ValType::I64) => {
+                f.instruction(&Instruction::I64Add);
+            }
+            (BinaryOp::Sub, ValType::I64) => {
+                f.instruction(&Instruction::I64Sub);
+            }
+            (BinaryOp::Mul, ValType::I64) => {
+                f.instruction(&Instruction::I64Mul);
+            }
+            (BinaryOp::Div, ValType::I64) => {
+                f.instruction(&Instruction::I64DivS);
+            }
+            (BinaryOp::Rem, ValType::I64) => {
+                f.instruction(&Instruction::I64RemS);
+            }
+            (BinaryOp::And, ValType::I64) => {
+                f.instruction(&Instruction::I64And);
+            }
+            (BinaryOp::Or, ValType::I64) => {
+                f.instruction(&Instruction::I64Or);
+            }
+            (BinaryOp::Xor, ValType::I64) => {
+                f.instruction(&Instruction::I64Xor);
+            }
+            (BinaryOp::Shl, ValType::I64) => {
+                f.instruction(&Instruction::I64Shl);
+            }
+            (BinaryOp::Shr, ValType::I64) => {
+                f.instruction(&Instruction::I64ShrS);
+            }
+            (BinaryOp::Ushr, ValType::I64) => {
+                f.instruction(&Instruction::I64ShrU);
+            }
 
-            (BinaryOp::FAdd, ValType::F32) => { f.instruction(&Instruction::F32Add); }
-            (BinaryOp::FSub, ValType::F32) => { f.instruction(&Instruction::F32Sub); }
-            (BinaryOp::FMul, ValType::F32) => { f.instruction(&Instruction::F32Mul); }
-            (BinaryOp::FDiv, ValType::F32) => { f.instruction(&Instruction::F32Div); }
+            (BinaryOp::FAdd, ValType::F32) => {
+                f.instruction(&Instruction::F32Add);
+            }
+            (BinaryOp::FSub, ValType::F32) => {
+                f.instruction(&Instruction::F32Sub);
+            }
+            (BinaryOp::FMul, ValType::F32) => {
+                f.instruction(&Instruction::F32Mul);
+            }
+            (BinaryOp::FDiv, ValType::F32) => {
+                f.instruction(&Instruction::F32Div);
+            }
 
-            (BinaryOp::FAdd, ValType::F64) => { f.instruction(&Instruction::F64Add); }
-            (BinaryOp::FSub, ValType::F64) => { f.instruction(&Instruction::F64Sub); }
-            (BinaryOp::FMul, ValType::F64) => { f.instruction(&Instruction::F64Mul); }
-            (BinaryOp::FDiv, ValType::F64) => { f.instruction(&Instruction::F64Div); }
+            (BinaryOp::FAdd, ValType::F64) => {
+                f.instruction(&Instruction::F64Add);
+            }
+            (BinaryOp::FSub, ValType::F64) => {
+                f.instruction(&Instruction::F64Sub);
+            }
+            (BinaryOp::FMul, ValType::F64) => {
+                f.instruction(&Instruction::F64Mul);
+            }
+            (BinaryOp::FDiv, ValType::F64) => {
+                f.instruction(&Instruction::F64Div);
+            }
 
             // FRem has no direct WASM equivalent.
-            (BinaryOp::FRem, _) => { f.instruction(&Instruction::Unreachable); }
+            (BinaryOp::FRem, _) => {
+                f.instruction(&Instruction::Unreachable);
+            }
 
             // Fallback: default to i32 ops for pointers etc.
-            (BinaryOp::Add, _) => { f.instruction(&Instruction::I32Add); }
-            (BinaryOp::Sub, _) => { f.instruction(&Instruction::I32Sub); }
-            (BinaryOp::Mul, _) => { f.instruction(&Instruction::I32Mul); }
-            (BinaryOp::Div, _) => { f.instruction(&Instruction::I32DivS); }
-            (BinaryOp::Rem, _) => { f.instruction(&Instruction::I32RemS); }
-            (BinaryOp::And, _) => { f.instruction(&Instruction::I32And); }
-            (BinaryOp::Or, _) => { f.instruction(&Instruction::I32Or); }
-            (BinaryOp::Xor, _) => { f.instruction(&Instruction::I32Xor); }
-            (BinaryOp::Shl, _) => { f.instruction(&Instruction::I32Shl); }
-            (BinaryOp::Shr, _) => { f.instruction(&Instruction::I32ShrS); }
-            (BinaryOp::Ushr, _) => { f.instruction(&Instruction::I32ShrU); }
-            (BinaryOp::FAdd, _) => { f.instruction(&Instruction::F64Add); }
-            (BinaryOp::FSub, _) => { f.instruction(&Instruction::F64Sub); }
-            (BinaryOp::FMul, _) => { f.instruction(&Instruction::F64Mul); }
-            (BinaryOp::FDiv, _) => { f.instruction(&Instruction::F64Div); }
+            (BinaryOp::Add, _) => {
+                f.instruction(&Instruction::I32Add);
+            }
+            (BinaryOp::Sub, _) => {
+                f.instruction(&Instruction::I32Sub);
+            }
+            (BinaryOp::Mul, _) => {
+                f.instruction(&Instruction::I32Mul);
+            }
+            (BinaryOp::Div, _) => {
+                f.instruction(&Instruction::I32DivS);
+            }
+            (BinaryOp::Rem, _) => {
+                f.instruction(&Instruction::I32RemS);
+            }
+            (BinaryOp::And, _) => {
+                f.instruction(&Instruction::I32And);
+            }
+            (BinaryOp::Or, _) => {
+                f.instruction(&Instruction::I32Or);
+            }
+            (BinaryOp::Xor, _) => {
+                f.instruction(&Instruction::I32Xor);
+            }
+            (BinaryOp::Shl, _) => {
+                f.instruction(&Instruction::I32Shl);
+            }
+            (BinaryOp::Shr, _) => {
+                f.instruction(&Instruction::I32ShrS);
+            }
+            (BinaryOp::Ushr, _) => {
+                f.instruction(&Instruction::I32ShrU);
+            }
+            (BinaryOp::FAdd, _) => {
+                f.instruction(&Instruction::F64Add);
+            }
+            (BinaryOp::FSub, _) => {
+                f.instruction(&Instruction::F64Sub);
+            }
+            (BinaryOp::FMul, _) => {
+                f.instruction(&Instruction::F64Mul);
+            }
+            (BinaryOp::FDiv, _) => {
+                f.instruction(&Instruction::F64Div);
+            }
         }
     }
 
@@ -1973,76 +2203,202 @@ impl<'a> FunctionLowerer<'a> {
         match (op, operand_ty) {
             // MIR uses Eq/Ne/Lt/Le/Gt/Ge for both int and float comparisons.
             // When operand type is F64/F32, emit float comparison instructions.
-            (CompareOp::Eq, ValType::F64) | (CompareOp::FEq, ValType::F64) => { f.instruction(&Instruction::F64Eq); }
-            (CompareOp::Ne, ValType::F64) | (CompareOp::FNe, ValType::F64) => { f.instruction(&Instruction::F64Ne); }
-            (CompareOp::Lt, ValType::F64) | (CompareOp::FLt, ValType::F64) => { f.instruction(&Instruction::F64Lt); }
-            (CompareOp::Le, ValType::F64) | (CompareOp::FLe, ValType::F64) => { f.instruction(&Instruction::F64Le); }
-            (CompareOp::Gt, ValType::F64) | (CompareOp::FGt, ValType::F64) => { f.instruction(&Instruction::F64Gt); }
-            (CompareOp::Ge, ValType::F64) | (CompareOp::FGe, ValType::F64) => { f.instruction(&Instruction::F64Ge); }
-            (CompareOp::Eq, ValType::F32) | (CompareOp::FEq, ValType::F32) => { f.instruction(&Instruction::F32Eq); }
-            (CompareOp::Ne, ValType::F32) | (CompareOp::FNe, ValType::F32) => { f.instruction(&Instruction::F32Ne); }
-            (CompareOp::Lt, ValType::F32) | (CompareOp::FLt, ValType::F32) => { f.instruction(&Instruction::F32Lt); }
-            (CompareOp::Le, ValType::F32) | (CompareOp::FLe, ValType::F32) => { f.instruction(&Instruction::F32Le); }
-            (CompareOp::Gt, ValType::F32) | (CompareOp::FGt, ValType::F32) => { f.instruction(&Instruction::F32Gt); }
-            (CompareOp::Ge, ValType::F32) | (CompareOp::FGe, ValType::F32) => { f.instruction(&Instruction::F32Ge); }
+            (CompareOp::Eq, ValType::F64) | (CompareOp::FEq, ValType::F64) => {
+                f.instruction(&Instruction::F64Eq);
+            }
+            (CompareOp::Ne, ValType::F64) | (CompareOp::FNe, ValType::F64) => {
+                f.instruction(&Instruction::F64Ne);
+            }
+            (CompareOp::Lt, ValType::F64) | (CompareOp::FLt, ValType::F64) => {
+                f.instruction(&Instruction::F64Lt);
+            }
+            (CompareOp::Le, ValType::F64) | (CompareOp::FLe, ValType::F64) => {
+                f.instruction(&Instruction::F64Le);
+            }
+            (CompareOp::Gt, ValType::F64) | (CompareOp::FGt, ValType::F64) => {
+                f.instruction(&Instruction::F64Gt);
+            }
+            (CompareOp::Ge, ValType::F64) | (CompareOp::FGe, ValType::F64) => {
+                f.instruction(&Instruction::F64Ge);
+            }
+            (CompareOp::Eq, ValType::F32) | (CompareOp::FEq, ValType::F32) => {
+                f.instruction(&Instruction::F32Eq);
+            }
+            (CompareOp::Ne, ValType::F32) | (CompareOp::FNe, ValType::F32) => {
+                f.instruction(&Instruction::F32Ne);
+            }
+            (CompareOp::Lt, ValType::F32) | (CompareOp::FLt, ValType::F32) => {
+                f.instruction(&Instruction::F32Lt);
+            }
+            (CompareOp::Le, ValType::F32) | (CompareOp::FLe, ValType::F32) => {
+                f.instruction(&Instruction::F32Le);
+            }
+            (CompareOp::Gt, ValType::F32) | (CompareOp::FGt, ValType::F32) => {
+                f.instruction(&Instruction::F32Gt);
+            }
+            (CompareOp::Ge, ValType::F32) | (CompareOp::FGe, ValType::F32) => {
+                f.instruction(&Instruction::F32Ge);
+            }
 
-            (CompareOp::Eq, ValType::I32) => { f.instruction(&Instruction::I32Eq); }
-            (CompareOp::Ne, ValType::I32) => { f.instruction(&Instruction::I32Ne); }
-            (CompareOp::Lt, ValType::I32) => { f.instruction(&Instruction::I32LtS); }
-            (CompareOp::Le, ValType::I32) => { f.instruction(&Instruction::I32LeS); }
-            (CompareOp::Gt, ValType::I32) => { f.instruction(&Instruction::I32GtS); }
-            (CompareOp::Ge, ValType::I32) => { f.instruction(&Instruction::I32GeS); }
-            (CompareOp::ULt, ValType::I32) => { f.instruction(&Instruction::I32LtU); }
-            (CompareOp::ULe, ValType::I32) => { f.instruction(&Instruction::I32LeU); }
-            (CompareOp::UGt, ValType::I32) => { f.instruction(&Instruction::I32GtU); }
-            (CompareOp::UGe, ValType::I32) => { f.instruction(&Instruction::I32GeU); }
+            (CompareOp::Eq, ValType::I32) => {
+                f.instruction(&Instruction::I32Eq);
+            }
+            (CompareOp::Ne, ValType::I32) => {
+                f.instruction(&Instruction::I32Ne);
+            }
+            (CompareOp::Lt, ValType::I32) => {
+                f.instruction(&Instruction::I32LtS);
+            }
+            (CompareOp::Le, ValType::I32) => {
+                f.instruction(&Instruction::I32LeS);
+            }
+            (CompareOp::Gt, ValType::I32) => {
+                f.instruction(&Instruction::I32GtS);
+            }
+            (CompareOp::Ge, ValType::I32) => {
+                f.instruction(&Instruction::I32GeS);
+            }
+            (CompareOp::ULt, ValType::I32) => {
+                f.instruction(&Instruction::I32LtU);
+            }
+            (CompareOp::ULe, ValType::I32) => {
+                f.instruction(&Instruction::I32LeU);
+            }
+            (CompareOp::UGt, ValType::I32) => {
+                f.instruction(&Instruction::I32GtU);
+            }
+            (CompareOp::UGe, ValType::I32) => {
+                f.instruction(&Instruction::I32GeU);
+            }
 
-            (CompareOp::Eq, ValType::I64) => { f.instruction(&Instruction::I64Eq); }
-            (CompareOp::Ne, ValType::I64) => { f.instruction(&Instruction::I64Ne); }
-            (CompareOp::Lt, ValType::I64) => { f.instruction(&Instruction::I64LtS); }
-            (CompareOp::Le, ValType::I64) => { f.instruction(&Instruction::I64LeS); }
-            (CompareOp::Gt, ValType::I64) => { f.instruction(&Instruction::I64GtS); }
-            (CompareOp::Ge, ValType::I64) => { f.instruction(&Instruction::I64GeS); }
-            (CompareOp::ULt, ValType::I64) => { f.instruction(&Instruction::I64LtU); }
-            (CompareOp::ULe, ValType::I64) => { f.instruction(&Instruction::I64LeU); }
-            (CompareOp::UGt, ValType::I64) => { f.instruction(&Instruction::I64GtU); }
-            (CompareOp::UGe, ValType::I64) => { f.instruction(&Instruction::I64GeU); }
+            (CompareOp::Eq, ValType::I64) => {
+                f.instruction(&Instruction::I64Eq);
+            }
+            (CompareOp::Ne, ValType::I64) => {
+                f.instruction(&Instruction::I64Ne);
+            }
+            (CompareOp::Lt, ValType::I64) => {
+                f.instruction(&Instruction::I64LtS);
+            }
+            (CompareOp::Le, ValType::I64) => {
+                f.instruction(&Instruction::I64LeS);
+            }
+            (CompareOp::Gt, ValType::I64) => {
+                f.instruction(&Instruction::I64GtS);
+            }
+            (CompareOp::Ge, ValType::I64) => {
+                f.instruction(&Instruction::I64GeS);
+            }
+            (CompareOp::ULt, ValType::I64) => {
+                f.instruction(&Instruction::I64LtU);
+            }
+            (CompareOp::ULe, ValType::I64) => {
+                f.instruction(&Instruction::I64LeU);
+            }
+            (CompareOp::UGt, ValType::I64) => {
+                f.instruction(&Instruction::I64GtU);
+            }
+            (CompareOp::UGe, ValType::I64) => {
+                f.instruction(&Instruction::I64GeU);
+            }
 
-            (CompareOp::FEq, ValType::F32) => { f.instruction(&Instruction::F32Eq); }
-            (CompareOp::FNe, ValType::F32) => { f.instruction(&Instruction::F32Ne); }
-            (CompareOp::FLt, ValType::F32) => { f.instruction(&Instruction::F32Lt); }
-            (CompareOp::FLe, ValType::F32) => { f.instruction(&Instruction::F32Le); }
-            (CompareOp::FGt, ValType::F32) => { f.instruction(&Instruction::F32Gt); }
-            (CompareOp::FGe, ValType::F32) => { f.instruction(&Instruction::F32Ge); }
+            (CompareOp::FEq, ValType::F32) => {
+                f.instruction(&Instruction::F32Eq);
+            }
+            (CompareOp::FNe, ValType::F32) => {
+                f.instruction(&Instruction::F32Ne);
+            }
+            (CompareOp::FLt, ValType::F32) => {
+                f.instruction(&Instruction::F32Lt);
+            }
+            (CompareOp::FLe, ValType::F32) => {
+                f.instruction(&Instruction::F32Le);
+            }
+            (CompareOp::FGt, ValType::F32) => {
+                f.instruction(&Instruction::F32Gt);
+            }
+            (CompareOp::FGe, ValType::F32) => {
+                f.instruction(&Instruction::F32Ge);
+            }
 
-            (CompareOp::FEq, ValType::F64) => { f.instruction(&Instruction::F64Eq); }
-            (CompareOp::FNe, ValType::F64) => { f.instruction(&Instruction::F64Ne); }
-            (CompareOp::FLt, ValType::F64) => { f.instruction(&Instruction::F64Lt); }
-            (CompareOp::FLe, ValType::F64) => { f.instruction(&Instruction::F64Le); }
-            (CompareOp::FGt, ValType::F64) => { f.instruction(&Instruction::F64Gt); }
-            (CompareOp::FGe, ValType::F64) => { f.instruction(&Instruction::F64Ge); }
+            (CompareOp::FEq, ValType::F64) => {
+                f.instruction(&Instruction::F64Eq);
+            }
+            (CompareOp::FNe, ValType::F64) => {
+                f.instruction(&Instruction::F64Ne);
+            }
+            (CompareOp::FLt, ValType::F64) => {
+                f.instruction(&Instruction::F64Lt);
+            }
+            (CompareOp::FLe, ValType::F64) => {
+                f.instruction(&Instruction::F64Le);
+            }
+            (CompareOp::FGt, ValType::F64) => {
+                f.instruction(&Instruction::F64Gt);
+            }
+            (CompareOp::FGe, ValType::F64) => {
+                f.instruction(&Instruction::F64Ge);
+            }
 
             // Ordered / unordered: Phase 1 approximation.
-            (CompareOp::FOrd, _) => { f.instruction(&Instruction::I32Const(1)); return; }
-            (CompareOp::FUno, _) => { f.instruction(&Instruction::I32Const(0)); return; }
+            (CompareOp::FOrd, _) => {
+                f.instruction(&Instruction::I32Const(1));
+                return;
+            }
+            (CompareOp::FUno, _) => {
+                f.instruction(&Instruction::I32Const(0));
+                return;
+            }
 
             // Fallback: default to i32 comparisons.
-            (CompareOp::Eq, _) => { f.instruction(&Instruction::I32Eq); }
-            (CompareOp::Ne, _) => { f.instruction(&Instruction::I32Ne); }
-            (CompareOp::Lt, _) => { f.instruction(&Instruction::I32LtS); }
-            (CompareOp::Le, _) => { f.instruction(&Instruction::I32LeS); }
-            (CompareOp::Gt, _) => { f.instruction(&Instruction::I32GtS); }
-            (CompareOp::Ge, _) => { f.instruction(&Instruction::I32GeS); }
-            (CompareOp::ULt, _) => { f.instruction(&Instruction::I32LtU); }
-            (CompareOp::ULe, _) => { f.instruction(&Instruction::I32LeU); }
-            (CompareOp::UGt, _) => { f.instruction(&Instruction::I32GtU); }
-            (CompareOp::UGe, _) => { f.instruction(&Instruction::I32GeU); }
-            (CompareOp::FEq, _) => { f.instruction(&Instruction::F64Eq); }
-            (CompareOp::FNe, _) => { f.instruction(&Instruction::F64Ne); }
-            (CompareOp::FLt, _) => { f.instruction(&Instruction::F64Lt); }
-            (CompareOp::FLe, _) => { f.instruction(&Instruction::F64Le); }
-            (CompareOp::FGt, _) => { f.instruction(&Instruction::F64Gt); }
-            (CompareOp::FGe, _) => { f.instruction(&Instruction::F64Ge); }
+            (CompareOp::Eq, _) => {
+                f.instruction(&Instruction::I32Eq);
+            }
+            (CompareOp::Ne, _) => {
+                f.instruction(&Instruction::I32Ne);
+            }
+            (CompareOp::Lt, _) => {
+                f.instruction(&Instruction::I32LtS);
+            }
+            (CompareOp::Le, _) => {
+                f.instruction(&Instruction::I32LeS);
+            }
+            (CompareOp::Gt, _) => {
+                f.instruction(&Instruction::I32GtS);
+            }
+            (CompareOp::Ge, _) => {
+                f.instruction(&Instruction::I32GeS);
+            }
+            (CompareOp::ULt, _) => {
+                f.instruction(&Instruction::I32LtU);
+            }
+            (CompareOp::ULe, _) => {
+                f.instruction(&Instruction::I32LeU);
+            }
+            (CompareOp::UGt, _) => {
+                f.instruction(&Instruction::I32GtU);
+            }
+            (CompareOp::UGe, _) => {
+                f.instruction(&Instruction::I32GeU);
+            }
+            (CompareOp::FEq, _) => {
+                f.instruction(&Instruction::F64Eq);
+            }
+            (CompareOp::FNe, _) => {
+                f.instruction(&Instruction::F64Ne);
+            }
+            (CompareOp::FLt, _) => {
+                f.instruction(&Instruction::F64Lt);
+            }
+            (CompareOp::FLe, _) => {
+                f.instruction(&Instruction::F64Le);
+            }
+            (CompareOp::FGt, _) => {
+                f.instruction(&Instruction::F64Gt);
+            }
+            (CompareOp::FGe, _) => {
+                f.instruction(&Instruction::F64Ge);
+            }
         }
     }
 
@@ -2064,17 +2420,39 @@ impl<'a> FunctionLowerer<'a> {
                     f.instruction(&Instruction::I64ExtendI32U);
                 }
             }
-            (ValType::I64, ValType::I32) => { f.instruction(&Instruction::I32WrapI64); }
-            (ValType::I32, ValType::F32) => { f.instruction(&Instruction::F32ConvertI32S); }
-            (ValType::I32, ValType::F64) => { f.instruction(&Instruction::F64ConvertI32S); }
-            (ValType::I64, ValType::F64) => { f.instruction(&Instruction::F64ConvertI64S); }
-            (ValType::I64, ValType::F32) => { f.instruction(&Instruction::F32ConvertI64S); }
-            (ValType::F32, ValType::I32) => { f.instruction(&Instruction::I32TruncF32S); }
-            (ValType::F64, ValType::I32) => { f.instruction(&Instruction::I32TruncF64S); }
-            (ValType::F64, ValType::I64) => { f.instruction(&Instruction::I64TruncF64S); }
-            (ValType::F32, ValType::I64) => { f.instruction(&Instruction::I64TruncF32S); }
-            (ValType::F32, ValType::F64) => { f.instruction(&Instruction::F64PromoteF32); }
-            (ValType::F64, ValType::F32) => { f.instruction(&Instruction::F32DemoteF64); }
+            (ValType::I64, ValType::I32) => {
+                f.instruction(&Instruction::I32WrapI64);
+            }
+            (ValType::I32, ValType::F32) => {
+                f.instruction(&Instruction::F32ConvertI32S);
+            }
+            (ValType::I32, ValType::F64) => {
+                f.instruction(&Instruction::F64ConvertI32S);
+            }
+            (ValType::I64, ValType::F64) => {
+                f.instruction(&Instruction::F64ConvertI64S);
+            }
+            (ValType::I64, ValType::F32) => {
+                f.instruction(&Instruction::F32ConvertI64S);
+            }
+            (ValType::F32, ValType::I32) => {
+                f.instruction(&Instruction::I32TruncF32S);
+            }
+            (ValType::F64, ValType::I32) => {
+                f.instruction(&Instruction::I32TruncF64S);
+            }
+            (ValType::F64, ValType::I64) => {
+                f.instruction(&Instruction::I64TruncF64S);
+            }
+            (ValType::F32, ValType::I64) => {
+                f.instruction(&Instruction::I64TruncF32S);
+            }
+            (ValType::F32, ValType::F64) => {
+                f.instruction(&Instruction::F64PromoteF32);
+            }
+            (ValType::F64, ValType::F32) => {
+                f.instruction(&Instruction::F32DemoteF64);
+            }
             _ => {} // no-op
         }
     }
@@ -2085,14 +2463,28 @@ impl<'a> FunctionLowerer<'a> {
 
     /// Emit a type conversion instruction if `from` != `to`.
     fn emit_type_coerce(&self, f: &mut Function, from: ValType, to: ValType) {
-        if from == to { return; }
+        if from == to {
+            return;
+        }
         match (from, to) {
-            (ValType::I32, ValType::F64) => { f.instruction(&Instruction::F64ConvertI32S); }
-            (ValType::F64, ValType::I32) => { f.instruction(&Instruction::I32TruncF64S); }
-            (ValType::I32, ValType::F32) => { f.instruction(&Instruction::F32ConvertI32S); }
-            (ValType::F32, ValType::I32) => { f.instruction(&Instruction::I32TruncF32S); }
-            (ValType::F32, ValType::F64) => { f.instruction(&Instruction::F64PromoteF32); }
-            (ValType::F64, ValType::F32) => { f.instruction(&Instruction::F32DemoteF64); }
+            (ValType::I32, ValType::F64) => {
+                f.instruction(&Instruction::F64ConvertI32S);
+            }
+            (ValType::F64, ValType::I32) => {
+                f.instruction(&Instruction::I32TruncF64S);
+            }
+            (ValType::I32, ValType::F32) => {
+                f.instruction(&Instruction::F32ConvertI32S);
+            }
+            (ValType::F32, ValType::I32) => {
+                f.instruction(&Instruction::I32TruncF32S);
+            }
+            (ValType::F32, ValType::F64) => {
+                f.instruction(&Instruction::F64PromoteF32);
+            }
+            (ValType::F64, ValType::F32) => {
+                f.instruction(&Instruction::F32DemoteF64);
+            }
             _ => {}
         }
     }
@@ -2165,11 +2557,21 @@ fn ir_value_to_i64(val: &IrValue) -> i64 {
 /// Emit a zero constant for the given WASM type.
 fn emit_zero(f: &mut Function, vt: ValType) {
     match vt {
-        ValType::I32 => { f.instruction(&Instruction::I32Const(0)); }
-        ValType::I64 => { f.instruction(&Instruction::I64Const(0)); }
-        ValType::F32 => { f.instruction(&Instruction::F32Const(Ieee32::from(0.0f32))); }
-        ValType::F64 => { f.instruction(&Instruction::F64Const(Ieee64::from(0.0f64))); }
-        _ => { f.instruction(&Instruction::I32Const(0)); }
+        ValType::I32 => {
+            f.instruction(&Instruction::I32Const(0));
+        }
+        ValType::I64 => {
+            f.instruction(&Instruction::I64Const(0));
+        }
+        ValType::F32 => {
+            f.instruction(&Instruction::F32Const(Ieee32::from(0.0f32)));
+        }
+        ValType::F64 => {
+            f.instruction(&Instruction::F64Const(Ieee64::from(0.0f64)));
+        }
+        _ => {
+            f.instruction(&Instruction::I32Const(0));
+        }
     }
 }
 
@@ -2179,57 +2581,117 @@ fn emit_bitcast(f: &mut Function, from: ValType, to: ValType) {
         return;
     }
     match (from, to) {
-        (ValType::I32, ValType::F32) => { f.instruction(&Instruction::F32ReinterpretI32); }
-        (ValType::F32, ValType::I32) => { f.instruction(&Instruction::I32ReinterpretF32); }
-        (ValType::I64, ValType::F64) => { f.instruction(&Instruction::F64ReinterpretI64); }
-        (ValType::F64, ValType::I64) => { f.instruction(&Instruction::I64ReinterpretF64); }
-        (ValType::I32, ValType::I64) => { f.instruction(&Instruction::I64ExtendI32U); }
-        (ValType::I64, ValType::I32) => { f.instruction(&Instruction::I32WrapI64); }
+        (ValType::I32, ValType::F32) => {
+            f.instruction(&Instruction::F32ReinterpretI32);
+        }
+        (ValType::F32, ValType::I32) => {
+            f.instruction(&Instruction::I32ReinterpretF32);
+        }
+        (ValType::I64, ValType::F64) => {
+            f.instruction(&Instruction::F64ReinterpretI64);
+        }
+        (ValType::F64, ValType::I64) => {
+            f.instruction(&Instruction::I64ReinterpretF64);
+        }
+        (ValType::I32, ValType::I64) => {
+            f.instruction(&Instruction::I64ExtendI32U);
+        }
+        (ValType::I64, ValType::I32) => {
+            f.instruction(&Instruction::I32WrapI64);
+        }
         _ => {} // no-op best effort
     }
 }
 
 /// Emit a typed load at offset 0.
 fn emit_typed_load(f: &mut Function, vt: ValType) {
-    let ma = MemArg { offset: 0, align: 0, memory_index: 0 };
+    let ma = MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    };
     match vt {
-        ValType::I64 => { f.instruction(&Instruction::I64Load(ma)); }
-        ValType::F32 => { f.instruction(&Instruction::F32Load(ma)); }
-        ValType::F64 => { f.instruction(&Instruction::F64Load(ma)); }
-        _ => { f.instruction(&Instruction::I32Load(ma)); }
+        ValType::I64 => {
+            f.instruction(&Instruction::I64Load(ma));
+        }
+        ValType::F32 => {
+            f.instruction(&Instruction::F32Load(ma));
+        }
+        ValType::F64 => {
+            f.instruction(&Instruction::F64Load(ma));
+        }
+        _ => {
+            f.instruction(&Instruction::I32Load(ma));
+        }
     }
 }
 
 /// Emit a typed load at a constant offset.
 fn emit_typed_load_offset(f: &mut Function, vt: ValType, offset: u64) {
-    let ma = MemArg { offset, align: 0, memory_index: 0 };
+    let ma = MemArg {
+        offset,
+        align: 0,
+        memory_index: 0,
+    };
     match vt {
-        ValType::I64 => { f.instruction(&Instruction::I64Load(ma)); }
-        ValType::F32 => { f.instruction(&Instruction::F32Load(ma)); }
-        ValType::F64 => { f.instruction(&Instruction::F64Load(ma)); }
-        _ => { f.instruction(&Instruction::I32Load(ma)); }
+        ValType::I64 => {
+            f.instruction(&Instruction::I64Load(ma));
+        }
+        ValType::F32 => {
+            f.instruction(&Instruction::F32Load(ma));
+        }
+        ValType::F64 => {
+            f.instruction(&Instruction::F64Load(ma));
+        }
+        _ => {
+            f.instruction(&Instruction::I32Load(ma));
+        }
     }
 }
 
 /// Emit a typed store at offset 0.
 fn emit_typed_store(f: &mut Function, vt: ValType) {
-    let ma = MemArg { offset: 0, align: 0, memory_index: 0 };
+    let ma = MemArg {
+        offset: 0,
+        align: 0,
+        memory_index: 0,
+    };
     match vt {
-        ValType::I64 => { f.instruction(&Instruction::I64Store(ma)); }
-        ValType::F32 => { f.instruction(&Instruction::F32Store(ma)); }
-        ValType::F64 => { f.instruction(&Instruction::F64Store(ma)); }
-        _ => { f.instruction(&Instruction::I32Store(ma)); }
+        ValType::I64 => {
+            f.instruction(&Instruction::I64Store(ma));
+        }
+        ValType::F32 => {
+            f.instruction(&Instruction::F32Store(ma));
+        }
+        ValType::F64 => {
+            f.instruction(&Instruction::F64Store(ma));
+        }
+        _ => {
+            f.instruction(&Instruction::I32Store(ma));
+        }
     }
 }
 
 /// Emit a typed store at a constant offset.
 fn emit_typed_store_offset(f: &mut Function, vt: ValType, offset: u64) {
-    let ma = MemArg { offset, align: 0, memory_index: 0 };
+    let ma = MemArg {
+        offset,
+        align: 0,
+        memory_index: 0,
+    };
     match vt {
-        ValType::I64 => { f.instruction(&Instruction::I64Store(ma)); }
-        ValType::F32 => { f.instruction(&Instruction::F32Store(ma)); }
-        ValType::F64 => { f.instruction(&Instruction::F64Store(ma)); }
-        _ => { f.instruction(&Instruction::I32Store(ma)); }
+        ValType::I64 => {
+            f.instruction(&Instruction::I64Store(ma));
+        }
+        ValType::F32 => {
+            f.instruction(&Instruction::F32Store(ma));
+        }
+        ValType::F64 => {
+            f.instruction(&Instruction::F64Store(ma));
+        }
+        _ => {
+            f.instruction(&Instruction::I32Store(ma));
+        }
     }
 }
 
@@ -2248,7 +2710,10 @@ mod tests {
         assert_eq!(ir_type_to_wasm(&IrType::F32), ValType::F32);
         assert_eq!(ir_type_to_wasm(&IrType::F64), ValType::F64);
         assert_eq!(ir_type_to_wasm(&IrType::Bool), ValType::I32);
-        assert_eq!(ir_type_to_wasm(&IrType::Ptr(Box::new(IrType::I32))), ValType::I32);
+        assert_eq!(
+            ir_type_to_wasm(&IrType::Ptr(Box::new(IrType::I32))),
+            ValType::I32
+        );
         assert_eq!(ir_type_to_wasm(&IrType::String), ValType::I32);
         assert_eq!(ir_type_to_wasm(&IrType::Any), ValType::I32);
     }

@@ -9,8 +9,8 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
     use wasmtime::*;
 
     let engine = Engine::default();
-    let module = Module::new(&engine, wasm_bytes)
-        .map_err(|e| format!("WASM compilation failed: {}", e))?;
+    let module =
+        Module::new(&engine, wasm_bytes).map_err(|e| format!("WASM compilation failed: {}", e))?;
 
     // Build WASI P1 context with inherited stdio + current directory access
     let mut builder = wasi_common::WasiCtxBuilder::new();
