@@ -3991,6 +3991,17 @@ fn cmd_rpkg_inspect(file: PathBuf) -> Result<(), String> {
         );
     }
 
+    if !loaded.js_hosts.is_empty() {
+        println!("\n  JS Hosts ({}):", loaded.js_hosts.len());
+        for (module_name, source) in &loaded.js_hosts {
+            println!(
+                "    {} ({:.1} KB)",
+                module_name,
+                source.len() as f64 / 1024.0,
+            );
+        }
+    }
+
     Ok(())
 }
 
