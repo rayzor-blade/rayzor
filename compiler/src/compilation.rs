@@ -212,6 +212,10 @@ pub struct CompilationConfig {
 
     /// Whether to emit safety warnings (use-after-move, etc.)
     pub emit_safety_warnings: bool,
+
+    /// Extra preprocessor defines (e.g., "wasm" for WASM target builds).
+    /// Added to the default set ("rayzor", "sys").
+    pub extra_defines: Vec<String>,
 }
 
 impl Default for CompilationConfig {
@@ -243,6 +247,7 @@ impl Default for CompilationConfig {
             pipeline_config: PipelineConfig::default(),
             hdll_search_paths: vec![PathBuf::from(".")],
             emit_safety_warnings: true,
+            extra_defines: Vec::new(),
         }
     }
 }
@@ -1078,6 +1083,7 @@ impl CompilationUnit {
                 c_includes: None,
                 c_sources: None,
                 c_libs: None,
+                js_import: None,
             };
 
             // Add symbol to symbol table
@@ -3675,9 +3681,17 @@ impl CompilationUnit {
 
     /// Add a user source file to the compilation unit
     pub fn add_file(&mut self, source: &str, file_path: &str) -> Result<(), String> {
-        // Parse the file (file_name, input, recovery mode=true, debug=true to preserve source)
-        let haxe_file = parse_haxe_file_with_debug(file_path, source, true, true)
-            .map_err(|e| format!("Parse error in {}: {}", file_path, e))?;
+        // Build preprocessor config with extra defines (e.g., "wasm" for WASM target)
+        let haxe_file = if self.config.extra_defines.is_empty() {
+            parse_haxe_file_with_debug(file_path, source, true, true)
+        } else {
+            let mut pp_config = parser::preprocessor::PreprocessorConfig::default();
+            for define in &self.config.extra_defines {
+                pp_config.defines.insert(define.clone());
+            }
+            parser::haxe_parser::parse_haxe_file_with_config(file_path, source, true, true, &pp_config)
+        }
+        .map_err(|e| format!("Parse error in {}: {}", file_path, e))?;
 
         self.user_files.push(haxe_file);
         Ok(())

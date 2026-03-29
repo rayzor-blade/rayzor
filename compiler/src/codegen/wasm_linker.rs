@@ -400,6 +400,19 @@ struct LinkerCtx {
 
     /// Names of unresolved imports (for diagnostics).
     unresolved_imports: Vec<String>,
+
+    /// Non-rayzor imports preserved as real WASM imports (from @:jsImport).
+    /// These are emitted in the import section so the JS host can provide them.
+    preserved_imports: Vec<PreservedImport>,
+}
+
+/// A user import that's preserved in the linked output (not stubbed).
+/// Used for @:jsImport functions that the JS host module provides.
+struct PreservedImport {
+    module: String,
+    name: String,
+    type_idx: u32,
+    merged_func_idx: u32,
 }
 
 impl LinkerCtx {
@@ -416,6 +429,7 @@ impl LinkerCtx {
             n_wasi_imports: 0,
             stub_type_indices: Vec::new(),
             unresolved_imports: Vec::new(),
+            preserved_imports: Vec::new(),
         }
     }
 
@@ -540,18 +554,17 @@ impl LinkerCtx {
                     self.unresolved_imports.push(imp.name.clone());
                 }
             } else {
-                // Non-rayzor import in user module — generate stub.
-                let stub_merged_idx = next_func_idx;
+                // Non-rayzor import in user module.
+                // Preserve as a real WASM import (for @:jsImport host modules).
+                // The JS harness will provide these at instantiation time.
+                self.preserved_imports.push(PreservedImport {
+                    module: imp.module.clone(),
+                    name: imp.name.clone(),
+                    type_idx: self.user_type_remap.get(&imp.type_idx).copied().unwrap_or(0),
+                    merged_func_idx: next_func_idx,
+                });
+                self.user_func_remap.insert(user_orig_idx, next_func_idx);
                 next_func_idx += 1;
-                self.user_func_remap.insert(user_orig_idx, stub_merged_idx);
-                let merged_type_idx = self
-                    .user_type_remap
-                    .get(&imp.type_idx)
-                    .copied()
-                    .unwrap_or(0);
-                self.stub_type_indices.push(merged_type_idx);
-                self.unresolved_imports
-                    .push(format!("{}:{}", imp.module, imp.name));
             }
         }
 
@@ -608,6 +621,14 @@ impl LinkerCtx {
                 &imp.module,
                 &imp.name,
                 EntityType::Function(merged_type_idx),
+            );
+        }
+        // Preserved @:jsImport imports — emitted as real WASM imports for JS host modules
+        for imp in &self.preserved_imports {
+            import_section.import(
+                &imp.module,
+                &imp.name,
+                EntityType::Function(imp.type_idx),
             );
         }
         module.section(&import_section);

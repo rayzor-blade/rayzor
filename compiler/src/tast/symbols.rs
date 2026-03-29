@@ -290,6 +290,10 @@ pub struct Symbol {
     /// System libraries from @:clib(["sqlite3"]) metadata
     /// Discovered via pkg-config and loaded into TCC context
     pub c_libs: Option<Vec<InternedString>>,
+    /// JS import module and function name from @:jsImport("module", "function") metadata.
+    /// Used by WASM backend to emit WASM imports from the specified JS module.
+    /// First element is the module name, second is the function name.
+    pub js_import: Option<(InternedString, InternedString)>,
 }
 
 /// Bitflags for various symbol properties
@@ -441,7 +445,7 @@ impl Symbol {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None,
+            c_libs: None, js_import: None,
         }
     }
 
@@ -909,7 +913,7 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None,
+            c_libs: None, js_import: None,
         };
 
         // Add the symbol to the table
@@ -948,7 +952,7 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None,
+            c_libs: None, js_import: None,
         };
 
         // Add the symbol to the table
@@ -991,7 +995,7 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None,
+            c_libs: None, js_import: None,
         };
 
         // Add the symbol to the table
@@ -1033,7 +1037,7 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None,
+            c_libs: None, js_import: None,
         };
 
         self.add_symbol(symbol);
@@ -1073,7 +1077,7 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None,
+            c_libs: None, js_import: None,
         };
 
         self.add_symbol(symbol);
@@ -1123,7 +1127,7 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None,
+            c_libs: None, js_import: None,
         };
 
         self.add_symbol(symbol);
@@ -1154,7 +1158,7 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None,
+            c_libs: None, js_import: None,
         };
 
         self.add_symbol(symbol);
@@ -1189,7 +1193,7 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None,
+            c_libs: None, js_import: None,
         };
 
         self.add_symbol(symbol);
@@ -1224,7 +1228,7 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None,
+            c_libs: None, js_import: None,
         };
 
         self.add_symbol(symbol);
@@ -1260,7 +1264,7 @@ impl SymbolTable {
             frameworks: None,
             c_includes: None,
             c_sources: None,
-            c_libs: None,
+            c_libs: None, js_import: None,
         };
 
         self.add_symbol(symbol);

@@ -123,6 +123,9 @@ pub struct HirToMirContext<'a> {
     /// Current HIR module being processed
     current_module: Option<String>,
 
+    /// Current class being processed (for @:jsImport propagation to methods)
+    current_class_symbol: Option<SymbolId>,
+
     /// Error accumulator
     errors: Vec<LoweringError>,
 
@@ -554,6 +557,7 @@ impl<'a> HirToMirContext<'a> {
             block_map: BTreeMap::new(),
             loop_stack: Vec::new(),
             current_module: Some(module_name),
+            current_class_symbol: None,
             errors: Vec::new(),
             diagnostics: Vec::new(),
             ssa_hints: SsaOptimizationHints::default(),
@@ -2245,6 +2249,7 @@ impl<'a> HirToMirContext<'a> {
                     //     "DEBUG Pass1a: Registering methods for class {:?}",
                     //     self.string_interner.get(class.name).unwrap_or("<unknown>")
                     // );
+                    self.current_class_symbol = Some(class.symbol_id);
                     for method in &class.methods {
                         let this_type = if !method.is_static {
                             Some(*type_id)
@@ -2654,6 +2659,9 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Propagate @:jsImport
+        self.propagate_js_import(symbol_id, func_id, this_type);
+
         self.builder.finish_function(); // Close to allow next function to start
     }
 
@@ -2753,6 +2761,9 @@ impl<'a> HirToMirContext<'a> {
                 func.attributes.inline = super::InlineHint::Always;
             }
         }
+
+        // Propagate @:jsImport (same as register_function_signature)
+        self.propagate_js_import(symbol_id, func_id, this_type);
 
         self.builder.finish_function();
     }
@@ -2996,6 +3007,47 @@ impl<'a> HirToMirContext<'a> {
             if should_export {
                 if let Some(func_mut) = self.builder.module.functions.get_mut(&func_id) {
                     func_mut.wasm_export = true;
+                }
+            }
+        }
+
+        // Propagate @:jsImport from symbol or owning class to MIR function.
+        // Method-level @:jsImport("mod", "func") takes precedence.
+        // Class-level @:jsImport("mod") + method @:native("func-name") also works.
+        {
+            let mut js_mod: Option<String> = None;
+            let mut js_func: Option<String> = None;
+
+            // Check method's own @:jsImport
+            if let Some(sym) = self.symbol_table.get_symbol(symbol_id) {
+                if let Some((module_is, func_is)) = sym.js_import {
+                    js_mod = Some(self.string_interner.get(module_is).unwrap_or("").to_string());
+                    js_func = Some(self.string_interner.get(func_is).unwrap_or("").to_string());
+                }
+            }
+
+            // Check owning class for @:jsImport (via this_type or class_symbol)
+            if js_mod.is_none() {
+                let class_sym_id = class_symbol
+                    .or_else(|| {
+                        this_type.and_then(|t| self.class_type_to_symbol.get(&t).copied())
+                    });
+                if let Some(csid) = class_sym_id {
+                    if let Some(class_sym) = self.symbol_table.get_symbol(csid) {
+                        if let Some((mod_is, _)) = class_sym.js_import {
+                            js_mod = Some(self.string_interner.get(mod_is).unwrap_or("").to_string());
+                            // Use the function's native name or bare name as import name
+                            if let Some(func_ref) = self.builder.module.functions.get(&func_id) {
+                                js_func = Some(func_ref.name.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let (Some(module), Some(func_name)) = (js_mod, js_func) {
+                if let Some(func_mut) = self.builder.module.functions.get_mut(&func_id) {
+                    func_mut.js_import = Some((module, func_name));
                 }
             }
         }
@@ -6181,7 +6233,7 @@ impl<'a> HirToMirContext<'a> {
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
             type_param_tag_fixups: Vec::new(),
-            wasm_export: false,
+            wasm_export: false, js_import: None,
         };
 
         self.builder.module.functions.insert(func_id, function);
@@ -6372,7 +6424,7 @@ impl<'a> HirToMirContext<'a> {
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
             type_param_tag_fixups: Vec::new(),
-            wasm_export: false,
+            wasm_export: false, js_import: None,
         };
 
         // Add to both functions and extern_functions maps
@@ -30870,6 +30922,58 @@ impl<'a> HirToMirContext<'a> {
 
     /// Record which function parameters are constrained type parameters.
     /// Used at call sites to wrap class arguments in fat pointers.
+    /// Propagate @:jsImport metadata from symbol/owning class to MIR function.
+    fn propagate_js_import(
+        &mut self,
+        symbol_id: SymbolId,
+        func_id: IrFunctionId,
+        this_type: Option<TypeId>,
+    ) {
+        self.propagate_js_import_with_class(symbol_id, func_id, this_type, None);
+    }
+
+    fn propagate_js_import_with_class(
+        &mut self,
+        symbol_id: SymbolId,
+        func_id: IrFunctionId,
+        this_type: Option<TypeId>,
+        class_symbol: Option<SymbolId>,
+    ) {
+        let mut js_mod: Option<String> = None;
+        let mut js_func: Option<String> = None;
+
+        // Check method's own @:jsImport
+        if let Some(sym) = self.symbol_table.get_symbol(symbol_id) {
+            if let Some((mod_is, func_is)) = sym.js_import {
+                js_mod = Some(self.string_interner.get(mod_is).unwrap_or("").to_string());
+                js_func = Some(self.string_interner.get(func_is).unwrap_or("").to_string());
+            }
+        }
+
+        // Check owning class for @:jsImport (via this_type, explicit class_symbol, or current_class)
+        if js_mod.is_none() {
+            let csid = class_symbol
+                .or(self.current_class_symbol)
+                .or_else(|| this_type.and_then(|t| self.class_type_to_symbol.get(&t).copied()));
+            if let Some(csid) = csid {
+                if let Some(class_sym) = self.symbol_table.get_symbol(csid) {
+                    if let Some((mod_is, _)) = class_sym.js_import {
+                        js_mod = Some(self.string_interner.get(mod_is).unwrap_or("").to_string());
+                        if let Some(f) = self.builder.module.functions.get(&func_id) {
+                            js_func = Some(f.name.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if let (Some(module), Some(func_name)) = (js_mod, js_func) {
+            if let Some(func_mut) = self.builder.module.functions.get_mut(&func_id) {
+                func_mut.js_import = Some((module, func_name));
+            }
+        }
+    }
+
     fn record_constrained_params(
         &mut self,
         func_id: IrFunctionId,
