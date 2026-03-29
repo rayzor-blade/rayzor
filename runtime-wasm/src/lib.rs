@@ -1951,3 +1951,87 @@ pub extern "C" fn haxe_file_append(_path: i32, _data: i32) -> i32 {
 pub extern "C" fn haxe_file_update(_path: i32, _data: i32) -> i32 {
     0
 }
+
+// ============================================================================
+// Section 15 — Trace variants (trace int, trace float, trace bool)
+// ============================================================================
+
+/// Trace an f64 value to stdout: "trace: {value}\n"
+#[no_mangle]
+pub extern "C" fn haxe_trace_float(val: f64) {
+    unsafe {
+        let prefix = b"trace: ";
+        let mut buf = [0u8; 32];
+        let len = float_to_buf(val, &mut buf);
+        let nl = b"\n";
+
+        let mut iov = [0u8; 24]; // 3 iovecs * 8 bytes
+        let iov_ptr = iov.as_mut_ptr() as *mut u32;
+        // iov[0]: prefix
+        *iov_ptr = prefix.as_ptr() as u32;
+        *iov_ptr.add(1) = prefix.len() as u32;
+        // iov[1]: number
+        *iov_ptr.add(2) = buf.as_ptr() as u32;
+        *iov_ptr.add(3) = len as u32;
+        // iov[2]: newline
+        *iov_ptr.add(4) = nl.as_ptr() as u32;
+        *iov_ptr.add(5) = nl.len() as u32;
+
+        let mut nwritten: u32 = 0;
+        fd_write(1, iov.as_ptr() as i32, 3, &mut nwritten as *mut u32 as i32);
+    }
+}
+
+/// Trace an i32 value to stdout: "trace: {value}\n"
+#[no_mangle]
+pub extern "C" fn haxe_trace_int(val: i32) {
+    unsafe {
+        let prefix = b"trace: ";
+        let mut buf = [0u8; 12];
+        let num_bytes = int_to_buf(val, &mut buf);
+        let nl = b"\n";
+
+        let mut iov = [0u8; 24];
+        let iov_ptr = iov.as_mut_ptr() as *mut u32;
+        *iov_ptr = prefix.as_ptr() as u32;
+        *iov_ptr.add(1) = prefix.len() as u32;
+        *iov_ptr.add(2) = num_bytes.as_ptr() as u32;
+        *iov_ptr.add(3) = num_bytes.len() as u32;
+        *iov_ptr.add(4) = nl.as_ptr() as u32;
+        *iov_ptr.add(5) = nl.len() as u32;
+
+        let mut nwritten: u32 = 0;
+        fd_write(1, iov.as_ptr() as i32, 3, &mut nwritten as *mut u32 as i32);
+    }
+}
+
+/// Trace a bool value to stdout.
+#[no_mangle]
+pub extern "C" fn haxe_trace_bool(val: i32) {
+    let s: &[u8] = if val != 0 { b"trace: true\n" } else { b"trace: false\n" };
+    unsafe { wasi_write(1, s.as_ptr(), s.len()); }
+}
+
+// ============================================================================
+// Section 16 — Array get_ptr (returns pointer to element)
+// ============================================================================
+
+/// Get a pointer to the array element at index. Returns pointer as i32.
+/// This is used by the MIR for array[i] access on class/pointer types.
+#[no_mangle]
+pub extern "C" fn haxe_array_get_ptr(arr: i32, idx: i32) -> i32 {
+    if arr == 0 || idx < 0 {
+        return 0;
+    }
+    unsafe {
+        let (data_ptr, len, _, elem_size) = read_array(arr);
+        let index = idx as u32;
+        if index >= len {
+            return 0;
+        }
+        let es = if elem_size == 0 { 4 } else { elem_size };
+        (data_ptr + index * es) as i32
+    }
+}
+
+// int_to_buf already defined above in Section 8
