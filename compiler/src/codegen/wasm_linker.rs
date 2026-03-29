@@ -634,11 +634,14 @@ impl LinkerCtx {
         // --- Memory section ---
         let rt_mem = rt.memory.unwrap_or((256, None));
         let user_mem = user.memory.unwrap_or((256, None));
-        let merged_initial = rt_mem.0.max(user_mem.0);
+        // Ensure minimum 512 pages (32 MB) for heap room above data/stack sections.
+        // The runtime's __heap_base can be ~16 MB, so 256 pages (16 MB) leaves no heap.
+        let merged_initial = rt_mem.0.max(user_mem.0).max(512);
         let merged_maximum = match (rt_mem.1, user_mem.1) {
             (Some(a), Some(b)) => Some(a.max(b)),
             (Some(a), None) | (None, Some(a)) => Some(a),
-            (None, None) => None,
+            // Allow growth up to 1024 pages (64 MB) by default
+            (None, None) => Some(1024),
         };
         let mut mem_section = MemorySection::new();
         mem_section.memory(EncMemoryType {
