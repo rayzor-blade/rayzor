@@ -1,6 +1,7 @@
 //! WGSL shader module compilation.
 
 use super::GraphicsContext;
+#[cfg(feature = "native")]
 use rayzor_runtime::haxe_string::HaxeString;
 
 pub struct GraphicsShader {
@@ -9,6 +10,9 @@ pub struct GraphicsShader {
     pub fragment_entry: String,
 }
 
+// All FFI entry points below are native-only.
+// On wasm-host, wasm_exports.rs provides wasm-bindgen equivalents.
+#[cfg(feature = "native")]
 /// Helper: read a HaxeString* to a &str
 unsafe fn hs_to_str<'a>(hs: *const HaxeString) -> &'a str {
     if hs.is_null() || (*hs).ptr.is_null() || (*hs).len == 0 {

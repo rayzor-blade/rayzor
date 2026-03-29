@@ -218,6 +218,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_read_rgba(
 
 /// Haxe-friendly: read texture pixels into a HaxeBytes (RGBA8, 4 bytes per pixel).
 /// Returns null on failure.
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_texture_to_bytes(
     tex: *mut super::texture::GraphicsTexture,
@@ -247,6 +248,7 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_texture_to_bytes(
 
 /// Haxe-friendly: read texture pixels and save as PPM file.
 /// Accepts a HaxeString* path.
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_save_texture_ppm(
     ctx: *mut GraphicsContext,

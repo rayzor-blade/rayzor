@@ -1,6 +1,7 @@
 //! Render pipeline creation via builder pattern.
 
 use super::bind_group::GraphicsBindGroupLayout;
+#[cfg(feature = "native")]
 use super::shader::GraphicsShader;
 use super::types::*;
 use super::GraphicsContext;
@@ -12,7 +13,10 @@ pub struct GraphicsPipeline {
 /// Builder for constructing a RenderPipeline incrementally.
 /// Supports multiple color targets for MRT (Multiple Render Targets).
 pub struct PipelineBuilder {
+    #[cfg(feature = "native")]
     shader: Option<*const GraphicsShader>,
+    #[cfg(not(feature = "native"))]
+    shader: Option<()>, // placeholder — WASM pipeline uses wasm_exports.rs
     topology: wgpu::PrimitiveTopology,
     cull_mode: Option<wgpu::Face>,
     /// Color targets — supports MRT. First target set via setFormat(), additional via addColorTarget().
@@ -25,8 +29,11 @@ pub struct PipelineBuilder {
 }
 
 // ============================================================================
-// Extern "C" entry points
+// Extern "C" entry points (native only)
 // ============================================================================
+#[cfg(feature = "native")]
+mod native_ffi {
+use super::*;
 
 #[no_mangle]
 pub extern "C" fn rayzor_gpu_gfx_pipeline_begin() -> *mut PipelineBuilder {
@@ -43,6 +50,7 @@ pub extern "C" fn rayzor_gpu_gfx_pipeline_begin() -> *mut PipelineBuilder {
     }))
 }
 
+#[cfg(feature = "native")]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_set_shader(
     builder: *mut PipelineBuilder,
@@ -284,3 +292,6 @@ pub unsafe extern "C" fn rayzor_gpu_gfx_pipeline_destroy(pipeline: *mut Graphics
         drop(Box::from_raw(pipeline));
     }
 }
+} // mod native_ffi
+#[cfg(feature = "native")]
+pub use native_ffi::*;
