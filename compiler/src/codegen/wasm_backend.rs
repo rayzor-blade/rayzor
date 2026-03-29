@@ -1740,6 +1740,21 @@ impl<'a> FunctionLowerer<'a> {
 
     fn emit_cmp(&self, f: &mut Function, op: CompareOp, operand_ty: ValType) {
         match (op, operand_ty) {
+            // MIR uses Eq/Ne/Lt/Le/Gt/Ge for both int and float comparisons.
+            // When operand type is F64/F32, emit float comparison instructions.
+            (CompareOp::Eq, ValType::F64) | (CompareOp::FEq, ValType::F64) => { f.instruction(&Instruction::F64Eq); }
+            (CompareOp::Ne, ValType::F64) | (CompareOp::FNe, ValType::F64) => { f.instruction(&Instruction::F64Ne); }
+            (CompareOp::Lt, ValType::F64) | (CompareOp::FLt, ValType::F64) => { f.instruction(&Instruction::F64Lt); }
+            (CompareOp::Le, ValType::F64) | (CompareOp::FLe, ValType::F64) => { f.instruction(&Instruction::F64Le); }
+            (CompareOp::Gt, ValType::F64) | (CompareOp::FGt, ValType::F64) => { f.instruction(&Instruction::F64Gt); }
+            (CompareOp::Ge, ValType::F64) | (CompareOp::FGe, ValType::F64) => { f.instruction(&Instruction::F64Ge); }
+            (CompareOp::Eq, ValType::F32) | (CompareOp::FEq, ValType::F32) => { f.instruction(&Instruction::F32Eq); }
+            (CompareOp::Ne, ValType::F32) | (CompareOp::FNe, ValType::F32) => { f.instruction(&Instruction::F32Ne); }
+            (CompareOp::Lt, ValType::F32) | (CompareOp::FLt, ValType::F32) => { f.instruction(&Instruction::F32Lt); }
+            (CompareOp::Le, ValType::F32) | (CompareOp::FLe, ValType::F32) => { f.instruction(&Instruction::F32Le); }
+            (CompareOp::Gt, ValType::F32) | (CompareOp::FGt, ValType::F32) => { f.instruction(&Instruction::F32Gt); }
+            (CompareOp::Ge, ValType::F32) | (CompareOp::FGe, ValType::F32) => { f.instruction(&Instruction::F32Ge); }
+
             (CompareOp::Eq, ValType::I32) => { f.instruction(&Instruction::I32Eq); }
             (CompareOp::Ne, ValType::I32) => { f.instruction(&Instruction::I32Ne); }
             (CompareOp::Lt, ValType::I32) => { f.instruction(&Instruction::I32LtS); }
