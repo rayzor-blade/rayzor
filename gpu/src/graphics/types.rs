@@ -30,6 +30,20 @@ pub fn texture_format_to_int(fmt: wgpu::TextureFormat) -> i32 {
     }
 }
 
+pub fn int_to_texture_format(code: i32) -> wgpu::TextureFormat {
+    match code {
+        0 => wgpu::TextureFormat::Bgra8Unorm,
+        1 => wgpu::TextureFormat::Rgba8Unorm,
+        2 => wgpu::TextureFormat::Depth24PlusStencil8,
+        3 => wgpu::TextureFormat::Depth32Float,
+        4 => wgpu::TextureFormat::Rgba16Float,
+        5 => wgpu::TextureFormat::Rgba32Float,
+        6 => wgpu::TextureFormat::Bgra8UnormSrgb,
+        7 => wgpu::TextureFormat::Rgba8UnormSrgb,
+        _ => wgpu::TextureFormat::Bgra8Unorm,
+    }
+}
+
 pub fn primitive_topology_from_int(code: i32) -> wgpu::PrimitiveTopology {
     match code {
         0 => wgpu::PrimitiveTopology::TriangleList,

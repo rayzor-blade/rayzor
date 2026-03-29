@@ -11,7 +11,7 @@ default = ["native"]
 native = ["dep:rayzor-plugin", "dep:rayzor-runtime", "dep:libc"]
 metal-backend = ["dep:objc2", "dep:objc2-metal", "dep:objc2-foundation"]
 webgpu-backend = ["dep:wgpu", "dep:pollster", "dep:raw-window-handle"]
-wasm-host = ["dep:wgpu", "dep:wasm-bindgen", "dep:web-sys", "dep:wasm-bindgen-futures"]
+wasm-host = ["dep:wgpu", "dep:wasm-bindgen", "dep:web-sys", "dep:wasm-bindgen-futures", "dep:js-sys"]
 cuda-backend = []
 
 [dependencies]
@@ -36,5 +36,9 @@ raw-window-handle = { version = "0.6", optional = true }
 # WASM host (wasm-bindgen + web-sys for browser WebGPU)
 wasm-bindgen = { version = "0.2", optional = true }
 wasm-bindgen-futures = { version = "0.4", optional = true }
-web-sys = { version = "0.3", optional = true, features = ["HtmlCanvasElement", "Document", "Window", "Element"] }
+web-sys = { version = "0.3", optional = true, features = [
+    "HtmlCanvasElement", "Document", "Window", "Element", "Navigator",
+] }
+js-sys = { version = "0.3", optional = true }
+once_cell = "1"
 

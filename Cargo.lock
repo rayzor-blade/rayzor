@@ -2648,10 +2648,12 @@ dependencies = [
 name = "rayzor-gpu"
 version = "0.1.0"
 dependencies = [
+ "js-sys",
  "libc",
  "objc2",
  "objc2-foundation",
  "objc2-metal",
+ "once_cell",
  "pollster",
  "raw-window-handle",
  "rayzor-plugin",

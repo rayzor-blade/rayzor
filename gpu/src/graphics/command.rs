@@ -41,6 +41,94 @@ pub struct CommandRecorder {
     current_pass: Option<RecordedRenderPass>,
 }
 
+impl CommandRecorder {
+    pub fn new() -> Self {
+        Self {
+            passes: Vec::new(),
+            current_pass: None,
+        }
+    }
+
+    /// Submit all recorded passes to the GPU.
+    /// Replays color attachments + commands into real wgpu render passes.
+    pub unsafe fn submit(&mut self, device: &wgpu::Device, queue: &wgpu::Queue) {
+        if let Some(pass) = self.current_pass.take() {
+            self.passes.push(pass);
+        }
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("rayzor_submit"),
+        });
+
+        for recorded_pass in &self.passes {
+            let depth_attachment =
+                recorded_pass
+                    .depth_view
+                    .map(|dv| wgpu::RenderPassDepthStencilAttachment {
+                        view: &*dv,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    });
+
+            let color_attachments: Vec<Option<wgpu::RenderPassColorAttachment>> = recorded_pass
+                .color_attachments
+                .iter()
+                .map(|ca| {
+                    Some(wgpu::RenderPassColorAttachment {
+                        view: &*ca.view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: ca.load_op,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })
+                })
+                .collect();
+
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("rayzor_pass"),
+                    color_attachments: &color_attachments,
+                    depth_stencil_attachment: depth_attachment,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                });
+
+                for command in &recorded_pass.commands {
+                    match command {
+                        RenderCommand::SetPipeline(p) => pass.set_pipeline(&(**p).pipeline),
+                        RenderCommand::SetVertexBuffer(slot, buf) => {
+                            pass.set_vertex_buffer(*slot, (**buf).buffer.slice(..));
+                        }
+                        RenderCommand::SetIndexBuffer(buf, fmt) => {
+                            pass.set_index_buffer((**buf).buffer.slice(..), *fmt);
+                        }
+                        RenderCommand::SetBindGroup(idx, bg) => {
+                            pass.set_bind_group(*idx, Some(&(**bg).bind_group), &[]);
+                        }
+                        RenderCommand::Draw(vc, ic, _fv, _fi) => pass.draw(0..*vc, 0..*ic),
+                        RenderCommand::DrawIndexed(ic, inst, _fi, bv, _finst) => {
+                            pass.draw_indexed(0..*ic, *bv, 0..*inst);
+                        }
+                        RenderCommand::SetViewport(x, y, w, h, mind, maxd) => {
+                            pass.set_viewport(*x, *y, *w, *h, *mind, *maxd);
+                        }
+                        RenderCommand::SetScissor(x, y, w, h) => {
+                            pass.set_scissor_rect(*x, *y, *w, *h);
+                        }
+                    }
+                }
+            }
+        }
+
+        queue.submit(std::iter::once(encoder.finish()));
+        self.passes.clear();
+    }
+}
+
 // ============================================================================
 // Extern "C" entry points
 // ============================================================================
