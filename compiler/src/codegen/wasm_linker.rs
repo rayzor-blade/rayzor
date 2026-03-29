@@ -679,10 +679,11 @@ impl LinkerCtx {
         // --- Export section ---
         let mut export_section = ExportSection::new();
         export_section.export("memory", ExportKind::Memory, 0);
+        // Preserve ALL user exports (not just _start)
         for export in &user.exports {
-            if export.name == "_start" && export.kind == ExportItemKind::Func {
+            if export.kind == ExportItemKind::Func {
                 if let Some(&merged_idx) = self.user_func_remap.get(&export.index) {
-                    export_section.export("_start", ExportKind::Func, merged_idx);
+                    export_section.export(&export.name, ExportKind::Func, merged_idx);
                 }
             }
         }
