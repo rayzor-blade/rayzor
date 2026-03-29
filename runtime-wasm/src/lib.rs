@@ -455,18 +455,18 @@ pub extern "C" fn haxe_math_pow(x: f64, y: f64) -> f64 {
 }
 
 #[no_mangle]
-pub extern "C" fn haxe_math_floor(x: f64) -> i32 {
-    libm::floor(x) as i32
+pub extern "C" fn haxe_math_floor(x: f64) -> f64 {
+    libm::floor(x)
 }
 
 #[no_mangle]
-pub extern "C" fn haxe_math_ceil(x: f64) -> i32 {
-    libm::ceil(x) as i32
+pub extern "C" fn haxe_math_ceil(x: f64) -> f64 {
+    libm::ceil(x)
 }
 
 #[no_mangle]
-pub extern "C" fn haxe_math_round(x: f64) -> i32 {
-    libm::round(x) as i32
+pub extern "C" fn haxe_math_round(x: f64) -> f64 {
+    libm::round(x)
 }
 
 #[no_mangle]
@@ -1960,25 +1960,11 @@ pub extern "C" fn haxe_file_update(_path: i32, _data: i32) -> i32 {
 #[no_mangle]
 pub extern "C" fn haxe_trace_float(val: f64) {
     unsafe {
-        let prefix = b"trace: ";
+        wasi_write(1, b"trace: ".as_ptr(), 7);
         let mut buf = [0u8; 32];
         let len = float_to_buf(val, &mut buf);
-        let nl = b"\n";
-
-        let mut iov = [0u8; 24]; // 3 iovecs * 8 bytes
-        let iov_ptr = iov.as_mut_ptr() as *mut u32;
-        // iov[0]: prefix
-        *iov_ptr = prefix.as_ptr() as u32;
-        *iov_ptr.add(1) = prefix.len() as u32;
-        // iov[1]: number
-        *iov_ptr.add(2) = buf.as_ptr() as u32;
-        *iov_ptr.add(3) = len as u32;
-        // iov[2]: newline
-        *iov_ptr.add(4) = nl.as_ptr() as u32;
-        *iov_ptr.add(5) = nl.len() as u32;
-
-        let mut nwritten: u32 = 0;
-        fd_write(1, iov.as_ptr() as i32, 3, &mut nwritten as *mut u32 as i32);
+        wasi_write(1, buf.as_ptr(), len);
+        wasi_write(1, b"\n".as_ptr(), 1);
     }
 }
 
@@ -1986,22 +1972,11 @@ pub extern "C" fn haxe_trace_float(val: f64) {
 #[no_mangle]
 pub extern "C" fn haxe_trace_int(val: i32) {
     unsafe {
-        let prefix = b"trace: ";
+        wasi_write(1, b"trace: ".as_ptr(), 7);
         let mut buf = [0u8; 12];
         let num_bytes = int_to_buf(val, &mut buf);
-        let nl = b"\n";
-
-        let mut iov = [0u8; 24];
-        let iov_ptr = iov.as_mut_ptr() as *mut u32;
-        *iov_ptr = prefix.as_ptr() as u32;
-        *iov_ptr.add(1) = prefix.len() as u32;
-        *iov_ptr.add(2) = num_bytes.as_ptr() as u32;
-        *iov_ptr.add(3) = num_bytes.len() as u32;
-        *iov_ptr.add(4) = nl.as_ptr() as u32;
-        *iov_ptr.add(5) = nl.len() as u32;
-
-        let mut nwritten: u32 = 0;
-        fd_write(1, iov.as_ptr() as i32, 3, &mut nwritten as *mut u32 as i32);
+        wasi_write(1, num_bytes.as_ptr(), num_bytes.len());
+        wasi_write(1, b"\n".as_ptr(), 1);
     }
 }
 
