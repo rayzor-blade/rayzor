@@ -186,6 +186,10 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
 
+        /// Generate browser HTML harness (for --target wasm)
+        #[arg(long)]
+        browser: bool,
+
         /// Target platform: native (default), wasm, wasm-wasi
         #[arg(long, default_value = "native")]
         target: String,
@@ -409,6 +413,10 @@ enum RpkgAction {
         #[arg(long, value_name = "ARCH")]
         arch: Vec<String>,
 
+        /// WASM component to embed (universal fallback for all platforms)
+        #[arg(long, value_name = "FILE")]
+        wasm: Option<PathBuf>,
+
         /// Directory containing .hx source files to bundle
         #[arg(long)]
         haxe_dir: PathBuf,
@@ -618,10 +626,11 @@ fn main() {
             strip,
             opt_level,
             dry_run,
+            browser,
             target,
         } => {
             if target == "wasm" || target == "wasm-wasi" || target == "wasm32" {
-                cmd_build_wasm(file, output, target)
+                cmd_build_wasm(file, output, target, browser)
             } else {
                 build_hxml(file, verbose, output, strip, opt_level, dry_run)
             }
@@ -723,10 +732,11 @@ fn main() {
                 dylib,
                 os,
                 arch,
+                wasm,
                 haxe_dir,
                 output,
                 name,
-            } => cmd_rpkg_pack(dylib, os, arch, haxe_dir, output, name),
+            } => cmd_rpkg_pack(dylib, os, arch, wasm, haxe_dir, output, name),
             RpkgAction::Inspect { file } => cmd_rpkg_inspect(file),
             RpkgAction::Install { file } => cmd_rpkg_install(file),
             RpkgAction::Add { name } => cmd_rpkg_add(name),
@@ -3025,6 +3035,7 @@ fn cmd_build_wasm(
     file: Option<PathBuf>,
     output: Option<PathBuf>,
     target: String,
+    browser: bool,
 ) -> Result<(), String> {
     let file = file.ok_or_else(|| "file path required for WASM build".to_string())?;
     let source = std::fs::read_to_string(&file)
@@ -3069,15 +3080,61 @@ fn cmd_build_wasm(
     std::fs::write(&js_path, &js_harness)
         .map_err(|e| format!("failed to write {}: {}", js_path.display(), e))?;
 
-    println!(
-        "  wrote {} ({:.1} KB)",
-        out_path.display(),
-        linked_wasm.len() as f64 / 1024.0,
-    );
-    if runtime_wasm_path.is_some() {
-        println!("\n  Run: wasmtime {}", out_path.display());
+    // Generate HTML if --browser
+    if browser {
+        let html_path = out_path.with_extension("html");
+        let js_name = js_path.file_name().unwrap().to_string_lossy();
+        let title = file.file_stem().unwrap().to_string_lossy();
+        let html = format!(
+            r#"<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>{title}</title>
+  <style>
+    body {{ font-family: monospace; background: #1a1a2e; color: #e0e0e0; padding: 20px; }}
+    #output {{ white-space: pre-wrap; background: #16213e; padding: 16px; border-radius: 8px; }}
+  </style>
+</head>
+<body>
+  <h2>{title}</h2>
+  <div id="output"></div>
+  <script>
+    // Redirect console.log to the page
+    const output = document.getElementById('output');
+    const origLog = console.log;
+    console.log = (...args) => {{
+      output.textContent += args.join(' ') + '\n';
+      origLog.apply(console, args);
+    }};
+  </script>
+  <script type="module" src="{js_name}"></script>
+</body>
+</html>"#,
+            title = title,
+            js_name = js_name,
+        );
+        std::fs::write(&html_path, &html)
+            .map_err(|e| format!("failed to write {}: {}", html_path.display(), e))?;
+        println!(
+            "  wrote {} ({:.1} KB)",
+            out_path.display(),
+            linked_wasm.len() as f64 / 1024.0,
+        );
+        println!("  wrote {}", js_path.display());
+        println!("  wrote {}", html_path.display());
+        println!("\n  Serve: npx serve . && open http://localhost:3000/{}", html_path.file_name().unwrap().to_string_lossy());
+    } else {
+        println!(
+            "  wrote {} ({:.1} KB)",
+            out_path.display(),
+            linked_wasm.len() as f64 / 1024.0,
+        );
+        if runtime_wasm_path.is_some() {
+            println!("\n  Run: wasmtime {}", out_path.display());
+        }
+        println!("  Run: node {}", js_path.display());
     }
-    println!("  Run: node {}", js_path.display());
 
     Ok(())
 }
@@ -3289,6 +3346,7 @@ fn cmd_rpkg_pack(
     dylibs: Vec<PathBuf>,
     os_tags: Vec<String>,
     arch_tags: Vec<String>,
+    wasm: Option<PathBuf>,
     haxe_dir: PathBuf,
     output: PathBuf,
     name: Option<String>,
@@ -3300,13 +3358,31 @@ fn cmd_rpkg_pack(
             .unwrap_or_else(|| "unnamed".to_string())
     });
 
-    if dylibs.is_empty() {
+    if dylibs.is_empty() && wasm.is_none() {
         println!(
             "Packing rpkg '{}' from {} (pure Haxe)",
             package_name,
             haxe_dir.display()
         );
         compiler::rpkg::pack::build_from_haxe_dir(&package_name, &haxe_dir, &output)?;
+    } else if dylibs.is_empty() && wasm.is_some() {
+        // WASM-only package (no native libs)
+        println!(
+            "Packing rpkg '{}' from {} + WASM component",
+            package_name,
+            haxe_dir.display()
+        );
+        let mut builder = compiler::rpkg::pack::RpkgBuilder::new(&package_name);
+        if haxe_dir.is_dir() {
+            compiler::rpkg::pack::collect_haxe_sources(&mut builder, &haxe_dir, &haxe_dir)?;
+        }
+        if let Some(wasm_path) = &wasm {
+            let wasm_bytes = std::fs::read(wasm_path)
+                .map_err(|e| format!("failed to read WASM: {}", e))?;
+            builder.add_wasm_component(&package_name, &wasm_bytes);
+            println!("  wasm: {} ({:.1} KB)", wasm_path.display(), wasm_bytes.len() as f64 / 1024.0);
+        }
+        builder.write(&output).map_err(|e| format!("failed to write rpkg: {}", e))?;
     } else {
         // Build platform entries: pair each dylib with its os/arch tag
         let current_os = if cfg!(target_os = "macos") {
