@@ -2707,9 +2707,13 @@ dependencies = [
 name = "rayzor-window"
 version = "0.1.0"
 dependencies = [
+ "js-sys",
  "libc",
+ "once_cell",
  "rayzor-plugin",
  "rayzor-runtime",
+ "wasm-bindgen",
+ "web-sys",
 ]
 
 [[package]]

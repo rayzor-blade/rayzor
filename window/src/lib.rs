@@ -8,6 +8,7 @@
 //! - Linux: dlopen("libX11.so") + X11
 //! - Windows: CreateWindowExW (user32.dll)
 
+#[cfg(feature = "native")]
 use std::ffi::c_void;
 
 pub mod event;
@@ -21,12 +22,20 @@ mod x11;
 #[cfg(target_os = "windows")]
 mod win32;
 
+#[cfg(feature = "wasm-host")]
+pub mod web;
+
+#[cfg(feature = "wasm-host")]
+pub mod wasm_exports;
+
+#[cfg(feature = "native")]
 use rayzor_runtime::haxe_string::HaxeString;
 
 // ============================================================================
-// NativeWindow — platform-agnostic wrapper
+// NativeWindow — platform-agnostic wrapper (native only)
 // ============================================================================
 
+#[cfg(feature = "native")]
 pub struct NativeWindow {
     #[cfg(target_os = "macos")]
     inner: cocoa::CocoaWindow,
@@ -36,6 +45,7 @@ pub struct NativeWindow {
     inner: win32::Win32Window,
 }
 
+#[cfg(feature = "native")]
 macro_rules! platform_create {
     ($method:ident, $($arg:expr),*) => {{
         #[cfg(target_os = "macos")]
@@ -50,402 +60,426 @@ macro_rules! platform_create {
 }
 
 // ============================================================================
-// Extern "C" entry points
+// Extern "C" entry points (native only)
 // ============================================================================
+#[cfg(feature = "native")]
+mod native_ffi {
+    use super::*;
+    use std::ffi::c_void;
 
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_create(
-    title: *const HaxeString,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    style: i32,
-) -> *mut NativeWindow {
-    let t = haxe_string_to_str(title);
-    platform_create!(create, &t, x, y, w, h, style)
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_create_centered(
-    title: *const HaxeString,
-    w: i32,
-    h: i32,
-) -> *mut NativeWindow {
-    let t = haxe_string_to_str(title);
-    platform_create!(create_centered, &t, w, h)
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_poll_events(win: *mut NativeWindow) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_create(
+        title: *const HaxeString,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        style: i32,
+    ) -> *mut NativeWindow {
+        let t = haxe_string_to_str(title);
+        platform_create!(create, &t, x, y, w, h, style)
     }
-    if (*win).inner.poll_events() {
-        1
-    } else {
-        0
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_create_centered(
+        title: *const HaxeString,
+        w: i32,
+        h: i32,
+    ) -> *mut NativeWindow {
+        let t = haxe_string_to_str(title);
+        platform_create!(create_centered, &t, w, h)
     }
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_is_key_down(win: *mut NativeWindow, key: i32) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_poll_events(win: *mut NativeWindow) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        if (*win).inner.poll_events() {
+            1
+        } else {
+            0
+        }
     }
-    if (*win).inner.is_key_down(key) {
-        1
-    } else {
-        0
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_is_key_down(win: *mut NativeWindow, key: i32) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        if (*win).inner.is_key_down(key) {
+            1
+        } else {
+            0
+        }
     }
-}
 
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_get_handle(win: *mut NativeWindow) -> *mut c_void {
-    if win.is_null() {
-        return std::ptr::null_mut();
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_get_handle(win: *mut NativeWindow) -> *mut c_void {
+        if win.is_null() {
+            return std::ptr::null_mut();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            (*win).inner.ns_view
+        }
+        #[cfg(target_os = "linux")]
+        {
+            (*win).inner.window as *mut c_void
+        }
+        #[cfg(target_os = "windows")]
+        {
+            (*win).inner.hwnd
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+        {
+            std::ptr::null_mut()
+        }
     }
-    #[cfg(target_os = "macos")]
-    {
-        (*win).inner.ns_view
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_get_display_handle(
+        win: *mut NativeWindow,
+    ) -> *mut c_void {
+        if win.is_null() {
+            return std::ptr::null_mut();
+        }
+        #[cfg(target_os = "linux")]
+        {
+            (*win).inner.display
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            std::ptr::null_mut()
+        }
     }
-    #[cfg(target_os = "linux")]
-    {
-        (*win).inner.window as *mut c_void
-    }
-    #[cfg(target_os = "windows")]
-    {
-        (*win).inner.hwnd
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        std::ptr::null_mut()
-    }
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_get_display_handle(win: *mut NativeWindow) -> *mut c_void {
-    if win.is_null() {
-        return std::ptr::null_mut();
-    }
-    #[cfg(target_os = "linux")]
-    {
-        (*win).inner.display
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        std::ptr::null_mut()
-    }
-}
 
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_get_width(win: *mut NativeWindow) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_get_width(win: *mut NativeWindow) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        (*win).inner.width as i32
     }
-    (*win).inner.width as i32
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_get_height(win: *mut NativeWindow) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_get_height(win: *mut NativeWindow) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        (*win).inner.height as i32
     }
-    (*win).inner.height as i32
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_get_x(win: *mut NativeWindow) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_get_x(win: *mut NativeWindow) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        (*win).inner.get_position().0
     }
-    (*win).inner.get_position().0
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_get_y(win: *mut NativeWindow) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_get_y(win: *mut NativeWindow) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        (*win).inner.get_position().1
     }
-    (*win).inner.get_position().1
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_was_resized(win: *mut NativeWindow) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_was_resized(win: *mut NativeWindow) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        if (*win).inner.resized {
+            1
+        } else {
+            0
+        }
     }
-    if (*win).inner.resized {
-        1
-    } else {
-        0
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_set_position(win: *mut NativeWindow, x: i32, y: i32) {
+        if !win.is_null() {
+            (*win).inner.set_position(x, y);
+        }
     }
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_set_position(win: *mut NativeWindow, x: i32, y: i32) {
-    if !win.is_null() {
-        (*win).inner.set_position(x, y);
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_set_size(win: *mut NativeWindow, w: i32, h: i32) {
+        if !win.is_null() {
+            (*win).inner.set_size(w, h);
+        }
     }
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_set_size(win: *mut NativeWindow, w: i32, h: i32) {
-    if !win.is_null() {
-        (*win).inner.set_size(w, h);
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_set_min_size(win: *mut NativeWindow, w: i32, h: i32) {
+        if !win.is_null() {
+            (*win).inner.set_min_size(w, h);
+        }
     }
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_set_min_size(win: *mut NativeWindow, w: i32, h: i32) {
-    if !win.is_null() {
-        (*win).inner.set_min_size(w, h);
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_set_max_size(win: *mut NativeWindow, w: i32, h: i32) {
+        if !win.is_null() {
+            (*win).inner.set_max_size(w, h);
+        }
     }
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_set_max_size(win: *mut NativeWindow, w: i32, h: i32) {
-    if !win.is_null() {
-        (*win).inner.set_max_size(w, h);
-    }
-}
 
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_set_title(win: *mut NativeWindow, title: *const HaxeString) {
-    if win.is_null() {
-        return;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_set_title(
+        win: *mut NativeWindow,
+        title: *const HaxeString,
+    ) {
+        if win.is_null() {
+            return;
+        }
+        let t = haxe_string_to_str(title);
+        (*win).inner.set_title(&t);
     }
-    let t = haxe_string_to_str(title);
-    (*win).inner.set_title(&t);
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_set_fullscreen(win: *mut NativeWindow, fs: i32) {
-    if !win.is_null() {
-        (*win).inner.set_fullscreen(fs != 0);
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_set_fullscreen(win: *mut NativeWindow, fs: i32) {
+        if !win.is_null() {
+            (*win).inner.set_fullscreen(fs != 0);
+        }
     }
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_set_visible(win: *mut NativeWindow, vis: i32) {
-    if !win.is_null() {
-        (*win).inner.set_visible(vis != 0);
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_set_visible(win: *mut NativeWindow, vis: i32) {
+        if !win.is_null() {
+            (*win).inner.set_visible(vis != 0);
+        }
     }
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_set_floating(win: *mut NativeWindow, on_top: i32) {
-    if !win.is_null() {
-        (*win).inner.set_floating(on_top != 0);
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_set_floating(win: *mut NativeWindow, on_top: i32) {
+        if !win.is_null() {
+            (*win).inner.set_floating(on_top != 0);
+        }
     }
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_set_opacity(win: *mut NativeWindow, opacity: f64) {
-    if !win.is_null() {
-        (*win).inner.set_opacity(opacity);
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_set_opacity(win: *mut NativeWindow, opacity: f64) {
+        if !win.is_null() {
+            (*win).inner.set_opacity(opacity);
+        }
     }
-}
 
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_is_fullscreen(win: *mut NativeWindow) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_is_fullscreen(win: *mut NativeWindow) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        if (*win).inner.is_fullscreen() {
+            1
+        } else {
+            0
+        }
     }
-    if (*win).inner.is_fullscreen() {
-        1
-    } else {
-        0
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_is_visible(win: *mut NativeWindow) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        if (*win).inner.is_visible() {
+            1
+        } else {
+            0
+        }
     }
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_is_visible(win: *mut NativeWindow) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_is_minimized(win: *mut NativeWindow) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        if (*win).inner.is_minimized() {
+            1
+        } else {
+            0
+        }
     }
-    if (*win).inner.is_visible() {
-        1
-    } else {
-        0
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_is_focused(win: *mut NativeWindow) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        if (*win).inner.is_focused() {
+            1
+        } else {
+            0
+        }
     }
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_is_minimized(win: *mut NativeWindow) -> i32 {
-    if win.is_null() {
-        return 0;
-    }
-    if (*win).inner.is_minimized() {
-        1
-    } else {
-        0
-    }
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_is_focused(win: *mut NativeWindow) -> i32 {
-    if win.is_null() {
-        return 0;
-    }
-    if (*win).inner.is_focused() {
-        1
-    } else {
-        0
-    }
-}
 
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_get_mouse_x(win: *mut NativeWindow) -> f64 {
-    if win.is_null() {
-        return 0.0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_get_mouse_x(win: *mut NativeWindow) -> f64 {
+        if win.is_null() {
+            return 0.0;
+        }
+        (*win).inner.get_mouse_x()
     }
-    (*win).inner.get_mouse_x()
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_get_mouse_y(win: *mut NativeWindow) -> f64 {
-    if win.is_null() {
-        return 0.0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_get_mouse_y(win: *mut NativeWindow) -> f64 {
+        if win.is_null() {
+            return 0.0;
+        }
+        (*win).inner.get_mouse_y()
     }
-    (*win).inner.get_mouse_y()
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_is_mouse_down(win: *mut NativeWindow, button: i32) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_is_mouse_down(
+        win: *mut NativeWindow,
+        button: i32,
+    ) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        if (*win).inner.is_mouse_down(button) {
+            1
+        } else {
+            0
+        }
     }
-    if (*win).inner.is_mouse_down(button) {
-        1
-    } else {
-        0
-    }
-}
 
-// --- Event Queue ---
+    // --- Event Queue ---
 
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_event_count(win: *mut NativeWindow) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_event_count(win: *mut NativeWindow) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        (*win).inner.events.len() as i32
     }
-    (*win).inner.events.len() as i32
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_event_type(win: *mut NativeWindow, index: i32) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_event_type(win: *mut NativeWindow, index: i32) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        (*win)
+            .inner
+            .events
+            .get(index as usize)
+            .map(|e| e.event_type)
+            .unwrap_or(0)
     }
-    (*win)
-        .inner
-        .events
-        .get(index as usize)
-        .map(|e| e.event_type)
-        .unwrap_or(0)
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_event_x(win: *mut NativeWindow, index: i32) -> f64 {
-    if win.is_null() {
-        return 0.0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_event_x(win: *mut NativeWindow, index: i32) -> f64 {
+        if win.is_null() {
+            return 0.0;
+        }
+        (*win)
+            .inner
+            .events
+            .get(index as usize)
+            .map(|e| e.x)
+            .unwrap_or(0.0)
     }
-    (*win)
-        .inner
-        .events
-        .get(index as usize)
-        .map(|e| e.x)
-        .unwrap_or(0.0)
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_event_y(win: *mut NativeWindow, index: i32) -> f64 {
-    if win.is_null() {
-        return 0.0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_event_y(win: *mut NativeWindow, index: i32) -> f64 {
+        if win.is_null() {
+            return 0.0;
+        }
+        (*win)
+            .inner
+            .events
+            .get(index as usize)
+            .map(|e| e.y)
+            .unwrap_or(0.0)
     }
-    (*win)
-        .inner
-        .events
-        .get(index as usize)
-        .map(|e| e.y)
-        .unwrap_or(0.0)
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_event_key(win: *mut NativeWindow, index: i32) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_event_key(win: *mut NativeWindow, index: i32) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        (*win)
+            .inner
+            .events
+            .get(index as usize)
+            .map(|e| e.key)
+            .unwrap_or(0)
     }
-    (*win)
-        .inner
-        .events
-        .get(index as usize)
-        .map(|e| e.key)
-        .unwrap_or(0)
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_event_button(win: *mut NativeWindow, index: i32) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_event_button(win: *mut NativeWindow, index: i32) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        (*win)
+            .inner
+            .events
+            .get(index as usize)
+            .map(|e| e.button)
+            .unwrap_or(0)
     }
-    (*win)
-        .inner
-        .events
-        .get(index as usize)
-        .map(|e| e.button)
-        .unwrap_or(0)
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_event_modifiers(win: *mut NativeWindow, index: i32) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_event_modifiers(
+        win: *mut NativeWindow,
+        index: i32,
+    ) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        (*win)
+            .inner
+            .events
+            .get(index as usize)
+            .map(|e| e.modifiers)
+            .unwrap_or(0)
     }
-    (*win)
-        .inner
-        .events
-        .get(index as usize)
-        .map(|e| e.modifiers)
-        .unwrap_or(0)
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_event_width(win: *mut NativeWindow, index: i32) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_event_width(win: *mut NativeWindow, index: i32) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        (*win)
+            .inner
+            .events
+            .get(index as usize)
+            .map(|e| e.width)
+            .unwrap_or(0)
     }
-    (*win)
-        .inner
-        .events
-        .get(index as usize)
-        .map(|e| e.width)
-        .unwrap_or(0)
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_event_height(win: *mut NativeWindow, index: i32) -> i32 {
-    if win.is_null() {
-        return 0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_event_height(win: *mut NativeWindow, index: i32) -> i32 {
+        if win.is_null() {
+            return 0;
+        }
+        (*win)
+            .inner
+            .events
+            .get(index as usize)
+            .map(|e| e.height)
+            .unwrap_or(0)
     }
-    (*win)
-        .inner
-        .events
-        .get(index as usize)
-        .map(|e| e.height)
-        .unwrap_or(0)
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_event_scroll_x(win: *mut NativeWindow, index: i32) -> f64 {
-    if win.is_null() {
-        return 0.0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_event_scroll_x(
+        win: *mut NativeWindow,
+        index: i32,
+    ) -> f64 {
+        if win.is_null() {
+            return 0.0;
+        }
+        (*win)
+            .inner
+            .events
+            .get(index as usize)
+            .map(|e| e.scroll_x)
+            .unwrap_or(0.0)
     }
-    (*win)
-        .inner
-        .events
-        .get(index as usize)
-        .map(|e| e.scroll_x)
-        .unwrap_or(0.0)
-}
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_event_scroll_y(win: *mut NativeWindow, index: i32) -> f64 {
-    if win.is_null() {
-        return 0.0;
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_event_scroll_y(
+        win: *mut NativeWindow,
+        index: i32,
+    ) -> f64 {
+        if win.is_null() {
+            return 0.0;
+        }
+        (*win)
+            .inner
+            .events
+            .get(index as usize)
+            .map(|e| e.scroll_y)
+            .unwrap_or(0.0)
     }
-    (*win)
-        .inner
-        .events
-        .get(index as usize)
-        .map(|e| e.scroll_y)
-        .unwrap_or(0.0)
-}
 
-// --- Cleanup ---
+    // --- Cleanup ---
 
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_window_destroy(win: *mut NativeWindow) {
-    if !win.is_null() {
-        (*win).inner.destroy();
-        drop(Box::from_raw(win));
+    #[no_mangle]
+    pub unsafe extern "C" fn rayzor_window_destroy(win: *mut NativeWindow) {
+        if !win.is_null() {
+            (*win).inner.destroy();
+            drop(Box::from_raw(win));
+        }
     }
-}
+} // mod native_ffi
+#[cfg(feature = "native")]
+pub use native_ffi::*;
 
 // ============================================================================
-// HaxeString helper
+// HaxeString helper (native only)
 // ============================================================================
-
+#[cfg(feature = "native")]
 unsafe fn haxe_string_to_str(s: *const HaxeString) -> String {
     if s.is_null() {
         return String::new();
@@ -459,8 +493,9 @@ unsafe fn haxe_string_to_str(s: *const HaxeString) -> String {
 }
 
 // ============================================================================
-// Plugin method table
+// Plugin method table (native only)
 // ============================================================================
+#[cfg(feature = "native")]
 
 rayzor_plugin::declare_native_methods! {
     RAYZOR_WINDOW_METHODS;
@@ -507,6 +542,7 @@ rayzor_plugin::declare_native_methods! {
     "rayzor_window_Window", "destroy",          instance, "rayzor_window_destroy",             [Ptr]           => Void;
 }
 
+#[cfg(feature = "native")]
 fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
     vec![
         ("rayzor_window_create", rayzor_window_create as *const u8),
@@ -651,4 +687,5 @@ fn get_runtime_symbols() -> Vec<(&'static str, *const u8)> {
     ]
 }
 
+#[cfg(feature = "native")]
 rayzor_plugin::rpkg_entry!(RAYZOR_WINDOW_METHODS, get_runtime_symbols);
