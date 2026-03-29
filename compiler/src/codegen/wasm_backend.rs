@@ -298,6 +298,10 @@ impl CompileCtx {
                 });
                 self.ir_func_to_idx.insert(*func_id, func_idx);
                 self.func_name_to_idx.insert(func.name.clone(), func_idx);
+                // Also register qualified name (ClassName.method)
+                if let Some(ref qn) = func.qualified_name {
+                    self.func_name_to_idx.insert(qn.clone(), func_idx);
+                }
                 // Store return type for CallDirect type inference
                 let ret_ty = ir_type_to_wasm(&func.signature.return_type);
                 self.func_return_types.insert(*func_id, ret_ty);
@@ -550,13 +554,20 @@ impl CompileCtx {
             }
         }
 
-        // Also auto-export functions with "export_" prefix
+        // Auto-export functions with "export_" prefix (strip prefix)
+        // AND functions marked with @:export (use qualified_name as ClassName_method)
         for module in modules {
             for (func_id, func) in &module.functions {
-                if func.name.starts_with("export_") {
-                    if let Some(&idx) = self.ir_func_to_idx.get(func_id) {
+                if let Some(&idx) = self.ir_func_to_idx.get(func_id) {
+                    if func.name.starts_with("export_") {
                         let export_name = &func.name["export_".len()..];
                         export_section.export(export_name, ExportKind::Func, idx);
+                    } else if func.wasm_export {
+                        // Use qualified_name (ClassName.method) → ClassName_method
+                        let export_name = func.qualified_name.as_deref()
+                            .unwrap_or(&func.name)
+                            .replace('.', "_");
+                        export_section.export(&export_name, ExportKind::Func, idx);
                     }
                 }
             }

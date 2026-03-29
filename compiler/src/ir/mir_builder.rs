@@ -894,7 +894,7 @@ impl<'a> FunctionBuilder<'a> {
             kind: FunctionKind::MirWrapper, // MIR builder creates stdlib wrapper functions
             source_location: IrSourceLocation::unknown(),
             next_reg_id,
-            type_param_tag_fixups: Vec::new(),
+            type_param_tag_fixups: Vec::new(), wasm_export: false,
         };
 
         self.builder.module.functions.insert(func_id, function);

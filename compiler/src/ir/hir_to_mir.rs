@@ -2969,6 +2969,33 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Check if the function or its owning class has @:export metadata.
+        // If so, mark the MIR function for WASM export.
+        {
+            let mut should_export = false;
+            // Check function's own symbol for @:export
+            if let Some(sym) = self.symbol_table.get_symbol(symbol_id) {
+                if sym.flags.is_wasm_export() {
+                    should_export = true;
+                }
+            }
+            // Check owning class for @:export
+            if let Some(class_type) = this_type {
+                if let Some(&class_sym_id) = self.class_type_to_symbol.get(&class_type) {
+                    if let Some(class_sym) = self.symbol_table.get_symbol(class_sym_id) {
+                        if class_sym.flags.is_wasm_export() {
+                            should_export = true;
+                        }
+                    }
+                }
+            }
+            if should_export {
+                if let Some(func_mut) = self.builder.module.functions.get_mut(&func_id) {
+                    func_mut.wasm_export = true;
+                }
+            }
+        }
+
         // Set source location from HIR function (propagated from TAST TypedFunction.source_location).
         {
             let loc = hir_func.source_location;
@@ -6134,7 +6161,7 @@ impl<'a> HirToMirContext<'a> {
             kind: FunctionKind::MirWrapper, // Stdlib MIR function
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
-            type_param_tag_fixups: Vec::new(),
+            type_param_tag_fixups: Vec::new(), wasm_export: false,
         };
 
         self.builder.module.functions.insert(func_id, function);
@@ -6324,7 +6351,7 @@ impl<'a> HirToMirContext<'a> {
             kind: crate::ir::functions::FunctionKind::ExternC, // Extern C function
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
-            type_param_tag_fixups: Vec::new(),
+            type_param_tag_fixups: Vec::new(), wasm_export: false,
         };
 
         // Add to both functions and extern_functions maps
