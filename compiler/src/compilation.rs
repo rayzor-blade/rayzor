@@ -2658,6 +2658,10 @@ impl CompilationUnit {
                 );
                 self.store_inline_vars(&inline_vars);
 
+                // Register extern class methods as plugin mappings so MIR lowerer
+                // can resolve them (same as rpkg NativePlugin does).
+                self.register_extern_methods_from_typed_file(&typed_file);
+
                 self.loaded_stdlib_typed_files.push(typed_file);
 
                 // Move the MIR from mir_modules to import_mir_modules.
@@ -5465,6 +5469,95 @@ impl CompilationUnit {
     /// These should be merged with runtime symbols when creating the backend.
     pub fn get_hdll_symbols(&self) -> &[(String, *const u8)] {
         &self.hdll_symbols
+    }
+
+    /// Register extern class methods from a TypedFile as plugin mappings.
+    ///
+    /// When an imported file contains an extern class (e.g., GPUDevice with @:native methods),
+    /// this extracts the method signatures and registers them as NativePlugin entries.
+    /// This makes them visible to the MIR lowerer's StdlibMapping, which otherwise only
+    /// knows about methods from rpkg NativePlugins.
+    fn register_extern_methods_from_typed_file(&mut self, typed_file: &TypedFile) {
+        use crate::compiler_plugin::NativePlugin;
+        use crate::rpkg::MethodDescEntry;
+
+        let mut entries: Vec<MethodDescEntry> = Vec::new();
+
+        for class in &typed_file.classes {
+            // Check if this is an extern class by looking up the symbol's flags
+            let is_extern = self
+                .symbol_table
+                .get_symbol(class.symbol_id)
+                .map(|s| {
+                    s.flags.contains(crate::tast::symbols::SymbolFlags::EXTERN)
+                        || s.flags.is_native()
+                })
+                .unwrap_or(false);
+
+            if !is_extern {
+                continue;
+            }
+
+            // Get the class's native name (from @:native metadata)
+            let class_native_name = self
+                .symbol_table
+                .get_symbol(class.symbol_id)
+                .and_then(|s| {
+                    s.native_name
+                        .and_then(|n| self.string_interner.get(n).map(|s| s.to_string()))
+                })
+                .or_else(|| {
+                    self.symbol_table.get_symbol(class.symbol_id).and_then(|s| {
+                        s.qualified_name
+                            .and_then(|n| self.string_interner.get(n).map(|s| s.to_string()))
+                    })
+                })
+                .unwrap_or_default();
+
+            if class_native_name.is_empty() {
+                continue;
+            }
+
+            // Extract method entries
+            for method in &class.methods {
+                let method_name = self
+                    .string_interner
+                    .get(method.name)
+                    .map(|s| s.to_string())
+                    .unwrap_or_default();
+                let symbol_name = self
+                    .symbol_table
+                    .get_symbol(method.symbol_id)
+                    .and_then(|s| {
+                        s.native_name
+                            .and_then(|n| self.string_interner.get(n).map(|s| s.to_string()))
+                    })
+                    .unwrap_or_else(|| method_name.clone());
+
+                if symbol_name.is_empty() {
+                    continue;
+                }
+
+                entries.push(MethodDescEntry {
+                    symbol_name,
+                    class_name: class_native_name.clone(),
+                    method_name,
+                    is_static: method.is_static,
+                    param_count: method.parameters.len() as u8
+                        + if method.is_static { 0 } else { 1 },
+                    return_type: 3, // Ptr (default for opaque handles)
+                    param_types: vec![
+                        3;
+                        method.parameters.len() + if method.is_static { 0 } else { 1 }
+                    ],
+                });
+            }
+        }
+
+        if !entries.is_empty() {
+            let plugin = NativePlugin::from_method_entries("extern_import", entries);
+            self.compiler_plugin_registry.register(Box::new(plugin));
+        }
     }
 
     /// Register an external compiler plugin.
