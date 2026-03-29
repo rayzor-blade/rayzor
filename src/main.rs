@@ -3238,8 +3238,8 @@ fn cmd_build_wasm(
             &core_wasm_filename,
         )
     } else {
-        // Fall back to basic JS harness
-        generate_wasm_js_harness(&core_wasm_filename)
+        // Fall back to basic JS harness (with host module auto-wiring)
+        generate_wasm_js_harness(&core_wasm_filename, &js_imports)
     };
     std::fs::write(&js_path, &js_content)
         .map_err(|e| format!("failed to write {}: {}", js_path.display(), e))?;
@@ -3356,7 +3356,226 @@ fn dirs_next() -> PathBuf {
         .unwrap_or_else(|_| PathBuf::from(".rayzor"))
 }
 
-fn generate_wasm_js_harness(wasm_filename: &str) -> String {
+/// Generate JS host module code for detected @:jsImport modules.
+/// Injects real WebGPU/DOM implementations into the rayzor import object.
+fn generate_host_module_code(
+    js_imports: &std::collections::BTreeMap<String, Vec<(String, String)>>,
+) -> String {
+    let mut code = String::new();
+
+    if js_imports.contains_key("rayzor-gpu") {
+        code.push_str(r#"
+// === rayzor-gpu host (WebGPU) ===
+(function() {
+  let _gpuDevice = null, _gpuQueue = null, _handles = new Map(), _nextH = 1;
+  const _alloc = (o) => { const h = _nextH++; _handles.set(h, o); return h; };
+  const _get = (h) => _handles.get(h) ?? null;
+  const _free = (h) => _handles.delete(h);
+
+  async function _initGpu() {
+    if (!navigator.gpu) return false;
+    try {
+      const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+      if (!adapter) return false;
+      _gpuDevice = await adapter.requestDevice();
+      _gpuQueue = _gpuDevice.queue;
+      return true;
+    } catch(e) { console.warn('[rayzor:gpu]', e); return false; }
+  }
+
+  // Device
+  rayzor['is-available'] = () => _gpuDevice ? 1 : 0;
+  rayzor['create-device'] = () => _gpuDevice ? _alloc({ type: 'device' }) : 0;
+  rayzor['destroy-device'] = (h) => _free(h);
+
+  // Surface (canvas)
+  rayzor['create-surface-canvas'] = (_dev, _id, w, h) => {
+    let canvas = document.querySelector('canvas');
+    if (!canvas) {
+      canvas = document.createElement('canvas');
+      canvas.id = 'rayzor-canvas';
+      canvas.style.cssText = 'display:block;margin:0 auto;background:#0d0d1a;';
+      document.body.appendChild(canvas);
+    }
+    canvas.width = w || 800; canvas.height = h || 600;
+    if (!_gpuDevice) return 0;
+    const ctx = canvas.getContext('webgpu');
+    if (!ctx) return 0;
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    ctx.configure({ device: _gpuDevice, format, alphaMode: 'premultiplied' });
+    return _alloc({ type: 'surface', canvas, ctx, format });
+  };
+  rayzor['surface-get-texture'] = (sh) => {
+    const s = _get(sh); if (!s?.ctx) return 0;
+    try {
+      const tex = s.ctx.getCurrentTexture();
+      s._frame = tex;
+      return _alloc({ type: 'view', view: tex.createView() });
+    } catch(e) { return 0; }
+  };
+  rayzor['surface-present'] = (sh) => { const s = _get(sh); if (s) s._frame = null; };
+  rayzor['surface-resize'] = (sh, _d, w, h) => {
+    const s = _get(sh); if (!s) return;
+    s.canvas.width = w; s.canvas.height = h;
+    if (_gpuDevice) s.ctx.configure({ device: _gpuDevice, format: s.format, alphaMode: 'premultiplied' });
+  };
+  rayzor['surface-get-format'] = (sh) => { const s = _get(sh); return s?.format?.includes('srgb') ? 7 : 1; };
+  rayzor['surface-destroy'] = (h) => _free(h);
+
+  // Shader
+  rayzor['create-shader'] = (_d, wgslPtr, vsPtr, fsPtr) => {
+    if (!_gpuDevice) return 0;
+    const wgsl = readString(wgslPtr);
+    if (!wgsl) return 0;
+    try {
+      const module = _gpuDevice.createShaderModule({ code: wgsl });
+      const vs = readString(vsPtr) || 'vs_main';
+      const fs = readString(fsPtr) || 'fs_main';
+      return _alloc({ type: 'shader', module, vs, fs });
+    } catch(e) { console.error('[rayzor:gpu] shader:', e); return 0; }
+  };
+  rayzor['destroy-shader'] = (h) => _free(h);
+
+  // Pipeline
+  rayzor['pipeline-begin'] = () => _alloc({ type: 'pipe', shader: null, format: 'bgra8unorm', topo: 'triangle-list', cull: 'none' });
+  rayzor['pipeline-set-shader'] = (p, s) => { const pb = _get(p), sh = _get(s); if (pb && sh) pb.shader = sh; };
+  rayzor['pipeline-set-format'] = (p, f) => { const pb = _get(p); if (pb) pb.format = ['bgra8unorm','rgba8unorm','depth24plus-stencil8','depth32float','rgba16float','rgba32float','bgra8unorm-srgb','rgba8unorm-srgb'][f] || 'bgra8unorm'; };
+  rayzor['pipeline-set-topology'] = (p, t) => { const pb = _get(p); if (pb) pb.topo = ['triangle-list','triangle-strip','line-list','line-strip','point-list'][t] || 'triangle-list'; };
+  rayzor['pipeline-set-cull'] = (p, c) => { const pb = _get(p); if (pb) pb.cull = ['none','front','back'][c] || 'none'; };
+  rayzor['pipeline-build'] = (p, _d) => {
+    const pb = _get(p); if (!pb?.shader?.module || !_gpuDevice) return 0;
+    try {
+      const pipeline = _gpuDevice.createRenderPipeline({
+        layout: 'auto',
+        vertex: { module: pb.shader.module, entryPoint: pb.shader.vs },
+        fragment: { module: pb.shader.module, entryPoint: pb.shader.fs, targets: [{ format: pb.format }] },
+        primitive: { topology: pb.topo, cullMode: pb.cull },
+      });
+      _free(p);
+      return _alloc({ type: 'pipeline', pipeline });
+    } catch(e) { console.error('[rayzor:gpu] pipeline:', e); return 0; }
+  };
+  rayzor['pipeline-destroy'] = (h) => _free(h);
+
+  // Command encoder
+  rayzor['cmd-create'] = () => {
+    if (!_gpuDevice) return 0;
+    return _alloc({ type: 'cmd', encoder: _gpuDevice.createCommandEncoder(), pass: null });
+  };
+  rayzor['cmd-begin-pass'] = (ch, vh, loadOp, r, g, b, a, _dv) => {
+    const cmd = _get(ch), v = _get(vh); if (!cmd?.encoder || !v?.view) return;
+    cmd.pass = cmd.encoder.beginRenderPass({
+      colorAttachments: [{ view: v.view, loadOp: loadOp === 0 ? 'clear' : 'load', storeOp: 'store', clearValue: { r, g, b, a } }],
+    });
+  };
+  rayzor['cmd-set-pipeline'] = (ch, ph) => { const c = _get(ch), p = _get(ph); if (c?.pass && p?.pipeline) c.pass.setPipeline(p.pipeline); };
+  rayzor['cmd-draw'] = (ch, vc, ic, fv, fi) => { const c = _get(ch); if (c?.pass) c.pass.draw(vc, ic, fv, fi); };
+  rayzor['cmd-end-pass'] = (ch) => { const c = _get(ch); if (c?.pass) { c.pass.end(); c.pass = null; } };
+  rayzor['cmd-submit'] = (ch, _d) => {
+    const c = _get(ch); if (!c?.encoder || !_gpuDevice) return;
+    _gpuQueue.submit([c.encoder.finish()]);
+    c.encoder = _gpuDevice.createCommandEncoder();
+  };
+  rayzor['cmd-destroy'] = (h) => _free(h);
+
+  // Register GPU init — called automatically before WASM starts
+  if (typeof window !== 'undefined') window.__rayzorHostInits.push(_initGpu);
+})();
+"#);
+    }
+
+    if js_imports.contains_key("rayzor-window") {
+        code.push_str(r#"
+// === rayzor-window host (DOM canvas + events) ===
+(function() {
+  let _wins = new Map(), _nextW = 1;
+  const KEY_MAP = {};
+  'Escape:256,Enter:257,Tab:258,Backspace:259,Delete:261,ArrowRight:262,ArrowLeft:263,ArrowDown:264,ArrowUp:265,Space:32,ShiftLeft:340,ShiftRight:340,ControlLeft:341,ControlRight:341,AltLeft:342,AltRight:342,MetaLeft:343,MetaRight:343'.split(',').forEach(s => { const [k,v] = s.split(':'); KEY_MAP[k] = +v; });
+  for (let i = 0; i < 26; i++) KEY_MAP['Key' + String.fromCharCode(65+i)] = 65+i;
+  for (let i = 0; i < 10; i++) KEY_MAP['Digit'+i] = 48+i;
+  for (let i = 1; i <= 12; i++) KEY_MAP['F'+i] = 289+i;
+
+  rayzor['create-centered'] = (_t, w, h) => {
+    let canvas = document.querySelector('canvas') || (() => {
+      const c = document.createElement('canvas');
+      c.id = 'rayzor-window';
+      c.style.cssText = 'display:block;margin:0 auto;background:#0d0d1a;';
+      document.body.appendChild(c); return c;
+    })();
+    canvas.width = w || 800; canvas.height = h || 600;
+    canvas.tabIndex = 0; canvas.focus();
+    const win = { canvas, w: canvas.width, h: canvas.height, mx: 0, my: 0, keys: new Set(), btns: new Set(), events: [], open: true, resized: false };
+    canvas.addEventListener('mousemove', e => { const r = canvas.getBoundingClientRect(); win.mx = e.clientX-r.left; win.my = e.clientY-r.top; });
+    canvas.addEventListener('mousedown', e => win.btns.add(e.button));
+    canvas.addEventListener('mouseup', e => win.btns.delete(e.button));
+    document.addEventListener('keydown', e => { const k = KEY_MAP[e.code]||0; win.keys.add(k); if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Tab'].includes(e.key)) e.preventDefault(); });
+    document.addEventListener('keyup', e => { const k = KEY_MAP[e.code]||0; win.keys.delete(k); });
+    const wh = _nextW++; _wins.set(wh, win); return wh;
+  };
+  rayzor['create'] = (_t, _x, _y, w, h, _s) => rayzor['create-centered'](_t, w, h);
+  rayzor['poll-events'] = (wh) => { const w = _wins.get(wh); if (!w) return 0; w.events = []; w.resized = false; return w.open ? 1 : 0; };
+  rayzor['is-key-down'] = (wh, k) => _wins.get(wh)?.keys.has(k) ? 1 : 0;
+  rayzor['get-width'] = (wh) => _wins.get(wh)?.w ?? 0;
+  rayzor['get-height'] = (wh) => _wins.get(wh)?.h ?? 0;
+  rayzor['get-x'] = () => 0;
+  rayzor['get-y'] = () => 0;
+  rayzor['was-resized'] = (wh) => _wins.get(wh)?.resized ? 1 : 0;
+  rayzor['get-handle'] = (wh) => wh;
+  rayzor['get-display-handle'] = () => 0;
+  rayzor['set-title'] = (_wh, ptr) => { try { document.title = readString(ptr); } catch(e) {} };
+  rayzor['set-size'] = (wh, w, h) => { const win = _wins.get(wh); if (win) { win.canvas.width = w; win.canvas.height = h; win.w = w; win.h = h; } };
+  rayzor['set-fullscreen'] = (wh) => { _wins.get(wh)?.canvas.requestFullscreen?.(); };
+  rayzor['set-visible'] = (wh, v) => { const win = _wins.get(wh); if (win) win.canvas.style.display = v ? 'block' : 'none'; };
+  rayzor['set-floating'] = () => {};
+  rayzor['set-opacity'] = (wh, o) => { const win = _wins.get(wh); if (win) win.canvas.style.opacity = ''+o; };
+  rayzor['set-position'] = () => {};
+  rayzor['set-min-size'] = () => {};
+  rayzor['set-max-size'] = () => {};
+  rayzor['is-fullscreen'] = () => document.fullscreenElement ? 1 : 0;
+  rayzor['is-visible'] = () => 1;
+  rayzor['is-minimized'] = () => document.hidden ? 1 : 0;
+  rayzor['is-focused'] = () => 1;
+  rayzor['get-mouse-x'] = (wh) => _wins.get(wh)?.mx ?? 0;
+  rayzor['get-mouse-y'] = (wh) => _wins.get(wh)?.my ?? 0;
+  rayzor['is-mouse-down'] = (wh, b) => _wins.get(wh)?.btns.has(b) ? 1 : 0;
+  rayzor['event-count'] = () => 0;
+  rayzor['event-type'] = () => 0;
+  rayzor['event-x'] = () => 0;
+  rayzor['event-y'] = () => 0;
+  rayzor['event-key'] = () => 0;
+  rayzor['event-button'] = () => 0;
+  rayzor['event-modifiers'] = () => 0;
+  rayzor['event-width'] = () => 0;
+  rayzor['event-height'] = () => 0;
+  rayzor['event-scroll-x'] = () => 0;
+  rayzor['event-scroll-y'] = () => 0;
+  rayzor['run-loop'] = (wh, cbPtr) => {
+    // requestAnimationFrame loop — calls back into WASM each frame
+    const win = _wins.get(wh);
+    if (!win) return;
+    function frame() {
+      win.events = []; win.resized = false;
+      // Call the WASM callback via table
+      const cb = instance.exports.__indirect_function_table?.get(cbPtr);
+      const shouldContinue = cb ? cb() : 0;
+      if (shouldContinue && win.open) requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  };
+  rayzor['destroy'] = (wh) => _wins.delete(wh);
+})();
+"#);
+    }
+
+    code
+}
+
+fn generate_wasm_js_harness(
+    wasm_filename: &str,
+    js_imports: &std::collections::BTreeMap<String, Vec<(String, String)>>,
+) -> String {
+    // Generate host module code for detected @:jsImport modules
+    let host_code = generate_host_module_code(js_imports);
     format!(
         r#"// Rayzor WASM Runtime Harness
 // Generated by `rayzor build --target wasm`
@@ -3449,6 +3668,12 @@ const rayzor = {{
   haxe_math_abs: (x) => Math.abs(x),
   haxe_math_random: () => Math.random(),
 }};
+
+// Host module init registry — each host pushes its async init function
+if (typeof window !== 'undefined') window.__rayzorHostInits = window.__rayzorHostInits || [];
+
+// Auto-wired host modules from @:jsImport detection
+{host_code}
 
 // Proxy: any missing import returns a no-op function
 const rayzorProxy = new Proxy(rayzor, {{
@@ -3555,6 +3780,11 @@ async function run() {{
 
   memory = instance.exports.memory;
 
+  // Initialize all registered host modules before WASM starts
+  if (typeof window !== 'undefined' && window.__rayzorHostInits) {{
+    for (const init of window.__rayzorHostInits) await init();
+  }}
+
   if (instance.exports._start) {{
     instance.exports._start();
   }} else {{
@@ -3564,7 +3794,8 @@ async function run() {{
 
 run().catch(e => {{ console.error("WASM error:", e); if (typeof process !== "undefined") process.exitCode = 1; }});
 "#,
-        filename = wasm_filename
+        filename = wasm_filename,
+        host_code = host_code
     )
 }
 

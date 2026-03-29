@@ -90,6 +90,12 @@ const rayzor = {
   haxe_math_random: () => Math.random(),
 };
 
+// Host module init registry — each host pushes its async init function
+if (typeof window !== 'undefined') window.__rayzorHostInits = window.__rayzorHostInits || [];
+
+// Auto-wired host modules from @:jsImport detection
+
+
 // Proxy: any missing import returns a no-op function
 const rayzorProxy = new Proxy(rayzor, {
   get(target, prop) {
@@ -194,6 +200,11 @@ async function run() {
   });
 
   memory = instance.exports.memory;
+
+  // Initialize all registered host modules before WASM starts
+  if (typeof window !== 'undefined' && window.__rayzorHostInits) {
+    for (const init of window.__rayzorHostInits) await init();
+  }
 
   if (instance.exports._start) {
     instance.exports._start();
