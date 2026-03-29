@@ -86,6 +86,10 @@ enum Commands {
         #[arg(short, long)]
         interactive: bool,
 
+        /// Run in WASM sandbox (compile to WASM, execute via embedded wasmtime)
+        #[arg(long)]
+        wasm: bool,
+
         /// Arguments to pass to the Haxe program (after --)
         #[arg(last = true)]
         program_args: Vec<String>,
@@ -563,22 +567,29 @@ fn main() {
             rpkg_files,
             safety_warnings,
             interactive,
+            wasm,
             program_args,
-        } => run_file(
-            file,
-            verbose,
-            stats,
-            tier,
-            llvm,
-            preset,
-            !no_cache,
-            cache_dir,
-            release,
-            rpkg_files,
-            safety_warnings != "off",
-            interactive,
-            program_args,
-        ),
+        } => {
+            if wasm {
+                cmd_run_wasm(file, rpkg_files, safety_warnings != "off")
+            } else {
+                run_file(
+                    file,
+                    verbose,
+                    stats,
+                    tier,
+                    llvm,
+                    preset,
+                    !no_cache,
+                    cache_dir,
+                    release,
+                    rpkg_files,
+                    safety_warnings != "off",
+                    interactive,
+                    program_args,
+                )
+            }
+        }
         Commands::Jit {
             file,
             tier,
@@ -2968,6 +2979,47 @@ fn cmd_dump(
 // ---------------------------------------------------------------------------
 // build command (AOT compilation to WASM, C, etc.)
 // ---------------------------------------------------------------------------
+
+fn cmd_run_wasm(
+    file: Option<PathBuf>,
+    rpkg_files: Vec<PathBuf>,
+    safety_warnings: bool,
+) -> Result<(), String> {
+    let file = file.ok_or_else(|| "file path required for --wasm".to_string())?;
+    let source = std::fs::read_to_string(&file)
+        .map_err(|e| format!("failed to read {}: {}", file.display(), e))?;
+
+    eprintln!("Compiling {} [wasm]...", file.display());
+
+    // Compile Haxe → MIR → WASM
+    let (mir_module, _diagnostics) = compile_haxe_to_mir(
+        &source,
+        file.to_str().unwrap_or("unknown"),
+        Vec::new(),
+        &[],
+        safety_warnings,
+    )?;
+
+    let user_wasm = compiler::codegen::wasm_backend::WasmBackend::compile(
+        &[&mir_module],
+        Some("main"),
+    )?;
+
+    // Link with runtime
+    let runtime_path = find_wasm_runtime();
+    let linked_wasm = if let Some(rt_path) = &runtime_path {
+        let rt_bytes = std::fs::read(rt_path)
+            .map_err(|e| format!("failed to read runtime: {}", e))?;
+        compiler::codegen::wasm_linker::WasmLinker::link(&user_wasm, &rt_bytes)?
+    } else {
+        user_wasm
+    };
+
+    eprintln!("Running ({:.1} KB)...", linked_wasm.len() as f64 / 1024.0);
+
+    // Execute via embedded wasmtime
+    compiler::codegen::wasm_runner::run_wasm(&linked_wasm)
+}
 
 fn cmd_build_wasm(
     file: Option<PathBuf>,
