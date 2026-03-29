@@ -674,6 +674,7 @@ impl<'a> AstLowering<'a> {
                 "no_mangle" => flags = flags.union(SymbolFlags::NO_MANGLE),
                 "notNull" => flags = flags.union(SymbolFlags::NOT_NULL),
                 "async" => flags = flags.union(SymbolFlags::ASYNC),
+                "export" => flags = flags.union(SymbolFlags::WASM_EXPORT),
                 "frameworks" | "cInclude" | "cSource" | "clib" => {
                     // @:frameworks(["Accelerate"]), @:cInclude(["vendor/stb"]), @:cSource(["lib.c"])
                     if let Some(first_param) = meta.params.first() {

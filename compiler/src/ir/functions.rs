@@ -56,6 +56,11 @@ pub struct IrFunction {
     /// based on the concrete type that the type parameter resolves to.
     #[serde(default)]
     pub type_param_tag_fixups: Vec<(IrId, String)>,
+
+    /// Whether this function should be exported from WASM (@:export metadata).
+    /// When true, the WASM backend exports it with its qualified_name.
+    #[serde(default)]
+    pub wasm_export: bool,
 }
 
 /// Unique identifier for functions
@@ -243,7 +248,7 @@ impl IrFunction {
             kind: FunctionKind::UserDefined,
             source_location: IrSourceLocation::unknown(),
             next_reg_id: 0,
-            type_param_tag_fixups: Vec::new(),
+            type_param_tag_fixups: Vec::new(), wasm_export: false,
         };
 
         // Allocate registers for parameters and register their types

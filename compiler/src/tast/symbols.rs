@@ -329,6 +329,12 @@ impl SymbolFlags {
     pub const ASYNC: Self = Self(1 << 19);
     /// @:shader - class is a WGSL shader transpilation target
     pub const SHADER: Self = Self(1 << 20);
+    /// @:export - export class/function for WASM JS interop
+    pub const WASM_EXPORT: Self = Self(1 << 21);
+
+    pub const fn is_wasm_export(self) -> bool {
+        self.contains(Self::WASM_EXPORT)
+    }
 
     pub const fn empty() -> Self {
         Self::NONE

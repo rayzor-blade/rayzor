@@ -10,11 +10,19 @@ use super::{IrFunctionId, IrGlobalId};
 use std::collections::HashSet;
 
 fn is_keep_function(func: &crate::ir::functions::IrFunction) -> bool {
-    func.attributes
-        .custom
-        .get("keep")
-        .map(|v| v == "true")
-        .unwrap_or(false)
+    // @:keep attribute
+    if func.attributes.custom.get("keep").map(|v| v == "true").unwrap_or(false) {
+        return true;
+    }
+    // @:export — WASM exports must survive DCE
+    if func.wasm_export {
+        return true;
+    }
+    // export_ prefix convention
+    if func.name.starts_with("export_") {
+        return true;
+    }
+    false
 }
 
 fn is_startup_function(func: &crate::ir::functions::IrFunction) -> bool {
