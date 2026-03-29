@@ -717,11 +717,14 @@ impl<'a> AstLowering<'a> {
                 "jsMethod" => {
                     // @:jsMethod("function-name") on a method in a @:jsImport class.
                     // Sets the JS function name within the class's module.
-                    // The module is inherited from the owning class's @:jsImport.
+                    // Also marks as native so the method is resolvable by the compiler.
+                    flags = flags.union(SymbolFlags::NATIVE);
                     if let Some(first_param) = meta.params.first() {
                         if let parser::haxe_ast::ExprKind::String(func_name) = &first_param.kind {
                             let func_interned = self.context.string_interner.intern(func_name);
                             if let Some(sym) = self.context.symbol_table.get_symbol_mut(symbol_id) {
+                                // Set native name for extern method resolution
+                                sym.native_name = Some(func_interned);
                                 // Store function name with a placeholder module —
                                 // propagate_js_import will fill in the real module from the class.
                                 let placeholder =
@@ -733,7 +736,7 @@ impl<'a> AstLowering<'a> {
                 }
                 "jsFunction" => {
                     // @:jsFunction("module", "function") on a standalone extern function.
-                    // Sets both the JS module and function name directly.
+                    flags = flags.union(SymbolFlags::NATIVE);
                     if meta.params.len() >= 2 {
                         if let (
                             parser::haxe_ast::ExprKind::String(module_name),
@@ -743,6 +746,7 @@ impl<'a> AstLowering<'a> {
                             let module_interned = self.context.string_interner.intern(module_name);
                             let func_interned = self.context.string_interner.intern(func_name);
                             if let Some(sym) = self.context.symbol_table.get_symbol_mut(symbol_id) {
+                                sym.native_name = Some(func_interned);
                                 sym.js_import = Some((module_interned, func_interned));
                             }
                         }
@@ -750,12 +754,13 @@ impl<'a> AstLowering<'a> {
                 }
                 "jsGet" => {
                     // @:jsGet("property") on a field getter — maps to JS property read.
-                    // Generates: module.get-property(handle) → value
+                    flags = flags.union(SymbolFlags::NATIVE);
                     if let Some(first_param) = meta.params.first() {
                         if let parser::haxe_ast::ExprKind::String(prop_name) = &first_param.kind {
                             let getter_name = format!("get-{}", prop_name);
                             let func_interned = self.context.string_interner.intern(&getter_name);
                             if let Some(sym) = self.context.symbol_table.get_symbol_mut(symbol_id) {
+                                sym.native_name = Some(func_interned);
                                 let placeholder =
                                     self.context.string_interner.intern("__jsMethod__");
                                 sym.js_import = Some((placeholder, func_interned));
@@ -765,12 +770,13 @@ impl<'a> AstLowering<'a> {
                 }
                 "jsSet" => {
                     // @:jsSet("property") on a field setter — maps to JS property write.
-                    // Generates: module.set-property(handle, value) → void
+                    flags = flags.union(SymbolFlags::NATIVE);
                     if let Some(first_param) = meta.params.first() {
                         if let parser::haxe_ast::ExprKind::String(prop_name) = &first_param.kind {
                             let setter_name = format!("set-{}", prop_name);
                             let func_interned = self.context.string_interner.intern(&setter_name);
                             if let Some(sym) = self.context.symbol_table.get_symbol_mut(symbol_id) {
+                                sym.native_name = Some(func_interned);
                                 let placeholder =
                                     self.context.string_interner.intern("__jsMethod__");
                                 sym.js_import = Some((placeholder, func_interned));

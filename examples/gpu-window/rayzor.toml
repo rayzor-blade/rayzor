@@ -1,0 +1,6 @@
+[project]
+name = "gpu-window"
+entry = "Main.hx"
+
+[build]
+class-paths = [".", "../../compiler/haxe-std"]
