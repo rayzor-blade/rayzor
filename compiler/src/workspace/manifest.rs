@@ -18,6 +18,7 @@ struct RawManifest {
     build: Option<BuildConfig>,
     cache: Option<CacheConfig>,
     bundle: Option<BundleConfig>,
+    wasm: Option<WasmConfig>,
     dependencies: Option<HashMap<String, DependencySpec>>,
 }
 
@@ -71,6 +72,9 @@ pub struct ProjectManifest {
     /// Dependencies
     #[serde(skip)]
     pub dependencies: Option<HashMap<String, DependencySpec>>,
+    /// WASM target configuration
+    #[serde(skip)]
+    pub wasm: Option<WasmConfig>,
 }
 
 /// Workspace manifest fields.
@@ -80,6 +84,15 @@ pub struct WorkspaceManifest {
     pub members: Vec<String>,
     /// Shared cache configuration
     pub cache: Option<WorkspaceCacheConfig>,
+}
+
+/// `[wasm]` section — WASM target configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct WasmConfig {
+    /// JS host module mappings: module_name → path to .js file.
+    /// Example: `hosts = { "my-module" = "wasm/my-host.js" }`
+    #[serde(default)]
+    pub hosts: HashMap<String, String>,
 }
 
 /// `[build]` section.
@@ -145,6 +158,7 @@ pub fn parse_manifest(content: &str) -> Result<RayzorManifest, String> {
         project.cache = raw.cache;
         project.bundle = raw.bundle;
         project.dependencies = raw.dependencies;
+        project.wasm = raw.wasm;
         return Ok(RayzorManifest::SingleProject(project));
     }
 

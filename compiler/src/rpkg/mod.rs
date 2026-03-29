@@ -63,6 +63,9 @@ pub enum EntryKind {
     /// Universal WASM component — runs on any platform via wasmtime/browser.
     /// Used as fallback when no NativeLib matches the current platform.
     WasmComponent,
+    /// JavaScript host module for WASM @:jsImport functions.
+    /// Provides browser-side implementations of native functions.
+    JsHost,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -75,6 +78,8 @@ pub enum EntryMeta {
     MethodTable { plugin_name: String },
     /// For `WasmComponent`: the component name
     WasmComponent { name: String },
+    /// For `JsHost`: the @:jsImport module name this host provides
+    JsHost { module_name: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -110,6 +115,8 @@ pub struct LoadedRpkg {
     pub wasm_component_bytes: Option<Vec<u8>>,
     /// Plugin name from method table entry
     pub plugin_name: Option<String>,
+    /// JS host modules: @:jsImport module name → JS source code
+    pub js_hosts: HashMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -222,6 +229,7 @@ pub fn load_rpkg(path: &Path) -> Result<LoadedRpkg, RpkgError> {
     let mut native_lib_bytes = None;
     let mut wasm_component_bytes = None;
     let mut plugin_name = None;
+    let mut js_hosts = HashMap::new();
 
     for entry in &toc.entries {
         let start = entry.offset as usize;
@@ -265,6 +273,11 @@ pub fn load_rpkg(path: &Path) -> Result<LoadedRpkg, RpkgError> {
             (EntryKind::WasmComponent, EntryMeta::WasmComponent { .. }) => {
                 wasm_component_bytes = Some(entry_data.to_vec());
             }
+            (EntryKind::JsHost, EntryMeta::JsHost { module_name }) => {
+                if let Ok(js_source) = std::str::from_utf8(entry_data) {
+                    js_hosts.insert(module_name.clone(), js_source.to_string());
+                }
+            }
             _ => {} // mismatched kind/meta — skip
         }
     }
@@ -276,6 +289,7 @@ pub fn load_rpkg(path: &Path) -> Result<LoadedRpkg, RpkgError> {
         native_lib_bytes,
         wasm_component_bytes,
         plugin_name,
+        js_hosts,
     })
 }
 

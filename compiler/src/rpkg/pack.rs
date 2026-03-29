@@ -68,6 +68,19 @@ impl RpkgBuilder {
         ));
     }
 
+    /// Add a JavaScript host module for WASM @:jsImport functions.
+    /// `module_name` is the @:jsImport module (e.g., "rayzor-gpu").
+    /// `js_source` is the JavaScript source code providing the host implementations.
+    pub fn add_js_host(&mut self, module_name: &str, js_source: &str) {
+        self.entries.push((
+            EntryKind::JsHost,
+            EntryMeta::JsHost {
+                module_name: module_name.to_string(),
+            },
+            js_source.as_bytes().to_vec(),
+        ));
+    }
+
     /// Add a serialized method table.
     pub fn add_method_table(&mut self, plugin_name: &str, methods: &[MethodDescEntry]) {
         let data = postcard::to_allocvec(methods).expect("method table serialization failed");

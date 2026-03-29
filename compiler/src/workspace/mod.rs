@@ -58,6 +58,21 @@ impl Project {
             .map(|o| self.root.join(o))
     }
 
+    /// Resolve WASM JS host module paths from [wasm] config.
+    /// Returns module_name → absolute path to .js file.
+    pub fn resolved_wasm_hosts(&self) -> std::collections::HashMap<String, PathBuf> {
+        self.manifest
+            .wasm
+            .as_ref()
+            .map(|w| {
+                w.hosts
+                    .iter()
+                    .map(|(name, path)| (name.clone(), self.root.join(path)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Get the BLADE cache directory for this project.
     pub fn cache_dir(&self) -> PathBuf {
         if let Some(ref cache) = self.manifest.cache {
