@@ -57,6 +57,17 @@ impl RpkgBuilder {
         ));
     }
 
+    /// Add a WASM component (universal fallback for platforms without native lib).
+    pub fn add_wasm_component(&mut self, name: &str, data: &[u8]) {
+        self.entries.push((
+            EntryKind::WasmComponent,
+            EntryMeta::WasmComponent {
+                name: name.to_string(),
+            },
+            data.to_vec(),
+        ));
+    }
+
     /// Add a serialized method table.
     pub fn add_method_table(&mut self, plugin_name: &str, methods: &[MethodDescEntry]) {
         let data = postcard::to_allocvec(methods).expect("method table serialization failed");
@@ -203,7 +214,7 @@ pub fn build_from_haxe_dir(
 }
 
 /// Walk a directory tree and add all `.hx` files as HaxeSource entries.
-fn collect_haxe_sources(
+pub fn collect_haxe_sources(
     builder: &mut RpkgBuilder,
     base_dir: &Path,
     current_dir: &Path,

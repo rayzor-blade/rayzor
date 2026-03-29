@@ -60,6 +60,9 @@ pub enum EntryKind {
     NativeLib,
     HaxeSource,
     MethodTable,
+    /// Universal WASM component — runs on any platform via wasmtime/browser.
+    /// Used as fallback when no NativeLib matches the current platform.
+    WasmComponent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +73,8 @@ pub enum EntryMeta {
     HaxeSource { module_path: String },
     /// For `MethodTable`: plugin name
     MethodTable { plugin_name: String },
+    /// For `WasmComponent`: the component name
+    WasmComponent { name: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -101,6 +106,8 @@ pub struct LoadedRpkg {
     pub haxe_sources: HashMap<String, String>,
     /// Raw native lib bytes for the current platform (if present)
     pub native_lib_bytes: Option<Vec<u8>>,
+    /// WASM component bytes (universal fallback when no native lib matches)
+    pub wasm_component_bytes: Option<Vec<u8>>,
     /// Plugin name from method table entry
     pub plugin_name: Option<String>,
 }
@@ -213,6 +220,7 @@ pub fn load_rpkg(path: &Path) -> Result<LoadedRpkg, RpkgError> {
     let mut methods = Vec::new();
     let mut haxe_sources = HashMap::new();
     let mut native_lib_bytes = None;
+    let mut wasm_component_bytes = None;
     let mut plugin_name = None;
 
     for entry in &toc.entries {
@@ -254,6 +262,9 @@ pub fn load_rpkg(path: &Path) -> Result<LoadedRpkg, RpkgError> {
                     postcard::from_bytes(entry_data).map_err(RpkgError::DeserializationFailed)?;
                 methods = table;
             }
+            (EntryKind::WasmComponent, EntryMeta::WasmComponent { .. }) => {
+                wasm_component_bytes = Some(entry_data.to_vec());
+            }
             _ => {} // mismatched kind/meta — skip
         }
     }
@@ -263,6 +274,7 @@ pub fn load_rpkg(path: &Path) -> Result<LoadedRpkg, RpkgError> {
         methods,
         haxe_sources,
         native_lib_bytes,
+        wasm_component_bytes,
         plugin_name,
     })
 }
