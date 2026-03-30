@@ -66,6 +66,8 @@ pub enum EntryKind {
     /// JavaScript host module for WASM @:jsImport functions.
     /// Provides browser-side implementations of native functions.
     JsHost,
+    /// Companion WASM binary for a JsHost (wasm-bindgen _bg.wasm).
+    JsHostWasm,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,6 +82,8 @@ pub enum EntryMeta {
     WasmComponent { name: String },
     /// For `JsHost`: the @:jsImport module name this host provides
     JsHost { module_name: String },
+    /// For `JsHostWasm`: companion _bg.wasm for a JsHost module
+    JsHostWasm { module_name: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +121,8 @@ pub struct LoadedRpkg {
     pub plugin_name: Option<String>,
     /// JS host modules: @:jsImport module name → JS source code
     pub js_hosts: HashMap<String, String>,
+    /// Companion WASM binaries for JS hosts: module name → _bg.wasm bytes
+    pub js_host_wasms: HashMap<String, Vec<u8>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +236,7 @@ pub fn load_rpkg(path: &Path) -> Result<LoadedRpkg, RpkgError> {
     let mut wasm_component_bytes = None;
     let mut plugin_name = None;
     let mut js_hosts = HashMap::new();
+    let mut js_host_wasms = HashMap::new();
 
     for entry in &toc.entries {
         let start = entry.offset as usize;
@@ -278,6 +285,9 @@ pub fn load_rpkg(path: &Path) -> Result<LoadedRpkg, RpkgError> {
                     js_hosts.insert(module_name.clone(), js_source.to_string());
                 }
             }
+            (EntryKind::JsHostWasm, EntryMeta::JsHostWasm { module_name }) => {
+                js_host_wasms.insert(module_name.clone(), entry_data.to_vec());
+            }
             _ => {} // mismatched kind/meta — skip
         }
     }
@@ -290,6 +300,7 @@ pub fn load_rpkg(path: &Path) -> Result<LoadedRpkg, RpkgError> {
         wasm_component_bytes,
         plugin_name,
         js_hosts,
+        js_host_wasms,
     })
 }
 
