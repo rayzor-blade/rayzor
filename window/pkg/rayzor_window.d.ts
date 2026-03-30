@@ -130,10 +130,10 @@ export interface InitOutput {
   readonly rayzor_window_set_title: (a: number, b: number, c: number) => void;
   readonly rayzor_window_set_visible: (a: number, b: number) => void;
   readonly rayzor_window_was_resized: (a: number) => number;
-  readonly wasm_bindgen_335648ada7beb221___convert__closures_____invoke______: (a: number, b: number) => void;
-  readonly wasm_bindgen_335648ada7beb221___closure__destroy___dyn_core_e0615fd90a40850c___ops__function__FnMut_____Output_______: (a: number, b: number) => void;
   readonly wasm_bindgen_335648ada7beb221___convert__closures_____invoke___wasm_bindgen_335648ada7beb221___JsValue_____: (a: number, b: number, c: any) => void;
   readonly wasm_bindgen_335648ada7beb221___closure__destroy___dyn_core_e0615fd90a40850c___ops__function__FnMut__wasm_bindgen_335648ada7beb221___JsValue____Output_______: (a: number, b: number) => void;
+  readonly wasm_bindgen_335648ada7beb221___convert__closures_____invoke______: (a: number, b: number) => void;
+  readonly wasm_bindgen_335648ada7beb221___closure__destroy___dyn_core_e0615fd90a40850c___ops__function__FnMut_____Output_______: (a: number, b: number) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;
   readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
   readonly __wbindgen_exn_store: (a: number) => void;

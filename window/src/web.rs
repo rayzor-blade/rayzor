@@ -66,8 +66,6 @@ pub struct WebWindow {
     pub open: bool,
     pub focused: bool,
     pub resized: bool,
-    // Prevent GC of closures
-    _closures: Vec<Closure<dyn FnMut(JsValue)>>,
 }
 
 impl WebWindow {
@@ -120,7 +118,6 @@ impl WebWindow {
             open: true,
             focused: true,
             resized: false,
-            _closures: Vec::new(),
         };
 
         win.attach_listeners();
@@ -181,7 +178,7 @@ impl WebWindow {
             self.canvas
                 .add_event_listener_with_callback("keydown", closure.as_ref().unchecked_ref())
                 .unwrap();
-            self._closures.push(closure);
+            closure.forget();
         }
 
         // Keyup
@@ -198,7 +195,7 @@ impl WebWindow {
             self.canvas
                 .add_event_listener_with_callback("keyup", closure.as_ref().unchecked_ref())
                 .unwrap();
-            self._closures.push(closure);
+            closure.forget();
         }
 
         // Mousemove
@@ -217,7 +214,7 @@ impl WebWindow {
             self.canvas
                 .add_event_listener_with_callback("mousemove", closure.as_ref().unchecked_ref())
                 .unwrap();
-            self._closures.push(closure);
+            closure.forget();
         }
 
         // Mousedown
@@ -235,7 +232,7 @@ impl WebWindow {
             self.canvas
                 .add_event_listener_with_callback("mousedown", closure.as_ref().unchecked_ref())
                 .unwrap();
-            self._closures.push(closure);
+            closure.forget();
         }
 
         // Mouseup
@@ -253,7 +250,7 @@ impl WebWindow {
             self.canvas
                 .add_event_listener_with_callback("mouseup", closure.as_ref().unchecked_ref())
                 .unwrap();
-            self._closures.push(closure);
+            closure.forget();
         }
 
         // Wheel
@@ -273,7 +270,7 @@ impl WebWindow {
                     web_sys::AddEventListenerOptions::new().passive(false),
                 )
                 .unwrap();
-            self._closures.push(closure);
+            closure.forget();
         }
 
         // Focus/blur
@@ -285,7 +282,7 @@ impl WebWindow {
             self.canvas
                 .add_event_listener_with_callback("focus", closure.as_ref().unchecked_ref())
                 .unwrap();
-            self._closures.push(closure);
+            closure.forget();
         }
         {
             let events_b = events.clone();
@@ -295,7 +292,7 @@ impl WebWindow {
             self.canvas
                 .add_event_listener_with_callback("blur", closure.as_ref().unchecked_ref())
                 .unwrap();
-            self._closures.push(closure);
+            closure.forget();
         }
 
         // Store shared state references for poll_events to read
