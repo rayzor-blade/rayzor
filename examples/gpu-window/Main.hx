@@ -28,8 +28,9 @@ class Main {
         var device = GPUDevice.create();
         var win = Window.createCentered("Rayzor GPU", 800, 600);
 
+        // Native: OS window handle → surface. WASM: reuse Window's canvas.
         #if wasm
-        var surface = Surface.createCanvas(device, "gpu-canvas", 800, 600);
+        var surface = Surface.createCanvas(device, "rayzor-window", 800, 600);
         #else
         var surface = Surface.create(device, win.getHandle(), win.getDisplayHandle(), 800, 600);
         #end
