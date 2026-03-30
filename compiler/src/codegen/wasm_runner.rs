@@ -8,7 +8,9 @@
 pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
     use wasmtime::*;
 
-    let engine = Engine::default();
+    let mut config = Config::new();
+    config.wasm_simd(true);
+    let engine = Engine::new(&config).map_err(|e| format!("Engine config failed: {}", e))?;
     let module =
         Module::new(&engine, wasm_bytes).map_err(|e| format!("WASM compilation failed: {}", e))?;
 
