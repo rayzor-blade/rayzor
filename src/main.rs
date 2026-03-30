@@ -3554,11 +3554,17 @@ function _wrapFnPtr(closurePtr) {{
   const table = _wasmInstance.exports.__indirect_function_table;
   if (table && fnIdx < table.length) {{
     const fn = table.get(fnIdx);
-    if (fn) return () => fn(closurePtr);
+    if (fn) {{
+      // Detect arity: try with env pointer, fall back to no-arg
+      return () => {{
+        try {{ return fn(closurePtr); }}
+        catch(e) {{
+          if (e instanceof WebAssembly.RuntimeError) return fn();
+          throw e;
+        }}
+      }};
+    }}
   }}
-  // Fallback: use __call_indirect export if available
-  const callInd = _wasmInstance.exports.__call_indirect;
-  if (callInd) return () => callInd(fnIdx, closurePtr);
   return () => 0;
 }}
 

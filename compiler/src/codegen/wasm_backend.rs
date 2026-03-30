@@ -2101,11 +2101,10 @@ impl<'a> FunctionLowerer<'a> {
                 f.instruction(&Instruction::I32Sub);
                 f.instruction(&Instruction::GlobalSet(STACK_PTR_GLOBAL));
 
-                // Store table slot at offset 0 (for call_indirect / JS interop).
+                // Store func index at offset 0 — used as table index (all funcs are in table).
                 f.instruction(&Instruction::GlobalGet(STACK_PTR_GLOBAL));
                 let fn_idx = self.ctx.ir_func_to_idx.get(func_id).copied().unwrap_or(0);
-                let table_slot = self.ctx.table_entries.get(&fn_idx).copied().unwrap_or(0);
-                f.instruction(&Instruction::I32Const(table_slot as i32));
+                f.instruction(&Instruction::I32Const(fn_idx as i32));
                 f.instruction(&Instruction::I32Store(MemArg {
                     offset: 0,
                     align: 2,
