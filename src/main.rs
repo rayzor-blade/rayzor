@@ -3158,6 +3158,7 @@ fn cmd_build_wasm(
         Some("main"),
         &mir_result.qualified_method_map,
     )?;
+    let _ = std::fs::write("/tmp/rayzor_prelink.wasm", &user_wasm);
 
     // Build host function map from rayzor.toml [wasm] hosts:
     // Scan each JS host file for `export function` names and map them to the module name.
