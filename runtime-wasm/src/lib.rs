@@ -2072,3 +2072,458 @@ pub extern "C" fn haxe_array_get_ptr(arr: i32, idx: i32) -> i32 {
 }
 
 // int_to_buf already defined above in Section 8
+
+// ============================================================================
+// SIMD4f — 4-lane f32 SIMD operations
+// Uses core::arch::wasm32 SIMD128 intrinsics when available.
+// Simd4f is represented as 4 contiguous f32 values (16 bytes) in memory.
+// Passed as i32 pointer to [f32; 4].
+// ============================================================================
+
+#[cfg(target_arch = "wasm32")]
+use core::arch::wasm32::*;
+
+/// Allocate a 16-byte aligned Simd4f and return its pointer.
+fn simd4f_alloc() -> *mut f32 {
+    unsafe {
+        let layout = Layout::from_size_align_unchecked(16, 16);
+        alloc(layout) as *mut f32
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_splat(v: f32) -> i32 {
+    let ptr = simd4f_alloc();
+    unsafe {
+        #[cfg(target_feature = "simd128")]
+        {
+            let vec = f32x4_splat(v);
+            v128_store(ptr as *mut v128, vec);
+        }
+        #[cfg(not(target_feature = "simd128"))]
+        {
+            *ptr = v; *ptr.add(1) = v; *ptr.add(2) = v; *ptr.add(3) = v;
+        }
+    }
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_make(x: f32, y: f32, z: f32, w: f32) -> i32 {
+    let ptr = simd4f_alloc();
+    unsafe {
+        #[cfg(target_feature = "simd128")]
+        {
+            let vec = f32x4(x, y, z, w);
+            v128_store(ptr as *mut v128, vec);
+        }
+        #[cfg(not(target_feature = "simd128"))]
+        {
+            *ptr = x; *ptr.add(1) = y; *ptr.add(2) = z; *ptr.add(3) = w;
+        }
+    }
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_load(src: i32) -> i32 {
+    let ptr = simd4f_alloc();
+    unsafe {
+        ptr::copy_nonoverlapping(src as *const u8, ptr as *mut u8, 16);
+    }
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_store(vec: i32, dst: i32) {
+    unsafe {
+        ptr::copy_nonoverlapping(vec as *const u8, dst as *mut u8, 16);
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_extract(vec: i32, lane: i32) -> f32 {
+    unsafe { *((vec as *const f32).add(lane as usize)) }
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_insert(vec: i32, lane: i32, val: f32) -> i32 {
+    let ptr = simd4f_alloc();
+    unsafe {
+        ptr::copy_nonoverlapping(vec as *const u8, ptr as *mut u8, 16);
+        *(ptr.add(lane as usize)) = val;
+    }
+    ptr as i32
+}
+
+macro_rules! simd4f_binop {
+    ($name:ident, $simd_op:ident, $scalar_op:tt) => {
+        #[no_mangle]
+        pub extern "C" fn $name(a: i32, b: i32) -> i32 {
+            let ptr = simd4f_alloc();
+            unsafe {
+                #[cfg(target_feature = "simd128")]
+                {
+                    let va = v128_load(a as *const v128);
+                    let vb = v128_load(b as *const v128);
+                    v128_store(ptr as *mut v128, $simd_op(va, vb));
+                }
+                #[cfg(not(target_feature = "simd128"))]
+                {
+                    let pa = a as *const f32;
+                    let pb = b as *const f32;
+                    for i in 0..4 {
+                        *ptr.add(i) = *pa.add(i) $scalar_op *pb.add(i);
+                    }
+                }
+            }
+            ptr as i32
+        }
+    };
+}
+
+simd4f_binop!(rayzor_simd4f_add, f32x4_add, +);
+simd4f_binop!(rayzor_simd4f_sub, f32x4_sub, -);
+simd4f_binop!(rayzor_simd4f_mul, f32x4_mul, *);
+simd4f_binop!(rayzor_simd4f_div, f32x4_div, /);
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_min(a: i32, b: i32) -> i32 {
+    let ptr = simd4f_alloc();
+    unsafe {
+        #[cfg(target_feature = "simd128")]
+        {
+            let va = v128_load(a as *const v128);
+            let vb = v128_load(b as *const v128);
+            v128_store(ptr as *mut v128, f32x4_min(va, vb));
+        }
+        #[cfg(not(target_feature = "simd128"))]
+        {
+            let pa = a as *const f32; let pb = b as *const f32;
+            for i in 0..4 { let av = *pa.add(i); let bv = *pb.add(i); *ptr.add(i) = if av < bv { av } else { bv }; }
+        }
+    }
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_max(a: i32, b: i32) -> i32 {
+    let ptr = simd4f_alloc();
+    unsafe {
+        #[cfg(target_feature = "simd128")]
+        {
+            let va = v128_load(a as *const v128);
+            let vb = v128_load(b as *const v128);
+            v128_store(ptr as *mut v128, f32x4_max(va, vb));
+        }
+        #[cfg(not(target_feature = "simd128"))]
+        {
+            let pa = a as *const f32; let pb = b as *const f32;
+            for i in 0..4 { let av = *pa.add(i); let bv = *pb.add(i); *ptr.add(i) = if av > bv { av } else { bv }; }
+        }
+    }
+    ptr as i32
+}
+
+macro_rules! simd4f_unary {
+    ($name:ident, $simd_op:ident) => {
+        #[no_mangle]
+        pub extern "C" fn $name(a: i32) -> i32 {
+            let ptr = simd4f_alloc();
+            unsafe {
+                #[cfg(target_feature = "simd128")]
+                {
+                    let va = v128_load(a as *const v128);
+                    v128_store(ptr as *mut v128, $simd_op(va));
+                }
+                #[cfg(not(target_feature = "simd128"))]
+                {
+                    let pa = a as *const f32;
+                    for i in 0..4 { *ptr.add(i) = libm::sqrtf(*pa.add(i)); } // placeholder
+                }
+            }
+            ptr as i32
+        }
+    };
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_sqrt(a: i32) -> i32 {
+    let ptr = simd4f_alloc();
+    unsafe {
+        #[cfg(target_feature = "simd128")]
+        {
+            let va = v128_load(a as *const v128);
+            v128_store(ptr as *mut v128, f32x4_sqrt(va));
+        }
+        #[cfg(not(target_feature = "simd128"))]
+        {
+            let pa = a as *const f32;
+            for i in 0..4 { *ptr.add(i) = libm::sqrtf(*pa.add(i)); }
+        }
+    }
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_abs(a: i32) -> i32 {
+    let ptr = simd4f_alloc();
+    unsafe {
+        #[cfg(target_feature = "simd128")]
+        {
+            let va = v128_load(a as *const v128);
+            v128_store(ptr as *mut v128, f32x4_abs(va));
+        }
+        #[cfg(not(target_feature = "simd128"))]
+        {
+            let pa = a as *const f32;
+            for i in 0..4 { *ptr.add(i) = libm::fabsf(*pa.add(i)); }
+        }
+    }
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_neg(a: i32) -> i32 {
+    let ptr = simd4f_alloc();
+    unsafe {
+        #[cfg(target_feature = "simd128")]
+        {
+            let va = v128_load(a as *const v128);
+            v128_store(ptr as *mut v128, f32x4_neg(va));
+        }
+        #[cfg(not(target_feature = "simd128"))]
+        {
+            let pa = a as *const f32;
+            for i in 0..4 { *ptr.add(i) = -*pa.add(i); }
+        }
+    }
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_ceil(a: i32) -> i32 {
+    let ptr = simd4f_alloc();
+    unsafe {
+        #[cfg(target_feature = "simd128")]
+        {
+            let va = v128_load(a as *const v128);
+            v128_store(ptr as *mut v128, f32x4_ceil(va));
+        }
+        #[cfg(not(target_feature = "simd128"))]
+        {
+            let pa = a as *const f32;
+            for i in 0..4 { *ptr.add(i) = libm::ceilf(*pa.add(i)); }
+        }
+    }
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_floor(a: i32) -> i32 {
+    let ptr = simd4f_alloc();
+    unsafe {
+        #[cfg(target_feature = "simd128")]
+        {
+            let va = v128_load(a as *const v128);
+            v128_store(ptr as *mut v128, f32x4_floor(va));
+        }
+        #[cfg(not(target_feature = "simd128"))]
+        {
+            let pa = a as *const f32;
+            for i in 0..4 { *ptr.add(i) = libm::floorf(*pa.add(i)); }
+        }
+    }
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_nearest(a: i32) -> i32 {
+    let ptr = simd4f_alloc();
+    unsafe {
+        #[cfg(target_feature = "simd128")]
+        {
+            let va = v128_load(a as *const v128);
+            v128_store(ptr as *mut v128, f32x4_nearest(va));
+        }
+        #[cfg(not(target_feature = "simd128"))]
+        {
+            let pa = a as *const f32;
+            for i in 0..4 { *ptr.add(i) = libm::roundf(*pa.add(i)); }
+        }
+    }
+    ptr as i32
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_sum(a: i32) -> f32 {
+    unsafe {
+        let p = a as *const f32;
+        *p + *p.add(1) + *p.add(2) + *p.add(3)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_dot(a: i32, b: i32) -> f32 {
+    unsafe {
+        let pa = a as *const f32;
+        let pb = b as *const f32;
+        #[cfg(target_feature = "simd128")]
+        {
+            let va = v128_load(pa as *const v128);
+            let vb = v128_load(pb as *const v128);
+            let prod = f32x4_mul(va, vb);
+            // Horizontal sum: extract all 4 lanes and add
+            f32x4_extract_lane::<0>(prod) + f32x4_extract_lane::<1>(prod) +
+            f32x4_extract_lane::<2>(prod) + f32x4_extract_lane::<3>(prod)
+        }
+        #[cfg(not(target_feature = "simd128"))]
+        {
+            (*pa) * (*pb) + (*pa.add(1)) * (*pb.add(1)) +
+            (*pa.add(2)) * (*pb.add(2)) + (*pa.add(3)) * (*pb.add(3))
+        }
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_length(a: i32) -> f32 {
+    libm::sqrtf(rayzor_simd4f_dot(a, a))
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_normalize(a: i32) -> i32 {
+    let len = rayzor_simd4f_length(a);
+    if len == 0.0 { return rayzor_simd4f_splat(0.0); }
+    let inv = 1.0 / len;
+    let inv_vec = rayzor_simd4f_splat(inv);
+    rayzor_simd4f_mul(a, inv_vec)
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_cross3(a: i32, b: i32) -> i32 {
+    unsafe {
+        let pa = a as *const f32;
+        let pb = b as *const f32;
+        let x = *pa.add(1) * *pb.add(2) - *pa.add(2) * *pb.add(1);
+        let y = *pa.add(2) * *pb.add(0) - *pa.add(0) * *pb.add(2);
+        let z = *pa.add(0) * *pb.add(1) - *pa.add(1) * *pb.add(0);
+        rayzor_simd4f_make(x, y, z, 0.0)
+    }
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_distance(a: i32, b: i32) -> f32 {
+    let diff = rayzor_simd4f_sub(a, b);
+    rayzor_simd4f_length(diff)
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_clamp(v: i32, lo: i32, hi: i32) -> i32 {
+    let tmp = rayzor_simd4f_max(v, lo);
+    rayzor_simd4f_min(tmp, hi)
+}
+
+#[no_mangle]
+pub extern "C" fn rayzor_simd4f_lerp(a: i32, b: i32, t: f32) -> i32 {
+    let t_vec = rayzor_simd4f_splat(t);
+    let diff = rayzor_simd4f_sub(b, a);
+    let scaled = rayzor_simd4f_mul(diff, t_vec);
+    rayzor_simd4f_add(a, scaled)
+}
+
+// ============================================================================
+// Tensor SIMD Kernels — vectorized f32 operations for tensor runtime
+// ============================================================================
+
+/// Vectorized f32 add: dst[i] = a[i] + b[i], processing 4 elements at a time.
+#[no_mangle]
+pub extern "C" fn rayzor_tensor_simd_add_f32(dst: i32, a: i32, b: i32, n: i32) {
+    unsafe {
+        let pd = dst as *mut f32;
+        let pa = a as *const f32;
+        let pb = b as *const f32;
+        let count = n as usize;
+        let mut i = 0;
+        #[cfg(target_feature = "simd128")]
+        {
+            while i + 4 <= count {
+                let va = v128_load(pa.add(i) as *const v128);
+                let vb = v128_load(pb.add(i) as *const v128);
+                v128_store(pd.add(i) as *mut v128, f32x4_add(va, vb));
+                i += 4;
+            }
+        }
+        while i < count { *pd.add(i) = *pa.add(i) + *pb.add(i); i += 1; }
+    }
+}
+
+/// Vectorized f32 mul
+#[no_mangle]
+pub extern "C" fn rayzor_tensor_simd_mul_f32(dst: i32, a: i32, b: i32, n: i32) {
+    unsafe {
+        let pd = dst as *mut f32;
+        let pa = a as *const f32;
+        let pb = b as *const f32;
+        let count = n as usize;
+        let mut i = 0;
+        #[cfg(target_feature = "simd128")]
+        {
+            while i + 4 <= count {
+                let va = v128_load(pa.add(i) as *const v128);
+                let vb = v128_load(pb.add(i) as *const v128);
+                v128_store(pd.add(i) as *mut v128, f32x4_mul(va, vb));
+                i += 4;
+            }
+        }
+        while i < count { *pd.add(i) = *pa.add(i) * *pb.add(i); i += 1; }
+    }
+}
+
+/// Vectorized f32 dot product
+#[no_mangle]
+pub extern "C" fn rayzor_tensor_simd_dot_f32(a: i32, b: i32, n: i32) -> f32 {
+    unsafe {
+        let pa = a as *const f32;
+        let pb = b as *const f32;
+        let count = n as usize;
+        let mut sum = 0.0f32;
+        let mut i = 0;
+        #[cfg(target_feature = "simd128")]
+        {
+            let mut acc = f32x4_splat(0.0);
+            while i + 4 <= count {
+                let va = v128_load(pa.add(i) as *const v128);
+                let vb = v128_load(pb.add(i) as *const v128);
+                acc = f32x4_add(acc, f32x4_mul(va, vb));
+                i += 4;
+            }
+            sum = f32x4_extract_lane::<0>(acc) + f32x4_extract_lane::<1>(acc) +
+                  f32x4_extract_lane::<2>(acc) + f32x4_extract_lane::<3>(acc);
+        }
+        while i < count { sum += *pa.add(i) * *pb.add(i); i += 1; }
+        sum
+    }
+}
+
+/// Vectorized f32 sum
+#[no_mangle]
+pub extern "C" fn rayzor_tensor_simd_sum_f32(a: i32, n: i32) -> f32 {
+    unsafe {
+        let pa = a as *const f32;
+        let count = n as usize;
+        let mut sum = 0.0f32;
+        let mut i = 0;
+        #[cfg(target_feature = "simd128")]
+        {
+            let mut acc = f32x4_splat(0.0);
+            while i + 4 <= count {
+                acc = f32x4_add(acc, v128_load(pa.add(i) as *const v128));
+                i += 4;
+            }
+            sum = f32x4_extract_lane::<0>(acc) + f32x4_extract_lane::<1>(acc) +
+                  f32x4_extract_lane::<2>(acc) + f32x4_extract_lane::<3>(acc);
+        }
+        while i < count { sum += *pa.add(i); i += 1; }
+        sum
+    }
+}
