@@ -81,6 +81,18 @@ impl RpkgBuilder {
         ));
     }
 
+    /// Add a JS host module with its companion _bg.wasm binary.
+    pub fn add_js_host_with_wasm(&mut self, module_name: &str, js_source: &str, wasm_bytes: &[u8]) {
+        self.add_js_host(module_name, js_source);
+        self.entries.push((
+            EntryKind::JsHostWasm,
+            EntryMeta::JsHostWasm {
+                module_name: module_name.to_string(),
+            },
+            wasm_bytes.to_vec(),
+        ));
+    }
+
     /// Add a serialized method table.
     pub fn add_method_table(&mut self, plugin_name: &str, methods: &[MethodDescEntry]) {
         let data = postcard::to_allocvec(methods).expect("method table serialization failed");

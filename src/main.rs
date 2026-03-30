@@ -4339,8 +4339,7 @@ fn cmd_rpkg_pack(
     // Source 1: CLI --js-host MODULE=FILE args
     for arg in &js_host_args {
         if let Some((module_name, file_path)) = arg.split_once('=') {
-            let base = haxe_dir.parent().unwrap_or(&haxe_dir);
-            let path = base.join(file_path);
+            let path = PathBuf::from(file_path);
             match std::fs::read_to_string(&path) {
                 Ok(source) => {
                     println!(
@@ -4348,6 +4347,14 @@ fn cmd_rpkg_pack(
                         module_name,
                         source.len() as f64 / 1024.0
                     );
+                    // Check for companion _bg.wasm (wasm-bindgen output)
+                    let bg_wasm_path = path.with_file_name(
+                        path.file_stem().unwrap().to_string_lossy().to_string() + "_bg.wasm"
+                    );
+                    if bg_wasm_path.exists() {
+                        let bg_size = std::fs::metadata(&bg_wasm_path).map(|m| m.len()).unwrap_or(0);
+                        println!("  js-host-wasm: {} ({:.1} KB)", bg_wasm_path.display(), bg_size as f64 / 1024.0);
+                    }
                     js_hosts.push((module_name.to_string(), source));
                 }
                 Err(e) => eprintln!("  warning: JS host {} not found: {}", path.display(), e),
@@ -4405,6 +4412,26 @@ fn cmd_rpkg_pack(
             builder.add_wasm_component(&loaded.package_name, wasm_bytes);
         }
         for (module_name, js_source) in &js_hosts {
+            // Check for companion _bg.wasm alongside the JS host
+            // Reconstruct the path from the CLI arg to find the companion
+            let bg_path = js_host_args.iter().find_map(|arg| {
+                if let Some((name, file)) = arg.split_once('=') {
+                    if name == module_name {
+                        let js_path = PathBuf::from(file);
+                        let bg = js_path.with_file_name(
+                            js_path.file_stem().unwrap().to_string_lossy().to_string() + "_bg.wasm"
+                        );
+                        if bg.exists() { return Some(bg); }
+                    }
+                }
+                None
+            });
+            if let Some(bg) = bg_path {
+                if let Ok(wasm_bytes) = std::fs::read(&bg) {
+                    builder.add_js_host_with_wasm(module_name, js_source, &wasm_bytes);
+                    continue;
+                }
+            }
             builder.add_js_host(module_name, js_source);
         }
         // Rewrite with JS hosts included
@@ -4778,6 +4805,12 @@ fn cmd_rpkg_inspect(file: PathBuf) -> Result<(), String> {
                 module_name,
                 source.len() as f64 / 1024.0,
             );
+            if let Some(wasm_bytes) = loaded.js_host_wasms.get(module_name) {
+                println!(
+                    "      + companion WASM ({:.1} KB)",
+                    wasm_bytes.len() as f64 / 1024.0,
+                );
+            }
         }
     }
 
