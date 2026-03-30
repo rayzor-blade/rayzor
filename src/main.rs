@@ -3158,7 +3158,6 @@ fn cmd_build_wasm(
         Some("main"),
         &mir_result.qualified_method_map,
     )?;
-    let _ = std::fs::write("/tmp/rayzor_prelink.wasm", &user_wasm);
 
     // Build host function map from rayzor.toml [wasm] hosts:
     // Scan each JS host file for `export function` names and map them to the module name.
@@ -3323,17 +3322,6 @@ fn cmd_build_wasm(
   </style>
 </head>
 <body>
-  <h2>{title}</h2>
-  <div id="output"></div>
-  <script>
-    // Redirect console.log to the page
-    const output = document.getElementById('output');
-    const origLog = console.log;
-    console.log = (...args) => {{
-      output.textContent += args.join(' ') + '\n';
-      origLog.apply(console, args);
-    }};
-  </script>
   <script type="module" src="{js_name}"></script>
 </body>
 </html>"#,
@@ -3597,10 +3585,7 @@ function _make_host_adapter(hostModule) {{
         }}
         return a;
       }});
-      const r = fn(...converted);
-      if (name.includes('create') || name.includes('build') || name.includes('begin') || name.includes('submit') || name.includes('format'))
-        console.log('[gpu] ' + name + '(' + converted.map(a => typeof a === 'string' ? '"'+a.slice(0,30)+'..."' : a).join(', ') + ') -> ' + r);
-      return r;
+      return fn(...converted);
     }};
   }}
   return new Proxy(adapter, {{ get: (t, p) => t[p] ?? ((...a) => 0) }});

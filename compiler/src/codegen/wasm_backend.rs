@@ -78,14 +78,11 @@ impl WasmBackend {
         ctx.collect_imports(modules);
         ctx.collect_functions(modules);
         // Build qualified_to_import from the method map
-        let mut q_resolved = 0;
         for (qualified, native) in qualified_method_map {
             if let Some(&idx) = ctx.import_name_to_idx.get(native) {
                 ctx.qualified_to_import.insert(qualified.clone(), idx);
-                q_resolved += 1;
             }
         }
-        eprintln!("[wasm] qualified_to_import: {}/{} resolved", q_resolved, qualified_method_map.len());
         ctx.build_func_id_fallback(modules);
         ctx.collect_strings(modules);
         ctx.collect_globals(modules);
