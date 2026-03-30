@@ -655,10 +655,6 @@ impl LinkerCtx {
                     next_func_idx += 1;
                 }
                 UserImportKind::Preserved(module, name, type_idx) => {
-                    eprintln!(
-                        "[wasm-linker] preserved: user_idx {} → slot {} ({}::{})",
-                        user_orig_idx, preserved_slot, module, name
-                    );
                     self.preserved_imports.push(PreservedImport {
                         module,
                         name,
