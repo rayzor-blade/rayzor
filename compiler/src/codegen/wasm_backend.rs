@@ -1010,9 +1010,17 @@ impl CompileCtx {
             // Check if this function should forward to an import.
             // Any function whose name matches a qualified_to_import entry is a stub
             // wrapper that should delegate to the real import.
-            let has_import = self.import_name_to_idx.contains_key(&ir_func.name)
+            // Only use forwarder for TRUE stubs (all blocks have Unreachable terminator).
+            // Wrappers with real bodies (Return, Branch) compile correctly via normal path
+            // since the name-based CallDirect resolution resolves their extern targets.
+            let all_unreachable_terminators = !ir_func.cfg.blocks.is_empty()
+                && ir_func.cfg.blocks.values().all(|b|
+                    matches!(b.terminator, crate::ir::IrTerminator::Unreachable | crate::ir::IrTerminator::NoReturn { .. })
+                );
+            let has_import = all_unreachable_terminators && (
+                self.import_name_to_idx.contains_key(&ir_func.name)
                 || self.qualified_to_import.contains_key(&ir_func.name)
-                || ir_func.qualified_name.as_ref().map_or(false, |qn| self.qualified_to_import.contains_key(qn));
+                || ir_func.qualified_name.as_ref().map_or(false, |qn| self.qualified_to_import.contains_key(qn)));
             // Also check: if ALL blocks have Unreachable/NoReturn terminator,
             // this is an unresolved extern wrapper. Try to match by method name.
             let has_import = has_import || {
