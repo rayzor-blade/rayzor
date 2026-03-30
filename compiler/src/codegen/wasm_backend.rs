@@ -2095,15 +2095,52 @@ impl<'a> FunctionLowerer<'a> {
                 let slot_count = 2 + captured_values.len();
                 let alloc_size = ((slot_count * 4 + 7) & !7) as i32;
 
-                // Bump shadow stack.
-                f.instruction(&Instruction::GlobalGet(STACK_PTR_GLOBAL));
+                // Heap-allocate closure (NOT stack!) — closures may outlive their
+                // creating function (e.g. callbacks passed to async APIs like runLoop).
                 f.instruction(&Instruction::I32Const(alloc_size));
-                f.instruction(&Instruction::I32Sub);
-                f.instruction(&Instruction::GlobalSet(STACK_PTR_GLOBAL));
+                // Call malloc (import)
+                if let Some(&malloc_idx) = self.ctx.import_name_to_idx.get("malloc") {
+                    f.instruction(&Instruction::Call(malloc_idx));
+                } else if let Some(&malloc_idx) = self.ctx.func_name_to_idx.get("malloc") {
+                    f.instruction(&Instruction::Call(malloc_idx));
+                } else {
+                    // Fallback: bump shadow stack (less safe but works for sync closures)
+                    f.instruction(&Instruction::Drop);
+                    f.instruction(&Instruction::GlobalGet(STACK_PTR_GLOBAL));
+                    f.instruction(&Instruction::I32Const(alloc_size));
+                    f.instruction(&Instruction::I32Sub);
+                    f.instruction(&Instruction::GlobalSet(STACK_PTR_GLOBAL));
+                    f.instruction(&Instruction::GlobalGet(STACK_PTR_GLOBAL));
+                }
 
-                // Store func index at offset 0 — used as table index (all funcs are in table).
-                f.instruction(&Instruction::GlobalGet(STACK_PTR_GLOBAL));
+                // The malloc result (closure pointer) is on the stack.
+                // Store to dest register first, then use it for field stores.
+                self.set_reg(f, *dest);
+
+                // Store func index at offset 0.
+                // IMPORTANT: We store the function index as i32.const, which the linker
+                // does NOT remap. We use a special marker: store via table.get(i32.const idx)
+                // pattern that we DON'T actually need. Instead, we embed the func index in a
+                // RefFunc instruction that the linker DOES remap, and extract it back.
+                // Pattern: ref.func idx → table.set(idx) → i32.const idx → i32.store
+                // The linker remaps both ref.func AND the i32.const in the same pattern.
+                //
+                // Actually: use our own mechanism. Store the pre-link index, and let the
+                // element section handle the mapping (table[pre_link_idx] = merged_func).
+                // At runtime, table.get(stored_idx) resolves correctly because the element
+                // section was also remapped by the linker.
+                // Store the function in the indirect function table and record its slot.
+                // Use ref.func (which the linker remaps) to ensure correctness post-linking.
                 let fn_idx = self.ctx.ir_func_to_idx.get(func_id).copied().unwrap_or(0);
+                // table.set(fn_idx, ref.func(fn_idx)) — ensures table[fn_idx] = correct func
+                f.instruction(&Instruction::I32Const(fn_idx as i32));
+                f.instruction(&Instruction::RefFunc(fn_idx));
+                f.instruction(&Instruction::TableSet(0));
+                // Store fn_idx in closure struct. The i32.const isn't remapped by the linker,
+                // BUT we just set table[fn_idx] = ref.func(fn_idx) which IS remapped.
+                // After linking: i32.const still says old fn_idx, BUT table[old_fn_idx]
+                // was set to the REMAPPED function ref. So table.get(old_fn_idx) → correct func.
+                self.get_reg(f, *dest);
                 f.instruction(&Instruction::I32Const(fn_idx as i32));
                 f.instruction(&Instruction::I32Store(MemArg {
                     offset: 0,
@@ -2113,7 +2150,7 @@ impl<'a> FunctionLowerer<'a> {
 
                 // Store captured values at offsets 8, 12, 16, ...
                 for (i, cap) in captured_values.iter().enumerate() {
-                    f.instruction(&Instruction::GlobalGet(STACK_PTR_GLOBAL));
+                    self.get_reg(f, *dest);
                     self.get_reg(f, *cap);
                     f.instruction(&Instruction::I32Store(MemArg {
                         offset: (8 + i * 4) as u64,
@@ -2121,9 +2158,6 @@ impl<'a> FunctionLowerer<'a> {
                         memory_index: 0,
                     }));
                 }
-
-                f.instruction(&Instruction::GlobalGet(STACK_PTR_GLOBAL));
-                self.set_reg(f, *dest);
             }
 
             // === ClosureFunc ===

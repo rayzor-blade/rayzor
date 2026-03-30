@@ -3555,14 +3555,10 @@ function _wrapFnPtr(closurePtr) {{
   if (table && fnIdx < table.length) {{
     const fn = table.get(fnIdx);
     if (fn) {{
-      // Detect arity: try with env pointer, fall back to no-arg
-      return () => {{
-        try {{ return fn(closurePtr); }}
-        catch(e) {{
-          if (e instanceof WebAssembly.RuntimeError) return fn();
-          throw e;
-        }}
-      }};
+      // Closure env pointer is at closurePtr + 8 (after fn_idx and padding).
+      // The closure function expects (env_ptr: i32) as its first parameter.
+      const envPtr = closurePtr + 8;
+      return () => fn(envPtr);
     }}
   }}
   return () => 0;
