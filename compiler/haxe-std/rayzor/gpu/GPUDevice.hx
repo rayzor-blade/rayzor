@@ -4,7 +4,7 @@ package rayzor.gpu;
  * GPU graphics device — wraps a wgpu Device + Queue.
  *
  * On native: backed by Metal/Vulkan/DX12 via wgpu.
- * On WASM: backed by browser WebGPU API (with WebGL2 fallback).
+ * On WASM: backed by browser WebGPU API via wasm-bindgen host module.
  *
  * Example:
  * ```haxe
@@ -16,25 +16,12 @@ package rayzor.gpu;
  * }
  * ```
  */
-#if wasm
-@:jsImport("rayzor-gpu")
-#else
 @:native("rayzor::gpu::GPUDevice")
-#end
 extern class GPUDevice {
-    #if wasm
-    @:jsMethod("create-device")
-    public static function create():GPUDevice;
-    @:jsMethod("destroy-device")
-    public function destroy():Void;
-    @:jsMethod("is-available")
-    public static function isAvailable():Bool;
-    #else
     @:native("rayzor_gpu_gfx_device_create")
     public static function create():GPUDevice;
     @:native("rayzor_gpu_gfx_device_destroy")
     public function destroy():Void;
     @:native("rayzor_gpu_gfx_is_available")
     public static function isAvailable():Bool;
-    #end
 }

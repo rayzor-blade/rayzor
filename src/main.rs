@@ -3150,8 +3150,30 @@ fn cmd_build_wasm(
         &["wasm"],
     )?;
 
-    let user_wasm =
-        compiler::codegen::wasm_backend::WasmBackend::compile(&[&mir_result.module], Some("main"))?;
+    let user_wasm = compiler::codegen::wasm_backend::WasmBackend::compile(
+        &[&mir_result.module],
+        Some("main"),
+    )?;
+
+    // Build host function map from rayzor.toml [wasm] hosts:
+    // Scan each JS host file for `export function` names and map them to the module name.
+    let host_functions: std::collections::HashMap<String, String> = {
+        let config_hosts = project
+            .as_ref()
+            .map(|p| p.resolved_wasm_hosts())
+            .unwrap_or_default();
+        let mut map = std::collections::HashMap::new();
+        for (module_name, js_path) in &config_hosts {
+            if let Ok(js_source) = std::fs::read_to_string(js_path) {
+                let exports = compiler::codegen::wasm_linker::WasmLinker::scan_js_exports(&js_source);
+                println!("  host: {} ({} exports from {})", module_name, exports.len(), js_path.display());
+                for name in exports {
+                    map.insert(name, module_name.clone());
+                }
+            }
+        }
+        map
+    };
 
     // Link with pre-built WASM runtime (if available)
     let runtime_wasm_path = find_wasm_runtime();
@@ -3163,61 +3185,65 @@ fn cmd_build_wasm(
             rt_path.display(),
             rt_bytes.len() as f64 / 1024.0
         );
-        compiler::codegen::wasm_linker::WasmLinker::link(&user_wasm, &rt_bytes)?
+        compiler::codegen::wasm_linker::WasmLinker::link_with_hosts(&user_wasm, &rt_bytes, &host_functions)?
     } else {
         println!("  warning: WASM runtime not found, output needs JS harness");
         user_wasm
     };
-
-    // Wrap as WASI P2 Component
-    let component_bytes = compiler::codegen::wasm_component::wrap_as_component(
-        &linked_wasm,
-        compiler::codegen::wasm_component::ComponentKind::Command,
-    )?;
-    println!(
-        "  component: {:.1} KB (core: {:.1} KB)",
-        component_bytes.len() as f64 / 1024.0,
-        linked_wasm.len() as f64 / 1024.0
-    );
 
     let out_path = output.unwrap_or_else(|| file.with_extension("wasm"));
     // Ensure output directory exists
     if let Some(parent) = out_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::fs::write(&out_path, &component_bytes)
-        .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
 
-    // Also write core module for JS/browser use (WebAssembly.instantiate needs core modules)
+    // Write core module first (JS/browser use — WebAssembly.instantiate needs core modules)
     let core_path = out_path.with_extension("core.wasm");
     std::fs::write(&core_path, &linked_wasm)
         .map_err(|e| format!("failed to write {}: {}", core_path.display(), e))?;
 
-    // Collect exported class metadata and @:jsImport mappings for JS bindings
+    // Wrap as WASI P2 Component (non-fatal for browser builds with host imports)
+    match compiler::codegen::wasm_component::wrap_as_component(
+        &linked_wasm,
+        compiler::codegen::wasm_component::ComponentKind::Command,
+    ) {
+        Ok(component_bytes) => {
+            println!(
+                "  component: {:.1} KB (core: {:.1} KB)",
+                component_bytes.len() as f64 / 1024.0,
+                linked_wasm.len() as f64 / 1024.0
+            );
+            std::fs::write(&out_path, &component_bytes)
+                .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
+        }
+        Err(e) => {
+            if browser {
+                // Browser builds don't need Component Model — core module is sufficient
+                println!("  note: component encoding skipped ({})", e);
+                // Write core module as .wasm too for compatibility
+                std::fs::write(&out_path, &linked_wasm)
+                    .map_err(|err| format!("failed to write {}: {}", out_path.display(), err))?;
+            } else {
+                return Err(format!("Failed to encode WASM Component: {}", e));
+            }
+        }
+    }
+
+    // Collect exported class metadata for JS bindings
     let modules_ref = [&mir_result.module];
     let exported_classes = compiler::codegen::wasm_bindgen::collect_exported_classes(
         &modules_ref,
         &mir_result.class_alloc_sizes,
     );
-    let mut js_imports = compiler::codegen::wasm_bindgen::collect_js_imports(&modules_ref);
 
-    // Also detect host modules from rayzor.toml [wasm] hosts config
-    // (extern class methods go through StdlibMapping, not IrFunction.js_import)
-    if let Some(ref proj) = project {
-        for module_name in proj.resolved_wasm_hosts().keys() {
-            js_imports.entry(module_name.clone()).or_default();
-        }
-    }
-
-    if !js_imports.is_empty() {
-        println!(
-            "  js imports: {}",
-            js_imports
-                .iter()
-                .map(|(module, funcs)| format!("{} ({} functions)", module, funcs.len()))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
+    // Build js_imports from host_functions map (grouped by module name)
+    let mut js_imports: std::collections::BTreeMap<String, Vec<(String, String)>> =
+        std::collections::BTreeMap::new();
+    for (func_name, module_name) in &host_functions {
+        js_imports
+            .entry(module_name.clone())
+            .or_default()
+            .push((func_name.clone(), func_name.clone()));
     }
 
     // Resolve and copy host modules to build output directory
@@ -3314,7 +3340,7 @@ fn cmd_build_wasm(
         println!(
             "  wrote {} ({:.1} KB)",
             out_path.display(),
-            component_bytes.len() as f64 / 1024.0,
+            linked_wasm.len() as f64 / 1024.0,
         );
         println!("  wrote {}", js_path.display());
         println!("  wrote {}", html_path.display());
@@ -3326,7 +3352,7 @@ fn cmd_build_wasm(
         println!(
             "  wrote {} ({:.1} KB)",
             out_path.display(),
-            component_bytes.len() as f64 / 1024.0,
+            linked_wasm.len() as f64 / 1024.0,
         );
         if runtime_wasm_path.is_some() {
             println!("\n  Run: wasmtime {}", out_path.display());
@@ -3418,241 +3444,40 @@ fn resolve_and_copy_host_modules(
     resolved
 }
 
-/// Generate JS host module code for detected @:jsImport modules.
-/// Injects real WebGPU/DOM implementations into the rayzor import object.
-fn generate_host_module_code(
-    js_imports: &std::collections::BTreeMap<String, Vec<(String, String)>>,
-) -> String {
-    let mut code = String::new();
-
-    if js_imports.contains_key("rayzor-gpu") {
-        code.push_str(r#"
-// === rayzor-gpu host (WebGPU) ===
-(function() {
-  let _gpuDevice = null, _gpuQueue = null, _handles = new Map(), _nextH = 1;
-  const _alloc = (o) => { const h = _nextH++; _handles.set(h, o); return h; };
-  const _get = (h) => _handles.get(h) ?? null;
-  const _free = (h) => _handles.delete(h);
-
-  async function _initGpu() {
-    if (!navigator.gpu) return false;
-    try {
-      const adapter = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
-      if (!adapter) return false;
-      _gpuDevice = await adapter.requestDevice();
-      _gpuQueue = _gpuDevice.queue;
-      return true;
-    } catch(e) { console.warn('[rayzor:gpu]', e); return false; }
-  }
-
-  // Device
-  rayzor['is-available'] = () => _gpuDevice ? 1 : 0;
-  rayzor['create-device'] = () => _gpuDevice ? _alloc({ type: 'device' }) : 0;
-  rayzor['destroy-device'] = (h) => _free(h);
-
-  // Surface (canvas)
-  rayzor['create-surface-canvas'] = (_dev, _id, w, h) => {
-    let canvas = document.querySelector('canvas');
-    if (!canvas) {
-      canvas = document.createElement('canvas');
-      canvas.id = 'rayzor-canvas';
-      canvas.style.cssText = 'display:block;margin:0 auto;background:#0d0d1a;';
-      document.body.appendChild(canvas);
-    }
-    canvas.width = w || 800; canvas.height = h || 600;
-    if (!_gpuDevice) return 0;
-    const ctx = canvas.getContext('webgpu');
-    if (!ctx) return 0;
-    const format = navigator.gpu.getPreferredCanvasFormat();
-    ctx.configure({ device: _gpuDevice, format, alphaMode: 'premultiplied' });
-    return _alloc({ type: 'surface', canvas, ctx, format });
-  };
-  rayzor['surface-get-texture'] = (sh) => {
-    const s = _get(sh); if (!s?.ctx) return 0;
-    try {
-      const tex = s.ctx.getCurrentTexture();
-      s._frame = tex;
-      return _alloc({ type: 'view', view: tex.createView() });
-    } catch(e) { return 0; }
-  };
-  rayzor['surface-present'] = (sh) => { const s = _get(sh); if (s) s._frame = null; };
-  rayzor['surface-resize'] = (sh, _d, w, h) => {
-    const s = _get(sh); if (!s) return;
-    s.canvas.width = w; s.canvas.height = h;
-    if (_gpuDevice) s.ctx.configure({ device: _gpuDevice, format: s.format, alphaMode: 'premultiplied' });
-  };
-  rayzor['surface-get-format'] = (sh) => { const s = _get(sh); return s?.format?.includes('srgb') ? 7 : 1; };
-  rayzor['surface-destroy'] = (h) => _free(h);
-
-  // Shader
-  rayzor['create-shader'] = (_d, wgslPtr, vsPtr, fsPtr) => {
-    if (!_gpuDevice) return 0;
-    const wgsl = readString(wgslPtr);
-    if (!wgsl) return 0;
-    try {
-      const module = _gpuDevice.createShaderModule({ code: wgsl });
-      const vs = readString(vsPtr) || 'vs_main';
-      const fs = readString(fsPtr) || 'fs_main';
-      return _alloc({ type: 'shader', module, vs, fs });
-    } catch(e) { console.error('[rayzor:gpu] shader:', e); return 0; }
-  };
-  rayzor['destroy-shader'] = (h) => _free(h);
-
-  // Pipeline
-  rayzor['pipeline-begin'] = () => _alloc({ type: 'pipe', shader: null, format: 'bgra8unorm', topo: 'triangle-list', cull: 'none' });
-  rayzor['pipeline-set-shader'] = (p, s) => { const pb = _get(p), sh = _get(s); if (pb && sh) pb.shader = sh; };
-  rayzor['pipeline-set-format'] = (p, f) => { const pb = _get(p); if (pb) pb.format = ['bgra8unorm','rgba8unorm','depth24plus-stencil8','depth32float','rgba16float','rgba32float','bgra8unorm-srgb','rgba8unorm-srgb'][f] || 'bgra8unorm'; };
-  rayzor['pipeline-set-topology'] = (p, t) => { const pb = _get(p); if (pb) pb.topo = ['triangle-list','triangle-strip','line-list','line-strip','point-list'][t] || 'triangle-list'; };
-  rayzor['pipeline-set-cull'] = (p, c) => { const pb = _get(p); if (pb) pb.cull = ['none','front','back'][c] || 'none'; };
-  rayzor['pipeline-build'] = (p, _d) => {
-    const pb = _get(p); if (!pb?.shader?.module || !_gpuDevice) return 0;
-    try {
-      const pipeline = _gpuDevice.createRenderPipeline({
-        layout: 'auto',
-        vertex: { module: pb.shader.module, entryPoint: pb.shader.vs },
-        fragment: { module: pb.shader.module, entryPoint: pb.shader.fs, targets: [{ format: pb.format }] },
-        primitive: { topology: pb.topo, cullMode: pb.cull },
-      });
-      _free(p);
-      return _alloc({ type: 'pipeline', pipeline });
-    } catch(e) { console.error('[rayzor:gpu] pipeline:', e); return 0; }
-  };
-  rayzor['pipeline-destroy'] = (h) => _free(h);
-
-  // Command encoder
-  rayzor['cmd-create'] = () => {
-    if (!_gpuDevice) return 0;
-    return _alloc({ type: 'cmd', encoder: _gpuDevice.createCommandEncoder(), pass: null });
-  };
-  rayzor['cmd-begin-pass'] = (ch, vh, loadOp, r, g, b, a, _dv) => {
-    const cmd = _get(ch), v = _get(vh); if (!cmd?.encoder || !v?.view) return;
-    cmd.pass = cmd.encoder.beginRenderPass({
-      colorAttachments: [{ view: v.view, loadOp: loadOp === 0 ? 'clear' : 'load', storeOp: 'store', clearValue: { r, g, b, a } }],
-    });
-  };
-  rayzor['cmd-set-pipeline'] = (ch, ph) => { const c = _get(ch), p = _get(ph); if (c?.pass && p?.pipeline) c.pass.setPipeline(p.pipeline); };
-  rayzor['cmd-draw'] = (ch, vc, ic, fv, fi) => { const c = _get(ch); if (c?.pass) c.pass.draw(vc, ic, fv, fi); };
-  rayzor['cmd-end-pass'] = (ch) => { const c = _get(ch); if (c?.pass) { c.pass.end(); c.pass = null; } };
-  rayzor['cmd-submit'] = (ch, _d) => {
-    const c = _get(ch); if (!c?.encoder || !_gpuDevice) return;
-    _gpuQueue.submit([c.encoder.finish()]);
-    c.encoder = _gpuDevice.createCommandEncoder();
-  };
-  rayzor['cmd-destroy'] = (h) => _free(h);
-
-  // Register GPU init — called automatically before WASM starts
-  if (typeof window !== 'undefined') window.__rayzorHostInits.push(_initGpu);
-})();
-"#);
-    }
-
-    if js_imports.contains_key("rayzor-window") {
-        code.push_str(r#"
-// === rayzor-window host (DOM canvas + events) ===
-(function() {
-  let _wins = new Map(), _nextW = 1;
-  const KEY_MAP = {};
-  'Escape:256,Enter:257,Tab:258,Backspace:259,Delete:261,ArrowRight:262,ArrowLeft:263,ArrowDown:264,ArrowUp:265,Space:32,ShiftLeft:340,ShiftRight:340,ControlLeft:341,ControlRight:341,AltLeft:342,AltRight:342,MetaLeft:343,MetaRight:343'.split(',').forEach(s => { const [k,v] = s.split(':'); KEY_MAP[k] = +v; });
-  for (let i = 0; i < 26; i++) KEY_MAP['Key' + String.fromCharCode(65+i)] = 65+i;
-  for (let i = 0; i < 10; i++) KEY_MAP['Digit'+i] = 48+i;
-  for (let i = 1; i <= 12; i++) KEY_MAP['F'+i] = 289+i;
-
-  rayzor['create-centered'] = (_t, w, h) => {
-    let canvas = document.querySelector('canvas') || (() => {
-      const c = document.createElement('canvas');
-      c.id = 'rayzor-window';
-      c.style.cssText = 'display:block;margin:0 auto;background:#0d0d1a;';
-      document.body.appendChild(c); return c;
-    })();
-    canvas.width = w || 800; canvas.height = h || 600;
-    canvas.tabIndex = 0; canvas.focus();
-    const win = { canvas, w: canvas.width, h: canvas.height, mx: 0, my: 0, keys: new Set(), btns: new Set(), events: [], open: true, resized: false };
-    canvas.addEventListener('mousemove', e => { const r = canvas.getBoundingClientRect(); win.mx = e.clientX-r.left; win.my = e.clientY-r.top; });
-    canvas.addEventListener('mousedown', e => win.btns.add(e.button));
-    canvas.addEventListener('mouseup', e => win.btns.delete(e.button));
-    document.addEventListener('keydown', e => { const k = KEY_MAP[e.code]||0; win.keys.add(k); if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Tab'].includes(e.key)) e.preventDefault(); });
-    document.addEventListener('keyup', e => { const k = KEY_MAP[e.code]||0; win.keys.delete(k); });
-    const wh = _nextW++; _wins.set(wh, win); return wh;
-  };
-  rayzor['create'] = (_t, _x, _y, w, h, _s) => rayzor['create-centered'](_t, w, h);
-  rayzor['poll-events'] = (wh) => { const w = _wins.get(wh); if (!w) return 0; w.events = []; w.resized = false; return w.open ? 1 : 0; };
-  rayzor['is-key-down'] = (wh, k) => _wins.get(wh)?.keys.has(k) ? 1 : 0;
-  rayzor['get-width'] = (wh) => _wins.get(wh)?.w ?? 0;
-  rayzor['get-height'] = (wh) => _wins.get(wh)?.h ?? 0;
-  rayzor['get-x'] = () => 0;
-  rayzor['get-y'] = () => 0;
-  rayzor['was-resized'] = (wh) => _wins.get(wh)?.resized ? 1 : 0;
-  rayzor['get-handle'] = (wh) => wh;
-  rayzor['get-display-handle'] = () => 0;
-  rayzor['set-title'] = (_wh, ptr) => { try { document.title = readString(ptr); } catch(e) {} };
-  rayzor['set-size'] = (wh, w, h) => { const win = _wins.get(wh); if (win) { win.canvas.width = w; win.canvas.height = h; win.w = w; win.h = h; } };
-  rayzor['set-fullscreen'] = (wh) => { _wins.get(wh)?.canvas.requestFullscreen?.(); };
-  rayzor['set-visible'] = (wh, v) => { const win = _wins.get(wh); if (win) win.canvas.style.display = v ? 'block' : 'none'; };
-  rayzor['set-floating'] = () => {};
-  rayzor['set-opacity'] = (wh, o) => { const win = _wins.get(wh); if (win) win.canvas.style.opacity = ''+o; };
-  rayzor['set-position'] = () => {};
-  rayzor['set-min-size'] = () => {};
-  rayzor['set-max-size'] = () => {};
-  rayzor['is-fullscreen'] = () => document.fullscreenElement ? 1 : 0;
-  rayzor['is-visible'] = () => 1;
-  rayzor['is-minimized'] = () => document.hidden ? 1 : 0;
-  rayzor['is-focused'] = () => 1;
-  rayzor['get-mouse-x'] = (wh) => _wins.get(wh)?.mx ?? 0;
-  rayzor['get-mouse-y'] = (wh) => _wins.get(wh)?.my ?? 0;
-  rayzor['is-mouse-down'] = (wh, b) => _wins.get(wh)?.btns.has(b) ? 1 : 0;
-  rayzor['event-count'] = () => 0;
-  rayzor['event-type'] = () => 0;
-  rayzor['event-x'] = () => 0;
-  rayzor['event-y'] = () => 0;
-  rayzor['event-key'] = () => 0;
-  rayzor['event-button'] = () => 0;
-  rayzor['event-modifiers'] = () => 0;
-  rayzor['event-width'] = () => 0;
-  rayzor['event-height'] = () => 0;
-  rayzor['event-scroll-x'] = () => 0;
-  rayzor['event-scroll-y'] = () => 0;
-  rayzor['run-loop'] = (wh, cbPtr) => {
-    // requestAnimationFrame loop — calls back into WASM each frame
-    const win = _wins.get(wh);
-    if (!win) return;
-    function frame() {
-      win.events = []; win.resized = false;
-      // Call the WASM callback via table
-      const cb = instance.exports.__indirect_function_table?.get(cbPtr);
-      const shouldContinue = cb ? cb() : 0;
-      if (shouldContinue && win.open) requestAnimationFrame(frame);
-    }
-    requestAnimationFrame(frame);
-  };
-  rayzor['destroy'] = (wh) => _wins.delete(wh);
-})();
-"#);
-    }
-
-    code
-}
-
 fn generate_wasm_js_harness(
     wasm_filename: &str,
-    js_imports: &std::collections::BTreeMap<String, Vec<(String, String)>>,
+    _js_imports: &std::collections::BTreeMap<String, Vec<(String, String)>>,
     resolved_hosts: &std::collections::BTreeMap<String, String>,
 ) -> String {
     // Generate import statements for resolved host modules
     let mut host_imports = String::new();
+    let mut host_init = String::new();
+    let mut host_import_objects = String::new();
     for (module_name, filename) in resolved_hosts {
+        let var_name = module_name.replace('-', "_");
         host_imports.push_str(&format!(
-            "import * as _{} from './{}';\n",
-            module_name.replace('-', "_"),
-            filename,
+            "import __{var} from './{filename}';\nimport * as _{var} from './{filename}';\n",
+            var = var_name,
+            filename = filename,
+        ));
+        // Init wasm-bindgen module (loads _bg.wasm), then pre-call async exports
+        // so they're resolved before WASM starts (WASM can't await Promises).
+        host_init.push_str(&format!(
+            "  try {{\n    await __{var}();\n    await _precall_async(_{var});\n    console.log('[rayzor] {module} host initialized (' + Object.keys(_{var}).filter(k => typeof _{var}[k] === 'function').length + ' functions)');\n  }} catch(e) {{ console.warn('[rayzor] {module} init failed:', e); }}\n",
+            var = var_name,
+            module = module_name,
+        ));
+        // Build import namespace for this host module.
+        // The WASM module imports from e.g. "rayzor-gpu" module name.
+        // String/byte parameters need adaptation: Rayzor passes i32 pointers into its
+        // own linear memory, but wasm-bindgen expects JS strings/Uint8Arrays.
+        // We generate wrappers that read from Rayzor's memory before calling the export.
+        host_import_objects.push_str(&format!(
+            "    '{module}': _make_host_adapter(_{var}),\n",
+            module = module_name,
+            var = var_name,
         ));
     }
-
-    // Generate host init code — each resolved host module's init is called before WASM start
-    let host_code = if resolved_hosts.is_empty() {
-        generate_host_module_code(js_imports) // fallback inline stubs
-    } else {
-        String::new() // hosts are loaded from co-located files
-    };
     format!(
         r#"// Rayzor WASM Runtime Harness
 // Generated by `rayzor build --target wasm`
@@ -3679,22 +3504,116 @@ function free(_ptr) {{
   // No-op bump allocator (Phase 1)
 }}
 
-// Read a Rayzor string from WASM memory: [len:i32][utf8 bytes]
+// Read a Rayzor string from WASM memory.
+// HaxeString struct: {{ ptr: u32, len: u32, cap: u32 }} (12 bytes)
 function readString(ptr) {{
+  if (!ptr || !memory) return '';
   const view = new DataView(memory.buffer);
-  const len = view.getInt32(ptr, true);
-  const bytes = new Uint8Array(memory.buffer, ptr + 4, len);
+  const dataPtr = view.getUint32(ptr, true);     // pointer to UTF-8 bytes
+  const len = view.getUint32(ptr + 4, true);     // byte length
+  if (len <= 0 || len > 1000000 || dataPtr + len > memory.buffer.byteLength) return '';
+  const bytes = new Uint8Array(memory.buffer, dataPtr, len);
   return new TextDecoder().decode(bytes);
 }}
 
-// Write a string into WASM memory, return pointer
+// Read a Rayzor Bytes object: [len:i32][data ptr:i32] → Uint8Array
+function readBytes(ptr) {{
+  if (!memory || !ptr) return new Uint8Array(0);
+  const view = new DataView(memory.buffer);
+  const len = view.getInt32(ptr, true);
+  const dataPtr = view.getInt32(ptr + 4, true);
+  return new Uint8Array(memory.buffer, dataPtr, len);
+}}
+
+// Pre-call async exports (e.g. GPU device creation) during init.
+// Results are cached in __asyncCache so the sync adapter can return them.
+const __asyncCache = new Map();
+async function _precall_async(hostModule) {{
+  for (const [name, fn] of Object.entries(hostModule)) {{
+    if (typeof fn !== 'function') continue;
+    // Detect zero-arg async functions that return Promise (wasm-bindgen async exports)
+    if (fn.length === 0) {{
+      try {{
+        const result = fn();
+        if (result && typeof result.then === 'function') {{
+          const resolved = await result;
+          __asyncCache.set(name, resolved);
+          console.log(`[rayzor] pre-resolved async: ${{name}} → ${{resolved}}`);
+        }}
+      }} catch(e) {{
+        // Not all zero-arg functions are async — ignore errors
+      }}
+    }}
+  }}
+}}
+
+// Build a host adapter that wraps wasm-bindgen exports.
+// Handles three cases:
+// 1. Async functions → return pre-cached result
+// 2. String/byte params → read from Rayzor memory before calling
+// 3. Pure i32 functions → pass through directly
+function _make_host_adapter(hostModule) {{
+  const adapter = {{}};
+  for (const [name, fn] of Object.entries(hostModule)) {{
+    if (typeof fn !== 'function') {{ adapter[name] = fn; continue; }}
+
+    // If we have a pre-resolved async result, return it as a sync function
+    if (__asyncCache.has(name)) {{
+      const cached = __asyncCache.get(name);
+      adapter[name] = () => cached;
+      continue;
+    }}
+
+    const src = fn.toString();
+    const hasStr = src.includes('passStringToWasm0');
+    const hasBytes = src.includes('passArray8ToWasm0');
+    if (!hasStr && !hasBytes) {{
+      // Pure i32 function — pass through directly
+      adapter[name] = fn;
+      continue;
+    }}
+    // Build a wrapper that converts Rayzor pointers to JS values.
+    const paramNames = src.match(/^(?:async\s+)?function\s*\w*\(([^)]*)\)/)?.[1]?.split(',').map(s => s.trim()) ?? [];
+    const strParams = new Set();
+    const byteParams = new Set();
+    for (const m of src.matchAll(/passStringToWasm0\((\w+),/g)) {{
+      const idx = paramNames.indexOf(m[1]);
+      if (idx >= 0) strParams.add(idx);
+    }}
+    for (const m of src.matchAll(/passArray8ToWasm0\((\w+),/g)) {{
+      const idx = paramNames.indexOf(m[1]);
+      if (idx >= 0) byteParams.add(idx);
+    }}
+    adapter[name] = (...args) => {{
+      const converted = args.map((a, i) => {{
+        if (strParams.has(i) && typeof a === 'number' && memory) {{
+          try {{ return readString(a); }} catch {{ return ''; }}
+        }}
+        if (byteParams.has(i) && typeof a === 'number' && memory) {{
+          try {{ return readBytes(a); }} catch {{ return new Uint8Array(0); }}
+        }}
+        return a;
+      }});
+      return fn(...converted);
+    }};
+  }}
+  return new Proxy(adapter, {{ get: (t, p) => t[p] ?? ((...a) => 0) }});
+}}
+
+// Write a string into WASM memory as HaxeString struct, return struct pointer
 function writeString(str) {{
   const encoded = new TextEncoder().encode(str);
-  const ptr = malloc(4 + encoded.length);
+  // 1. Write UTF-8 bytes + NUL
+  const dataPtr = malloc(encoded.length + 1);
+  new Uint8Array(memory.buffer).set(encoded, dataPtr);
+  new Uint8Array(memory.buffer)[dataPtr + encoded.length] = 0; // NUL
+  // 2. Write HaxeString struct: {{ ptr, len, cap }}
+  const structPtr = malloc(12);
   const view = new DataView(memory.buffer);
-  view.setInt32(ptr, encoded.length, true);
-  new Uint8Array(memory.buffer).set(encoded, ptr + 4);
-  return ptr;
+  view.setUint32(structPtr, dataPtr, true);     // ptr to bytes
+  view.setUint32(structPtr + 4, encoded.length, true); // len
+  view.setUint32(structPtr + 8, encoded.length, true); // cap
+  return structPtr;
 }}
 
 // Rayzor runtime imports
@@ -3747,17 +3666,10 @@ const rayzor = {{
   haxe_math_random: () => Math.random(),
 }};
 
-// Host module init registry — each host pushes its async init function
-if (typeof window !== 'undefined') window.__rayzorHostInits = window.__rayzorHostInits || [];
-
-// Auto-wired host modules from @:jsImport detection
-{host_code}
-
 // Proxy: any missing import returns a no-op function
 const rayzorProxy = new Proxy(rayzor, {{
   get(target, prop) {{
     if (prop in target) return target[prop];
-    // Auto-stub unknown imports
     return (...args) => {{
       if (typeof args[0] === "bigint") return BigInt(0);
       return 0;
@@ -3851,17 +3763,15 @@ async function run() {{
     get: (target, prop) => target[prop] ?? ((...args) => 0),
   }});
 
+  // Initialize wasm-bindgen host modules
+  {host_init}
+
   const {{ instance }} = await WebAssembly.instantiate(wasmBytes, {{
     rayzor: rayzorProxy,
     wasi_snapshot_preview1: wasiProxy,
-  }});
+{host_import_objects}  }});
 
   memory = instance.exports.memory;
-
-  // Initialize all registered host modules before WASM starts
-  if (typeof window !== 'undefined' && window.__rayzorHostInits) {{
-    for (const init of window.__rayzorHostInits) await init();
-  }}
 
   if (instance.exports._start) {{
     instance.exports._start();
@@ -3873,8 +3783,9 @@ async function run() {{
 run().catch(e => {{ console.error("WASM error:", e); if (typeof process !== "undefined") process.exitCode = 1; }});
 "#,
         filename = wasm_filename,
-        host_code = host_code,
-        host_imports = host_imports
+        host_imports = host_imports,
+        host_init = host_init,
+        host_import_objects = host_import_objects
     )
 }
 

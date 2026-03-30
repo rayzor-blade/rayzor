@@ -677,6 +677,221 @@ pub fn gfx_cmd_destroy(h: i32) {
     HANDLES.lock().unwrap().free(h);
 }
 
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_cmd_begin_pass")]
+pub fn gfx_cmd_begin_pass(
+    cmd_h: i32,
+    color_view_h: i32,
+    load_op: i32,
+    clear_r: f64,
+    clear_g: f64,
+    clear_b: f64,
+    clear_a: f64,
+    depth_view_h: i32,
+) {
+    let mut ht = HANDLES.lock().unwrap();
+    // Get raw pointers before mutable borrow of cmd
+    let color_view_ptr = match ht.get(color_view_h) {
+        Some(GpuObject::TextureView(v)) => &**v as *const wgpu::TextureView,
+        _ => return,
+    };
+    let depth_view_ptr = if depth_view_h != 0 {
+        match ht.get(depth_view_h) {
+            Some(GpuObject::TextureView(v)) => &**v as *const wgpu::TextureView,
+            _ => std::ptr::null(),
+        }
+    } else {
+        std::ptr::null()
+    };
+    if let Some(GpuObject::CommandRecorder(cmd)) = ht.get_mut(cmd_h) {
+        cmd.begin_pass(color_view_ptr, load_op, clear_r, clear_g, clear_b, clear_a, depth_view_ptr);
+    }
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_cmd_set_pipeline")]
+pub fn gfx_cmd_set_pipeline(cmd_h: i32, pipeline_h: i32) {
+    let mut ht = HANDLES.lock().unwrap();
+    let pipeline_ptr = match ht.get(pipeline_h) {
+        Some(GpuObject::Pipeline(p)) => &**p as *const GraphicsPipeline,
+        _ => return,
+    };
+    if let Some(GpuObject::CommandRecorder(cmd)) = ht.get_mut(cmd_h) {
+        cmd.push_set_pipeline(pipeline_ptr);
+    }
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_cmd_set_vertex_buffer")]
+pub fn gfx_cmd_set_vertex_buffer(cmd_h: i32, slot: u32, buffer_h: i32) {
+    let mut ht = HANDLES.lock().unwrap();
+    let buffer_ptr = match ht.get(buffer_h) {
+        Some(GpuObject::Buffer(b)) => &**b as *const crate::graphics::GraphicsBuffer,
+        _ => return,
+    };
+    if let Some(GpuObject::CommandRecorder(cmd)) = ht.get_mut(cmd_h) {
+        cmd.push_set_vertex_buffer(slot, buffer_ptr);
+    }
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_cmd_set_index_buffer")]
+pub fn gfx_cmd_set_index_buffer(cmd_h: i32, buffer_h: i32, format: i32) {
+    let mut ht = HANDLES.lock().unwrap();
+    let buffer_ptr = match ht.get(buffer_h) {
+        Some(GpuObject::Buffer(b)) => &**b as *const crate::graphics::GraphicsBuffer,
+        _ => return,
+    };
+    if let Some(GpuObject::CommandRecorder(cmd)) = ht.get_mut(cmd_h) {
+        cmd.push_set_index_buffer(buffer_ptr, format);
+    }
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_cmd_set_bind_group")]
+pub fn gfx_cmd_set_bind_group(cmd_h: i32, group_index: u32, bind_group_h: i32) {
+    let mut ht = HANDLES.lock().unwrap();
+    let bg_ptr = match ht.get(bind_group_h) {
+        Some(GpuObject::BindGroup(bg)) => &**bg as *const GraphicsBindGroup,
+        _ => return,
+    };
+    if let Some(GpuObject::CommandRecorder(cmd)) = ht.get_mut(cmd_h) {
+        cmd.push_set_bind_group(group_index, bg_ptr);
+    }
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_cmd_draw")]
+pub fn gfx_cmd_draw(cmd_h: i32, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) {
+    let mut ht = HANDLES.lock().unwrap();
+    if let Some(GpuObject::CommandRecorder(cmd)) = ht.get_mut(cmd_h) {
+        cmd.push_draw(vertex_count, instance_count, first_vertex, first_instance);
+    }
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_cmd_draw_indexed")]
+pub fn gfx_cmd_draw_indexed(cmd_h: i32, index_count: u32, instance_count: u32, first_index: u32, base_vertex: i32, first_instance: u32) {
+    let mut ht = HANDLES.lock().unwrap();
+    if let Some(GpuObject::CommandRecorder(cmd)) = ht.get_mut(cmd_h) {
+        cmd.push_draw_indexed(index_count, instance_count, first_index, base_vertex, first_instance);
+    }
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_cmd_set_viewport")]
+pub fn gfx_cmd_set_viewport(cmd_h: i32, x: f32, y: f32, w: f32, h: f32, min_depth: f32, max_depth: f32) {
+    let mut ht = HANDLES.lock().unwrap();
+    if let Some(GpuObject::CommandRecorder(cmd)) = ht.get_mut(cmd_h) {
+        cmd.push_set_viewport(x, y, w, h, min_depth, max_depth);
+    }
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_cmd_set_scissor")]
+pub fn gfx_cmd_set_scissor(cmd_h: i32, x: u32, y: u32, w: u32, h: u32) {
+    let mut ht = HANDLES.lock().unwrap();
+    if let Some(GpuObject::CommandRecorder(cmd)) = ht.get_mut(cmd_h) {
+        cmd.push_set_scissor(x, y, w, h);
+    }
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_cmd_begin_pass_mrt")]
+pub fn gfx_cmd_begin_pass_mrt(cmd_h: i32, _count: i32, _color_views: &[i32], _load_ops: &[i32], _clear_colors: &[f64], _depth_h: i32) {
+    let mut ht = HANDLES.lock().unwrap();
+    if let Some(GpuObject::CommandRecorder(_cmd)) = ht.get_mut(cmd_h) {
+        // MRT stub — single pass fallback for now
+    }
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_cmd_end_pass")]
+pub fn gfx_cmd_end_pass(cmd_h: i32) {
+    let mut ht = HANDLES.lock().unwrap();
+    if let Some(GpuObject::CommandRecorder(cmd)) = ht.get_mut(cmd_h) {
+        cmd.end_pass();
+    }
+}
+
+// ============================================================================
+// Pipeline extras
+// ============================================================================
+
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_pipeline_set_vertex_layout_simple")]
+pub fn gfx_pipeline_set_vertex_layout_simple(builder_h: i32, stride: i32, attr_count: i32, attr_data: &[i32]) {
+    let mut ht = HANDLES.lock().unwrap();
+    if let Some(GpuObject::PipelineBuilder(pb)) = ht.get_mut(builder_h) {
+        pb.set_vertex_layout_simple(stride, attr_count, attr_data);
+    }
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_pipeline_set_depth_simple")]
+pub fn gfx_pipeline_set_depth_simple(builder_h: i32, depth_format: i32) {
+    let mut ht = HANDLES.lock().unwrap();
+    if let Some(GpuObject::PipelineBuilder(pb)) = ht.get_mut(builder_h) {
+        pb.set_depth_simple(depth_format);
+    }
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_pipeline_add_layout")]
+pub fn gfx_pipeline_add_layout(builder_h: i32, layout_h: i32) {
+    let mut ht = HANDLES.lock().unwrap();
+    let layout_ptr = match ht.get(layout_h) {
+        Some(GpuObject::BindGroupLayout(l)) => &**l as *const GraphicsBindGroupLayout,
+        _ => return,
+    };
+    if let Some(GpuObject::PipelineBuilder(pb)) = ht.get_mut(builder_h) {
+        pb.add_layout(layout_ptr);
+    }
+}
+
+// ============================================================================
+// Buffer extras
+// ============================================================================
+
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_buffer_from_bytes")]
+pub fn gfx_buffer_from_bytes(dev_h: i32, data: &[u8], usage_flags: i32) -> i32 {
+    let mut ht = HANDLES.lock().unwrap();
+    let ctx = match ht.get(dev_h) {
+        Some(GpuObject::GfxContext(c)) => c,
+        _ => return 0,
+    };
+    let usage = wgpu::BufferUsages::from_bits_truncate(usage_flags as u32);
+    let buffer = wgpu::util::DeviceExt::create_buffer_init(
+        &*ctx.device,
+        &wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: data,
+            usage,
+        },
+    );
+    let gfx_buf = crate::graphics::GraphicsBuffer {
+        buffer,
+        size: data.len() as u64,
+    };
+    ht.alloc(GpuObject::Buffer(Box::new(gfx_buf)))
+}
+
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_buffer_write_bytes")]
+pub fn gfx_buffer_write_bytes(buf_h: i32, dev_h: i32, offset: i32, data: &[u8]) {
+    let ht = HANDLES.lock().unwrap();
+    let ctx = match ht.get(dev_h) {
+        Some(GpuObject::GfxContext(c)) => c,
+        _ => return,
+    };
+    if let Some(GpuObject::Buffer(b)) = ht.get(buf_h) {
+        ctx.queue
+            .write_buffer(&b.buffer, offset as u64, data);
+    }
+}
+
+// ============================================================================
+// Surface extras
+// ============================================================================
+
+#[wasm_bindgen(js_name = "rayzor_gpu_gfx_surface_create")]
+pub fn gfx_surface_create(
+    _dev_h: i32,
+    _window_handle: i32,
+    _display_handle: i32,
+    _width: i32,
+    _height: i32,
+) -> i32 {
+    // Native surface creation from raw window handles — not available on WASM.
+    // Use Surface.createCanvas() instead.
+    0
+}
+
 // ============================================================================
 // Compute
 // ============================================================================
