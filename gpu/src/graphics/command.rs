@@ -127,6 +127,85 @@ impl CommandRecorder {
         queue.submit(std::iter::once(encoder.finish()));
         self.passes.clear();
     }
+
+    /// Begin a new render pass with a color attachment and optional depth.
+    pub fn begin_pass(
+        &mut self,
+        color_view: *const wgpu::TextureView,
+        load_op: i32,
+        clear_r: f64, clear_g: f64, clear_b: f64, clear_a: f64,
+        depth_view: *const wgpu::TextureView,
+    ) {
+        if color_view.is_null() { return; }
+        if let Some(pass) = self.current_pass.take() {
+            self.passes.push(pass);
+        }
+        let load = if load_op == 0 {
+            wgpu::LoadOp::Clear(wgpu::Color { r: clear_r, g: clear_g, b: clear_b, a: clear_a })
+        } else {
+            wgpu::LoadOp::Load
+        };
+        self.current_pass = Some(RecordedRenderPass {
+            color_attachments: vec![ColorAttachment { view: color_view, load_op: load }],
+            depth_view: if depth_view.is_null() { None } else { Some(depth_view) },
+            commands: Vec::new(),
+        });
+    }
+
+    pub fn end_pass(&mut self) {
+        if let Some(pass) = self.current_pass.take() {
+            self.passes.push(pass);
+        }
+    }
+
+    pub fn push_set_pipeline(&mut self, pipeline: *const super::pipeline::GraphicsPipeline) {
+        if let Some(pass) = self.current_pass.as_mut() {
+            pass.commands.push(RenderCommand::SetPipeline(pipeline));
+        }
+    }
+
+    pub fn push_set_vertex_buffer(&mut self, slot: u32, buffer: *const super::GraphicsBuffer) {
+        if let Some(pass) = self.current_pass.as_mut() {
+            pass.commands.push(RenderCommand::SetVertexBuffer(slot, buffer));
+        }
+    }
+
+    pub fn push_set_index_buffer(&mut self, buffer: *const super::GraphicsBuffer, format: i32) {
+        if let Some(pass) = self.current_pass.as_mut() {
+            let fmt = if format == 1 { wgpu::IndexFormat::Uint32 } else { wgpu::IndexFormat::Uint16 };
+            pass.commands.push(RenderCommand::SetIndexBuffer(buffer, fmt));
+        }
+    }
+
+    pub fn push_set_bind_group(&mut self, idx: u32, bg: *const super::bind_group::GraphicsBindGroup) {
+        if let Some(pass) = self.current_pass.as_mut() {
+            pass.commands.push(RenderCommand::SetBindGroup(idx, bg));
+        }
+    }
+
+    pub fn push_draw(&mut self, vc: u32, ic: u32, fv: u32, fi: u32) {
+        if let Some(pass) = self.current_pass.as_mut() {
+            pass.commands.push(RenderCommand::Draw(vc, ic, fv, fi));
+        }
+    }
+
+    pub fn push_draw_indexed(&mut self, ic: u32, inst: u32, fi: u32, bv: i32, finst: u32) {
+        if let Some(pass) = self.current_pass.as_mut() {
+            pass.commands.push(RenderCommand::DrawIndexed(ic, inst, fi, bv, finst));
+        }
+    }
+
+    pub fn push_set_viewport(&mut self, x: f32, y: f32, w: f32, h: f32, mind: f32, maxd: f32) {
+        if let Some(pass) = self.current_pass.as_mut() {
+            pass.commands.push(RenderCommand::SetViewport(x, y, w, h, mind, maxd));
+        }
+    }
+
+    pub fn push_set_scissor(&mut self, x: u32, y: u32, w: u32, h: u32) {
+        if let Some(pass) = self.current_pass.as_mut() {
+            pass.commands.push(RenderCommand::SetScissor(x, y, w, h));
+        }
+    }
 }
 
 // ============================================================================

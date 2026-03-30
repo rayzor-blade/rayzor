@@ -41,6 +41,37 @@ impl PipelineBuilder {
             bind_group_layouts: vec![],
         }
     }
+
+    pub fn set_vertex_layout_simple(&mut self, stride: i32, attr_count: i32, attr_data: &[i32]) {
+        self.vertex_stride = stride as u64;
+        self.vertex_attributes.clear();
+        let mut offset = 0u64;
+        for i in 0..attr_count as usize {
+            if i >= attr_data.len() { break; }
+            let components = attr_data[i];
+            let format = match components {
+                1 => wgpu::VertexFormat::Float32,
+                2 => wgpu::VertexFormat::Float32x2,
+                3 => wgpu::VertexFormat::Float32x3,
+                4 => wgpu::VertexFormat::Float32x4,
+                _ => wgpu::VertexFormat::Float32x4,
+            };
+            self.vertex_attributes.push(wgpu::VertexAttribute {
+                format,
+                offset,
+                shader_location: i as u32,
+            });
+            offset += (components as u64) * 4;
+        }
+    }
+
+    pub fn set_depth_simple(&mut self, depth_format: i32) {
+        self.depth_format = Some(super::types::int_to_texture_format(depth_format));
+    }
+
+    pub fn add_layout(&mut self, layout: *const super::bind_group::GraphicsBindGroupLayout) {
+        self.bind_group_layouts.push(layout);
+    }
 }
 
 // ============================================================================

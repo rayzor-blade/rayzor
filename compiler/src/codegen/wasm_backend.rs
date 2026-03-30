@@ -63,22 +63,28 @@ impl WasmBackend {
     /// `entry_function` -- if provided, the named function is exported as `_start`.
     /// Returns raw `.wasm` bytes on success.
     pub fn compile(modules: &[&IrModule], entry_function: Option<&str>) -> Result<Vec<u8>, String> {
-        Self::compile_with_exports(modules, entry_function, &[])
+        Self::compile_with_js_modules(modules, entry_function, &[], &std::collections::BTreeMap::new())
     }
 
-    /// Compile with additional function exports (for JS interop).
-    /// `extra_exports` is a list of function names to export from WASM.
-    pub fn compile_with_exports(
+    /// Compile with extern function → JS module mappings from @:jsImport.
+    pub fn compile_with_js_modules(
         modules: &[&IrModule],
         entry_function: Option<&str>,
         extra_exports: &[&str],
+        extern_js_modules: &std::collections::BTreeMap<String, String>,
     ) -> Result<Vec<u8>, String> {
         let mut ctx = CompileCtx::new();
+        // Pre-populate js_import_modules from extern class @:jsImport mappings
+        for (func_name, module_name) in extern_js_modules {
+            ctx.js_import_modules.insert(func_name.clone(), (module_name.clone(), func_name.clone()));
+        }
         ctx.collect_imports(modules);
         ctx.collect_functions(modules);
+        // Build fallback map: scan ALL functions for CallDirect targets not in ir_func_to_idx,
+        // resolve them by name from extern_functions/functions across all modules.
+        ctx.build_func_id_fallback(modules);
         ctx.collect_strings(modules);
         ctx.collect_globals(modules);
-        // Build set of exported class names from @:export functions
         for m in modules {
             for func in m.functions.values() {
                 if func.wasm_export {
@@ -91,6 +97,15 @@ impl WasmBackend {
             }
         }
         ctx.encode_with_exports(modules, entry_function, extra_exports)
+    }
+
+    /// Compile with additional function exports (for JS interop).
+    pub fn compile_with_exports(
+        modules: &[&IrModule],
+        entry_function: Option<&str>,
+        extra_exports: &[&str],
+    ) -> Result<Vec<u8>, String> {
+        Self::compile_with_js_modules(modules, entry_function, extra_exports, &std::collections::BTreeMap::new())
     }
 }
 
@@ -158,6 +173,9 @@ struct CompileCtx {
     /// @:jsImport function name → (js_module, js_import_name).
     /// Used to emit WASM imports from named JS modules instead of the default "rayzor" module.
     js_import_modules: HashMap<String, (String, String)>,
+    /// Fallback IrFunctionId → WASM func index for cross-module extern resolution.
+    /// Populated after collect_imports + collect_functions to resolve IDs not in ir_func_to_idx.
+    func_id_fallback: HashMap<IrFunctionId, u32>,
 }
 
 impl CompileCtx {
@@ -180,6 +198,7 @@ impl CompileCtx {
             func_param_types: HashMap::new(),
             exported_classes: std::collections::HashSet::new(),
             js_import_modules: HashMap::new(),
+            func_id_fallback: HashMap::new(),
         }
     }
 
@@ -339,6 +358,35 @@ impl CompileCtx {
                     self.func_name_to_idx.insert(func.name.clone(), idx);
                     continue;
                 }
+                // Map CallDirect targets in this function to import indices.
+                // This doesn't remove the function — it just ensures the func_id→idx
+                // mapping for any CallDirect targets is available.
+                {
+                    use crate::ir::IrInstruction;
+                    for block in func.cfg.blocks.values() {
+                        for inst in &block.instructions {
+                            if let IrInstruction::CallDirect { func_id: fid, .. } = inst {
+                                if !self.ir_func_to_idx.contains_key(fid) {
+                                    // Try to resolve the target by name across all modules
+                                    'resolve: for m2 in modules.iter() {
+                                        if let Some(tf) = m2.extern_functions.get(fid) {
+                                            if let Some(&idx) = self.import_name_to_idx.get(&tf.name) {
+                                                self.ir_func_to_idx.insert(*fid, idx);
+                                                break 'resolve;
+                                            }
+                                        }
+                                        if let Some(tf) = m2.functions.get(fid) {
+                                            if let Some(&idx) = self.import_name_to_idx.get(&tf.name) {
+                                                self.ir_func_to_idx.insert(*fid, idx);
+                                                break 'resolve;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 let (params, results) = Self::sig_to_wasm(&func.signature);
                 let type_idx = self.intern_type(params, results);
                 let func_idx = self.next_func_idx;
@@ -413,6 +461,103 @@ impl CompileCtx {
                     }
                 }
             }
+        }
+    }
+
+    /// Build fallback map for unresolved CallDirect targets.
+    /// Scans all internal functions' instructions for CallDirect with unknown func_ids,
+    /// then resolves them by name across all modules' extern_functions and functions.
+    fn build_func_id_fallback(&mut self, modules: &[&IrModule]) {
+        use crate::ir::IrInstruction;
+        let mut unresolved: std::collections::BTreeSet<IrFunctionId> = std::collections::BTreeSet::new();
+
+        // Collect all unresolved CallDirect targets
+        for module in modules {
+            for func in module.functions.values() {
+                for block in func.cfg.blocks.values() {
+                    for inst in &block.instructions {
+                        if let IrInstruction::CallDirect { func_id: fid, .. } = inst {
+                            if !self.ir_func_to_idx.contains_key(fid) {
+                                unresolved.insert(*fid);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Also check for targets that ARE in ir_func_to_idx but might point to wrong functions
+        let mut suspicious = 0u32;
+        for module in modules {
+            for func in module.functions.values() {
+                for block in func.cfg.blocks.values() {
+                    for inst in &block.instructions {
+                        if let IrInstruction::CallDirect { func_id: fid, .. } = inst {
+                            if let Some(&idx) = self.ir_func_to_idx.get(fid) {
+                                // Check if the target is an import or an internal function
+                                let is_import = (idx as usize) < self.imports.len();
+                                if !is_import {
+                                    // Target is internal — check if the name matches an import
+                                    if let Some(ef) = module.extern_functions.get(fid) {
+                                        if self.import_name_to_idx.contains_key(&ef.name) {
+                                            // This should be calling an import but calls an internal!
+                                            let import_idx = self.import_name_to_idx[&ef.name];
+                                            eprintln!(
+                                                "[wasm] MISROUTE: func_id {:?} ({}) → idx {} (internal) but should be {} (import)",
+                                                fid, ef.name, idx, import_idx
+                                            );
+                                            self.func_id_fallback.insert(*fid, import_idx);
+                                            suspicious += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if suspicious > 0 {
+            eprintln!("[wasm] fixed {} misrouted CallDirect targets", suspicious);
+        }
+
+        if unresolved.is_empty() {
+            return;
+        }
+
+        // Resolve by name: find the function name for each unresolved ID, then map to import/func index
+        for fid in &unresolved {
+            for module in modules {
+                if let Some(ef) = module.extern_functions.get(fid) {
+                    if let Some(&idx) = self.import_name_to_idx.get(&ef.name) {
+                        self.func_id_fallback.insert(*fid, idx);
+                        break;
+                    }
+                    if let Some(&idx) = self.func_name_to_idx.get(&ef.name) {
+                        self.func_id_fallback.insert(*fid, idx);
+                        break;
+                    }
+                }
+                if let Some(ff) = module.functions.get(fid) {
+                    if let Some(&idx) = self.import_name_to_idx.get(&ff.name) {
+                        self.func_id_fallback.insert(*fid, idx);
+                        break;
+                    }
+                    if let Some(&idx) = self.func_name_to_idx.get(&ff.name) {
+                        self.func_id_fallback.insert(*fid, idx);
+                        break;
+                    }
+                }
+            }
+        }
+
+        let resolved = self.func_id_fallback.len();
+        if resolved > 0 || unresolved.len() > resolved {
+            eprintln!(
+                "[wasm] func_id_fallback: {}/{} resolved",
+                resolved,
+                unresolved.len()
+            );
         }
     }
 
@@ -505,12 +650,17 @@ impl CompileCtx {
         wasm_module.section(&type_section);
 
         // --- Import section ---
-        // All imports use "rayzor" module — the linker resolves them against runtime exports.
-        // @:jsImport functions get stub implementations from the linker; the JS harness
-        // overrides stubs with real host implementations based on js_import_modules mapping.
+        // Import section: "rayzor" for runtime functions, actual module name for @:jsImport.
+        // @:jsImport functions use their declared JS module name so the linker preserves
+        // them as real WASM imports (not stubs). The JS harness provides the host implementations.
         let mut import_section = ImportSection::new();
         for imp in &self.imports {
-            import_section.import("rayzor", &imp.name, EntityType::Function(imp.type_idx));
+            let module = if let Some((js_mod, _)) = self.js_import_modules.get(&imp.name) {
+                js_mod.as_str()
+            } else {
+                "rayzor"
+            };
+            import_section.import(module, &imp.name, EntityType::Function(imp.type_idx));
         }
         wasm_module.section(&import_section);
 
@@ -681,6 +831,32 @@ impl CompileCtx {
                         internal.ir_id
                     )
                 })?;
+            // Check if this is a stub function that should forward to an import.
+            // These are extern class method wrappers with Unreachable/empty terminators
+            // where the actual implementation is a WASM import with the same name.
+            let is_stub = ir_func.cfg.blocks.len() <= 2
+                && ir_func.cfg.blocks.values().all(|b| {
+                    b.instructions.is_empty()
+                        || matches!(
+                            b.terminator,
+                            crate::ir::IrTerminator::Unreachable
+                                | crate::ir::IrTerminator::NoReturn { .. }
+                        )
+                });
+            if is_stub {
+                if let Some(&import_idx) = self.import_name_to_idx.get(&ir_func.name) {
+                    // Generate a thin forwarder: pass all params to the import, return result
+                    let (params, results) = Self::sig_to_wasm(&ir_func.signature);
+                    let mut func = Function::new(std::iter::empty::<(u32, ValType)>());
+                    for i in 0..params.len() {
+                        func.instruction(&Instruction::LocalGet(i as u32));
+                    }
+                    func.instruction(&Instruction::Call(import_idx));
+                    func.instruction(&Instruction::End);
+                    code_section.function(&func);
+                    continue;
+                }
+            }
             let body = FunctionLowerer::lower(self, ir_func)?;
             code_section.function(&body);
         }
@@ -1600,6 +1776,9 @@ impl<'a> FunctionLowerer<'a> {
                     }
                 }
                 if let Some(&idx) = self.ctx.ir_func_to_idx.get(func_id) {
+                    f.instruction(&Instruction::Call(idx));
+                } else if let Some(&idx) = self.ctx.func_id_fallback.get(func_id) {
+                    // Resolved via pre-computed fallback map (cross-module extern lookup)
                     f.instruction(&Instruction::Call(idx));
                 } else {
                     // Unknown function -- drop args, trap.

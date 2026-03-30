@@ -50,14 +50,45 @@ impl WasmLinker {
     /// Link a user WASM module with the pre-built runtime WASM.
     /// Returns a single self-contained `.wasm` binary with only WASI imports remaining.
     pub fn link(user_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>, String> {
+        Self::link_with_hosts(user_wasm, runtime_wasm, &HashMap::new())
+    }
+
+    /// Link with host module function map.
+    /// `host_functions` maps function names (e.g. "rayzor_gpu_gfx_device_create")
+    /// to host module names (e.g. "rayzor-gpu"). Matching "rayzor" imports are
+    /// preserved in the output as imports from the host module instead of being stubbed.
+    pub fn link_with_hosts(
+        user_wasm: &[u8],
+        runtime_wasm: &[u8],
+        host_functions: &HashMap<String, String>,
+    ) -> Result<Vec<u8>, String> {
         // 1. Parse both modules.
         let rt = ParsedModule::parse(runtime_wasm, "runtime")?;
         let user = ParsedModule::parse(user_wasm, "user")?;
 
         // 2. Build the merged module.
         let mut linker = LinkerCtx::new();
+        linker.host_functions = host_functions.clone();
         linker.merge(&rt, &user)?;
         linker.encode(&rt, &user)
+    }
+
+    /// Scan a JS file for `export function <name>(` lines and return the names.
+    /// Works with wasm-bindgen output (ES6 module format).
+    pub fn scan_js_exports(js_source: &str) -> Vec<String> {
+        let mut names = Vec::new();
+        for line in js_source.lines() {
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("export function ") {
+                if let Some(paren) = rest.find('(') {
+                    let name = rest[..paren].trim();
+                    if !name.is_empty() {
+                        names.push(name.to_string());
+                    }
+                }
+            }
+        }
+        names
     }
 }
 
@@ -401,9 +432,13 @@ struct LinkerCtx {
     /// Names of unresolved imports (for diagnostics).
     unresolved_imports: Vec<String>,
 
-    /// Non-rayzor imports preserved as real WASM imports (from @:jsImport).
+    /// Non-rayzor imports preserved as real WASM imports (from host modules).
     /// These are emitted in the import section so the JS host can provide them.
     preserved_imports: Vec<PreservedImport>,
+
+    /// Host function map: function_name → host_module_name.
+    /// "rayzor" imports matching this map are preserved instead of stubbed.
+    host_functions: HashMap<String, String>,
 }
 
 /// A user import that's preserved in the linked output (not stubbed).
@@ -430,6 +465,7 @@ impl LinkerCtx {
             stub_type_indices: Vec::new(),
             unresolved_imports: Vec::new(),
             preserved_imports: Vec::new(),
+            host_functions: HashMap::new(),
         }
     }
 
@@ -539,6 +575,18 @@ impl LinkerCtx {
                     } else {
                         user_import_kinds.push(UserImportKind::Resolved(merged_idx));
                     }
+                } else if let Some(host_module) = self.host_functions.get(&imp.name) {
+                    // This "rayzor" import is provided by an external host module
+                    let type_idx = self
+                        .user_type_remap
+                        .get(&imp.type_idx)
+                        .copied()
+                        .unwrap_or(0);
+                    user_import_kinds.push(UserImportKind::Preserved(
+                        host_module.clone(),
+                        imp.name.clone(),
+                        type_idx,
+                    ));
                 } else {
                     let merged_type_idx = self
                         .user_type_remap
@@ -588,6 +636,7 @@ impl LinkerCtx {
         }
 
         // Pass B: assign final indices.
+        let mut user_import_resolved_count = 0u32;
         let mut preserved_slot = self.n_wasi_imports; // preserved imports start right after WASI
         for (i, kind) in user_import_kinds.into_iter().enumerate() {
             let user_orig_idx = i as u32;
@@ -598,6 +647,7 @@ impl LinkerCtx {
                         merged_idx += n_preserved;
                     }
                     self.user_func_remap.insert(user_orig_idx, merged_idx);
+                    user_import_resolved_count += 1;
                 }
                 UserImportKind::Stub(type_idx) => {
                     self.user_func_remap.insert(user_orig_idx, next_func_idx);
@@ -605,6 +655,10 @@ impl LinkerCtx {
                     next_func_idx += 1;
                 }
                 UserImportKind::Preserved(module, name, type_idx) => {
+                    eprintln!(
+                        "[wasm-linker] preserved: user_idx {} → slot {} ({}::{})",
+                        user_orig_idx, preserved_slot, module, name
+                    );
                     self.preserved_imports.push(PreservedImport {
                         module,
                         name,
@@ -618,6 +672,15 @@ impl LinkerCtx {
         }
 
         // 2d. User internal functions.
+        let n_resolved = user_import_resolved_count;
+        eprintln!(
+            "[wasm-linker] user imports: {} total ({} resolved, {} preserved, {} stubs), {} internal funcs",
+            user.num_func_imports,
+            n_resolved,
+            self.preserved_imports.len(),
+            self.stub_type_indices.len(),
+            user.functions.len()
+        );
         for i in 0..user.functions.len() {
             let user_orig_idx = user.num_func_imports + i as u32;
             self.user_func_remap.insert(user_orig_idx, next_func_idx);
@@ -676,7 +739,10 @@ impl LinkerCtx {
             );
         }
 
-        // Preserved @:jsImport imports (indices n_wasi..n_wasi+n_preserved)
+        // Preserved @:jsImport imports
+        for imp in &self.preserved_imports {
+            import_section.import(&imp.module, &imp.name, EntityType::Function(imp.type_idx));
+        }
         let n_preserved = self.preserved_imports.len();
         module.section(&import_section);
 

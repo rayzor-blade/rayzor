@@ -27,16 +27,26 @@ class Main {
             return;
         }
 
-        var win = Window.createCentered("Rayzor GPU", 800, 600);
+        trace("Creating device...");
         var device = GPUDevice.create();
-        trace("Device created");
+        trace("Device created: " + device);
 
+        trace("Creating surface...");
         #if wasm
-        var surface = Surface.createCanvas(device, null, 800, 600);
+        var surface = Surface.createCanvas(device, "gpu-canvas", 800, 600);
         #else
+        var win = Window.createCentered("Rayzor GPU", 800, 600);
         var surface = Surface.create(device, win.getHandle(), win.getDisplayHandle(), 800, 600);
         #end
-        trace("Surface format: " + surface.getFormat());
+        trace("Surface created");
+        if (surface == null) {
+            trace("Surface is NULL!");
+            return;
+        }
+        trace("Surface is non-null, getting format...");
+        var fmt = surface.getFormat();
+        trace("Got format");
+        trace(fmt);
 
         var wgsl = "
 struct VertexOutput {
@@ -63,34 +73,26 @@ struct VertexOutput {
         var pipeline = pipe.build(device);
         trace("Pipeline ready");
 
+        trace("Rendering single frame...");
         var cmd = CommandEncoder.create();
-        var frames = 0;
+        trace("CommandEncoder created: " + cmd);
 
-        Window.runLoop(win, function():Bool {
-            if (win.wasResized()) {
-                surface.resize(device, win.getWidth(), win.getHeight());
-            }
+        var view = surface.getTexture();
+        trace("Got texture view: " + view);
 
-            var view = surface.getTexture();
-            if (view == null) return true;
+        cmd.beginPass(view, 0, 0.05, 0.05, 0.15, 1.0, null);
+        cmd.setPipeline(pipeline);
+        cmd.draw(3, 1, 0, 0);
+        cmd.endPass();
+        cmd.submit(device);
+        surface.present();
+        trace("Frame rendered!");
 
-            cmd.beginPass(view, 0, 0.05, 0.05, 0.15, 1.0, null);
-            cmd.setPipeline(pipeline);
-            cmd.draw(3, 1, 0, 0);
-            cmd.endPass();
-            cmd.submit(device);
-            surface.present();
-
-            frames++;
-            if (frames % 120 == 0) trace("Frame " + frames);
-            return !win.isKeyDown(27); // ESC
-        });
-
-        trace("Done — " + frames + " frames");
+        // Cleanup
         pipeline.destroy();
         shader.destroy();
         surface.destroy();
         device.destroy();
-        win.destroy();
+        trace("Done!");
     }
 }
