@@ -986,25 +986,13 @@ impl CompileCtx {
                         internal.ir_id
                     )
                 })?;
-            // Check if this is a stub function that should forward to an import.
-            // These are extern class method wrappers with Unreachable/empty terminators
-            // where the actual implementation is a WASM import with the same name.
-            // Detect stub functions: small CFG where the WASM output would be unreachable.
-            // These are extern class method wrappers that the MIR lowerer couldn't resolve.
-            let is_stub = ir_func.cfg.blocks.len() <= 2
-                && ir_func.cfg.blocks.values().all(|b| {
-                    matches!(
-                        b.terminator,
-                        crate::ir::IrTerminator::Unreachable
-                            | crate::ir::IrTerminator::NoReturn { .. }
-                            | crate::ir::IrTerminator::Return { .. }
-                    )
-                })
-                // Only treat as stub if the function name suggests it's an extern wrapper
-                && ir_func.name.contains('.');
-            if is_stub {
-            }
-            if is_stub {
+            // Check if this function should forward to an import.
+            // Any function whose name matches a qualified_to_import entry is a stub
+            // wrapper that should delegate to the real import.
+            let has_import = self.import_name_to_idx.contains_key(&ir_func.name)
+                || self.qualified_to_import.contains_key(&ir_func.name)
+                || ir_func.qualified_name.as_ref().map_or(false, |qn| self.qualified_to_import.contains_key(qn));
+            if has_import {
                 // Try direct name, qualified name, then CallDirect scan
                 let import_idx = self.import_name_to_idx.get(&ir_func.name).copied()
                     .or_else(|| self.qualified_to_import.get(&ir_func.name).copied())
@@ -1990,11 +1978,42 @@ impl<'a> FunctionLowerer<'a> {
                         }
                     }
                 }
-                if let Some(&idx) = self.ctx.ir_func_to_idx.get(func_id) {
+                let resolved_idx = self.ctx.ir_func_to_idx.get(func_id).copied()
+                    .or_else(|| self.ctx.func_id_fallback.get(func_id).copied());
+                if let Some(idx) = resolved_idx {
+                    // Check if the callee expects a different number of params.
+                    // If so, adjust the stack (drop extra or push zeros).
+                    // Get the callee's actual WASM signature from the import/function type
+                    let callee_sig = if (idx as usize) < self.ctx.imports.len() {
+                        let imp = &self.ctx.imports[idx as usize];
+                        self.ctx.types.get(imp.type_idx as usize).cloned()
+                    } else {
+                        None
+                    };
+                    if let Some((expected_params, expected_results)) = &callee_sig {
+                        let pushed = args.len();
+                        // Adjust params: drop extra or push zeros
+                        if pushed > expected_params.len() {
+                            for _ in 0..(pushed - expected_params.len()) {
+                                f.instruction(&Instruction::Drop);
+                            }
+                        } else if pushed < expected_params.len() {
+                            for i in pushed..expected_params.len() {
+                                emit_zero(f, expected_params[i]);
+                            }
+                        }
+                    }
                     f.instruction(&Instruction::Call(idx));
-                } else if let Some(&idx) = self.ctx.func_id_fallback.get(func_id) {
-                    // Resolved via pre-computed fallback map (cross-module extern lookup)
-                    f.instruction(&Instruction::Call(idx));
+                    // Adjust return value mismatch
+                    if let Some((_, expected_results)) = &callee_sig {
+                        if dest.is_some() && expected_results.is_empty() {
+                            // Callee returns void but caller wants a value — push zero
+                            emit_zero(f, self.reg_wasm_type(dest.unwrap()));
+                        } else if dest.is_none() && !expected_results.is_empty() {
+                            // Callee returns a value but caller doesn't want it — drop
+                            f.instruction(&Instruction::Drop);
+                        }
+                    }
                 } else {
                     // Unknown function -- drop args, trap.
                     for _ in args {
