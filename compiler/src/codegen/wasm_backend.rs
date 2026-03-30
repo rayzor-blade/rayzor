@@ -1028,7 +1028,6 @@ impl CompileCtx {
                     false
                 }
             };
-            // Debug: removed
             if has_import {
                 // Try direct name, qualified name, bare method name, then CallDirect scan
                 let import_idx = self.import_name_to_idx.get(&ir_func.name).copied()
@@ -2032,16 +2031,25 @@ impl<'a> FunctionLowerer<'a> {
                     .or_else(|| self.ctx.func_id_fallback.get(func_id).copied())
                     // Last resort: look up by function name from any module
                     .or_else(|| {
-                        // Find the function name for this ID
                         for m in self.ctx.all_module_funcs.iter() {
                             if let Some(name) = m.get(func_id) {
-                                // Try import name
                                 if let Some(&idx) = self.ctx.import_name_to_idx.get(name) {
                                     return Some(idx);
                                 }
-                                // Try func name
                                 if let Some(&idx) = self.ctx.func_name_to_idx.get(name) {
                                     return Some(idx);
+                                }
+                                // Try qualified_to_import (the name might be a qualified Haxe name)
+                                if let Some(&idx) = self.ctx.qualified_to_import.get(name) {
+                                    return Some(idx);
+                                }
+                                // Try bare method name match against imports
+                                let bare = name.rsplit('.').next().unwrap_or(name);
+                                let bare_underscore = name.rsplit('_').next().unwrap_or(name);
+                                for (imp_name, &idx) in &self.ctx.import_name_to_idx {
+                                    if imp_name.ends_with(bare) || imp_name.ends_with(bare_underscore) {
+                                        return Some(idx);
+                                    }
                                 }
                             }
                         }
@@ -2082,7 +2090,14 @@ impl<'a> FunctionLowerer<'a> {
                         }
                     }
                 } else {
-                    // Unknown function -- drop args, trap.
+                    // Unknown function — try to find its name for diagnostics
+                    let mut found_name = None;
+                    for m in self.ctx.all_module_funcs.iter() {
+                        if let Some(name) = m.get(func_id) {
+                            found_name = Some(name.clone());
+                            break;
+                        }
+                    }
                     for _ in args {
                         f.instruction(&Instruction::Drop);
                     }
