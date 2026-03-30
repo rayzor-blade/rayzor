@@ -889,15 +889,15 @@ pub fn gfx_buffer_write_bytes(buf_h: i32, dev_h: i32, offset: i32, data: &[u8]) 
 
 #[wasm_bindgen(js_name = "rayzor_gpu_gfx_surface_create")]
 pub fn gfx_surface_create(
-    _dev_h: i32,
+    dev_h: i32,
     _window_handle: i32,
     _display_handle: i32,
-    _width: i32,
-    _height: i32,
+    width: i32,
+    height: i32,
 ) -> i32 {
-    // Native surface creation from raw window handles — not available on WASM.
-    // Use Surface.createCanvas() instead.
-    0
+    // On WASM, ignore raw handles — find the existing canvas on the page.
+    // Window.createCentered already created a canvas element.
+    gfx_surface_create_canvas(dev_h, "", width, height)
 }
 
 // ============================================================================
