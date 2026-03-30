@@ -6,4 +6,4 @@ entry = "Main.hx"
 class-paths = [".", "../../compiler/haxe-std"]
 
 [wasm]
-hosts = { "rayzor-gpu" = "../../gpu/pkg/rayzor_gpu.js" }
+hosts = { "rayzor-gpu" = "../../gpu/pkg/rayzor_gpu.js", "rayzor-window" = "../../window/pkg/rayzor_window.js" }

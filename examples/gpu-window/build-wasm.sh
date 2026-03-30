@@ -5,6 +5,7 @@ cd "$(dirname "$0")"
 ROOT="$(cd ../.. && pwd)"
 RAYZOR="$ROOT/target/release/rayzor"
 GPU_PKG="$ROOT/gpu/pkg"
+WIN_PKG="$ROOT/window/pkg"
 
 # 1. Build the compiler (if needed)
 if [ ! -f "$RAYZOR" ] || [ "$ROOT/src/main.rs" -nt "$RAYZOR" ]; then
@@ -20,6 +21,16 @@ if [ ! -f "$GPU_PKG/rayzor_gpu.js" ] || [ "$ROOT/gpu/src/wasm_exports.rs" -nt "$
   (cd "$ROOT/gpu" && RUSTC="$RUSTC" "$CARGO" build --target wasm32-unknown-unknown --no-default-features --features wasm-host)
   wasm-bindgen --target web --out-dir "$GPU_PKG" "$ROOT/target/wasm32-unknown-unknown/debug/rayzor_gpu.wasm"
   echo "GPU host: $(grep -c 'export function' "$GPU_PKG/rayzor_gpu.js") exports"
+fi
+
+# 2b. Build Window wasm host (if needed)
+if [ ! -f "$WIN_PKG/rayzor_window.js" ] || [ "$ROOT/window/src/wasm_exports.rs" -nt "$WIN_PKG/rayzor_window.js" ]; then
+  echo "Building Window wasm host module..."
+  RUSTC="$HOME/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/rustc"
+  CARGO="$HOME/.rustup/toolchains/nightly-aarch64-apple-darwin/bin/cargo"
+  (cd "$ROOT/window" && RUSTC="$RUSTC" "$CARGO" build --target wasm32-unknown-unknown --no-default-features --features wasm-host)
+  wasm-bindgen --target web --out-dir "$WIN_PKG" "$ROOT/target/wasm32-unknown-unknown/debug/rayzor_window.wasm"
+  echo "Window host: $(grep -c 'export function' "$WIN_PKG/rayzor_window.js") exports"
 fi
 
 # 3. Compile Haxe → WASM
