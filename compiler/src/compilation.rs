@@ -173,6 +173,16 @@ pub struct CompilationUnit {
 
     /// Cached stdlib MIR module (built once, cloned for each user file merge)
     cached_stdlib_mir: Option<crate::ir::IrModule>,
+
+    /// Map from extern function symbol name → JS module name.
+    /// Populated by register_extern_methods_from_typed_file for @:jsImport classes.
+    /// Used by WASM backend to import from correct JS module instead of "rayzor".
+    pub extern_js_module_map: BTreeMap<String, String>,
+
+    /// Map from qualified Haxe method name (e.g. "rayzor.gpu.Surface.getFormat")
+    /// to native symbol name (e.g. "rayzor_gpu_gfx_surface_get_format").
+    /// Used by WASM backend to resolve stub wrapper functions to their imports.
+    pub qualified_method_map: BTreeMap<String, String>,
 }
 
 /// Configuration for compilation
@@ -469,6 +479,8 @@ impl CompilationUnit {
             last_compiled_cached_maps: None,
             last_compiled_own_func_ids: None,
             cached_stdlib_mir: None,
+            extern_js_module_map: BTreeMap::new(),
+            qualified_method_map: BTreeMap::new(),
         }
     }
 
@@ -5457,6 +5469,15 @@ impl CompilationUnit {
         self.mir_modules.clone()
     }
 
+    /// Get extern function → JS module name mappings (from @:jsImport classes).
+    pub fn get_extern_js_module_map(&self) -> &BTreeMap<String, String> {
+        &self.extern_js_module_map
+    }
+
+    pub fn get_qualified_method_map(&self) -> &BTreeMap<String, String> {
+        &self.qualified_method_map
+    }
+
     /// Get class allocation sizes keyed by class name.
     /// Used by WASM bindgen to generate JS constructors that call malloc(size).
     pub fn get_class_alloc_sizes_by_name(&self) -> &BTreeMap<String, u64> {
@@ -5538,6 +5559,23 @@ impl CompilationUnit {
                     continue;
                 }
 
+                // Build qualified Haxe name for WASM stub resolution.
+                // The MIR lowerer creates wrapper functions named e.g. "rayzor.gpu.Surface.getFormat"
+                // from the Haxe package + class + method name.
+                let class_haxe_name = self
+                    .symbol_table
+                    .get_symbol(class.symbol_id)
+                    .and_then(|s| {
+                        s.qualified_name
+                            .and_then(|n| self.string_interner.get(n).map(|s| s.to_string()))
+                    })
+                    .unwrap_or_default();
+                if !class_haxe_name.is_empty() && !symbol_name.is_empty() {
+                    let qualified = format!("{}.{}", class_haxe_name, method_name);
+                    self.qualified_method_map
+                        .insert(qualified, symbol_name.clone());
+                }
+
                 entries.push(MethodDescEntry {
                     symbol_name,
                     class_name: class_native_name.clone(),
@@ -5551,6 +5589,20 @@ impl CompilationUnit {
                         method.parameters.len() + if method.is_static { 0 } else { 1 }
                     ],
                 });
+            }
+
+            // Store JS module mapping for @:jsImport class methods
+            if let Some(class_sym) = self.symbol_table.get_symbol(class.symbol_id) {
+                if let Some((mod_is, _)) = class_sym.js_import {
+                    if let Some(js_module) = self.string_interner.get(mod_is) {
+                        for entry in &entries {
+                            self.extern_js_module_map.insert(
+                                entry.symbol_name.clone(),
+                                js_module.to_string(),
+                            );
+                        }
+                    }
+                }
             }
         }
 

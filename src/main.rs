@@ -773,6 +773,7 @@ struct MirCompilationResult {
     module: compiler::ir::IrModule,
     diagnostics: Vec<diagnostics::Diagnostic>,
     class_alloc_sizes: std::collections::BTreeMap<String, u64>,
+    qualified_method_map: std::collections::BTreeMap<String, String>,
 }
 
 fn compile_haxe_to_mir(
@@ -865,10 +866,12 @@ fn compile_haxe_to_mir_with_defines(
     let module = (**mir_modules.last().unwrap()).clone();
     let diagnostics = unit.collected_diagnostics.clone();
     let class_alloc_sizes = unit.get_class_alloc_sizes_by_name().clone();
+    let qualified_method_map = unit.get_qualified_method_map().clone();
     Ok(MirCompilationResult {
         module,
         diagnostics,
         class_alloc_sizes,
+        qualified_method_map,
     })
 }
 
@@ -3150,9 +3153,10 @@ fn cmd_build_wasm(
         &["wasm"],
     )?;
 
-    let user_wasm = compiler::codegen::wasm_backend::WasmBackend::compile(
+    let user_wasm = compiler::codegen::wasm_backend::WasmBackend::compile_with_method_map(
         &[&mir_result.module],
         Some("main"),
+        &mir_result.qualified_method_map,
     )?;
 
     // Build host function map from rayzor.toml [wasm] hosts:

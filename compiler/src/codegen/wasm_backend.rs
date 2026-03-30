@@ -63,7 +63,41 @@ impl WasmBackend {
     /// `entry_function` -- if provided, the named function is exported as `_start`.
     /// Returns raw `.wasm` bytes on success.
     pub fn compile(modules: &[&IrModule], entry_function: Option<&str>) -> Result<Vec<u8>, String> {
-        Self::compile_with_js_modules(modules, entry_function, &[], &std::collections::BTreeMap::new())
+        Self::compile_with_method_map(modules, entry_function, &std::collections::BTreeMap::new())
+    }
+
+    /// Compile with a qualified method name → native name map for stub resolution.
+    /// Maps e.g. "rayzor.gpu.Surface.getFormat" → "rayzor_gpu_gfx_surface_get_format"
+    /// so the WASM backend can generate proper forwarder functions instead of unreachable stubs.
+    pub fn compile_with_method_map(
+        modules: &[&IrModule],
+        entry_function: Option<&str>,
+        qualified_method_map: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Vec<u8>, String> {
+        let mut ctx = CompileCtx::new();
+        ctx.collect_imports(modules);
+        ctx.collect_functions(modules);
+        // Build qualified_to_import from the method map
+        for (qualified, native) in qualified_method_map {
+            if let Some(&idx) = ctx.import_name_to_idx.get(native) {
+                ctx.qualified_to_import.insert(qualified.clone(), idx);
+            }
+        }
+        ctx.build_func_id_fallback(modules);
+        ctx.collect_strings(modules);
+        ctx.collect_globals(modules);
+        for m in modules {
+            for func in m.functions.values() {
+                if func.wasm_export {
+                    if let Some(ref qn) = func.qualified_name {
+                        if let Some(dot) = qn.rfind('.') {
+                            ctx.exported_classes.insert(qn[..dot].to_string());
+                        }
+                    }
+                }
+            }
+        }
+        ctx.encode_with_exports(modules, entry_function, &[])
     }
 
     /// Compile with extern function → JS module mappings from @:jsImport.
@@ -176,6 +210,9 @@ struct CompileCtx {
     /// Fallback IrFunctionId → WASM func index for cross-module extern resolution.
     /// Populated after collect_imports + collect_functions to resolve IDs not in ir_func_to_idx.
     func_id_fallback: HashMap<IrFunctionId, u32>,
+    /// Qualified name → import index. Maps "rayzor.gpu.Surface.getFormat" → import idx for
+    /// "rayzor_gpu_gfx_surface_get_format". Built from extern function qualified_name fields.
+    qualified_to_import: HashMap<String, u32>,
 }
 
 impl CompileCtx {
@@ -199,6 +236,7 @@ impl CompileCtx {
             exported_classes: std::collections::HashSet::new(),
             js_import_modules: HashMap::new(),
             func_id_fallback: HashMap::new(),
+            qualified_to_import: HashMap::new(),
         }
     }
 
@@ -305,6 +343,23 @@ impl CompileCtx {
                     });
                     self.import_name_to_idx.insert(func.name.clone(), func_idx);
                     self.ir_func_to_idx.insert(*func_id, func_idx);
+                    // Map qualified name too (e.g. "rayzor.gpu.Surface.getFormat" → import idx)
+                    if let Some(ref qn) = func.qualified_name {
+                        self.qualified_to_import.insert(qn.clone(), func_idx);
+                    }
+                }
+            }
+        }
+        // Also build qualified_to_import from extern_functions that have qualified names
+        // registered on IrFunctions with the same name
+        for module in modules {
+            for func in module.functions.values() {
+                if let Some(ref qn) = func.qualified_name {
+                    if !self.qualified_to_import.contains_key(qn) {
+                        if let Some(&idx) = self.import_name_to_idx.get(&func.name) {
+                            self.qualified_to_import.insert(qn.clone(), idx);
+                        }
+                    }
                 }
             }
         }
@@ -834,24 +889,84 @@ impl CompileCtx {
             // Check if this is a stub function that should forward to an import.
             // These are extern class method wrappers with Unreachable/empty terminators
             // where the actual implementation is a WASM import with the same name.
+            // Detect stub functions: small CFG where the WASM output would be unreachable.
+            // These are extern class method wrappers that the MIR lowerer couldn't resolve.
             let is_stub = ir_func.cfg.blocks.len() <= 2
                 && ir_func.cfg.blocks.values().all(|b| {
-                    b.instructions.is_empty()
-                        || matches!(
-                            b.terminator,
-                            crate::ir::IrTerminator::Unreachable
-                                | crate::ir::IrTerminator::NoReturn { .. }
-                        )
-                });
+                    matches!(
+                        b.terminator,
+                        crate::ir::IrTerminator::Unreachable
+                            | crate::ir::IrTerminator::NoReturn { .. }
+                            | crate::ir::IrTerminator::Return { .. }
+                    )
+                })
+                // Only treat as stub if the function name suggests it's an extern wrapper
+                && ir_func.name.contains('.');
             if is_stub {
-                if let Some(&import_idx) = self.import_name_to_idx.get(&ir_func.name) {
-                    // Generate a thin forwarder: pass all params to the import, return result
-                    let (params, results) = Self::sig_to_wasm(&ir_func.signature);
+            }
+            if is_stub {
+                // Try direct name, qualified name, then CallDirect scan
+                let import_idx = self.import_name_to_idx.get(&ir_func.name).copied()
+                    .or_else(|| self.qualified_to_import.get(&ir_func.name).copied())
+                    .or_else(|| ir_func.qualified_name.as_ref().and_then(|qn| self.qualified_to_import.get(qn).copied()))
+                    .or_else(|| {
+                        use crate::ir::IrInstruction;
+                        for block in ir_func.cfg.blocks.values() {
+                            for inst in &block.instructions {
+                                if let IrInstruction::CallDirect { func_id: fid, .. } = inst {
+                                    if let Some(&idx) = self.ir_func_to_idx.get(fid) {
+                                        return Some(idx);
+                                    }
+                                    if let Some(&idx) = self.func_id_fallback.get(fid) {
+                                        return Some(idx);
+                                    }
+                                }
+                            }
+                        }
+                        None
+                    });
+                if let Some(import_idx) = import_idx {
+                    // Generate a thin forwarder that calls the import with type coercion.
+                    let (stub_params, stub_results) = Self::sig_to_wasm(&ir_func.signature);
+                    let (import_params, import_results) = if (import_idx as usize) < self.imports.len() {
+                        let imp = &self.imports[import_idx as usize];
+                        self.types.get(imp.type_idx as usize)
+                            .cloned()
+                            .unwrap_or_default()
+                    } else {
+                        (stub_params.clone(), stub_results.clone())
+                    };
                     let mut func = Function::new(std::iter::empty::<(u32, ValType)>());
-                    for i in 0..params.len() {
+                    // Pass params with type coercion (f64→i32 conversion for flattened signatures)
+                    let n_args = stub_params.len().min(import_params.len());
+                    for i in 0..n_args {
                         func.instruction(&Instruction::LocalGet(i as u32));
+                        // Coerce type if needed
+                        match (stub_params[i], import_params[i]) {
+                            (a, b) if a == b => {} // same type, no conversion
+                            (ValType::F64, ValType::I32) => { func.instruction(&Instruction::I32TruncF64S); }
+                            (ValType::F64, ValType::I64) => { func.instruction(&Instruction::I64TruncF64S); }
+                            (ValType::I32, ValType::F64) => { func.instruction(&Instruction::F64ConvertI32S); }
+                            (ValType::I64, ValType::F64) => { func.instruction(&Instruction::F64ConvertI64S); }
+                            (ValType::F32, ValType::I32) => { func.instruction(&Instruction::I32TruncF32S); }
+                            (ValType::I32, ValType::F32) => { func.instruction(&Instruction::F32ConvertI32S); }
+                            _ => {} // other conversions: pass through
+                        }
+                    }
+                    // Pad missing import args with zeros
+                    for i in n_args..import_params.len() {
+                        emit_zero(&mut func, import_params[i]);
                     }
                     func.instruction(&Instruction::Call(import_idx));
+                    // Handle result mismatch
+                    if import_results.len() > stub_results.len() {
+                        for _ in 0..(import_results.len() - stub_results.len()) {
+                            func.instruction(&Instruction::Drop);
+                        }
+                    }
+                    for i in import_results.len()..stub_results.len() {
+                        emit_zero(&mut func, stub_results[i]);
+                    }
                     func.instruction(&Instruction::End);
                     code_section.function(&func);
                     continue;
