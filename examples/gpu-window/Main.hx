@@ -9,14 +9,12 @@ import rayzor.window.Window;
  * GPU Window — real-time colored triangle.
  *
  * Same Haxe code works on both native and WASM.
- * Extern classes resolved via import from compiler/haxe-std/.
- * #if wasm selects @:jsImport path, #else selects @:native path.
  *
  * Native:
  *   rayzor run --rpkg rayzor-gpu.rpkg --rpkg rayzor-window.rpkg examples/gpu-window/Main.hx
  *
  * WASM (browser):
- *   cd examples/gpu-window && rayzor build --target wasm --browser Main.hx
+ *   cd examples/gpu-window && ./build-wasm.sh
  */
 class Main {
     static function main() {
@@ -27,26 +25,14 @@ class Main {
             return;
         }
 
-        trace("Creating device...");
         var device = GPUDevice.create();
-        trace("Device created: " + device);
+        var win = Window.createCentered("Rayzor GPU", 800, 600);
 
-        trace("Creating surface...");
         #if wasm
         var surface = Surface.createCanvas(device, "gpu-canvas", 800, 600);
         #else
-        var win = Window.createCentered("Rayzor GPU", 800, 600);
         var surface = Surface.create(device, win.getHandle(), win.getDisplayHandle(), 800, 600);
         #end
-        trace("Surface created");
-        if (surface == null) {
-            trace("Surface is NULL!");
-            return;
-        }
-        trace("Surface is non-null, getting format...");
-        var fmt = surface.getFormat();
-        trace("Got format");
-        trace(fmt);
 
         var wgsl = "
 struct VertexOutput {
@@ -71,28 +57,35 @@ struct VertexOutput {
         pipe.setShader(shader);
         pipe.setFormat(surface.getFormat());
         var pipeline = pipe.build(device);
-        trace("Pipeline ready");
 
-        trace("Rendering single frame...");
         var cmd = CommandEncoder.create();
-        trace("CommandEncoder created: " + cmd);
+        var frames = 0;
 
-        var view = surface.getTexture();
-        trace("Got texture view: " + view);
+        Window.runLoop(win, function():Bool {
+            if (win.wasResized()) {
+                surface.resize(device, win.getWidth(), win.getHeight());
+            }
 
-        cmd.beginPass(view, 0, 0.05, 0.05, 0.15, 1.0, null);
-        cmd.setPipeline(pipeline);
-        cmd.draw(3, 1, 0, 0);
-        cmd.endPass();
-        cmd.submit(device);
-        surface.present();
-        trace("Frame rendered!");
+            var view = surface.getTexture();
+            if (view == null) return true;
 
-        // Cleanup
+            cmd.beginPass(view, 0, 0.05, 0.05, 0.15, 1.0, null);
+            cmd.setPipeline(pipeline);
+            cmd.draw(3, 1, 0, 0);
+            cmd.endPass();
+            cmd.submit(device);
+            surface.present();
+
+            frames++;
+            if (frames % 120 == 0) trace("Frame " + frames);
+            return !win.isKeyDown(27); // ESC to quit
+        });
+
+        trace("Done — " + frames + " frames");
         pipeline.destroy();
         shader.destroy();
         surface.destroy();
         device.destroy();
-        trace("Done!");
+        win.destroy();
     }
 }
