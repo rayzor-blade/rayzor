@@ -131,7 +131,7 @@ export function rayzor_gpu_gfx_shader_create_hx(dev_h: number, wgsl: string, vs:
 
 export function rayzor_gpu_gfx_shader_destroy(h: number): void;
 
-export function rayzor_gpu_gfx_surface_create(_dev_h: number, _window_handle: number, _display_handle: number, _width: number, _height: number): number;
+export function rayzor_gpu_gfx_surface_create(dev_h: number, _window_handle: number, _display_handle: number, width: number, height: number): number;
 
 export function rayzor_gpu_gfx_surface_create_canvas(dev_h: number, canvas_id: string, width: number, height: number): number;
 

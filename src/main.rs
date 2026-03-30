@@ -3538,11 +3538,23 @@ async function _precall_async(hostModule) {{
   }}
 }}
 
+// Wrap a WASM function table index as a callable JS function.
+// Used for callback parameters (e.g. Window.runLoop's frame callback).
+let _wasmInstance = null; // set after instantiation
+function _wrapFnPtr(idx) {{
+  if (!_wasmInstance) return () => 0;
+  const table = _wasmInstance.exports.__indirect_function_table;
+  if (!table) return () => 0;
+  const fn = table.get(idx);
+  return fn || (() => 0);
+}}
+
 // Build a host adapter that wraps wasm-bindgen exports.
-// Handles three cases:
+// Handles four cases:
 // 1. Async functions → return pre-cached result
 // 2. String/byte params → read from Rayzor memory before calling
-// 3. Pure i32 functions → pass through directly
+// 3. Function params → wrap i32 table index as JS function
+// 4. Pure i32 functions → pass through directly
 function _make_host_adapter(hostModule) {{
   const adapter = {{}};
   for (const [name, fn] of Object.entries(hostModule)) {{
@@ -3558,7 +3570,8 @@ function _make_host_adapter(hostModule) {{
     const src = fn.toString();
     const hasStr = src.includes('passStringToWasm0');
     const hasBytes = src.includes('passArray8ToWasm0');
-    if (!hasStr && !hasBytes) {{
+    const hasFn = src.includes('addHeapObject') || src.includes('addBorrowedObject');
+    if (!hasStr && !hasBytes && !hasFn) {{
       // Pure i32 function — pass through directly
       adapter[name] = fn;
       continue;
@@ -3575,6 +3588,12 @@ function _make_host_adapter(hostModule) {{
       const idx = paramNames.indexOf(m[1]);
       if (idx >= 0) byteParams.add(idx);
     }}
+    // Detect function/JsValue params (addHeapObject/addBorrowedObject calls)
+    const fnParams = new Set();
+    for (const m of src.matchAll(/add(?:Heap|Borrowed)Object\((\w+)\)/g)) {{
+      const idx = paramNames.indexOf(m[1]);
+      if (idx >= 0) fnParams.add(idx);
+    }}
     adapter[name] = (...args) => {{
       const converted = args.map((a, i) => {{
         if (strParams.has(i) && typeof a === 'number' && memory) {{
@@ -3582,6 +3601,9 @@ function _make_host_adapter(hostModule) {{
         }}
         if (byteParams.has(i) && typeof a === 'number' && memory) {{
           try {{ return readBytes(a); }} catch {{ return new Uint8Array(0); }}
+        }}
+        if (fnParams.has(i) && typeof a === 'number') {{
+          return _wrapFnPtr(a);
         }}
         return a;
       }});
@@ -3798,6 +3820,7 @@ async function run() {{
 {host_import_objects}  }});
 
   memory = instance.exports.memory;
+  _wasmInstance = instance;
 
   if (instance.exports._start) {{
     instance.exports._start();

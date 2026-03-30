@@ -965,15 +965,15 @@ export function rayzor_gpu_gfx_shader_destroy(h) {
 }
 
 /**
- * @param {number} _dev_h
+ * @param {number} dev_h
  * @param {number} _window_handle
  * @param {number} _display_handle
- * @param {number} _width
- * @param {number} _height
+ * @param {number} width
+ * @param {number} height
  * @returns {number}
  */
-export function rayzor_gpu_gfx_surface_create(_dev_h, _window_handle, _display_handle, _width, _height) {
-    const ret = wasm.rayzor_gpu_gfx_surface_create(_dev_h, _window_handle, _display_handle, _width, _height);
+export function rayzor_gpu_gfx_surface_create(dev_h, _window_handle, _display_handle, width, height) {
+    const ret = wasm.rayzor_gpu_gfx_surface_create(dev_h, _window_handle, _display_handle, width, height);
     return ret;
 }
 
