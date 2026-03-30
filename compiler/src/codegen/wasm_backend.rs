@@ -796,12 +796,15 @@ impl CompileCtx {
         wasm_module.section(&func_section);
 
         // --- Table section (for call_indirect / closures) ---
-        if !self.table_entries.is_empty() {
+        // Always emit a table large enough for all functions — closures store
+        // raw func indices and JS needs to call them via table.get().
+        let total_funcs = self.next_func_idx;
+        {
             let mut table_section = wasm_encoder::TableSection::new();
             table_section.table(wasm_encoder::TableType {
                 element_type: wasm_encoder::RefType::FUNCREF,
-                minimum: self.next_table_slot as u64,
-                maximum: Some(self.next_table_slot as u64),
+                minimum: total_funcs as u64,
+                maximum: Some(total_funcs as u64),
                 table64: false,
                 shared: false,
             });
@@ -849,30 +852,10 @@ impl CompileCtx {
         }
         wasm_module.section(&global_section);
 
-        // --- Element section (populate indirect function table for closures) ---
-        if !self.table_entries.is_empty() {
-            let mut elem_section = wasm_encoder::ElementSection::new();
-            // Sort by table slot for deterministic output
-            let mut entries: Vec<(u32, u32)> = self.table_entries.iter().map(|(&fi, &slot)| (slot, fi)).collect();
-            entries.sort();
-            // Emit each entry as an active element at its slot offset
-            for (slot, func_idx) in entries {
-                let funcs = [func_idx];
-                elem_section.active(
-                    Some(0), // table 0
-                    &wasm_encoder::ConstExpr::i32_const(slot as i32),
-                    wasm_encoder::Elements::Functions(std::borrow::Cow::Borrowed(&funcs)),
-                );
-            }
-            wasm_module.section(&elem_section);
-        }
-
         // --- Export section ---
         let mut export_section = ExportSection::new();
         export_section.export("memory", ExportKind::Memory, 0);
-        if !self.table_entries.is_empty() {
-            export_section.export("__indirect_function_table", ExportKind::Table, 0);
-        }
+        export_section.export("__indirect_function_table", ExportKind::Table, 0);
         if let Some(entry_name) = entry_function {
             // Search by name in func_name_to_idx
             let idx = self
@@ -976,6 +959,20 @@ impl CompileCtx {
         }
 
         wasm_module.section(&export_section);
+
+        // --- Element section: map ALL function indices into the table ---
+        // Closures store raw func indices and call_indirect/JS needs table access.
+        // Element (section 9) must come AFTER Export (section 7).
+        {
+            let mut elem_section = wasm_encoder::ElementSection::new();
+            let all_funcs: Vec<u32> = (0..total_funcs).collect();
+            elem_section.active(
+                Some(0),
+                &wasm_encoder::ConstExpr::i32_const(0),
+                wasm_encoder::Elements::Functions(std::borrow::Cow::Owned(all_funcs)),
+            );
+            wasm_module.section(&elem_section);
+        }
 
         // --- Code section ---
         let mut code_section = CodeSection::new();

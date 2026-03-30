@@ -439,6 +439,8 @@ struct LinkerCtx {
     /// Host function map: function_name → host_module_name.
     /// "rayzor" imports matching this map are preserved instead of stubbed.
     host_functions: HashMap<String, String>,
+    /// Total merged function count (set after merge).
+    total_func_count: u32,
 }
 
 /// A user import that's preserved in the linked output (not stubbed).
@@ -466,6 +468,7 @@ impl LinkerCtx {
             unresolved_imports: Vec::new(),
             preserved_imports: Vec::new(),
             host_functions: HashMap::new(),
+            total_func_count: 0,
         }
     }
 
@@ -705,6 +708,7 @@ impl LinkerCtx {
             }
         }
 
+        self.total_func_count = next_func_idx;
         Ok(())
     }
 
@@ -768,17 +772,21 @@ impl LinkerCtx {
             rt.tables.len(),
             rt.elements.len()
         );
-        if !rt.tables.is_empty() {
+        // Grow table to accommodate user closure functions.
+        // User closures store raw func indices; they need table entries to be callable
+        // via call_indirect and from JS.
+        let rt_table_size = rt.tables.first().map(|(init, _)| *init).unwrap_or(0);
+        let table_size = rt_table_size.max(self.total_func_count);
+        eprintln!("[wasm-linker] table: rt={}, total_funcs={}, merged={}", rt_table_size, self.total_func_count, table_size);
+        if !rt.tables.is_empty() || table_size > 0 {
             let mut table_section = wasm_encoder::TableSection::new();
-            for (initial, maximum) in &rt.tables {
-                table_section.table(wasm_encoder::TableType {
-                    element_type: wasm_encoder::RefType::FUNCREF,
-                    minimum: *initial as u64,
-                    maximum: maximum.map(|m| m as u64),
-                    table64: false,
-                    shared: false,
-                });
-            }
+            table_section.table(wasm_encoder::TableType {
+                element_type: wasm_encoder::RefType::FUNCREF,
+                minimum: table_size as u64,
+                maximum: Some(table_size as u64),
+                table64: false,
+                shared: false,
+            });
             module.section(&table_section);
         }
 
@@ -833,6 +841,7 @@ impl LinkerCtx {
         // --- Export section ---
         let mut export_section = ExportSection::new();
         export_section.export("memory", ExportKind::Memory, 0);
+        export_section.export("__indirect_function_table", ExportKind::Table, 0);
         // Preserve ALL user exports (not just _start)
         for export in &user.exports {
             if export.kind == ExportItemKind::Func {
@@ -844,8 +853,9 @@ impl LinkerCtx {
         module.section(&export_section);
 
         // --- Element section (from runtime, populates function table) ---
-        if !rt.elements.is_empty() {
+        {
             let mut elem_section = wasm_encoder::ElementSection::new();
+            // Runtime element entries (remapped)
             for (table_idx, offset, func_indices) in &rt.elements {
                 let remapped: Vec<u32> = func_indices
                     .iter()
@@ -855,6 +865,21 @@ impl LinkerCtx {
                     Some(*table_idx),
                     &ConstExpr::i32_const(*offset as i32),
                     wasm_encoder::Elements::Functions(std::borrow::Cow::Owned(remapped)),
+                );
+            }
+            // Add ALL user internal functions to table (for closures / call_indirect).
+            // User functions start after imports in the merged index space.
+            // Map each user-module function to its merged index.
+            let user_func_start = self.n_wasi_imports + n_preserved as u32 + rt.functions.len() as u32 + self.stub_type_indices.len() as u32;
+            let user_func_count = user.functions.len() as u32;
+            if user_func_count > 0 {
+                let user_funcs: Vec<u32> = (0..user_func_count)
+                    .map(|i| user_func_start + i)
+                    .collect();
+                elem_section.active(
+                    Some(0),
+                    &ConstExpr::i32_const(user_func_start as i32),
+                    wasm_encoder::Elements::Functions(std::borrow::Cow::Owned(user_funcs)),
                 );
             }
             module.section(&elem_section);

@@ -3547,14 +3547,19 @@ let _wasmInstance = null; // set after instantiation
 function _wrapFnPtr(closurePtr) {{
   if (!_wasmInstance || !memory || !closurePtr) return () => 0;
   const view = new DataView(memory.buffer);
-  const tableSlot = view.getUint32(closurePtr, true);
-  // Closure layout: [table_slot: i32, padding: i32, captures...]
-  // The callee expects the closure pointer as its first arg (reads captures from ptr+8).
+  const fnIdx = view.getUint32(closurePtr, true);
+  // Closure layout: [fn_idx: i32, padding: i32, captures...]
+  // Try indirect function table first (if closures have table entries).
+  // Fall back to calling via a trampoline export.
   const table = _wasmInstance.exports.__indirect_function_table;
-  if (!table || tableSlot >= table.length) return () => 0;
-  const fn = table.get(tableSlot);
-  if (!fn) return () => 0;
-  return () => fn(closurePtr);
+  if (table && fnIdx < table.length) {{
+    const fn = table.get(fnIdx);
+    if (fn) return () => fn(closurePtr);
+  }}
+  // Fallback: use __call_indirect export if available
+  const callInd = _wasmInstance.exports.__call_indirect;
+  if (callInd) return () => callInd(fnIdx, closurePtr);
+  return () => 0;
 }}
 
 // Build a host adapter that wraps wasm-bindgen exports.
