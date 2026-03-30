@@ -237,17 +237,25 @@ pub fn gfx_surface_create_canvas(dev_h: i32, canvas_id: &str, width: i32, height
 #[wasm_bindgen(js_name = "rayzor_gpu_gfx_surface_get_texture")]
 pub fn gfx_surface_get_texture(h: i32) -> i32 {
     let mut ht = HANDLES.lock().unwrap();
-    let surf = match ht.get_mut(h) {
-        Some(GpuObject::Surface(s)) => s,
-        _ => return 0,
-    };
-    match surf.surface.get_current_texture() {
-        Ok(frame) => {
-            let view = frame.texture.create_view(&Default::default());
-            surf.current_texture = Some(frame);
-            ht.alloc(GpuObject::TextureView(Box::new(view)))
+    // Two-phase: get texture from surface, then alloc view handle.
+    // Can't hold mutable borrow of surface while allocating.
+    let view = {
+        let surf = match ht.get_mut(h) {
+            Some(GpuObject::Surface(s)) => s,
+            _ => return 0,
+        };
+        match surf.surface.get_current_texture() {
+            Ok(frame) => {
+                let v = frame.texture.create_view(&Default::default());
+                surf.current_texture = Some(frame);
+                Some(v)
+            }
+            Err(_) => None,
         }
-        Err(_) => 0,
+    }; // surf borrow ends here
+    match view {
+        Some(v) => ht.alloc(GpuObject::TextureView(Box::new(v))),
+        None => 0,
     }
 }
 

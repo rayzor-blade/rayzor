@@ -5538,6 +5538,9 @@ impl CompilationUnit {
             if class_native_name.is_empty() {
                 continue;
             }
+            // Also get the dot-separated qualified name for stdlib mapping lookups
+            // (MIR lowerer queries with dots, not ::)
+            let class_dot_name = class_native_name.replace("::", ".");
 
             // Extract method entries
             for method in &class.methods {
@@ -5610,6 +5613,33 @@ impl CompilationUnit {
                 }
             }
         }
+
+        // Register entries under multiple class name formats used by the MIR lowerer:
+        // 1. Native: "rayzor::gpu::CommandEncoder" (from @:native)
+        // 2. Dot-separated: "rayzor.gpu.CommandEncoder"
+        // 3. Underscore-joined: "rayzor_gpu_CommandEncoder" (qualified_class_name in hir_to_mir)
+        // 4. Bare: "CommandEncoder" (last component)
+        let mut extra_entries: Vec<MethodDescEntry> = Vec::new();
+        for entry in &entries {
+            let parts: Vec<&str> = entry.class_name.split("::").collect();
+            // Dot-separated
+            let dot_class = parts.join(".");
+            if dot_class != entry.class_name {
+                extra_entries.push(MethodDescEntry {
+                    class_name: dot_class,
+                    ..entry.clone()
+                });
+            }
+            // Underscore-joined
+            let underscore_class = parts.join("_");
+            if underscore_class != entry.class_name {
+                extra_entries.push(MethodDescEntry {
+                    class_name: underscore_class,
+                    ..entry.clone()
+                });
+            }
+        }
+        entries.extend(extra_entries);
 
         if !entries.is_empty() {
             let plugin = NativePlugin::from_method_entries("extern_import", entries);
