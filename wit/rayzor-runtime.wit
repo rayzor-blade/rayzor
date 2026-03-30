@@ -1,0 +1,145 @@
+/// Rayzor runtime components — platform-agnostic interfaces.
+///
+/// Each interface maps to:
+///   WASI host → native component implementation
+///   Browser   → JS shim (RegExp, CompressionStream, fetch, WebGPU/WebGL2)
+
+interface regex {
+    /// Compile a regex pattern. Returns handle (0 = error).
+    new: func(pattern: u32, flags: u32) -> u32;
+    /// Test if string matches the pattern.
+    match-str: func(re: u32, str: u32) -> u32;
+    /// Get the nth matched group (0 = full match).
+    matched: func(re: u32, n: u32) -> u32;
+    /// Get text to the left of the match.
+    matched-left: func(re: u32) -> u32;
+    /// Get text to the right of the match.
+    matched-right: func(re: u32) -> u32;
+    /// Get match position as {pos, len}.
+    matched-pos: func(re: u32) -> u32;
+    /// Get match position as anonymous object {pos:Int, len:Int}.
+    matched-pos-anon: func(re: u32) -> u32;
+    /// Match starting from position with length limit.
+    match-sub: func(re: u32, str: u32, pos: u32, len: u32) -> u32;
+    /// Split string by pattern.
+    split: func(re: u32, str: u32) -> u32;
+    /// Replace matches with replacement string.
+    replace: func(re: u32, with-str: u32) -> u32;
+    /// Replace matches using a callback function.
+    map: func(re: u32, fn-ptr: u32) -> u32;
+    /// Escape special regex characters in a string.
+    escape: func(str: u32) -> u32;
+}
+
+interface compress {
+    /// Create a new compressor (deflate). Returns handle.
+    compress-new: func() -> u32;
+    /// Execute compression step. Returns bytes written.
+    compress-execute: func(handle: u32, src: u32, src-len: u32, dst: u32, dst-len: u32) -> u32;
+    /// Set flush mode.
+    compress-set-flush: func(handle: u32, mode: u32);
+    /// Close compressor.
+    compress-close: func(handle: u32);
+    /// One-shot compress.
+    compress-run: func(src: u32, src-len: u32) -> u32;
+    /// Create a new decompressor (inflate). Returns handle.
+    uncompress-new: func() -> u32;
+    /// Execute decompression step.
+    uncompress-execute: func(handle: u32, src: u32, src-len: u32, dst: u32, dst-len: u32) -> u32;
+    /// Set flush mode.
+    uncompress-set-flush: func(handle: u32, mode: u32);
+    /// Close decompressor.
+    uncompress-close: func(handle: u32);
+}
+
+interface tensor {
+    /// Create tensor filled with zeros. shape_ptr points to [ndim, dim0, dim1, ...].
+    zeros: func(shape-ptr: u32, dtype: u32) -> u32;
+    ones: func(shape-ptr: u32, dtype: u32) -> u32;
+    rand: func(shape-ptr: u32, dtype: u32) -> u32;
+    full: func(shape-ptr: u32, dtype: u32, value: f64) -> u32;
+    from-array: func(data-ptr: u32, shape-ptr: u32, dtype: u32) -> u32;
+
+    /// Tensor properties
+    shape: func(tensor: u32) -> u32;
+    ndim: func(tensor: u32) -> u32;
+    numel: func(tensor: u32) -> u32;
+    dtype: func(tensor: u32) -> u32;
+    shape-ptr: func(tensor: u32) -> u32;
+    shape-ndim: func(tensor: u32) -> u32;
+    get: func(tensor: u32, idx: u32) -> f64;
+    set: func(tensor: u32, idx: u32, value: f64);
+
+    /// Tensor operations
+    reshape: func(tensor: u32, shape-ptr: u32) -> u32;
+    transpose: func(tensor: u32) -> u32;
+    add: func(a: u32, b: u32) -> u32;
+    sub: func(a: u32, b: u32) -> u32;
+    mul: func(a: u32, b: u32) -> u32;
+    div: func(a: u32, b: u32) -> u32;
+    matmul: func(a: u32, b: u32) -> u32;
+    sqrt: func(tensor: u32) -> u32;
+    exp: func(tensor: u32) -> u32;
+    log: func(tensor: u32) -> u32;
+    relu: func(tensor: u32) -> u32;
+    sum: func(tensor: u32) -> f64;
+    mean: func(tensor: u32) -> f64;
+    dot: func(a: u32, b: u32) -> f64;
+    data: func(tensor: u32) -> u32;
+    free: func(tensor: u32);
+}
+
+interface net {
+    /// TCP socket operations
+    socket-new: func(tcp: u32) -> u32;
+    socket-connect: func(sock: u32, host: u32, port: u32) -> u32;
+    socket-bind: func(sock: u32, host: u32, port: u32) -> u32;
+    socket-listen: func(sock: u32, backlog: u32) -> u32;
+    socket-accept: func(sock: u32) -> u32;
+    socket-close: func(sock: u32);
+    socket-read: func(sock: u32, buf: u32, len: u32) -> u32;
+    socket-write: func(sock: u32, buf: u32, len: u32) -> u32;
+    socket-shutdown: func(sock: u32, how: u32);
+    socket-set-blocking: func(sock: u32, blocking: u32);
+    socket-set-timeout: func(sock: u32, ms: u32);
+    socket-set-fast-send: func(sock: u32, fast: u32);
+    socket-wait-for-read: func(sock: u32, timeout: u32) -> u32;
+    socket-select: func(read: u32, write: u32, except: u32, timeout: u32) -> u32;
+    socket-peer: func(sock: u32) -> u32;
+
+    /// Host resolution
+    host-new: func(name: u32) -> u32;
+    host-get-ip: func(host: u32) -> u32;
+    host-to-string: func(host: u32) -> u32;
+    host-reverse: func(host: u32) -> u32;
+    host-localhost: func() -> u32;
+    host-info: func(host: u32) -> u32;
+
+    /// Socket stream I/O
+    socket-get-input: func(sock: u32) -> u32;
+    socket-get-output: func(sock: u32) -> u32;
+    socket-read-byte: func(sock: u32) -> u32;
+    socket-read-bytes: func(sock: u32, buf: u32, pos: u32, len: u32) -> u32;
+    socket-write-byte: func(sock: u32, byte: u32);
+    socket-write-bytes: func(sock: u32, buf: u32, pos: u32, len: u32) -> u32;
+    socket-write-string: func(sock: u32, str: u32) -> u32;
+    socket-flush: func(sock: u32);
+}
+
+interface typed-vec {
+    /// i32 vector
+    vec-i32-new: func() -> u32;
+    vec-i32-with-capacity: func(cap: u32) -> u32;
+    vec-i32-push: func(vec: u32, val: u32);
+    vec-i32-pop: func(vec: u32) -> u32;
+    vec-i32-get: func(vec: u32, idx: u32) -> u32;
+    vec-i32-set: func(vec: u32, idx: u32, val: u32);
+    vec-i32-len: func(vec: u32) -> u32;
+    vec-i32-capacity: func(vec: u32) -> u32;
+    vec-i32-is-empty: func(vec: u32) -> u32;
+    vec-i32-clear: func(vec: u32);
+    vec-i32-first: func(vec: u32) -> u32;
+    vec-i32-last: func(vec: u32) -> u32;
+    vec-i32-sort: func(vec: u32);
+    vec-i32-sort-by: func(vec: u32, cmp-fn: u32);
+}
