@@ -607,7 +607,25 @@ impl LinkerCtx {
                         || imp.name.starts_with("rayzor_arc_")
                         || imp.name.starts_with("rayzor_box_")
                         || imp.name.starts_with("haxe_ereg_")
-                        || imp.name.starts_with("haxe_coerce_dynamic");
+                        || imp.name.starts_with("haxe_coerce_dynamic")
+                        || imp.name.starts_with("rayzor_compress_")
+                        || imp.name.starts_with("rayzor_uncompress_")
+                        || imp.name.starts_with("rayzor_tensor_")
+                        || imp.name.starts_with("rayzor_socket_")
+                        || imp.name.starts_with("rayzor_host_")
+                        || imp.name.starts_with("rayzor_ssl_")
+                        || imp.name.starts_with("rayzor_vec_")
+                        || imp.name.starts_with("haxe_vtable_")
+                        || imp.name.starts_with("haxe_type_register")
+                        || imp.name.starts_with("haxe_register_interface")
+                        || imp.name.starts_with("rayzor_tcc_")
+                        // Catch remaining short-name stubs (Bytes methods: alloc, get, set, etc.)
+                        || matches!(imp.name.as_str(),
+                            "alloc" | "ofString" | "get" | "set" | "sub" | "blit" | "fill"
+                            | "compare" | "toString" | "getInt16" | "getInt32" | "getInt64"
+                            | "getFloat" | "getDouble" | "setInt16" | "setInt32" | "setInt64"
+                            | "setFloat" | "setDouble"
+                        );
                     if is_runtime_import {
                         user_import_kinds.push(UserImportKind::Preserved(
                             "rayzor".to_string(),

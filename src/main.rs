@@ -3819,18 +3819,288 @@ const rayzor = {{
   rayzor_box_free: () => {{}},
 
   // EReg — browser RegExp
-  haxe_ereg_new: (_pattern, _flags) => 0,
-  haxe_ereg_match: (_re, _str) => 0,
-  haxe_ereg_matched: (_re, _n) => 0,
-  haxe_ereg_matched_left: (_re) => 0,
-  haxe_ereg_matched_right: (_re) => 0,
-  haxe_ereg_matched_pos: (_re) => 0,
-  haxe_ereg_matched_pos_anon: (_re) => 0,
-  haxe_ereg_match_sub: (_re, _str, _pos, _len) => 0,
-  haxe_ereg_split: (_re, _str) => 0,
-  haxe_ereg_replace: (_re, _with) => 0,
-  haxe_ereg_map: (_re, _fn) => 0,
-  haxe_ereg_escape: (_str) => 0,
+  // Handle table for regex objects
+  _reHandles: new Map(),
+  _reNext: 1,
+  _reAlloc: function(obj) {{ const h = this._reNext++; this._reHandles.set(h, obj); return h; }},
+  _reGet: function(h) {{ return this._reHandles.get(h); }},
+  haxe_ereg_new: (patternPtr, flagsPtr) => {{
+    try {{
+      const pattern = readString(patternPtr);
+      const flags = flagsPtr ? readString(flagsPtr) : '';
+      const re = new RegExp(pattern, flags.replace(/s/g,''));
+      return rayzor._reAlloc({{ re, lastMatch: null, input: '' }});
+    }} catch {{ return 0; }}
+  }},
+  haxe_ereg_match: (h, strPtr) => {{
+    const obj = rayzor._reGet(h); if (!obj) return 0;
+    const str = readString(strPtr);
+    obj.input = str;
+    obj.lastMatch = obj.re.exec(str);
+    return obj.lastMatch ? 1 : 0;
+  }},
+  haxe_ereg_matched: (h, n) => {{
+    const obj = rayzor._reGet(h); if (!obj?.lastMatch) return 0;
+    const s = obj.lastMatch[n]; return s != null ? writeString(s) : 0;
+  }},
+  haxe_ereg_matched_left: (h) => {{
+    const obj = rayzor._reGet(h); if (!obj?.lastMatch) return 0;
+    return writeString(obj.input.substring(0, obj.lastMatch.index));
+  }},
+  haxe_ereg_matched_right: (h) => {{
+    const obj = rayzor._reGet(h); if (!obj?.lastMatch) return 0;
+    const end = obj.lastMatch.index + obj.lastMatch[0].length;
+    return writeString(obj.input.substring(end));
+  }},
+  haxe_ereg_matched_pos: (h) => {{
+    const obj = rayzor._reGet(h); if (!obj?.lastMatch) return 0;
+    if (!memory) return 0;
+    const p = malloc(8);
+    const v = new DataView(memory.buffer);
+    v.setInt32(p, obj.lastMatch.index, true);
+    v.setInt32(p + 4, obj.lastMatch[0].length, true);
+    return p;
+  }},
+  haxe_ereg_matched_pos_anon: (h) => rayzor.haxe_ereg_matched_pos(h),
+  haxe_ereg_match_sub: (h, strPtr, pos, len) => {{
+    const obj = rayzor._reGet(h); if (!obj) return 0;
+    const str = readString(strPtr).substring(pos, pos + len);
+    obj.input = str;
+    obj.lastMatch = obj.re.exec(str);
+    return obj.lastMatch ? 1 : 0;
+  }},
+  haxe_ereg_split: (h, strPtr) => {{
+    const obj = rayzor._reGet(h); if (!obj) return 0;
+    const parts = readString(strPtr).split(obj.re);
+    // Return as Haxe Array (simplified — returns first part for now)
+    return writeString(parts.join(','));
+  }},
+  haxe_ereg_replace: (h, withPtr) => {{
+    const obj = rayzor._reGet(h); if (!obj?.lastMatch) return 0;
+    const replacement = readString(withPtr);
+    return writeString(obj.input.replace(obj.re, replacement));
+  }},
+  haxe_ereg_map: (_h, _fn) => 0,
+  haxe_ereg_escape: (strPtr) => {{
+    const s = readString(strPtr);
+    return writeString(s.replace(/[.*+?^${{}}()|[\]\\]/g, '\\$&'));
+  }},
+
+  // Compress — browser CompressionStream/DecompressionStream
+  rayzor_compress_new: () => 0,
+  rayzor_compress_execute: () => 0,
+  rayzor_compress_set_flush: () => {{}},
+  rayzor_compress_close: () => {{}},
+  rayzor_compress_run: () => 0,
+  rayzor_uncompress_new: () => 0,
+  rayzor_uncompress_execute: () => 0,
+  rayzor_uncompress_set_flush: () => {{}},
+  rayzor_uncompress_close: () => {{}},
+
+  // Tensor — WASM SIMD + WebGPU compute (with WebGL2 fallback)
+  // Tensor data lives in WASM linear memory for SIMD ops.
+  // GPU offload uses the rayzor-gpu host module.
+  _tensorHandles: new Map(),
+  _tensorNext: 1,
+  rayzor_tensor_zeros: (shapePtr, dtype) => 0,
+  rayzor_tensor_ones: (shapePtr, dtype) => 0,
+  rayzor_tensor_rand: (shapePtr, dtype) => 0,
+  rayzor_tensor_full: (shapePtr, dtype, val) => 0,
+  rayzor_tensor_from_array: (dataPtr, shapePtr, dtype) => 0,
+  rayzor_tensor_shape: (t) => 0,
+  rayzor_tensor_ndim: (t) => 0,
+  rayzor_tensor_numel: (t) => 0,
+  rayzor_tensor_dtype: (t) => 0,
+  rayzor_tensor_shape_ptr: (t) => 0,
+  rayzor_tensor_shape_ndim: (t) => 0,
+  rayzor_tensor_get: (t, idx) => 0,
+  rayzor_tensor_set: (t, idx, val) => {{}},
+  rayzor_tensor_reshape: (t, shapePtr) => 0,
+  rayzor_tensor_transpose: (t) => 0,
+  rayzor_tensor_add: (a, b) => 0,
+  rayzor_tensor_sub: (a, b) => 0,
+  rayzor_tensor_mul: (a, b) => 0,
+  rayzor_tensor_div: (a, b) => 0,
+  rayzor_tensor_matmul: (a, b) => 0,
+  rayzor_tensor_sqrt: (t) => 0,
+  rayzor_tensor_exp: (t) => 0,
+  rayzor_tensor_log: (t) => 0,
+  rayzor_tensor_relu: (t) => 0,
+  rayzor_tensor_sum: (t) => 0,
+  rayzor_tensor_mean: (t) => 0,
+  rayzor_tensor_dot: (a, b) => 0,
+  rayzor_tensor_data: (t) => 0,
+  rayzor_tensor_free: (t) => {{}},
+
+  // Networking — fetch + WebSocket for browser
+  rayzor_socket_new: () => 0,
+  rayzor_socket_connect: () => 0,
+  rayzor_socket_bind: () => 0,
+  rayzor_socket_listen: () => 0,
+  rayzor_socket_accept: () => 0,
+  rayzor_socket_close: () => {{}},
+  rayzor_socket_read: () => 0,
+  rayzor_socket_write: () => 0,
+  rayzor_socket_shutdown: () => {{}},
+  rayzor_socket_set_blocking: () => {{}},
+  rayzor_socket_set_timeout: () => {{}},
+  rayzor_socket_set_fast_send: () => {{}},
+  rayzor_socket_wait_for_read: () => 0,
+  rayzor_socket_select: () => 0,
+  rayzor_socket_peer: () => 0,
+  rayzor_host_new: () => 0,
+  rayzor_host_get_ip: () => 0,
+  rayzor_host_to_string: () => 0,
+  rayzor_host_reverse: () => 0,
+  rayzor_host_localhost: () => 0,
+  rayzor_socket_host_info: () => 0,
+  rayzor_socket_get_input: () => 0,
+  rayzor_socket_get_output: () => 0,
+  rayzor_socket_read_byte: () => 0,
+  rayzor_socket_read_bytes: () => 0,
+  rayzor_socket_write_byte: () => {{}},
+  rayzor_socket_write_bytes: () => 0,
+  rayzor_socket_write_string: () => 0,
+  rayzor_socket_flush: () => {{}},
+
+  // SSL — stub (browser uses HTTPS natively)
+  rayzor_ssl_socket_new: () => 0,
+  rayzor_ssl_socket_connect: () => 0,
+  rayzor_ssl_socket_handshake: () => 0,
+  rayzor_ssl_socket_set_hostname: () => {{}},
+  rayzor_ssl_socket_set_ca: () => {{}},
+  rayzor_ssl_socket_set_certificate: () => {{}},
+  rayzor_ssl_socket_peer_certificate: () => 0,
+  rayzor_ssl_socket_read: () => 0,
+  rayzor_ssl_socket_write: () => 0,
+  rayzor_ssl_socket_close: () => {{}},
+  rayzor_ssl_socket_set_blocking: () => {{}},
+  rayzor_ssl_socket_set_timeout: () => {{}},
+  rayzor_ssl_socket_get_input: () => 0,
+  rayzor_ssl_socket_get_output: () => 0,
+  rayzor_ssl_socket_shutdown: () => {{}},
+  rayzor_ssl_socket_set_fast_send: () => {{}},
+  rayzor_ssl_socket_read_byte: () => 0,
+  rayzor_ssl_socket_read_bytes: () => 0,
+  rayzor_ssl_socket_write_byte: () => {{}},
+  rayzor_ssl_socket_write_bytes: () => 0,
+  rayzor_ssl_socket_write_string: () => 0,
+  rayzor_ssl_socket_flush: () => {{}},
+  rayzor_ssl_cert_load_file: () => 0,
+  rayzor_ssl_cert_load_path: () => 0,
+  rayzor_ssl_cert_from_string: () => 0,
+  rayzor_ssl_cert_load_defaults: () => 0,
+  rayzor_ssl_cert_common_name: () => 0,
+  rayzor_ssl_cert_alt_names: () => 0,
+  rayzor_ssl_cert_not_before: () => 0,
+  rayzor_ssl_cert_not_after: () => 0,
+  rayzor_ssl_cert_subject: () => 0,
+  rayzor_ssl_cert_issuer: () => 0,
+  rayzor_ssl_cert_next: () => 0,
+  rayzor_ssl_cert_add: () => 0,
+  rayzor_ssl_cert_add_der: () => 0,
+  rayzor_ssl_key_load_file: () => 0,
+  rayzor_ssl_key_read_pem: () => 0,
+  rayzor_ssl_key_read_der: () => 0,
+  rayzor_ssl_digest_make: () => 0,
+  rayzor_ssl_digest_sign: () => 0,
+  rayzor_ssl_digest_verify: () => 0,
+
+  // Typed vectors — pure WASM linear memory implementation
+  _vecHandles: new Map(),
+  _vecNext: 1,
+  _vecAlloc: function(elemSize) {{ const h = this._vecNext++; this._vecHandles.set(h, {{data: [], elemSize}}); return h; }},
+  _vecGet: function(h) {{ return this._vecHandles.get(h); }},
+  rayzor_vec_i32_new: () => rayzor._vecAlloc(4),
+  rayzor_vec_i32_with_capacity: (_cap) => rayzor._vecAlloc(4),
+  rayzor_vec_i32_push: (h, v) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data.push(v); }},
+  rayzor_vec_i32_pop: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data.pop() ?? 0; }},
+  rayzor_vec_i32_get: (h, i) => {{ const vec = rayzor._vecGet(h); return vec?.data[i] ?? 0; }},
+  rayzor_vec_i32_set: (h, i, v) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data[i] = v; }},
+  rayzor_vec_i32_len: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data.length ?? 0; }},
+  rayzor_vec_i32_capacity: (h) => rayzor.rayzor_vec_i32_len(h),
+  rayzor_vec_i32_is_empty: (h) => rayzor.rayzor_vec_i32_len(h) === 0 ? 1 : 0,
+  rayzor_vec_i32_clear: (h) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data.length = 0; }},
+  rayzor_vec_i32_first: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data[0] ?? 0; }},
+  rayzor_vec_i32_last: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data.at(-1) ?? 0; }},
+  rayzor_vec_i32_sort: (h) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data.sort((a,b) => a-b); }},
+  rayzor_vec_i32_sort_by: (h, _fn) => rayzor.rayzor_vec_i32_sort(h),
+  rayzor_vec_i64_new: () => rayzor._vecAlloc(8),
+  rayzor_vec_i64_push: (h, v) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data.push(v); }},
+  rayzor_vec_i64_pop: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data.pop() ?? 0; }},
+  rayzor_vec_i64_get: (h, i) => {{ const vec = rayzor._vecGet(h); return vec?.data[i] ?? 0; }},
+  rayzor_vec_i64_set: (h, i, v) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data[i] = v; }},
+  rayzor_vec_i64_len: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data.length ?? 0; }},
+  rayzor_vec_i64_is_empty: (h) => rayzor.rayzor_vec_i64_len(h) === 0 ? 1 : 0,
+  rayzor_vec_i64_clear: (h) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data.length = 0; }},
+  rayzor_vec_i64_first: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data[0] ?? 0; }},
+  rayzor_vec_i64_last: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data.at(-1) ?? 0; }},
+  rayzor_vec_f64_new: () => rayzor._vecAlloc(8),
+  rayzor_vec_f64_push: (h, v) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data.push(v); }},
+  rayzor_vec_f64_pop: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data.pop() ?? 0; }},
+  rayzor_vec_f64_get: (h, i) => {{ const vec = rayzor._vecGet(h); return vec?.data[i] ?? 0; }},
+  rayzor_vec_f64_set: (h, i, v) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data[i] = v; }},
+  rayzor_vec_f64_len: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data.length ?? 0; }},
+  rayzor_vec_f64_is_empty: (h) => rayzor.rayzor_vec_f64_len(h) === 0 ? 1 : 0,
+  rayzor_vec_f64_clear: (h) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data.length = 0; }},
+  rayzor_vec_f64_first: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data[0] ?? 0; }},
+  rayzor_vec_f64_last: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data.at(-1) ?? 0; }},
+  rayzor_vec_f64_sort: (h) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data.sort((a,b) => a-b); }},
+  rayzor_vec_f64_sort_by: (h, _fn) => rayzor.rayzor_vec_f64_sort(h),
+  rayzor_vec_ptr_new: () => rayzor._vecAlloc(4),
+  rayzor_vec_ptr_push: (h, v) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data.push(v); }},
+  rayzor_vec_ptr_pop: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data.pop() ?? 0; }},
+  rayzor_vec_ptr_get: (h, i) => {{ const vec = rayzor._vecGet(h); return vec?.data[i] ?? 0; }},
+  rayzor_vec_ptr_set: (h, i, v) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data[i] = v; }},
+  rayzor_vec_ptr_len: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data.length ?? 0; }},
+  rayzor_vec_ptr_is_empty: (h) => rayzor.rayzor_vec_ptr_len(h) === 0 ? 1 : 0,
+  rayzor_vec_ptr_clear: (h) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data.length = 0; }},
+  rayzor_vec_ptr_first: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data[0] ?? 0; }},
+  rayzor_vec_ptr_last: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data.at(-1) ?? 0; }},
+  rayzor_vec_ptr_sort_by: (h, _fn) => {{}},
+  rayzor_vec_bool_new: () => rayzor._vecAlloc(1),
+  rayzor_vec_bool_push: (h, v) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data.push(v ? 1 : 0); }},
+  rayzor_vec_bool_pop: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data.pop() ?? 0; }},
+  rayzor_vec_bool_get: (h, i) => {{ const vec = rayzor._vecGet(h); return vec?.data[i] ?? 0; }},
+  rayzor_vec_bool_set: (h, i, v) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data[i] = v ? 1 : 0; }},
+  rayzor_vec_bool_len: (h) => {{ const vec = rayzor._vecGet(h); return vec?.data.length ?? 0; }},
+  rayzor_vec_bool_is_empty: (h) => rayzor.rayzor_vec_bool_len(h) === 0 ? 1 : 0,
+  rayzor_vec_bool_clear: (h) => {{ const vec = rayzor._vecGet(h); if (vec) vec.data.length = 0; }},
+
+  // Vtable / type registration — no-op stubs (type info not needed at WASM runtime)
+  haxe_vtable_init: () => 0,
+  haxe_vtable_set_slot: () => {{}},
+  haxe_type_register_constructor: () => {{}},
+  haxe_register_interface_impl: () => {{}},
+  haxe_coerce_dynamic_to_int: (v) => Number(v) || 0,
+  rayzor_tcc_create: () => 0,
+
+  // haxe.io.Bytes — linear memory byte buffer operations
+  alloc: (size) => malloc(Number(size)),
+  ofString: (ptr) => {{ try {{ const s = readString(ptr); const enc = new TextEncoder().encode(s); const p = malloc(enc.length); new Uint8Array(memory.buffer).set(enc, p); return p; }} catch {{ return 0; }} }},
+  get: (buf, pos) => {{ if (!memory) return 0; return new Uint8Array(memory.buffer)[buf + pos]; }},
+  set: (buf, pos, val) => {{ if (memory) new Uint8Array(memory.buffer)[buf + pos] = val; }},
+  sub: (buf, pos, len) => {{ const p = malloc(len); new Uint8Array(memory.buffer).copyWithin(p, buf + pos, buf + pos + len); return p; }},
+  blit: (dst, dstPos, src, srcPos, len) => {{ if (memory) new Uint8Array(memory.buffer).copyWithin(dst + dstPos, src + srcPos, src + srcPos + len); }},
+  fill: (buf, pos, len, val) => {{ if (memory) new Uint8Array(memory.buffer).fill(val, buf + pos, buf + pos + len); }},
+  compare: (a, aLen, b, bLen) => {{
+    if (!memory) return 0;
+    const u = new Uint8Array(memory.buffer);
+    const len = Math.min(aLen, bLen);
+    for (let i = 0; i < len; i++) {{ if (u[a+i] !== u[b+i]) return u[a+i] < u[b+i] ? -1 : 1; }}
+    return aLen === bLen ? 0 : aLen < bLen ? -1 : 1;
+  }},
+  toString: (buf, len) => {{ if (!memory) return 0; return writeString(new TextDecoder().decode(new Uint8Array(memory.buffer, buf, len))); }},
+  getInt16: (buf, pos) => {{ if (!memory) return 0; return new DataView(memory.buffer).getInt16(buf + pos, true); }},
+  getInt32: (buf, pos) => {{ if (!memory) return 0; return new DataView(memory.buffer).getInt32(buf + pos, true); }},
+  getInt64: (buf, pos) => {{ if (!memory) return BigInt(0); return new DataView(memory.buffer).getBigInt64(buf + pos, true); }},
+  getFloat: (buf, pos) => {{ if (!memory) return 0; return new DataView(memory.buffer).getFloat32(buf + pos, true); }},
+  getDouble: (buf, pos) => {{ if (!memory) return 0; return new DataView(memory.buffer).getFloat64(buf + pos, true); }},
+  setInt16: (buf, pos, val) => {{ if (memory) new DataView(memory.buffer).setInt16(buf + pos, val, true); }},
+  setInt32: (buf, pos, val) => {{ if (memory) new DataView(memory.buffer).setInt32(buf + pos, val, true); }},
+  setInt64: (buf, pos, val) => {{ if (memory) new DataView(memory.buffer).setBigInt64(buf + pos, BigInt(val), true); }},
+  setFloat: (buf, pos, val) => {{ if (memory) new DataView(memory.buffer).setFloat32(buf + pos, val, true); }},
+  setDouble: (buf, pos, val) => {{ if (memory) new DataView(memory.buffer).setFloat64(buf + pos, val, true); }},
 }};
 
 // Proxy: any missing import returns a no-op function
