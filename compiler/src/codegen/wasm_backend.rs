@@ -84,6 +84,22 @@ impl WasmBackend {
             }
         }
         ctx.build_func_id_fallback(modules);
+        // Pre-allocate table slots for all MakeClosure targets
+        {
+            use crate::ir::IrInstruction;
+            for m in modules {
+                for func in m.functions.values() {
+                    for block in func.cfg.blocks.values() {
+                        for inst in &block.instructions {
+                            if let IrInstruction::MakeClosure { func_id, .. } = inst {
+                                let fn_idx = ctx.ir_func_to_idx.get(func_id).copied().unwrap_or(0);
+                                ctx.get_table_slot(fn_idx);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         ctx.collect_strings(modules);
         ctx.collect_globals(modules);
         for m in modules {
@@ -117,6 +133,22 @@ impl WasmBackend {
         // Build fallback map: scan ALL functions for CallDirect targets not in ir_func_to_idx,
         // resolve them by name from extern_functions/functions across all modules.
         ctx.build_func_id_fallback(modules);
+        // Pre-allocate table slots for all MakeClosure targets
+        {
+            use crate::ir::IrInstruction;
+            for m in modules {
+                for func in m.functions.values() {
+                    for block in func.cfg.blocks.values() {
+                        for inst in &block.instructions {
+                            if let IrInstruction::MakeClosure { func_id, .. } = inst {
+                                let fn_idx = ctx.ir_func_to_idx.get(func_id).copied().unwrap_or(0);
+                                ctx.get_table_slot(fn_idx);
+                            }
+                        }
+                    }
+                }
+            }
+        }
         ctx.collect_strings(modules);
         ctx.collect_globals(modules);
         for m in modules {
@@ -210,6 +242,11 @@ struct CompileCtx {
     /// Fallback IrFunctionId → WASM func index for cross-module extern resolution.
     /// Populated after collect_imports + collect_functions to resolve IDs not in ir_func_to_idx.
     func_id_fallback: HashMap<IrFunctionId, u32>,
+    /// Function indices that need indirect function table entries (for closures/call_indirect).
+    /// Maps WASM func index → table slot index.
+    table_entries: HashMap<u32, u32>,
+    /// Next available table slot.
+    next_table_slot: u32,
     /// Qualified name → import index. Maps "rayzor.gpu.Surface.getFormat" → import idx for
     /// "rayzor_gpu_gfx_surface_get_format". Built from extern function qualified_name fields.
     qualified_to_import: HashMap<String, u32>,
@@ -237,6 +274,8 @@ impl CompileCtx {
             js_import_modules: HashMap::new(),
             func_id_fallback: HashMap::new(),
             qualified_to_import: HashMap::new(),
+            table_entries: HashMap::new(),
+            next_table_slot: 1, // slot 0 is reserved (null)
         }
     }
 
@@ -635,6 +674,17 @@ impl CompileCtx {
         }
     }
 
+    /// Get or allocate a table slot for a function (used by MakeClosure).
+    fn get_table_slot(&mut self, func_idx: u32) -> u32 {
+        if let Some(&slot) = self.table_entries.get(&func_idx) {
+            return slot;
+        }
+        let slot = self.next_table_slot;
+        self.next_table_slot += 1;
+        self.table_entries.insert(func_idx, slot);
+        slot
+    }
+
     /// Add a string to the data section. Returns a pointer to a HaxeString struct.
     ///
     /// Layout in linear memory:
@@ -745,6 +795,19 @@ impl CompileCtx {
         }
         wasm_module.section(&func_section);
 
+        // --- Table section (for call_indirect / closures) ---
+        if !self.table_entries.is_empty() {
+            let mut table_section = wasm_encoder::TableSection::new();
+            table_section.table(wasm_encoder::TableType {
+                element_type: wasm_encoder::RefType::FUNCREF,
+                minimum: self.next_table_slot as u64,
+                maximum: Some(self.next_table_slot as u64),
+                table64: false,
+                shared: false,
+            });
+            wasm_module.section(&table_section);
+        }
+
         // --- Memory section ---
         let mut mem_section = MemorySection::new();
         mem_section.memory(MemoryType {
@@ -786,9 +849,30 @@ impl CompileCtx {
         }
         wasm_module.section(&global_section);
 
+        // --- Element section (populate indirect function table for closures) ---
+        if !self.table_entries.is_empty() {
+            let mut elem_section = wasm_encoder::ElementSection::new();
+            // Sort by table slot for deterministic output
+            let mut entries: Vec<(u32, u32)> = self.table_entries.iter().map(|(&fi, &slot)| (slot, fi)).collect();
+            entries.sort();
+            // Emit each entry as an active element at its slot offset
+            for (slot, func_idx) in entries {
+                let funcs = [func_idx];
+                elem_section.active(
+                    Some(0), // table 0
+                    &wasm_encoder::ConstExpr::i32_const(slot as i32),
+                    wasm_encoder::Elements::Functions(std::borrow::Cow::Borrowed(&funcs)),
+                );
+            }
+            wasm_module.section(&elem_section);
+        }
+
         // --- Export section ---
         let mut export_section = ExportSection::new();
         export_section.export("memory", ExportKind::Memory, 0);
+        if !self.table_entries.is_empty() {
+            export_section.export("__indirect_function_table", ExportKind::Table, 0);
+        }
         if let Some(entry_name) = entry_function {
             // Search by name in func_name_to_idx
             let idx = self
@@ -2020,10 +2104,11 @@ impl<'a> FunctionLowerer<'a> {
                 f.instruction(&Instruction::I32Sub);
                 f.instruction(&Instruction::GlobalSet(STACK_PTR_GLOBAL));
 
-                // Store fn_idx at offset 0.
+                // Store table slot at offset 0 (for call_indirect / JS interop).
                 f.instruction(&Instruction::GlobalGet(STACK_PTR_GLOBAL));
                 let fn_idx = self.ctx.ir_func_to_idx.get(func_id).copied().unwrap_or(0);
-                f.instruction(&Instruction::I32Const(fn_idx as i32));
+                let table_slot = self.ctx.table_entries.get(&fn_idx).copied().unwrap_or(0);
+                f.instruction(&Instruction::I32Const(table_slot as i32));
                 f.instruction(&Instruction::I32Store(MemArg {
                     offset: 0,
                     align: 2,

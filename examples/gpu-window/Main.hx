@@ -57,6 +57,8 @@ struct VertexOutput {
         var cmd = CommandEncoder.create();
         var frames = 0;
 
+        // runLoop: blocking on native, async (requestAnimationFrame) on WASM.
+        // Cleanup must NOT run after runLoop on WASM — resources are still in use.
         Window.runLoop(win, function():Bool {
             if (win.wasResized()) {
                 surface.resize(device, win.getWidth(), win.getHeight());
@@ -74,14 +76,7 @@ struct VertexOutput {
 
             frames++;
             if (frames % 120 == 0) trace("Frame " + frames);
-            return !win.isKeyDown(27); // ESC to quit
+            return true; // continuous render
         });
-
-        trace("Done — " + frames + " frames");
-        pipeline.destroy();
-        shader.destroy();
-        surface.destroy();
-        device.destroy();
-        win.destroy();
     }
 }
