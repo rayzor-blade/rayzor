@@ -35,6 +35,38 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
     wasi_common::p1::add_to_linker_sync(&mut linker, |ctx| ctx)
         .map_err(|e| format!("WASI linker error: {}", e))?;
 
+    // Provide stubs for "rayzor" module imports (thread/sync/future/arc/box/ereg).
+    // These are preserved as real imports by the linker for browser JS runtime,
+    // but wasmtime needs at least stub definitions.
+    for import in module.imports() {
+        if import.module() == "rayzor" {
+            let name = import.name().to_string();
+            let ty = import.ty();
+            match ty {
+                ExternType::Func(func_ty) => {
+                    let results: Vec<ValType> = func_ty.results().collect();
+                    let module_name = import.module().to_string();
+                    linker
+                        .func_new(&module_name, &name, func_ty.clone(), move |_caller, _params, out| {
+                            // Return default values (0 for i32/i64, 0.0 for f32/f64)
+                            for (i, r) in results.iter().enumerate() {
+                                out[i] = match r {
+                                    ValType::I32 => Val::I32(0),
+                                    ValType::I64 => Val::I64(0),
+                                    ValType::F32 => Val::F32(0),
+                                    ValType::F64 => Val::F64(0),
+                                    _ => Val::I32(0),
+                                };
+                            }
+                            Ok(())
+                        })
+                        .map_err(|e| format!("Failed to stub {}: {}", name, e))?;
+                }
+                _ => {}
+            }
+        }
+    }
+
     let instance = linker
         .instantiate(&mut store, &module)
         .map_err(|e| format!("WASM instantiation failed: {}", e))?;

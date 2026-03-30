@@ -1,0 +1,131 @@
+/// Rayzor thread runtime — fibers on Web Workers.
+///
+/// WASI: maps to wasi:threads (when available)
+/// Browser: Worker pool + SharedArrayBuffer + Atomics
+///
+/// Design:
+///   - Shared linear memory across all workers (SharedArrayBuffer)
+///   - Worker pool pre-spawned at init (navigator.hardwareConcurrency)
+///   - Thread.spawn posts (fn_table_idx, env_ptr) to idle worker
+///   - Mutex/Semaphore: Atomics.wait/notify on i32 cells in shared memory
+///   - Channel: lock-free ring buffer in shared memory + Atomics
+///   - Main thread cannot block (no Atomics.wait) — uses polling for join/await
+
+interface threads {
+    /// Spawn a new thread. The closure at (fn_idx, env_ptr) runs on a Worker.
+    /// Returns a thread handle.
+    spawn: func(fn-idx: u32, env-ptr: u32) -> u32;
+
+    /// Block until thread completes. Only callable from Worker threads (not main).
+    join: func(thread-id: u32);
+
+    /// Check if thread has completed (non-blocking).
+    is-finished: func(thread-id: u32) -> bool;
+
+    /// Yield execution to other fibers (cooperative scheduling hint).
+    yield-now: func();
+
+    /// Sleep for the given number of milliseconds.
+    sleep: func(ms: u32);
+
+    /// Get the current thread's ID (0 = main thread).
+    current-id: func() -> u32;
+}
+
+interface sync {
+    /// Initialize a mutex. Returns a mutex handle.
+    /// The mutex state lives in shared memory (Atomics-compatible).
+    mutex-init: func() -> u32;
+
+    /// Lock a mutex. Blocks via Atomics.wait (Workers only).
+    mutex-lock: func(mutex-id: u32);
+
+    /// Try to lock without blocking. Returns true if acquired.
+    mutex-try-lock: func(mutex-id: u32) -> bool;
+
+    /// Check if mutex is currently locked.
+    mutex-is-locked: func(mutex-id: u32) -> bool;
+
+    /// Get the value protected by the mutex.
+    mutex-guard-get: func(mutex-id: u32) -> u64;
+
+    /// Unlock a mutex. Wakes one waiting thread via Atomics.notify.
+    mutex-unlock: func(mutex-id: u32);
+
+    /// Initialize a semaphore with the given count.
+    semaphore-init: func(count: u32) -> u32;
+
+    /// Acquire a semaphore permit. Blocks if count is 0.
+    semaphore-acquire: func(sem-id: u32);
+
+    /// Try to acquire without blocking.
+    semaphore-try-acquire: func(sem-id: u32) -> bool;
+}
+
+interface channels {
+    /// Create a new channel. Returns channel handle.
+    /// Channel uses a ring buffer in shared memory.
+    channel-init: func() -> u32;
+
+    /// Send a value through the channel.
+    channel-send: func(chan-id: u32, value: u64);
+
+    /// Try to send without blocking.
+    channel-try-send: func(chan-id: u32, value: u64) -> bool;
+
+    /// Receive a value from the channel. Blocks if empty.
+    channel-receive: func(chan-id: u32) -> u64;
+
+    /// Try to receive without blocking.
+    channel-try-receive: func(chan-id: u32) -> u64;
+
+    /// Close the channel.
+    channel-close: func(chan-id: u32);
+
+    /// Check if channel is closed.
+    channel-is-closed: func(chan-id: u32) -> bool;
+
+    /// Get the number of items in the channel.
+    channel-len: func(chan-id: u32) -> u32;
+
+    /// Get the channel capacity.
+    channel-capacity: func(chan-id: u32) -> u32;
+
+    /// Check if channel is empty.
+    channel-is-empty: func(chan-id: u32) -> bool;
+
+    /// Check if channel is full.
+    channel-is-full: func(chan-id: u32) -> bool;
+}
+
+interface futures {
+    /// Create a lazy future from a closure (fn_idx, env_ptr).
+    future-create: func(fn-idx: u32, env-ptr: u32) -> u32;
+
+    /// Block until future resolves. Returns the result.
+    future-await: func(future-id: u32) -> u64;
+
+    /// Attach a callback to run when future completes.
+    future-then: func(future-id: u32, cb-fn-idx: u32, cb-env-ptr: u32);
+
+    /// Check if future has resolved (non-blocking).
+    future-poll: func(future-id: u32) -> bool;
+
+    /// Check if future result is ready.
+    future-is-ready: func(future-id: u32) -> bool;
+
+    /// Wait for all futures in an array.
+    future-all: func(array-ptr: u32) -> u32;
+
+    /// Wait with timeout (milliseconds). Returns 0 if timed out.
+    future-await-timeout: func(future-id: u32, ms: u32) -> u64;
+
+    /// Race multiple futures — returns first to complete.
+    future-race: func(array-ptr: u32) -> u32;
+
+    /// Cancel a future.
+    future-cancel: func(future-id: u32);
+
+    /// Check if future was cancelled.
+    future-is-cancelled: func(future-id: u32) -> bool;
+}

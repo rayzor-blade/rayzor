@@ -591,13 +591,33 @@ impl LinkerCtx {
                         type_idx,
                     ));
                 } else {
-                    let merged_type_idx = self
+                    let type_idx = self
                         .user_type_remap
                         .get(&imp.type_idx)
                         .copied()
                         .unwrap_or(0);
-                    self.unresolved_imports.push(imp.name.clone());
-                    user_import_kinds.push(UserImportKind::Stub(merged_type_idx));
+                    // Keep thread/sync/channel/future/arc/box as "rayzor" imports
+                    // so the JS runtime can provide real implementations.
+                    let is_runtime_import = imp.name.starts_with("rayzor_thread_")
+                        || imp.name.starts_with("rayzor_semaphore_")
+                        || imp.name.starts_with("sys_semaphore_")
+                        || imp.name.starts_with("rayzor_channel_")
+                        || imp.name.starts_with("rayzor_mutex_")
+                        || imp.name.starts_with("rayzor_future_")
+                        || imp.name.starts_with("rayzor_arc_")
+                        || imp.name.starts_with("rayzor_box_")
+                        || imp.name.starts_with("haxe_ereg_")
+                        || imp.name.starts_with("haxe_coerce_dynamic");
+                    if is_runtime_import {
+                        user_import_kinds.push(UserImportKind::Preserved(
+                            "rayzor".to_string(),
+                            imp.name.clone(),
+                            type_idx,
+                        ));
+                    } else {
+                        self.unresolved_imports.push(imp.name.clone());
+                        user_import_kinds.push(UserImportKind::Stub(type_idx));
+                    }
                 }
             } else {
                 let type_idx = self
