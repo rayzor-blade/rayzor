@@ -3158,6 +3158,7 @@ fn cmd_build_wasm(
         Some("main"),
         &mir_result.qualified_method_map,
     )?;
+    let _ = std::fs::write("/tmp/rayzor_prelink.wasm", &user_wasm);
 
     // Build host function map from rayzor.toml [wasm] hosts:
     // Scan each JS host file for `export function` names and map them to the module name.
@@ -3538,15 +3539,22 @@ async function _precall_async(hostModule) {{
   }}
 }}
 
-// Wrap a WASM function table index as a callable JS function.
-// Used for callback parameters (e.g. Window.runLoop's frame callback).
+// Wrap a Rayzor closure pointer as a callable JS function.
+// Closures in WASM linear memory: {{ fn_table_idx: i32, env_ptr: i32 }}
+// Reads the function table index and env pointer, returns a JS function
+// that calls the WASM function with the env pointer as argument.
 let _wasmInstance = null; // set after instantiation
-function _wrapFnPtr(idx) {{
-  if (!_wasmInstance) return () => 0;
+function _wrapFnPtr(closurePtr) {{
+  if (!_wasmInstance || !memory || !closurePtr) return () => 0;
+  const view = new DataView(memory.buffer);
+  const tableSlot = view.getUint32(closurePtr, true);
+  // Closure layout: [table_slot: i32, padding: i32, captures...]
+  // The callee expects the closure pointer as its first arg (reads captures from ptr+8).
   const table = _wasmInstance.exports.__indirect_function_table;
-  if (!table) return () => 0;
-  const fn = table.get(idx);
-  return fn || (() => 0);
+  if (!table || tableSlot >= table.length) return () => 0;
+  const fn = table.get(tableSlot);
+  if (!fn) return () => 0;
+  return () => fn(closurePtr);
 }}
 
 // Build a host adapter that wraps wasm-bindgen exports.
@@ -3570,14 +3578,15 @@ function _make_host_adapter(hostModule) {{
     const src = fn.toString();
     const hasStr = src.includes('passStringToWasm0');
     const hasBytes = src.includes('passArray8ToWasm0');
-    const hasFn = src.includes('addHeapObject') || src.includes('addBorrowedObject');
-    if (!hasStr && !hasBytes && !hasFn) {{
+    // Check param names for callback conventions
+    const paramNames = src.match(/^(?:async\s+)?function\s*\w*\(([^)]*)\)/)?.[1]?.split(',').map(s => s.trim()) ?? [];
+    const hasFnByName = paramNames.some(p => ['callback','cb','handler','func','f','on_frame'].includes(p.toLowerCase()));
+    if (!hasStr && !hasBytes && !hasFnByName) {{
       // Pure i32 function — pass through directly
       adapter[name] = fn;
       continue;
     }}
     // Build a wrapper that converts Rayzor pointers to JS values.
-    const paramNames = src.match(/^(?:async\s+)?function\s*\w*\(([^)]*)\)/)?.[1]?.split(',').map(s => s.trim()) ?? [];
     const strParams = new Set();
     const byteParams = new Set();
     for (const m of src.matchAll(/passStringToWasm0\((\w+),/g)) {{
@@ -3588,11 +3597,15 @@ function _make_host_adapter(hostModule) {{
       const idx = paramNames.indexOf(m[1]);
       if (idx >= 0) byteParams.add(idx);
     }}
-    // Detect function/JsValue params (addHeapObject/addBorrowedObject calls)
+    // Detect function/callback params by name convention.
+    // wasm-bindgen passes js_sys::Function via externref — no detectable pattern in JS source.
+    // Match common callback param names.
     const fnParams = new Set();
-    for (const m of src.matchAll(/add(?:Heap|Borrowed)Object\((\w+)\)/g)) {{
-      const idx = paramNames.indexOf(m[1]);
-      if (idx >= 0) fnParams.add(idx);
+    for (let i = 0; i < paramNames.length; i++) {{
+      const pname = paramNames[i].toLowerCase();
+      if (pname === 'callback' || pname === 'cb' || pname === 'handler' || pname === 'func' || pname === 'f' || pname === 'on_frame') {{
+        fnParams.add(i);
+      }}
     }}
     adapter[name] = (...args) => {{
       const converted = args.map((a, i) => {{
@@ -3608,6 +3621,31 @@ function _make_host_adapter(hostModule) {{
         return a;
       }});
       return fn(...converted);
+    }};
+  }}
+  // Override run_loop to use JS-side requestAnimationFrame loop.
+  // The window crate's Rust run_loop uses cross-module Closure which doesn't survive.
+  if (adapter['rayzor_window_run_loop']) {{
+    adapter['rayzor_window_run_loop'] = (winH, cbPtr) => {{
+      const cb = _wrapFnPtr(cbPtr);
+      // Debug closure struct
+      const view = new DataView(memory.buffer);
+      const fnIdx = view.getUint32(cbPtr, true);
+      const envPtr = view.getUint32(cbPtr + 4, true);
+      console.log('[rayzor] runLoop: winH=' + winH + ', closurePtr=' + cbPtr + ', fnIdx=' + fnIdx + ', envPtr=' + envPtr);
+      if (!cb) return;
+      let frameCount = 0;
+      function frame() {{
+        try {{
+          const cont = cb();
+          frameCount++;
+          if (frameCount <= 3 || frameCount % 60 === 0) console.log('[rayzor] frame ' + frameCount + ', cont=' + cont);
+          if (cont) requestAnimationFrame(frame);
+        }} catch(e) {{
+          console.error('[rayzor] render loop error:', e);
+        }}
+      }}
+      requestAnimationFrame(frame);
     }};
   }}
   return new Proxy(adapter, {{ get: (t, p) => t[p] ?? ((...a) => 0) }});
