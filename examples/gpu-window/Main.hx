@@ -59,11 +59,9 @@ struct VertexOutput {
 
         // runLoop: blocking on native, async (requestAnimationFrame) on WASM.
         // Cleanup must NOT run after runLoop on WASM — resources are still in use.
-        Window.runLoop(win, function():Bool {
-            if (win.wasResized()) {
-                surface.resize(device, win.getWidth(), win.getHeight());
-            }
+        trace("device=" + device + " surface=" + surface + " pipeline=" + pipeline + " cmd=" + cmd);
 
+        Window.runLoop(win, function():Bool {
             var view = surface.getTexture();
             if (view == null) return true;
 
@@ -75,8 +73,9 @@ struct VertexOutput {
             surface.present();
 
             frames++;
+            if (frames == 1) trace("First frame: view=" + view);
             if (frames % 120 == 0) trace("Frame " + frames);
-            return true; // continuous render
+            return true;
         });
     }
 }

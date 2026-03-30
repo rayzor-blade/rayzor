@@ -2091,9 +2091,9 @@ impl<'a> FunctionLowerer<'a> {
                 func_id,
                 captured_values,
             } => {
-                // Layout: [fn_idx: i32] [padding: i32] [captures...]
-                let slot_count = 2 + captured_values.len();
-                let alloc_size = ((slot_count * 4 + 7) & !7) as i32;
+                // Layout: [fn_idx: i32(4)] [padding: i32(4)] [captures: 8 bytes each...]
+                // Captures use 8-byte slots to match EnvironmentLayout (storage_ty = I64).
+                let alloc_size = (8 + captured_values.len() * 8) as i32;
 
                 // Heap-allocate closure (NOT stack!) — closures may outlive their
                 // creating function (e.g. callbacks passed to async APIs like runLoop).
@@ -2148,12 +2148,15 @@ impl<'a> FunctionLowerer<'a> {
                     memory_index: 0,
                 }));
 
-                // Store captured values at offsets 8, 12, 16, ...
+                // Store captured values at 8-byte intervals starting at offset 8.
+                // EnvironmentLayout uses I64 storage with 8-byte alignment.
+                // On WASM32, values are i32 but we store them in 8-byte slots.
                 for (i, cap) in captured_values.iter().enumerate() {
                     self.get_reg(f, *dest);
                     self.get_reg(f, *cap);
+                    // Store as i32 at the start of each 8-byte slot
                     f.instruction(&Instruction::I32Store(MemArg {
-                        offset: (8 + i * 4) as u64,
+                        offset: (8 + i * 8) as u64,
                         align: 2,
                         memory_index: 0,
                     }));
