@@ -1036,14 +1036,11 @@ impl CompileCtx {
                     // Match by bare method name: "rayzor.concurrent.Mutex.unlock" → find "*.unlock"
                     .or_else(|| {
                         let method = ir_func.name.rsplit('.').next()?;
-                        // Find the FIRST matching qualified entry by method name
-                        // Filter by class prefix to reduce false positives
-                        let class_prefix = ir_func.name.rsplitn(2, '.').nth(1).unwrap_or("");
+                        // Match by bare method name across all qualified_to_import entries.
+                        // No class prefix filter — wrapper class may differ from registered class
+                        // (e.g., Mutex.unlock vs MutexGuard.unlock).
                         self.qualified_to_import.iter()
-                            .find(|(k, _)| {
-                                k.rsplit('.').next() == Some(method) &&
-                                (class_prefix.is_empty() || k.contains(&class_prefix.replace('.', "_")))
-                            })
+                            .find(|(k, _)| k.rsplit('.').next() == Some(method))
                             .map(|(_, &idx)| idx)
                     })
                     .or_else(|| {
