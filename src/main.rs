@@ -3656,6 +3656,41 @@ const rayzor = {{
   haxe_string_length: (ptr) => {{
     try {{ return readString(ptr).length; }} catch {{ return 0; }}
   }},
+  haxe_string_from_int: (n) => writeString(String(n)),
+  haxe_string_from_float: (f) => writeString(String(f)),
+  haxe_int_to_string: (n) => writeString(String(n)),
+  haxe_float_to_string: (f) => writeString(String(f)),
+  haxe_dynamic_to_string: (ptr) => {{
+    if (!ptr) return writeString("null");
+    try {{ return writeString(readString(ptr)); }} catch {{ return writeString(String(ptr)); }}
+  }},
+  haxe_coerce_dynamic_to_int: (ptr) => {{
+    if (!ptr) return 0;
+    return Number(ptr);
+  }},
+  haxe_box_int: (n) => n,
+  haxe_box_float: (f) => f,
+  haxe_box_bool: (b) => b,
+  haxe_box_int_ptr: (n) => n,
+  haxe_box_float_ptr: (f) => f,
+  haxe_unbox_int: (n) => n,
+  haxe_unbox_float: (f) => f,
+  haxe_unbox_reference_ptr: (ptr) => ptr,
+  haxe_concat_string_int: (s, n) => {{
+    try {{ return writeString(readString(s) + String(n)); }} catch {{ return 0; }}
+  }},
+  haxe_concat_string_float: (s, f) => {{
+    try {{ return writeString(readString(s) + String(f)); }} catch {{ return 0; }}
+  }},
+  haxe_concat_string_dynamic: (s, d) => {{
+    try {{
+      const left = readString(s);
+      let right = '';
+      if (d) try {{ right = readString(d); }} catch {{ right = String(d); }}
+      else right = 'null';
+      return writeString(left + right);
+    }} catch {{ return 0; }}
+  }},
 
   // Array stub
   haxe_array_get_i64: (_arr, _idx) => BigInt(0),

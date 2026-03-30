@@ -5576,18 +5576,23 @@ impl CompilationUnit {
                         .insert(qualified, symbol_name.clone());
                 }
 
+                // Map Haxe parameter types to IrTypeDescriptor values
+                let mut param_types = Vec::new();
+                if !method.is_static {
+                    param_types.push(9); // PtrVoid for `this`
+                }
+                for param in &method.parameters {
+                    param_types.push(self.haxe_type_to_descriptor(param.param_type));
+                }
+                let ret_type = self.haxe_type_to_descriptor(method.return_type);
                 entries.push(MethodDescEntry {
                     symbol_name,
                     class_name: class_native_name.clone(),
                     method_name,
                     is_static: method.is_static,
-                    param_count: method.parameters.len() as u8
-                        + if method.is_static { 0 } else { 1 },
-                    return_type: 3, // Ptr (default for opaque handles)
-                    param_types: vec![
-                        3;
-                        method.parameters.len() + if method.is_static { 0 } else { 1 }
-                    ],
+                    param_count: param_types.len() as u8,
+                    return_type: ret_type,
+                    param_types,
                 });
             }
 
@@ -5609,6 +5614,20 @@ impl CompilationUnit {
         if !entries.is_empty() {
             let plugin = NativePlugin::from_method_entries("extern_import", entries);
             self.compiler_plugin_registry.register(Box::new(plugin));
+        }
+    }
+
+    /// Map a Haxe TypeId to an IrTypeDescriptor u8 value for MethodDescEntry.
+    fn haxe_type_to_descriptor(&self, type_id: TypeId) -> u8 {
+        use crate::tast::TypeKind;
+        let tt = self.type_table.borrow();
+        match tt.get(type_id).map(|t| &t.kind) {
+            Some(TypeKind::Int) => 3,       // I32
+            Some(TypeKind::Float) => 7,     // F64
+            Some(TypeKind::Bool) => 1,      // Bool
+            Some(TypeKind::String) => 8,    // String
+            Some(TypeKind::Void) => 0,      // Void
+            _ => 9,                         // PtrVoid for class types, etc.
         }
     }
 
