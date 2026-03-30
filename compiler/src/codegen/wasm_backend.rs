@@ -100,6 +100,15 @@ impl WasmBackend {
                 }
             }
         }
+        // Build per-module func_id→name maps for last-resort name resolution
+        if ctx.all_module_funcs.is_empty() {
+            for m in modules {
+                let mut map = HashMap::new();
+                for (id, f) in &m.functions { map.insert(*id, f.name.clone()); }
+                for (_, f) in &m.extern_functions { map.insert(f.id, f.name.clone()); }
+                ctx.all_module_funcs.push(map);
+            }
+        }
         ctx.collect_strings(modules);
         ctx.collect_globals(modules);
         for m in modules {
@@ -147,6 +156,15 @@ impl WasmBackend {
                         }
                     }
                 }
+            }
+        }
+        // Build per-module func_id→name maps for last-resort name resolution
+        if ctx.all_module_funcs.is_empty() {
+            for m in modules {
+                let mut map = HashMap::new();
+                for (id, f) in &m.functions { map.insert(*id, f.name.clone()); }
+                for (_, f) in &m.extern_functions { map.insert(f.id, f.name.clone()); }
+                ctx.all_module_funcs.push(map);
             }
         }
         ctx.collect_strings(modules);
@@ -239,6 +257,8 @@ struct CompileCtx {
     /// @:jsImport function name → (js_module, js_import_name).
     /// Used to emit WASM imports from named JS modules instead of the default "rayzor" module.
     js_import_modules: HashMap<String, (String, String)>,
+    /// Per-module func_id → name maps for last-resort name-based resolution.
+    all_module_funcs: Vec<HashMap<IrFunctionId, String>>,
     /// Fallback IrFunctionId → WASM func index for cross-module extern resolution.
     /// Populated after collect_imports + collect_functions to resolve IDs not in ir_func_to_idx.
     func_id_fallback: HashMap<IrFunctionId, u32>,
@@ -272,6 +292,7 @@ impl CompileCtx {
             func_param_types: HashMap::new(),
             exported_classes: std::collections::HashSet::new(),
             js_import_modules: HashMap::new(),
+            all_module_funcs: Vec::new(),
             func_id_fallback: HashMap::new(),
             qualified_to_import: HashMap::new(),
             table_entries: HashMap::new(),
@@ -1007,10 +1028,7 @@ impl CompileCtx {
                     false
                 }
             };
-            // Debug: log functions with unreachable that AREN'T caught as forwarders
-            if !has_import && ir_func.cfg.blocks.values().any(|b| matches!(b.terminator, crate::ir::IrTerminator::Unreachable)) {
-                eprintln!("[wasm] unmatched stub: '{}' qn={:?} blocks={}", ir_func.name, ir_func.qualified_name, ir_func.cfg.blocks.len());
-            }
+            // Debug: removed
             if has_import {
                 // Try direct name, qualified name, bare method name, then CallDirect scan
                 let import_idx = self.import_name_to_idx.get(&ir_func.name).copied()
@@ -2011,7 +2029,24 @@ impl<'a> FunctionLowerer<'a> {
                     }
                 }
                 let resolved_idx = self.ctx.ir_func_to_idx.get(func_id).copied()
-                    .or_else(|| self.ctx.func_id_fallback.get(func_id).copied());
+                    .or_else(|| self.ctx.func_id_fallback.get(func_id).copied())
+                    // Last resort: look up by function name from any module
+                    .or_else(|| {
+                        // Find the function name for this ID
+                        for m in self.ctx.all_module_funcs.iter() {
+                            if let Some(name) = m.get(func_id) {
+                                // Try import name
+                                if let Some(&idx) = self.ctx.import_name_to_idx.get(name) {
+                                    return Some(idx);
+                                }
+                                // Try func name
+                                if let Some(&idx) = self.ctx.func_name_to_idx.get(name) {
+                                    return Some(idx);
+                                }
+                            }
+                        }
+                        None
+                    });
                 if let Some(idx) = resolved_idx {
                     // Check if the callee expects a different number of params.
                     // If so, adjust the stack (drop extra or push zeros).
