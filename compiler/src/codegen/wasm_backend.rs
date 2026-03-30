@@ -313,6 +313,9 @@ impl CompileCtx {
                 }
                 seen.insert(ext.name.clone());
                 let (params, results) = Self::sig_to_wasm(&ext.signature);
+                // Save param types before they're moved into intern_type
+                let param_types_for_registry = params.clone();
+                let ret_type = if results.is_empty() { ValType::I32 } else { results[0] };
                 let type_idx = self.intern_type(params, results);
                 let func_idx = self.next_func_idx;
                 self.next_func_idx += 1;
@@ -322,6 +325,9 @@ impl CompileCtx {
                 });
                 self.import_name_to_idx.insert(ext.name.clone(), func_idx);
                 self.ir_func_to_idx.insert(ext.id, func_idx);
+                // Register param types from the import signature (authoritative for CallDirect coercion)
+                self.func_param_types.insert(ext.id, param_types_for_registry);
+                self.func_return_types.insert(ext.id, ret_type);
             }
         }
 
@@ -377,14 +383,27 @@ impl CompileCtx {
             for (func_id, func) in &module.functions {
                 // Skip functions already registered as imports (by ID or name).
                 // Always register return type for CallDirect type inference
-                let ret_vt = ir_type_to_wasm(&func.signature.return_type);
+                // If this function maps to an import, use the import's signature for param types
+                // (the import type is authoritative — it may have f64 for Float params while
+                // the IrFunction might have Ptr/i32 from an older compilation context).
+                let (param_vts, ret_vt) = if let Some(&idx) = self.ir_func_to_idx.get(func_id) {
+                    if (idx as usize) < self.imports.len() {
+                        let imp = &self.imports[idx as usize];
+                        self.types.get(imp.type_idx as usize)
+                            .map(|(p, r)| (p.clone(), r.first().copied().unwrap_or(ValType::I32)))
+                            .unwrap_or_else(|| {
+                                let p: Vec<ValType> = func.signature.parameters.iter().map(|p| ir_type_to_wasm(&p.ty)).collect();
+                                (p, ir_type_to_wasm(&func.signature.return_type))
+                            })
+                    } else {
+                        let p: Vec<ValType> = func.signature.parameters.iter().map(|p| ir_type_to_wasm(&p.ty)).collect();
+                        (p, ir_type_to_wasm(&func.signature.return_type))
+                    }
+                } else {
+                    let p: Vec<ValType> = func.signature.parameters.iter().map(|p| ir_type_to_wasm(&p.ty)).collect();
+                    (p, ir_type_to_wasm(&func.signature.return_type))
+                };
                 self.func_return_types.insert(*func_id, ret_vt);
-                let param_vts: Vec<ValType> = func
-                    .signature
-                    .parameters
-                    .iter()
-                    .map(|p| ir_type_to_wasm(&p.ty))
-                    .collect();
                 self.func_param_types.insert(*func_id, param_vts);
 
                 if self.ir_func_to_idx.contains_key(func_id) {
