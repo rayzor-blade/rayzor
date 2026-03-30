@@ -3768,12 +3768,12 @@ const rayzor = {{
   rayzor_thread_current_id: () => 0,
 
   // Mutex — Atomics.compareExchange on shared memory
-  rayzor_mutex_init: () => {{ if (!memory) return 0; const p = heapBase; heapBase += 8; new Int32Array(memory.buffer)[p>>2] = 0; return p; }},
-  rayzor_mutex_lock: (id) => {{ if (!memory) return; const v = new Int32Array(memory.buffer); while (Atomics.compareExchange(v, id>>2, 0, 1) !== 0) {{}} }},
+  rayzor_mutex_init: () => {{ if (!memory) return 0; const p = heapBase; heapBase = align8(heapBase + 8); const v = new DataView(memory.buffer); v.setInt32(p, 0, true); return p; }},
+  rayzor_mutex_lock: (id) => {{ if (!memory) return; const v = new DataView(memory.buffer); v.setInt32(id, 1, true); }},
   rayzor_mutex_try_lock: (id) => {{ if (!memory) return 0; return Atomics.compareExchange(new Int32Array(memory.buffer), id>>2, 0, 1) === 0 ? 1 : 0; }},
-  rayzor_mutex_is_locked: (id) => {{ if (!memory) return 0; return new Int32Array(memory.buffer)[id>>2] !== 0 ? 1 : 0; }},
+  rayzor_mutex_is_locked: (id) => {{ if (!memory) return 0; return new DataView(memory.buffer).getInt32(id, true) !== 0 ? 1 : 0; }},
   rayzor_mutex_guard_get: (id) => {{ if (!memory) return 0; return new DataView(memory.buffer).getUint32(id + 4, true); }},
-  rayzor_mutex_unlock: (id) => {{ if (!memory) return; const v = new Int32Array(memory.buffer); Atomics.store(v, id>>2, 0); }},
+  rayzor_mutex_unlock: (id) => {{ if (!memory) return; new DataView(memory.buffer).setInt32(id, 0, true); }},
 
   // Semaphore
   rayzor_semaphore_init: (n) => {{ if (!memory) return 0; const p = heapBase; heapBase += 4; new Int32Array(memory.buffer)[p>>2] = n; return p; }},
