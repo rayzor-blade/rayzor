@@ -992,11 +992,40 @@ impl CompileCtx {
             let has_import = self.import_name_to_idx.contains_key(&ir_func.name)
                 || self.qualified_to_import.contains_key(&ir_func.name)
                 || ir_func.qualified_name.as_ref().map_or(false, |qn| self.qualified_to_import.contains_key(qn));
+            // Also check: if this function's body has ALL blocks with Unreachable terminator
+            // and contains a `.` in the name, it's an unresolved extern wrapper.
+            // Try to match by bare method name across all qualified_to_import entries.
+            let has_import = has_import || {
+                let is_likely_stub = ir_func.name.contains('.') && ir_func.cfg.blocks.values().all(|b|
+                    matches!(b.terminator, crate::ir::IrTerminator::Unreachable | crate::ir::IrTerminator::NoReturn { .. })
+                );
+                if is_likely_stub {
+                    // Extract method name (last component after '.')
+                    let method = ir_func.name.rsplit('.').next().unwrap_or("");
+                    // Search qualified_to_import for any entry ending with this method
+                    self.qualified_to_import.keys().any(|k| k.rsplit('.').next() == Some(method))
+                } else {
+                    false
+                }
+            };
             if has_import {
-                // Try direct name, qualified name, then CallDirect scan
+                // Try direct name, qualified name, bare method name, then CallDirect scan
                 let import_idx = self.import_name_to_idx.get(&ir_func.name).copied()
                     .or_else(|| self.qualified_to_import.get(&ir_func.name).copied())
                     .or_else(|| ir_func.qualified_name.as_ref().and_then(|qn| self.qualified_to_import.get(qn).copied()))
+                    // Match by bare method name: "rayzor.concurrent.Mutex.unlock" → find "*.unlock"
+                    .or_else(|| {
+                        let method = ir_func.name.rsplit('.').next()?;
+                        // Find the FIRST matching qualified entry by method name
+                        // Filter by class prefix to reduce false positives
+                        let class_prefix = ir_func.name.rsplitn(2, '.').nth(1).unwrap_or("");
+                        self.qualified_to_import.iter()
+                            .find(|(k, _)| {
+                                k.rsplit('.').next() == Some(method) &&
+                                (class_prefix.is_empty() || k.contains(&class_prefix.replace('.', "_")))
+                            })
+                            .map(|(_, &idx)| idx)
+                    })
                     .or_else(|| {
                         use crate::ir::IrInstruction;
                         for block in ir_func.cfg.blocks.values() {
