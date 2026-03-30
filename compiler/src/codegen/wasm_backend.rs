@@ -992,22 +992,25 @@ impl CompileCtx {
             let has_import = self.import_name_to_idx.contains_key(&ir_func.name)
                 || self.qualified_to_import.contains_key(&ir_func.name)
                 || ir_func.qualified_name.as_ref().map_or(false, |qn| self.qualified_to_import.contains_key(qn));
-            // Also check: if this function's body has ALL blocks with Unreachable terminator
-            // and contains a `.` in the name, it's an unresolved extern wrapper.
-            // Try to match by bare method name across all qualified_to_import entries.
+            // Also check: if ALL blocks have Unreachable/NoReturn terminator,
+            // this is an unresolved extern wrapper. Try to match by method name.
             let has_import = has_import || {
-                let is_likely_stub = ir_func.name.contains('.') && ir_func.cfg.blocks.values().all(|b|
+                let all_unreachable = !ir_func.cfg.blocks.is_empty() && ir_func.cfg.blocks.values().all(|b|
                     matches!(b.terminator, crate::ir::IrTerminator::Unreachable | crate::ir::IrTerminator::NoReturn { .. })
                 );
-                if is_likely_stub {
-                    // Extract method name (last component after '.')
-                    let method = ir_func.name.rsplit('.').next().unwrap_or("");
+                if all_unreachable {
+                    let method = ir_func.name.rsplit('.').next().unwrap_or(&ir_func.name);
                     // Search qualified_to_import for any entry ending with this method
                     self.qualified_to_import.keys().any(|k| k.rsplit('.').next() == Some(method))
+                        || self.import_name_to_idx.keys().any(|k| k.rsplit('_').next() == Some(method))
                 } else {
                     false
                 }
             };
+            // Debug: log functions with unreachable that AREN'T caught as forwarders
+            if !has_import && ir_func.cfg.blocks.values().any(|b| matches!(b.terminator, crate::ir::IrTerminator::Unreachable)) {
+                eprintln!("[wasm] unmatched stub: '{}' qn={:?} blocks={}", ir_func.name, ir_func.qualified_name, ir_func.cfg.blocks.len());
+            }
             if has_import {
                 // Try direct name, qualified name, bare method name, then CallDirect scan
                 let import_idx = self.import_name_to_idx.get(&ir_func.name).copied()
