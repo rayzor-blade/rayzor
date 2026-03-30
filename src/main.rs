@@ -3530,24 +3530,22 @@ function readBytes(ptr) {{
 }}
 
 // Pre-call async exports (e.g. GPU device creation) during init.
-// Results are cached in __asyncCache so the sync adapter can return them.
+// Detects Promise-returning functions by actually calling them, but ONLY
+// functions whose names suggest device/context creation (to avoid side effects).
 const __asyncCache = new Map();
 async function _precall_async(hostModule) {{
   for (const [name, fn] of Object.entries(hostModule)) {{
-    if (typeof fn !== 'function') continue;
-    // Detect zero-arg async functions that return Promise (wasm-bindgen async exports)
-    if (fn.length === 0) {{
-      try {{
-        const result = fn();
-        if (result && typeof result.then === 'function') {{
-          const resolved = await result;
-          __asyncCache.set(name, resolved);
-          console.log(`[rayzor] pre-resolved async: ${{name}} → ${{resolved}}`);
-        }}
-      }} catch(e) {{
-        // Not all zero-arg functions are async — ignore errors
+    if (typeof fn !== 'function' || fn.length !== 0) continue;
+    // Only try functions that look like device/context creation (not pipeline_begin, cmd_create, etc.)
+    if (!name.includes('device_create') && !name.includes('compute_create')) continue;
+    try {{
+      const result = fn();
+      if (result && typeof result.then === 'function') {{
+        const resolved = await result;
+        __asyncCache.set(name, resolved);
+        console.log('[rayzor] pre-resolved: ' + name + ' -> ' + resolved);
       }}
-    }}
+    }} catch(e) {{}}
   }}
 }}
 
@@ -3598,7 +3596,10 @@ function _make_host_adapter(hostModule) {{
         }}
         return a;
       }});
-      return fn(...converted);
+      const r = fn(...converted);
+      if (name.includes('create') || name.includes('build') || name.includes('begin') || name.includes('submit') || name.includes('format'))
+        console.log('[gpu] ' + name + '(' + converted.map(a => typeof a === 'string' ? '"'+a.slice(0,30)+'..."' : a).join(', ') + ') -> ' + r);
+      return r;
     }};
   }}
   return new Proxy(adapter, {{ get: (t, p) => t[p] ?? ((...a) => 0) }});
