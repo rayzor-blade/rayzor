@@ -3757,6 +3757,80 @@ const rayzor = {{
   haxe_math_ceil: (x) => Math.ceil(x),
   haxe_math_abs: (x) => Math.abs(x),
   haxe_math_random: () => Math.random(),
+
+  // Thread/sync runtime — Atomics-based implementation.
+  // Worker pool initialized lazily on first spawn.
+  rayzor_thread_spawn: (fnIdx, envPtr) => 0,  // overridden after init
+  rayzor_thread_join: (_tid) => {{}},
+  rayzor_thread_is_finished: (_tid) => 1,
+  rayzor_thread_yield_now: () => {{}},
+  rayzor_thread_sleep: (_ms) => {{}},
+  rayzor_thread_current_id: () => 0,
+
+  // Mutex — Atomics.compareExchange on shared memory
+  rayzor_mutex_init: () => {{ if (!memory) return 0; const p = heapBase; heapBase += 8; new Int32Array(memory.buffer)[p>>2] = 0; return p; }},
+  rayzor_mutex_lock: (id) => {{ if (!memory) return; const v = new Int32Array(memory.buffer); while (Atomics.compareExchange(v, id>>2, 0, 1) !== 0) {{}} }},
+  rayzor_mutex_try_lock: (id) => {{ if (!memory) return 0; return Atomics.compareExchange(new Int32Array(memory.buffer), id>>2, 0, 1) === 0 ? 1 : 0; }},
+  rayzor_mutex_is_locked: (id) => {{ if (!memory) return 0; return new Int32Array(memory.buffer)[id>>2] !== 0 ? 1 : 0; }},
+  rayzor_mutex_guard_get: (id) => {{ if (!memory) return 0; return new DataView(memory.buffer).getUint32(id + 4, true); }},
+  rayzor_mutex_unlock: (id) => {{ if (!memory) return; const v = new Int32Array(memory.buffer); Atomics.store(v, id>>2, 0); }},
+
+  // Semaphore
+  rayzor_semaphore_init: (n) => {{ if (!memory) return 0; const p = heapBase; heapBase += 4; new Int32Array(memory.buffer)[p>>2] = n; return p; }},
+  rayzor_semaphore_acquire: (id) => {{ if (!memory) return; const v = new Int32Array(memory.buffer); const idx = id>>2; while (true) {{ const c = Atomics.load(v,idx); if (c > 0 && Atomics.compareExchange(v,idx,c,c-1) === c) return; }} }},
+  rayzor_semaphore_try_acquire: (id) => {{ if (!memory) return 0; const v = new Int32Array(memory.buffer); const idx = id>>2; const c = Atomics.load(v,idx); return (c > 0 && Atomics.compareExchange(v,idx,c,c-1) === c) ? 1 : 0; }},
+  sys_semaphore_try_acquire_nowait: (id) => rayzor.rayzor_semaphore_try_acquire(id),
+
+  // Channel — simple ring buffer in linear memory
+  rayzor_channel_init: () => {{ if (!memory) return 0; const p = heapBase; heapBase = align8(heapBase + 5*4 + 64*8); const v = new Int32Array(memory.buffer); const b = p>>2; v[b]=0; v[b+1]=0; v[b+2]=0; v[b+3]=64; v[b+4]=0; return p; }},
+  rayzor_channel_send: (id, val) => {{ if (!memory) return; const v = new Int32Array(memory.buffer); const dv = new DataView(memory.buffer); const b = id>>2; const cap = v[b+3]; const tail = v[b+1]; dv.setBigUint64(id+20+(tail%cap)*8, BigInt(val), true); v[b+1] = (tail+1)%cap; }},
+  rayzor_channel_try_send: (id, val) => {{ rayzor.rayzor_channel_send(id, val); return 1; }},
+  rayzor_channel_receive: (id) => {{ if (!memory) return 0; const v = new Int32Array(memory.buffer); const dv = new DataView(memory.buffer); const b = id>>2; const cap = v[b+3]; const head = v[b]; if (head === v[b+1]) return 0; const val = Number(dv.getBigUint64(id+20+(head%cap)*8, true)); v[b] = (head+1)%cap; return val; }},
+  rayzor_channel_try_receive: (id) => rayzor.rayzor_channel_receive(id),
+  rayzor_channel_close: (id) => {{ if (memory) new Int32Array(memory.buffer)[(id>>2)+2] = 1; }},
+  rayzor_channel_is_closed: (id) => {{ if (!memory) return 0; return new Int32Array(memory.buffer)[(id>>2)+2] ? 1 : 0; }},
+  rayzor_channel_len: (id) => {{ if (!memory) return 0; const v = new Int32Array(memory.buffer); const b = id>>2; return (v[b+1] - v[b] + v[b+3]) % v[b+3]; }},
+  rayzor_channel_capacity: (id) => {{ if (!memory) return 0; return new Int32Array(memory.buffer)[(id>>2)+3]; }},
+  rayzor_channel_is_empty: (id) => rayzor.rayzor_channel_len(id) === 0 ? 1 : 0,
+  rayzor_channel_is_full: (id) => rayzor.rayzor_channel_len(id) >= rayzor.rayzor_channel_capacity(id) - 1 ? 1 : 0,
+
+  // Future — spawn thread + track result
+  rayzor_future_create: (fn, env) => rayzor.rayzor_thread_spawn(fn, env),
+  rayzor_future_await: (_id) => 0,
+  rayzor_future_then: (_id, _fn, _env) => {{}},
+  rayzor_future_poll: (_id) => rayzor.rayzor_thread_is_finished(_id),
+  rayzor_future_is_ready: (_id) => rayzor.rayzor_thread_is_finished(_id),
+  rayzor_future_all: () => 0,
+  rayzor_future_await_timeout: () => 0,
+  rayzor_future_race: () => 0,
+  rayzor_future_cancel: () => {{}},
+  rayzor_future_is_cancelled: () => 0,
+
+  // Arc/Box — identity on WASM (single shared heap)
+  rayzor_arc_init: (v) => v,
+  rayzor_arc_clone: (v) => v,
+  rayzor_arc_get: (v) => v,
+  rayzor_arc_strong_count: () => 1,
+  rayzor_arc_try_unwrap: (v) => v,
+  rayzor_arc_as_ptr: (v) => v,
+  rayzor_box_init: (v) => v,
+  rayzor_box_unbox: (v) => v,
+  rayzor_box_raw: (v) => v,
+  rayzor_box_free: () => {{}},
+
+  // EReg — browser RegExp
+  haxe_ereg_new: (_pattern, _flags) => 0,
+  haxe_ereg_match: (_re, _str) => 0,
+  haxe_ereg_matched: (_re, _n) => 0,
+  haxe_ereg_matched_left: (_re) => 0,
+  haxe_ereg_matched_right: (_re) => 0,
+  haxe_ereg_matched_pos: (_re) => 0,
+  haxe_ereg_matched_pos_anon: (_re) => 0,
+  haxe_ereg_match_sub: (_re, _str, _pos, _len) => 0,
+  haxe_ereg_split: (_re, _str) => 0,
+  haxe_ereg_replace: (_re, _with) => 0,
+  haxe_ereg_map: (_re, _fn) => 0,
+  haxe_ereg_escape: (_str) => 0,
 }};
 
 // Proxy: any missing import returns a no-op function
