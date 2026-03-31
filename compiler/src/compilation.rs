@@ -5579,23 +5579,18 @@ impl CompilationUnit {
                         .insert(qualified, symbol_name.clone());
                 }
 
-                // Map Haxe parameter types to IrTypeDescriptor values
-                let mut param_types = Vec::new();
-                if !method.is_static {
-                    param_types.push(9); // PtrVoid for `this`
-                }
-                for param in &method.parameters {
-                    param_types.push(self.haxe_type_to_descriptor(param.param_type));
-                }
-                let ret_type = self.haxe_type_to_descriptor(method.return_type);
                 entries.push(MethodDescEntry {
                     symbol_name,
                     class_name: class_native_name.clone(),
                     method_name,
                     is_static: method.is_static,
-                    param_count: param_types.len() as u8,
-                    return_type: ret_type,
-                    param_types,
+                    param_count: method.parameters.len() as u8
+                        + if method.is_static { 0 } else { 1 },
+                    return_type: 3, // Ptr (safe default — matches native path)
+                    param_types: vec![
+                        3; // All Ptr (safe default)
+                        method.parameters.len() + if method.is_static { 0 } else { 1 }
+                    ],
                 });
             }
 
@@ -5614,25 +5609,18 @@ impl CompilationUnit {
             }
         }
 
-        // Register entries under multiple class name formats used by the MIR lowerer:
-        // 1. Native: "rayzor::gpu::CommandEncoder" (from @:native)
-        // 2. Dot-separated: "rayzor.gpu.CommandEncoder"
-        // 3. Underscore-joined: "rayzor_gpu_CommandEncoder" (qualified_class_name in hir_to_mir)
-        // 4. Bare: "CommandEncoder" (last component)
+        // Also register entries under dot-separated and underscore-joined class names
+        // so the MIR lowerer can find them regardless of class name format.
         let mut extra_entries: Vec<MethodDescEntry> = Vec::new();
         for entry in &entries {
             let parts: Vec<&str> = entry.class_name.split("::").collect();
-            // Dot-separated
-            let dot_class = parts.join(".");
-            if dot_class != entry.class_name {
+            if parts.len() > 1 {
+                let dot_class = parts.join(".");
                 extra_entries.push(MethodDescEntry {
                     class_name: dot_class,
                     ..entry.clone()
                 });
-            }
-            // Underscore-joined
-            let underscore_class = parts.join("_");
-            if underscore_class != entry.class_name {
+                let underscore_class = parts.join("_");
                 extra_entries.push(MethodDescEntry {
                     class_name: underscore_class,
                     ..entry.clone()
