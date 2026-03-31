@@ -331,20 +331,17 @@ impl CompileCtx {
     // ------------------------------------------------------------------
 
     fn collect_imports(&mut self, modules: &[&IrModule]) {
-        // First, build a set of IrFunctionIds that have actual code bodies.
-        // These are internal functions and should NOT be imported.
+        // Build set of IrFunctionIds that have actual code bodies (internal functions).
         let mut has_code: BTreeSet<IrFunctionId> = BTreeSet::new();
-        let mut has_code_name: BTreeSet<String> = BTreeSet::new();
         for module in modules {
             for (func_id, func) in &module.functions {
                 if !func.cfg.blocks.is_empty() {
                     has_code.insert(*func_id);
-                    has_code_name.insert(func.name.clone());
                 }
             }
         }
 
-        // Pre-scan: collect @:jsImport mappings from module.functions
+        // Pre-scan: collect @:jsImport mappings
         for module in modules {
             for (_id, func) in &module.functions {
                 if let Some((ref js_mod, ref js_name)) = func.js_import {
@@ -354,115 +351,116 @@ impl CompileCtx {
             }
         }
 
-        let mut seen: BTreeSet<String> = BTreeSet::new();
+        // ============================================================
+        // DETERMINISTIC IMPORT RESOLUTION
+        // ============================================================
+        // Phase 1: Collect ALL unique import names from externs + empty-body functions.
+        // Phase 2: Sort by name, assign WASM indices in sorted order.
+        // Phase 3: Map ALL IrFunctionIds to their name's index.
+        // This makes import ordering identical across builds regardless of
+        // non-deterministic IrFunctionId assignment during compilation.
+        // ============================================================
 
-        // Import declared externs that have no internal body.
-        // Sort by name for deterministic import ordering — IrFunctionIds vary between
-        // builds due to non-deterministic compilation order. Sorting by name ensures
-        // the WASM binary's import section is identical across builds.
-        {
-            let mut all_externs: Vec<&crate::ir::modules::IrExternFunction> = modules.iter()
-                .flat_map(|m| m.extern_functions.values())
-                .filter(|ext| !has_code.contains(&ext.id))
-                .collect();
-            all_externs.sort_by(|a, b| a.name.cmp(&b.name));
+        // Phase 1: Collect unique import entries (name → signature) from all sources.
+        // Use BTreeMap for deterministic iteration.
+        let mut import_entries: BTreeMap<String, (Vec<ValType>, Vec<ValType>)> = BTreeMap::new();
 
-            for ext in &all_externs {
-                if seen.contains(&ext.name) {
-                    if let Some(&idx) = self.import_name_to_idx.get(&ext.name) {
-                        self.ir_func_to_idx.insert(ext.id, idx);
-                    }
-                    continue;
-                }
-                seen.insert(ext.name.clone());
-                let (params, results) = Self::sig_to_wasm(&ext.signature);
-                let param_types_for_registry = params.clone();
-                let ret_type = if results.is_empty() { ValType::I32 } else { results[0] };
-                let type_idx = self.intern_type(params, results);
-                let func_idx = self.next_func_idx;
-                self.next_func_idx += 1;
-                self.imports.push(ImportedFunc {
-                    name: ext.name.clone(),
-                    type_idx,
-                });
-                self.import_name_to_idx.insert(ext.name.clone(), func_idx);
-                self.ir_func_to_idx.insert(ext.id, func_idx);
-                self.func_param_types.insert(ext.id, param_types_for_registry);
-                self.func_return_types.insert(ext.id, ret_type);
+        // From extern_functions
+        for module in modules {
+            for (_id, ext) in &module.extern_functions {
+                if has_code.contains(&ext.id) { continue; }
+                import_entries.entry(ext.name.clone())
+                    .or_insert_with(|| Self::sig_to_wasm(&ext.signature));
             }
         }
 
-        // Also import empty-body functions from module.functions — these are
-        // MIR wrappers for runtime functions (like haxe_trace_string_struct).
-        // In native mode, the cranelift backend links them to runtime symbols.
-        // In WASM mode, they become host imports.
-        // Bare-name stubs (e.g., "get") are redirected to their qualified import
-        // (e.g., "haxe_bytes_get") if one exists, to avoid collision-prone imports.
-        // Sort by name for deterministic ordering.
-        let mut empty_body_funcs: Vec<(IrFunctionId, &IrFunction)> = modules.iter()
-            .flat_map(|m| m.functions.iter())
-            .filter(|(_, f)| f.cfg.blocks.is_empty())
-            .map(|(id, f)| (*id, f))
-            .collect();
-        empty_body_funcs.sort_by(|a, b| a.1.name.cmp(&b.1.name));
-
-        for (func_id, func) in &empty_body_funcs {
-                if !self.ir_func_to_idx.contains_key(func_id)
-                    && !seen.contains(&func.name)
-                {
-                    // Redirect bare-name stubs to qualified imports.
-                    // "get" → find "haxe_bytes_get" → reuse its import index.
-                    // Search BOTH already-created imports AND the remaining empty-body
-                    // functions (which will become imports). This handles cases where the
-                    // qualified function hasn't been imported yet due to compilation ordering.
-                    let is_bare = !func.name.contains('_') && !func.name.contains('.');
-                    if is_bare {
-                        let snake: String = func.name.chars().enumerate().fold(String::new(), |mut s, (i, c)| {
-                            if c.is_uppercase() && i > 0 { s.push('_'); }
-                            s.push(c.to_ascii_lowercase());
-                            s
-                        });
-                        let suffix = format!("_{}", snake);
-                        // Check existing imports — only redirect to haxe_* imports
-                        // (stdlib-mapped externs that replace bare stubs). Don't redirect
-                        // to rayzor_* imports (runtime functions that coexist with bare stubs
-                        // used by WASM forwarders for DynamicValue boxing).
-                        let found = self.import_name_to_idx.iter()
-                            .filter(|(k, _)| k.starts_with("haxe_") && k.ends_with(&suffix) && k.len() > suffix.len())
-                            .min_by_key(|(k, _)| k.len())
-                            .map(|(_, &idx)| idx);
-                        // If not found, check other empty-body functions in the list
-                        let found = found.or_else(|| {
-                            empty_body_funcs.iter()
-                                .find(|(_, f)| f.name.starts_with("haxe_") && f.name.ends_with(&suffix) && f.name.len() > suffix.len())
-                                .and_then(|(qid, _)| self.ir_func_to_idx.get(qid).copied())
-                        });
-                        if let Some(idx) = found {
-                            self.ir_func_to_idx.insert(*func_id, idx);
-                            seen.insert(func.name.clone());
-                            continue;
-                        }
-                    }
-
-                    seen.insert(func.name.clone());
-                    let (params, results) = Self::sig_to_wasm(&func.signature);
-                    let type_idx = self.intern_type(params, results);
-                    let func_idx = self.next_func_idx;
-                    self.next_func_idx += 1;
-                    self.imports.push(ImportedFunc {
-                        name: func.name.clone(),
-                        type_idx,
+        // From empty-body functions in module.functions
+        for module in modules {
+            for (_id, func) in &module.functions {
+                if !func.cfg.blocks.is_empty() { continue; }
+                // Redirect bare-name stubs to qualified haxe_* imports if available.
+                // "get" → if "haxe_bytes_get" exists, don't create a "get" import.
+                let is_bare = !func.name.contains('_') && !func.name.contains('.');
+                if is_bare {
+                    let snake: String = func.name.chars().enumerate().fold(String::new(), |mut s, (i, c)| {
+                        if c.is_uppercase() && i > 0 { s.push('_'); }
+                        s.push(c.to_ascii_lowercase());
+                        s
                     });
-                    self.import_name_to_idx.insert(func.name.clone(), func_idx);
-                    self.ir_func_to_idx.insert(*func_id, func_idx);
-                    // Map qualified name too (e.g. "rayzor.gpu.Surface.getFormat" → import idx)
-                    if let Some(ref qn) = func.qualified_name {
-                        self.qualified_to_import.insert(qn.clone(), func_idx);
+                    let suffix = format!("_{}", snake);
+                    let has_haxe_qualified = import_entries.keys()
+                        .any(|k| k.starts_with("haxe_") && k.ends_with(&suffix));
+                    if has_haxe_qualified {
+                        continue; // Will be mapped in Phase 3
                     }
                 }
+                import_entries.entry(func.name.clone())
+                    .or_insert_with(|| Self::sig_to_wasm(&func.signature));
+            }
         }
-        // Also build qualified_to_import from extern_functions that have qualified names
-        // registered on IrFunctions with the same name
+
+        // Phase 2: Create imports in deterministic name order (BTreeMap iterates sorted).
+        // Build name→index map.
+        let mut name_to_idx: BTreeMap<String, u32> = BTreeMap::new();
+        for (name, (params, results)) in &import_entries {
+            let param_types = params.clone();
+            let ret_type = if results.is_empty() { ValType::I32 } else { results[0] };
+            let type_idx = self.intern_type(params.clone(), results.clone());
+            let func_idx = self.next_func_idx;
+            self.next_func_idx += 1;
+            self.imports.push(ImportedFunc {
+                name: name.clone(),
+                type_idx,
+            });
+            self.import_name_to_idx.insert(name.clone(), func_idx);
+            name_to_idx.insert(name.clone(), func_idx);
+        }
+
+        // Phase 3: Map ALL IrFunctionIds to their import index via name lookup.
+        // This is the key step — IDs resolve by NAME, not by iteration order.
+        for module in modules {
+            // Map extern function IDs
+            for (_id, ext) in &module.extern_functions {
+                if has_code.contains(&ext.id) { continue; }
+                if let Some(&idx) = name_to_idx.get(&ext.name) {
+                    self.ir_func_to_idx.entry(ext.id).or_insert(idx);
+                    let (params, _) = Self::sig_to_wasm(&ext.signature);
+                    let ret = if let Some((_, results)) = import_entries.get(&ext.name) {
+                        if results.is_empty() { ValType::I32 } else { results[0] }
+                    } else { ValType::I32 };
+                    self.func_param_types.entry(ext.id).or_insert(params);
+                    self.func_return_types.entry(ext.id).or_insert(ret);
+                }
+            }
+            // Map empty-body function IDs
+            for (func_id, func) in &module.functions {
+                if !func.cfg.blocks.is_empty() { continue; }
+                if self.ir_func_to_idx.contains_key(func_id) { continue; }
+                // Direct name match
+                if let Some(&idx) = name_to_idx.get(&func.name) {
+                    self.ir_func_to_idx.insert(*func_id, idx);
+                    continue;
+                }
+                // Bare-name redirect: "get" → "haxe_bytes_get"
+                if !func.name.contains('_') && !func.name.contains('.') {
+                    let snake: String = func.name.chars().enumerate().fold(String::new(), |mut s, (i, c)| {
+                        if c.is_uppercase() && i > 0 { s.push('_'); }
+                        s.push(c.to_ascii_lowercase());
+                        s
+                    });
+                    let suffix = format!("_{}", snake);
+                    if let Some((&ref qname, &idx)) = name_to_idx.iter()
+                        .filter(|(k, _)| k.starts_with("haxe_") && k.ends_with(&suffix))
+                        .min_by_key(|(k, _)| k.len())
+                    {
+                        self.ir_func_to_idx.insert(*func_id, idx);
+                        continue;
+                    }
+                }
+            }
+        }
+
+        // Build qualified_to_import from function qualified_name fields
         for module in modules {
             for func in module.functions.values() {
                 if let Some(ref qn) = func.qualified_name {
@@ -481,8 +479,18 @@ impl CompileCtx {
     // ------------------------------------------------------------------
 
     fn collect_functions(&mut self, modules: &[&IrModule]) {
-        for (mod_idx, module) in modules.iter().enumerate() {
-            for (func_id, func) in &module.functions {
+        // Sort functions by name for deterministic index assignment.
+        // IrFunctionIds vary between builds, but names are stable.
+        let mut all_funcs: Vec<(usize, IrFunctionId, &IrFunction)> = modules.iter()
+            .enumerate()
+            .flat_map(|(mod_idx, module)| {
+                module.functions.iter().map(move |(fid, f)| (mod_idx, *fid, f))
+            })
+            .collect();
+        all_funcs.sort_by(|a, b| a.2.name.cmp(&b.2.name).then(a.1.cmp(&b.1)));
+
+        for &(mod_idx, func_id, func) in &all_funcs {
+            let func_id = &func_id; // match old code's reference pattern
                 // Skip functions already registered as imports (by ID or name).
                 // Always register return type for CallDirect type inference
                 // If this function maps to an import, use the import's signature for param types
@@ -585,7 +593,6 @@ impl CompileCtx {
                 // Store return type for CallDirect type inference
                 let ret_ty = ir_type_to_wasm(&func.signature.return_type);
                 self.func_return_types.insert(*func_id, ret_ty);
-            }
         }
 
         // Cross-module extern->internal resolution by name.
