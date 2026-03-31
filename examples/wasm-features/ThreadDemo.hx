@@ -17,12 +17,12 @@ class ThreadDemo {
         mtx.lock();
         trace("Mutex locked");
 
-        trace("Is locked: " + mtx.isLocked());
+        if (mtx.isLocked()) trace("Is locked: true"); else trace("Is locked: false");
 
         mtx.unlock();
         trace("Mutex unlocked");
 
-        trace("Is locked: " + mtx.isLocked());
+        if (mtx.isLocked()) trace("Is locked: true"); else trace("Is locked: false");
 
         trace("=== Done ===");
     }

@@ -3777,10 +3777,34 @@ const rayzor = {{
   rayzor_mutex_guard_get: (id) => {{ if (!memory) return 0; return new DataView(memory.buffer).getUint32(id + 4, true); }},
   rayzor_mutex_unlock: (id) => {{ if (!memory) return; new DataView(memory.buffer).setInt32(id, 0, true); }},
   // Bare-name aliases — MIR generates short names for extern class methods
-  lock: (id) => {{ if (!memory) return 0; const v = new DataView(memory.buffer); v.setInt32(id, 1, true); const readback = v.getInt32(id, true); console.log('[bare] lock('+id+') wrote=1 readback='+readback+' bufLen='+memory.buffer.byteLength); return id; }},
-  try_lock: (id) => {{ if (!memory) return 0; const v = new DataView(memory.buffer); return v.getInt32(id, true) === 0 ? (v.setInt32(id, 1, true), 1) : 0; }},
-  is_locked: (id) => {{ if (!memory) return 0; const v = new DataView(memory.buffer); const raw = v.getInt32(id, true); const bytes = [v.getUint8(id), v.getUint8(id+1), v.getUint8(id+2), v.getUint8(id+3)]; console.log('[bare] is_locked('+id+') raw='+raw+' bytes='+JSON.stringify(bytes)+' bufLen='+memory.buffer.byteLength); return raw !== 0 ? 1 : 0; }},
-  unlock: (id) => {{ console.log('[bare] unlock('+id+')'); if (!memory) return; new DataView(memory.buffer).setInt32(id, 0, true); }},
+  // Box a value as DynamicValue: {{type_id: i32, value_ptr: i32}}
+  // type_id: 0=Int, 1=Float, 2=Bool, 3=String, 4=Object
+  _boxBool: function(val) {{
+    if (!memory) return 0;
+    // Allocate value cell (4 bytes for the bool i32)
+    const valPtr = malloc(4);
+    new DataView(memory.buffer).setInt32(valPtr, val ? 1 : 0, true);
+    // Allocate DynamicValue struct (8 bytes: type_id + value_ptr)
+    const dvPtr = malloc(8);
+    const v = new DataView(memory.buffer);
+    v.setInt32(dvPtr, 2, true);     // type_id = 2 (Bool)
+    v.setInt32(dvPtr + 4, valPtr, true); // value_ptr
+    return dvPtr;
+  }},
+  _boxInt: function(val) {{
+    if (!memory) return 0;
+    const valPtr = malloc(8);
+    new DataView(memory.buffer).setBigInt64(valPtr, BigInt(val), true);
+    const dvPtr = malloc(8);
+    const v = new DataView(memory.buffer);
+    v.setInt32(dvPtr, 0, true);     // type_id = 0 (Int)
+    v.setInt32(dvPtr + 4, valPtr, true);
+    return dvPtr;
+  }},
+  lock: (id) => {{ if (!memory) return 0; new DataView(memory.buffer).setInt32(id, 1, true); return rayzor._boxInt(id); }},
+  try_lock: (id) => {{ if (!memory) return 0; const v = new DataView(memory.buffer); const ok = v.getInt32(id, true) === 0; if (ok) v.setInt32(id, 1, true); return rayzor._boxBool(ok); }},
+  is_locked: (id) => {{ if (!memory) return 0; const val = new DataView(memory.buffer).getInt32(id, true) !== 0; return rayzor._boxBool(val); }},
+  unlock: (id) => {{ if (!memory) return; new DataView(memory.buffer).setInt32(id, 0, true); }},
   init: (val) => {{ if (!memory) return 0; const p = heapBase; heapBase = align8(heapBase + 8); new DataView(memory.buffer).setInt32(p, 0, true); return p; }},
 
   // Semaphore
