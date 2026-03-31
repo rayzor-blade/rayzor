@@ -357,11 +357,17 @@ impl CompileCtx {
         let mut seen: BTreeSet<String> = BTreeSet::new();
 
         // Import declared externs that have no internal body.
-        for module in modules {
-            for (_id, ext) in &module.extern_functions {
-                if has_code.contains(&ext.id) || has_code_name.contains(&ext.name) {
-                    continue;
-                }
+        // Sort by name for deterministic import ordering — IrFunctionIds vary between
+        // builds due to non-deterministic compilation order. Sorting by name ensures
+        // the WASM binary's import section is identical across builds.
+        {
+            let mut all_externs: Vec<&crate::ir::modules::IrExternFunction> = modules.iter()
+                .flat_map(|m| m.extern_functions.values())
+                .filter(|ext| !has_code.contains(&ext.id))
+                .collect();
+            all_externs.sort_by(|a, b| a.name.cmp(&b.name));
+
+            for ext in &all_externs {
                 if seen.contains(&ext.name) {
                     if let Some(&idx) = self.import_name_to_idx.get(&ext.name) {
                         self.ir_func_to_idx.insert(ext.id, idx);
@@ -370,7 +376,6 @@ impl CompileCtx {
                 }
                 seen.insert(ext.name.clone());
                 let (params, results) = Self::sig_to_wasm(&ext.signature);
-                // Save param types before they're moved into intern_type
                 let param_types_for_registry = params.clone();
                 let ret_type = if results.is_empty() { ValType::I32 } else { results[0] };
                 let type_idx = self.intern_type(params, results);
@@ -382,7 +387,6 @@ impl CompileCtx {
                 });
                 self.import_name_to_idx.insert(ext.name.clone(), func_idx);
                 self.ir_func_to_idx.insert(ext.id, func_idx);
-                // Register param types from the import signature (authoritative for CallDirect coercion)
                 self.func_param_types.insert(ext.id, param_types_for_registry);
                 self.func_return_types.insert(ext.id, ret_type);
             }
@@ -392,12 +396,54 @@ impl CompileCtx {
         // MIR wrappers for runtime functions (like haxe_trace_string_struct).
         // In native mode, the cranelift backend links them to runtime symbols.
         // In WASM mode, they become host imports.
-        for module in modules {
-            for (func_id, func) in &module.functions {
-                if func.cfg.blocks.is_empty()
-                    && !self.ir_func_to_idx.contains_key(func_id)
+        // Bare-name stubs (e.g., "get") are redirected to their qualified import
+        // (e.g., "haxe_bytes_get") if one exists, to avoid collision-prone imports.
+        // Sort by name for deterministic ordering.
+        let mut empty_body_funcs: Vec<(IrFunctionId, &IrFunction)> = modules.iter()
+            .flat_map(|m| m.functions.iter())
+            .filter(|(_, f)| f.cfg.blocks.is_empty())
+            .map(|(id, f)| (*id, f))
+            .collect();
+        empty_body_funcs.sort_by(|a, b| a.1.name.cmp(&b.1.name));
+
+        for (func_id, func) in &empty_body_funcs {
+                if !self.ir_func_to_idx.contains_key(func_id)
                     && !seen.contains(&func.name)
                 {
+                    // Redirect bare-name stubs to qualified imports.
+                    // "get" → find "haxe_bytes_get" → reuse its import index.
+                    // Search BOTH already-created imports AND the remaining empty-body
+                    // functions (which will become imports). This handles cases where the
+                    // qualified function hasn't been imported yet due to compilation ordering.
+                    let is_bare = !func.name.contains('_') && !func.name.contains('.');
+                    if is_bare {
+                        let snake: String = func.name.chars().enumerate().fold(String::new(), |mut s, (i, c)| {
+                            if c.is_uppercase() && i > 0 { s.push('_'); }
+                            s.push(c.to_ascii_lowercase());
+                            s
+                        });
+                        let suffix = format!("_{}", snake);
+                        // Check existing imports — only redirect to haxe_* imports
+                        // (stdlib-mapped externs that replace bare stubs). Don't redirect
+                        // to rayzor_* imports (runtime functions that coexist with bare stubs
+                        // used by WASM forwarders for DynamicValue boxing).
+                        let found = self.import_name_to_idx.iter()
+                            .filter(|(k, _)| k.starts_with("haxe_") && k.ends_with(&suffix) && k.len() > suffix.len())
+                            .min_by_key(|(k, _)| k.len())
+                            .map(|(_, &idx)| idx);
+                        // If not found, check other empty-body functions in the list
+                        let found = found.or_else(|| {
+                            empty_body_funcs.iter()
+                                .find(|(_, f)| f.name.starts_with("haxe_") && f.name.ends_with(&suffix) && f.name.len() > suffix.len())
+                                .and_then(|(qid, _)| self.ir_func_to_idx.get(qid).copied())
+                        });
+                        if let Some(idx) = found {
+                            self.ir_func_to_idx.insert(*func_id, idx);
+                            seen.insert(func.name.clone());
+                            continue;
+                        }
+                    }
+
                     seen.insert(func.name.clone());
                     let (params, results) = Self::sig_to_wasm(&func.signature);
                     let type_idx = self.intern_type(params, results);
@@ -414,7 +460,6 @@ impl CompileCtx {
                         self.qualified_to_import.insert(qn.clone(), func_idx);
                     }
                 }
-            }
         }
         // Also build qualified_to_import from extern_functions that have qualified names
         // registered on IrFunctions with the same name

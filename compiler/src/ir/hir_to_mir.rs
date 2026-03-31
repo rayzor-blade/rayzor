@@ -2251,6 +2251,13 @@ impl<'a> HirToMirContext<'a> {
                     // );
                     self.current_class_symbol = Some(class.symbol_id);
                     for method in &class.methods {
+                        // Skip bodyless extern class methods. The stdlib mapping in Phase 2
+                        // creates properly qualified functions (e.g., "haxe_bytes_get") via
+                        // get_or_register_extern_function. Phase 1 stubs use bare method
+                        // names (e.g., "get") which cause WASM import collisions.
+                        if class.is_extern && method.function.body.is_none() {
+                            continue;
+                        }
                         let this_type = if !method.is_static {
                             Some(*type_id)
                         } else {
@@ -2267,12 +2274,14 @@ impl<'a> HirToMirContext<'a> {
 
                     // Register constructor signature with class type params
                     if let Some(constructor) = &class.constructor {
-                        self.register_constructor_signature_with_class_type_params(
-                            class.symbol_id,
-                            constructor,
-                            *type_id,
-                            &class.type_params,
-                        );
+                        if !class.is_extern {
+                            self.register_constructor_signature_with_class_type_params(
+                                class.symbol_id,
+                                constructor,
+                                *type_id,
+                                &class.type_params,
+                            );
+                        }
                     }
                 }
                 HirTypeDecl::Abstract(abstract_decl) => {

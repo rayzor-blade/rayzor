@@ -3493,6 +3493,11 @@ function malloc(size) {{
   size = Number(size);
   const ptr = heapBase;
   heapBase = align8(heapBase + size);
+  // Grow memory if needed (WASM memory starts small, JS heap is at 17MB+)
+  if (memory && heapBase > memory.buffer.byteLength) {{
+    const needed = Math.ceil((heapBase - memory.buffer.byteLength) / 65536);
+    try {{ memory.grow(needed); }} catch(e) {{}}
+  }}
   return ptr;
 }}
 
@@ -3776,7 +3781,6 @@ const rayzor = {{
   rayzor_mutex_is_locked: (id) => {{ if (!memory) return 0; return new DataView(memory.buffer).getInt32(id, true) !== 0 ? 1 : 0; }},
   rayzor_mutex_guard_get: (id) => {{ if (!memory) return 0; return new DataView(memory.buffer).getUint32(id + 4, true); }},
   rayzor_mutex_unlock: (id) => {{ if (!memory) return; new DataView(memory.buffer).setInt32(id, 0, true); }},
-  // Bare-name aliases — MIR generates short names for extern class methods
   // Box a value as DynamicValue: {{type_id: i32, value_ptr: i32}}
   // type_id: 0=Int, 1=Float, 2=Bool, 3=String, 4=Object
   _boxBool: function(val) {{
@@ -4107,32 +4111,106 @@ const rayzor = {{
   haxe_coerce_dynamic_to_int: (v) => Number(v) || 0,
   rayzor_tcc_create: () => 0,
 
-  // haxe.io.Bytes — linear memory byte buffer operations
-  alloc: (size) => malloc(Number(size)),
-  ofString: (ptr) => {{ try {{ const s = readString(ptr); const enc = new TextEncoder().encode(s); const p = malloc(enc.length); new Uint8Array(memory.buffer).set(enc, p); return p; }} catch {{ return 0; }} }},
-  get: (buf, pos) => {{ if (!memory) return 0; return new Uint8Array(memory.buffer)[buf + pos]; }},
-  set: (buf, pos, val) => {{ if (memory) new Uint8Array(memory.buffer)[buf + pos] = val; }},
-  sub: (buf, pos, len) => {{ const p = malloc(len); new Uint8Array(memory.buffer).copyWithin(p, buf + pos, buf + pos + len); return p; }},
-  blit: (dst, dstPos, src, srcPos, len) => {{ if (memory) new Uint8Array(memory.buffer).copyWithin(dst + dstPos, src + srcPos, src + srcPos + len); }},
-  fill: (buf, pos, len, val) => {{ if (memory) new Uint8Array(memory.buffer).fill(val, buf + pos, buf + pos + len); }},
-  compare: (a, aLen, b, bLen) => {{
+  // haxe.io.Bytes — handle-table backed byte buffer operations
+  // All imports use qualified names (haxe_bytes_*) to avoid collisions with other extern classes.
+  _bytesHandles: new Map(),
+  _bytesNext: 1,
+  _bytesGet: function(h) {{ return rayzor._bytesHandles.get(h); }},
+  haxe_bytes_alloc: (size) => {{
     if (!memory) return 0;
-    const u = new Uint8Array(memory.buffer);
-    const len = Math.min(aLen, bLen);
-    for (let i = 0; i < len; i++) {{ if (u[a+i] !== u[b+i]) return u[a+i] < u[b+i] ? -1 : 1; }}
-    return aLen === bLen ? 0 : aLen < bLen ? -1 : 1;
+    size = Number(size);
+    const dataPtr = malloc(size);
+    new Uint8Array(memory.buffer).fill(0, dataPtr, dataPtr + size);
+    const id = rayzor._bytesNext++;
+    rayzor._bytesHandles.set(id, {{ dataPtr, len: size }});
+    return id;
   }},
-  toString: (buf, len) => {{ if (!memory) return 0; return writeString(new TextDecoder().decode(new Uint8Array(memory.buffer, buf, len))); }},
-  getInt16: (buf, pos) => {{ if (!memory) return 0; return new DataView(memory.buffer).getInt16(buf + pos, true); }},
-  getInt32: (buf, pos) => {{ if (!memory) return 0; return new DataView(memory.buffer).getInt32(buf + pos, true); }},
-  getInt64: (buf, pos) => {{ if (!memory) return BigInt(0); return new DataView(memory.buffer).getBigInt64(buf + pos, true); }},
-  getFloat: (buf, pos) => {{ if (!memory) return 0; return new DataView(memory.buffer).getFloat32(buf + pos, true); }},
-  getDouble: (buf, pos) => {{ if (!memory) return 0; return new DataView(memory.buffer).getFloat64(buf + pos, true); }},
-  setInt16: (buf, pos, val) => {{ if (memory) new DataView(memory.buffer).setInt16(buf + pos, val, true); }},
-  setInt32: (buf, pos, val) => {{ if (memory) new DataView(memory.buffer).setInt32(buf + pos, val, true); }},
-  setInt64: (buf, pos, val) => {{ if (memory) new DataView(memory.buffer).setBigInt64(buf + pos, BigInt(val), true); }},
-  setFloat: (buf, pos, val) => {{ if (memory) new DataView(memory.buffer).setFloat32(buf + pos, val, true); }},
-  setDouble: (buf, pos, val) => {{ if (memory) new DataView(memory.buffer).setFloat64(buf + pos, val, true); }},
+  haxe_bytes_of_string: (ptr) => {{
+    try {{
+      const s = readString(ptr);
+      const enc = new TextEncoder().encode(s);
+      const dataPtr = malloc(enc.length);
+      new Uint8Array(memory.buffer).set(enc, dataPtr);
+      const id = rayzor._bytesNext++;
+      rayzor._bytesHandles.set(id, {{ dataPtr, len: enc.length }});
+      return id;
+    }} catch {{ return 0; }}
+  }},
+  haxe_bytes_length: (h) => {{ const b = rayzor._bytesGet(h); return b ? b.len : 0; }},
+  haxe_bytes_get: (h, pos) => {{ if (!memory) return 0; const b = rayzor._bytesGet(h); if (!b) return 0; return new Uint8Array(memory.buffer)[b.dataPtr + pos]; }},
+  haxe_bytes_set: (h, pos, val) => {{ if (!memory) return; const b = rayzor._bytesGet(h); if (b) new Uint8Array(memory.buffer)[b.dataPtr + pos] = val; }},
+  haxe_bytes_sub: (h, pos, len) => {{
+    if (!memory) return 0;
+    const b = rayzor._bytesGet(h);
+    if (!b) return 0;
+    const dataPtr = malloc(len);
+    new Uint8Array(memory.buffer).copyWithin(dataPtr, b.dataPtr + pos, b.dataPtr + pos + len);
+    const id = rayzor._bytesNext++;
+    rayzor._bytesHandles.set(id, {{ dataPtr, len }});
+    return id;
+  }},
+  haxe_bytes_blit: (h, srcPos, dest, destPos, len) => {{
+    if (!memory) return;
+    const src = rayzor._bytesGet(h);
+    const dst = rayzor._bytesGet(dest);
+    if (src && dst) new Uint8Array(memory.buffer).copyWithin(dst.dataPtr + destPos, src.dataPtr + srcPos, src.dataPtr + srcPos + len);
+  }},
+  haxe_bytes_fill: (h, pos, len, val) => {{ if (!memory) return; const b = rayzor._bytesGet(h); if (b) new Uint8Array(memory.buffer).fill(val, b.dataPtr + pos, b.dataPtr + pos + len); }},
+  haxe_bytes_compare: (h1, h2) => {{
+    if (!memory) return 0;
+    const a = rayzor._bytesGet(h1);
+    const bObj = rayzor._bytesGet(h2);
+    if (!a || !bObj) return 0;
+    const u = new Uint8Array(memory.buffer);
+    const len = Math.min(a.len, bObj.len);
+    for (let i = 0; i < len; i++) {{
+      const av = u[a.dataPtr + i], bv = u[bObj.dataPtr + i];
+      if (av !== bv) return av < bv ? -1 : 1;
+    }}
+    return a.len === bObj.len ? 0 : a.len < bObj.len ? -1 : 1;
+  }},
+  haxe_bytes_to_string: (h) => {{
+    if (!memory) return 0;
+    const b = rayzor._bytesGet(h);
+    if (!b) return 0;
+    return writeString(new TextDecoder().decode(new Uint8Array(memory.buffer, b.dataPtr, b.len)));
+  }},
+  haxe_bytes_get_int16: (h, pos) => {{ if (!memory) return 0; const b = rayzor._bytesGet(h); if (!b) return 0; return new DataView(memory.buffer).getInt16(b.dataPtr + pos, true); }},
+  haxe_bytes_get_int32: (h, pos) => {{ if (!memory) return 0; const b = rayzor._bytesGet(h); if (!b) return 0; return new DataView(memory.buffer).getInt32(b.dataPtr + pos, true); }},
+  haxe_bytes_get_int64: (h, pos) => {{ if (!memory) return BigInt(0); const b = rayzor._bytesGet(h); if (!b) return BigInt(0); return new DataView(memory.buffer).getBigInt64(b.dataPtr + pos, true); }},
+  haxe_bytes_get_float: (h, pos) => {{ if (!memory) return 0; const b = rayzor._bytesGet(h); if (!b) return 0; return new DataView(memory.buffer).getFloat32(b.dataPtr + pos, true); }},
+  haxe_bytes_get_double: (h, pos) => {{ if (!memory) return 0; const b = rayzor._bytesGet(h); if (!b) return 0; return new DataView(memory.buffer).getFloat64(b.dataPtr + pos, true); }},
+  haxe_bytes_set_int16: (h, pos, val) => {{ if (!memory) return; const b = rayzor._bytesGet(h); if (b) new DataView(memory.buffer).setInt16(b.dataPtr + pos, val, true); }},
+  haxe_bytes_set_int32: (h, pos, val) => {{ if (!memory) return; const b = rayzor._bytesGet(h); if (b) new DataView(memory.buffer).setInt32(b.dataPtr + pos, val, true); }},
+  haxe_bytes_set_int64: (h, pos, val) => {{ if (!memory) return; const b = rayzor._bytesGet(h); if (b) new DataView(memory.buffer).setBigInt64(b.dataPtr + pos, BigInt(val), true); }},
+  haxe_bytes_set_float: (h, pos, val) => {{ if (!memory) return; const b = rayzor._bytesGet(h); if (b) new DataView(memory.buffer).setFloat32(b.dataPtr + pos, val, true); }},
+  haxe_bytes_set_double: (h, pos, val) => {{ if (!memory) return; const b = rayzor._bytesGet(h); if (b) new DataView(memory.buffer).setFloat64(b.dataPtr + pos, val, true); }},
+
+  // Bare-name aliases for extern class method stubs.
+  // The MIR's stdlib-cache creates dead bare stubs ("get", "set") alongside
+  // qualified functions ("haxe_bytes_get"). Both become WASM imports.
+  // These aliases route bare imports to the handle-table implementations.
+  // TODO: Fix at MIR/stdlib-cache level to stop creating bare stubs entirely.
+  alloc: (...a) => rayzor.haxe_bytes_alloc(...a),
+  ofString: (...a) => rayzor.haxe_bytes_of_string(...a),
+  length: (...a) => rayzor.haxe_bytes_length(...a),
+  get: (...a) => rayzor.haxe_bytes_get(...a),
+  set: (...a) => rayzor.haxe_bytes_set(...a),
+  sub: (...a) => rayzor.haxe_bytes_sub(...a),
+  blit: (...a) => rayzor.haxe_bytes_blit(...a),
+  fill: (...a) => rayzor.haxe_bytes_fill(...a),
+  compare: (...a) => rayzor.haxe_bytes_compare(...a),
+  toString: (...a) => rayzor.haxe_bytes_to_string(...a),
+  getInt16: (...a) => rayzor.haxe_bytes_get_int16(...a),
+  getInt32: (...a) => rayzor.haxe_bytes_get_int32(...a),
+  getInt64: (...a) => rayzor.haxe_bytes_get_int64(...a),
+  getFloat: (...a) => rayzor.haxe_bytes_get_float(...a),
+  getDouble: (...a) => rayzor.haxe_bytes_get_double(...a),
+  setInt16: (...a) => rayzor.haxe_bytes_set_int16(...a),
+  setInt32: (...a) => rayzor.haxe_bytes_set_int32(...a),
+  setInt64: (...a) => rayzor.haxe_bytes_set_int64(...a),
+  setFloat: (...a) => rayzor.haxe_bytes_set_float(...a),
+  setDouble: (...a) => rayzor.haxe_bytes_set_double(...a),
 }};
 
 // Proxy: any missing import returns a no-op function
