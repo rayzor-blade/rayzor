@@ -16,7 +16,7 @@ use crate::tast::{
     SymbolTable, TypeId, TypeKind, TypeTable, Visibility,
 };
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 /// Context for lowering TAST to HIR
@@ -130,7 +130,7 @@ impl<'a> TastToHirContext<'a> {
                 imports: Vec::new(),
                 types: indexmap::IndexMap::new(), // Use IndexMap for deterministic ordering
                 functions: indexmap::IndexMap::new(),
-                globals: HashMap::new(),
+                globals: BTreeMap::new(),
                 metadata: HirMetadata {
                     source_file: String::new(),
                     language_version: "1.0".to_string(),
