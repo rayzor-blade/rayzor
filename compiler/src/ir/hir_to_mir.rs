@@ -2566,7 +2566,12 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Lower globals
-        for (symbol_id, global) in &hir_module.globals {
+        // Sort globals by symbol ID for deterministic lowering order.
+        // globals is a HashMap — unsorted iteration causes non-deterministic
+        // function ID assignment when global initializers create extern functions.
+        let mut sorted_globals: Vec<_> = hir_module.globals.iter().collect();
+        sorted_globals.sort_by_key(|(sid, _)| sid.as_raw());
+        for (symbol_id, global) in sorted_globals {
             self.lower_global(*symbol_id, global);
         }
 

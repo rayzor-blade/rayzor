@@ -11,7 +11,7 @@
 
 use crate::tast::{InternedString, LifetimeId, ScopeId, SourceLocation, SymbolId, TypeId};
 use indexmap::IndexMap;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 /// HIR Module - top-level container
 #[derive(Debug, Clone)]
@@ -20,7 +20,7 @@ pub struct HirModule {
     pub imports: Vec<HirImport>,
     pub types: IndexMap<TypeId, HirTypeDecl>, // IndexMap for deterministic ordering
     pub functions: IndexMap<SymbolId, HirFunction>, // IndexMap for deterministic ordering
-    pub globals: HashMap<SymbolId, HirGlobal>,
+    pub globals: BTreeMap<SymbolId, HirGlobal>,
     pub metadata: HirMetadata,
 }
 
