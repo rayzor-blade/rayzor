@@ -3484,7 +3484,9 @@ const isNode = typeof process !== "undefined" && process.versions?.node;
 let memory;
 
 // Simple bump allocator for WASM linear memory
-let heapBase = 1048576; // 1MB offset (below is stack/data)
+// JS heap starts AFTER the WASM stack (which starts at 1MB and grows down)
+// and data sections. Use 17MB offset to avoid collision with stack/globals.
+let heapBase = 17 * 1024 * 1024;
 const align8 = (n) => (n + 7) & ~7;
 
 function malloc(size) {{
@@ -3768,12 +3770,18 @@ const rayzor = {{
   rayzor_thread_current_id: () => 0,
 
   // Mutex — Atomics.compareExchange on shared memory
-  rayzor_mutex_init: () => {{ if (!memory) return 0; const p = heapBase; heapBase = align8(heapBase + 8); const v = new DataView(memory.buffer); v.setInt32(p, 0, true); return p; }},
-  rayzor_mutex_lock: (id) => {{ if (!memory) return; const v = new DataView(memory.buffer); v.setInt32(id, 1, true); }},
-  rayzor_mutex_try_lock: (id) => {{ if (!memory) return 0; return Atomics.compareExchange(new Int32Array(memory.buffer), id>>2, 0, 1) === 0 ? 1 : 0; }},
+  rayzor_mutex_init: (val) => {{ if (!memory) return 0; const p = heapBase; heapBase = align8(heapBase + 8); new DataView(memory.buffer).setInt32(p, 0, true); return p; }},
+  rayzor_mutex_lock: (id) => {{ if (!memory) return; new DataView(memory.buffer).setInt32(id, 1, true); }},
+  rayzor_mutex_try_lock: (id) => {{ if (!memory) return 0; const v = new DataView(memory.buffer); return v.getInt32(id, true) === 0 ? (v.setInt32(id, 1, true), 1) : 0; }},
   rayzor_mutex_is_locked: (id) => {{ if (!memory) return 0; return new DataView(memory.buffer).getInt32(id, true) !== 0 ? 1 : 0; }},
   rayzor_mutex_guard_get: (id) => {{ if (!memory) return 0; return new DataView(memory.buffer).getUint32(id + 4, true); }},
   rayzor_mutex_unlock: (id) => {{ if (!memory) return; new DataView(memory.buffer).setInt32(id, 0, true); }},
+  // Bare-name aliases — MIR generates short names for extern class methods
+  lock: (id) => {{ if (!memory) return 0; const v = new DataView(memory.buffer); v.setInt32(id, 1, true); const readback = v.getInt32(id, true); console.log('[bare] lock('+id+') wrote=1 readback='+readback+' bufLen='+memory.buffer.byteLength); return id; }},
+  try_lock: (id) => {{ if (!memory) return 0; const v = new DataView(memory.buffer); return v.getInt32(id, true) === 0 ? (v.setInt32(id, 1, true), 1) : 0; }},
+  is_locked: (id) => {{ if (!memory) return 0; const v = new DataView(memory.buffer); const raw = v.getInt32(id, true); const bytes = [v.getUint8(id), v.getUint8(id+1), v.getUint8(id+2), v.getUint8(id+3)]; console.log('[bare] is_locked('+id+') raw='+raw+' bytes='+JSON.stringify(bytes)+' bufLen='+memory.buffer.byteLength); return raw !== 0 ? 1 : 0; }},
+  unlock: (id) => {{ console.log('[bare] unlock('+id+')'); if (!memory) return; new DataView(memory.buffer).setInt32(id, 0, true); }},
+  init: (val) => {{ if (!memory) return 0; const p = heapBase; heapBase = align8(heapBase + 8); new DataView(memory.buffer).setInt32(p, 0, true); return p; }},
 
   // Semaphore
   rayzor_semaphore_init: (n) => {{ if (!memory) return 0; const p = heapBase; heapBase += 4; new Int32Array(memory.buffer)[p>>2] = n; return p; }},
