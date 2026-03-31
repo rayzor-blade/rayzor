@@ -4364,6 +4364,10 @@ impl CompilationUnit {
             // (b) generated MIR wrappers for stdlib calls — let stdlib merge replace these
             let mut merged_import_func_ids: std::collections::HashSet<IrFunctionId> =
                 own_func_ids.clone();
+            // Sort import modules by name for deterministic merge order.
+            // Different HashMap iteration orders in the resolver produce different
+            // compilation orders. Sorting ensures the merged MIR is identical.
+            self.import_mir_modules.sort_by(|a, b| a.name.cmp(&b.name));
             for import_module in self.import_mir_modules.drain(..) {
                 // Merge import type definitions so runtime RTTI registration includes
                 // imported classes/enums (needed for uncaught exception formatting and
