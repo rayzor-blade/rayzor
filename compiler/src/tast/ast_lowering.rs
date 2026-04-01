@@ -32,7 +32,7 @@ use parser::{
     ModuleField, Package, Type, TypeDeclaration, TypeParam, TypedefDecl, UnaryOp, Using,
 };
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 use tracing::warn;
@@ -371,7 +371,7 @@ pub struct DeferredTypeResolution {
 #[derive(Debug, Default)]
 pub struct TypeResolutionState {
     pub deferred_resolutions: Vec<DeferredTypeResolution>,
-    pub placeholder_to_real: HashMap<TypeId, TypeId>,
+    pub placeholder_to_real: BTreeMap<TypeId, TypeId>,
 }
 
 impl ModifierInfo {
@@ -423,7 +423,7 @@ pub struct LoweringContext<'a> {
     pub scope_tree: &'a mut ScopeTree,
     pub current_scope: ScopeId,
     pub errors: Vec<LoweringError>,
-    pub type_parameter_stack: Vec<HashMap<InternedString, TypeId>>,
+    pub type_parameter_stack: Vec<BTreeMap<InternedString, TypeId>>,
     pub span_converter: Option<super::span_conversion::SpanConverter>,
     /// Stack of class symbols we're currently inside (for method resolution)
     pub class_context_stack: Vec<SymbolId>,
@@ -505,7 +505,7 @@ impl<'a> LoweringContext<'a> {
     }
 
     /// Push type parameters onto the stack
-    pub fn push_type_parameters(&mut self, type_params: HashMap<InternedString, TypeId>) {
+    pub fn push_type_parameters(&mut self, type_params: BTreeMap<InternedString, TypeId>) {
         self.type_parameter_stack.push(type_params);
     }
 
@@ -590,8 +590,8 @@ pub struct AstLowering<'a> {
     context: LoweringContext<'a>,
     resolution_state: TypeResolutionState,
     /// Temporary storage for classes being built (symbol_id -> class methods)
-    class_methods: HashMap<SymbolId, Vec<(InternedString, SymbolId, bool)>>, // (name, symbol, is_static)
-    class_fields: HashMap<SymbolId, Vec<(InternedString, SymbolId, bool)>>, // (name, symbol, is_static)
+    class_methods: BTreeMap<SymbolId, Vec<(InternedString, SymbolId, bool)>>, // (name, symbol, is_static)
+    class_fields: BTreeMap<SymbolId, Vec<(InternedString, SymbolId, bool)>>, // (name, symbol, is_static)
     /// Skip internal stdlib loading (used when CompilationUnit handles it)
     skip_stdlib_loading: bool,
     /// Skip pre-registration pass (used when CompilationUnit has already pre-registered all files)
@@ -607,9 +607,9 @@ pub struct AstLowering<'a> {
     /// Whether we're currently lowering a static method body (no `this` available)
     in_static_method: bool,
     /// Ordered type parameter TypeIds for each generic class (class_symbol → [TypeParam TypeIds])
-    class_type_params: HashMap<SymbolId, Vec<TypeId>>,
+    class_type_params: BTreeMap<SymbolId, Vec<TypeId>>,
     /// Constructor symbol for each class (class_symbol → constructor SymbolId)
-    class_constructor_symbols: HashMap<SymbolId, SymbolId>,
+    class_constructor_symbols: BTreeMap<SymbolId, SymbolId>,
 }
 
 /// Result of type parameter substitution for generic method return types
@@ -1200,8 +1200,8 @@ impl<'a> AstLowering<'a> {
         Self {
             context,
             resolution_state: TypeResolutionState::default(),
-            class_methods: HashMap::new(),
-            class_fields: HashMap::new(),
+            class_methods: BTreeMap::new(),
+            class_fields: BTreeMap::new(),
             skip_stdlib_loading: false,
             skip_pre_registration: false,
             collected_errors: Vec::new(),
@@ -1209,8 +1209,8 @@ impl<'a> AstLowering<'a> {
             pending_usings: Vec::new(),
             // (class_fields will be seeded below if global_class_fields provided)
             in_static_method: false,
-            class_type_params: HashMap::new(),
-            class_constructor_symbols: HashMap::new(),
+            class_type_params: BTreeMap::new(),
+            class_constructor_symbols: BTreeMap::new(),
         }
     }
 
@@ -1228,7 +1228,7 @@ impl<'a> AstLowering<'a> {
     /// static field access (e.g., BufferUsage.VERTEX from GraphicsTypes.hx) works.
     pub fn seed_class_fields(
         &mut self,
-        fields: &HashMap<SymbolId, Vec<(InternedString, SymbolId, bool)>>,
+        fields: &BTreeMap<SymbolId, Vec<(InternedString, SymbolId, bool)>>,
     ) {
         for (class_sym, field_list) in fields {
             self.class_fields
@@ -1238,7 +1238,7 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Export class_fields for accumulation across file compilations.
-    pub fn export_class_fields(&self) -> &HashMap<SymbolId, Vec<(InternedString, SymbolId, bool)>> {
+    pub fn export_class_fields(&self) -> &BTreeMap<SymbolId, Vec<(InternedString, SymbolId, bool)>> {
         &self.class_fields
     }
 
@@ -2883,8 +2883,8 @@ impl<'a> AstLowering<'a> {
 
         // Process type parameters
         let type_params = self.lower_type_parameters(&class_decl.type_params)?;
-        let mut type_param_map: HashMap<InternedString, TypeId> =
-            HashMap::with_capacity(type_params.len());
+        let mut type_param_map: BTreeMap<InternedString, TypeId> =
+            BTreeMap::new();
         for tp in &type_params {
             let interned_name = tp.name;
             // Convert constraints to ConstraintKind for symbol table
@@ -3470,8 +3470,8 @@ impl<'a> AstLowering<'a> {
 
         // Process type parameters
         let type_params = self.lower_type_parameters(&interface_decl.type_params)?;
-        let mut type_param_map: HashMap<InternedString, TypeId> =
-            HashMap::with_capacity(type_params.len());
+        let mut type_param_map: BTreeMap<InternedString, TypeId> =
+            BTreeMap::new();
         for tp in &type_params {
             let interned_name = tp.name;
             // Convert constraints to ConstraintKind for symbol table
@@ -3580,8 +3580,8 @@ impl<'a> AstLowering<'a> {
 
         // Process type parameters
         let type_params = self.lower_type_parameters(&enum_decl.type_params)?;
-        let mut type_param_map: HashMap<InternedString, TypeId> =
-            HashMap::with_capacity(type_params.len());
+        let mut type_param_map: BTreeMap<InternedString, TypeId> =
+            BTreeMap::new();
         let mut type_param_ids = Vec::new();
         for tp in &type_params {
             let interned_name = tp.name;
@@ -3676,7 +3676,7 @@ impl<'a> AstLowering<'a> {
         let type_params = self.lower_type_parameters(&typedef_decl.type_params)?;
 
         // Build type parameter map for the stack
-        let mut type_param_map = HashMap::new();
+        let mut type_param_map = BTreeMap::new();
         for type_param in &type_params {
             // Type parameter already has a symbol_id from lower_type_parameters
             // Create a TypeId for this parameter
@@ -3837,8 +3837,8 @@ impl<'a> AstLowering<'a> {
 
         // Process type parameters
         let type_params = self.lower_type_parameters(&abstract_decl.type_params)?;
-        let mut type_param_map: HashMap<InternedString, TypeId> =
-            HashMap::with_capacity(type_params.len());
+        let mut type_param_map: BTreeMap<InternedString, TypeId> =
+            BTreeMap::new();
         for tp in &type_params {
             let interned_name = tp.name;
             // Convert constraints to ConstraintKind for symbol table
@@ -4007,7 +4007,7 @@ impl<'a> AstLowering<'a> {
 
         // Process type parameters
         let type_params = self.lower_type_parameters(&function_decl.type_params)?;
-        let type_param_map: HashMap<InternedString, TypeId> = type_params
+        let type_param_map: BTreeMap<InternedString, TypeId> = type_params
             .iter()
             .map(|tp| (tp.name, TypeId::invalid()))
             .collect();
@@ -4508,7 +4508,7 @@ impl<'a> AstLowering<'a> {
 
         // Process type parameters
         let type_params = self.lower_type_parameters(&func.type_params)?;
-        let type_param_map: HashMap<InternedString, TypeId> = type_params
+        let type_param_map: BTreeMap<InternedString, TypeId> = type_params
             .iter()
             .map(|tp| (tp.name, TypeId::invalid()))
             .collect();
@@ -4592,7 +4592,7 @@ impl<'a> AstLowering<'a> {
         };
 
         // Match TypeParameter params against argument types
-        let mut tp_to_concrete: HashMap<TypeId, TypeId> = HashMap::new();
+        let mut tp_to_concrete: BTreeMap<TypeId, TypeId> = BTreeMap::new();
         {
             let tt = self.context.type_table.borrow();
             for (i, param_ty) in param_type_ids.iter().enumerate() {
@@ -4716,8 +4716,8 @@ impl<'a> AstLowering<'a> {
 
         // Process type parameters
         let type_params = self.lower_type_parameters(&func.type_params)?;
-        let mut type_param_map: HashMap<InternedString, TypeId> =
-            HashMap::with_capacity(type_params.len());
+        let mut type_param_map: BTreeMap<InternedString, TypeId> =
+            BTreeMap::new();
         for tp in &type_params {
             let interned_name = tp.name;
             // Convert constraints to ConstraintKind for symbol table
@@ -4877,8 +4877,8 @@ impl<'a> AstLowering<'a> {
 
         // Process type parameters
         let type_params = self.lower_type_parameters(&func.type_params)?;
-        let mut type_param_map: HashMap<InternedString, TypeId> =
-            HashMap::with_capacity(type_params.len());
+        let mut type_param_map: BTreeMap<InternedString, TypeId> =
+            BTreeMap::new();
         for tp in &type_params {
             let interned_name = tp.name;
             // Convert constraints to ConstraintKind for symbol table
@@ -8737,7 +8737,7 @@ impl<'a> AstLowering<'a> {
                                 .collect();
 
                             // Build set of imported qualified names from user imports
-                            let mut imported_qnames = std::collections::HashSet::new();
+                            let mut imported_qnames = std::collections::BTreeSet::new();
                             for scope_id in [self.context.current_scope, ScopeId::first()] {
                                 for entry in self.context.import_resolver.get_imports(scope_id) {
                                     let qn: String = entry

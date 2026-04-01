@@ -33,7 +33,7 @@ use crate::ir::{
     IrValue, UnaryOp,
 };
 // SmallVec disabled temporarily - reverting to Vec to debug Linux CI heap corruption
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 // ============================================================================
@@ -972,7 +972,7 @@ enum TerminatorResult {
 /// optional pre-decoded block caching for faster repeated execution.
 pub struct MirInterpreter {
     /// Runtime function pointers (for FFI calls)
-    runtime_symbols: HashMap<String, *const u8>,
+    runtime_symbols: BTreeMap<String, *const u8>,
 
     /// Call stack (frames with register files)
     stack: Vec<InterpreterFrame>,
@@ -991,14 +991,14 @@ pub struct MirInterpreter {
 
     /// Pre-decoded block cache for faster execution
     /// Key: (function_id.0, block_id.0)
-    decoded_blocks: HashMap<(u32, u32), DecodedBlock>,
+    decoded_blocks: BTreeMap<(u32, u32), DecodedBlock>,
 
     /// Whether to use cached decoded blocks
     use_decoded_cache: bool,
 
     /// Track heap allocations from system allocator for proper free
     /// Maps pointer address to allocation size for correct deallocation
-    heap_allocations: HashMap<usize, usize>,
+    heap_allocations: BTreeMap<usize, usize>,
 
     /// Iteration counter for hot loop detection
     /// When exceeded, interpreter signals need for JIT compilation
@@ -1010,7 +1010,7 @@ pub struct MirInterpreter {
 
     /// Global variable store - maps global IDs to their values
     /// Used for static class fields and module-level variables
-    global_store: HashMap<crate::ir::IrGlobalId, NanBoxedValue>,
+    global_store: BTreeMap<crate::ir::IrGlobalId, NanBoxedValue>,
 }
 
 // Safety: MirInterpreter can be sent across threads
@@ -1035,18 +1035,18 @@ impl MirInterpreter {
     /// Create a new interpreter
     pub fn new() -> Self {
         Self {
-            runtime_symbols: HashMap::new(),
+            runtime_symbols: BTreeMap::new(),
             stack: Vec::new(),
             max_stack_depth: 1000,
             heap: vec![0u8; 1024 * 1024], // 1MB heap
             heap_offset: 0,
             object_heap: ObjectHeap::new(),
-            decoded_blocks: HashMap::new(),
+            decoded_blocks: BTreeMap::new(),
             use_decoded_cache: true, // Enable by default for performance
-            heap_allocations: HashMap::new(),
+            heap_allocations: BTreeMap::new(),
             iteration_count: 0,
             max_iterations: 10_000, // Trigger JIT bailout after 10k iterations
-            global_store: HashMap::new(),
+            global_store: BTreeMap::new(),
         }
     }
 

@@ -492,8 +492,8 @@ fn test_parse_all_stdlib_files() {
     let mut total_files = 0;
     let mut parsed_ok = 0;
     let mut parse_errors = 0;
-    let mut error_categories: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
+    let mut error_categories: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
 
     println!("\n=== SCANNING ALL STDLIB FILES ===\n");
 

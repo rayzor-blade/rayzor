@@ -45,7 +45,7 @@ use super::{
     IrTerminator, IrType, IrTypeParam, IrValue, Linkage, StructField, UnaryOp, UnionVariant,
     VectorMinMaxKind, VectorUnaryOpKind,
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Builder for programmatically constructing MIR modules
 pub struct MirBuilder {
@@ -844,7 +844,7 @@ impl<'a> FunctionBuilder<'a> {
         let next_reg_id = self.params.len() as u32;
 
         // Build register_types map with parameter types BEFORE moving self.params
-        let mut register_types = HashMap::new();
+        let mut register_types = BTreeMap::new();
         for (i, param) in self.params.iter().enumerate() {
             register_types.insert(IrId(i as u32), param.ty.clone());
         }
@@ -888,7 +888,7 @@ impl<'a> FunctionBuilder<'a> {
             qualified_name: None,
             signature,
             cfg,
-            locals: HashMap::new(),
+            locals: BTreeMap::new(),
             register_types,
             attributes,
             kind: FunctionKind::MirWrapper, // MIR builder creates stdlib wrapper functions

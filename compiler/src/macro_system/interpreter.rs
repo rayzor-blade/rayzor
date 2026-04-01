@@ -19,7 +19,7 @@ use super::reification::ReificationEngine;
 use super::value::{MacroFunction, MacroParam, MacroValue};
 use crate::tast::SourceLocation;
 use parser::{AssignOp, BinaryOp, Expr, ExprKind, Span, UnaryOp};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Maximum call depth for macro function calls
@@ -35,7 +35,7 @@ const DEFAULT_MAX_CALL_DEPTH: usize = 256;
 /// Cold macros (called < threshold times) never pay compilation cost.
 struct MorselScheduler {
     /// Per-macro call counts (keyed by qualified name).
-    call_counts: HashMap<String, u32>,
+    call_counts: BTreeMap<String, u32>,
     /// Promotion threshold: compile after this many tree-walker calls.
     threshold: u32,
     /// Whether class chunks have been compiled and transferred to the VM.
@@ -64,11 +64,11 @@ pub struct MacroInterpreter {
     trace_output: Vec<String>,
     /// Import map: short class name → fully qualified name
     /// e.g., "Context" → "haxe.macro.Context"
-    import_map: HashMap<String, String>,
+    import_map: BTreeMap<String, String>,
     /// Class registry for fallback dispatch to any imported/user class
     class_registry: Option<Arc<ClassRegistry>>,
     /// Cache of extracted class data for constructor calls (avoids re-cloning)
-    class_data_cache: HashMap<String, Arc<CachedClassData>>,
+    class_data_cache: BTreeMap<String, Arc<CachedClassData>>,
     /// Bytecode VM instance (created when RAYZOR_MACRO_VM=1).
     vm: Option<MacroVm>,
     /// Morsel scheduler for tiered compilation (only active when VM is present).
@@ -86,7 +86,7 @@ impl MacroInterpreter {
             (
                 Some(MacroVm::new()),
                 Some(MorselScheduler {
-                    call_counts: HashMap::new(),
+                    call_counts: BTreeMap::new(),
                     threshold,
                     classes_compiled: false,
                 }),
@@ -104,16 +104,16 @@ impl MacroInterpreter {
             call_depth: 0,
             max_call_depth: DEFAULT_MAX_CALL_DEPTH,
             trace_output: Vec::new(),
-            import_map: HashMap::new(),
+            import_map: BTreeMap::new(),
             class_registry: None,
-            class_data_cache: HashMap::new(),
+            class_data_cache: BTreeMap::new(),
             vm,
             scheduler,
         }
     }
 
     /// Create an interpreter with import mappings from the source file.
-    pub fn with_imports(registry: MacroRegistry, import_map: HashMap<String, String>) -> Self {
+    pub fn with_imports(registry: MacroRegistry, import_map: BTreeMap<String, String>) -> Self {
         let (vm, scheduler) = Self::make_vm_and_scheduler();
         Self {
             env: Environment::new(),
@@ -123,7 +123,7 @@ impl MacroInterpreter {
             trace_output: Vec::new(),
             import_map,
             class_registry: None,
-            class_data_cache: HashMap::new(),
+            class_data_cache: BTreeMap::new(),
             vm,
             scheduler,
         }
@@ -134,7 +134,7 @@ impl MacroInterpreter {
     /// when the first macro crosses the call-count threshold.
     pub fn with_class_registry(
         registry: MacroRegistry,
-        import_map: HashMap<String, String>,
+        import_map: BTreeMap<String, String>,
         class_registry: Arc<ClassRegistry>,
     ) -> Self {
         let (vm, scheduler) = Self::make_vm_and_scheduler();
@@ -146,7 +146,7 @@ impl MacroInterpreter {
             trace_output: Vec::new(),
             import_map,
             class_registry: Some(class_registry),
-            class_data_cache: HashMap::new(),
+            class_data_cache: BTreeMap::new(),
             vm,
             scheduler,
         }
@@ -501,7 +501,7 @@ impl MacroInterpreter {
 
             // --- Object literal ---
             ExprKind::Object(fields) => {
-                let mut map = std::collections::HashMap::new();
+                let mut map = std::collections::BTreeMap::new();
                 for field in fields {
                     let val = self.eval_expr(&field.expr)?;
                     map.insert(field.name.clone(), val);
@@ -511,7 +511,7 @@ impl MacroInterpreter {
 
             // --- Map literal ---
             ExprKind::Map(entries) => {
-                let mut map = std::collections::HashMap::new();
+                let mut map = std::collections::BTreeMap::new();
                 for (key, value) in entries {
                     let k = self.eval_expr(key)?;
                     let v = self.eval_expr(value)?;
@@ -592,7 +592,7 @@ impl MacroInterpreter {
                 // Special handling for known types
                 match resolved_name {
                     "Map" | "haxe.ds.Map" => Ok(MacroValue::Object(Arc::new(
-                        std::collections::HashMap::new(),
+                        std::collections::BTreeMap::new(),
                     ))),
                     "Array" => Ok(MacroValue::Array(Arc::new(Vec::new()))),
                     "sys.io.Process" => self.construct_process(arg_vals, location),
@@ -638,7 +638,7 @@ impl MacroInterpreter {
                         }
 
                         // Generic object construction (no class found)
-                        let mut obj = std::collections::HashMap::new();
+                        let mut obj = std::collections::BTreeMap::new();
                         obj.insert(
                             "__type__".to_string(),
                             MacroValue::String(Arc::from(name.as_str())),
@@ -1058,7 +1058,7 @@ impl MacroInterpreter {
             name: def.name.clone(),
             params: def.params.clone(),
             body: def.body.clone(),
-            captures: std::collections::HashMap::new(),
+            captures: std::collections::BTreeMap::new(),
         };
         let result = self.call_function(&func, args, location)?;
 
@@ -1519,7 +1519,7 @@ impl MacroInterpreter {
     /// Built-in object methods
     fn object_method(
         &mut self,
-        obj: &std::collections::HashMap<String, MacroValue>,
+        obj: &std::collections::BTreeMap<String, MacroValue>,
         method: &str,
         _args: Vec<MacroValue>,
         location: SourceLocation,
@@ -1630,7 +1630,7 @@ impl MacroInterpreter {
         let exit_code = output.status.code().unwrap_or(-1) as i64;
 
         // Build stdout pseudo-object (supports .readAll() / .toString())
-        let mut stdout_obj = std::collections::HashMap::new();
+        let mut stdout_obj = std::collections::BTreeMap::new();
         stdout_obj.insert(
             "__type__".to_string(),
             MacroValue::String(Arc::from("sys.io.ProcessStdout")),
@@ -1641,7 +1641,7 @@ impl MacroInterpreter {
         );
 
         // Build stderr pseudo-object
-        let mut stderr_obj = std::collections::HashMap::new();
+        let mut stderr_obj = std::collections::BTreeMap::new();
         stderr_obj.insert(
             "__type__".to_string(),
             MacroValue::String(Arc::from("sys.io.ProcessOutput")),
@@ -1652,7 +1652,7 @@ impl MacroInterpreter {
         );
 
         // Build Process object
-        let mut proc_obj = std::collections::HashMap::new();
+        let mut proc_obj = std::collections::BTreeMap::new();
         proc_obj.insert(
             "__type__".to_string(),
             MacroValue::String(Arc::from("sys.io.Process")),
@@ -1677,7 +1677,7 @@ impl MacroInterpreter {
         _location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
         // File construction is typically done via static methods (File.getContent)
-        let mut obj = std::collections::HashMap::new();
+        let mut obj = std::collections::BTreeMap::new();
         obj.insert(
             "__type__".to_string(),
             MacroValue::String(Arc::from("sys.io.File")),
@@ -1696,7 +1696,7 @@ impl MacroInterpreter {
         _location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
         // Create the object with __type__ and instance var defaults
-        let mut obj = std::collections::HashMap::new();
+        let mut obj = std::collections::BTreeMap::new();
         obj.insert(
             "__type__".to_string(),
             MacroValue::String(Arc::from(qualified_name)),
@@ -1945,8 +1945,8 @@ impl MacroInterpreter {
 /// in the closure body need to be captured from the enclosing scope.
 fn collect_free_vars(
     expr: &Expr,
-    bound: &mut std::collections::HashSet<String>,
-    free: &mut std::collections::HashSet<String>,
+    bound: &mut std::collections::BTreeSet<String>,
+    free: &mut std::collections::BTreeSet<String>,
 ) {
     match &expr.kind {
         ExprKind::Ident(name) => {
@@ -2108,12 +2108,12 @@ fn collect_free_vars(
 fn get_free_vars_for_closure(
     body: &Expr,
     params: &[MacroParam],
-) -> std::collections::HashSet<String> {
-    let mut bound = std::collections::HashSet::new();
+) -> std::collections::BTreeSet<String> {
+    let mut bound = std::collections::BTreeSet::new();
     for p in params {
         bound.insert(p.name.clone());
     }
-    let mut free = std::collections::HashSet::new();
+    let mut free = std::collections::BTreeSet::new();
     collect_free_vars(body, &mut bound, &mut free);
     free
 }
@@ -2176,8 +2176,8 @@ fn extract_qualified_call<'a>(base: &'a Expr, method: &'a str) -> Option<(String
 /// - `import haxe.macro.Context;` → "Context" → "haxe.macro.Context"
 /// - `import haxe.macro.Context as Ctx;` → "Ctx" → "haxe.macro.Context"
 /// - `import haxe.macro.*;` → not resolved here (wildcard)
-pub fn build_import_map(imports: &[parser::Import]) -> HashMap<String, String> {
-    let mut map = HashMap::new();
+pub fn build_import_map(imports: &[parser::Import]) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
     for import in imports {
         match &import.mode {
             parser::ImportMode::Normal => {

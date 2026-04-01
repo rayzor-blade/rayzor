@@ -2,7 +2,7 @@
 // Real-world Haxe scenarios and performance benchmarks
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use crate::tast::core::{TypeKind, TypeTable};
@@ -849,7 +849,7 @@ impl TestResult {
 /// Collection of test results with summary statistics
 #[derive(Debug)]
 pub struct TestResults {
-    results: HashMap<String, TestResult>,
+    results: BTreeMap<String, TestResult>,
     total_tests: usize,
     passed_tests: usize,
     failed_tests: usize,
@@ -858,7 +858,7 @@ pub struct TestResults {
 impl TestResults {
     pub fn new() -> Self {
         Self {
-            results: HashMap::new(),
+            results: BTreeMap::new(),
             total_tests: 0,
             passed_tests: 0,
             failed_tests: 0,

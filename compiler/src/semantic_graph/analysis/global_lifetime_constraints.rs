@@ -13,7 +13,7 @@ use crate::semantic_graph::analysis::lifetime_analyzer::{
 use crate::semantic_graph::{CallGraph, CallSite, CallTarget};
 use crate::tast::collections::{new_id_map, new_id_set, IdMap, IdSet};
 use crate::tast::{CallSiteId, LifetimeId, SourceLocation, SymbolId, TypeId};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 /// Main structure containing all global lifetime constraints and analysis results
@@ -702,9 +702,9 @@ impl GlobalLifetimeConstraints {
     fn find_strongly_connected_components(&mut self) -> Result<(), LifetimeAnalysisError> {
         let mut index_counter = 0;
         let mut stack = Vec::new();
-        let mut indices: HashMap<LifetimeId, usize> = HashMap::new();
-        let mut lowlinks: HashMap<LifetimeId, usize> = HashMap::new();
-        let mut on_stack: HashSet<LifetimeId> = HashSet::new();
+        let mut indices: BTreeMap<LifetimeId, usize> = BTreeMap::new();
+        let mut lowlinks: BTreeMap<LifetimeId, usize> = BTreeMap::new();
+        let mut on_stack: BTreeSet<LifetimeId> = BTreeSet::new();
 
         self.constraint_graph.sccs.clear();
 
@@ -732,9 +732,9 @@ impl GlobalLifetimeConstraints {
         v: LifetimeId,
         index_counter: &mut usize,
         stack: &mut Vec<LifetimeId>,
-        indices: &mut HashMap<LifetimeId, usize>,
-        lowlinks: &mut HashMap<LifetimeId, usize>,
-        on_stack: &mut HashSet<LifetimeId>,
+        indices: &mut BTreeMap<LifetimeId, usize>,
+        lowlinks: &mut BTreeMap<LifetimeId, usize>,
+        on_stack: &mut BTreeSet<LifetimeId>,
     ) -> Result<(), LifetimeAnalysisError> {
         indices.insert(v, *index_counter);
         lowlinks.insert(v, *index_counter);
@@ -792,8 +792,8 @@ impl GlobalLifetimeConstraints {
         const MAX_ITERATIONS: usize = 1000;
 
         // Lifetime bounds tracking: lifetime -> set of lifetimes it must outlive
-        let mut outlives_constraints: HashMap<LifetimeId, HashSet<LifetimeId>> = HashMap::new();
-        let mut equal_constraints: HashMap<LifetimeId, HashSet<LifetimeId>> = HashMap::new();
+        let mut outlives_constraints: BTreeMap<LifetimeId, BTreeSet<LifetimeId>> = BTreeMap::new();
+        let mut equal_constraints: BTreeMap<LifetimeId, BTreeSet<LifetimeId>> = BTreeMap::new();
 
         // Initialize constraint sets
         for edge in &self.constraint_graph.edges {
@@ -801,24 +801,24 @@ impl GlobalLifetimeConstraints {
                 EdgeType::Outlives => {
                     outlives_constraints
                         .entry(edge.from)
-                        .or_insert_with(HashSet::new)
+                        .or_insert_with(BTreeSet::new)
                         .insert(edge.to);
                 }
                 EdgeType::Equal => {
                     equal_constraints
                         .entry(edge.from)
-                        .or_insert_with(HashSet::new)
+                        .or_insert_with(BTreeSet::new)
                         .insert(edge.to);
                     equal_constraints
                         .entry(edge.to)
-                        .or_insert_with(HashSet::new)
+                        .or_insert_with(BTreeSet::new)
                         .insert(edge.from);
                 }
                 EdgeType::Borrow => {
                     // Borrow implies outlives
                     outlives_constraints
                         .entry(edge.from)
-                        .or_insert_with(HashSet::new)
+                        .or_insert_with(BTreeSet::new)
                         .insert(edge.to);
                 }
             }
@@ -837,7 +837,7 @@ impl GlobalLifetimeConstraints {
                         for &transitive in &transitive_outlives {
                             if outlives_constraints
                                 .entry(lifetime)
-                                .or_insert_with(HashSet::new)
+                                .or_insert_with(BTreeSet::new)
                                 .insert(transitive)
                             {
                                 solution_changed = true;
@@ -856,7 +856,7 @@ impl GlobalLifetimeConstraints {
                         for &outlived in &equal_outlives {
                             if outlives_constraints
                                 .entry(lifetime)
-                                .or_insert_with(HashSet::new)
+                                .or_insert_with(BTreeSet::new)
                                 .insert(outlived)
                             {
                                 solution_changed = true;
@@ -869,7 +869,7 @@ impl GlobalLifetimeConstraints {
                         if other_outlives.contains(&equal_lifetime) {
                             if outlives_constraints
                                 .entry(other_lifetime)
-                                .or_insert_with(HashSet::new)
+                                .or_insert_with(BTreeSet::new)
                                 .insert(lifetime)
                             {
                                 solution_changed = true;
@@ -888,14 +888,14 @@ impl GlobalLifetimeConstraints {
                             // They must be equal
                             if equal_constraints
                                 .entry(lifetime_a)
-                                .or_insert_with(HashSet::new)
+                                .or_insert_with(BTreeSet::new)
                                 .insert(lifetime_b)
                             {
                                 solution_changed = true;
                             }
                             if equal_constraints
                                 .entry(lifetime_b)
-                                .or_insert_with(HashSet::new)
+                                .or_insert_with(BTreeSet::new)
                                 .insert(lifetime_a)
                             {
                                 solution_changed = true;
@@ -919,15 +919,15 @@ impl GlobalLifetimeConstraints {
     /// Store the constraint solution back into the graph
     fn store_constraint_solution(
         &mut self,
-        outlives_constraints: HashMap<LifetimeId, HashSet<LifetimeId>>,
-        equal_constraints: HashMap<LifetimeId, HashSet<LifetimeId>>,
+        outlives_constraints: BTreeMap<LifetimeId, BTreeSet<LifetimeId>>,
+        equal_constraints: BTreeMap<LifetimeId, BTreeSet<LifetimeId>>,
     ) -> Result<(), LifetimeAnalysisError> {
         // Create unified constraint representation
         // For now, we'll store this as additional metadata in the constraint graph
 
         // Create equivalence classes for equal lifetimes
-        let mut equivalence_classes: HashMap<LifetimeId, Vec<LifetimeId>> = HashMap::new();
-        let mut visited = HashSet::new();
+        let mut equivalence_classes: BTreeMap<LifetimeId, Vec<LifetimeId>> = BTreeMap::new();
+        let mut visited = BTreeSet::new();
 
         for (&lifetime, equal_set) in &equal_constraints {
             if visited.contains(&lifetime) {
@@ -1050,8 +1050,8 @@ impl GlobalLifetimeConstraints {
                 Ok(result)
             }
             ConstraintOperator::Intersection => {
-                let lhs_set: HashSet<_> = equation.lhs.iter().collect();
-                let rhs_set: HashSet<_> = equation.rhs.iter().collect();
+                let lhs_set: BTreeSet<_> = equation.lhs.iter().collect();
+                let rhs_set: BTreeSet<_> = equation.rhs.iter().collect();
                 Ok(lhs_set.intersection(&rhs_set).cloned().cloned().collect())
             }
         }
@@ -1079,8 +1079,8 @@ impl GlobalLifetimeConstraints {
             return false;
         }
 
-        let set1: HashSet<_> = solution1.iter().collect();
-        let set2: HashSet<_> = solution2.iter().collect();
+        let set1: BTreeSet<_> = solution1.iter().collect();
+        let set2: BTreeSet<_> = solution2.iter().collect();
 
         let intersection_size = set1.intersection(&set2).count();
         let union_size = set1.union(&set2).count();
@@ -1147,7 +1147,7 @@ impl GlobalLifetimeConstraints {
 
     /// Check if there's a path from one lifetime to another in the constraint graph
     fn has_path_in_constraint_graph(&self, from: LifetimeId, to: LifetimeId) -> bool {
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
         let mut stack = vec![from];
 
         while let Some(current) = stack.pop() {

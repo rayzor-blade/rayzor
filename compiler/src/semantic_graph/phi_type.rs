@@ -7,7 +7,7 @@ use crate::tast::core::{TypeKind, TypeTable};
 use crate::tast::type_checker::TypeChecker;
 use crate::tast::{DataFlowNodeId, TypeId};
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 /// Type unification module for phi nodes in the DFG builder
 /// Always uses TypeChecker for proper type hierarchy resolution
@@ -54,8 +54,8 @@ impl<'a> PhiTypeUnifier<'a> {
         &self,
         phi_operands: &[PhiIncoming],
         dfg: &DataFlowGraph,
-    ) -> Result<HashSet<TypeId>, GraphConstructionError> {
-        let mut types = HashSet::new();
+    ) -> Result<BTreeSet<TypeId>, GraphConstructionError> {
+        let mut types = BTreeSet::new();
 
         for operand in phi_operands {
             if let Some(node) = dfg.nodes.get(&operand.value) {
@@ -73,7 +73,7 @@ impl<'a> PhiTypeUnifier<'a> {
     /// Find the least upper bound (LUB) of a set of types using TypeChecker
     fn find_least_upper_bound(
         &mut self,
-        types: &HashSet<TypeId>,
+        types: &BTreeSet<TypeId>,
     ) -> Result<TypeId, GraphConstructionError> {
         let types_vec: Vec<TypeId> = types.iter().cloned().collect();
 
@@ -423,8 +423,8 @@ impl<'a> PhiTypeUnifier<'a> {
         chain2: &[crate::tast::SymbolId],
     ) -> Result<TypeId, GraphConstructionError> {
         // Convert chains to sets for efficient lookup
-        let set1: HashSet<_> = chain1.iter().collect();
-        let set2: HashSet<_> = chain2.iter().collect();
+        let set1: BTreeSet<_> = chain1.iter().collect();
+        let set2: BTreeSet<_> = chain2.iter().collect();
 
         // Find the first common ancestor in chain1 (closest to the original class)
         for &class in chain1 {
@@ -457,8 +457,8 @@ impl<'a> PhiTypeUnifier<'a> {
     fn collect_implemented_interfaces(
         &self,
         inheritance_chain: &[crate::tast::SymbolId],
-    ) -> Result<HashSet<crate::tast::SymbolId>, GraphConstructionError> {
-        let mut interfaces = HashSet::new();
+    ) -> Result<BTreeSet<crate::tast::SymbolId>, GraphConstructionError> {
+        let mut interfaces = BTreeSet::new();
 
         for &class_id in inheritance_chain {
             if let Some(hierarchy_info) = self

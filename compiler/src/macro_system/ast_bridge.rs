@@ -10,7 +10,7 @@ use super::errors::MacroError;
 use super::value::MacroValue;
 use crate::tast::SourceLocation;
 use parser::{BinaryOp, Expr, ExprKind, Span};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Convert a parser AST expression literal to a MacroValue.
@@ -34,7 +34,7 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
         }
 
         ExprKind::Object(fields) => {
-            let mut map = HashMap::new();
+            let mut map = BTreeMap::new();
             for field in fields {
                 let value = expr_to_value(&field.expr)?;
                 map.insert(field.name.clone(), value);
@@ -43,7 +43,7 @@ pub fn expr_to_value(expr: &Expr) -> Result<MacroValue, MacroError> {
         }
 
         ExprKind::Map(entries) => {
-            let mut map = HashMap::new();
+            let mut map = BTreeMap::new();
             for (key, value) in entries {
                 let key_str = match &key.kind {
                     ExprKind::String(s) => s.clone(),
@@ -604,7 +604,7 @@ pub fn expr_kind_to_value(kind: &ExprKind, span: Span) -> MacroValue {
         }
         ExprKind::Function(func) => {
             let func_val = MacroValue::Object(Arc::new({
-                let mut m = std::collections::HashMap::new();
+                let mut m = std::collections::BTreeMap::new();
                 m.insert(
                     "name".to_string(),
                     MacroValue::String(Arc::from(func.name.as_str())),
@@ -613,7 +613,7 @@ pub fn expr_kind_to_value(kind: &ExprKind, span: Span) -> MacroValue {
                     .params
                     .iter()
                     .map(|p| {
-                        let mut pm = std::collections::HashMap::new();
+                        let mut pm = std::collections::BTreeMap::new();
                         pm.insert(
                             "name".to_string(),
                             MacroValue::String(Arc::from(p.name.as_str())),

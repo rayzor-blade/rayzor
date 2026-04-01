@@ -1,7 +1,7 @@
 // Generic Instantiation Engine for Haxe Compiler
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -31,7 +31,7 @@ impl InstantiationId {
 }
 
 /// Represents a generic instantiation request
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct InstantiationRequest {
     /// The generic base type to instantiate
     pub base_type: TypeId,
@@ -154,10 +154,10 @@ impl Default for InstantiationConfig {
 /// The main generic instantiation engine
 pub struct GenericInstantiator {
     /// Cache of completed instantiations for performance
-    instantiation_cache: HashMap<InstantiationRequest, InstantiationResult>,
+    instantiation_cache: BTreeMap<InstantiationRequest, InstantiationResult>,
 
     /// Currently active instantiations for cycle detection
-    active_instantiations: HashSet<InstantiationRequest>,
+    active_instantiations: BTreeSet<InstantiationRequest>,
 
     /// Stack of instantiations for recursion tracking
     instantiation_stack: Vec<InstantiationRequest>,
@@ -196,8 +196,8 @@ impl GenericInstantiator {
     /// Create a new generic instantiation engine
     pub fn new(config: InstantiationConfig) -> Self {
         Self {
-            instantiation_cache: HashMap::new(),
-            active_instantiations: HashSet::new(),
+            instantiation_cache: BTreeMap::new(),
+            active_instantiations: BTreeSet::new(),
             instantiation_stack: Vec::new(),
             constraint_validator: ConstraintValidator::new(),
             config,
@@ -607,10 +607,10 @@ struct TypeParameterInfo {
 /// Specialized instantiation context for performance-critical paths
 pub struct FastInstantiationContext {
     /// Pre-computed substitution maps
-    substitution_cache: HashMap<(TypeId, Vec<TypeId>), TypeId>,
+    substitution_cache: BTreeMap<(TypeId, Vec<TypeId>), TypeId>,
 
     /// Simple validation cache
-    validation_cache: HashMap<(TypeId, Vec<TypeId>), bool>,
+    validation_cache: BTreeMap<(TypeId, Vec<TypeId>), bool>,
 
     /// Statistics
     fast_stats: FastInstantiationStats,
@@ -626,8 +626,8 @@ pub struct FastInstantiationStats {
 impl FastInstantiationContext {
     pub fn new() -> Self {
         Self {
-            substitution_cache: HashMap::new(),
-            validation_cache: HashMap::new(),
+            substitution_cache: BTreeMap::new(),
+            validation_cache: BTreeMap::new(),
             fast_stats: FastInstantiationStats::default(),
         }
     }

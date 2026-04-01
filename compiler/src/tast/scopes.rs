@@ -11,11 +11,11 @@
 use super::{
     InternedString, LifetimeId, ScopeId, StringInterner, Symbol, SymbolId, SymbolTable, TypedArena,
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// The kind of scope (class, function, block, etc.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ScopeKind {
     /// Global/module scope
     Global,
@@ -252,7 +252,7 @@ pub struct Scope {
     /// Whether this scope is currently active/open
     pub is_active: bool,
     /// Cached symbol lookup for performance
-    symbol_lookup_cache: HashMap<InternedString, SymbolId>,
+    symbol_lookup_cache: BTreeMap<InternedString, SymbolId>,
 }
 
 impl Scope {
@@ -275,7 +275,7 @@ impl Scope {
             location,
             depth,
             is_active: true,
-            symbol_lookup_cache: HashMap::new(),
+            symbol_lookup_cache: BTreeMap::new(),
         }
     }
 
@@ -385,13 +385,13 @@ pub struct ScopeTree {
     /// Arena for scope storage
     scopes_arena: TypedArena<Scope>,
     /// Map from scope ID to scope reference
-    scopes_by_id: HashMap<ScopeId, &'static mut Scope>,
+    scopes_by_id: BTreeMap<ScopeId, &'static mut Scope>,
     /// Root scope (global scope)
     root_scope_id: ScopeId,
     /// Currently active scope (for parsing)
     current_scope_id: ScopeId,
     /// Fast lookup: scope -> all ancestor scopes (cached for performance)
-    ancestor_cache: HashMap<ScopeId, Vec<ScopeId>>,
+    ancestor_cache: BTreeMap<ScopeId, Vec<ScopeId>>,
     /// Statistics
     total_scopes: usize,
     max_depth: u32,
@@ -402,10 +402,10 @@ impl ScopeTree {
     pub fn new(global_scope_id: ScopeId) -> Self {
         let mut tree = Self {
             scopes_arena: TypedArena::new(),
-            scopes_by_id: HashMap::new(),
+            scopes_by_id: BTreeMap::new(),
             root_scope_id: global_scope_id,
             current_scope_id: global_scope_id,
-            ancestor_cache: HashMap::new(),
+            ancestor_cache: BTreeMap::new(),
             total_scopes: 0,
             max_depth: 0,
         };
@@ -705,8 +705,8 @@ impl ScopeTree {
     /// Get scope tree statistics
     pub fn stats(&self) -> ScopeTreeStats {
         let arena_stats = self.scopes_arena.stats();
-        let mut scopes_by_kind = HashMap::new();
-        let mut scopes_by_depth = HashMap::new();
+        let mut scopes_by_kind = BTreeMap::new();
+        let mut scopes_by_depth = BTreeMap::new();
         let mut total_symbols = 0;
 
         for scope_ref in self.scopes_by_id.values() {
@@ -802,8 +802,8 @@ impl ScopeTree {
 pub struct ScopeTreeStats {
     pub total_scopes: usize,
     pub max_depth: u32,
-    pub scopes_by_kind: HashMap<ScopeKind, usize>,
-    pub scopes_by_depth: HashMap<u32, usize>,
+    pub scopes_by_kind: BTreeMap<ScopeKind, usize>,
+    pub scopes_by_depth: BTreeMap<u32, usize>,
     pub total_symbols: usize,
     pub arena_stats: super::ArenaStats,
     pub cache_entries: usize,

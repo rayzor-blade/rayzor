@@ -14,18 +14,18 @@ use crate::tast::{
     SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 /// Analyzes a function to determine its effects
 pub struct EffectAnalyzer<'a> {
     symbol_table: &'a SymbolTable,
     type_table: &'a RefCell<TypeTable>,
     /// Set of functions known to throw
-    throwing_functions: HashSet<SymbolId>,
+    throwing_functions: BTreeSet<SymbolId>,
     /// Set of functions known to be async
-    async_functions: HashSet<SymbolId>,
+    async_functions: BTreeSet<SymbolId>,
     /// Set of functions known to be pure
-    pure_functions: HashSet<SymbolId>,
+    pure_functions: BTreeSet<SymbolId>,
 }
 
 impl<'a> EffectAnalyzer<'a> {
@@ -34,9 +34,9 @@ impl<'a> EffectAnalyzer<'a> {
         Self {
             symbol_table,
             type_table,
-            throwing_functions: HashSet::new(),
-            async_functions: HashSet::new(),
-            pure_functions: HashSet::new(),
+            throwing_functions: BTreeSet::new(),
+            async_functions: BTreeSet::new(),
+            pure_functions: BTreeSet::new(),
         }
     }
 

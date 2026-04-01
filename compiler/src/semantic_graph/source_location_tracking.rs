@@ -5,22 +5,22 @@
 //! accurate location information for error reporting and debugging.
 
 use crate::tast::{BlockId, CallSiteId, DataFlowNodeId, SourceLocation, SymbolId};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Source location tracker for semantic graph construction
 #[derive(Debug, Clone)]
 pub struct SourceLocationTracker {
     /// Symbol to source location mapping
-    symbol_locations: HashMap<SymbolId, SourceLocation>,
+    symbol_locations: BTreeMap<SymbolId, SourceLocation>,
 
     /// Data flow node to source location mapping
-    node_locations: HashMap<DataFlowNodeId, SourceLocation>,
+    node_locations: BTreeMap<DataFlowNodeId, SourceLocation>,
 
     /// Basic block to source location mapping
-    block_locations: HashMap<BlockId, SourceLocation>,
+    block_locations: BTreeMap<BlockId, SourceLocation>,
 
     /// Call site to source location mapping
-    call_site_locations: HashMap<CallSiteId, SourceLocation>,
+    call_site_locations: BTreeMap<CallSiteId, SourceLocation>,
 
     /// Default location for missing mappings
     default_location: SourceLocation,
@@ -30,10 +30,10 @@ impl SourceLocationTracker {
     /// Create a new source location tracker
     pub fn new() -> Self {
         Self {
-            symbol_locations: HashMap::new(),
-            node_locations: HashMap::new(),
-            block_locations: HashMap::new(),
-            call_site_locations: HashMap::new(),
+            symbol_locations: BTreeMap::new(),
+            node_locations: BTreeMap::new(),
+            block_locations: BTreeMap::new(),
+            call_site_locations: BTreeMap::new(),
             default_location: SourceLocation::unknown(),
         }
     }

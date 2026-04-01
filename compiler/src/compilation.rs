@@ -28,7 +28,7 @@ use crate::tast::{
 use log::{debug, info, trace, warn};
 use parser::{parse_haxe_file, parse_haxe_file_with_debug, HaxeFile};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -69,11 +69,11 @@ pub struct CompilationUnit {
     pub config: CompilationConfig,
 
     /// Cache of types that failed to load on-demand (to avoid repeated attempts)
-    pub failed_type_loads: HashSet<String>,
+    pub failed_type_loads: BTreeSet<String>,
 
     /// Cache of files that have been successfully compiled (to avoid redundant recompilation)
     /// Maps filename to the TypedFile result
-    compiled_files: HashMap<String, TypedFile>,
+    compiled_files: BTreeMap<String, TypedFile>,
 
     /// Internal compilation pipeline (delegates to HaxeCompilationPipeline)
     pipeline: HaxeCompilationPipeline,
@@ -89,7 +89,7 @@ pub struct CompilationUnit {
     /// Function IDs from import modules that correspond to source-level declarations
     /// (class methods, constructors, top-level functions — NOT generated MIR wrappers).
     /// These must be protected from stdlib merge name collisions.
-    import_own_func_ids: std::collections::HashSet<crate::ir::IrFunctionId>,
+    import_own_func_ids: std::collections::BTreeSet<crate::ir::IrFunctionId>,
 
     /// Stdlib typed files loaded on-demand (typedefs, etc. that need to be in HIR)
     loaded_stdlib_typed_files: Vec<TypedFile>,
@@ -100,7 +100,7 @@ pub struct CompilationUnit {
 
     /// Accumulated class_fields from all compiled files.
     /// Allows cross-file static field access (e.g., BufferUsage.VERTEX from imported GraphicsTypes.hx).
-    global_class_fields: HashMap<
+    global_class_fields: BTreeMap<
         crate::tast::SymbolId,
         Vec<(crate::tast::InternedString, crate::tast::SymbolId, bool)>,
     >,
@@ -153,12 +153,12 @@ pub struct CompilationUnit {
     hdll_symbols: Vec<(String, *const u8)>,
 
     /// Set of already-loaded HDLL library names to avoid duplicate loading
-    loaded_hdlls: HashSet<String>,
+    loaded_hdlls: BTreeSet<String>,
 
     /// Global inline var constants (name-keyed: "ClassName.fieldName" → value).
     /// Populated from both fresh compilation and BLADE cache restore.
     /// Passed to HIR lowering for cross-file static inline var resolution.
-    global_inline_vars: HashMap<String, crate::ir::blade::BladeInlineValue>,
+    global_inline_vars: BTreeMap<String, crate::ir::blade::BladeInlineValue>,
 
     /// Type info extracted from the last compiled file (for BLADE cache save)
     last_compiled_type_info: Option<BladeTypeInfo>,
@@ -169,7 +169,7 @@ pub struct CompilationUnit {
     /// Source-level function IDs from the last compiled file (methods + constructors).
     /// Used by try_compile_import to track which functions in import modules are
     /// genuine declarations vs generated MIR wrappers.
-    last_compiled_own_func_ids: Option<std::collections::HashSet<crate::ir::IrFunctionId>>,
+    last_compiled_own_func_ids: Option<std::collections::BTreeSet<crate::ir::IrFunctionId>>,
 
     /// Cached stdlib MIR module (built once, cloned for each user file merge)
     cached_stdlib_mir: Option<crate::ir::IrModule>,
@@ -452,15 +452,15 @@ impl CompilationUnit {
             namespace_resolver,
             import_resolver,
             config,
-            failed_type_loads: HashSet::new(),
-            compiled_files: HashMap::new(),
+            failed_type_loads: BTreeSet::new(),
+            compiled_files: BTreeMap::new(),
             pipeline,
             mir_modules: Vec::new(),
             import_mir_modules: Vec::new(),
-            import_own_func_ids: std::collections::HashSet::new(),
+            import_own_func_ids: std::collections::BTreeSet::new(),
             loaded_stdlib_typed_files: Vec::new(),
             collected_diagnostics: Vec::new(),
-            global_class_fields: HashMap::new(),
+            global_class_fields: BTreeMap::new(),
             stdlib_function_map: BTreeMap::new(),
             stdlib_function_name_map: BTreeMap::new(),
             import_field_index_map: BTreeMap::new(),
@@ -473,8 +473,8 @@ impl CompilationUnit {
             import_class_method_symbols: BTreeMap::new(),
             compiler_plugin_registry: CompilerPluginRegistry::new(),
             hdll_symbols: Vec::new(),
-            loaded_hdlls: HashSet::new(),
-            global_inline_vars: HashMap::new(),
+            loaded_hdlls: BTreeSet::new(),
+            global_inline_vars: BTreeMap::new(),
             last_compiled_type_info: None,
             last_compiled_cached_maps: None,
             last_compiled_own_func_ids: None,
@@ -1395,7 +1395,7 @@ impl CompilationUnit {
 
         // Create type parameters for generic enums (e.g., Option<T>, Result<T, E>)
         let mut type_param_ids = Vec::new();
-        let mut type_param_map: HashMap<String, TypeId> = HashMap::new();
+        let mut type_param_map: BTreeMap<String, TypeId> = BTreeMap::new();
         for tp_name in &enum_info.type_params {
             let tp_interned = self.string_interner.intern(tp_name);
             let tp_symbol = self.symbol_table.create_type_parameter(tp_interned, vec![]);
@@ -1767,7 +1767,7 @@ impl CompilationUnit {
     fn extract_all_dependencies(ast: &parser::HaxeFile) -> Vec<String> {
         use parser::{BlockElement, ClassFieldKind, ExprKind, Type, TypeDeclaration};
 
-        let mut deps = std::collections::HashSet::new();
+        let mut deps = std::collections::BTreeSet::new();
 
         // 1. Explicit imports
         for import in &ast.imports {
@@ -1784,7 +1784,7 @@ impl CompilationUnit {
         }
 
         // Helper to extract type references from a Type
-        fn extract_type_deps(ty: &Type, deps: &mut std::collections::HashSet<String>) {
+        fn extract_type_deps(ty: &Type, deps: &mut std::collections::BTreeSet<String>) {
             match ty {
                 Type::Path { path, params, .. } => {
                     // Only add if it looks like a class name (starts with uppercase)
@@ -1822,7 +1822,7 @@ impl CompilationUnit {
         // Helper to extract dependencies from a block element
         fn extract_block_elem_deps(
             elem: &BlockElement,
-            deps: &mut std::collections::HashSet<String>,
+            deps: &mut std::collections::BTreeSet<String>,
         ) {
             match elem {
                 BlockElement::Expr(e) => extract_expr_deps(e, deps),
@@ -1858,7 +1858,7 @@ impl CompilationUnit {
         }
 
         // Helper to extract dependencies from an expression
-        fn extract_expr_deps(expr: &parser::Expr, deps: &mut std::collections::HashSet<String>) {
+        fn extract_expr_deps(expr: &parser::Expr, deps: &mut std::collections::BTreeSet<String>) {
             match &expr.kind {
                 ExprKind::New {
                     type_path,
@@ -2126,7 +2126,7 @@ impl CompilationUnit {
         // Helper to extract dependencies from patterns (in switch cases)
         fn extract_pattern_deps(
             pattern: &parser::Pattern,
-            deps: &mut std::collections::HashSet<String>,
+            deps: &mut std::collections::BTreeSet<String>,
         ) {
             match pattern {
                 parser::Pattern::Const(e) => extract_expr_deps(e, deps),
@@ -2175,7 +2175,7 @@ impl CompilationUnit {
         // Helper to extract dependencies from class fields
         fn extract_field_deps(
             field: &parser::ClassField,
-            deps: &mut std::collections::HashSet<String>,
+            deps: &mut std::collections::BTreeSet<String>,
         ) {
             match &field.kind {
                 ClassFieldKind::Var {
@@ -2330,15 +2330,15 @@ impl CompilationUnit {
     /// Load imports efficiently by pre-collecting all dependencies and compiling in topological order.
     /// This avoids the fail-retry pattern that causes exponential recompilation.
     pub fn load_imports_efficiently(&mut self, imports: &[String]) -> Result<(), String> {
-        use std::collections::{BTreeMap, HashSet, VecDeque};
+        use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
         // Step 1: Collect all files and their dependencies by parsing (not compiling)
-        // Use BTreeMap for deterministic iteration order — HashMap iteration is random
+        // Use BTreeMap for deterministic iteration order
         // and causes non-deterministic import base offsets, leading to different function
         // IDs, different inlining decisions, and ultimately wrong optimized MIR.
         let mut all_files: BTreeMap<String, (PathBuf, String, Vec<String>)> = BTreeMap::new();
         let mut to_process: VecDeque<String> = imports.iter().cloned().collect();
-        let mut visited: HashSet<String> = HashSet::new();
+        let mut visited: BTreeSet<String> = BTreeSet::new();
 
         while let Some(qualified_path) = to_process.pop_front() {
             if visited.contains(&qualified_path) {
@@ -2493,7 +2493,7 @@ impl CompilationUnit {
                     "Cycle detected, {} files stuck in dependency cycle. Forcing compilation.",
                     stuck_count
                 );
-                let in_order: std::collections::HashSet<_> =
+                let in_order: std::collections::BTreeSet<_> =
                     compile_order.iter().cloned().collect();
                 // Mini topological sort for stuck files: repeatedly emit files
                 // whose deps (among remaining stuck files) are all already emitted.
@@ -2523,7 +2523,7 @@ impl CompilationUnit {
                         .unwrap_or_default();
                     stuck.insert(name.clone(), deps_in_stuck);
                 }
-                let mut emitted: HashSet<String> = HashSet::new();
+                let mut emitted: BTreeSet<String> = BTreeSet::new();
                 loop {
                     let ready: Vec<String> = stuck
                         .iter()
@@ -2827,8 +2827,8 @@ impl CompilationUnit {
     fn register_symbols_from_type_info(
         &mut self,
         symbols: &BladeTypeInfo,
-    ) -> HashMap<String, (crate::tast::SymbolId, crate::tast::TypeId, ScopeId)> {
-        let mut class_map = HashMap::new();
+    ) -> BTreeMap<String, (crate::tast::SymbolId, crate::tast::TypeId, ScopeId)> {
+        let mut class_map = BTreeMap::new();
 
         for class_info in &symbols.classes {
             let symbol_id = self.register_class_from_blade(class_info);
@@ -2869,7 +2869,7 @@ impl CompilationUnit {
     fn restore_cached_maps(
         &mut self,
         cached_maps: &BladeCachedMaps,
-        registered: &HashMap<String, (crate::tast::SymbolId, crate::tast::TypeId, ScopeId)>,
+        registered: &BTreeMap<String, (crate::tast::SymbolId, crate::tast::TypeId, ScopeId)>,
     ) {
         use crate::ir::IrFunctionId;
 
@@ -3017,8 +3017,8 @@ impl CompilationUnit {
         use crate::ir::IrInstruction;
 
         // Build a set of all valid function IDs across all import modules
-        let mut all_func_ids: std::collections::HashSet<crate::ir::IrFunctionId> =
-            std::collections::HashSet::new();
+        let mut all_func_ids: std::collections::BTreeSet<crate::ir::IrFunctionId> =
+            std::collections::BTreeSet::new();
         for m in &self.import_mir_modules {
             all_func_ids.extend(m.functions.keys().copied());
             all_func_ids.extend(m.extern_functions.keys().copied());
@@ -3062,8 +3062,8 @@ impl CompilationUnit {
         let import_base: u32 = 100_000 + (self.import_mir_modules.len() as u32 * 10_000);
 
         // Build old→new ID mapping (include both functions and extern_functions)
-        let mut id_map: std::collections::HashMap<IrFunctionId, IrFunctionId> =
-            std::collections::HashMap::new();
+        let mut id_map: std::collections::BTreeMap<IrFunctionId, IrFunctionId> =
+            std::collections::BTreeMap::new();
         for old_id in import_mir.functions.keys() {
             id_map.insert(*old_id, IrFunctionId(old_id.0 + import_base));
         }
@@ -3968,7 +3968,7 @@ impl CompilationUnit {
         // with no matching field, causing the static method to fall through to a
         // generic path instead of the stdlib dispatch.
         if !self.global_class_fields.is_empty() {
-            let non_empty: HashMap<_, _> = self
+            let non_empty: BTreeMap<_, _> = self
                 .global_class_fields
                 .iter()
                 .filter(|(_, fields)| !fields.is_empty())
@@ -4149,7 +4149,7 @@ impl CompilationUnit {
 
         // Single pass: build both constructor param counts and function param types
         // from all import MIR modules (previously two separate O(modules × functions) loops)
-        let constructor_ids: std::collections::HashSet<_> =
+        let constructor_ids: std::collections::BTreeSet<_> =
             self.import_constructor_name_map.values().copied().collect();
         let mut constructor_param_counts: BTreeMap<crate::ir::IrFunctionId, usize> =
             BTreeMap::new();
@@ -4176,7 +4176,7 @@ impl CompilationUnit {
         }
 
         // Save external constructor keys to filter them out of the result
-        let external_constructor_keys: std::collections::HashSet<String> =
+        let external_constructor_keys: std::collections::BTreeSet<String> =
             self.import_constructor_name_map.keys().cloned().collect();
 
         let mir_result = lower_hir_to_mir_with_function_map(
@@ -4216,9 +4216,9 @@ impl CompilationUnit {
         }
 
         // Capture user-defined function IDs before module is consumed
-        let mir_result_func_ids: std::collections::HashSet<crate::ir::IrFunctionId> =
+        let mir_result_func_ids: std::collections::BTreeSet<crate::ir::IrFunctionId> =
             mir_result.function_map.values().copied().collect();
-        let mir_result_ctor_ids: std::collections::HashSet<crate::ir::IrFunctionId> =
+        let mir_result_ctor_ids: std::collections::BTreeSet<crate::ir::IrFunctionId> =
             mir_result.constructor_name_map.values().copied().collect();
 
         let mut mir_module = mir_result.module;
@@ -4322,7 +4322,7 @@ impl CompilationUnit {
         // replaced by the stdlib merge with real implementations that delegate to runtime.
         // Without this filter, non-extern stdlib classes like EReg have their methods (match,
         // matched, etc.) incorrectly protected from replacement.
-        let own_func_ids: std::collections::HashSet<crate::ir::IrFunctionId> = mir_result_func_ids
+        let own_func_ids: std::collections::BTreeSet<crate::ir::IrFunctionId> = mir_result_func_ids
             .union(&mir_result_ctor_ids)
             .copied()
             .filter(|func_id| {
@@ -4362,11 +4362,10 @@ impl CompilationUnit {
             // Import modules now skip the stdlib merge, so they contain both:
             // (a) source-level declarations (tracked in import_own_func_ids) — protect these
             // (b) generated MIR wrappers for stdlib calls — let stdlib merge replace these
-            let mut merged_import_func_ids: std::collections::HashSet<IrFunctionId> =
+            let mut merged_import_func_ids: std::collections::BTreeSet<IrFunctionId> =
                 own_func_ids.clone();
             // Sort import modules by name for deterministic merge order.
-            // Different HashMap iteration orders in the resolver produce different
-            // compilation orders. Sorting ensures the merged MIR is identical.
+            // Sorting ensures the merged MIR is identical regardless of resolver order.
             self.import_mir_modules.sort_by(|a, b| a.name.cmp(&b.name));
             for import_module in self.import_mir_modules.drain(..) {
                 // Merge import type definitions so runtime RTTI registration includes
@@ -4419,8 +4418,8 @@ impl CompilationUnit {
 
             // Build mapping of old stdlib IDs to new renumbered IDs
             use crate::ir::IrFunctionId;
-            use std::collections::HashMap;
-            let mut id_mapping: HashMap<IrFunctionId, IrFunctionId> = HashMap::new();
+            use std::collections::BTreeMap;
+            let mut id_mapping: BTreeMap<IrFunctionId, IrFunctionId> = BTreeMap::new();
 
             // Note: extern_functions is not used - externs are in the functions map with empty CFGs
             // So we only need to renumber the functions map
@@ -4433,7 +4432,7 @@ impl CompilationUnit {
             }
 
             // SECOND PASS: Renumber functions and update their internal references
-            let mut renumbered_functions = HashMap::new();
+            let mut renumbered_functions = BTreeMap::new();
             for (old_id, mut func) in stdlib_mir.functions {
                 let new_id = *id_mapping.get(&old_id).unwrap();
 
@@ -4496,7 +4495,7 @@ impl CompilationUnit {
             // Build map of function names to ALL IDs in the user module (before merging)
             // Multiple import modules can have duplicate extern declarations of the same function.
             // We need to track ALL of them to replace every copy.
-            let mut user_func_name_to_ids: HashMap<String, Vec<IrFunctionId>> = HashMap::new();
+            let mut user_func_name_to_ids: BTreeMap<String, Vec<IrFunctionId>> = BTreeMap::new();
             for (func_id, func) in &mir_module.functions {
                 user_func_name_to_ids
                     .entry(func.name.clone())
@@ -4505,7 +4504,7 @@ impl CompilationUnit {
             }
 
             // Build a map of old ID -> new ID for all replacements
-            let mut id_replacements: HashMap<IrFunctionId, IrFunctionId> = HashMap::new();
+            let mut id_replacements: BTreeMap<IrFunctionId, IrFunctionId> = BTreeMap::new();
 
             for (func_id, func) in &renumbered_functions {
                 if let Some(existing_ids) = user_func_name_to_ids.get(&func.name) {
@@ -5842,11 +5841,11 @@ impl CacheStats {
 /// For example, `new haxe.ds.BalancedTree<Int, String>()` yields "haxe.ds.BalancedTree".
 fn collect_qualified_type_refs_from_ast(ast: &parser::HaxeFile, out: &mut Vec<String>) {
     use parser::haxe_ast::{BlockElement, ClassFieldKind, Expr, ExprKind, Type, TypeDeclaration};
-    use std::collections::HashSet;
+    use std::collections::BTreeSet;
 
-    let mut seen = HashSet::new();
+    let mut seen = BTreeSet::new();
 
-    fn collect_from_type(ty: &Type, seen: &mut HashSet<String>, out: &mut Vec<String>) {
+    fn collect_from_type(ty: &Type, seen: &mut BTreeSet<String>, out: &mut Vec<String>) {
         match ty {
             Type::Path { path, params, .. } => {
                 if !path.package.is_empty() {
@@ -5881,7 +5880,7 @@ fn collect_qualified_type_refs_from_ast(ast: &parser::HaxeFile, out: &mut Vec<St
         }
     }
 
-    fn collect_from_expr(expr: &Expr, seen: &mut HashSet<String>, out: &mut Vec<String>) {
+    fn collect_from_expr(expr: &Expr, seen: &mut BTreeSet<String>, out: &mut Vec<String>) {
         match &expr.kind {
             ExprKind::New {
                 type_path,
@@ -6071,7 +6070,7 @@ fn collect_qualified_type_refs_from_ast(ast: &parser::HaxeFile, out: &mut Vec<St
     // Walk class field helpers
     fn collect_from_class_field(
         field: &parser::haxe_ast::ClassField,
-        seen: &mut HashSet<String>,
+        seen: &mut BTreeSet<String>,
         out: &mut Vec<String>,
     ) {
         match &field.kind {

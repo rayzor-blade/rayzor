@@ -16,7 +16,7 @@ use crate::semantic_graph::CallType;
 use crate::tast::collections::{new_id_map, new_id_set, IdMap, IdSet};
 use crate::tast::node::TypedExpression;
 use crate::tast::{BlockId, CallSiteId, DataFlowNodeId, TypeId};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 /// Complete call graph for a program or module
@@ -155,7 +155,7 @@ pub struct CallSiteMetadata {
     pub inlining_hint: InliningHint,
 
     /// Custom analysis annotations
-    pub annotations: HashMap<String, String>,
+    pub annotations: BTreeMap<String, String>,
 }
 
 /// Hints for function inlining
@@ -186,10 +186,10 @@ pub struct VirtualCallResolution {
     pub vtables: IdMap<TypeId, VirtualMethodTable>,
 
     /// Method override relationships
-    pub overrides: HashMap<SymbolId, Vec<SymbolId>>,
+    pub overrides: BTreeMap<SymbolId, Vec<SymbolId>>,
 
     /// Interface implementation mappings
-    pub interface_impls: HashMap<(TypeId, SymbolId), SymbolId>,
+    pub interface_impls: BTreeMap<(TypeId, SymbolId), SymbolId>,
 }
 
 /// Virtual method table for a type
@@ -362,8 +362,8 @@ impl CallGraph {
     }
 
     /// Find all functions reachable from a given function
-    pub fn reachable_functions(&self, start: SymbolId) -> HashSet<SymbolId> {
-        let mut reachable = HashSet::new();
+    pub fn reachable_functions(&self, start: SymbolId) -> BTreeSet<SymbolId> {
+        let mut reachable = BTreeSet::new();
         let mut worklist = VecDeque::new();
 
         worklist.push_back(start);
@@ -416,9 +416,9 @@ impl CallGraph {
         let mut sccs = Vec::new();
         let mut index_counter = 0;
         let mut stack = Vec::new();
-        let mut indices: HashMap<SymbolId, usize> = HashMap::new();
-        let mut lowlinks: HashMap<SymbolId, usize> = HashMap::new();
-        let mut on_stack: HashSet<SymbolId> = HashSet::new();
+        let mut indices: BTreeMap<SymbolId, usize> = BTreeMap::new();
+        let mut lowlinks: BTreeMap<SymbolId, usize> = BTreeMap::new();
+        let mut on_stack: BTreeSet<SymbolId> = BTreeSet::new();
 
         for &function in &self.functions {
             if !indices.contains_key(&function) {
@@ -443,9 +443,9 @@ impl CallGraph {
         v: SymbolId,
         index_counter: &mut usize,
         stack: &mut Vec<SymbolId>,
-        indices: &mut HashMap<SymbolId, usize>,
-        lowlinks: &mut HashMap<SymbolId, usize>,
-        on_stack: &mut HashSet<SymbolId>,
+        indices: &mut BTreeMap<SymbolId, usize>,
+        lowlinks: &mut BTreeMap<SymbolId, usize>,
+        on_stack: &mut BTreeSet<SymbolId>,
         sccs: &mut Vec<StronglyConnectedComponent>,
     ) {
         indices.insert(v, *index_counter);
@@ -530,7 +530,7 @@ impl CallGraph {
         let mut max_recursion_depth = 0;
 
         for &function in &self.functions {
-            let depth = self.compute_call_depth(function, &mut HashSet::new());
+            let depth = self.compute_call_depth(function, &mut BTreeSet::new());
             max_depth = max_depth.max(depth);
 
             // For recursive functions, compute recursion depth
@@ -557,7 +557,7 @@ impl CallGraph {
     }
 
     /// Compute call depth from a function (with cycle detection)
-    fn compute_call_depth(&self, function: SymbolId, visited: &mut HashSet<SymbolId>) -> u32 {
+    fn compute_call_depth(&self, function: SymbolId, visited: &mut BTreeSet<SymbolId>) -> u32 {
         if visited.contains(&function) {
             return 0; // Cycle detected, return 0 to avoid infinite recursion
         }

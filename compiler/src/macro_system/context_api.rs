@@ -11,7 +11,7 @@ use super::value::MacroValue;
 use crate::tast::{SourceLocation, SymbolId, SymbolTable, TypeId, TypeTable};
 use parser::HaxeFile;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -45,7 +45,7 @@ pub struct MacroContext {
 
     // --- Conditional compilation ---
     /// Conditional compilation defines (-D flags)
-    pub defines: HashMap<String, String>,
+    pub defines: BTreeMap<String, String>,
 
     // --- Output collectors ---
     /// Diagnostics emitted by the macro
@@ -196,7 +196,7 @@ impl MacroContext {
             current_module: None,
             current_method: None,
             current_class: None,
-            defines: HashMap::new(),
+            defines: BTreeMap::new(),
             diagnostics: Vec::new(),
             defined_types: Vec::new(),
             build_fields: None,
@@ -219,7 +219,7 @@ impl MacroContext {
             current_module: None,
             current_method: None,
             current_class: None,
-            defines: HashMap::new(),
+            defines: BTreeMap::new(),
             diagnostics: Vec::new(),
             defined_types: Vec::new(),
             build_fields: None,
@@ -324,7 +324,7 @@ impl MacroContext {
 
     /// `Context.getDefines()` — Get all conditional compilation defines
     pub fn get_defines(&self) -> MacroValue {
-        let mut obj = HashMap::new();
+        let mut obj = BTreeMap::new();
         for (k, v) in &self.defines {
             obj.insert(k.clone(), MacroValue::String(Arc::from(v.as_str())));
         }
@@ -489,7 +489,7 @@ impl MacroContext {
 
     /// `Context.getPosInfos(pos)` — Get position information
     pub fn get_pos_infos(&self, pos: &SourceLocation) -> MacroValue {
-        let mut obj = HashMap::new();
+        let mut obj = BTreeMap::new();
         obj.insert("file".to_string(), MacroValue::Int(pos.file_id as i64));
         obj.insert("min".to_string(), MacroValue::Int(pos.byte_offset as i64));
         obj.insert("max".to_string(), MacroValue::Int(pos.byte_offset as i64));
@@ -679,7 +679,7 @@ fn arg_as_position(args: &[MacroValue], index: usize) -> Option<SourceLocation> 
 ///
 /// Matches the `haxe.macro.Expr.Field` structure.
 fn build_field_to_value(field: &BuildField) -> MacroValue {
-    let mut obj = HashMap::new();
+    let mut obj = BTreeMap::new();
     obj.insert(
         "name".to_string(),
         MacroValue::String(Arc::from(field.name.as_str())),
@@ -697,7 +697,7 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
     // Kind
     let kind_value = match &field.kind {
         BuildFieldKind::Var { type_hint, expr } => {
-            let mut kind_obj = HashMap::new();
+            let mut kind_obj = BTreeMap::new();
             kind_obj.insert("kind".to_string(), MacroValue::String(Arc::from("FVar")));
             if let Some(t) = type_hint {
                 kind_obj.insert(
@@ -718,7 +718,7 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
             return_type,
             body,
         } => {
-            let mut kind_obj = HashMap::new();
+            let mut kind_obj = BTreeMap::new();
             kind_obj.insert("kind".to_string(), MacroValue::String(Arc::from("FFun")));
             kind_obj.insert(
                 "args".to_string(),
@@ -748,7 +748,7 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
             set,
             type_hint,
         } => {
-            let mut kind_obj = HashMap::new();
+            let mut kind_obj = BTreeMap::new();
             kind_obj.insert("kind".to_string(), MacroValue::String(Arc::from("FProp")));
             kind_obj.insert(
                 "get".to_string(),
@@ -782,7 +782,7 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
         .meta
         .iter()
         .map(|m| {
-            let mut meta_obj = HashMap::new();
+            let mut meta_obj = BTreeMap::new();
             meta_obj.insert(
                 "name".to_string(),
                 MacroValue::String(Arc::from(m.name.as_str())),
@@ -1131,7 +1131,7 @@ mod tests {
     #[test]
     fn test_make_position() {
         let ctx = MacroContext::new();
-        let mut info = HashMap::new();
+        let mut info = BTreeMap::new();
         info.insert("file".to_string(), MacroValue::Int(3));
         info.insert("min".to_string(), MacroValue::Int(100));
         info.insert("max".to_string(), MacroValue::Int(200));

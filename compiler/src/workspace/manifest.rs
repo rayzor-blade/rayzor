@@ -1,7 +1,7 @@
 //! TOML manifest parsing for `rayzor.toml`.
 
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Top-level manifest — either a single project or a workspace.
 #[derive(Debug)]
@@ -19,7 +19,7 @@ struct RawManifest {
     cache: Option<CacheConfig>,
     bundle: Option<BundleConfig>,
     wasm: Option<WasmConfig>,
-    dependencies: Option<HashMap<String, DependencySpec>>,
+    dependencies: Option<BTreeMap<String, DependencySpec>>,
 }
 
 /// A single dependency specification in `[dependencies]`.
@@ -71,7 +71,7 @@ pub struct ProjectManifest {
     pub bundle: Option<BundleConfig>,
     /// Dependencies
     #[serde(skip)]
-    pub dependencies: Option<HashMap<String, DependencySpec>>,
+    pub dependencies: Option<BTreeMap<String, DependencySpec>>,
     /// WASM target configuration
     #[serde(skip)]
     pub wasm: Option<WasmConfig>,
@@ -92,7 +92,7 @@ pub struct WasmConfig {
     /// JS host module mappings: module_name → path to .js file.
     /// Example: `hosts = { "my-module" = "wasm/my-host.js" }`
     #[serde(default)]
-    pub hosts: HashMap<String, String>,
+    pub hosts: BTreeMap<String, String>,
 }
 
 /// `[build]` section.
@@ -111,7 +111,7 @@ pub struct BuildConfig {
     /// Output path
     pub output: Option<String>,
     /// Defines (-D equivalent)
-    pub defines: Option<HashMap<String, toml::Value>>,
+    pub defines: Option<BTreeMap<String, toml::Value>>,
 }
 
 /// `[cache]` section.

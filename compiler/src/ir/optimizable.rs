@@ -167,7 +167,7 @@ pub struct HirDeadCodeElimination<'a> {
     /// Optional call graph for more accurate analysis
     call_graph: Option<&'a crate::semantic_graph::CallGraph>,
     /// Entry points to preserve
-    entry_points: std::collections::HashSet<crate::tast::SymbolId>,
+    entry_points: std::collections::BTreeSet<crate::tast::SymbolId>,
 }
 
 impl<'a> HirDeadCodeElimination<'a> {
@@ -175,7 +175,7 @@ impl<'a> HirDeadCodeElimination<'a> {
     pub fn new() -> Self {
         Self {
             call_graph: None,
-            entry_points: std::collections::HashSet::new(),
+            entry_points: std::collections::BTreeSet::new(),
         }
     }
 
@@ -208,7 +208,7 @@ impl<'a> HirOptimizationPass for HirDeadCodeElimination<'a> {
         let mut result = OptimizationResult::unchanged();
 
         // Collect all reachable functions
-        let mut reachable_functions = std::collections::HashSet::new();
+        let mut reachable_functions = std::collections::BTreeSet::new();
         for func in module.functions.values() {
             if func.is_keep {
                 reachable_functions.insert(func.symbol_id);
@@ -317,7 +317,7 @@ fn count_statements_in_block(block: &super::hir::HirBlock) -> usize {
 /// Helper function to collect called functions from a HIR block
 fn collect_called_functions(
     block: &super::hir::HirBlock,
-    called: &mut std::collections::HashSet<crate::tast::SymbolId>,
+    called: &mut std::collections::BTreeSet<crate::tast::SymbolId>,
 ) {
     // Check expressions in the block
     if let Some(expr) = &block.expr {
@@ -405,7 +405,7 @@ fn collect_called_functions(
 /// Helper function to collect called functions from a HIR expression
 fn collect_called_functions_in_expr(
     expr: &super::hir::HirExpr,
-    called: &mut std::collections::HashSet<crate::tast::SymbolId>,
+    called: &mut std::collections::BTreeSet<crate::tast::SymbolId>,
 ) {
     use super::hir::HirExprKind;
 
@@ -481,7 +481,7 @@ fn validate_hir(module: &super::hir::HirModule) -> Result<(), Vec<ValidationErro
     let mut errors = Vec::new();
 
     // Check that all functions have unique names
-    let mut function_names = std::collections::HashSet::new();
+    let mut function_names = std::collections::BTreeSet::new();
     for func in module.functions.values() {
         if !function_names.insert(&func.name) {
             errors.push(ValidationError {
@@ -511,7 +511,7 @@ mod tests {
     use super::{HirDeadCodeElimination, HirOptimizationPass};
     use crate::ir::hir::{HirBlock, HirCallingConvention, HirFunction, HirMetadata, HirModule};
     use crate::tast::{ScopeId, SourceLocation, StringInterner, SymbolId, TypeId};
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     fn test_function(
         symbol_id: SymbolId,
@@ -545,7 +545,7 @@ mod tests {
             imports: Vec::new(),
             types: indexmap::IndexMap::new(),
             functions: indexmap::IndexMap::new(),
-            globals: HashMap::new(),
+            globals: BTreeMap::new(),
             metadata: HirMetadata {
                 source_file: String::new(),
                 language_version: "1.0".to_string(),

@@ -29,7 +29,7 @@
 
 use super::hir::{HirBlock, HirExpr, HirExprKind, HirLValue, HirPattern, HirStatement};
 use crate::tast::SymbolId;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Defines how a type should be dropped/cleaned up
 ///
@@ -64,18 +64,18 @@ pub enum DropBehavior {
 pub struct DropPoints {
     /// Variables that need drop and their last-use statement index
     /// The index refers to the position in the flattened statement list
-    pub last_use: HashMap<SymbolId, LastUseInfo>,
+    pub last_use: BTreeMap<SymbolId, LastUseInfo>,
 
     /// Variables that are heap-allocated (from `new` expressions)
-    pub heap_allocated: HashSet<SymbolId>,
+    pub heap_allocated: BTreeSet<SymbolId>,
 
     /// Variables that escape (returned, stored in fields, passed to functions)
     /// Used by last-use analysis to prevent premature freeing
-    pub escaping: HashSet<SymbolId>,
+    pub escaping: BTreeSet<SymbolId>,
 
     /// Variables captured by lambdas - these truly escape the function scope
     /// and should NOT be freed at scope exit (the closure owns them)
-    pub lambda_captures: HashSet<SymbolId>,
+    pub lambda_captures: BTreeSet<SymbolId>,
 }
 
 /// Information about a variable's last use
@@ -106,19 +106,19 @@ pub struct DropPointAnalyzer {
     in_loop: bool,
 
     /// Collected uses: variable -> list of (stmt_idx, in_loop, depth)
-    uses: HashMap<SymbolId, Vec<(usize, bool, usize)>>,
+    uses: BTreeMap<SymbolId, Vec<(usize, bool, usize)>>,
 
     /// Variables assigned from `new` expressions
-    heap_vars: HashSet<SymbolId>,
+    heap_vars: BTreeSet<SymbolId>,
 
     /// Variables that are reassigned
-    reassigned: HashSet<SymbolId>,
+    reassigned: BTreeSet<SymbolId>,
 
     /// Variables that escape the function (passed to functions, returned, etc.)
-    escaping: HashSet<SymbolId>,
+    escaping: BTreeSet<SymbolId>,
 
     /// Variables captured by lambdas (truly escape scope)
-    lambda_captures: HashSet<SymbolId>,
+    lambda_captures: BTreeSet<SymbolId>,
 }
 
 impl DropPointAnalyzer {
@@ -127,11 +127,11 @@ impl DropPointAnalyzer {
             current_stmt_idx: 0,
             current_depth: 0,
             in_loop: false,
-            uses: HashMap::new(),
-            heap_vars: HashSet::new(),
-            reassigned: HashSet::new(),
-            escaping: HashSet::new(),
-            lambda_captures: HashSet::new(),
+            uses: BTreeMap::new(),
+            heap_vars: BTreeSet::new(),
+            reassigned: BTreeSet::new(),
+            escaping: BTreeSet::new(),
+            lambda_captures: BTreeSet::new(),
         }
     }
 
@@ -151,7 +151,7 @@ impl DropPointAnalyzer {
         self.analyze_block(body);
 
         // Compute last use for each variable
-        let mut last_use = HashMap::new();
+        let mut last_use = BTreeMap::new();
         for (symbol, use_list) in &self.uses {
             if let Some(&(stmt_idx, in_loop, depth)) = use_list.last() {
                 last_use.insert(

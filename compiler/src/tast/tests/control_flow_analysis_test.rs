@@ -21,7 +21,7 @@ use crate::tast::{
     },
     SymbolId, TypeId, SourceLocation,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(test)]
 mod tests {
@@ -282,7 +282,7 @@ mod tests {
         analyzer.resources.insert(file_var, ResourceInfo {
             kind: ResourceKind::File,
             allocation_point: BlockId::from_raw(0),
-            cleanup_points: HashSet::new(),
+            cleanup_points: BTreeSet::new(),
             escapes: false,
         });
 

@@ -4,7 +4,7 @@
 //! It detects circular dependencies and determines the correct compilation order.
 
 use parser::HaxeFile;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Represents a file in the dependency graph
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -22,14 +22,14 @@ pub struct FileNode {
 /// Dependency graph for file compilation ordering
 pub struct DependencyGraph {
     /// Nodes in the graph (package name -> node info)
-    nodes: HashMap<String, FileNode>,
+    nodes: BTreeMap<String, FileNode>,
 
     /// Edges in the graph (from -> [to])
     /// If A imports B, there's an edge from A to B (A depends on B)
-    edges: HashMap<String, HashSet<String>>,
+    edges: BTreeMap<String, BTreeSet<String>>,
 
     /// Reverse edges (to -> [from])
-    reverse_edges: HashMap<String, HashSet<String>>,
+    reverse_edges: BTreeMap<String, BTreeSet<String>>,
 }
 
 /// Result of dependency analysis
@@ -56,9 +56,9 @@ impl DependencyGraph {
     /// Create a new empty dependency graph
     pub fn new() -> Self {
         Self {
-            nodes: HashMap::new(),
-            edges: HashMap::new(),
-            reverse_edges: HashMap::new(),
+            nodes: BTreeMap::new(),
+            edges: BTreeMap::new(),
+            reverse_edges: BTreeMap::new(),
         }
     }
 
@@ -156,13 +156,13 @@ impl DependencyGraph {
         // Add forward edge
         self.edges
             .entry(from.to_string())
-            .or_insert_with(HashSet::new)
+            .or_insert_with(BTreeSet::new)
             .insert(to.to_string());
 
         // Add reverse edge
         self.reverse_edges
             .entry(to.to_string())
-            .or_insert_with(HashSet::new)
+            .or_insert_with(BTreeSet::new)
             .insert(from.to_string());
     }
 
@@ -175,8 +175,8 @@ impl DependencyGraph {
         let mut circular_dependencies = Vec::new();
 
         // Detect cycles using DFS
-        let mut visited = HashSet::new();
-        let mut rec_stack = HashSet::new();
+        let mut visited = BTreeSet::new();
+        let mut rec_stack = BTreeSet::new();
         let mut path = Vec::new();
 
         for node_name in self.nodes.keys() {
@@ -204,8 +204,8 @@ impl DependencyGraph {
     fn detect_cycles(
         &self,
         node: &str,
-        visited: &mut HashSet<String>,
-        rec_stack: &mut HashSet<String>,
+        visited: &mut BTreeSet<String>,
+        rec_stack: &mut BTreeSet<String>,
         path: &mut Vec<String>,
         cycles: &mut Vec<CircularDependency>,
     ) {
@@ -246,7 +246,7 @@ impl DependencyGraph {
     ///
     /// Returns file indices in compilation order (dependencies first)
     fn topological_sort(&self) -> Vec<usize> {
-        let mut in_degree: HashMap<String, usize> = HashMap::new();
+        let mut in_degree: BTreeMap<String, usize> = BTreeMap::new();
         let mut result = Vec::new();
 
         // Calculate in-degree for each node
@@ -300,8 +300,8 @@ impl DependencyGraph {
     }
 
     /// Get all dependencies of a given package (transitive)
-    pub fn get_all_dependencies(&self, package: &str) -> HashSet<String> {
-        let mut deps = HashSet::new();
+    pub fn get_all_dependencies(&self, package: &str) -> BTreeSet<String> {
+        let mut deps = BTreeSet::new();
         let mut to_visit = VecDeque::new();
         to_visit.push_back(package.to_string());
 
@@ -319,8 +319,8 @@ impl DependencyGraph {
     }
 
     /// Get all dependents of a given package (transitive)
-    pub fn get_all_dependents(&self, package: &str) -> HashSet<String> {
-        let mut dependents = HashSet::new();
+    pub fn get_all_dependents(&self, package: &str) -> BTreeSet<String> {
+        let mut dependents = BTreeSet::new();
         let mut to_visit = VecDeque::new();
         to_visit.push_back(package.to_string());
 

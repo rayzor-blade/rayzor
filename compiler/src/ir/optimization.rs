@@ -8,7 +8,7 @@ use super::{
     BinaryOp, CompareOp, IrBasicBlock, IrBlockId, IrFunction, IrFunctionId, IrGlobalId, IrId,
     IrInstruction, IrModule, IrTerminator, IrType, IrValue,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Optimization pass trait
 pub trait OptimizationPass {
@@ -37,7 +37,7 @@ pub struct OptimizationResult {
     pub blocks_eliminated: usize,
 
     /// Other statistics
-    pub stats: HashMap<String, usize>,
+    pub stats: BTreeMap<String, usize>,
 }
 
 impl OptimizationResult {
@@ -47,7 +47,7 @@ impl OptimizationResult {
             modified: false,
             instructions_eliminated: 0,
             blocks_eliminated: 0,
-            stats: HashMap::new(),
+            stats: BTreeMap::new(),
         }
     }
 
@@ -57,7 +57,7 @@ impl OptimizationResult {
             modified: true,
             instructions_eliminated: 0,
             blocks_eliminated: 0,
-            stats: HashMap::new(),
+            stats: BTreeMap::new(),
         }
     }
 
@@ -87,7 +87,7 @@ pub struct PassManager {
 pub fn strip_stack_trace_updates(module: &mut IrModule) -> OptimizationResult {
     const UPDATE_FN: &str = "rayzor_update_call_frame_location";
 
-    let mut update_fn_ids: HashSet<IrFunctionId> = module
+    let mut update_fn_ids: BTreeSet<IrFunctionId> = module
         .extern_functions
         .values()
         .filter(|ef| ef.name == UPDATE_FN)
@@ -246,8 +246,8 @@ impl DeadCodeEliminationPass {
     }
 
     /// Find all used registers in a function
-    fn find_used_registers(&self, function: &IrFunction) -> HashSet<IrId> {
-        let mut used = HashSet::new();
+    fn find_used_registers(&self, function: &IrFunction) -> BTreeSet<IrId> {
+        let mut used = BTreeSet::new();
 
         for block in function.cfg.blocks.values() {
             // Mark phi node uses
@@ -392,7 +392,7 @@ impl OptimizationPass for ConstantFoldingPass {
         let mut result = OptimizationResult::unchanged();
 
         // Build constant value map
-        let mut constants: HashMap<IrId, IrValue> = HashMap::new();
+        let mut constants: BTreeMap<IrId, IrValue> = BTreeMap::new();
 
         for function in module.functions.values_mut() {
             constants.clear();
@@ -540,8 +540,8 @@ impl UnreachableBlockEliminationPass {
     }
 
     /// Find reachable blocks from entry
-    fn find_reachable(&self, function: &IrFunction) -> HashSet<IrBlockId> {
-        let mut reachable = HashSet::new();
+    fn find_reachable(&self, function: &IrFunction) -> BTreeSet<IrBlockId> {
+        let mut reachable = BTreeSet::new();
         let mut worklist = vec![function.entry_block()];
 
         while let Some(block_id) = worklist.pop() {
@@ -603,7 +603,7 @@ impl ControlFlowSimplificationPass {
         let mut modified = false;
 
         // Collect constant values
-        let mut constants: HashMap<IrId, IrValue> = HashMap::new();
+        let mut constants: BTreeMap<IrId, IrValue> = BTreeMap::new();
         for block in function.cfg.blocks.values() {
             for inst in &block.instructions {
                 if let IrInstruction::Const { dest, value } = inst {
@@ -701,7 +701,7 @@ pub(super) trait InstructionExt {
     fn dest(&self) -> Option<IrId>;
     fn has_side_effects(&self) -> bool;
     fn replace_uses(&mut self, replacements: &BTreeMap<IrId, IrId>);
-    fn collect_uses(&self, set: &mut HashSet<IrId>);
+    fn collect_uses(&self, set: &mut BTreeSet<IrId>);
 }
 
 impl InstructionExt for IrInstruction {
@@ -872,7 +872,7 @@ impl InstructionExt for IrInstruction {
         }
     }
 
-    fn collect_uses(&self, set: &mut HashSet<IrId>) {
+    fn collect_uses(&self, set: &mut BTreeSet<IrId>) {
         for id in self.uses() {
             set.insert(id);
         }
@@ -880,7 +880,7 @@ impl InstructionExt for IrInstruction {
 }
 
 /// Helper to collect uses from a terminator
-fn collect_terminator_uses(terminator: &IrTerminator, set: &mut HashSet<IrId>) {
+fn collect_terminator_uses(terminator: &IrTerminator, set: &mut BTreeSet<IrId>) {
     match terminator {
         IrTerminator::Return { value: Some(v) } => {
             set.insert(*v);
@@ -911,9 +911,9 @@ impl LICMPass {
     /// Check if an instruction is loop-invariant.
     fn is_loop_invariant(
         inst: &IrInstruction,
-        loop_blocks: &HashSet<IrBlockId>,
-        def_block: &HashMap<IrId, IrBlockId>,
-        invariant_defs: &HashSet<IrId>,
+        loop_blocks: &BTreeSet<IrBlockId>,
+        def_block: &BTreeMap<IrId, IrBlockId>,
+        invariant_defs: &BTreeSet<IrId>,
     ) -> bool {
         // Instructions with side effects are not loop-invariant
         if inst.has_side_effects() {
@@ -959,7 +959,7 @@ impl LICMPass {
     fn ensure_preheader(
         cfg: &mut super::IrControlFlowGraph,
         header: IrBlockId,
-        loop_blocks: &HashSet<IrBlockId>,
+        loop_blocks: &BTreeSet<IrBlockId>,
     ) -> IrBlockId {
         let header_block = cfg.get_block(header).unwrap();
 
@@ -1059,7 +1059,7 @@ impl OptimizationPass for LICMPass {
             }
 
             // Build definition site map: register -> block where it's defined
-            let mut def_block: HashMap<IrId, IrBlockId> = HashMap::new();
+            let mut def_block: BTreeMap<IrId, IrBlockId> = BTreeMap::new();
             for (&block_id, block) in &function.cfg.blocks {
                 for phi in &block.phi_nodes {
                     def_block.insert(phi.dest, block_id);
@@ -1073,7 +1073,7 @@ impl OptimizationPass for LICMPass {
 
             // Process loops from innermost to outermost
             for loop_data in loop_info.loops_innermost_first() {
-                let mut invariant_defs: HashSet<IrId> = HashSet::new();
+                let mut invariant_defs: BTreeSet<IrId> = BTreeSet::new();
                 let mut to_hoist: Vec<(IrBlockId, usize, IrInstruction)> = Vec::new();
 
                 // Iterate until no more invariants found
@@ -1155,7 +1155,7 @@ impl OptimizationPass for LICMPass {
                     Self::ensure_preheader(&mut function.cfg, loop_data.header, &loop_data.blocks);
 
                 // Collect ALL indices to remove (regular hoists + alloc hoists + free removals)
-                let mut indices_to_remove: HashMap<IrBlockId, Vec<usize>> = HashMap::new();
+                let mut indices_to_remove: BTreeMap<IrBlockId, Vec<usize>> = BTreeMap::new();
 
                 // Sort hoisted instructions by original position to maintain order
                 to_hoist.sort_by_key(|(block_id, idx, _)| (block_id.as_u32(), *idx));
@@ -1211,7 +1211,7 @@ impl OptimizationPass for LICMPass {
                 // Sink Free instructions to after the loop exits
                 if !free_insts_to_sink.is_empty() {
                     // Find exit targets: successors of exit blocks that are outside the loop
-                    let mut exit_targets: HashSet<IrBlockId> = HashSet::new();
+                    let mut exit_targets: BTreeSet<IrBlockId> = BTreeSet::new();
                     for &exit_block in &loop_data.exit_blocks {
                         if let Some(block) = function.cfg.get_block(exit_block) {
                             for succ in block.successors() {
@@ -1328,7 +1328,7 @@ impl OptimizationPass for CSEPass {
         for function in module.functions.values_mut() {
             // Local CSE within each block
             for block in function.cfg.blocks.values_mut() {
-                let mut available: HashMap<String, IrId> = HashMap::new();
+                let mut available: BTreeMap<String, IrId> = BTreeMap::new();
                 // Use BTreeMap for deterministic iteration order
                 let mut replacements: BTreeMap<IrId, IrId> = BTreeMap::new();
 
@@ -1373,7 +1373,7 @@ impl OptimizationPass for CSEPass {
 ///
 /// Within each function, if the same global is loaded multiple times and never
 /// stored to, replace all loads after the first with the cached value.
-/// This eliminates expensive runtime HashMap lookups (rayzor_global_load) in
+/// This eliminates expensive runtime BTreeMap lookups (rayzor_global_load) in
 /// hot loops that repeatedly access static class fields.
 pub struct GlobalLoadCachingPass;
 
@@ -1395,7 +1395,7 @@ impl OptimizationPass for GlobalLoadCachingPass {
 
         for function in module.functions.values_mut() {
             // Find all globals that are stored to in this function
-            let mut stored_globals: HashSet<IrGlobalId> = HashSet::new();
+            let mut stored_globals: BTreeSet<IrGlobalId> = BTreeSet::new();
             for block in function.cfg.blocks.values() {
                 for inst in &block.instructions {
                     if let IrInstruction::StoreGlobal { global_id, .. } = inst {
@@ -1408,7 +1408,7 @@ impl OptimizationPass for GlobalLoadCachingPass {
             let domtree = DominatorTree::compute(function);
 
             // Map: global_id -> Vec<(block_id, dest_id)> for read-only globals
-            let mut global_loads: HashMap<IrGlobalId, Vec<(IrBlockId, IrId)>> = HashMap::new();
+            let mut global_loads: BTreeMap<IrGlobalId, Vec<(IrBlockId, IrId)>> = BTreeMap::new();
             for (&block_id, block) in &function.cfg.blocks {
                 for inst in &block.instructions {
                     if let IrInstruction::LoadGlobal {
@@ -1426,9 +1426,9 @@ impl OptimizationPass for GlobalLoadCachingPass {
             }
 
             // Build a map of where each IrId is used (block_id -> set of used IrIds)
-            let mut uses_in_block: HashMap<IrBlockId, HashSet<IrId>> = HashMap::new();
+            let mut uses_in_block: BTreeMap<IrBlockId, BTreeSet<IrId>> = BTreeMap::new();
             for (&block_id, block) in &function.cfg.blocks {
-                let mut used = HashSet::new();
+                let mut used = BTreeSet::new();
                 for inst in &block.instructions {
                     inst.collect_uses(&mut used);
                 }
@@ -1512,7 +1512,7 @@ impl OptimizationPass for GlobalLoadCachingPass {
             }
 
             // Apply replacements
-            let dead_dests: HashSet<IrId> = all_replacements.keys().copied().collect();
+            let dead_dests: BTreeSet<IrId> = all_replacements.keys().copied().collect();
 
             for block in function.cfg.blocks.values_mut() {
                 for inst in &mut block.instructions {
@@ -1562,7 +1562,7 @@ impl OptimizationPass for GVNPass {
 
         // Pre-collect function IDs that involve exception handling (setjmp calls).
         // We need this before the mutable borrow loop.
-        let exception_func_ids: HashSet<IrFunctionId> = module
+        let exception_func_ids: BTreeSet<IrFunctionId> = module
             .functions
             .iter()
             .filter(|(_, f)| {
@@ -1593,7 +1593,7 @@ impl OptimizationPass for GVNPass {
             // Each child gets a CLONE of its parent's map so siblings
             // don't share values — only dominated blocks inherit.
             let entry = function.entry_block();
-            let mut stack: Vec<(IrBlockId, HashMap<String, IrId>)> = vec![(entry, HashMap::new())];
+            let mut stack: Vec<(IrBlockId, BTreeMap<String, IrId>)> = vec![(entry, BTreeMap::new())];
 
             while let Some((block_id, mut local_values)) = stack.pop() {
                 if let Some(block) = function.cfg.get_block(block_id) {
@@ -1865,7 +1865,7 @@ impl PassManager {
                 manager.add_pass(ConstantFoldingPass::new());
                 manager.add_pass(CopyPropagationPass::new());
                 // GlobalLoadCachingPass: caches repeated global loads within functions
-                // Provides ~1.67x speedup on nbody by eliminating redundant HashMap lookups
+                // Provides ~1.67x speedup on nbody by eliminating redundant BTreeMap lookups
                 manager.add_pass(GlobalLoadCachingPass::new());
                 // BCE: eliminate redundant bounds checks in for-in loops
                 manager

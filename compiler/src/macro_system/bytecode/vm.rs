@@ -8,7 +8,7 @@ use super::super::value::{MacroFunction, MacroParam, MacroValue};
 use super::chunk::Chunk;
 use super::opcode::{Op, Reader};
 use parser::Span;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Compiled class metadata for VM dispatch.
@@ -17,9 +17,9 @@ pub struct CompiledClassInfo {
     /// Constructor chunk (slot 0 = this, returns this).
     pub constructor: Option<Arc<Chunk>>,
     /// Instance methods: name → chunk (slot 0 = this).
-    pub instance_methods: HashMap<String, Arc<Chunk>>,
+    pub instance_methods: BTreeMap<String, Arc<Chunk>>,
     /// Static methods: name → chunk.
-    pub static_methods: HashMap<String, Arc<Chunk>>,
+    pub static_methods: BTreeMap<String, Arc<Chunk>>,
     /// Instance variable names and their default values.
     pub instance_vars: Vec<(String, MacroValue)>,
 }
@@ -72,7 +72,7 @@ pub struct MacroVm {
     /// Trace output (from trace() calls).
     pub trace_output: Vec<String>,
     /// Compiled class data for constructor/method dispatch.
-    class_chunks: HashMap<String, CompiledClassInfo>,
+    class_chunks: BTreeMap<String, CompiledClassInfo>,
 }
 
 impl MacroVm {
@@ -81,12 +81,12 @@ impl MacroVm {
             stack: Vec::with_capacity(256),
             frames: Vec::with_capacity(16),
             trace_output: Vec::new(),
-            class_chunks: HashMap::new(),
+            class_chunks: BTreeMap::new(),
         }
     }
 
     /// Set compiled class data for class-aware dispatch.
-    pub fn set_class_chunks(&mut self, chunks: HashMap<String, CompiledClassInfo>) {
+    pub fn set_class_chunks(&mut self, chunks: BTreeMap<String, CompiledClassInfo>) {
         self.class_chunks = chunks;
     }
 
@@ -558,7 +558,7 @@ impl MacroVm {
                 }
                 Op::MakeObject => {
                     let count = self.read_u16(frame_idx);
-                    let mut map = HashMap::new();
+                    let mut map = BTreeMap::new();
                     // Stack has N pairs of (name_string, value)
                     let start = self.stack.len() - (count as usize * 2);
                     let items: Vec<MacroValue> = self.stack.drain(start..).collect();
@@ -571,7 +571,7 @@ impl MacroVm {
                 }
                 Op::MakeMap => {
                     let count = self.read_u16(frame_idx);
-                    let mut map = HashMap::new();
+                    let mut map = BTreeMap::new();
                     let start = self.stack.len() - (count as usize * 2);
                     let items: Vec<MacroValue> = self.stack.drain(start..).collect();
                     for pair in items.chunks(2) {
@@ -605,7 +605,7 @@ impl MacroVm {
 
                     // Capture current environment for the closure
                     let bp = self.frames[frame_idx].bp;
-                    let mut captures = HashMap::new();
+                    let mut captures = BTreeMap::new();
                     for (slot, name) in &self.frames[frame_idx].chunk.local_names {
                         let idx = bp + *slot as usize;
                         if idx < self.stack.len() {
@@ -638,7 +638,7 @@ impl MacroVm {
                     // Check if we have compiled class data
                     if let Some(class_info) = self.class_chunks.get(&class_name) {
                         // Create object with __type__ and instance var defaults
-                        let mut map = HashMap::new();
+                        let mut map = BTreeMap::new();
                         map.insert(
                             "__type__".to_string(),
                             MacroValue::String(Arc::from(class_name.as_str())),
@@ -680,7 +680,7 @@ impl MacroVm {
                         }
                     } else {
                         // Fallback: generic object construction
-                        let mut map = HashMap::new();
+                        let mut map = BTreeMap::new();
                         map.insert(
                             "__type__".to_string(),
                             MacroValue::String(Arc::from(class_name.as_str())),

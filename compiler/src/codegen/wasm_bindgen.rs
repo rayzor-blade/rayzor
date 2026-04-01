@@ -80,8 +80,8 @@ pub fn collect_exported_classes(
     let mut class_map: BTreeMap<String, ExportedClass> = BTreeMap::new();
 
     // Also collect all exported class names so we know which return types to wrap
-    let mut exported_class_names: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut exported_class_names: std::collections::BTreeSet<String> =
+        std::collections::BTreeSet::new();
 
     // First pass: discover all exported class names
     for module in modules {

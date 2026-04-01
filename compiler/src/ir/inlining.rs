@@ -11,7 +11,7 @@ use super::{
     IrBasicBlock, IrBlockId, IrFunction, IrFunctionId, IrId, IrInstruction, IrModule, IrPhiNode,
     IrTerminator, IrType, IrValue,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// A call site in the program.
 #[derive(Debug, Clone)]
@@ -266,7 +266,7 @@ impl InliningPass {
     ) -> Result<(), String> {
         // Extract type_args from the CallDirect instruction at the call site.
         // Must do this before borrowing module mutably for caller.
-        let type_sub_map: HashMap<String, IrType> = {
+        let type_sub_map: BTreeMap<String, IrType> = {
             let caller_func = module
                 .functions
                 .get(&call_site.caller)
@@ -276,7 +276,7 @@ impl InliningPass {
                 .get(&call_site.callee)
                 .ok_or_else(|| format!("Callee function {:?} not found", call_site.callee))?;
 
-            let mut sub_map = HashMap::new();
+            let mut sub_map = BTreeMap::new();
 
             // Try explicit type_args from CallDirect first
             let block = caller_func
@@ -778,7 +778,7 @@ impl OptimizationPass for InliningPass {
 }
 
 /// Substitute TypeVar names with concrete types using the provided map.
-fn substitute_type_with_map(ty: &IrType, sub_map: &HashMap<String, IrType>) -> IrType {
+fn substitute_type_with_map(ty: &IrType, sub_map: &BTreeMap<String, IrType>) -> IrType {
     if sub_map.is_empty() {
         return ty.clone();
     }
@@ -814,7 +814,7 @@ fn substitute_type_with_map(ty: &IrType, sub_map: &HashMap<String, IrType>) -> I
 }
 
 /// Apply type substitution to type-carrying fields within an instruction.
-fn substitute_instruction_types(inst: &mut IrInstruction, sub_map: &HashMap<String, IrType>) {
+fn substitute_instruction_types(inst: &mut IrInstruction, sub_map: &BTreeMap<String, IrType>) {
     match inst {
         IrInstruction::Alloc { ty, .. } => *ty = substitute_type_with_map(ty, sub_map),
         IrInstruction::Load { ty, .. } => *ty = substitute_type_with_map(ty, sub_map),

@@ -20,7 +20,7 @@ use crate::tast::{
 };
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 #[cfg(test)]
 mod tests {

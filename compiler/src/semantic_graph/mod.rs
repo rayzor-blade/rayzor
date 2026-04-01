@@ -165,7 +165,7 @@ impl SemanticGraphs {
         }
 
         // Validate ownership graph variables exist in DFG
-        let mut all_original_symbols = std::collections::HashSet::new();
+        let mut all_original_symbols = std::collections::BTreeSet::new();
         for dfg in self.data_flow.values() {
             for ssa_var in dfg.ssa_variables.values() {
                 all_original_symbols.insert(ssa_var.original_symbol);

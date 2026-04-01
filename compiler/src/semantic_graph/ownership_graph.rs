@@ -16,7 +16,7 @@ use super::{SourceLocation, SourceLocationTracker, SourceLocationTracking, Symbo
 use crate::semantic_graph::analysis::lifetime_analyzer::LifetimeConstraint;
 use crate::tast::collections::{new_id_map, new_id_set, IdMap, IdSet};
 use crate::tast::{BlockId, BorrowEdgeId, DataFlowNodeId, LifetimeId, MoveEdgeId, ScopeId, TypeId};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 /// Complete ownership and lifetime tracking graph
@@ -44,7 +44,7 @@ pub struct OwnershipGraph {
     pub location_tracker: SourceLocationTracker,
 
     /// Use sites for each variable (for use-after-move detection)
-    pub use_sites: HashMap<SymbolId, Vec<SourceLocation>>,
+    pub use_sites: BTreeMap<SymbolId, Vec<SourceLocation>>,
 
     /// Next available IDs for allocation
     next_lifetime_id: u32,
@@ -274,7 +274,7 @@ impl OwnershipGraph {
             lifetime_constraints: Vec::new(),
             statistics: OwnershipStatistics::default(),
             location_tracker: SourceLocationTracker::new(),
-            use_sites: HashMap::new(),
+            use_sites: BTreeMap::new(),
             next_lifetime_id: 2, // Start after global and static
             next_borrow_edge_id: 1,
             next_move_edge_id: 1,

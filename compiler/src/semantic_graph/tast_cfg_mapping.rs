@@ -7,26 +7,26 @@
 use super::cfg::ControlFlowGraph;
 use crate::tast::node::{TypedExpression, TypedFunction, TypedStatement};
 use crate::tast::{BlockId, SourceLocation, SymbolId};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Maps TAST statements to CFG blocks
 #[derive(Debug, Clone)]
 pub struct TastCfgMapping {
     /// Map from statement locations to CFG blocks
-    statement_to_block: HashMap<StatementLocation, BlockId>,
+    statement_to_block: BTreeMap<StatementLocation, BlockId>,
 
     /// Map from CFG blocks to statement ranges
-    block_to_statements: HashMap<BlockId, Vec<StatementLocation>>,
+    block_to_statements: BTreeMap<BlockId, Vec<StatementLocation>>,
 
     /// Source location mapping for precise error reporting
-    statement_locations: HashMap<StatementLocation, SourceLocation>,
+    statement_locations: BTreeMap<StatementLocation, SourceLocation>,
 
     /// Statement order within each block
-    statement_order: HashMap<BlockId, Vec<StatementLocation>>,
+    statement_order: BTreeMap<BlockId, Vec<StatementLocation>>,
 }
 
 /// Location of a statement in the TAST
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct StatementLocation {
     /// Index in the function body
     pub statement_index: usize,
@@ -42,7 +42,7 @@ pub struct StatementLocation {
 }
 
 /// Context for navigating branches in control flow statements
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BranchContext {
     /// Not in a branch
     None,
@@ -120,10 +120,10 @@ impl TastCfgMapping {
 
         let mut mapper = TastCfgMapper {
             mapping: TastCfgMapping {
-                statement_to_block: HashMap::new(),
-                block_to_statements: HashMap::new(),
-                statement_locations: HashMap::new(),
-                statement_order: HashMap::new(),
+                statement_to_block: BTreeMap::new(),
+                block_to_statements: BTreeMap::new(),
+                statement_locations: BTreeMap::new(),
+                statement_order: BTreeMap::new(),
             },
             warnings: Vec::new(),
             current_block: cfg.entry_block,

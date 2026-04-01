@@ -10,14 +10,14 @@
 use super::cfg::*;
 use super::{BlockId, GraphValidationError};
 use crate::tast::{SourceLocation, SymbolId, TypeId};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Comprehensive CFG validator with detailed analysis
 pub struct CfgValidator<'a> {
     cfg: &'a ControlFlowGraph,
-    visited: HashSet<BlockId>,
-    reachable: HashSet<BlockId>,
-    dominance_info: HashMap<BlockId, DominanceInfo>,
+    visited: BTreeSet<BlockId>,
+    reachable: BTreeSet<BlockId>,
+    dominance_info: BTreeMap<BlockId, DominanceInfo>,
     loop_info: LoopAnalysisInfo,
 }
 
@@ -27,7 +27,7 @@ pub struct LoopAnalysisInfo {
     /// Natural loops found in the CFG
     pub natural_loops: Vec<NaturalLoop>,
     /// Loop headers (blocks with back edges)
-    pub loop_headers: HashSet<BlockId>,
+    pub loop_headers: BTreeSet<BlockId>,
     /// Back edges in the CFG
     pub back_edges: Vec<(BlockId, BlockId)>,
 }
@@ -38,7 +38,7 @@ pub struct NaturalLoop {
     /// Header block of the loop
     pub header: BlockId,
     /// All blocks in the loop body
-    pub body: HashSet<BlockId>,
+    pub body: BTreeSet<BlockId>,
     /// Nesting depth
     pub depth: u32,
     /// Exit blocks (blocks that leave the loop)
@@ -51,9 +51,9 @@ pub struct DominanceInfo {
     /// Immediate dominator
     pub immediate_dominator: Option<BlockId>,
     /// Blocks that this block dominates
-    pub dominates: HashSet<BlockId>,
+    pub dominates: BTreeSet<BlockId>,
     /// Dominance frontier
-    pub dominance_frontier: HashSet<BlockId>,
+    pub dominance_frontier: BTreeSet<BlockId>,
 }
 
 /// Detailed validation results
@@ -145,9 +145,9 @@ impl<'a> CfgValidator<'a> {
     pub fn new(cfg: &'a ControlFlowGraph) -> Self {
         Self {
             cfg,
-            visited: HashSet::new(),
-            reachable: HashSet::new(),
-            dominance_info: HashMap::new(),
+            visited: BTreeSet::new(),
+            reachable: BTreeSet::new(),
+            dominance_info: BTreeMap::new(),
             loop_info: LoopAnalysisInfo::default(),
         }
     }
@@ -367,8 +367,8 @@ impl<'a> CfgValidator<'a> {
                 } else {
                     Some(self.cfg.entry_block) // Simplified
                 },
-                dominates: HashSet::new(),
-                dominance_frontier: HashSet::new(),
+                dominates: BTreeSet::new(),
+                dominance_frontier: BTreeSet::new(),
             };
             self.dominance_info.insert(block_id, dominance);
         }
@@ -407,8 +407,8 @@ impl<'a> CfgValidator<'a> {
     }
 
     /// Compute natural loop body
-    fn compute_natural_loop(&self, header: BlockId, tail: BlockId) -> HashSet<BlockId> {
-        let mut loop_body = HashSet::new();
+    fn compute_natural_loop(&self, header: BlockId, tail: BlockId) -> BTreeSet<BlockId> {
+        let mut loop_body = BTreeSet::new();
         let mut worklist = VecDeque::new();
 
         loop_body.insert(header);
@@ -609,13 +609,13 @@ impl<'a> CfgValidator<'a> {
     /// Compute maximum path length from entry
     fn compute_max_path_length(&self) -> u32 {
         let mut max_length = 0;
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
 
         fn dfs(
             cfg: &ControlFlowGraph,
             block_id: BlockId,
             current_length: u32,
-            visited: &mut HashSet<BlockId>,
+            visited: &mut BTreeSet<BlockId>,
             max_length: &mut u32,
         ) {
             if visited.contains(&block_id) {

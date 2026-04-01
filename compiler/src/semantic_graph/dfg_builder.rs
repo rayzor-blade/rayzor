@@ -23,7 +23,7 @@ use super::dominance::DominanceTree;
 use super::{GraphConstructionError, GraphConstructionOptions};
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Instant;
 
 impl TypeId {
@@ -54,7 +54,7 @@ pub struct DfgBuilder {
     loop_scope_tracker: LoopScopeTracker,
 
     /// Pending Phi updates for loop back-edges
-    phi_pending_updates: HashMap<DataFlowNodeId, Vec<PhiIncoming>>,
+    phi_pending_updates: BTreeMap<DataFlowNodeId, Vec<PhiIncoming>>,
 
     /// Statistics and diagnostics
     stats: DfgBuilderStats,
@@ -64,35 +64,35 @@ pub struct DfgBuilder {
 #[derive(Debug)]
 pub struct SsaConstructionState {
     /// Variable stacks for renaming (symbol -> stack of SSA variables)
-    variable_stacks: HashMap<SymbolId, Vec<SsaVariableId>>,
+    variable_stacks: BTreeMap<SymbolId, Vec<SsaVariableId>>,
 
     /// Blocks where each original variable is defined
-    def_blocks: HashMap<SymbolId, HashSet<BlockId>>,
+    def_blocks: BTreeMap<SymbolId, BTreeSet<BlockId>>,
 
     /// Phi nodes placed in each block for each variable
-    phi_placed: HashMap<(BlockId, SymbolId), DataFlowNodeId>,
+    phi_placed: BTreeMap<(BlockId, SymbolId), DataFlowNodeId>,
 
     /// Incomplete phi nodes awaiting operand completion
-    incomplete_phis: HashMap<DataFlowNodeId, IncompletePhiInfo>,
+    incomplete_phis: BTreeMap<DataFlowNodeId, IncompletePhiInfo>,
 
     /// Current block during construction
     current_block: BlockId,
 
     /// Variables at block exits for correct phi operand computation
-    block_exit_variables: HashMap<(BlockId, SymbolId), SsaVariableId>,
+    block_exit_variables: BTreeMap<(BlockId, SymbolId), SsaVariableId>,
 }
 
 /// **Loop Scope Tracker - Minimal scope awareness for Phi placement**
 #[derive(Debug, Default)]
 struct LoopScopeTracker {
     /// Variables that may need Phi nodes
-    potentially_modified: HashSet<SymbolId>,
+    potentially_modified: BTreeSet<SymbolId>,
 
     /// Current loop nesting level
     loop_depth: usize,
 
     /// Variables actually modified at each depth
-    modified_per_depth: Vec<HashSet<SymbolId>>,
+    modified_per_depth: Vec<BTreeSet<SymbolId>>,
 
     /// Loop header blocks at each depth (for Phi placement)
     loop_headers: Vec<BlockId>,
@@ -105,11 +105,11 @@ impl LoopScopeTracker {
 
     fn enter_loop(&mut self, header_block: BlockId) {
         self.loop_depth += 1;
-        self.modified_per_depth.push(HashSet::new());
+        self.modified_per_depth.push(BTreeSet::new());
         self.loop_headers.push(header_block);
     }
 
-    fn exit_loop(&mut self) -> HashSet<SymbolId> {
+    fn exit_loop(&mut self) -> BTreeSet<SymbolId> {
         self.loop_depth = self.loop_depth.saturating_sub(1);
         self.loop_headers.pop();
         self.modified_per_depth.pop().unwrap_or_default()
@@ -163,7 +163,7 @@ impl DfgBuilder {
             next_node_id: 2, // Start from 2 since entry is 1
             next_ssa_var_id: 1,
             loop_scope_tracker: LoopScopeTracker::new(),
-            phi_pending_updates: HashMap::new(),
+            phi_pending_updates: BTreeMap::new(),
             stats: DfgBuilderStats::default(),
         }
     }
@@ -517,7 +517,7 @@ impl DfgBuilder {
 
             // Use worklist algorithm to place phi nodes
             let mut worklist: VecDeque<BlockId> = def_blocks.iter().copied().collect();
-            let mut phi_placed_for_var = HashSet::new();
+            let mut phi_placed_for_var = BTreeSet::new();
 
             while let Some(block) = worklist.pop_front() {
                 // Get dominance frontier of this block
@@ -641,8 +641,8 @@ impl DfgBuilder {
         function: &'a TypedFunction,
         variable: SymbolId,
         mapping: &TastCfgMapping,
-    ) -> HashSet<BlockId> {
-        let mut def_blocks = HashSet::new();
+    ) -> BTreeSet<BlockId> {
+        let mut def_blocks = BTreeSet::new();
 
         // Parameters are defined in entry block
         if function.parameters.iter().any(|p| p.symbol_id == variable) {
@@ -705,11 +705,11 @@ impl DfgBuilder {
         &mut self,
         cfg: &ControlFlowGraph,
         variable: SymbolId,
-        def_blocks: HashSet<BlockId>,
+        def_blocks: BTreeSet<BlockId>,
         dominance_tree: &DominanceTree,
     ) -> Result<(), GraphConstructionError> {
         let mut worklist: VecDeque<BlockId> = def_blocks.iter().copied().collect();
-        let mut processed = HashSet::new();
+        let mut processed = BTreeSet::new();
 
         while let Some(block) = worklist.pop_front() {
             if processed.contains(&block) {
@@ -2430,7 +2430,7 @@ impl DfgBuilder {
                 metadata: NodeMetadata {
                     has_side_effects: true,
                     // annotations: {
-                    //     let mut annotations = HashMap::new();
+                    //     let mut annotations = BTreeMap::new();
                     //     annotations.insert("field_name".to_string(), field.name.clone());
                     //     annotations
                     // },
@@ -2512,7 +2512,7 @@ impl DfgBuilder {
 
         // 6. Create a Load node that represents loading the initialized closure
         // with metadata indicating it's a closure and its capture count
-        let mut annotations = HashMap::new();
+        let mut annotations = BTreeMap::new();
         let capture_count = captured_vars.len();
         annotations.insert("capture_count".to_string(), capture_count.to_string());
         if capture_count > 0 {
@@ -2829,7 +2829,7 @@ impl DfgBuilder {
         self.loop_scope_tracker.enter_loop(loop_header);
 
         // 3. Create Phi nodes for each modified variable
-        let mut loop_phi_nodes = HashMap::new();
+        let mut loop_phi_nodes = BTreeMap::new();
         for var_id in &modified_vars {
             if let Ok(entry_value) = self.get_current_ssa_variable(*var_id) {
                 let phi_node_id =
@@ -2970,8 +2970,8 @@ impl DfgBuilder {
     fn find_modified_variables(
         &self,
         expr: &TypedExpression,
-    ) -> Result<HashSet<SymbolId>, GraphConstructionError> {
-        let mut modified = HashSet::new();
+    ) -> Result<BTreeSet<SymbolId>, GraphConstructionError> {
+        let mut modified = BTreeSet::new();
         self.collect_modified_variables_recursive(expr, &mut modified)?;
         Ok(modified)
     }
@@ -2980,7 +2980,7 @@ impl DfgBuilder {
     fn collect_modified_variables_recursive(
         &self,
         expr: &TypedExpression,
-        modified: &mut HashSet<SymbolId>,
+        modified: &mut BTreeSet<SymbolId>,
     ) -> Result<(), GraphConstructionError> {
         match &expr.kind {
             TypedExpressionKind::BinaryOp {
@@ -3047,7 +3047,7 @@ impl DfgBuilder {
     fn collect_modified_variables_from_statement(
         &self,
         stmt: &TypedStatement,
-        modified: &mut HashSet<SymbolId>,
+        modified: &mut BTreeSet<SymbolId>,
     ) -> Result<(), GraphConstructionError> {
         match stmt {
             TypedStatement::VarDeclaration { symbol_id, .. } => {
@@ -3347,12 +3347,12 @@ impl DfgBuilder {
     }
 
     /// **Save variable stacks**
-    fn save_variable_stacks(&self) -> HashMap<SymbolId, Vec<SsaVariableId>> {
+    fn save_variable_stacks(&self) -> BTreeMap<SymbolId, Vec<SsaVariableId>> {
         self.ssa_state.variable_stacks.clone()
     }
 
     /// **Restore variable stacks**
-    fn restore_variable_stacks(&mut self, saved_stacks: HashMap<SymbolId, Vec<SsaVariableId>>) {
+    fn restore_variable_stacks(&mut self, saved_stacks: BTreeMap<SymbolId, Vec<SsaVariableId>>) {
         self.ssa_state.variable_stacks = saved_stacks;
     }
 
@@ -3636,7 +3636,7 @@ impl DfgBuilder {
                 metadata: NodeMetadata {
                     has_side_effects: true,
                     annotations: {
-                        let mut annotations = HashMap::new();
+                        let mut annotations = BTreeMap::new();
                         annotations.insert("capture_index".to_string(), index.to_string());
                         annotations.insert(
                             "captured_symbol".to_string(),
@@ -3728,12 +3728,12 @@ impl DfgBuilder {
 impl SsaConstructionState {
     fn new() -> Self {
         Self {
-            variable_stacks: HashMap::new(),
-            def_blocks: HashMap::new(),
-            phi_placed: HashMap::new(),
-            incomplete_phis: HashMap::new(),
+            variable_stacks: BTreeMap::new(),
+            def_blocks: BTreeMap::new(),
+            phi_placed: BTreeMap::new(),
+            incomplete_phis: BTreeMap::new(),
             current_block: BlockId::invalid(),
-            block_exit_variables: HashMap::new(),
+            block_exit_variables: BTreeMap::new(),
         }
     }
 }

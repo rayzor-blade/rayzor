@@ -13,7 +13,7 @@ use super::optimization::{OptimizationPass, OptimizationResult};
 use super::{
     IrBlockId, IrFunction, IrFunctionId, IrId, IrInstruction, IrModule, IrPhiNode, IrType, IrValue,
 };
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub struct ScalarReplacementPass;
 
@@ -85,8 +85,8 @@ impl OptimizationPass for ScalarReplacementPass {
         }
 
         // Identify malloc and free function IDs
-        let mut malloc_ids = HashSet::new();
-        let mut free_ids = HashSet::new();
+        let mut malloc_ids = BTreeSet::new();
+        let mut free_ids = BTreeSet::new();
         for (&fid, func) in &module.functions {
             if func.name == "malloc" {
                 malloc_ids.insert(fid);
@@ -140,8 +140,8 @@ impl OptimizationPass for ScalarReplacementPass {
 
 fn run_sra_on_function(
     function: &mut IrFunction,
-    malloc_ids: &HashSet<IrFunctionId>,
-    free_ids: &HashSet<IrFunctionId>,
+    malloc_ids: &BTreeSet<IrFunctionId>,
+    free_ids: &BTreeSet<IrFunctionId>,
 ) -> OptimizationResult {
     let mut result = OptimizationResult::unchanged();
 
@@ -173,8 +173,8 @@ fn run_sra_on_function(
 /// flow into a phi node. Replaces pointer phis with scalar phis for each field.
 fn run_phi_sra_on_function(
     function: &mut IrFunction,
-    malloc_ids: &HashSet<IrFunctionId>,
-    free_ids: &HashSet<IrFunctionId>,
+    malloc_ids: &BTreeSet<IrFunctionId>,
+    free_ids: &BTreeSet<IrFunctionId>,
 ) -> OptimizationResult {
     let mut result = OptimizationResult::unchanged();
 
@@ -205,7 +205,7 @@ fn run_phi_sra_on_function(
 /// Returns the original IrId (which may be the same as input if not a copy).
 fn trace_copy_chain(id: IrId, cfg: &super::blocks::IrControlFlowGraph) -> IrId {
     let mut current = id;
-    let mut visited = HashSet::new();
+    let mut visited = BTreeSet::new();
     let sorted = sorted_blocks(cfg);
 
     while visited.insert(current) {
@@ -243,15 +243,15 @@ fn sorted_blocks(
 /// Find phi nodes that merge allocations and can be flattened.
 fn find_phi_sra_candidates(
     cfg: &super::blocks::IrControlFlowGraph,
-    constants: &HashMap<IrId, i64>,
-    malloc_ids: &HashSet<IrFunctionId>,
-    free_ids: &HashSet<IrFunctionId>,
+    constants: &BTreeMap<IrId, i64>,
+    malloc_ids: &BTreeSet<IrFunctionId>,
+    free_ids: &BTreeSet<IrFunctionId>,
 ) -> Vec<PhiSraCandidate> {
     let mut candidates = Vec::new();
     let sorted = sorted_blocks(cfg);
 
     // Build map of IrId -> (block_id, inst_idx) for all malloc calls
-    let mut malloc_locations: HashMap<IrId, (IrBlockId, usize)> = HashMap::new();
+    let mut malloc_locations: BTreeMap<IrId, (IrBlockId, usize)> = BTreeMap::new();
     for &(block_id, block) in &sorted {
         for (idx, inst) in block.instructions.iter().enumerate() {
             if let IrInstruction::CallDirect {
@@ -334,10 +334,10 @@ fn try_build_phi_candidate(
     phi_block: IrBlockId,
     incoming_mallocs: &[(IrBlockId, IrId)],
     _has_back_edge: bool,
-    malloc_locations: &HashMap<IrId, (IrBlockId, usize)>,
+    malloc_locations: &BTreeMap<IrId, (IrBlockId, usize)>,
     cfg: &super::blocks::IrControlFlowGraph,
-    constants: &HashMap<IrId, i64>,
-    free_ids: &HashSet<IrFunctionId>,
+    constants: &BTreeMap<IrId, i64>,
+    free_ids: &BTreeSet<IrFunctionId>,
 ) -> Option<PhiSraCandidate> {
     // Build value type map for tracking types from Store instructions
     let value_types = build_value_type_map(cfg);
@@ -654,7 +654,7 @@ fn try_build_phi_candidate(
     // If intermediate blocks (between malloc and phi header) load from malloc GEPs
     // (e.g., rpad's pre-loop `add(s)` inlined body), those loads would become dangling.
     for (malloc_id, gep_map) in &malloc_gep_maps {
-        let malloc_geps: std::collections::HashSet<&IrId> = gep_map.keys().collect();
+        let malloc_geps: std::collections::BTreeSet<&IrId> = gep_map.keys().collect();
         for &(_, block) in &sorted {
             for inst in &block.instructions {
                 if let IrInstruction::Load { ptr, .. } = inst {
@@ -802,7 +802,7 @@ fn apply_phi_sra(function: &mut IrFunction, candidate: &PhiSraCandidate) -> usiz
     accessed_fields.dedup();
 
     // Allocate scalar phi registers for each accessed field (in sorted order for determinism)
-    let mut field_phi_regs: HashMap<usize, IrId> = HashMap::new();
+    let mut field_phi_regs: BTreeMap<usize, IrId> = BTreeMap::new();
     for field_idx in &accessed_fields {
         let id = IrId::new(function.next_reg_id);
         function.next_reg_id += 1;
@@ -828,7 +828,7 @@ fn apply_phi_sra(function: &mut IrFunction, candidate: &PhiSraCandidate) -> usiz
     // because loop bodies may modify fields (e.g., StringBuf.add updates field 1).
     // We identify loop body blocks by backward reachability from the back-edge block
     // to the phi block (excluding the phi block itself to avoid crossing the loop boundary).
-    let mut back_edge_values: HashMap<usize, IrId> = HashMap::new();
+    let mut back_edge_values: BTreeMap<usize, IrId> = BTreeMap::new();
     if let Some(back_edge_block) = back_edge_info {
         // Find loop body blocks: blocks reachable backward from back_edge_block
         // without crossing the phi block
@@ -921,7 +921,7 @@ fn apply_phi_sra(function: &mut IrFunction, candidate: &PhiSraCandidate) -> usiz
     // DCE will clean it up once all uses are replaced.
 
     // Track field loads to replace
-    let mut load_replacements: HashMap<IrId, IrId> = HashMap::new();
+    let mut load_replacements: BTreeMap<IrId, IrId> = BTreeMap::new();
     for (&gep_dest, &field_idx) in &candidate.phi_gep_map {
         if let Some(&scalar_reg) = field_phi_regs.get(&field_idx) {
             load_replacements.insert(gep_dest, scalar_reg);
@@ -942,7 +942,7 @@ fn apply_phi_sra(function: &mut IrFunction, candidate: &PhiSraCandidate) -> usiz
 
     // Expand dead_pointers to include all GEPs, Copies, Casts derived from mallocs
     // Also track field indices for GEPs so we can replace their loads
-    let mut gep_field_indices: HashMap<IrId, usize> = HashMap::new();
+    let mut gep_field_indices: BTreeMap<IrId, usize> = BTreeMap::new();
     let mut block_order: Vec<IrBlockId> = function.cfg.blocks.keys().copied().collect();
     block_order.sort_by_key(|id| id.0);
 
@@ -1226,8 +1226,8 @@ fn apply_phi_sra(function: &mut IrFunction, candidate: &PhiSraCandidate) -> usiz
 }
 
 /// Build a map of IrId → constant value from all Const instructions.
-fn build_constant_map(cfg: &super::blocks::IrControlFlowGraph) -> HashMap<IrId, i64> {
-    let mut constants = HashMap::new();
+fn build_constant_map(cfg: &super::blocks::IrControlFlowGraph) -> BTreeMap<IrId, i64> {
+    let mut constants = BTreeMap::new();
     let sorted = sorted_blocks(cfg);
     for &(_, block) in &sorted {
         for inst in &block.instructions {
@@ -1251,9 +1251,9 @@ fn build_constant_map(cfg: &super::blocks::IrControlFlowGraph) -> HashMap<IrId, 
 /// Find all SRA candidates across the entire function.
 fn find_candidates_in_function(
     cfg: &super::blocks::IrControlFlowGraph,
-    constants: &HashMap<IrId, i64>,
-    malloc_ids: &HashSet<IrFunctionId>,
-    free_ids: &HashSet<IrFunctionId>,
+    constants: &BTreeMap<IrId, i64>,
+    malloc_ids: &BTreeSet<IrFunctionId>,
+    free_ids: &BTreeSet<IrFunctionId>,
 ) -> Vec<SraCandidate> {
     let mut candidates = Vec::new();
     let sorted = sorted_blocks(cfg);
@@ -1291,8 +1291,8 @@ fn find_candidates_in_function(
 }
 
 /// Build a map of IrId -> IrType from instruction definitions.
-fn build_value_type_map(cfg: &super::blocks::IrControlFlowGraph) -> HashMap<IrId, IrType> {
-    let mut types = HashMap::new();
+fn build_value_type_map(cfg: &super::blocks::IrControlFlowGraph) -> BTreeMap<IrId, IrType> {
+    let mut types = BTreeMap::new();
     let sorted = sorted_blocks(cfg);
 
     for &(_, block) in &sorted {
@@ -1377,8 +1377,8 @@ fn try_build_candidate_function_wide(
     alloc_dest: IrId,
     alloc_location: (IrBlockId, usize),
     cfg: &super::blocks::IrControlFlowGraph,
-    constants: &HashMap<IrId, i64>,
-    free_ids: &HashSet<IrFunctionId>,
+    constants: &BTreeMap<IrId, i64>,
+    free_ids: &BTreeSet<IrFunctionId>,
 ) -> Option<SraCandidate> {
     // Build value type map for tracking types from Store instructions
     let value_types = build_value_type_map(cfg);
@@ -1614,7 +1614,7 @@ fn try_build_candidate_function_wide(
 }
 
 /// Resolve GEP indices to a single field index.
-fn resolve_gep_field_index(indices: &[IrId], constants: &HashMap<IrId, i64>) -> Option<usize> {
+fn resolve_gep_field_index(indices: &[IrId], constants: &BTreeMap<IrId, i64>) -> Option<usize> {
     match indices.len() {
         1 => {
             let idx = constants.get(&indices[0])?;
@@ -1719,7 +1719,7 @@ fn apply_sra(function: &mut IrFunction, candidate: &SraCandidate) -> usize {
     let mut eliminated = 0;
 
     // Collect all locations to remove, grouped by block
-    let mut to_remove: HashMap<IrBlockId, HashSet<usize>> = HashMap::new();
+    let mut to_remove: BTreeMap<IrBlockId, BTreeSet<usize>> = BTreeMap::new();
 
     // Mark alloc for removal
     to_remove
@@ -1744,7 +1744,7 @@ fn apply_sra(function: &mut IrFunction, candidate: &SraCandidate) -> usize {
     // First pass: find all stores to determine field values per block
     // We need to process in order so loads see the right field values.
     // Build a map of (block_id, inst_idx) → replacement instruction
-    let mut replacements: HashMap<(IrBlockId, usize), IrInstruction> = HashMap::new();
+    let mut replacements: BTreeMap<(IrBlockId, usize), IrInstruction> = BTreeMap::new();
 
     for &block_id in &block_order {
         let block = match function.cfg.blocks.get(&block_id) {
@@ -1845,7 +1845,7 @@ fn apply_sra(function: &mut IrFunction, candidate: &SraCandidate) -> usize {
 /// BFS block ordering from entry block.
 fn bfs_block_order(cfg: &super::blocks::IrControlFlowGraph) -> Vec<IrBlockId> {
     let mut order = Vec::new();
-    let mut visited = HashSet::new();
+    let mut visited = BTreeSet::new();
     let mut queue = std::collections::VecDeque::new();
 
     queue.push_back(cfg.entry_block);

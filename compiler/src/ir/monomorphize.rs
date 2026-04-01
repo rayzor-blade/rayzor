@@ -17,7 +17,7 @@
 //! - Rewrites CallDirect instructions that target generic functions
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::functions::{IrFunctionSignature, IrParameter};
 use super::modules::IrModule;
@@ -27,7 +27,7 @@ use super::{
 };
 
 /// Key for caching monomorphized function instances
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MonoKey {
     /// The original generic function ID
     pub generic_func: IrFunctionId,
@@ -114,10 +114,10 @@ pub struct MonomorphizationStats {
 /// The monomorphization engine
 pub struct Monomorphizer {
     /// Cache of generated specializations: MonoKey -> specialized function ID
-    instances: HashMap<MonoKey, IrFunctionId>,
+    instances: BTreeMap<MonoKey, IrFunctionId>,
 
     /// Mapping from type parameter names to concrete types (current substitution context)
-    substitution_map: HashMap<String, IrType>,
+    substitution_map: BTreeMap<String, IrType>,
 
     /// Next available function ID for new instantiations
     next_func_id: u32,
@@ -126,7 +126,7 @@ pub struct Monomorphizer {
     /// Needed for transitive monomorphization: when a specialized function calls
     /// another function that has type_param_tag_fixups, we propagate the same
     /// substitution_map to create a specialized version of the callee.
-    instantiation_sub_maps: HashMap<IrFunctionId, HashMap<String, IrType>>,
+    instantiation_sub_maps: BTreeMap<IrFunctionId, BTreeMap<String, IrType>>,
 
     /// Newly created functions from transitive monomorphization, to be inserted
     /// into the module after `instantiate_with_sub_map` returns (avoids borrow issues).
@@ -139,10 +139,10 @@ pub struct Monomorphizer {
 impl Monomorphizer {
     pub fn new() -> Self {
         Self {
-            instances: HashMap::new(),
-            substitution_map: HashMap::new(),
+            instances: BTreeMap::new(),
+            substitution_map: BTreeMap::new(),
             next_func_id: 10000, // Start high to avoid conflicts
-            instantiation_sub_maps: HashMap::new(),
+            instantiation_sub_maps: BTreeMap::new(),
             pending_transitive_funcs: Vec::new(),
             stats: MonomorphizationStats::default(),
         }
@@ -206,8 +206,8 @@ impl Monomorphizer {
         &self,
         module: &IrModule,
         generic_funcs: &[IrFunctionId],
-    ) -> HashMap<MonoKey, Vec<CallSiteLocation>> {
-        let mut requests: HashMap<MonoKey, Vec<CallSiteLocation>> = HashMap::new();
+    ) -> BTreeMap<MonoKey, Vec<CallSiteLocation>> {
+        let mut requests: BTreeMap<MonoKey, Vec<CallSiteLocation>> = BTreeMap::new();
 
         for (func_id, function) in &module.functions {
             for (block_id, block) in &function.cfg.blocks {
@@ -327,7 +327,7 @@ impl Monomorphizer {
         }
 
         // Substitute types in register_types
-        let mut new_register_types = HashMap::new();
+        let mut new_register_types = BTreeMap::new();
         for (id, ty) in &specialized.register_types {
             new_register_types.insert(*id, self.substitute_type(ty));
         }
@@ -533,7 +533,7 @@ impl Monomorphizer {
     /// create a specialized version of the callee using the caller's substitution map.
     fn propagate_transitive_fixups(&mut self, module: &mut IrModule) {
         // Collect IDs of functions with direct type_param_tag_fixups
-        let direct_fixups: HashSet<IrFunctionId> = module
+        let direct_fixups: BTreeSet<IrFunctionId> = module
             .functions
             .iter()
             .filter(|(_, f)| !f.type_param_tag_fixups.is_empty())
@@ -578,7 +578,7 @@ impl Monomorphizer {
 
         // Worklist: start with all initially monomorphized functions
         let mut worklist: Vec<IrFunctionId> = self.instantiation_sub_maps.keys().copied().collect();
-        let mut processed: HashSet<IrFunctionId> = HashSet::new();
+        let mut processed: BTreeSet<IrFunctionId> = BTreeSet::new();
 
         while let Some(func_id) = worklist.pop() {
             if processed.contains(&func_id) {
@@ -676,7 +676,7 @@ impl Monomorphizer {
     fn instantiate_with_sub_map(
         &mut self,
         generic_func: &IrFunction,
-        sub_map: &HashMap<String, IrType>,
+        sub_map: &BTreeMap<String, IrType>,
     ) -> (IrFunctionId, bool) {
         // Build deterministic type_args from sorted substitution map for caching
         let mut sorted_entries: Vec<_> = sub_map.iter().collect();
@@ -708,7 +708,7 @@ impl Monomorphizer {
         specialized.signature = self.substitute_signature(&specialized.signature);
 
         // Substitute types in register_types
-        let mut new_register_types = HashMap::new();
+        let mut new_register_types = BTreeMap::new();
         for (id, ty) in &specialized.register_types {
             new_register_types.insert(*id, self.substitute_type(ty));
         }
@@ -743,7 +743,7 @@ impl Monomorphizer {
     fn rewrite_call_sites(
         &mut self,
         module: &mut IrModule,
-        requests: &HashMap<MonoKey, Vec<CallSiteLocation>>,
+        requests: &BTreeMap<MonoKey, Vec<CallSiteLocation>>,
     ) {
         for (key, locations) in requests {
             if let Some(&specialized_id) = self.instances.get(key) {

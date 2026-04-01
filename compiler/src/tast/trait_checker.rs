@@ -18,7 +18,7 @@ pub struct TraitChecker<'a> {
     type_table: &'a Rc<RefCell<TypeTable>>,
     symbol_table: &'a SymbolTable,
     /// Map from SymbolId to TypedClass for quick lookup
-    class_map: std::collections::HashMap<SymbolId, &'a TypedClass>,
+    class_map: std::collections::BTreeMap<SymbolId, &'a TypedClass>,
     /// Core type checker for identifying stdlib concurrent types
     core_checker: CoreTypeChecker<'a>,
 }
@@ -32,7 +32,7 @@ impl<'a> TraitChecker<'a> {
         classes: &'a [TypedClass],
     ) -> Self {
         // Build a map from SymbolId to TypedClass
-        let mut class_map = std::collections::HashMap::new();
+        let mut class_map = std::collections::BTreeMap::new();
         for class in classes {
             class_map.insert(class.symbol_id, class);
         }

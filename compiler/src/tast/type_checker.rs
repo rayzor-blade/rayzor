@@ -18,7 +18,7 @@ use std::fmt;
 use std::hash::{Hash, Hasher};
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap},
     sync::LazyLock,
 };
 
@@ -206,7 +206,7 @@ pub enum ConstraintPriority {
 }
 
 /// Different kinds of type constraints
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ConstraintKind {
     /// Type variable must equal this type
     Equality { target_type: TypeId },
@@ -289,13 +289,13 @@ pub enum ConstraintKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstraintSet {
     /// All constraints indexed by type variable
-    constraints_by_var: HashMap<TypeId, Vec<TypeConstraint>>,
+    constraints_by_var: BTreeMap<TypeId, Vec<TypeConstraint>>,
 
     /// Constraints indexed by kind for fast lookups
     constraints_by_kind: HashMap<std::mem::Discriminant<ConstraintKind>, Vec<TypeConstraint>>,
 
     /// Dependency graph for constraint propagation
-    dependencies: HashMap<TypeId, HashSet<TypeId>>,
+    dependencies: BTreeMap<TypeId, BTreeSet<TypeId>>,
 
     /// Statistics for performance tracking
     stats: ConstraintStats,
@@ -305,8 +305,8 @@ pub struct ConstraintSet {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ConstraintStats {
     pub total_constraints: usize,
-    pub constraints_by_priority: HashMap<ConstraintPriority, usize>,
-    pub constraints_by_kind: HashMap<String, usize>,
+    pub constraints_by_priority: BTreeMap<ConstraintPriority, usize>,
+    pub constraints_by_kind: BTreeMap<String, usize>,
     pub dependency_edges: usize,
     pub propagation_rounds: usize,
     pub constraints_added: usize,
@@ -319,9 +319,9 @@ impl ConstraintSet {
     /// Create a new empty constraint set
     pub fn new() -> Self {
         Self {
-            constraints_by_var: HashMap::new(),
+            constraints_by_var: BTreeMap::new(),
             constraints_by_kind: HashMap::new(),
-            dependencies: HashMap::new(),
+            dependencies: BTreeMap::new(),
             stats: ConstraintStats::default(),
         }
     }
@@ -422,8 +422,8 @@ impl ConstraintSet {
     }
 
     /// Get dependencies for a type variable
-    pub fn dependencies_of(&self, type_var: TypeId) -> &HashSet<TypeId> {
-        static EMPTY_SET: LazyLock<HashSet<TypeId>> = LazyLock::new(|| HashSet::new());
+    pub fn dependencies_of(&self, type_var: TypeId) -> &BTreeSet<TypeId> {
+        static EMPTY_SET: LazyLock<BTreeSet<TypeId>> = LazyLock::new(|| BTreeSet::new());
         self.dependencies.get(&type_var).unwrap_or(&EMPTY_SET)
     }
 
@@ -438,8 +438,8 @@ impl ConstraintSet {
 
     /// Check if there's a dependency cycle
     pub fn has_dependency_cycle(&self) -> bool {
-        let mut visited = HashSet::new();
-        let mut recursion_stack = HashSet::new();
+        let mut visited = BTreeSet::new();
+        let mut recursion_stack = BTreeSet::new();
 
         for &type_var in self.dependencies.keys() {
             if !visited.contains(&type_var) {
@@ -453,8 +453,8 @@ impl ConstraintSet {
 
     /// Get constraint solving order (topological sort)
     pub fn solving_order(&self) -> Result<Vec<TypeId>, Vec<TypeId>> {
-        let mut in_degree: HashMap<TypeId, usize> = HashMap::new();
-        let mut out_edges: HashMap<TypeId, Vec<TypeId>> = HashMap::new();
+        let mut in_degree: BTreeMap<TypeId, usize> = BTreeMap::new();
+        let mut out_edges: BTreeMap<TypeId, Vec<TypeId>> = BTreeMap::new();
 
         // Build degree counts
         for (&var, deps) in &self.dependencies {
@@ -582,7 +582,7 @@ impl ConstraintSet {
         let deps = self
             .dependencies
             .entry(constraint.type_var)
-            .or_insert_with(HashSet::new);
+            .or_insert_with(BTreeSet::new);
 
         // Add dependencies based on constraint kind
         match &constraint.kind {
@@ -644,8 +644,8 @@ impl ConstraintSet {
     fn has_cycle_dfs(
         &self,
         var: TypeId,
-        visited: &mut HashSet<TypeId>,
-        recursion_stack: &mut HashSet<TypeId>,
+        visited: &mut BTreeSet<TypeId>,
+        recursion_stack: &mut BTreeSet<TypeId>,
     ) -> bool {
         visited.insert(var);
         recursion_stack.insert(var);
@@ -698,7 +698,7 @@ pub enum ConstraintValidation {
 /// Enhanced constraint validator for sophisticated type checking
 pub struct ConstraintValidator {
     /// Cache for constraint validation results
-    validation_cache: HashMap<(TypeId, ConstraintKind), ConstraintValidation>,
+    validation_cache: BTreeMap<(TypeId, ConstraintKind), ConstraintValidation>,
 
     /// Statistics tracking
     stats: ValidationStats,
@@ -717,7 +717,7 @@ pub struct ValidationStats {
 impl ConstraintValidator {
     pub fn new() -> Self {
         Self {
-            validation_cache: HashMap::new(),
+            validation_cache: BTreeMap::new(),
             stats: ValidationStats::default(),
         }
     }
@@ -984,7 +984,7 @@ pub struct ClassHierarchyInfo {
     pub interfaces: Vec<TypeId>,
 
     /// All supertypes (transitive closure) for fast lookup
-    pub all_supertypes: HashSet<TypeId>,
+    pub all_supertypes: BTreeSet<TypeId>,
 
     /// Depth in hierarchy (Object = 0, direct subclasses = 1, etc.)
     pub depth: usize,
@@ -1009,7 +1009,7 @@ pub struct ClassHierarchyInfo {
 pub trait ClassHierarchyRegistry {
     fn register_class_hierarchy(&mut self, class_id: SymbolId, info: ClassHierarchyInfo);
     fn get_class_hierarchy(&self, class_id: SymbolId) -> Option<&ClassHierarchyInfo>;
-    fn compute_all_supertypes(&self, class_id: SymbolId) -> HashSet<TypeId>;
+    fn compute_all_supertypes(&self, class_id: SymbolId) -> BTreeSet<TypeId>;
 }
 
 /// Main type checking engine
@@ -1036,7 +1036,7 @@ pub struct TypeChecker<'a> {
     errors: Vec<TypeCheckError>,
 
     /// Subtype relationship cache for performance
-    subtype_cache: HashMap<(TypeId, TypeId), bool>,
+    subtype_cache: BTreeMap<(TypeId, TypeId), bool>,
 
     /// Generic instantiation context
     generic_context: GenericContext,
@@ -1096,7 +1096,7 @@ impl<'a> TypeChecker<'a> {
                 expected_return_type: None,
             },
             errors: Vec::new(),
-            subtype_cache: HashMap::new(),
+            subtype_cache: BTreeMap::new(),
             generic_context: GenericContext::default(),
             stats: TypeCheckerStats {
                 types_checked: 0,

@@ -6,7 +6,7 @@
 use super::{IrFunction, IrFunctionId, IrId, IrSourceLocation, IrType, IrValue, Linkage};
 use crate::tast::{SymbolId, TypeId};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 /// HIR module - represents a compilation unit
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,10 +21,10 @@ pub struct IrModule {
     pub functions: BTreeMap<IrFunctionId, IrFunction>,
 
     /// Global variables
-    pub globals: HashMap<IrGlobalId, IrGlobal>,
+    pub globals: BTreeMap<IrGlobalId, IrGlobal>,
 
     /// Type definitions
-    pub types: HashMap<IrTypeDefId, IrTypeDef>,
+    pub types: BTreeMap<IrTypeDefId, IrTypeDef>,
 
     /// String constants pool
     pub string_pool: StringPool,
@@ -42,10 +42,10 @@ pub struct IrModule {
 
     /// Symbol-to-register mapping for memory safety validation
     /// Maps TAST SymbolId to MIR IrId for ownership tracking
-    pub symbol_to_register: HashMap<SymbolId, IrId>,
+    pub symbol_to_register: BTreeMap<SymbolId, IrId>,
 
     /// Register-to-symbol reverse mapping
-    pub register_to_symbol: HashMap<IrId, SymbolId>,
+    pub register_to_symbol: BTreeMap<IrId, SymbolId>,
 
     /// Maps external function IDs (from other modules) to their qualified names.
     /// Used to resolve cross-module references when loading from blade cache,
@@ -196,10 +196,10 @@ pub struct IrExternFunction {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StringPool {
     /// String constants indexed by ID
-    strings: HashMap<u32, String>,
+    strings: BTreeMap<u32, String>,
 
     /// Reverse mapping for deduplication
-    string_to_id: HashMap<String, u32>,
+    string_to_id: BTreeMap<String, u32>,
 
     /// Next available ID
     next_id: u32,
@@ -208,8 +208,8 @@ pub struct StringPool {
 impl StringPool {
     pub fn new() -> Self {
         Self {
-            strings: HashMap::new(),
-            string_to_id: HashMap::new(),
+            strings: BTreeMap::new(),
+            string_to_id: BTreeMap::new(),
             next_id: 0,
         }
     }
@@ -256,7 +256,7 @@ pub struct ModuleMetadata {
     pub debug_info: DebugInfoLevel,
 
     /// Custom attributes
-    pub attributes: HashMap<String, String>,
+    pub attributes: BTreeMap<String, String>,
 }
 
 /// Optimization level
@@ -292,7 +292,7 @@ impl Default for ModuleMetadata {
             language_version: "1.0".to_string(),
             optimization_level: OptimizationLevel::None,
             debug_info: DebugInfoLevel::Full,
-            attributes: HashMap::new(),
+            attributes: BTreeMap::new(),
         }
     }
 }
@@ -304,16 +304,16 @@ impl IrModule {
             name,
             source_file,
             functions: BTreeMap::new(),
-            globals: HashMap::new(),
-            types: HashMap::new(),
+            globals: BTreeMap::new(),
+            types: BTreeMap::new(),
             string_pool: StringPool::new(),
             extern_functions: BTreeMap::new(),
             metadata: ModuleMetadata::default(),
             next_function_id: 0,
             next_global_id: 0,
             next_typedef_id: 0,
-            symbol_to_register: HashMap::new(),
-            register_to_symbol: HashMap::new(),
+            symbol_to_register: BTreeMap::new(),
+            register_to_symbol: BTreeMap::new(),
             external_function_names: BTreeMap::new(),
         }
     }

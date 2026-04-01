@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use crate::tast::{TypeId, SymbolId};
 
 /// This module provides a fix for the generic instantiation issue where
@@ -16,13 +16,13 @@ use crate::tast::{TypeId, SymbolId};
 /// Registry for tracking the actual type parameter counts of generic types
 pub struct TypeParameterRegistry {
     /// Maps symbol IDs to their actual type parameter counts
-    type_param_counts: HashMap<SymbolId, usize>,
+    type_param_counts: BTreeMap<SymbolId, usize>,
 }
 
 impl TypeParameterRegistry {
     pub fn new() -> Self {
         Self {
-            type_param_counts: HashMap::new(),
+            type_param_counts: BTreeMap::new(),
         }
     }
 
@@ -39,8 +39,8 @@ impl TypeParameterRegistry {
 
 /// Alternative approach: Extract type parameter count from the TypedDeclaration
 /// after the file has been fully lowered.
-pub fn extract_type_param_counts(typed_file: &crate::tast::node::TypedFile) -> HashMap<SymbolId, usize> {
-    let mut counts = HashMap::new();
+pub fn extract_type_param_counts(typed_file: &crate::tast::node::TypedFile) -> BTreeMap<SymbolId, usize> {
+    let mut counts = BTreeMap::new();
 
     // Extract from classes
     for class in &typed_file.classes {

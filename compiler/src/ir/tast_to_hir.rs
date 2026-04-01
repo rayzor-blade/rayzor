@@ -16,7 +16,7 @@ use crate::tast::{
     SymbolTable, TypeId, TypeKind, TypeTable, Visibility,
 };
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 /// Context for lowering TAST to HIR
@@ -59,7 +59,7 @@ pub struct TastToHirContext<'a> {
 
     /// Inline variable values (for static inline vars that need constant evaluation)
     /// Maps symbol ID to the evaluated literal value (preserving type)
-    inline_var_values: HashMap<SymbolId, HirLiteral>,
+    inline_var_values: BTreeMap<SymbolId, HirLiteral>,
 }
 
 #[derive(Debug)]
@@ -145,7 +145,7 @@ impl<'a> TastToHirContext<'a> {
             temp_var_counter: 0,
             current_file: None,
             stdlib_mapping: StdlibMapping::new(),
-            inline_var_values: HashMap::new(),
+            inline_var_values: BTreeMap::new(),
         }
     }
 
@@ -168,7 +168,7 @@ impl<'a> TastToHirContext<'a> {
     /// (no TypedFile available). Looks up SymbolIds by matching class+field names.
     pub fn seed_inline_vars_from_global(
         &mut self,
-        global_vars: &HashMap<String, crate::ir::blade::BladeInlineValue>,
+        global_vars: &BTreeMap<String, crate::ir::blade::BladeInlineValue>,
     ) {
         if global_vars.is_empty() {
             return;
@@ -2080,7 +2080,7 @@ impl<'a> TastToHirContext<'a> {
                 return_type: _,
             } => {
                 // Compute captured variables from the lambda body
-                let param_symbols: std::collections::HashSet<_> =
+                let param_symbols: std::collections::BTreeSet<_> =
                     parameters.iter().map(|p| p.symbol_id).collect();
 
                 let captures = self.compute_captures(body, &param_symbols);
@@ -3792,7 +3792,7 @@ impl<'a> TastToHirContext<'a> {
                         // Search all symbols for a variable with this name.
                         // Use max_by_key on SymbolId to get the most recently created
                         // symbol, ensuring deterministic behavior regardless of
-                        // HashMap iteration order.
+                        // BTreeMap iteration order.
                         self.symbol_table
                             .all_symbols()
                             .filter(|s| {
@@ -4145,7 +4145,7 @@ impl<'a> TastToHirContext<'a> {
             .iter()
             .map(|arg| self.lower_expression(arg))
             .collect();
-        let mut param_map: HashMap<SymbolId, HirExpr> = HashMap::new();
+        let mut param_map: BTreeMap<SymbolId, HirExpr> = BTreeMap::new();
         if method.parameters.len() == arguments.len() {
             for (param, lowered_arg) in method.parameters.iter().zip(lowered_arguments.into_iter())
             {
@@ -4261,7 +4261,7 @@ impl<'a> TastToHirContext<'a> {
             .map(|arg| self.lower_expression(arg))
             .collect();
 
-        let mut param_map: HashMap<SymbolId, HirExpr> = HashMap::new();
+        let mut param_map: BTreeMap<SymbolId, HirExpr> = BTreeMap::new();
 
         // Map parameters to arguments
         if method.parameters.len() == arguments.len() {
@@ -4339,7 +4339,7 @@ impl<'a> TastToHirContext<'a> {
         &mut self,
         expr: &TypedExpression,
         this_replacement: &HirExpr,
-        param_map: &HashMap<SymbolId, HirExpr>,
+        param_map: &BTreeMap<SymbolId, HirExpr>,
         expected_type: TypeId,
     ) -> HirExpr {
         let kind_name = match &expr.kind {
@@ -4829,12 +4829,12 @@ impl<'a> TastToHirContext<'a> {
     fn compute_captures(
         &self,
         body: &[TypedStatement],
-        param_symbols: &std::collections::HashSet<SymbolId>,
+        param_symbols: &std::collections::BTreeSet<SymbolId>,
     ) -> Vec<HirCapture> {
-        use std::collections::{HashMap, HashSet};
+        use std::collections::{BTreeMap, BTreeSet};
 
         // Collect all variable references with their types
-        let mut referenced_vars: HashMap<SymbolId, TypeId> = HashMap::new();
+        let mut referenced_vars: BTreeMap<SymbolId, TypeId> = BTreeMap::new();
         for stmt in body {
             self.collect_var_refs_stmt(stmt, &mut referenced_vars);
         }
@@ -4863,7 +4863,7 @@ impl<'a> TastToHirContext<'a> {
     fn collect_var_refs_stmt(
         &self,
         stmt: &TypedStatement,
-        refs: &mut std::collections::HashMap<SymbolId, TypeId>,
+        refs: &mut std::collections::BTreeMap<SymbolId, TypeId>,
     ) {
         match stmt {
             TypedStatement::Expression { expression, .. } => {
@@ -4905,7 +4905,7 @@ impl<'a> TastToHirContext<'a> {
     fn collect_var_refs_expr(
         &self,
         expr: &TypedExpression,
-        refs: &mut std::collections::HashMap<SymbolId, TypeId>,
+        refs: &mut std::collections::BTreeMap<SymbolId, TypeId>,
     ) {
         match &expr.kind {
             TypedExpressionKind::Variable { symbol_id, .. } => {
@@ -4965,7 +4965,7 @@ impl<'a> TastToHirContext<'a> {
     fn collect_local_defs_stmt(
         &self,
         stmt: &TypedStatement,
-        defs: &mut std::collections::HashSet<SymbolId>,
+        defs: &mut std::collections::BTreeSet<SymbolId>,
     ) {
         match stmt {
             TypedStatement::Expression { expression, .. } => {
@@ -5022,7 +5022,7 @@ impl<'a> TastToHirContext<'a> {
     fn collect_local_defs_expr(
         &self,
         expr: &TypedExpression,
-        defs: &mut std::collections::HashSet<SymbolId>,
+        defs: &mut std::collections::BTreeSet<SymbolId>,
     ) {
         match &expr.kind {
             TypedExpressionKind::Block { statements, .. } => {
@@ -5125,7 +5125,7 @@ pub fn lower_tast_to_hir(
         string_interner,
         semantic_graphs,
         &[],
-        &HashMap::new(),
+        &BTreeMap::new(),
     )
 }
 
@@ -5136,7 +5136,7 @@ pub fn lower_tast_to_hir_with_imports(
     string_interner: &mut StringInterner,
     semantic_graphs: Option<&SemanticGraphs>,
     imported_files: &[&TypedFile],
-    global_inline_vars: &HashMap<String, crate::ir::blade::BladeInlineValue>,
+    global_inline_vars: &BTreeMap<String, crate::ir::blade::BladeInlineValue>,
 ) -> Result<HirModule, Vec<LoweringError>> {
     let mut context = TastToHirContext::new(
         symbol_table,

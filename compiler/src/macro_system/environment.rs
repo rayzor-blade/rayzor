@@ -1,5 +1,5 @@
 use super::value::MacroValue;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Scoped variable environment for the macro interpreter.
@@ -9,26 +9,26 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct Environment {
     /// Stack of variable scopes (innermost last)
-    scopes: Vec<HashMap<String, MacroValue>>,
+    scopes: Vec<BTreeMap<String, MacroValue>>,
 }
 
 impl Environment {
     /// Create a new environment with a single global scope
     pub fn new() -> Self {
         Self {
-            scopes: vec![HashMap::new()],
+            scopes: vec![BTreeMap::new()],
         }
     }
 
     /// Push a new scope onto the stack (e.g., entering a block or function)
     pub fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(BTreeMap::new());
     }
 
     /// Pop the innermost scope (e.g., leaving a block or function)
     ///
     /// Returns the popped scope's variables, or None if only the global scope remains.
-    pub fn pop_scope(&mut self) -> Option<HashMap<String, MacroValue>> {
+    pub fn pop_scope(&mut self) -> Option<BTreeMap<String, MacroValue>> {
         if self.scopes.len() > 1 {
             self.scopes.pop()
         } else {
@@ -114,7 +114,7 @@ impl Environment {
     /// Get all variable names visible in the current scope (for debugging/error messages)
     pub fn visible_names(&self) -> Vec<&str> {
         let mut names = Vec::new();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::BTreeSet::new();
         for scope in self.scopes.iter().rev() {
             for name in scope.keys() {
                 if seen.insert(name.as_str()) {
@@ -127,8 +127,8 @@ impl Environment {
     }
 
     /// Create a snapshot of all variables (for closures)
-    pub fn capture_all(&self) -> HashMap<String, MacroValue> {
-        let mut captured = HashMap::new();
+    pub fn capture_all(&self) -> BTreeMap<String, MacroValue> {
+        let mut captured = BTreeMap::new();
         // From outermost to innermost so inner scopes shadow outer
         for scope in &self.scopes {
             for (name, value) in scope {
@@ -145,9 +145,9 @@ impl Environment {
     /// from a large enclosing scope.
     pub fn capture_used(
         &self,
-        used_names: &std::collections::HashSet<String>,
-    ) -> HashMap<String, MacroValue> {
-        let mut captured = HashMap::new();
+        used_names: &std::collections::BTreeSet<String>,
+    ) -> BTreeMap<String, MacroValue> {
+        let mut captured = BTreeMap::new();
         // From outermost to innermost so inner scopes shadow outer
         for scope in &self.scopes {
             for (name, value) in scope {

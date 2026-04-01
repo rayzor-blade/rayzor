@@ -17,7 +17,7 @@ mod deadcode_analysis_tests {
         collections::new_id_set, BlockId, CallSiteId, DataFlowNodeId, SourceLocation,
         SsaVariableId, SymbolId, TypeId,
     };
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, BTreeSet};
     use std::time::Duration;
 
     /// Create test CFG with unreachable blocks
@@ -468,11 +468,11 @@ mod deadcode_analysis_integration_tests {
         use crate::semantic_graph::{CallGraph, OwnershipGraph};
 
         SemanticGraphs {
-            control_flow: std::collections::HashMap::new(),
-            data_flow: std::collections::HashMap::new(),
+            control_flow: std::collections::BTreeMap::new(),
+            data_flow: std::collections::BTreeMap::new(),
             call_graph: CallGraph::new(),
             ownership_graph: OwnershipGraph::new(),
-            source_locations: std::collections::HashMap::new(),
+            source_locations: std::collections::BTreeMap::new(),
         }
     }
 }

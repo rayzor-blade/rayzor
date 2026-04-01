@@ -30,7 +30,7 @@
 //! - 8: Conversion and casting errors
 //! - 9: Advanced/complex errors
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// Error code struct containing the numeric code and human-readable description
@@ -82,14 +82,14 @@ impl fmt::Display for ErrorCode {
 
 /// Registry containing all defined error codes
 pub struct ErrorCodeRegistry {
-    codes: HashMap<u16, ErrorCode>,
+    codes: BTreeMap<u16, ErrorCode>,
 }
 
 impl ErrorCodeRegistry {
     /// Create a new registry with all predefined error codes
     pub fn new() -> Self {
         let mut registry = Self {
-            codes: HashMap::new(),
+            codes: BTreeMap::new(),
         };
         registry.register_all_codes();
         registry

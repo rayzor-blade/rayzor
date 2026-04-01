@@ -79,8 +79,8 @@ class Main {
         );
         if has_main {
             // Build func_id -> name map
-            let mut id_to_name: std::collections::HashMap<compiler::ir::IrFunctionId, String> =
-                std::collections::HashMap::new();
+            let mut id_to_name: std::collections::BTreeMap<compiler::ir::IrFunctionId, String> =
+                std::collections::BTreeMap::new();
             for (fid, f) in &m.functions {
                 id_to_name.insert(*fid, f.name.clone());
             }

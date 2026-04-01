@@ -8,7 +8,7 @@ use super::super::value::{MacroParam, MacroValue};
 use super::chunk::{Chunk, CompiledParam, UpvalueDesc};
 use super::opcode::{Emitter, Op};
 use parser::{AssignOp, BinaryOp, BlockElement, Expr, ExprKind, Span, UnaryOp};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Error during bytecode compilation.
@@ -30,7 +30,7 @@ impl CompileError {
 /// Resolves variable names to local slot indices with lexical scoping.
 struct LocalResolver {
     /// Stack of scopes. Each scope maps name → slot index.
-    scopes: Vec<HashMap<String, u16>>,
+    scopes: Vec<BTreeMap<String, u16>>,
     /// Next slot to allocate.
     next_slot: u16,
 }
@@ -38,7 +38,7 @@ struct LocalResolver {
 impl LocalResolver {
     fn new() -> Self {
         Self {
-            scopes: vec![HashMap::new()],
+            scopes: vec![BTreeMap::new()],
             next_slot: 0,
         }
     }
@@ -65,7 +65,7 @@ impl LocalResolver {
     }
 
     fn push_scope(&mut self) {
-        self.scopes.push(HashMap::new());
+        self.scopes.push(BTreeMap::new());
     }
 
     fn pop_scope(&mut self) {

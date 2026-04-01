@@ -4,7 +4,7 @@
 /// Based on tested implementation from Zyntax compiler.
 use cranelift::prelude::*;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use crate::ir::{BinaryOp, CompareOp, IrId, IrInstruction, IrType, UnaryOp};
 
@@ -422,7 +422,7 @@ impl CraneliftBackend {
 
     /// Lower a binary operation (static version)
     pub(super) fn lower_binary_op_static(
-        value_map: &HashMap<IrId, Value>,
+        value_map: &BTreeMap<IrId, Value>,
         builder: &mut FunctionBuilder,
         op: &BinaryOp,
         ty: &IrType,
@@ -689,7 +689,7 @@ impl CraneliftBackend {
 
     /// Lower a comparison operation (static version)
     pub(super) fn lower_compare_op_static(
-        value_map: &HashMap<IrId, Value>,
+        value_map: &BTreeMap<IrId, Value>,
         builder: &mut FunctionBuilder,
         op: &CompareOp,
         ty: &IrType,
@@ -832,7 +832,7 @@ impl CraneliftBackend {
 
     /// Lower a unary operation (static version)
     pub(super) fn lower_unary_op_static(
-        value_map: &HashMap<IrId, Value>,
+        value_map: &BTreeMap<IrId, Value>,
         builder: &mut FunctionBuilder,
         op: &UnaryOp,
         ty: &IrType,
@@ -864,7 +864,7 @@ impl CraneliftBackend {
 
     /// Lower a load operation (static version)
     pub(super) fn lower_load_static(
-        value_map: &HashMap<IrId, Value>,
+        value_map: &BTreeMap<IrId, Value>,
         builder: &mut FunctionBuilder,
         ty: &IrType,
         ptr: IrId,
@@ -878,7 +878,7 @@ impl CraneliftBackend {
 
     /// Lower a store operation (static version)
     pub(super) fn lower_store_static(
-        value_map: &HashMap<IrId, Value>,
+        value_map: &BTreeMap<IrId, Value>,
         builder: &mut FunctionBuilder,
         ptr: IrId,
         value: IrId,

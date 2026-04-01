@@ -218,7 +218,7 @@ class Main {
     // Look for function calls in the MIR
     let mut found_spawn = false;
     let mut found_join = false;
-    let mut all_function_calls = std::collections::HashSet::new();
+    let mut all_function_calls = std::collections::BTreeSet::new();
 
     for (_func_id, func) in &mir_module.functions {
         for (_block_id, block) in &func.cfg.blocks {
@@ -318,7 +318,7 @@ class Main {
     // Look for function calls in the MIR
     let mut found_spawn = false;
     let mut found_join = false;
-    let mut all_function_calls = std::collections::HashSet::new();
+    let mut all_function_calls = std::collections::BTreeSet::new();
 
     for (_func_id, func) in &mir_module.functions {
         for (_block_id, block) in &func.cfg.blocks {
@@ -626,7 +626,7 @@ class Main {
         "rayzor_mutex_unlock",
     ];
 
-    let mut found_calls = std::collections::HashSet::new();
+    let mut found_calls = std::collections::BTreeSet::new();
 
     for (_func_id, func) in &mir_module.functions {
         for (_block_id, block) in &func.cfg.blocks {

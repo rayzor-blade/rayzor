@@ -27,7 +27,7 @@ use crate::tast::{
 };
 use log::{debug, trace, warn};
 use std::cell::RefCell;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 /// Layout information for a single field in a @:cstruct class
@@ -159,7 +159,7 @@ pub struct HirToMirContext<'a> {
 
     /// Reverse index: TypeId → Vec<(field_symbol, field_index)>
     /// Built lazily from field_index_map. Invalidated when field_index_map changes.
-    fields_by_type_cache: Option<HashMap<TypeId, Vec<(SymbolId, u32)>>>,
+    fields_by_type_cache: Option<BTreeMap<TypeId, Vec<(SymbolId, u32)>>>,
 
     /// Mapping from (typedef_type_id, field_name) to field_index for anonymous struct fields
     /// This allows field access on typedef'd anonymous structs like FileStat
@@ -663,7 +663,7 @@ impl<'a> HirToMirContext<'a> {
 
     /// Build or rebuild the fields_by_type reverse index from field_index_map.
     fn rebuild_fields_by_type_cache(&mut self) {
-        let mut cache: HashMap<TypeId, Vec<(SymbolId, u32)>> = HashMap::new();
+        let mut cache: BTreeMap<TypeId, Vec<(SymbolId, u32)>> = BTreeMap::new();
         for (field_sym, (class_ty, idx)) in &self.field_index_map {
             cache.entry(*class_ty).or_default().push((*field_sym, *idx));
         }
@@ -1149,7 +1149,7 @@ impl<'a> HirToMirContext<'a> {
         let mut current = type_id;
         {
             let type_table = self.type_table;
-            let mut visited = HashSet::new();
+            let mut visited = BTreeSet::new();
             loop {
                 if !visited.insert(current) {
                     break;
@@ -1262,7 +1262,7 @@ impl<'a> HirToMirContext<'a> {
         method_name: InternedString,
     ) -> Option<SymbolId> {
         let mut current = Some(class_symbol);
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
         while let Some(cls) = current {
             if !visited.insert(cls) {
                 break;
@@ -1294,7 +1294,7 @@ impl<'a> HirToMirContext<'a> {
         };
 
         let mut current = Some(class_symbol);
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
         while let Some(cls) = current {
             if !visited.insert(cls) {
                 break;
@@ -1608,7 +1608,7 @@ impl<'a> HirToMirContext<'a> {
             let class_name_interned = self.symbol_table.get_symbol(symbol_id).map(|s| s.name);
 
             // Find all unique class type_ids in field_index_map
-            let field_class_tys: std::collections::HashSet<TypeId> =
+            let field_class_tys: std::collections::BTreeSet<TypeId> =
                 self.field_index_map.values().map(|(ty, _)| *ty).collect();
 
             // For each class type_id, check if its fields belong to our class
@@ -1955,7 +1955,7 @@ impl<'a> HirToMirContext<'a> {
         let mut fields_with_index = self.fields_for_type(type_id);
         // Fallback: match by class symbol_id via HirTypeDecl
         if fields_with_index.is_empty() {
-            let field_class_tys: std::collections::HashSet<TypeId> =
+            let field_class_tys: std::collections::BTreeSet<TypeId> =
                 self.field_index_map.values().map(|(ty, _)| *ty).collect();
             for candidate_ty in &field_class_tys {
                 let is_our_class = self.current_hir_types.iter().any(|(tid, decl)| {
@@ -2193,8 +2193,8 @@ impl<'a> HirToMirContext<'a> {
                 .map(|(tid, td)| (*tid, td))
                 .collect();
 
-            let mut registered: std::collections::HashSet<TypeId> =
-                std::collections::HashSet::new();
+            let mut registered: std::collections::BTreeSet<TypeId> =
+                std::collections::BTreeSet::new();
             let mut remaining = interfaces.clone();
             let max_iterations = remaining.len() + 1;
             let mut iteration = 0;
@@ -2232,7 +2232,7 @@ impl<'a> HirToMirContext<'a> {
         self.build_class_vtables();
 
         // CRITICAL: Two-pass lowering to avoid non-deterministic function ordering issues
-        // HashMap iteration over hir_module.types is random, so class methods might be
+        // BTreeMap iteration over hir_module.types is random, so class methods might be
         // lowered after module functions that call them, causing "function not found" errors.
         //
         // Pass 1: Register ALL function signatures WITHOUT lowering bodies
@@ -2567,7 +2567,7 @@ impl<'a> HirToMirContext<'a> {
 
         // Lower globals
         // Sort globals by symbol ID for deterministic lowering order.
-        // globals is a HashMap — unsorted iteration causes non-deterministic
+        // globals is a BTreeMap — unsorted iteration causes non-deterministic
         // function ID assignment when global initializers create extern functions.
         let mut sorted_globals: Vec<_> = hir_module.globals.iter().collect();
         sorted_globals.sort_by_key(|(sid, _)| sid.as_raw());
@@ -6244,8 +6244,8 @@ impl<'a> HirToMirContext<'a> {
             qualified_name: None,
             signature,
             cfg: IrControlFlowGraph::new(), // Empty - will be replaced during merge
-            locals: HashMap::new(),
-            register_types: HashMap::new(),
+            locals: BTreeMap::new(),
+            register_types: BTreeMap::new(),
             attributes,
             kind: FunctionKind::MirWrapper, // Stdlib MIR function
             source_location: IrSourceLocation::unknown(),
@@ -6436,8 +6436,8 @@ impl<'a> HirToMirContext<'a> {
                 entry_block: IrBlockId(0),
                 next_block_id: 0,
             },
-            locals: std::collections::HashMap::new(),
-            register_types: std::collections::HashMap::new(),
+            locals: std::collections::BTreeMap::new(),
+            register_types: std::collections::BTreeMap::new(),
             attributes: crate::ir::functions::FunctionAttributes::default(),
             kind: crate::ir::functions::FunctionKind::ExternC, // Extern C function
             source_location: IrSourceLocation::unknown(),
@@ -19235,7 +19235,7 @@ impl<'a> HirToMirContext<'a> {
         };
 
         // Find all variables that are modified in either branch
-        let mut modified_vars = std::collections::HashSet::new();
+        let mut modified_vars = std::collections::BTreeSet::new();
         for stmt in &then_branch.statements {
             self.find_modified_variables_in_statement(stmt, &mut modified_vars);
         }
@@ -19248,7 +19248,7 @@ impl<'a> HirToMirContext<'a> {
         debug!("modified_vars.len() = {}", modified_vars.len());
 
         // Save initial values of variables that will be modified
-        let mut var_initial_values: HashMap<SymbolId, (IrId, IrType)> = HashMap::new();
+        let mut var_initial_values: BTreeMap<SymbolId, (IrId, IrType)> = BTreeMap::new();
         for symbol_id in &modified_vars {
             if let Some(&reg) = self.symbol_map.get(symbol_id) {
                 // Get the type from the locals table
@@ -19453,7 +19453,7 @@ impl<'a> HirToMirContext<'a> {
         //     }
 
         // Collect all variables referenced in condition
-        let mut referenced_vars = std::collections::HashSet::new();
+        let mut referenced_vars = std::collections::BTreeSet::new();
         self.collect_referenced_variables_in_expr(condition, &mut referenced_vars);
 
         // Collect all variables referenced in body
@@ -19467,7 +19467,7 @@ impl<'a> HirToMirContext<'a> {
         // Only include variables that were declared before the loop
         // (i.e., they're already in the symbol_map)
         // Exclude function parameters since they're immutable
-        let modified_vars: std::collections::HashSet<SymbolId> = referenced_vars
+        let modified_vars: std::collections::BTreeSet<SymbolId> = referenced_vars
             .into_iter()
             .filter(|sym| {
                 let in_map = self.symbol_map.contains_key(sym);
@@ -19806,7 +19806,7 @@ impl<'a> HirToMirContext<'a> {
     fn collect_referenced_variables_in_block(
         &self,
         block: &HirBlock,
-        vars: &mut std::collections::HashSet<SymbolId>,
+        vars: &mut std::collections::BTreeSet<SymbolId>,
     ) {
         for stmt in &block.statements {
             self.collect_referenced_variables_in_stmt(stmt, vars);
@@ -19821,7 +19821,7 @@ impl<'a> HirToMirContext<'a> {
     fn collect_referenced_variables_in_stmt(
         &self,
         stmt: &HirStatement,
-        vars: &mut std::collections::HashSet<SymbolId>,
+        vars: &mut std::collections::BTreeSet<SymbolId>,
     ) {
         match stmt {
             HirStatement::Let { init, .. } => {
@@ -19879,7 +19879,7 @@ impl<'a> HirToMirContext<'a> {
     fn collect_referenced_variables_in_expr(
         &self,
         expr: &HirExpr,
-        vars: &mut std::collections::HashSet<SymbolId>,
+        vars: &mut std::collections::BTreeSet<SymbolId>,
     ) {
         match &expr.kind {
             HirExprKind::Variable { symbol, .. } => {
@@ -19921,8 +19921,8 @@ impl<'a> HirToMirContext<'a> {
     fn find_modified_variables_in_block(
         &self,
         block: &HirBlock,
-    ) -> std::collections::HashSet<SymbolId> {
-        let mut modified = std::collections::HashSet::new();
+    ) -> std::collections::BTreeSet<SymbolId> {
+        let mut modified = std::collections::BTreeSet::new();
 
         for stmt in &block.statements {
             self.find_modified_variables_in_statement(stmt, &mut modified);
@@ -19939,7 +19939,7 @@ impl<'a> HirToMirContext<'a> {
     fn find_modified_variables_in_statement(
         &self,
         stmt: &HirStatement,
-        modified: &mut std::collections::HashSet<SymbolId>,
+        modified: &mut std::collections::BTreeSet<SymbolId>,
     ) {
         match stmt {
             HirStatement::Let { pattern, .. } => {
@@ -19998,7 +19998,7 @@ impl<'a> HirToMirContext<'a> {
     fn find_modified_variables_in_expression(
         &self,
         expr: &HirExpr,
-        modified: &mut std::collections::HashSet<SymbolId>,
+        modified: &mut std::collections::BTreeSet<SymbolId>,
     ) {
         match &expr.kind {
             HirExprKind::Binary { lhs, rhs, .. } => {
@@ -20034,7 +20034,7 @@ impl<'a> HirToMirContext<'a> {
     fn collect_pattern_variables(
         &self,
         pattern: &HirPattern,
-        variables: &mut std::collections::HashSet<SymbolId>,
+        variables: &mut std::collections::BTreeSet<SymbolId>,
     ) {
         match pattern {
             HirPattern::Variable { symbol, .. } => {
@@ -22292,7 +22292,7 @@ impl<'a> HirToMirContext<'a> {
         };
 
         // Build source index map: field_name → sorted index in source
-        let source_index_map: std::collections::HashMap<&str, usize> = source_fields
+        let source_index_map: std::collections::BTreeMap<&str, usize> = source_fields
             .iter()
             .enumerate()
             .map(|(i, (name, _))| (name.as_str(), i))
@@ -24592,7 +24592,7 @@ impl<'a> HirToMirContext<'a> {
             let mut resolved = self.resolve_through_aliases(receiver_ty);
             let type_table = self.type_table;
             // Also follow GenericInstance to base type
-            let mut visited = HashSet::new();
+            let mut visited = BTreeSet::new();
             loop {
                 if !visited.insert(resolved) {
                     break;
@@ -26059,7 +26059,7 @@ impl<'a> HirToMirContext<'a> {
         string_ptr_ty: &IrType,
     ) -> Option<IrId> {
         // Build a name→(type_id, gep_idx) map for field lookup
-        let field_map: std::collections::HashMap<String, (TypeId, u32)> = fields
+        let field_map: std::collections::BTreeMap<String, (TypeId, u32)> = fields
             .iter()
             .filter_map(|&(sym, ty, idx)| {
                 let name = self
@@ -26730,7 +26730,7 @@ impl<'a> HirToMirContext<'a> {
         self.builder.switch_to_block(merge_block);
 
         // Find variables that were modified in either branch
-        let mut modified_symbols = std::collections::HashSet::new();
+        let mut modified_symbols = std::collections::BTreeSet::new();
         // debug!("Checking for modified symbols");
         // eprintln!("  symbol_map_before: {} entries", symbol_map_before.len());
         // eprintln!(
@@ -26998,14 +26998,14 @@ impl<'a> HirToMirContext<'a> {
         };
 
         // Find all variables that are referenced in the loop body and condition
-        let mut referenced_vars = std::collections::HashSet::new();
+        let mut referenced_vars = std::collections::BTreeSet::new();
         self.collect_referenced_variables_in_block(body, &mut referenced_vars);
         self.collect_referenced_variables_in_expr(condition, &mut referenced_vars);
 
         // Only include variables that were declared before the loop
         // (i.e., they're already in the symbol_map)
         // Exclude function parameters since they're immutable
-        let modified_vars: std::collections::HashSet<SymbolId> = referenced_vars
+        let modified_vars: std::collections::BTreeSet<SymbolId> = referenced_vars
             .into_iter()
             .filter(|sym| {
                 let in_map = self.symbol_map.contains_key(sym);
@@ -27466,10 +27466,10 @@ impl<'a> HirToMirContext<'a> {
         };
 
         // Collect variables referenced in the body that need loop-carried SSA values.
-        let mut referenced_vars = std::collections::HashSet::new();
+        let mut referenced_vars = std::collections::BTreeSet::new();
         self.collect_referenced_variables_in_block(body, &mut referenced_vars);
 
-        let modified_vars: std::collections::HashSet<SymbolId> = referenced_vars
+        let modified_vars: std::collections::BTreeSet<SymbolId> = referenced_vars
             .into_iter()
             .filter(|sym| {
                 let in_map = self.symbol_map.contains_key(sym);
@@ -27700,7 +27700,7 @@ impl<'a> HirToMirContext<'a> {
             let type_table = self.type_table;
             let mut tid = iter_expr.ty;
             let mut result: Option<SymbolId> = None;
-            let mut visited = HashSet::new();
+            let mut visited = BTreeSet::new();
             loop {
                 if !visited.insert(tid) {
                     break;
@@ -28093,7 +28093,7 @@ impl<'a> HirToMirContext<'a> {
         // Also store mutable variables from outer scope in stack slots
         // so assignments in the loop body are visible after the loop
         let modified_vars = {
-            let mut modified = std::collections::HashSet::new();
+            let mut modified = std::collections::BTreeSet::new();
             for stmt in &body.statements {
                 self.find_modified_variables_in_statement(stmt, &mut modified);
             }
@@ -28295,9 +28295,9 @@ impl<'a> HirToMirContext<'a> {
 
         // Collect referenced variables in body for phi node creation
         // (same pattern as lower_while_loop)
-        let mut referenced_vars = std::collections::HashSet::new();
+        let mut referenced_vars = std::collections::BTreeSet::new();
         self.collect_referenced_variables_in_block(body, &mut referenced_vars);
-        let modified_vars: std::collections::HashSet<SymbolId> = referenced_vars
+        let modified_vars: std::collections::BTreeSet<SymbolId> = referenced_vars
             .into_iter()
             .filter(|sym| {
                 let in_map = self.symbol_map.contains_key(sym);
@@ -28597,10 +28597,10 @@ impl<'a> HirToMirContext<'a> {
         };
 
         // Collect referenced variables in loop body for loop-carried SSA updates.
-        let mut referenced_vars = std::collections::HashSet::new();
+        let mut referenced_vars = std::collections::BTreeSet::new();
         self.collect_referenced_variables_in_block(body, &mut referenced_vars);
 
-        let modified_vars: std::collections::HashSet<SymbolId> = referenced_vars
+        let modified_vars: std::collections::BTreeSet<SymbolId> = referenced_vars
             .into_iter()
             .filter(|sym| {
                 let in_map = self.symbol_map.contains_key(sym);
@@ -28806,8 +28806,8 @@ impl<'a> HirToMirContext<'a> {
     fn collect_covered_enum_variants(
         &self,
         cases: &[HirMatchCase],
-    ) -> (HashSet<InternedString>, bool) {
-        let mut covered = HashSet::new();
+    ) -> (BTreeSet<InternedString>, bool) {
+        let mut covered = BTreeSet::new();
         let mut has_wildcard = false;
 
         for case in cases {
@@ -28832,7 +28832,7 @@ impl<'a> HirToMirContext<'a> {
         &self,
         pattern: &HirPattern,
         has_guard: bool,
-        covered: &mut HashSet<InternedString>,
+        covered: &mut BTreeSet<InternedString>,
         has_wildcard: &mut bool,
     ) {
         match pattern {
@@ -28970,7 +28970,7 @@ impl<'a> HirToMirContext<'a> {
             None => return,
         };
 
-        let all_variants: HashSet<InternedString> = variant_symbols
+        let all_variants: BTreeSet<InternedString> = variant_symbols
             .iter()
             .filter_map(|sid| self.symbol_table.get_symbol(*sid).map(|s| s.name))
             .collect();
@@ -31124,7 +31124,7 @@ impl<'a> HirToMirContext<'a> {
                     fields: anon_fields,
                 } = &ty_info.kind
                 {
-                    let literal_names: std::collections::HashSet<&str> = literal_field_names
+                    let literal_names: std::collections::BTreeSet<&str> = literal_field_names
                         .iter()
                         .map(|(n, _)| n.as_str())
                         .collect();
@@ -31572,7 +31572,7 @@ impl<'a> HirToMirContext<'a> {
     fn resolve_through_aliases(&self, type_id: TypeId) -> TypeId {
         let type_table = self.type_table;
         let mut current = type_id;
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
         loop {
             if !visited.insert(current) {
                 break;
@@ -31641,7 +31641,7 @@ impl<'a> HirToMirContext<'a> {
         };
 
         let mut current_sym = source_sym;
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
         while visited.insert(current_sym) {
             // Find the class with this SymbolId in current_hir_types
             let parent_type = self.current_hir_types.values().find_map(|decl| {
@@ -31965,7 +31965,7 @@ impl<'a> HirToMirContext<'a> {
         // Use already-cached cstruct_layouts (populated by field accesses, constructors, cdef() calls)
         let mut cstruct_prefix = String::new();
         {
-            let mut seen_typedefs = std::collections::HashSet::new();
+            let mut seen_typedefs = std::collections::BTreeSet::new();
             let layouts: Vec<_> = self.cstruct_layouts.values().cloned().collect();
             for layout in &layouts {
                 for dep in &layout.dep_cdefs {
@@ -32031,10 +32031,10 @@ impl<'a> HirToMirContext<'a> {
         let mut source_files: Vec<String> = Vec::new();
         let mut clib_names: Vec<String> = Vec::new();
         {
-            let mut seen_fw = std::collections::HashSet::new();
-            let mut seen_inc = std::collections::HashSet::new();
-            let mut seen_src = std::collections::HashSet::new();
-            let mut seen_lib = std::collections::HashSet::new();
+            let mut seen_fw = std::collections::BTreeSet::new();
+            let mut seen_inc = std::collections::BTreeSet::new();
+            let mut seen_src = std::collections::BTreeSet::new();
+            let mut seen_lib = std::collections::BTreeSet::new();
 
             // Collect metadata from all relevant symbols
             let mut sym_ids: Vec<SymbolId> = Vec::new();

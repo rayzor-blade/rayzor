@@ -9,7 +9,7 @@ use crate::tast::{
     InternedString, ScopeId, SourceLocation, StringInterner, SymbolId, TypeId, Visibility,
 };
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 /// Ownership and usage information for variables and expressions
@@ -490,7 +490,7 @@ pub enum DerivedTrait {
     Ord,
 
     /// @:derive(Hash) - Type can be hashed
-    /// Generates hash() method for use in HashMap
+    /// Generates hash() method for use in BTreeMap
     Hash,
 
     /// @:derive(Drop) - Type has a custom destructor
@@ -1377,7 +1377,7 @@ pub struct TypedComprehensionFor {
 }
 
 /// Binary operators
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum BinaryOperator {
     // Arithmetic
     Add,
@@ -1428,7 +1428,7 @@ pub enum BinaryOperator {
 }
 
 /// Unary operators
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum UnaryOperator {
     /// Negation: -x
     Neg,

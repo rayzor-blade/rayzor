@@ -8,7 +8,7 @@ use crate::tast::{
     node::{TypedExpression, TypedExpressionKind, TypedStatement},
     ScopeId, SymbolId, TypeId,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Information about a captured variable
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,8 +71,8 @@ impl CaptureAnalyzer {
         parameters: &[crate::tast::node::TypedParameter],
         body: &[TypedStatement],
     ) -> CaptureAnalysis {
-        let mut referenced_symbols: HashMap<SymbolId, TypeId> = HashMap::new();
-        let mut local_symbols = HashSet::new();
+        let mut referenced_symbols: BTreeMap<SymbolId, TypeId> = BTreeMap::new();
+        let mut local_symbols = BTreeSet::new();
 
         // Parameters are local to the function
         for param in parameters {
@@ -103,8 +103,8 @@ impl CaptureAnalyzer {
     fn collect_variable_references(
         &self,
         stmt: &TypedStatement,
-        referenced: &mut HashMap<SymbolId, TypeId>,
-        locals: &mut HashSet<SymbolId>,
+        referenced: &mut BTreeMap<SymbolId, TypeId>,
+        locals: &mut BTreeSet<SymbolId>,
     ) {
         match stmt {
             TypedStatement::Expression { expression, .. } => {
@@ -261,8 +261,8 @@ impl CaptureAnalyzer {
     fn collect_from_expression(
         &self,
         expr: &TypedExpression,
-        referenced: &mut HashMap<SymbolId, TypeId>,
-        locals: &mut HashSet<SymbolId>,
+        referenced: &mut BTreeMap<SymbolId, TypeId>,
+        locals: &mut BTreeSet<SymbolId>,
     ) {
         match &expr.kind {
             TypedExpressionKind::Variable { symbol_id } => {

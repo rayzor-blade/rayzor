@@ -16,7 +16,7 @@ use diagnostics::{
 };
 use source_map::SourceFile;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::rc::Rc;
 
 /// Context for type errors to provide better suggestions
@@ -57,26 +57,26 @@ pub enum TypeErrorContext {
 /// Haxe standard library type knowledge for better suggestions
 pub struct HaxeStdTypes {
     /// Types that implement toString() method
-    stringable_types: HashSet<&'static str>,
+    stringable_types: BTreeSet<&'static str>,
     /// Numeric types that can be used in arithmetic
-    numeric_types: HashSet<&'static str>,
+    numeric_types: BTreeSet<&'static str>,
     /// Types that can be iterated in for loops
-    iterable_types: HashSet<&'static str>,
+    iterable_types: BTreeSet<&'static str>,
 }
 
 impl HaxeStdTypes {
     pub fn new() -> Self {
-        let mut stringable_types = HashSet::new();
+        let mut stringable_types = BTreeSet::new();
         stringable_types.insert("Int");
         stringable_types.insert("Float");
         stringable_types.insert("Bool");
         stringable_types.insert("String");
 
-        let mut numeric_types = HashSet::new();
+        let mut numeric_types = BTreeSet::new();
         numeric_types.insert("Int");
         numeric_types.insert("Float");
 
-        let mut iterable_types = HashSet::new();
+        let mut iterable_types = BTreeSet::new();
         iterable_types.insert("Array");
         iterable_types.insert("String");
 

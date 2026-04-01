@@ -5,7 +5,7 @@
 
 use log::{info, warn};
 use parser::{parse_haxe_file_with_diagnostics, ErrorFormatter, HaxeFile};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Strip ANSI escape codes from a string for cleaner error output
@@ -69,7 +69,7 @@ impl Default for StdLibConfig {
 pub struct StdLibLoader {
     config: StdLibConfig,
     /// Cache of loaded files to avoid re-parsing
-    loaded_files: HashMap<PathBuf, HaxeFile>,
+    loaded_files: BTreeMap<PathBuf, HaxeFile>,
     /// Preprocessor config for conditional compilation (#if wasm, etc.)
     pp_config: parser::preprocessor::PreprocessorConfig,
 }
@@ -78,7 +78,7 @@ impl StdLibLoader {
     pub fn new(config: StdLibConfig) -> Self {
         Self {
             config,
-            loaded_files: HashMap::new(),
+            loaded_files: BTreeMap::new(),
             pp_config: parser::preprocessor::PreprocessorConfig::default(),
         }
     }

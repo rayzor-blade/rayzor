@@ -8,7 +8,7 @@ use super::{
     AccessLevel, InternedString, NamespaceResolver, PackageId, SourceLocation, StringInterner,
     SymbolId, SymbolTable, TypeCheckError, TypeErrorKind, TypeId, Visibility,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Package access context for tracking current compilation unit
 #[derive(Debug, Clone)]
@@ -20,10 +20,10 @@ pub struct PackageAccessContext {
     pub current_file: Option<InternedString>,
 
     /// Symbols visible from current context
-    pub visible_symbols: HashSet<SymbolId>,
+    pub visible_symbols: BTreeSet<SymbolId>,
 
     /// Import permissions for current context
-    pub import_permissions: HashMap<PackageId, AccessPermission>,
+    pub import_permissions: BTreeMap<PackageId, AccessPermission>,
 }
 
 impl PackageAccessContext {
@@ -32,8 +32,8 @@ impl PackageAccessContext {
         PackageAccessContext {
             current_package: None,
             current_file: None,
-            visible_symbols: HashSet::new(),
-            import_permissions: HashMap::new(),
+            visible_symbols: BTreeSet::new(),
+            import_permissions: BTreeMap::new(),
         }
     }
 
@@ -93,7 +93,7 @@ pub struct PackageAccessValidator<'a> {
     context: PackageAccessContext,
 
     /// Cache of symbol-to-package mappings
-    symbol_packages: HashMap<SymbolId, PackageId>,
+    symbol_packages: BTreeMap<SymbolId, PackageId>,
 
     /// Cache of package relationships
     package_cache: PackageRelationCache,
@@ -111,7 +111,7 @@ impl<'a> PackageAccessValidator<'a> {
             namespace_resolver,
             string_interner,
             context: PackageAccessContext::new(),
-            symbol_packages: HashMap::new(),
+            symbol_packages: BTreeMap::new(),
             package_cache: PackageRelationCache::new(),
         }
     }
@@ -457,13 +457,13 @@ impl<'a> PackageAccessValidator<'a> {
 #[derive(Debug)]
 struct PackageRelationCache {
     /// Cache for same-package checks
-    same_package: HashMap<(PackageId, PackageId), bool>,
+    same_package: BTreeMap<(PackageId, PackageId), bool>,
 }
 
 impl PackageRelationCache {
     fn new() -> Self {
         PackageRelationCache {
-            same_package: HashMap::new(),
+            same_package: BTreeMap::new(),
         }
     }
 }

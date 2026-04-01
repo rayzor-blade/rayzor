@@ -5,11 +5,11 @@
 
 use crate::tast::{InternedString, ScopeId, SymbolId, SymbolKind, TypeId};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 /// Cache key for symbol resolution
-#[derive(Hash, Eq, PartialEq, Clone, Debug)]
+#[derive(Hash, Eq, PartialEq, PartialOrd, Ord, Clone, Debug)]
 pub enum SymbolCacheKey {
     /// Symbol lookup by name in a specific scope
     NameInScope(ScopeId, InternedString),
@@ -61,10 +61,10 @@ struct SymbolCacheEntry<T> {
 #[derive(Debug)]
 pub struct SymbolResolutionCache {
     /// Primary cache for single symbol lookups
-    symbol_cache: RefCell<HashMap<SymbolCacheKey, SymbolCacheEntry<Option<SymbolId>>>>,
+    symbol_cache: RefCell<BTreeMap<SymbolCacheKey, SymbolCacheEntry<Option<SymbolId>>>>,
 
     /// Cache for multi-symbol results (like all symbols in a scope)
-    multi_symbol_cache: RefCell<HashMap<SymbolCacheKey, SymbolCacheEntry<Vec<SymbolId>>>>,
+    multi_symbol_cache: RefCell<BTreeMap<SymbolCacheKey, SymbolCacheEntry<Vec<SymbolId>>>>,
 
     /// Cache statistics
     stats: RefCell<CacheStats>,
@@ -81,8 +81,8 @@ impl SymbolResolutionCache {
     /// Create a new symbol resolution cache
     pub fn new(max_size: usize) -> Self {
         Self {
-            symbol_cache: RefCell::new(HashMap::with_capacity(max_size / 2)),
-            multi_symbol_cache: RefCell::new(HashMap::with_capacity(max_size / 4)),
+            symbol_cache: RefCell::new(BTreeMap::new()),
+            multi_symbol_cache: RefCell::new(BTreeMap::new()),
             stats: RefCell::new(CacheStats::default()),
             access_counter: Cell::new(0),
             symbol_cache_max_size: max_size,
@@ -93,8 +93,8 @@ impl SymbolResolutionCache {
     /// Create a symbol resolution cache with custom sizes
     pub fn with_sizes(symbol_cache_size: usize, multi_symbol_cache_size: usize) -> Self {
         Self {
-            symbol_cache: RefCell::new(HashMap::with_capacity(symbol_cache_size)),
-            multi_symbol_cache: RefCell::new(HashMap::with_capacity(multi_symbol_cache_size)),
+            symbol_cache: RefCell::new(BTreeMap::new()),
+            multi_symbol_cache: RefCell::new(BTreeMap::new()),
             stats: RefCell::new(CacheStats::default()),
             access_counter: Cell::new(0),
             symbol_cache_max_size: symbol_cache_size,
@@ -282,7 +282,7 @@ impl SymbolResolutionCache {
     /// Evict least recently used entry from symbol cache
     fn evict_lru_symbol(
         &self,
-        cache: &mut HashMap<SymbolCacheKey, SymbolCacheEntry<Option<SymbolId>>>,
+        cache: &mut BTreeMap<SymbolCacheKey, SymbolCacheEntry<Option<SymbolId>>>,
     ) {
         if let Some(lru_key) = cache
             .iter()
@@ -297,7 +297,7 @@ impl SymbolResolutionCache {
     /// Evict least recently used entry from multi-symbol cache
     fn evict_lru_multi_symbol(
         &self,
-        cache: &mut HashMap<SymbolCacheKey, SymbolCacheEntry<Vec<SymbolId>>>,
+        cache: &mut BTreeMap<SymbolCacheKey, SymbolCacheEntry<Vec<SymbolId>>>,
     ) {
         if let Some(lru_key) = cache
             .iter()

@@ -16,7 +16,7 @@ use cranelift_frontend::Variable;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{DataDescription, DataId, FuncId, Linkage, Module};
 use cranelift_native;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::ir::{
     IrBasicBlock, IrBlockId, IrControlFlowGraph, IrFunction, IrFunctionId, IrId, IrInstruction,
@@ -33,18 +33,18 @@ pub struct CraneliftBackend {
     ctx: codegen::Context,
 
     /// Map from MIR function IDs to Cranelift function IDs
-    function_map: HashMap<IrFunctionId, FuncId>,
+    function_map: BTreeMap<IrFunctionId, FuncId>,
 
     /// Map from MIR value IDs to Cranelift values (per function)
-    pub(super) value_map: HashMap<IrId, Value>,
+    pub(super) value_map: BTreeMap<IrId, Value>,
 
     /// Map from closure registers (function pointers) to their environment pointers
     /// This is populated during MakeClosure and used during CallIndirect
-    closure_environments: HashMap<IrId, Value>,
+    closure_environments: BTreeMap<IrId, Value>,
 
     /// Map from runtime function names to Cranelift function IDs
     /// Used for rayzor_malloc, rayzor_realloc, rayzor_free
-    runtime_functions: HashMap<String, FuncId>,
+    runtime_functions: BTreeMap<String, FuncId>,
 
     /// Target pointer size (32-bit or 64-bit) from ISA
     pointer_type: types::Type,
@@ -54,15 +54,15 @@ pub struct CraneliftBackend {
     module_counter: usize,
 
     /// Set of Cranelift FuncIds that have already been defined (had their bodies compiled)
-    defined_functions: HashSet<FuncId>,
+    defined_functions: BTreeSet<FuncId>,
 
     /// Functions that are used as FunctionRef/MakeClosure targets (vtable/closure).
     /// These MUST keep the env parameter. All other functions can skip it
     /// for faster direct calls (eliminates ~2 billion env=0 pushes in fibonacci).
-    indirect_target_functions: HashSet<IrFunctionId>,
+    indirect_target_functions: BTreeSet<IrFunctionId>,
 
     /// Tracks which declared functions have env parameter (for call site matching)
-    functions_with_env: HashSet<IrFunctionId>,
+    functions_with_env: BTreeSet<IrFunctionId>,
 
     /// The environment parameter for the current function being compiled
     /// This is used by ClosureEnv to access the environment
@@ -70,7 +70,7 @@ pub struct CraneliftBackend {
 
     /// Map from string content to its DataId in the module
     /// Used to reuse string constants across functions
-    string_data: HashMap<String, DataId>,
+    string_data: BTreeMap<String, DataId>,
 
     /// Counter for unique string data names
     string_counter: usize,
@@ -78,7 +78,7 @@ pub struct CraneliftBackend {
     /// Map from qualified function names to Cranelift function IDs
     /// Used to link forward references to actual implementations
     /// Key is qualified name (e.g., "StringTools.unsafeCodeAt")
-    qualified_name_to_func: HashMap<String, FuncId>,
+    qualified_name_to_func: BTreeMap<String, FuncId>,
 }
 
 impl CraneliftBackend {
@@ -224,19 +224,19 @@ impl CraneliftBackend {
         Ok(Self {
             module,
             ctx,
-            function_map: HashMap::new(),
-            value_map: HashMap::new(),
-            closure_environments: HashMap::new(),
-            runtime_functions: HashMap::new(),
+            function_map: BTreeMap::new(),
+            value_map: BTreeMap::new(),
+            closure_environments: BTreeMap::new(),
+            runtime_functions: BTreeMap::new(),
             pointer_type,
             module_counter: 0,
-            defined_functions: HashSet::new(),
-            indirect_target_functions: HashSet::new(),
-            functions_with_env: HashSet::new(),
+            defined_functions: BTreeSet::new(),
+            indirect_target_functions: BTreeSet::new(),
+            functions_with_env: BTreeSet::new(),
             current_env_param: None,
-            string_data: HashMap::new(),
+            string_data: BTreeMap::new(),
             string_counter: 0,
-            qualified_name_to_func: HashMap::new(),
+            qualified_name_to_func: BTreeMap::new(),
         })
     }
 
@@ -580,8 +580,8 @@ impl CraneliftBackend {
         // Second pass: compile function bodies (skip extern functions with empty CFGs)
         // Track failed function IDs so we can also skip functions that call them
         // (calling a trap stub with mismatched args would panic cranelift).
-        let mut failed_funcs: std::collections::HashSet<IrFunctionId> =
-            std::collections::HashSet::new();
+        let mut failed_funcs: std::collections::BTreeSet<IrFunctionId> =
+            std::collections::BTreeSet::new();
         // Also skip unmonomorphized generic templates
         for (func_id, function) in &mir_module.functions {
             if !function.signature.type_params.is_empty() {
@@ -779,8 +779,8 @@ impl CraneliftBackend {
 
         // Second pass: compile function bodies (skip extern functions with empty CFGs)
         // Track failed functions to skip callers (prevents cranelift ABI panics)
-        let mut failed_funcs: std::collections::HashSet<IrFunctionId> =
-            std::collections::HashSet::new();
+        let mut failed_funcs: std::collections::BTreeSet<IrFunctionId> =
+            std::collections::BTreeSet::new();
         for (func_id, function) in &mir_module.functions {
             if !function.signature.type_params.is_empty() {
                 failed_funcs.insert(*func_id);
@@ -1528,7 +1528,7 @@ impl CraneliftBackend {
         // Note: Don't seal entry block yet, we need to add instructions first
 
         // First pass: Create all Cranelift blocks for MIR blocks
-        let mut block_map = std::collections::HashMap::new();
+        let mut block_map = std::collections::BTreeMap::new();
         // debug!("Cranelift: Function {} has {} blocks in CFG", function.name, function.cfg.blocks.len());
         for (mir_block_id, mir_block) in &function.cfg.blocks {
             // debug!("Cranelift:   Block {:?} has {} phi nodes, {} instructions",
@@ -1548,7 +1548,7 @@ impl CraneliftBackend {
         // with higher IDs in the middle of control flow.
         let blocks_to_process = {
             let mut rpo = Vec::new();
-            let mut visited = std::collections::HashSet::new();
+            let mut visited = std::collections::BTreeSet::new();
             let mut stack = vec![(function.cfg.entry_block, false)];
             while let Some((block_id, processed)) = stack.pop() {
                 if processed {
@@ -1595,7 +1595,7 @@ impl CraneliftBackend {
         };
 
         // Track which blocks have been translated
-        let mut translated_blocks = std::collections::HashSet::new();
+        let mut translated_blocks = std::collections::BTreeSet::new();
 
         for (mir_block_id, mir_block) in blocks_to_process {
             let cl_block = *block_map
@@ -1736,7 +1736,7 @@ impl CraneliftBackend {
     /// Collect phi node arguments when branching to a block
     /// This function also coerces value types if they don't match the expected phi parameter type
     fn collect_phi_args_with_coercion(
-        value_map: &HashMap<IrId, Value>,
+        value_map: &BTreeMap<IrId, Value>,
         function: &IrFunction,
         target_block: IrBlockId,
         from_block: IrBlockId,
@@ -1827,10 +1827,10 @@ impl CraneliftBackend {
 
     /// Translate a phi node to Cranelift IR
     fn translate_phi_node_static(
-        value_map: &mut HashMap<IrId, Value>,
+        value_map: &mut BTreeMap<IrId, Value>,
         builder: &mut FunctionBuilder,
         phi_node: &crate::ir::IrPhiNode,
-        block_map: &HashMap<IrBlockId, Block>,
+        block_map: &BTreeMap<IrBlockId, Block>,
         _cfg: &crate::ir::IrControlFlowGraph,
     ) -> Result<(), String> {
         // Create block parameters for the phi node
@@ -1961,19 +1961,19 @@ impl CraneliftBackend {
 
     /// Translate a single MIR instruction to Cranelift IR (static method)
     fn translate_instruction(
-        value_map: &mut HashMap<IrId, Value>,
+        value_map: &mut BTreeMap<IrId, Value>,
         builder: &mut FunctionBuilder,
         instruction: &IrInstruction,
         function: &IrFunction,
-        function_map: &HashMap<IrFunctionId, FuncId>,
-        runtime_functions: &mut HashMap<String, FuncId>,
+        function_map: &BTreeMap<IrFunctionId, FuncId>,
+        runtime_functions: &mut BTreeMap<String, FuncId>,
         mir_module: &IrModule,
         module: &mut JITModule,
-        closure_environments: &mut HashMap<IrId, Value>,
+        closure_environments: &mut BTreeMap<IrId, Value>,
         current_env_param: Option<Value>,
-        string_data: &mut HashMap<String, DataId>,
+        string_data: &mut BTreeMap<String, DataId>,
         string_counter: &mut usize,
-        functions_with_env: &HashSet<IrFunctionId>,
+        functions_with_env: &BTreeSet<IrFunctionId>,
     ) -> Result<(), String> {
         use crate::ir::IrInstruction;
 
@@ -3807,10 +3807,10 @@ impl CraneliftBackend {
 
     /// Translate a terminator instruction (static method)
     fn translate_terminator_static(
-        value_map: &HashMap<IrId, Value>,
+        value_map: &BTreeMap<IrId, Value>,
         builder: &mut FunctionBuilder,
         terminator: &IrTerminator,
-        block_map: &HashMap<IrBlockId, Block>,
+        block_map: &BTreeMap<IrBlockId, Block>,
         function: &IrFunction,
         sret_ptr: Option<Value>,
     ) -> Result<(), String> {
@@ -4009,10 +4009,10 @@ impl CraneliftBackend {
     fn translate_const_value(
         builder: &mut FunctionBuilder,
         value: &IrValue,
-        function_map: &HashMap<IrFunctionId, FuncId>,
-        runtime_functions: &mut HashMap<String, FuncId>,
+        function_map: &BTreeMap<IrFunctionId, FuncId>,
+        runtime_functions: &mut BTreeMap<String, FuncId>,
         module: &mut JITModule,
-        string_data: &mut HashMap<String, DataId>,
+        string_data: &mut BTreeMap<String, DataId>,
         string_counter: &mut usize,
     ) -> Result<Value, String> {
         use crate::ir::IrValue;

@@ -434,39 +434,39 @@ impl IdGeneratorStats {
 /// Convenience functions for working with ID collections
 pub mod collections {
     use super::*;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, BTreeSet};
 
     /// Fast hash map specialized for ID keys
-    pub type IdMap<K, V> = HashMap<K, V>;
+    pub type IdMap<K, V> = BTreeMap<K, V>;
 
     /// Fast hash set specialized for ID values
-    pub type IdSet<T> = HashSet<T>;
+    pub type IdSet<T> = BTreeSet<T>;
 
     /// Create a new ID map with reasonable default capacity
     pub fn new_id_map<K: IdType, V>() -> IdMap<K, V> {
-        HashMap::with_capacity(256)
+        BTreeMap::new()
     }
 
     /// Create a new ID set with reasonable default capacity
     pub fn new_id_set<T: IdType>() -> IdSet<T> {
-        HashSet::with_capacity(256)
+        BTreeSet::new()
     }
 
     /// Create a new ID map with specific capacity
     pub fn new_id_map_with_capacity<K: IdType, V>(capacity: usize) -> IdMap<K, V> {
-        HashMap::with_capacity(capacity)
+        BTreeMap::new()
     }
 
     /// Create a new ID set with specific capacity
     pub fn new_id_set_with_capacity<T: IdType>(capacity: usize) -> IdSet<T> {
-        HashSet::with_capacity(capacity)
+        BTreeSet::new()
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashSet;
+    use std::collections::BTreeSet;
     use std::sync::Arc;
     use std::thread;
 
@@ -516,7 +516,7 @@ mod tests {
         let id2 = ScopeId::from_raw(100);
         let id3 = ScopeId::from_raw(101);
 
-        let mut set = HashSet::new();
+        let mut set = BTreeSet::new();
         set.insert(id1);
         set.insert(id2); // Should not increase size (same as id1)
         set.insert(id3);
