@@ -3745,12 +3745,13 @@ impl CompilationUnit {
 
         let mut added_count = 0;
 
-        let entries = fs::read_dir(dir_path)
-            .map_err(|e| format!("Failed to read directory {:?}: {}", dir_path, e))?;
+        let mut paths: Vec<PathBuf> = fs::read_dir(dir_path)
+            .map_err(|e| format!("Failed to read directory {:?}: {}", dir_path, e))?
+            .map(|entry| entry.map(|e| e.path()).map_err(|e| format!("Failed to read directory entry: {}", e)))
+            .collect::<Result<_, _>>()?;
+        paths.sort();
 
-        for entry in entries {
-            let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
-            let path = entry.path();
+        for path in paths {
 
             if path.is_file() {
                 if let Some(ext) = path.extension() {
