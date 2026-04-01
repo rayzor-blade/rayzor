@@ -2231,9 +2231,9 @@ impl<'a> HirToMirContext<'a> {
         // Build class vtables after all type metadata is registered
         self.build_class_vtables();
 
-        // CRITICAL: Two-pass lowering to avoid non-deterministic function ordering issues
-        // BTreeMap iteration over hir_module.types is random, so class methods might be
-        // lowered after module functions that call them, causing "function not found" errors.
+        // CRITICAL: Two-pass lowering to handle forward references
+        // Class methods might be lowered after module functions that call them,
+        // causing "function not found" errors.
         //
         // Pass 1: Register ALL function signatures WITHOUT lowering bodies
         // This ensures function_map is fully populated before any calls are made

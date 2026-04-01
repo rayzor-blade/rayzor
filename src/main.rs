@@ -3162,12 +3162,12 @@ fn cmd_build_wasm(
 
     // Build host function map from rayzor.toml [wasm] hosts:
     // Scan each JS host file for `export function` names and map them to the module name.
-    let host_functions: std::collections::HashMap<String, String> = {
+    let host_functions: std::collections::BTreeMap<String, String> = {
         let config_hosts = project
             .as_ref()
             .map(|p| p.resolved_wasm_hosts())
             .unwrap_or_default();
-        let mut map = std::collections::HashMap::new();
+        let mut map = std::collections::BTreeMap::new();
         for (module_name, js_path) in &config_hosts {
             if let Ok(js_source) = std::fs::read_to_string(js_path) {
                 let exports = compiler::codegen::wasm_linker::WasmLinker::scan_js_exports(&js_source);
@@ -3403,7 +3403,7 @@ fn resolve_and_copy_host_modules(
     }
 
     // Collect host paths from rayzor.toml [wasm] hosts
-    let config_hosts: std::collections::HashMap<String, PathBuf> = project
+    let config_hosts: std::collections::BTreeMap<String, PathBuf> = project
         .as_ref()
         .map(|p| p.resolved_wasm_hosts())
         .unwrap_or_default();

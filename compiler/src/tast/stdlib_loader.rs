@@ -181,21 +181,16 @@ impl StdLibLoader {
             info!("Loading root stdlib from: {}", path.display());
 
             // Only load .hx files directly in the root directory
-            let entries = match std::fs::read_dir(&path) {
-                Ok(e) => e,
+            let mut dir_paths: Vec<std::path::PathBuf> = match std::fs::read_dir(&path) {
+                Ok(e) => e.filter_map(|entry| entry.ok().map(|e| e.path())).collect(),
                 Err(err) => {
                     warn!("Failed to read directory {:?}: {}", path, err);
                     return files;
                 }
             };
+            dir_paths.sort(); // Deterministic ordering
 
-            for entry in entries {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
-
-                let file_path = entry.path();
+            for file_path in dir_paths {
 
                 // Only load .hx files, skip directories
                 if file_path.is_file()
@@ -297,22 +292,17 @@ impl StdLibLoader {
             return;
         }
 
-        // Read directory entries
-        let entries = match std::fs::read_dir(dir) {
-            Ok(e) => e,
+        // Read directory entries (sorted for deterministic ordering)
+        let mut dir_paths: Vec<std::path::PathBuf> = match std::fs::read_dir(dir) {
+            Ok(e) => e.filter_map(|entry| entry.ok().map(|e| e.path())).collect(),
             Err(err) => {
                 warn!("Failed to read directory {:?}: {}", dir, err);
                 return;
             }
         };
+        dir_paths.sort();
 
-        for entry in entries {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-
-            let path = entry.path();
+        for path in dir_paths {
 
             if path.is_dir() {
                 // Recursively scan subdirectories

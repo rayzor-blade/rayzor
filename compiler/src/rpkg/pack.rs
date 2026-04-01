@@ -244,12 +244,13 @@ pub fn collect_haxe_sources(
     base_dir: &Path,
     current_dir: &Path,
 ) -> Result<(), String> {
-    let entries = std::fs::read_dir(current_dir)
-        .map_err(|e| format!("failed to read dir {}: {}", current_dir.display(), e))?;
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(current_dir)
+        .map_err(|e| format!("failed to read dir {}: {}", current_dir.display(), e))?
+        .map(|entry| entry.map(|e| e.path()).map_err(|e| format!("dir entry error: {}", e)))
+        .collect::<Result<_, _>>()?;
+    paths.sort(); // Deterministic ordering
 
-    for entry in entries {
-        let entry = entry.map_err(|e| format!("dir entry error: {}", e))?;
-        let path = entry.path();
+    for path in paths {
 
         if path.is_dir() {
             collect_haxe_sources(builder, base_dir, &path)?;

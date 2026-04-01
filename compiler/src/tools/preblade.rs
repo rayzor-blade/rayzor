@@ -335,13 +335,13 @@ fn discover_files_recursive(
     current_path: &Path,
     files: &mut Vec<(String, PathBuf)>,
 ) {
-    let entries = match std::fs::read_dir(current_path) {
-        Ok(e) => e,
+    let mut dir_paths: Vec<std::path::PathBuf> = match std::fs::read_dir(current_path) {
+        Ok(e) => e.filter_map(|entry| entry.ok().map(|e| e.path())).collect(),
         Err(_) => return,
     };
+    dir_paths.sort(); // Deterministic ordering
 
-    for entry in entries.flatten() {
-        let path = entry.path();
+    for path in dir_paths {
 
         if path.is_dir() {
             let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
