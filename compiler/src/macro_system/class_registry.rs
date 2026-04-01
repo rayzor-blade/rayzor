@@ -5,7 +5,7 @@
 //! hardcoded class dispatch (Std, Math, etc.) doesn't match.
 
 use parser::{ClassFieldKind, Expr, FunctionParam, HaxeFile, Modifier, TypeDeclaration};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Info about a single method (static or instance)
@@ -28,8 +28,8 @@ pub struct ClassInfo {
     pub name: String,
     pub qualified_name: String,
     pub constructor: Option<MethodInfo>,
-    pub static_methods: HashMap<String, MethodInfo>,
-    pub instance_methods: HashMap<String, MethodInfo>,
+    pub static_methods: BTreeMap<String, MethodInfo>,
+    pub instance_methods: BTreeMap<String, MethodInfo>,
     pub instance_vars: Vec<FieldVarInfo>,
     pub static_vars: Vec<FieldVarInfo>,
 }
@@ -40,16 +40,16 @@ pub struct ClassInfo {
 /// The interpreter falls back to this registry when hardcoded class dispatch doesn't match.
 pub struct ClassRegistry {
     /// qualified_name → ClassInfo
-    classes: HashMap<String, ClassInfo>,
+    classes: BTreeMap<String, ClassInfo>,
     /// short_name → qualified_name (for unambiguous lookups)
-    short_name_index: HashMap<String, String>,
+    short_name_index: BTreeMap<String, String>,
 }
 
 impl ClassRegistry {
     pub fn new() -> Self {
         Self {
-            classes: HashMap::new(),
-            short_name_index: HashMap::new(),
+            classes: BTreeMap::new(),
+            short_name_index: BTreeMap::new(),
         }
     }
 
@@ -67,8 +67,8 @@ impl ClassRegistry {
                     name: class.name.clone(),
                     qualified_name: qualified_name.clone(),
                     constructor: None,
-                    static_methods: HashMap::new(),
-                    instance_methods: HashMap::new(),
+                    static_methods: BTreeMap::new(),
+                    instance_methods: BTreeMap::new(),
                     instance_vars: Vec::new(),
                     static_vars: Vec::new(),
                 };

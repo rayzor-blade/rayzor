@@ -34,7 +34,7 @@ use crate::tast::{
 use parser::{haxe_ast::HaxeFile, parse_haxe_file_with_diagnostics, ParseResult};
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::{rc::Rc, sync::Arc};
 
@@ -1510,7 +1510,7 @@ impl HaxeCompilationPipeline {
         let mut errors = Vec::new();
 
         // Check for duplicate method names
-        let mut method_names = std::collections::HashSet::new();
+        let mut method_names = std::collections::BTreeSet::new();
         for method in &class.methods {
             let method_name = self.get_string_from_interned(method.name);
             if !method_names.insert(method_name.clone()) {
@@ -1554,7 +1554,7 @@ impl HaxeCompilationPipeline {
         let mut errors = Vec::new();
 
         // Check for duplicate method signatures
-        let mut method_signatures = std::collections::HashSet::new();
+        let mut method_signatures = std::collections::BTreeSet::new();
         for method in &interface.methods {
             let signature = format!("{}:{}", method.name, "type"); // Simplified signature
             if !method_signatures.insert(signature.clone()) {
@@ -1583,7 +1583,7 @@ impl HaxeCompilationPipeline {
         let mut errors = Vec::new();
 
         // Check for duplicate variant names
-        let mut variant_names = std::collections::HashSet::new();
+        let mut variant_names = std::collections::BTreeSet::new();
         for variant in &enum_def.variants {
             if !variant_names.insert(variant.name.clone()) {
                 errors.push(CompilationError {

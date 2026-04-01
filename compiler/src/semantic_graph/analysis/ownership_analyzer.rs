@@ -12,7 +12,7 @@
 //! - Integration with existing lifetime analysis pipeline
 //! - Performance optimized for large codebases
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use crate::semantic_graph::ownership_graph::{
@@ -37,10 +37,10 @@ pub struct OwnershipAnalyzer {
     stats: OwnershipAnalysisStats,
 
     /// Cache for SSA variable to symbol mappings
-    ssa_to_symbol_cache: HashMap<SsaVariableId, SymbolId>,
+    ssa_to_symbol_cache: BTreeMap<SsaVariableId, SymbolId>,
 
     /// Cache for move operation detection
-    move_cache: HashMap<DataFlowNodeId, Option<MoveOperation>>,
+    move_cache: BTreeMap<DataFlowNodeId, Option<MoveOperation>>,
 }
 
 /// Record of a move operation detected from data flow analysis
@@ -144,8 +144,8 @@ impl OwnershipAnalyzer {
     pub fn new() -> Self {
         Self {
             stats: OwnershipAnalysisStats::default(),
-            ssa_to_symbol_cache: HashMap::new(),
-            move_cache: HashMap::new(),
+            ssa_to_symbol_cache: BTreeMap::new(),
+            move_cache: BTreeMap::new(),
         }
     }
 
@@ -258,7 +258,7 @@ impl OwnershipAnalyzer {
         ownership_graph: &OwnershipGraph,
     ) -> Result<Vec<OwnershipViolation>, OwnershipAnalysisError> {
         let mut violations = Vec::new();
-        let mut checked_variables = HashSet::new();
+        let mut checked_variables = BTreeSet::new();
 
         // Debug: Print all move edges
         // println!(
@@ -536,7 +536,7 @@ impl OwnershipAnalyzer {
         let mut violations = Vec::new();
 
         // Method 1: Check ownership graph move edges for double moves (more reliable)
-        let mut checked_variables = HashSet::new();
+        let mut checked_variables = BTreeSet::new();
         for (_edge_id, move_edge) in &context.ownership_graph.move_edges {
             if !checked_variables.contains(&move_edge.source) {
                 checked_variables.insert(move_edge.source);

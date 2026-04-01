@@ -1,6 +1,6 @@
 use crate::tast::{SourceLocation, TypeId};
 use parser::{Expr, FunctionParam};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ pub struct MacroFunction {
     /// The function body AST (interpreted at call time)
     pub body: Arc<Expr>,
     /// Captured environment variables (for closures)
-    pub captures: HashMap<String, MacroValue>,
+    pub captures: BTreeMap<String, MacroValue>,
 }
 
 /// A parameter in a macro function definition
@@ -70,7 +70,7 @@ pub enum MacroValue {
     Array(Arc<Vec<MacroValue>>),
 
     /// Anonymous object / struct (Arc for O(1) clone, COW on mutation)
-    Object(Arc<HashMap<String, MacroValue>>),
+    Object(Arc<BTreeMap<String, MacroValue>>),
 
     /// Enum value: (enum_name, variant_name, args)
     Enum(Arc<str>, Arc<str>, Arc<Vec<MacroValue>>),
@@ -205,7 +205,7 @@ impl MacroValue {
     }
 
     /// Try to get as an object reference
-    pub fn as_object(&self) -> Option<&HashMap<String, MacroValue>> {
+    pub fn as_object(&self) -> Option<&BTreeMap<String, MacroValue>> {
         match self {
             MacroValue::Object(o) => Some(o),
             _ => None,
@@ -213,7 +213,7 @@ impl MacroValue {
     }
 
     /// Try to get as a mutable object reference (COW via Arc::make_mut)
-    pub fn as_object_mut(&mut self) -> Option<&mut HashMap<String, MacroValue>> {
+    pub fn as_object_mut(&mut self) -> Option<&mut BTreeMap<String, MacroValue>> {
         match self {
             MacroValue::Object(o) => Some(Arc::make_mut(o)),
             _ => None,

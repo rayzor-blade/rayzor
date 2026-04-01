@@ -6,7 +6,7 @@
 //! - Loop nesting info and metadata
 
 use super::{IrBlockId, IrControlFlowGraph, IrFunction};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Dominator tree for a function's control flow graph.
 ///
@@ -15,13 +15,13 @@ use std::collections::{HashMap, HashSet, VecDeque};
 #[derive(Debug, Clone)]
 pub struct DominatorTree {
     /// Immediate dominator for each block (entry block has no idom)
-    idom: HashMap<IrBlockId, IrBlockId>,
+    idom: BTreeMap<IrBlockId, IrBlockId>,
 
     /// Children in the dominator tree
-    children: HashMap<IrBlockId, Vec<IrBlockId>>,
+    children: BTreeMap<IrBlockId, Vec<IrBlockId>>,
 
     /// Dominator tree depth for each block (entry = 0)
-    depth: HashMap<IrBlockId, usize>,
+    depth: BTreeMap<IrBlockId, usize>,
 
     /// Entry block of the function
     entry: IrBlockId,
@@ -38,11 +38,11 @@ impl DominatorTree {
 
         // Get blocks in reverse postorder for efficient iteration
         let rpo = Self::reverse_postorder(cfg, entry);
-        let rpo_index: HashMap<IrBlockId, usize> =
+        let rpo_index: BTreeMap<IrBlockId, usize> =
             rpo.iter().enumerate().map(|(i, &b)| (b, i)).collect();
 
         // Initialize idom: entry dominates itself, others undefined
-        let mut idom: HashMap<IrBlockId, Option<IrBlockId>> = HashMap::new();
+        let mut idom: BTreeMap<IrBlockId, Option<IrBlockId>> = BTreeMap::new();
         for &block in &rpo {
             idom.insert(block, None);
         }
@@ -96,7 +96,7 @@ impl DominatorTree {
         }
 
         // Convert Option<IrBlockId> to IrBlockId (removing entry's self-domination)
-        let mut final_idom: HashMap<IrBlockId, IrBlockId> = HashMap::new();
+        let mut final_idom: BTreeMap<IrBlockId, IrBlockId> = BTreeMap::new();
         for (&block, &dom) in &idom {
             if let Some(d) = dom {
                 if block != entry {
@@ -107,7 +107,7 @@ impl DominatorTree {
 
         // Build children map
         // IMPORTANT: Sort children for deterministic iteration order in GVN and other passes
-        let mut children: HashMap<IrBlockId, Vec<IrBlockId>> = HashMap::new();
+        let mut children: BTreeMap<IrBlockId, Vec<IrBlockId>> = BTreeMap::new();
         for (&block, &dom) in &final_idom {
             children.entry(dom).or_default().push(block);
         }
@@ -117,7 +117,7 @@ impl DominatorTree {
         }
 
         // Compute depths via BFS from entry
-        let mut depth: HashMap<IrBlockId, usize> = HashMap::new();
+        let mut depth: BTreeMap<IrBlockId, usize> = BTreeMap::new();
         depth.insert(entry, 0);
         let mut queue: VecDeque<IrBlockId> = VecDeque::new();
         queue.push_back(entry);
@@ -140,13 +140,13 @@ impl DominatorTree {
 
     /// Compute reverse postorder of blocks (good for dataflow iteration).
     fn reverse_postorder(cfg: &IrControlFlowGraph, entry: IrBlockId) -> Vec<IrBlockId> {
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
         let mut postorder = Vec::new();
 
         fn dfs(
             cfg: &IrControlFlowGraph,
             block: IrBlockId,
-            visited: &mut HashSet<IrBlockId>,
+            visited: &mut BTreeSet<IrBlockId>,
             postorder: &mut Vec<IrBlockId>,
         ) {
             if !visited.insert(block) {
@@ -172,8 +172,8 @@ impl DominatorTree {
     fn intersect(
         mut b1: IrBlockId,
         mut b2: IrBlockId,
-        idom: &HashMap<IrBlockId, Option<IrBlockId>>,
-        rpo_index: &HashMap<IrBlockId, usize>,
+        idom: &BTreeMap<IrBlockId, Option<IrBlockId>>,
+        rpo_index: &BTreeMap<IrBlockId, usize>,
     ) -> IrBlockId {
         // Walk up the dominator tree until we find a common dominator
         let max_steps = idom.len() + 1;
@@ -267,7 +267,7 @@ pub struct NaturalLoop {
     pub back_edge_source: IrBlockId,
 
     /// All blocks in the loop body (including header)
-    pub blocks: HashSet<IrBlockId>,
+    pub blocks: BTreeSet<IrBlockId>,
 
     /// Exit blocks (blocks in the loop with edges outside the loop)
     pub exit_blocks: Vec<IrBlockId>,
@@ -308,13 +308,13 @@ pub enum TripCount {
 #[derive(Debug, Clone)]
 pub struct LoopNestInfo {
     /// All natural loops indexed by header block
-    pub loops: HashMap<IrBlockId, NaturalLoop>,
+    pub loops: BTreeMap<IrBlockId, NaturalLoop>,
 
     /// Top-level loops (not nested in any other loop)
     pub top_level_loops: Vec<IrBlockId>,
 
     /// Map from block to its innermost containing loop header
-    pub block_to_loop: HashMap<IrBlockId, IrBlockId>,
+    pub block_to_loop: BTreeMap<IrBlockId, IrBlockId>,
 
     /// Maximum nesting depth in the function
     pub max_depth: usize,
@@ -324,7 +324,7 @@ impl LoopNestInfo {
     /// Analyze loops in a function.
     pub fn analyze(function: &IrFunction, domtree: &DominatorTree) -> Self {
         let cfg = &function.cfg;
-        let mut loops = HashMap::new();
+        let mut loops = BTreeMap::new();
 
         // Find all back edges and create natural loops
         for (&block_id, block) in &cfg.blocks {
@@ -403,7 +403,7 @@ impl LoopNestInfo {
             .copied()
             .collect();
 
-        fn set_depth(loops: &mut HashMap<IrBlockId, NaturalLoop>, header: IrBlockId, depth: usize) {
+        fn set_depth(loops: &mut BTreeMap<IrBlockId, NaturalLoop>, header: IrBlockId, depth: usize) {
             loops.get_mut(&header).unwrap().nesting_depth = depth;
             let children: Vec<IrBlockId> = loops[&header].children.clone();
             for child in children {
@@ -418,7 +418,7 @@ impl LoopNestInfo {
         let max_depth = loops.values().map(|l| l.nesting_depth).max().unwrap_or(0);
 
         // Build block-to-loop mapping (map each block to its innermost loop)
-        let mut block_to_loop = HashMap::new();
+        let mut block_to_loop = BTreeMap::new();
         for (&header, loop_info) in &loops {
             for &block in &loop_info.blocks {
                 // Only set if not already set or if this loop is more deeply nested
@@ -445,8 +445,8 @@ impl LoopNestInfo {
         cfg: &IrControlFlowGraph,
         header: IrBlockId,
         back_edge_source: IrBlockId,
-    ) -> HashSet<IrBlockId> {
-        let mut loop_blocks = HashSet::new();
+    ) -> BTreeSet<IrBlockId> {
+        let mut loop_blocks = BTreeSet::new();
         loop_blocks.insert(header);
 
         if header == back_edge_source {
@@ -474,7 +474,7 @@ impl LoopNestInfo {
     /// Find exit blocks (blocks in loop with successors outside loop).
     fn find_exit_blocks(
         cfg: &IrControlFlowGraph,
-        loop_blocks: &HashSet<IrBlockId>,
+        loop_blocks: &BTreeSet<IrBlockId>,
     ) -> Vec<IrBlockId> {
         let mut exits = Vec::new();
 
@@ -496,7 +496,7 @@ impl LoopNestInfo {
     fn find_preheader(
         cfg: &IrControlFlowGraph,
         header: IrBlockId,
-        loop_blocks: &HashSet<IrBlockId>,
+        loop_blocks: &BTreeSet<IrBlockId>,
     ) -> Option<IrBlockId> {
         let header_block = cfg.get_block(header)?;
 

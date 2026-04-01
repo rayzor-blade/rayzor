@@ -13,14 +13,14 @@ use crate::tast::{
     InternedString,
     SourceLocation,
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::cell::RefCell;
 use std::rc::Rc;
 
 /// Type inference context
 pub struct TypeInferenceContext<'a> {
     type_table: &'a Rc<RefCell<TypeTable>>,
-    inference_variables: HashMap<InferenceVariableId, TypeId>,
+    inference_variables: BTreeMap<InferenceVariableId, TypeId>,
     next_inference_var: u32,
     constraints: Vec<TypeConstraint>,
 }
@@ -84,7 +84,7 @@ impl<'a> TypeInferenceContext<'a> {
     pub fn new(type_table: &'a Rc<RefCell<TypeTable>>) -> Self {
         Self {
             type_table,
-            inference_variables: HashMap::new(),
+            inference_variables: BTreeMap::new(),
             next_inference_var: 0,
             constraints: Vec::new(),
         }

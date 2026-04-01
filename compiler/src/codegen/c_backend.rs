@@ -7,7 +7,7 @@
 //!
 //! Pipeline: MIR → C source → gcc -O2 → native binary (linked with librayzor_runtime.a)
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write;
 
 use crate::ir::blocks::{IrBlockId, IrPhiNode, IrTerminator};
@@ -24,13 +24,13 @@ pub struct CBackend {
     /// MIR function ID → C function name.
     function_names: BTreeMap<IrFunctionId, String>,
     /// Extern functions already declared (by name).
-    declared_externs: HashSet<String>,
+    declared_externs: BTreeSet<String>,
     /// Functions whose bodies have been emitted.
-    emitted_functions: HashSet<IrFunctionId>,
+    emitted_functions: BTreeSet<IrFunctionId>,
     /// Global variable declarations needed.
     used_globals: BTreeSet<IrGlobalId>,
     /// Struct definitions that have been emitted (struct_name → field names).
-    emitted_structs: HashMap<String, Vec<String>>,
+    emitted_structs: BTreeMap<String, Vec<String>>,
 }
 
 impl CBackend {
@@ -39,10 +39,10 @@ impl CBackend {
             output: String::with_capacity(64 * 1024),
             indent: 0,
             function_names: BTreeMap::new(),
-            declared_externs: HashSet::new(),
-            emitted_functions: HashSet::new(),
+            declared_externs: BTreeSet::new(),
+            emitted_functions: BTreeSet::new(),
             used_globals: BTreeSet::new(),
-            emitted_structs: HashMap::new(),
+            emitted_structs: BTreeMap::new(),
         }
     }
 
@@ -98,7 +98,7 @@ impl CBackend {
     // -----------------------------------------------------------------------
 
     fn assign_function_names(&mut self, modules: &[IrModule]) {
-        let mut name_counts: HashMap<String, usize> = HashMap::new();
+        let mut name_counts: BTreeMap<String, usize> = BTreeMap::new();
 
         for module in modules {
             // Register names for all functions
@@ -198,7 +198,7 @@ impl CBackend {
     fn emit_extern_declarations(&mut self, modules: &[IrModule]) {
         self.emit_line("/* Runtime extern declarations */");
 
-        let c_stdlib_skip: HashSet<&str> = [
+        let c_stdlib_skip: BTreeSet<&str> = [
             "malloc", "realloc", "free", "calloc", "abort", "exit", "memcpy", "memset", "memmove",
             "strlen", "strcmp", "printf", "fprintf", "snprintf", "sprintf", "puts",
         ]
@@ -235,7 +235,7 @@ impl CBackend {
         }
 
         // 2. Declare functions with empty bodies (extern/forward declarations from stdlib)
-        let c_stdlib_names: HashSet<&str> = [
+        let c_stdlib_names: BTreeSet<&str> = [
             "malloc", "realloc", "free", "calloc", "abort", "exit", "memcpy", "memset", "memmove",
             "strlen", "strcmp", "printf", "fprintf", "snprintf", "sprintf", "puts", "fopen",
             "fclose", "fread", "fwrite", "fgets",
@@ -284,7 +284,7 @@ impl CBackend {
         let mut missing_externs: BTreeMap<IrFunctionId, (String, usize)> = BTreeMap::new();
         for module in modules {
             // Build a lookup of extern function names by ID
-            let extern_names: HashMap<IrFunctionId, &str> = module
+            let extern_names: BTreeMap<IrFunctionId, &str> = module
                 .extern_functions
                 .iter()
                 .map(|(id, ext)| (*id, ext.name.as_str()))
@@ -471,7 +471,7 @@ impl CBackend {
         }
 
         // Parameter registers (don't redeclare)
-        let param_regs: HashSet<IrId> = function
+        let param_regs: BTreeSet<IrId> = function
             .signature
             .parameters
             .iter()
@@ -561,8 +561,8 @@ impl CBackend {
     fn collect_phi_copies(
         &self,
         function: &crate::ir::IrFunction,
-    ) -> HashMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId, String)>> {
-        let mut copies: HashMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId, String)>> = HashMap::new();
+    ) -> BTreeMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId, String)>> {
+        let mut copies: BTreeMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId, String)>> = BTreeMap::new();
 
         for (block_id, block) in &function.cfg.blocks {
             for phi in &block.phi_nodes {
@@ -585,7 +585,7 @@ impl CBackend {
         &mut self,
         pred_block: IrBlockId,
         target_block: IrBlockId,
-        phi_info: &HashMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId, String)>>,
+        phi_info: &BTreeMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId, String)>>,
     ) {
         if let Some(copies) = phi_info.get(&(pred_block, target_block)) {
             if copies.len() == 1 {
@@ -1341,7 +1341,7 @@ impl CBackend {
         &mut self,
         term: &IrTerminator,
         current_block: IrBlockId,
-        phi_info: &HashMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId, String)>>,
+        phi_info: &BTreeMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId, String)>>,
     ) -> Result<(), String> {
         match term {
             IrTerminator::Branch { target } => {

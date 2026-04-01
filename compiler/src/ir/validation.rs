@@ -8,7 +8,7 @@ use super::{
     IrBasicBlock, IrBlockId, IrFunction, IrFunctionId, IrId, IrInstruction, IrModule, IrTerminator,
     IrType, IrValue, LifetimeId,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Ownership state of a register
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -63,25 +63,25 @@ pub struct ValidationContext {
     errors: Vec<ValidationError>,
 
     /// Type information for each register
-    register_types: HashMap<IrId, IrType>,
+    register_types: BTreeMap<IrId, IrType>,
 
     /// Defined registers
-    defined_registers: HashSet<IrId>,
+    defined_registers: BTreeSet<IrId>,
 
     /// Used registers
-    used_registers: HashSet<IrId>,
+    used_registers: BTreeSet<IrId>,
 
     /// Ownership state of each register
-    ownership_states: HashMap<IrId, OwnershipState>,
+    ownership_states: BTreeMap<IrId, OwnershipState>,
 
     /// Active borrows for each register
-    active_borrows: HashMap<IrId, Vec<BorrowInfo>>,
+    active_borrows: BTreeMap<IrId, Vec<BorrowInfo>>,
 
     /// Track where each register was moved
-    move_locations: HashMap<IrId, String>,
+    move_locations: BTreeMap<IrId, String>,
 
     /// Track active lifetimes
-    active_lifetimes: HashMap<LifetimeId, IrId>,
+    active_lifetimes: BTreeMap<LifetimeId, IrId>,
 }
 
 /// Validation error
@@ -184,13 +184,13 @@ impl ValidationContext {
             module: std::ptr::null(),
             current_function: None,
             errors: Vec::new(),
-            register_types: HashMap::new(),
-            defined_registers: HashSet::new(),
-            used_registers: HashSet::new(),
-            ownership_states: HashMap::new(),
-            active_borrows: HashMap::new(),
-            move_locations: HashMap::new(),
-            active_lifetimes: HashMap::new(),
+            register_types: BTreeMap::new(),
+            defined_registers: BTreeSet::new(),
+            used_registers: BTreeSet::new(),
+            ownership_states: BTreeMap::new(),
+            active_borrows: BTreeMap::new(),
+            move_locations: BTreeMap::new(),
+            active_lifetimes: BTreeMap::new(),
         }
     }
 
@@ -278,7 +278,7 @@ fn validate_function(ctx: &mut ValidationContext, function: &IrFunction) {
     validate_cfg_structure(ctx, function);
 
     // Validate each basic block
-    let mut visited = HashSet::new();
+    let mut visited = BTreeSet::new();
     validate_block_recursive(ctx, function, function.entry_block(), &mut visited);
 
     // Check for unused registers (potential dead code)
@@ -328,8 +328,8 @@ fn validate_cfg_structure(ctx: &mut ValidationContext, function: &IrFunction) {
 }
 
 /// Find all reachable blocks from entry
-fn find_reachable_blocks(function: &IrFunction) -> HashSet<IrBlockId> {
-    let mut reachable = HashSet::new();
+fn find_reachable_blocks(function: &IrFunction) -> BTreeSet<IrBlockId> {
+    let mut reachable = BTreeSet::new();
     let mut worklist = vec![function.entry_block()];
 
     while let Some(block_id) = worklist.pop() {
@@ -348,7 +348,7 @@ fn validate_block_recursive(
     ctx: &mut ValidationContext,
     function: &IrFunction,
     block_id: IrBlockId,
-    visited: &mut HashSet<IrBlockId>,
+    visited: &mut BTreeSet<IrBlockId>,
 ) {
     if !visited.insert(block_id) {
         return; // Already visited
@@ -769,10 +769,10 @@ pub struct MirSafetyValidator<'a> {
     semantic_graphs: &'a SemanticGraphs,
 
     /// Map from TAST symbols to MIR registers (from module)
-    symbol_to_register: &'a HashMap<SymbolId, IrId>,
+    symbol_to_register: &'a BTreeMap<SymbolId, IrId>,
 
     /// Reverse mapping: MIR register to TAST symbol
-    register_to_symbol: &'a HashMap<IrId, SymbolId>,
+    register_to_symbol: &'a BTreeMap<IrId, SymbolId>,
 
     /// Validation errors
     errors: Vec<ValidationError>,
@@ -782,8 +782,8 @@ impl<'a> MirSafetyValidator<'a> {
     /// Create a new MIR safety validator
     pub fn new(
         semantic_graphs: &'a SemanticGraphs,
-        symbol_to_register: &'a HashMap<SymbolId, IrId>,
-        register_to_symbol: &'a HashMap<IrId, SymbolId>,
+        symbol_to_register: &'a BTreeMap<SymbolId, IrId>,
+        register_to_symbol: &'a BTreeMap<IrId, SymbolId>,
     ) -> Self {
         Self {
             semantic_graphs,

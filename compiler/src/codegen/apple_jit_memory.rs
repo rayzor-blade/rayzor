@@ -23,7 +23,7 @@
 //! 4. **P/E Core Scheduling**: Code may execute on Performance or Efficiency
 //!    cores with different cache hierarchies.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::ptr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -171,7 +171,7 @@ pub struct AppleSiliconJITMemory {
     /// Memory regions for JIT code
     regions: Vec<JITRegion>,
     /// Registered functions by name
-    functions: HashMap<String, JITFunction>,
+    functions: BTreeMap<String, JITFunction>,
     /// Whether we're currently in write mode
     write_mode: bool,
 }
@@ -183,7 +183,7 @@ impl AppleSiliconJITMemory {
 
         Ok(Self {
             regions: vec![initial_region],
-            functions: HashMap::new(),
+            functions: BTreeMap::new(),
             write_mode: false,
         })
     }

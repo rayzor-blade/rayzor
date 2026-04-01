@@ -10,7 +10,7 @@
 //! - Per-function execution tracking
 
 use crate::ir::IrFunctionId;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 #[derive(Clone)]
 pub struct ProfileData {
     /// Per-function execution counters (lock-free atomic)
-    function_counts: Arc<RwLock<HashMap<IrFunctionId, Arc<AtomicU64>>>>,
+    function_counts: Arc<RwLock<BTreeMap<IrFunctionId, Arc<AtomicU64>>>>,
 
     /// Configuration for hotness detection
     config: ProfileConfig,
@@ -86,7 +86,7 @@ impl ProfileData {
     /// Create a new profiling data collector
     pub fn new(config: ProfileConfig) -> Self {
         Self {
-            function_counts: Arc::new(RwLock::new(HashMap::new())),
+            function_counts: Arc::new(RwLock::new(BTreeMap::new())),
             config,
         }
     }

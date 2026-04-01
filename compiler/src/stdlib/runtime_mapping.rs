@@ -18,7 +18,7 @@
 //! ```
 
 use crate::ir::IrType;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 // ============================================================================
 // Type Descriptors for Function Signatures
@@ -180,7 +180,7 @@ pub struct RuntimeFunctionCall {
 }
 
 /// Method signature in Haxe stdlib
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MethodSignature {
     /// Class name (e.g., "String", "Array")
     pub class: &'static str,
@@ -201,18 +201,18 @@ pub struct MethodSignature {
 
 /// Standard library runtime mapping
 pub struct StdlibMapping {
-    mappings: HashMap<MethodSignature, RuntimeFunctionCall>,
+    mappings: BTreeMap<MethodSignature, RuntimeFunctionCall>,
     /// Cached set of instance method names for fast `any_class_has_method` lookups.
     /// Built eagerly after all mappings are registered.
-    instance_method_names: std::collections::HashSet<String>,
+    instance_method_names: std::collections::BTreeSet<String>,
 }
 
 impl StdlibMapping {
     /// Create a new stdlib mapping with all built-in mappings
     pub fn new() -> Self {
         let mut mapping = StdlibMapping {
-            mappings: HashMap::new(),
-            instance_method_names: std::collections::HashSet::new(),
+            mappings: BTreeMap::new(),
+            instance_method_names: std::collections::BTreeSet::new(),
         };
 
         mapping.register_string_methods();
@@ -498,7 +498,7 @@ impl StdlibMapping {
     }
 
     /// Check if any stdlib class has a method with the given name.
-    /// O(1) lookup via pre-built HashSet (was O(n) linear scan over all mappings).
+    /// O(1) lookup via pre-built BTreeSet (was O(n) linear scan over all mappings).
     pub fn any_class_has_method(&self, method: &str) -> bool {
         self.instance_method_names.contains(method)
     }

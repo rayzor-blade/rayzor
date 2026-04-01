@@ -274,7 +274,7 @@ impl E2ETestCase {
     /// Validate MIR structure across all modules
     fn validate_mir_modules(&self, modules: &[std::sync::Arc<IrModule>]) -> Result<(), String> {
         // Collect all extern functions from all modules
-        let mut all_extern_functions = std::collections::HashSet::new();
+        let mut all_extern_functions = std::collections::BTreeSet::new();
         for module in modules {
             // Check module.extern_functions
             for (_, ef) in &module.extern_functions {
@@ -403,8 +403,8 @@ impl E2ETestSuite {
         let failed = total - passed;
 
         // Group by level
-        let mut by_level: std::collections::HashMap<String, (usize, usize)> =
-            std::collections::HashMap::new();
+        let mut by_level: std::collections::BTreeMap<String, (usize, usize)> =
+            std::collections::BTreeMap::new();
         for (_, result) in results {
             let level_name = format!("{:?}", result.level());
             let entry = by_level.entry(level_name).or_insert((0, 0));

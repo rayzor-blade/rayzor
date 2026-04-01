@@ -7,7 +7,7 @@
 use super::instructions::IrInstruction;
 use super::modules::IrModule;
 use super::{IrFunctionId, IrGlobalId};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 fn is_keep_function(func: &crate::ir::functions::IrFunction) -> bool {
     // @:keep attribute
@@ -68,9 +68,9 @@ pub fn tree_shake_bundle(
 
     // Phase 2: Build reachable sets per module
     // Each module has its own function ID space, so we track (module_index, func_id)
-    let mut reachable_functions: HashSet<(usize, IrFunctionId)> = HashSet::new();
-    let mut reachable_externs: HashSet<(usize, IrFunctionId)> = HashSet::new();
-    let mut reachable_globals: HashSet<(usize, IrGlobalId)> = HashSet::new();
+    let mut reachable_functions: BTreeSet<(usize, IrFunctionId)> = BTreeSet::new();
+    let mut reachable_externs: BTreeSet<(usize, IrFunctionId)> = BTreeSet::new();
+    let mut reachable_globals: BTreeSet<(usize, IrGlobalId)> = BTreeSet::new();
 
     // Worklist: (module_index, func_id) pairs to process
     let mut worklist: Vec<(usize, IrFunctionId)> = Vec::new();

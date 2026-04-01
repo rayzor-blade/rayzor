@@ -12,7 +12,7 @@
 //! - Integration with existing semantic graph infrastructure
 //! - Performance optimized for large codebases
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::semantic_graph::analysis::ownership_analyzer::FunctionAnalysisContext;
@@ -44,10 +44,10 @@ pub struct DeadCodeAnalyzer {
 #[derive(Debug, Default)]
 pub struct ReachabilityAnalyzer {
     /// Cache of reachability analysis results
-    reachability_cache: HashMap<BlockId, bool>,
+    reachability_cache: BTreeMap<BlockId, bool>,
 
     /// Cache of function reachability
-    function_reachability_cache: HashMap<SymbolId, bool>,
+    function_reachability_cache: BTreeMap<SymbolId, bool>,
 
     /// Statistics for cache efficiency
     cache_hits: usize,
@@ -58,17 +58,17 @@ pub struct ReachabilityAnalyzer {
 #[derive(Debug, Default)]
 pub struct UnusedVariableDetector {
     /// Cache of variable usage analysis
-    usage_cache: HashMap<SsaVariableId, VariableUsage>,
+    usage_cache: BTreeMap<SsaVariableId, VariableUsage>,
 
     /// Variables that should be ignored (e.g., debug variables)
-    ignored_variables: HashSet<SsaVariableId>,
+    ignored_variables: BTreeSet<SsaVariableId>,
 }
 
 /// Detects unreachable basic blocks
 #[derive(Debug, Default)]
 pub struct UnreachableBlockDetector {
     /// Cache of block reachability analysis
-    block_cache: HashMap<BlockId, BlockReachability>,
+    block_cache: BTreeMap<BlockId, BlockReachability>,
 }
 
 /// Information about variable usage
@@ -348,7 +348,7 @@ impl DeadCodeAnalyzer {
         function_id: SymbolId,
     ) -> Result<Vec<BlockId>, DeadCodeAnalysisError> {
         let mut unreachable = Vec::new();
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
         let mut worklist = VecDeque::new();
 
         // Start from entry block
@@ -436,7 +436,7 @@ impl DeadCodeAnalyzer {
         }
 
         // Real reachability analysis using BFS from entry block
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
         let mut worklist = VecDeque::new();
 
         // Start from entry block (typically the first block in CFG)
@@ -572,7 +572,7 @@ impl DeadCodeAnalyzer {
         call_graph: &CallGraph,
     ) -> Result<Vec<SymbolId>, DeadCodeAnalysisError> {
         let mut unreachable = Vec::new();
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
         let mut worklist = VecDeque::new();
 
         // Start from entry points (main functions, exported functions, etc.)
@@ -706,8 +706,8 @@ impl DeadCodeAnalysisResults {
     }
 
     /// Get dead code regions by type
-    pub fn get_dead_regions_by_type(&self) -> HashMap<String, Vec<&DeadCodeRegion>> {
-        let mut by_type = HashMap::new();
+    pub fn get_dead_regions_by_type(&self) -> BTreeMap<String, Vec<&DeadCodeRegion>> {
+        let mut by_type = BTreeMap::new();
 
         for region in &self.dead_code_regions {
             let type_name = match region {

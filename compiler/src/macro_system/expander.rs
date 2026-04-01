@@ -23,7 +23,7 @@ use super::registry::MacroRegistry;
 use super::value::MacroValue;
 use crate::tast::SourceLocation;
 use parser::{BlockElement, ClassFieldKind, Expr, ExprKind, HaxeFile, Metadata, TypeDeclaration};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 // Note: parser::ObjectField, Case, Catch are used via `parser::` prefix in walk handlers
@@ -74,9 +74,9 @@ pub struct MacroExpander {
     /// Tracked expansion origins for diagnostics
     expansion_origins: Vec<ExpansionOrigin>,
     /// Memoization cache: (macro_name, args_hash) -> expanded Expr
-    call_cache: HashMap<(String, u64), Expr>,
+    call_cache: BTreeMap<(String, u64), Expr>,
     /// Import map for the current file: short name → qualified name
-    import_map: HashMap<String, String>,
+    import_map: BTreeMap<String, String>,
     /// Class registry for macro interpreter fallback dispatch
     class_registry: Arc<ClassRegistry>,
 }
@@ -90,8 +90,8 @@ impl MacroExpander {
             expansions_count: 0,
             max_iterations: 100,
             expansion_origins: Vec::new(),
-            call_cache: HashMap::new(),
-            import_map: HashMap::new(),
+            call_cache: BTreeMap::new(),
+            import_map: BTreeMap::new(),
             class_registry: Arc::new(ClassRegistry::new()),
         }
     }
@@ -104,8 +104,8 @@ impl MacroExpander {
             expansions_count: 0,
             max_iterations: 100,
             expansion_origins: Vec::new(),
-            call_cache: HashMap::new(),
-            import_map: HashMap::new(),
+            call_cache: BTreeMap::new(),
+            import_map: BTreeMap::new(),
             class_registry: Arc::new(ClassRegistry::new()),
         }
     }
@@ -118,8 +118,8 @@ impl MacroExpander {
             expansions_count: 0,
             max_iterations: 100,
             expansion_origins: Vec::new(),
-            call_cache: HashMap::new(),
-            import_map: HashMap::new(),
+            call_cache: BTreeMap::new(),
+            import_map: BTreeMap::new(),
             class_registry: Arc::new(class_registry),
         }
     }
@@ -212,14 +212,14 @@ impl MacroExpander {
         let mut iteration = 0;
         let mut changed = true;
         let num_decls = file.declarations.len();
-        let mut dirty: std::collections::HashSet<usize> = (0..num_decls).collect();
+        let mut dirty: std::collections::BTreeSet<usize> = (0..num_decls).collect();
 
         while changed && iteration < self.max_iterations {
             changed = false;
             iteration += 1;
 
             let mut new_decls = Vec::with_capacity(num_decls);
-            let mut next_dirty = std::collections::HashSet::new();
+            let mut next_dirty = std::collections::BTreeSet::new();
 
             for (idx, decl) in file.declarations.drain(..).enumerate() {
                 if dirty.contains(&idx) {

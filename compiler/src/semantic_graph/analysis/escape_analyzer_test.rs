@@ -17,7 +17,7 @@ mod escape_analysis_tests {
         collections::new_id_set, node::BinaryOperator, BlockId, CallSiteId, DataFlowNodeId,
         SourceLocation, SsaVariableId, SymbolId, TypeId,
     };
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
     use std::time::Duration;
 
     /// Create test DFG with allocation patterns
@@ -528,11 +528,11 @@ mod escape_analysis_integration_tests {
 
     fn create_test_semantic_graphs() -> SemanticGraphs {
         SemanticGraphs {
-            control_flow: std::collections::HashMap::new(),
-            data_flow: std::collections::HashMap::new(),
+            control_flow: std::collections::BTreeMap::new(),
+            data_flow: std::collections::BTreeMap::new(),
             call_graph: CallGraph::new(),
             ownership_graph: OwnershipGraph::new(),
-            source_locations: std::collections::HashMap::new(),
+            source_locations: std::collections::BTreeMap::new(),
         }
     }
 }

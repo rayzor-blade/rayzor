@@ -21,7 +21,7 @@ use crate::tast::{
     Visibility,
 };
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Context for lowering TAST to HIR
 pub struct LoweringContext<'a> {
@@ -41,10 +41,10 @@ pub struct LoweringContext<'a> {
     lowering_hints: Option<&'a HIRLoweringHints>,
 
     /// Mapping from TAST symbols to HIR registers
-    symbol_map: HashMap<SymbolId, IrId>,
+    symbol_map: BTreeMap<SymbolId, IrId>,
 
     /// Mapping from TAST types to HIR types
-    type_cache: HashMap<TypeId, IrType>,
+    type_cache: BTreeMap<TypeId, IrType>,
 
     /// Current loop context (for break/continue)
     loop_stack: Vec<LoopContext>,
@@ -84,8 +84,8 @@ impl<'a> LoweringContext<'a> {
             type_table,
             analysis_results: None,
             lowering_hints: None,
-            symbol_map: HashMap::new(),
-            type_cache: HashMap::new(),
+            symbol_map: BTreeMap::new(),
+            type_cache: BTreeMap::new(),
             loop_stack: Vec::new(),
             errors: Vec::new(),
         }

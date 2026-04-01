@@ -4,11 +4,11 @@
 //! namespace resolution, and import tracking for proper type path resolution.
 
 use super::{InternedString, ScopeId, StringInterner, SymbolId};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 /// Unique identifier for a package
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PackageId(u32);
 
 impl PackageId {
@@ -38,10 +38,10 @@ pub struct PackageInfo {
     pub parent: Option<PackageId>,
 
     /// Symbols defined directly in this package
-    pub symbols: HashMap<InternedString, SymbolId>,
+    pub symbols: BTreeMap<InternedString, SymbolId>,
 
     /// Sub-packages
-    pub sub_packages: HashMap<InternedString, PackageId>,
+    pub sub_packages: BTreeMap<InternedString, PackageId>,
 
     /// Package visibility (for internal packages)
     pub is_internal: bool,
@@ -53,8 +53,8 @@ impl PackageInfo {
         PackageInfo {
             full_path,
             parent,
-            symbols: HashMap::new(),
-            sub_packages: HashMap::new(),
+            symbols: BTreeMap::new(),
+            sub_packages: BTreeMap::new(),
             is_internal: false,
         }
     }
@@ -138,10 +138,10 @@ pub struct ImportEntry {
 /// Manages package hierarchy and namespace resolution
 pub struct NamespaceResolver {
     /// All packages by ID
-    packages: HashMap<PackageId, PackageInfo>,
+    packages: BTreeMap<PackageId, PackageInfo>,
 
     /// Package lookup by full path
-    package_paths: HashMap<Vec<InternedString>, PackageId>,
+    package_paths: BTreeMap<Vec<InternedString>, PackageId>,
 
     /// Current package context
     current_package: Option<PackageId>,
@@ -150,7 +150,7 @@ pub struct NamespaceResolver {
     next_package_id: u32,
 
     /// Files that have been loaded (to avoid reloading)
-    loaded_files: HashSet<PathBuf>,
+    loaded_files: BTreeSet<PathBuf>,
 
     /// Source paths for user code (checked first)
     source_paths: Vec<PathBuf>,
@@ -163,11 +163,11 @@ impl NamespaceResolver {
     /// Create a new namespace resolver
     pub fn new() -> Self {
         let mut resolver = NamespaceResolver {
-            packages: HashMap::new(),
-            package_paths: HashMap::new(),
+            packages: BTreeMap::new(),
+            package_paths: BTreeMap::new(),
             current_package: None,
             next_package_id: 1, // 0 is reserved for root
-            loaded_files: HashSet::new(),
+            loaded_files: BTreeSet::new(),
             source_paths: Vec::new(),
             stdlib_paths: Vec::new(),
         };
@@ -212,7 +212,7 @@ impl NamespaceResolver {
     }
 
     /// Get all loaded files
-    pub fn loaded_files(&self) -> &HashSet<PathBuf> {
+    pub fn loaded_files(&self) -> &BTreeSet<PathBuf> {
         &self.loaded_files
     }
 
@@ -486,18 +486,18 @@ impl NamespaceResolver {
 /// Import resolver for managing import visibility and precedence
 pub struct ImportResolver {
     /// Imports organized by scope
-    imports_by_scope: HashMap<ScopeId, Vec<ImportEntry>>,
+    imports_by_scope: BTreeMap<ScopeId, Vec<ImportEntry>>,
 
     /// Type aliases by scope and name
-    aliases: HashMap<(ScopeId, InternedString), QualifiedPath>,
+    aliases: BTreeMap<(ScopeId, InternedString), QualifiedPath>,
 }
 
 impl ImportResolver {
     /// Create a new import resolver
     pub fn new() -> Self {
         ImportResolver {
-            imports_by_scope: HashMap::new(),
-            aliases: HashMap::new(),
+            imports_by_scope: BTreeMap::new(),
+            aliases: BTreeMap::new(),
         }
     }
 

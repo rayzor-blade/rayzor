@@ -11,7 +11,7 @@
 
 use crate::tast::{InternedString, LifetimeId, ScopeId, SourceLocation, SymbolId, TypeId};
 use indexmap::IndexMap;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 
 /// HIR Module - top-level container
 #[derive(Debug, Clone)]

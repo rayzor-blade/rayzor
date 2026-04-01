@@ -43,7 +43,7 @@ use super::loop_analysis::{DominatorTree, LoopNestInfo, NaturalLoop};
 use super::optimization::{OptimizationPass, OptimizationResult};
 use super::types::{IrType, IrValue};
 use super::{IrFunction, IrId, IrModule};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 pub struct BoundsCheckEliminationPass;
 
@@ -62,7 +62,7 @@ impl OptimizationPass for BoundsCheckEliminationPass {
         let mut total_eliminated = 0;
 
         // Find the function ID for haxe_array_get_ptr
-        let get_ptr_ids: HashSet<IrFunctionId> = module
+        let get_ptr_ids: BTreeSet<IrFunctionId> = module
             .extern_functions
             .iter()
             .filter(|(_, ef)| ef.name == "haxe_array_get_ptr")
@@ -70,7 +70,7 @@ impl OptimizationPass for BoundsCheckEliminationPass {
             .collect();
 
         // Also check internal functions (in case it was internalized)
-        let get_ptr_ids: HashSet<IrFunctionId> = get_ptr_ids
+        let get_ptr_ids: BTreeSet<IrFunctionId> = get_ptr_ids
             .into_iter()
             .chain(
                 module
@@ -86,7 +86,7 @@ impl OptimizationPass for BoundsCheckEliminationPass {
         }
 
         // Also find array mutation functions to check array invariance
-        let mutation_fn_ids: HashSet<IrFunctionId> = module
+        let mutation_fn_ids: BTreeSet<IrFunctionId> = module
             .extern_functions
             .iter()
             .filter(|(_, ef)| {
@@ -115,7 +115,7 @@ impl OptimizationPass for BoundsCheckEliminationPass {
                 instructions_eliminated: total_eliminated,
                 blocks_eliminated: 0,
                 stats: {
-                    let mut s = HashMap::new();
+                    let mut s = BTreeMap::new();
                     s.insert("bounds_checks_eliminated".to_string(), total_eliminated);
                     s
                 },
@@ -161,8 +161,8 @@ struct ArrayGetCallSite {
 /// Eliminate bounds checks in a single function. Returns count of eliminated checks.
 fn eliminate_bounds_checks(
     function: &mut IrFunction,
-    get_ptr_ids: &HashSet<IrFunctionId>,
-    mutation_fn_ids: &HashSet<IrFunctionId>,
+    get_ptr_ids: &BTreeSet<IrFunctionId>,
+    mutation_fn_ids: &BTreeSet<IrFunctionId>,
 ) -> usize {
     if function.cfg.blocks.len() < 3 {
         return 0; // Need at least preheader + header + body
@@ -245,10 +245,10 @@ fn eliminate_bounds_checks(
 }
 
 /// Map from IrId → (block_id, instruction_index) for quick definition lookup.
-type DefMap = HashMap<IrId, (IrBlockId, usize)>;
+type DefMap = BTreeMap<IrId, (IrBlockId, usize)>;
 
 fn build_def_map(function: &IrFunction) -> DefMap {
-    let mut map = HashMap::new();
+    let mut map = BTreeMap::new();
     for (&block_id, block) in &function.cfg.blocks {
         for (idx, inst) in block.instructions.iter().enumerate() {
             if let Some(dest) = instruction_dest(inst) {
@@ -393,7 +393,7 @@ fn find_load_source_in_block(instructions: &[IrInstruction], target_reg: IrId) -
 fn find_array_get_calls(
     function: &IrFunction,
     loop_info: &NaturalLoop,
-    get_ptr_ids: &HashSet<IrFunctionId>,
+    get_ptr_ids: &BTreeSet<IrFunctionId>,
 ) -> Vec<ArrayGetCallSite> {
     let mut calls = Vec::new();
 
@@ -569,7 +569,7 @@ fn is_array_invariant(
     function: &IrFunction,
     arr_reg: IrId,
     loop_info: &NaturalLoop,
-    mutation_fn_ids: &HashSet<IrFunctionId>,
+    mutation_fn_ids: &BTreeSet<IrFunctionId>,
 ) -> bool {
     for &block_id in &loop_info.blocks {
         let block = match function.cfg.blocks.get(&block_id) {

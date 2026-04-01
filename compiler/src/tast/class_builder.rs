@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
 };
 
 use crate::tast::{
@@ -12,13 +12,13 @@ use crate::tast::{
 /// Builder for constructing class hierarchies during semantic analysis
 pub struct ClassHierarchyBuilder {
     /// Temporary storage during construction
-    hierarchies: HashMap<SymbolId, ClassHierarchyInfo>,
+    hierarchies: BTreeMap<SymbolId, ClassHierarchyInfo>,
 }
 
 impl ClassHierarchyBuilder {
     pub fn new() -> Self {
         Self {
-            hierarchies: HashMap::with_capacity(32), // Most projects have <32 classes
+            hierarchies: BTreeMap::new(), // Most projects have <32 classes
         }
     }
 
@@ -32,7 +32,7 @@ impl ClassHierarchyBuilder {
         let info = ClassHierarchyInfo {
             superclass,
             interfaces,
-            all_supertypes: HashSet::new(), // Will be computed later
+            all_supertypes: BTreeSet::new(), // Will be computed later
             depth: 0,                       // Will be computed later
             is_final: false,                // TODO: Extract from class metadata
             is_abstract: false,             // TODO: Extract from class metadata
@@ -47,8 +47,8 @@ impl ClassHierarchyBuilder {
     /// Compute transitive closure of supertypes for all classes
     pub fn compute_transitive_closure(&mut self, type_table: &RefCell<TypeTable>) {
         // First pass: collect all direct relationships
-        let mut direct_supers: HashMap<SymbolId, Vec<TypeId>> =
-            HashMap::with_capacity(self.hierarchies.len());
+        let mut direct_supers: BTreeMap<SymbolId, Vec<TypeId>> =
+            BTreeMap::new();
 
         for (&class_id, info) in &self.hierarchies {
             let mut supers = Vec::with_capacity(1 + info.interfaces.len()); // Superclass + interfaces
@@ -64,7 +64,7 @@ impl ClassHierarchyBuilder {
 
         // Second pass: compute transitive closure using BFS
         for (&class_id, info) in self.hierarchies.iter_mut() {
-            let mut visited = HashSet::new();
+            let mut visited = BTreeSet::new();
             let mut queue = VecDeque::new();
             let mut max_depth = 0;
 
@@ -148,7 +148,7 @@ impl<'a> ClassHierarchyValidator<'a> {
 
     /// Check if there's a cycle starting from the given class
     fn has_cycle_from(&self, start: SymbolId) -> bool {
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
         let mut current = start;
 
         loop {
@@ -226,7 +226,7 @@ mod tests {
         let object_info = ClassHierarchyInfo {
             superclass: None,
             interfaces: vec![],
-            all_supertypes: HashSet::new(),
+            all_supertypes: BTreeSet::new(),
             depth: 0,
             is_final: false,
             is_abstract: false,
@@ -240,7 +240,7 @@ mod tests {
         let animal_info = ClassHierarchyInfo {
             superclass: Some(TypeId::from_raw(1)), // Assumes Object type ID
             interfaces: vec![],
-            all_supertypes: HashSet::from_iter([TypeId::from_raw(1)]),
+            all_supertypes: BTreeSet::from_iter([TypeId::from_raw(1)]),
             depth: 1,
             is_final: false,
             is_abstract: false,
@@ -270,7 +270,7 @@ mod tests {
         let interface_info = ClassHierarchyInfo {
             superclass: None,
             interfaces: vec![],
-            all_supertypes: HashSet::new(),
+            all_supertypes: BTreeSet::new(),
             depth: 0,
             is_final: false,
             is_abstract: false,

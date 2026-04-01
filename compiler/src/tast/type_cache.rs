@@ -5,7 +5,7 @@
 
 use super::{InternedString, SymbolId, TypeId};
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 /// Statistics for cache performance monitoring
@@ -28,7 +28,7 @@ impl CacheStats {
 }
 
 /// Cache key for type lookups
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TypeCacheKey {
     /// Named type lookup by symbol + kind tag (0=class, 1=interface, 2=enum)
     NamedType(SymbolId, u8),
@@ -63,11 +63,11 @@ struct CacheEntry {
 /// Multi-level type cache system
 pub struct TypeCache {
     /// L1 cache: Small, fast cache for most frequently accessed types
-    l1_cache: RefCell<HashMap<TypeCacheKey, CacheEntry>>,
+    l1_cache: RefCell<BTreeMap<TypeCacheKey, CacheEntry>>,
     l1_max_size: usize,
 
     /// L2 cache: Larger cache for moderately accessed types
-    l2_cache: RefCell<HashMap<TypeCacheKey, CacheEntry>>,
+    l2_cache: RefCell<BTreeMap<TypeCacheKey, CacheEntry>>,
     l2_max_size: usize,
 
     /// Access counter for LRU tracking
@@ -89,9 +89,9 @@ impl TypeCache {
     /// Create a type cache with custom sizes
     pub fn with_sizes(l1_size: usize, l2_size: usize, collect_stats: bool) -> Self {
         TypeCache {
-            l1_cache: RefCell::new(HashMap::with_capacity(l1_size)),
+            l1_cache: RefCell::new(BTreeMap::new()),
             l1_max_size: l1_size,
-            l2_cache: RefCell::new(HashMap::with_capacity(l2_size)),
+            l2_cache: RefCell::new(BTreeMap::new()),
             l2_max_size: l2_size,
             access_counter: Cell::new(0),
             stats: RefCell::new(CacheStats::default()),
@@ -213,7 +213,7 @@ impl TypeCache {
     }
 
     /// Evict least recently used entry from L1
-    fn evict_lru_from_l1(&self, l1_cache: &mut HashMap<TypeCacheKey, CacheEntry>) {
+    fn evict_lru_from_l1(&self, l1_cache: &mut BTreeMap<TypeCacheKey, CacheEntry>) {
         if let Some(lru_key) = l1_cache
             .iter()
             .min_by_key(|(_, entry)| entry.last_access.get())
@@ -231,7 +231,7 @@ impl TypeCache {
     }
 
     /// Evict least recently used entry from L2
-    fn evict_lru_from_l2(&self, l2_cache: &mut HashMap<TypeCacheKey, CacheEntry>) {
+    fn evict_lru_from_l2(&self, l2_cache: &mut BTreeMap<TypeCacheKey, CacheEntry>) {
         if let Some(lru_key) = l2_cache
             .iter()
             .min_by_key(|(_, entry)| entry.last_access.get())

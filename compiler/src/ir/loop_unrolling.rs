@@ -14,7 +14,7 @@ use super::{
     BinaryOp, CompareOp, IrBasicBlock, IrBlockId, IrFunction, IrFunctionId, IrId, IrInstruction,
     IrModule, IrPhiNode, IrTerminator, IrType, IrValue,
 };
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Maximum trip count for full unrolling
 const MAX_FULL_UNROLL: u64 = 16;
@@ -56,7 +56,7 @@ fn analyze_loop_trip_count(
     function: &IrFunction,
     header: IrBlockId,
     back_edge_source: IrBlockId,
-    loop_blocks: &HashSet<IrBlockId>,
+    loop_blocks: &BTreeSet<IrBlockId>,
 ) -> Option<LoopInductionInfo> {
     let header_block = function.cfg.get_block(header)?;
 
@@ -140,7 +140,7 @@ fn find_step_instruction(
     function: &IrFunction,
     step_reg: IrId,
     iv: IrId,
-    loop_blocks: &HashSet<IrBlockId>,
+    loop_blocks: &BTreeSet<IrBlockId>,
 ) -> Option<(i64, BinaryOp)> {
     for &block_id in loop_blocks {
         if let Some(block) = function.cfg.get_block(block_id) {
@@ -187,7 +187,7 @@ fn find_step_instruction(
 fn find_loop_bound(
     function: &IrFunction,
     iv: IrId,
-    loop_blocks: &HashSet<IrBlockId>,
+    loop_blocks: &BTreeSet<IrBlockId>,
     header: IrBlockId,
 ) -> Option<(i64, CompareOp)> {
     // Check the header's terminator first, then other blocks
@@ -399,7 +399,7 @@ fn unroll_loops_in_function(function: &mut IrFunction) -> OptimizationResult {
 /// substituting the induction variable with constants.
 fn fully_unroll_loop(
     function: &mut IrFunction,
-    loop_blocks: &HashSet<IrBlockId>,
+    loop_blocks: &BTreeSet<IrBlockId>,
     header: IrBlockId,
     info: &LoopInductionInfo,
 ) -> bool {
@@ -489,7 +489,7 @@ fn fully_unroll_loop(
         let iv_value = info.init_const + (iteration as i64) * info.step_amount;
 
         // Create a mapping from original registers to new ones for this iteration
-        let mut reg_map: HashMap<IrId, IrId> = HashMap::new();
+        let mut reg_map: BTreeMap<IrId, IrId> = BTreeMap::new();
 
         // Map IV phi to a constant
         let iv_const_reg = IrId::new(reg_id);
@@ -567,18 +567,18 @@ fn fully_unroll_loop(
 /// Clone an instruction with register remapping for unrolling.
 fn remap_instruction(
     inst: &IrInstruction,
-    reg_map: &mut HashMap<IrId, IrId>,
+    reg_map: &mut BTreeMap<IrId, IrId>,
     next_reg: &mut u32,
-    register_types: &mut HashMap<IrId, IrType>,
+    register_types: &mut BTreeMap<IrId, IrType>,
 ) -> IrInstruction {
     // Helper to remap a register, creating a new one if it's a definition
     let map_use =
-        |r: IrId, reg_map: &HashMap<IrId, IrId>| -> IrId { reg_map.get(&r).copied().unwrap_or(r) };
+        |r: IrId, reg_map: &BTreeMap<IrId, IrId>| -> IrId { reg_map.get(&r).copied().unwrap_or(r) };
 
     let alloc_new = |old: IrId,
                      next_reg: &mut u32,
-                     reg_map: &mut HashMap<IrId, IrId>,
-                     register_types: &mut HashMap<IrId, IrType>|
+                     reg_map: &mut BTreeMap<IrId, IrId>,
+                     register_types: &mut BTreeMap<IrId, IrType>|
      -> IrId {
         let new = IrId::new(*next_reg);
         *next_reg += 1;

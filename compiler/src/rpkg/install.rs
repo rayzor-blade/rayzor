@@ -21,7 +21,7 @@ pub struct RpkgPlugin {
     /// Compiler plugin (method mappings + extern declarations)
     pub compiler_plugin: Option<NativePlugin>,
     /// Haxe source files from the package (module_path → source)
-    pub haxe_sources: std::collections::HashMap<String, String>,
+    pub haxe_sources: std::collections::BTreeMap<String, String>,
     /// Package name
     pub package_name: String,
     /// Temp file for extracted native lib (cleaned up on drop)

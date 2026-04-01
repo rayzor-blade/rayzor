@@ -88,7 +88,7 @@ fn test_macro_value_type_names() {
     assert_eq!(MacroValue::from_str("hi").type_name(), "String");
     assert_eq!(MacroValue::Array(Arc::new(vec![])).type_name(), "Array");
     assert_eq!(
-        MacroValue::Object(Arc::new(std::collections::HashMap::new())).type_name(),
+        MacroValue::Object(Arc::new(std::collections::BTreeMap::new())).type_name(),
         "Object"
     );
 }
@@ -110,7 +110,7 @@ fn test_macro_value_truthiness() {
     assert!(MacroValue::Float(0.1).is_truthy());
     assert!(MacroValue::from_str("x").is_truthy());
     assert!(MacroValue::Array(Arc::new(vec![MacroValue::Null])).is_truthy());
-    assert!(MacroValue::Object(Arc::new(std::collections::HashMap::new())).is_truthy());
+    assert!(MacroValue::Object(Arc::new(std::collections::BTreeMap::new())).is_truthy());
 }
 
 #[test]

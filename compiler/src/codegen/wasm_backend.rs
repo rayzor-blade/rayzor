@@ -20,7 +20,7 @@
 //! - String constant pool in the data section
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 use wasm_encoder::{
     BlockType, CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection,
@@ -103,7 +103,7 @@ impl WasmBackend {
         // Build per-module func_id→name maps for last-resort name resolution
         if ctx.all_module_funcs.is_empty() {
             for m in modules {
-                let mut map = HashMap::new();
+                let mut map = BTreeMap::new();
                 for (id, f) in &m.functions { map.insert(*id, f.name.clone()); }
                 for (_, f) in &m.extern_functions { map.insert(f.id, f.name.clone()); }
                 ctx.all_module_funcs.push(map);
@@ -161,7 +161,7 @@ impl WasmBackend {
         // Build per-module func_id→name maps for last-resort name resolution
         if ctx.all_module_funcs.is_empty() {
             for m in modules {
-                let mut map = HashMap::new();
+                let mut map = BTreeMap::new();
                 for (id, f) in &m.functions { map.insert(*id, f.name.clone()); }
                 for (_, f) in &m.extern_functions { map.insert(f.id, f.name.clone()); }
                 ctx.all_module_funcs.push(map);
@@ -221,81 +221,81 @@ struct DataString {
 
 struct CompileCtx {
     // ----- Type section -----
-    type_map: HashMap<(Vec<ValType>, Vec<ValType>), u32>,
+    type_map: BTreeMap<(Vec<ValType>, Vec<ValType>), u32>,
     types: Vec<(Vec<ValType>, Vec<ValType>)>,
 
     // ----- Import section -----
     imports: Vec<ImportedFunc>,
-    import_name_to_idx: HashMap<String, u32>,
+    import_name_to_idx: BTreeMap<String, u32>,
 
     // ----- Internal functions -----
     internals: Vec<InternalFunc>,
     /// IrFunctionId -> absolute WASM function index.
-    ir_func_to_idx: HashMap<IrFunctionId, u32>,
+    ir_func_to_idx: BTreeMap<IrFunctionId, u32>,
     /// Name -> absolute func_idx for entry-point lookup.
-    func_name_to_idx: HashMap<String, u32>,
+    func_name_to_idx: BTreeMap<String, u32>,
 
     next_func_idx: u32,
 
     // ----- String pool / data section -----
     string_entries: Vec<DataString>,
-    string_offsets: HashMap<String, u32>,
+    string_offsets: BTreeMap<String, u32>,
     data_offset: u32,
 
     // ----- Globals -----
-    ir_global_to_idx: HashMap<IrGlobalId, u32>,
+    ir_global_to_idx: BTreeMap<IrGlobalId, u32>,
     /// User globals (excluding __stack_pointer which is always index 0).
     user_globals: Vec<(IrGlobalId, ValType, i64)>,
 
     // ----- Function return types -----
     /// IrFunctionId -> WASM return type. Used for CallDirect dest type inference.
-    func_return_types: HashMap<IrFunctionId, ValType>,
+    func_return_types: BTreeMap<IrFunctionId, ValType>,
     /// IrFunctionId -> WASM parameter types. Used for CallDirect arg coercion.
-    func_param_types: HashMap<IrFunctionId, Vec<ValType>>,
+    func_param_types: BTreeMap<IrFunctionId, Vec<ValType>>,
     /// Class names that have @:export (for constructor detection).
-    exported_classes: std::collections::HashSet<String>,
+    exported_classes: std::collections::BTreeSet<String>,
     /// @:jsImport function name → (js_module, js_import_name).
     /// Used to emit WASM imports from named JS modules instead of the default "rayzor" module.
-    js_import_modules: HashMap<String, (String, String)>,
+    js_import_modules: BTreeMap<String, (String, String)>,
     /// Per-module func_id → name maps for last-resort name-based resolution.
-    all_module_funcs: Vec<HashMap<IrFunctionId, String>>,
+    all_module_funcs: Vec<BTreeMap<IrFunctionId, String>>,
     /// Fallback IrFunctionId → WASM func index for cross-module extern resolution.
     /// Populated after collect_imports + collect_functions to resolve IDs not in ir_func_to_idx.
-    func_id_fallback: HashMap<IrFunctionId, u32>,
+    func_id_fallback: BTreeMap<IrFunctionId, u32>,
     /// Function indices that need indirect function table entries (for closures/call_indirect).
     /// Maps WASM func index → table slot index.
-    table_entries: HashMap<u32, u32>,
+    table_entries: BTreeMap<u32, u32>,
     /// Next available table slot.
     next_table_slot: u32,
     /// Qualified name → import index. Maps "rayzor.gpu.Surface.getFormat" → import idx for
     /// "rayzor_gpu_gfx_surface_get_format". Built from extern function qualified_name fields.
-    qualified_to_import: HashMap<String, u32>,
+    qualified_to_import: BTreeMap<String, u32>,
 }
 
 impl CompileCtx {
     fn new() -> Self {
         Self {
-            type_map: HashMap::new(),
+            type_map: BTreeMap::new(),
             types: Vec::new(),
             imports: Vec::new(),
-            import_name_to_idx: HashMap::new(),
+            import_name_to_idx: BTreeMap::new(),
             internals: Vec::new(),
-            ir_func_to_idx: HashMap::new(),
-            func_name_to_idx: HashMap::new(),
+            ir_func_to_idx: BTreeMap::new(),
+            func_name_to_idx: BTreeMap::new(),
             next_func_idx: 0,
             string_entries: Vec::new(),
-            string_offsets: HashMap::new(),
+            string_offsets: BTreeMap::new(),
             data_offset: DATA_SECTION_BASE,
-            ir_global_to_idx: HashMap::new(),
+            ir_global_to_idx: BTreeMap::new(),
             user_globals: Vec::new(),
-            func_return_types: HashMap::new(),
-            func_param_types: HashMap::new(),
-            exported_classes: std::collections::HashSet::new(),
-            js_import_modules: HashMap::new(),
+            func_return_types: BTreeMap::new(),
+            func_param_types: BTreeMap::new(),
+            exported_classes: std::collections::BTreeSet::new(),
+            js_import_modules: BTreeMap::new(),
             all_module_funcs: Vec::new(),
-            func_id_fallback: HashMap::new(),
-            qualified_to_import: HashMap::new(),
-            table_entries: HashMap::new(),
+            func_id_fallback: BTreeMap::new(),
+            qualified_to_import: BTreeMap::new(),
+            table_entries: BTreeMap::new(),
             next_table_slot: 1, // slot 0 is reserved (null)
         }
     }
@@ -1196,7 +1196,7 @@ struct FunctionLowerer<'a> {
     ir_func: &'a IrFunction,
 
     /// IrId -> WASM local index.
-    reg_to_local: HashMap<IrId, u32>,
+    reg_to_local: BTreeMap<IrId, u32>,
 
     /// Locals to declare (count, type) groups. Built during allocation.
     local_types: Vec<ValType>,
@@ -1210,7 +1210,7 @@ struct FunctionLowerer<'a> {
     /// Ordered block IDs (entry first, then sorted by id).
     block_order: Vec<IrBlockId>,
     /// Block ID -> positional index in block_order.
-    block_index: HashMap<IrBlockId, u32>,
+    block_index: BTreeMap<IrBlockId, u32>,
 }
 
 impl<'a> FunctionLowerer<'a> {
@@ -1219,12 +1219,12 @@ impl<'a> FunctionLowerer<'a> {
         let mut low = Self {
             ctx,
             ir_func,
-            reg_to_local: HashMap::new(),
+            reg_to_local: BTreeMap::new(),
             local_types: Vec::new(),
             param_count,
             next_local: param_count,
             block_order: Vec::new(),
-            block_index: HashMap::new(),
+            block_index: BTreeMap::new(),
         };
 
         // Early return for empty-body functions (extern stubs).

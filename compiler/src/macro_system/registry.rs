@@ -3,7 +3,7 @@ use super::errors::{MacroDiagnostic, MacroError};
 use super::value::MacroParam;
 use crate::tast::SourceLocation;
 use parser::{ClassDecl, ClassField, ClassFieldKind, Expr, HaxeFile, Modifier, TypeDeclaration};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Default maximum macro expansion depth
@@ -46,7 +46,7 @@ pub struct BuildMacroEntry {
 #[derive(Debug, Clone)]
 pub struct MacroRegistry {
     /// Macro function definitions indexed by qualified name
-    macros: HashMap<String, MacroDefinition>,
+    macros: BTreeMap<String, MacroDefinition>,
     /// Build macros pending application
     build_macros: Vec<BuildMacroEntry>,
     /// Current expansion depth counter
@@ -59,22 +59,22 @@ pub struct MacroRegistry {
     diagnostics: Vec<MacroDiagnostic>,
     /// Compiled bytecode chunks for macro functions (keyed by qualified name).
     /// Only populated when RAYZOR_MACRO_VM=1 is set.
-    compiled: HashMap<String, Arc<Chunk>>,
+    compiled: BTreeMap<String, Arc<Chunk>>,
     /// Compiled class data for VM class dispatch (keyed by class name).
-    compiled_classes: HashMap<String, CompiledClassInfo>,
+    compiled_classes: BTreeMap<String, CompiledClassInfo>,
 }
 
 impl MacroRegistry {
     pub fn new() -> Self {
         Self {
-            macros: HashMap::new(),
+            macros: BTreeMap::new(),
             build_macros: Vec::new(),
             expansion_depth: 0,
             max_depth: DEFAULT_MAX_DEPTH,
             expanding: Vec::new(),
             diagnostics: Vec::new(),
-            compiled: HashMap::new(),
-            compiled_classes: HashMap::new(),
+            compiled: BTreeMap::new(),
+            compiled_classes: BTreeMap::new(),
         }
     }
 
@@ -330,8 +330,8 @@ impl MacroRegistry {
             if let Some(class_info) = class_registry.find_class(class_name) {
                 let mut compiled = CompiledClassInfo {
                     constructor: None,
-                    instance_methods: std::collections::HashMap::new(),
-                    static_methods: std::collections::HashMap::new(),
+                    instance_methods: std::collections::BTreeMap::new(),
+                    static_methods: std::collections::BTreeMap::new(),
                     instance_vars: Vec::new(),
                 };
 
@@ -416,7 +416,7 @@ impl MacroRegistry {
     }
 
     /// Get compiled class data for VM dispatch.
-    pub fn get_compiled_classes(&self) -> &HashMap<String, CompiledClassInfo> {
+    pub fn get_compiled_classes(&self) -> &BTreeMap<String, CompiledClassInfo> {
         &self.compiled_classes
     }
 }

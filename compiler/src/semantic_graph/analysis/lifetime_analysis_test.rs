@@ -4,7 +4,7 @@
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, BTreeSet};
 
     use super::*;
     use crate::semantic_graph::analysis::lifetime_analyzer::{
@@ -386,7 +386,7 @@ mod tests {
             id: entry_block,
             statements: vec![],
             terminator: Terminator::Return { value: None },
-            predecessors: HashSet::new(),
+            predecessors: BTreeSet::new(),
             successors: vec![],
             source_location: SourceLocation::unknown(),
             metadata: Default::default(),
@@ -401,7 +401,7 @@ mod tests {
             LifetimeRegion {
                 id: LifetimeId::global(),
                 scope: ScopeId::from_raw(0),
-                variables: HashSet::new(),
+                variables: BTreeSet::new(),
                 parent: None,
                 children: vec![LifetimeId::from_raw(1)],
                 start_location: SourceLocation::unknown(),
@@ -410,7 +410,7 @@ mod tests {
             LifetimeRegion {
                 id: LifetimeId::from_raw(1),
                 scope: ScopeId::from_raw(1),
-                variables: HashSet::new(),
+                variables: BTreeSet::new(),
                 parent: Some(LifetimeId::global()),
                 children: vec![],
                 start_location: SourceLocation::unknown(),
@@ -503,7 +503,7 @@ mod tests {
     }
 
     fn create_test_solution() -> LifetimeSolution {
-        let mut assignments = HashMap::new();
+        let mut assignments = BTreeMap::new();
         assignments.insert(SymbolId::from_raw(1), LifetimeId::from_raw(1));
         assignments.insert(SymbolId::from_raw(2), LifetimeId::from_raw(2));
 
@@ -511,7 +511,7 @@ mod tests {
             assignments,
             constraint_hash: 12345,
             // solver_stats: SolverStats::default(),
-            lifetime_representatives: HashMap::new(),
+            lifetime_representatives: BTreeMap::new(),
             lifetime_ordering: vec![],
             satisfiable: true,
             conflicts: vec![],

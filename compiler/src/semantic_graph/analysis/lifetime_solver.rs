@@ -4,7 +4,7 @@
 //! Implements union-find, topological sorting, and cycle detection for
 //! resolving complex lifetime constraint systems efficiently.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::hash::{Hash, Hasher};
 
 use crate::semantic_graph::analysis::lifetime_analyzer::LifetimeConstraint;
@@ -32,7 +32,7 @@ pub struct LifetimeConstraintSolver {
     outlives_graph: OutlivesGraph,
 
     /// Variable to lifetime mapping for final assignment generation
-    variable_lifetimes: HashMap<SymbolId, LifetimeId>,
+    variable_lifetimes: BTreeMap<SymbolId, LifetimeId>,
 
     /// Solution cache for performance optimization
     solution_cache: LRUCache<ConstraintSetHash, LifetimeSolution>,
@@ -49,12 +49,12 @@ pub struct LifetimeConstraintSolver {
 /// Implements union-find with path compression and union by rank
 /// for efficiently managing lifetime equality constraints.
 #[derive(Debug, Clone)]
-pub struct UnionFind<T: Copy + Eq + Hash> {
+pub struct UnionFind<T: Copy + Eq + Hash + Ord> {
     /// Parent pointers (with path compression)
-    parent: HashMap<T, T>,
+    parent: BTreeMap<T, T>,
 
     /// Rank for union by rank optimization
-    rank: HashMap<T, usize>,
+    rank: BTreeMap<T, usize>,
 
     /// Number of disjoint sets
     num_sets: usize,
@@ -67,13 +67,13 @@ pub struct UnionFind<T: Copy + Eq + Hash> {
 #[derive(Debug, Clone)]
 pub struct OutlivesGraph {
     /// Adjacency list: lifetime -> lifetimes it outlives
-    edges: HashMap<LifetimeId, HashSet<LifetimeId>>,
+    edges: BTreeMap<LifetimeId, BTreeSet<LifetimeId>>,
 
     /// Reverse edges for efficient traversal
-    reverse_edges: HashMap<LifetimeId, HashSet<LifetimeId>>,
+    reverse_edges: BTreeMap<LifetimeId, BTreeSet<LifetimeId>>,
 
     /// All lifetimes in the graph
-    vertices: HashSet<LifetimeId>,
+    vertices: BTreeSet<LifetimeId>,
 
     /// Cached topological ordering (if acyclic)
     topo_order: Option<Vec<LifetimeId>>,
@@ -86,10 +86,10 @@ pub struct OutlivesGraph {
 #[derive(Debug, Clone)]
 pub struct LifetimeSolution {
     /// Final lifetime assignments for all variables
-    pub assignments: HashMap<SymbolId, LifetimeId>,
+    pub assignments: BTreeMap<SymbolId, LifetimeId>,
 
     /// Canonical representatives for lifetime equivalence classes
-    pub lifetime_representatives: HashMap<LifetimeId, LifetimeId>,
+    pub lifetime_representatives: BTreeMap<LifetimeId, LifetimeId>,
 
     /// Topological ordering of lifetimes (longest to shortest)
     pub lifetime_ordering: Vec<LifetimeId>,
@@ -201,7 +201,7 @@ impl LifetimeConstraintSolver {
         Self {
             union_find: UnionFind::new(),
             outlives_graph: OutlivesGraph::new(),
-            variable_lifetimes: HashMap::new(),
+            variable_lifetimes: BTreeMap::new(),
             solution_cache: LRUCache::new(config.max_cache_size),
             stats: SolverStatistics::default(),
             config,
@@ -248,8 +248,8 @@ impl LifetimeConstraintSolver {
         let cycles = self.detect_cycles()?;
         if !cycles.is_empty() {
             return Ok(LifetimeSolution {
-                assignments: HashMap::new(),
-                lifetime_representatives: HashMap::new(),
+                assignments: BTreeMap::new(),
+                lifetime_representatives: BTreeMap::new(),
                 lifetime_ordering: Vec::new(),
                 constraint_hash,
                 satisfiable: false,
@@ -393,8 +393,8 @@ impl LifetimeConstraintSolver {
     fn generate_assignments(
         &mut self,
         ordering: &[LifetimeId],
-    ) -> Result<HashMap<SymbolId, LifetimeId>, SolverError> {
-        let mut assignments = HashMap::new();
+    ) -> Result<BTreeMap<SymbolId, LifetimeId>, SolverError> {
+        let mut assignments = BTreeMap::new();
 
         // Get canonical representatives for all lifetimes
         let representatives = self.union_find.get_representatives();
@@ -489,11 +489,11 @@ impl LifetimeConstraintSolver {
 }
 
 /// **Union-Find Implementation**
-impl<T: Copy + Eq + Hash> UnionFind<T> {
+impl<T: Copy + Eq + Hash + Ord> UnionFind<T> {
     pub fn new() -> Self {
         Self {
-            parent: HashMap::new(),
-            rank: HashMap::new(),
+            parent: BTreeMap::new(),
+            rank: BTreeMap::new(),
             num_sets: 0,
         }
     }
@@ -552,8 +552,8 @@ impl<T: Copy + Eq + Hash> UnionFind<T> {
     }
 
     /// Get the canonical representative for each equivalence class
-    pub fn get_representatives(&mut self) -> HashMap<T, T> {
-        let mut representatives = HashMap::new();
+    pub fn get_representatives(&mut self) -> BTreeMap<T, T> {
+        let mut representatives = BTreeMap::new();
         let mut keys = vec![];
         for &key in self.parent.keys() {
             keys.push(key);
@@ -581,9 +581,9 @@ impl<T: Copy + Eq + Hash> UnionFind<T> {
 impl OutlivesGraph {
     pub fn new() -> Self {
         Self {
-            edges: HashMap::new(),
-            reverse_edges: HashMap::new(),
-            vertices: HashSet::new(),
+            edges: BTreeMap::new(),
+            reverse_edges: BTreeMap::new(),
+            vertices: BTreeSet::new(),
             topo_order: None,
             scc_cache: None,
         }
@@ -593,11 +593,11 @@ impl OutlivesGraph {
     pub fn add_edge(&mut self, from: LifetimeId, to: LifetimeId) {
         self.edges
             .entry(from)
-            .or_insert_with(HashSet::new)
+            .or_insert_with(BTreeSet::new)
             .insert(to);
         self.reverse_edges
             .entry(to)
-            .or_insert_with(HashSet::new)
+            .or_insert_with(BTreeSet::new)
             .insert(from);
         self.vertices.insert(from);
         self.vertices.insert(to);
@@ -625,7 +625,7 @@ impl OutlivesGraph {
             return Ok(cached_order.clone());
         }
 
-        let mut in_degree: HashMap<LifetimeId, usize> = HashMap::new();
+        let mut in_degree: BTreeMap<LifetimeId, usize> = BTreeMap::new();
         let mut queue = VecDeque::new();
         let mut result = Vec::new();
 
@@ -690,9 +690,9 @@ impl OutlivesGraph {
 struct TarjanSCC {
     index: usize,
     stack: Vec<LifetimeId>,
-    indices: HashMap<LifetimeId, usize>,
-    lowlinks: HashMap<LifetimeId, usize>,
-    on_stack: HashSet<LifetimeId>,
+    indices: BTreeMap<LifetimeId, usize>,
+    lowlinks: BTreeMap<LifetimeId, usize>,
+    on_stack: BTreeSet<LifetimeId>,
     sccs: Vec<Vec<LifetimeId>>,
 }
 
@@ -701,9 +701,9 @@ impl TarjanSCC {
         Self {
             index: 0,
             stack: Vec::new(),
-            indices: HashMap::new(),
-            lowlinks: HashMap::new(),
-            on_stack: HashSet::new(),
+            indices: BTreeMap::new(),
+            lowlinks: BTreeMap::new(),
+            on_stack: BTreeSet::new(),
             sccs: Vec::new(),
         }
     }
@@ -760,17 +760,17 @@ impl TarjanSCC {
 }
 
 /// **LRU Cache for Solutions**
-struct LRUCache<K: Hash + Eq + Clone, V: Clone> {
+struct LRUCache<K: Hash + Eq + Clone + Ord, V: Clone> {
     capacity: usize,
-    map: HashMap<K, V>,
+    map: BTreeMap<K, V>,
     insertion_order: VecDeque<K>,
 }
 
-impl<K: Hash + Eq + Clone, V: Clone> LRUCache<K, V> {
+impl<K: Hash + Eq + Clone + Ord, V: Clone> LRUCache<K, V> {
     fn new(capacity: usize) -> Self {
         Self {
             capacity,
-            map: HashMap::new(),
+            map: BTreeMap::new(),
             insertion_order: VecDeque::new(),
         }
     }

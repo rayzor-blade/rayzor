@@ -1,6 +1,6 @@
 // Lambda/Function Literal Support for DFG Builder
 
-use std::collections::{HashMap, HashSet};
+use std::collections::BTreeSet;
 
 use crate::{
     semantic_graph::dfg_builder::SsaConstructionState,
@@ -21,16 +21,16 @@ pub struct CapturedVariable {
 /// Free variable visitor for lambda capture analysis
 pub struct FreeVariableVisitor<'a> {
     /// Variables bound in the current scope (parameters + locals)
-    pub(crate) bound_variables: HashSet<SymbolId>,
+    pub(crate) bound_variables: BTreeSet<SymbolId>,
     /// Free variables found (need to be captured)
-    pub(crate) free_variables: HashSet<SymbolId>,
+    pub(crate) free_variables: BTreeSet<SymbolId>,
     /// Current SSA state for variable lookup
     pub(crate) ssa_state: &'a SsaConstructionState,
 }
 
 impl<'a> FreeVariableVisitor<'a> {
     pub(crate) fn new(parameters: &[TypedParameter], ssa_state: &'a SsaConstructionState) -> Self {
-        let mut bound_variables = HashSet::new();
+        let mut bound_variables = BTreeSet::new();
 
         // Parameters are bound in the lambda scope
         for param in parameters {
@@ -39,7 +39,7 @@ impl<'a> FreeVariableVisitor<'a> {
 
         Self {
             bound_variables,
-            free_variables: HashSet::new(),
+            free_variables: BTreeSet::new(),
             ssa_state,
         }
     }

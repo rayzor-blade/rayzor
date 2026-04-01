@@ -27,16 +27,16 @@ use super::functions::IrFunctionId;
 use super::instructions::{IrInstruction, OwnershipMode};
 use super::optimization::{OptimizationPass, OptimizationResult};
 use super::{IrFunction, IrId, IrModule, IrType};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Collected function IDs for allocation/deallocation patterns
 struct AllocFuncIds {
-    malloc_ids: HashSet<IrFunctionId>,
-    free_ids: HashSet<IrFunctionId>,
-    anon_new_ids: HashSet<IrFunctionId>,
-    anon_drop_ids: HashSet<IrFunctionId>,
+    malloc_ids: BTreeSet<IrFunctionId>,
+    free_ids: BTreeSet<IrFunctionId>,
+    anon_new_ids: BTreeSet<IrFunctionId>,
+    anon_drop_ids: BTreeSet<IrFunctionId>,
     /// Functions that take an anon handle as first arg but don't capture it
-    anon_safe_ids: HashSet<IrFunctionId>,
+    anon_safe_ids: BTreeSet<IrFunctionId>,
 }
 
 pub struct InsertFreePass;
@@ -57,11 +57,11 @@ impl OptimizationPass for InsertFreePass {
 
         // Identify malloc, free, and anon object function IDs
         let mut ids = AllocFuncIds {
-            malloc_ids: HashSet::new(),
-            free_ids: HashSet::new(),
-            anon_new_ids: HashSet::new(),
-            anon_drop_ids: HashSet::new(),
-            anon_safe_ids: HashSet::new(),
+            malloc_ids: BTreeSet::new(),
+            free_ids: BTreeSet::new(),
+            anon_new_ids: BTreeSet::new(),
+            anon_drop_ids: BTreeSet::new(),
+            anon_safe_ids: BTreeSet::new(),
         };
 
         // Scan both local and extern functions for known names
@@ -113,7 +113,7 @@ impl OptimizationPass for InsertFreePass {
                 modified: true,
                 instructions_eliminated: 0,
                 stats: {
-                    let mut s = HashMap::new();
+                    let mut s = BTreeMap::new();
                     s.insert("free_instructions_inserted".to_string(), total_inserted);
                     s
                 },
@@ -164,7 +164,7 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
     // Stack slots are automatically freed when the function returns.
     // Calling libc free() on a stack address causes SIGABRT.
     let mut alloc_ids: Vec<IrId> = Vec::new();
-    let mut anon_alloc_ids: HashSet<IrId> = HashSet::new();
+    let mut anon_alloc_ids: BTreeSet<IrId> = BTreeSet::new();
     for block in function.cfg.blocks.values() {
         for inst in &block.instructions {
             match inst {
@@ -194,7 +194,7 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
 
     // Step 2: For each alloc, check escape and collect non-escaping ones
     let mut allocs_needing_free: Vec<IrId> = Vec::new();
-    let dealloc_ids: HashSet<_> = ids.free_ids.union(&ids.anon_drop_ids).cloned().collect();
+    let dealloc_ids: BTreeSet<_> = ids.free_ids.union(&ids.anon_drop_ids).cloned().collect();
 
     for &alloc_id in &alloc_ids {
         let derived = build_derived_set(alloc_id, function);
@@ -218,7 +218,7 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
         }
 
         // For anon allocs, use modified escape analysis that whitelists safe accessors
-        let empty = HashSet::new();
+        let empty = BTreeSet::new();
         let safe_ids = if is_anon { &ids.anon_safe_ids } else { &empty };
         if !pointer_escapes(alloc_id, &derived, function, safe_ids) {
             allocs_needing_free.push(alloc_id);
@@ -239,7 +239,7 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
         .collect();
 
     // Pre-compute derived sets
-    let derived_sets: HashMap<IrId, HashSet<IrId>> = allocs_needing_free
+    let derived_sets: BTreeMap<IrId, BTreeSet<IrId>> = allocs_needing_free
         .iter()
         .map(|&id| (id, build_derived_set(id, function)))
         .collect();
@@ -254,7 +254,7 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
     let entry_block = function.entry_block();
 
     // Build a map: alloc_id → defining block
-    let mut alloc_def_block: HashMap<IrId, IrBlockId> = HashMap::new();
+    let mut alloc_def_block: BTreeMap<IrId, IrBlockId> = BTreeMap::new();
     for (&block_id, block) in &function.cfg.blocks {
         for inst in &block.instructions {
             if let IrInstruction::CallDirect {
@@ -334,8 +334,8 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
 
 /// Build the set of all IrIds derived from an allocation pointer.
 /// Includes the alloc_id itself plus any GEP, Cast, BitCast, or Copy that uses it.
-fn build_derived_set(alloc_id: IrId, function: &IrFunction) -> HashSet<IrId> {
-    let mut derived = HashSet::new();
+fn build_derived_set(alloc_id: IrId, function: &IrFunction) -> BTreeSet<IrId> {
+    let mut derived = BTreeSet::new();
     derived.insert(alloc_id);
 
     let mut changed = true;
@@ -373,9 +373,9 @@ fn build_derived_set(alloc_id: IrId, function: &IrFunction) -> HashSet<IrId> {
 /// `safe_call_ids` are function IDs that don't capture the pointer (e.g., anon object accessors).
 fn pointer_escapes(
     alloc_id: IrId,
-    derived: &HashSet<IrId>,
+    derived: &BTreeSet<IrId>,
     function: &IrFunction,
-    safe_call_ids: &HashSet<IrFunctionId>,
+    safe_call_ids: &BTreeSet<IrFunctionId>,
 ) -> bool {
     for block in function.cfg.blocks.values() {
         for inst in &block.instructions {

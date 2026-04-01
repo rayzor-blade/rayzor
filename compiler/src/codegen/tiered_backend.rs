@@ -21,7 +21,7 @@
 //! - Lock-free atomic counters: Minimal overhead profiling
 //! - RwLock for function pointer map: Fast reads, infrequent writes
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Condvar, Mutex, RwLock};
@@ -304,16 +304,16 @@ pub struct TieredBackend {
     profile_data: ProfileData,
 
     /// Current optimization tier for each function
-    function_tiers: Arc<RwLock<HashMap<IrFunctionId, OptimizationTier>>>,
+    function_tiers: Arc<RwLock<BTreeMap<IrFunctionId, OptimizationTier>>>,
 
     /// Function pointers (usize for thread safety, cast to function type when needed)
-    function_pointers: Arc<RwLock<HashMap<IrFunctionId, usize>>>,
+    function_pointers: Arc<RwLock<BTreeMap<IrFunctionId, usize>>>,
 
     /// Queue of functions waiting for recompilation at higher tier
     optimization_queue: Arc<Mutex<VecDeque<(IrFunctionId, OptimizationTier)>>>,
 
     /// Functions currently being optimized (prevents duplicate work)
-    optimizing: Arc<Mutex<HashSet<IrFunctionId>>>,
+    optimizing: Arc<Mutex<BTreeSet<IrFunctionId>>>,
 
     /// The MIR modules (needed for recompilation and interpretation)
     /// Multiple modules may be loaded (e.g., user code + stdlib)
@@ -874,10 +874,10 @@ impl TieredBackend {
             interpreter: Arc::new(Mutex::new(interp)),
             baseline_backend: Arc::new(Mutex::new(baseline_backend)),
             profile_data,
-            function_tiers: Arc::new(RwLock::new(HashMap::new())),
-            function_pointers: Arc::new(RwLock::new(HashMap::new())),
+            function_tiers: Arc::new(RwLock::new(BTreeMap::new())),
+            function_pointers: Arc::new(RwLock::new(BTreeMap::new())),
             optimization_queue: Arc::new(Mutex::new(VecDeque::new())),
-            optimizing: Arc::new(Mutex::new(HashSet::new())),
+            optimizing: Arc::new(Mutex::new(BTreeSet::new())),
             modules: Arc::new(RwLock::new(Vec::new())),
             config,
             worker_handle: None,
@@ -932,10 +932,10 @@ impl TieredBackend {
             interpreter: Arc::new(Mutex::new(interp)),
             baseline_backend: Arc::new(Mutex::new(baseline_backend)),
             profile_data,
-            function_tiers: Arc::new(RwLock::new(HashMap::new())),
-            function_pointers: Arc::new(RwLock::new(HashMap::new())),
+            function_tiers: Arc::new(RwLock::new(BTreeMap::new())),
+            function_pointers: Arc::new(RwLock::new(BTreeMap::new())),
             optimization_queue: Arc::new(Mutex::new(VecDeque::new())),
-            optimizing: Arc::new(Mutex::new(HashSet::new())),
+            optimizing: Arc::new(Mutex::new(BTreeSet::new())),
             modules: Arc::new(RwLock::new(Vec::new())),
             config,
             worker_handle: None,
@@ -1538,7 +1538,7 @@ impl TieredBackend {
             let ptr = self.compile_with_llvm(func_id)?;
             // LLVM compile_with_llvm returns a single pointer, but we need all
             // For now, just return the requested function
-            let mut map = HashMap::new();
+            let mut map = BTreeMap::new();
             map.insert(func_id, ptr);
             map
         } else {
@@ -1841,7 +1841,7 @@ impl TieredBackend {
     /// Static version of source info registration for background worker thread.
     fn register_source_info_static(
         modules: &Arc<RwLock<Vec<IrModule>>>,
-        pointers: &HashMap<IrFunctionId, usize>,
+        pointers: &BTreeMap<IrFunctionId, usize>,
         runtime_symbols: &Arc<Vec<(String, usize)>>,
     ) {
         let register_fn: Option<
@@ -1882,7 +1882,7 @@ impl TieredBackend {
 
     /// Register source info for a set of function pointers (used by LLVM/AOT paths).
     /// Iterates all modules, matching func_id → pointer in the given map.
-    fn register_source_info_for_pointers(&self, pointers: &HashMap<IrFunctionId, usize>) {
+    fn register_source_info_for_pointers(&self, pointers: &BTreeMap<IrFunctionId, usize>) {
         if !self.config.enable_stack_traces {
             return;
         }
@@ -1987,12 +1987,12 @@ impl TieredBackend {
     /// ALL function pointers. This is the correct approach for tier promotion because
     /// functions may call each other across modules.
     ///
-    /// Returns: HashMap of (func_id -> function pointer) for all compiled functions
+    /// Returns: BTreeMap of (func_id -> function pointer) for all compiled functions
     fn compile_all_at_tier(
         &self,
         all_modules: &[IrModule],
         target_tier: OptimizationTier,
-    ) -> Result<HashMap<IrFunctionId, usize>, String> {
+    ) -> Result<BTreeMap<IrFunctionId, usize>, String> {
         use crate::ir::optimization::PassManager;
 
         // Convert runtime symbols to the format Cranelift expects
@@ -2047,7 +2047,7 @@ impl TieredBackend {
             None
         };
 
-        let mut pointers = HashMap::new();
+        let mut pointers = BTreeMap::new();
         for module in modules_to_compile {
             for (func_id, function) in &module.functions {
                 // Skip extern functions (no body to compile)
@@ -2223,7 +2223,7 @@ impl TieredBackend {
 
     #[cfg(feature = "llvm-backend")]
     #[allow(dead_code)]
-    fn compile_all_with_llvm(&self) -> Result<HashMap<IrFunctionId, usize>, String> {
+    fn compile_all_with_llvm(&self) -> Result<BTreeMap<IrFunctionId, usize>, String> {
         // On x86_64 Linux, use AOT-to-dylib for ~2x better codegen quality.
         // MCJIT's code generator on x86_64 produces significantly worse code
         // than the AOT path using the same LLVM IR and optimization passes.
@@ -2242,7 +2242,7 @@ impl TieredBackend {
     /// MCJIT is stable on these platforms and provides the best JIT experience.
     #[cfg(feature = "llvm-backend")]
     #[allow(dead_code)]
-    fn compile_all_with_llvm_mcjit(&self) -> Result<HashMap<IrFunctionId, usize>, String> {
+    fn compile_all_with_llvm_mcjit(&self) -> Result<BTreeMap<IrFunctionId, usize>, String> {
         // Check if THIS instance has already compiled with LLVM
         {
             let llvm_compiled = self.llvm_compiled.lock().unwrap();
@@ -2310,7 +2310,7 @@ impl TieredBackend {
             fp_lock.keys().cloned().collect()
         };
 
-        let mut resolved_pointers = HashMap::new();
+        let mut resolved_pointers = BTreeMap::new();
         for func_id in &needed_func_ids {
             if let Some(ptr) = backend.get_function_pointer_by_id(*func_id) {
                 resolved_pointers.insert(*func_id, ptr);
@@ -2320,7 +2320,7 @@ impl TieredBackend {
         let _leaked_backend = Box::leak(Box::new(backend));
 
         // Build name -> pointer map for global storage (only resolved functions)
-        let global_ptrs: HashMap<String, usize> = function_symbols
+        let global_ptrs: BTreeMap<String, usize> = function_symbols
             .iter()
             .filter_map(|(id, name)| resolved_pointers.get(id).map(|ptr| (name.clone(), *ptr)))
             .collect();
@@ -2340,7 +2340,7 @@ impl TieredBackend {
     /// 4. Function pointers extracted via dlsym
     #[cfg(feature = "llvm-backend")]
     #[allow(dead_code)]
-    fn compile_all_with_llvm_aot(&self) -> Result<HashMap<IrFunctionId, usize>, String> {
+    fn compile_all_with_llvm_aot(&self) -> Result<BTreeMap<IrFunctionId, usize>, String> {
         // Check if THIS instance has already compiled with LLVM
         {
             let llvm_compiled = self.llvm_compiled.lock().unwrap();
@@ -2433,7 +2433,7 @@ impl TieredBackend {
         let _ = std::fs::remove_file(&obj_path);
 
         // Build name -> pointer map for global storage (so other backends can reuse)
-        let global_ptrs: HashMap<String, usize> = function_symbols
+        let global_ptrs: BTreeMap<String, usize> = function_symbols
             .iter()
             .filter_map(|(id, name)| all_pointers.get(id).map(|ptr| (name.clone(), *ptr)))
             .collect();
@@ -2449,10 +2449,10 @@ impl TieredBackend {
     #[cfg(feature = "llvm-backend")]
     fn map_global_pointers_to_ids(
         &self,
-        global_ptrs: &HashMap<String, usize>,
-    ) -> Result<HashMap<IrFunctionId, usize>, String> {
+        global_ptrs: &BTreeMap<String, usize>,
+    ) -> Result<BTreeMap<IrFunctionId, usize>, String> {
         let modules_lock = self.modules.read().unwrap();
-        let mut result = HashMap::new();
+        let mut result = BTreeMap::new();
 
         for module in modules_lock.iter() {
             for (func_id, func) in &module.functions {
@@ -2484,8 +2484,8 @@ impl TieredBackend {
         &self,
         obj_path: &Path,
         dylib_path: &Path,
-        function_symbols: &HashMap<IrFunctionId, String>,
-    ) -> Result<HashMap<IrFunctionId, usize>, String> {
+        function_symbols: &BTreeMap<IrFunctionId, String>,
+    ) -> Result<BTreeMap<IrFunctionId, usize>, String> {
         self.link_to_dylib(obj_path, dylib_path, &self.runtime_symbols)?;
 
         // Ensure dylib is fully visible on disk before loading.
@@ -2517,7 +2517,7 @@ impl TieredBackend {
         // Memory barrier to ensure all writes from dylib loading are visible.
         std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
 
-        let mut all_pointers = HashMap::new();
+        let mut all_pointers = BTreeMap::new();
         for (func_id, symbol_name) in function_symbols {
             let symbol_result: Result<libloading::Symbol<*const ()>, _> =
                 unsafe { lib.get(symbol_name.as_bytes()) };
@@ -2813,10 +2813,10 @@ impl TieredBackend {
     /// 5. Release barrier (allows JIT executions to resume)
     fn background_worker_iteration(
         queue: &Arc<Mutex<VecDeque<(IrFunctionId, OptimizationTier)>>>,
-        optimizing: &Arc<Mutex<HashSet<IrFunctionId>>>,
+        optimizing: &Arc<Mutex<BTreeSet<IrFunctionId>>>,
         modules: &Arc<RwLock<Vec<IrModule>>>,
-        function_pointers: &Arc<RwLock<HashMap<IrFunctionId, usize>>>,
-        function_tiers: &Arc<RwLock<HashMap<IrFunctionId, OptimizationTier>>>,
+        function_pointers: &Arc<RwLock<BTreeMap<IrFunctionId, usize>>>,
+        function_tiers: &Arc<RwLock<BTreeMap<IrFunctionId, OptimizationTier>>>,
         profile_data: &ProfileData,
         config: &TieredConfig,
         runtime_symbols: &Arc<Vec<(String, usize)>>,
@@ -3052,7 +3052,7 @@ impl TieredBackend {
         all_modules: &[IrModule],
         target_tier: OptimizationTier,
         runtime_symbols: &Arc<Vec<(String, usize)>>,
-    ) -> Result<HashMap<IrFunctionId, usize>, String> {
+    ) -> Result<BTreeMap<IrFunctionId, usize>, String> {
         use crate::ir::optimization::PassManager;
 
         // Convert runtime symbols to format expected by Cranelift
@@ -3093,7 +3093,7 @@ impl TieredBackend {
         backend.finalize()?;
 
         // Collect function pointers for all functions with bodies
-        let mut pointers = HashMap::new();
+        let mut pointers = BTreeMap::new();
         for module in modules_to_compile {
             for (func_id, function) in &module.functions {
                 // Skip extern functions (no body to compile)

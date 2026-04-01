@@ -48,7 +48,7 @@ use cranelift::prelude::*;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module};
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Runtime ownership state for a value
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,7 +61,7 @@ enum OwnershipState {
 
 /// Runtime memory model tracker
 struct MemoryRuntime {
-    values: RefCell<HashMap<i64, (i64, OwnershipState)>>,
+    values: RefCell<BTreeMap<i64, (i64, OwnershipState)>>,
     next_id: RefCell<i64>,
 }
 
@@ -70,7 +70,7 @@ static mut RUNTIME: Option<MemoryRuntime> = None;
 impl MemoryRuntime {
     fn new() -> Self {
         Self {
-            values: RefCell::new(HashMap::new()),
+            values: RefCell::new(BTreeMap::new()),
             next_id: RefCell::new(1),
         }
     }

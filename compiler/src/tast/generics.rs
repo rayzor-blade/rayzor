@@ -1,7 +1,7 @@
 // Generics System Integration
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Arc;
 
@@ -107,16 +107,16 @@ pub struct GenericsEngineStats {
 /// Cache for common generic operations
 struct GenericOperationCache {
     /// Cached type parameter bounds checking
-    bounds_cache: HashMap<(TypeId, Vec<ConstraintKind>), bool>,
+    bounds_cache: BTreeMap<(TypeId, Vec<ConstraintKind>), bool>,
 
     /// Cached subtype relationships for generics
-    subtype_cache: HashMap<(TypeId, TypeId), bool>,
+    subtype_cache: BTreeMap<(TypeId, TypeId), bool>,
 
     /// Cached method resolution for generic types
-    method_cache: HashMap<(TypeId, super::InternedString), Option<SymbolId>>,
+    method_cache: BTreeMap<(TypeId, super::InternedString), Option<SymbolId>>,
 
     /// Cache for complete generic resolutions
-    resolution_cache: HashMap<(TypeId, Vec<TypeId>), TypeId>,
+    resolution_cache: BTreeMap<(TypeId, Vec<TypeId>), TypeId>,
 
     /// Statistics
     hits: usize,
@@ -126,10 +126,10 @@ struct GenericOperationCache {
 impl GenericOperationCache {
     fn new() -> Self {
         Self {
-            bounds_cache: HashMap::with_capacity(128), // Typical bounds checks
-            subtype_cache: HashMap::with_capacity(256), // Common subtype queries
-            method_cache: HashMap::with_capacity(64),  // Method lookups
-            resolution_cache: HashMap::with_capacity(128), // Type resolutions
+            bounds_cache: BTreeMap::new(), // Typical bounds checks
+            subtype_cache: BTreeMap::new(), // Common subtype queries
+            method_cache: BTreeMap::new(),  // Method lookups
+            resolution_cache: BTreeMap::new(), // Type resolutions
             hits: 0,
             misses: 0,
         }

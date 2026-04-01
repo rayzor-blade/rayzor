@@ -15,7 +15,7 @@ use crate::tast::{BlockId, StatementId, TypeId};
 use super::cfg::*;
 use super::{GraphConstructionError, GraphConstructionOptions, GraphConstructionStats};
 use super::{SourceLocation, SymbolId};
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::time::Instant;
 
 /// Builder for constructing CFGs from TAST
@@ -33,7 +33,7 @@ pub struct CfgBuilder {
     next_statement_id: u32,
 
     /// Mapping from TAST statements to CFG statement IDs
-    statement_mapping: HashMap<*const TypedStatement, StatementId>,
+    statement_mapping: BTreeMap<*const TypedStatement, StatementId>,
 
     /// Stack of break targets for nested loops
     break_targets: Vec<BlockId>,
@@ -88,7 +88,7 @@ impl CfgBuilder {
             current_cfg: None,
             next_block_id: 1, // 0 is reserved for invalid ID
             next_statement_id: 1,
-            statement_mapping: HashMap::new(),
+            statement_mapping: BTreeMap::new(),
             break_targets: Vec::new(),
             continue_targets: Vec::new(),
             exception_handlers: Vec::new(),

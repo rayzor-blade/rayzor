@@ -60,7 +60,7 @@ impl Project {
 
     /// Resolve WASM JS host module paths from [wasm] config.
     /// Returns module_name → absolute path to .js file.
-    pub fn resolved_wasm_hosts(&self) -> std::collections::HashMap<String, PathBuf> {
+    pub fn resolved_wasm_hosts(&self) -> std::collections::BTreeMap<String, PathBuf> {
         self.manifest
             .wasm
             .as_ref()

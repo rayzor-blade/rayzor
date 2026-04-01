@@ -22,7 +22,7 @@
 
 use crate::semantic_graph::cfg::{BasicBlock, ControlFlowGraph};
 use crate::tast::{BlockId, SourceLocation};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::Instant;
 
 /// **Dominance Tree and Analysis Results**
@@ -32,22 +32,22 @@ use std::time::Instant;
 #[derive(Debug, Clone)]
 pub struct DominanceTree {
     /// Immediate dominator for each block (idom[b] = immediate dominator of b)
-    pub idom: HashMap<BlockId, BlockId>,
+    pub idom: BTreeMap<BlockId, BlockId>,
 
     /// All dominators for each block (transitive closure of dominance)
-    pub dominators: HashMap<BlockId, HashSet<BlockId>>,
+    pub dominators: BTreeMap<BlockId, BTreeSet<BlockId>>,
 
     /// Children in the dominance tree structure
-    pub dom_tree_children: HashMap<BlockId, Vec<BlockId>>,
+    pub dom_tree_children: BTreeMap<BlockId, Vec<BlockId>>,
 
     /// Dominance frontiers for phi-node placement (DF[b] = dominance frontier of b)
-    pub dominance_frontiers: HashMap<BlockId, Vec<BlockId>>,
+    pub dominance_frontiers: BTreeMap<BlockId, Vec<BlockId>>,
 
     /// DFS pre-order numbering for algorithm efficiency
-    pub dfs_preorder: HashMap<BlockId, usize>,
+    pub dfs_preorder: BTreeMap<BlockId, usize>,
 
     /// DFS post-order numbering for certain algorithms
-    pub dfs_postorder: HashMap<BlockId, usize>,
+    pub dfs_postorder: BTreeMap<BlockId, usize>,
 
     /// Reverse post-order traversal (good ordering for dataflow analysis)
     pub reverse_postorder: Vec<BlockId>,
@@ -63,16 +63,16 @@ pub struct DominanceTree {
 #[derive(Debug)]
 struct UnionFind {
     /// Parent pointers for union-find
-    parent: HashMap<BlockId, BlockId>,
+    parent: BTreeMap<BlockId, BlockId>,
 
     /// Ranks for union by rank optimization
-    rank: HashMap<BlockId, usize>,
+    rank: BTreeMap<BlockId, usize>,
 
     /// Semi-dominators for each vertex
-    semi: HashMap<BlockId, usize>,
+    semi: BTreeMap<BlockId, usize>,
 
     /// Labels for path compression optimization
-    label: HashMap<BlockId, BlockId>,
+    label: BTreeMap<BlockId, BlockId>,
 }
 
 /// **Performance and Diagnostic Statistics**
@@ -135,12 +135,12 @@ impl DominanceTree {
         let start_time = Instant::now();
 
         let mut tree = Self {
-            idom: HashMap::new(),
-            dominators: HashMap::new(),
-            dom_tree_children: HashMap::new(),
-            dominance_frontiers: HashMap::new(),
-            dfs_preorder: HashMap::new(),
-            dfs_postorder: HashMap::new(),
+            idom: BTreeMap::new(),
+            dominators: BTreeMap::new(),
+            dom_tree_children: BTreeMap::new(),
+            dominance_frontiers: BTreeMap::new(),
+            dfs_preorder: BTreeMap::new(),
+            dfs_postorder: BTreeMap::new(),
             reverse_postorder: Vec::new(),
             stats: DominanceStats::default(),
         };
@@ -233,7 +233,7 @@ impl DominanceTree {
     /// - Compute reverse post-order (RPO) for efficient dataflow analysis
     /// - Detect unreachable blocks
     fn compute_dfs_numbering(&mut self, cfg: &ControlFlowGraph) -> Result<(), DominanceError> {
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
         let mut preorder_counter = 0;
         let mut postorder_counter = 0;
         let mut postorder_stack = Vec::new();
@@ -299,8 +299,8 @@ impl DominanceTree {
     /// Lengauer-Tarjan algorithm with union-find optimization.
     fn compute_lengauer_tarjan(&mut self, cfg: &ControlFlowGraph) -> Result<(), DominanceError> {
         let mut union_find = UnionFind::new();
-        let mut vertex_by_dfs = HashMap::new();
-        let mut bucket: HashMap<BlockId, Vec<BlockId>> = HashMap::new();
+        let mut vertex_by_dfs = BTreeMap::new();
+        let mut bucket: BTreeMap<BlockId, Vec<BlockId>> = BTreeMap::new();
 
         // Initialize vertex array ordered by DFS number
         for (&block, &dfs_num) in &self.dfs_preorder {
@@ -387,7 +387,7 @@ impl DominanceTree {
 
         // Compute transitive dominance relation
         for &block in self.idom.keys() {
-            let mut dominators = HashSet::new();
+            let mut dominators = BTreeSet::new();
             let mut current = Some(block);
 
             // Walk up the dominance tree
@@ -498,7 +498,7 @@ impl DominanceTree {
         let dominators_b = self.dominators.get(&b)?;
 
         // Find common dominators
-        let common: HashSet<_> = dominators_a.intersection(dominators_b).collect();
+        let common: BTreeSet<_> = dominators_a.intersection(dominators_b).collect();
 
         // Find the one with the highest DFS number (closest to leaves)
         common
@@ -567,10 +567,10 @@ impl DominanceTree {
 impl UnionFind {
     fn new() -> Self {
         Self {
-            parent: HashMap::new(),
-            rank: HashMap::new(),
-            semi: HashMap::new(),
-            label: HashMap::new(),
+            parent: BTreeMap::new(),
+            rank: BTreeMap::new(),
+            semi: BTreeMap::new(),
+            label: BTreeMap::new(),
         }
     }
 

@@ -11,7 +11,7 @@ use crate::tast::{
     symbols::Mutability,
     ScopeId, SourceLocation, SymbolId, TypeId,
 };
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// Represents the state of a variable at a program point
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,9 +42,9 @@ pub struct ControlFlowBlock {
     /// Predecessors to this block
     pub predecessors: Vec<BlockId>,
     /// Variable states at the beginning of this block
-    pub entry_states: HashMap<SymbolId, VariableState>,
+    pub entry_states: BTreeMap<SymbolId, VariableState>,
     /// Variable states at the end of this block
-    pub exit_states: HashMap<SymbolId, VariableState>,
+    pub exit_states: BTreeMap<SymbolId, VariableState>,
     /// Whether this block is reachable
     pub is_reachable: bool,
     /// Whether this block definitely returns/throws
@@ -57,9 +57,9 @@ pub struct StatementInfo {
     /// The statement itself
     pub statement: TypedStatement,
     /// Variables assigned in this statement
-    pub assigns: HashSet<SymbolId>,
+    pub assigns: BTreeSet<SymbolId>,
     /// Variables used in this statement
-    pub uses: HashSet<SymbolId>,
+    pub uses: BTreeSet<SymbolId>,
     /// Whether this statement can throw
     pub can_throw: bool,
     /// Whether this statement definitely exits (return/throw)
@@ -73,7 +73,7 @@ pub type BlockId = usize;
 #[derive(Debug)]
 pub struct ControlFlowGraph {
     /// All blocks in the graph
-    pub blocks: HashMap<BlockId, ControlFlowBlock>,
+    pub blocks: BTreeMap<BlockId, ControlFlowBlock>,
     /// Entry block (where execution begins)
     pub entry_block: BlockId,
     /// Exit blocks (where execution ends)
@@ -86,7 +86,7 @@ impl ControlFlowGraph {
     /// Create a new empty control flow graph
     pub fn new() -> Self {
         Self {
-            blocks: HashMap::new(),
+            blocks: BTreeMap::new(),
             entry_block: 0,
             exit_blocks: Vec::new(),
             next_block_id: 0,
@@ -105,8 +105,8 @@ impl ControlFlowGraph {
                 statements: Vec::new(),
                 successors: Vec::new(),
                 predecessors: Vec::new(),
-                entry_states: HashMap::new(),
-                exit_states: HashMap::new(),
+                entry_states: BTreeMap::new(),
+                exit_states: BTreeMap::new(),
                 is_reachable: false,
                 definitely_exits: false,
             },
@@ -177,9 +177,9 @@ pub struct ControlFlowAnalyzer {
     /// Current block being built
     current_block: BlockId,
     /// Variables in current scope
-    variables: HashSet<SymbolId>,
+    variables: BTreeSet<SymbolId>,
     /// Resources that need cleanup (file handles, connections, etc.)
-    resources: HashMap<SymbolId, ResourceInfo>,
+    resources: BTreeMap<SymbolId, ResourceInfo>,
     /// Analysis results
     results: AnalysisResults,
     /// Whether we're analyzing an entry point function (like static main)
@@ -242,8 +242,8 @@ impl ControlFlowAnalyzer {
             break_targets: Vec::new(),
             continue_targets: Vec::new(),
             current_block: entry_block,
-            variables: HashSet::new(),
-            resources: HashMap::new(),
+            variables: BTreeSet::new(),
+            resources: BTreeMap::new(),
             results: AnalysisResults::default(),
             is_entry_point: false,
         }
@@ -544,8 +544,8 @@ impl ControlFlowAnalyzer {
 
     /// Create statement info for analysis
     fn create_statement_info(&self, statement: &TypedStatement) -> StatementInfo {
-        let mut assigns = HashSet::new();
-        let mut uses = HashSet::new();
+        let mut assigns = BTreeSet::new();
+        let mut uses = BTreeSet::new();
         let can_throw = self.statement_can_throw(statement);
         let definitely_exits = self.statement_definitely_exits(statement);
 
@@ -584,8 +584,8 @@ impl ControlFlowAnalyzer {
     /// Extract variables assigned and used in a statement
     fn extract_statement_variables(
         statement: &TypedStatement,
-        assigns: &mut HashSet<SymbolId>,
-        uses: &mut HashSet<SymbolId>,
+        assigns: &mut BTreeSet<SymbolId>,
+        uses: &mut BTreeSet<SymbolId>,
     ) {
         match statement {
             TypedStatement::VarDeclaration {
@@ -612,12 +612,12 @@ impl ControlFlowAnalyzer {
     }
 
     /// Extract variable uses from an expression
-    fn extract_expression_uses(&self, expression: &TypedExpression, uses: &mut HashSet<SymbolId>) {
+    fn extract_expression_uses(&self, expression: &TypedExpression, uses: &mut BTreeSet<SymbolId>) {
         Self::extract_expression_uses_static(expression, uses);
     }
 
     /// Static version of extract_expression_uses
-    fn extract_expression_uses_static(expression: &TypedExpression, uses: &mut HashSet<SymbolId>) {
+    fn extract_expression_uses_static(expression: &TypedExpression, uses: &mut BTreeSet<SymbolId>) {
         match &expression.kind {
             TypedExpressionKind::Variable { symbol_id } => {
                 uses.insert(*symbol_id);
@@ -726,7 +726,7 @@ impl ControlFlowAnalyzer {
 
     /// Compute reachability of all blocks
     fn compute_reachability(&mut self) {
-        let mut reachable = HashSet::new();
+        let mut reachable = BTreeSet::new();
         let mut worklist = VecDeque::new();
 
         // Start from entry block
@@ -771,7 +771,7 @@ impl ControlFlowAnalyzer {
         let mut changed = false;
 
         // Merge states from predecessors
-        let mut entry_states = HashMap::new();
+        let mut entry_states = BTreeMap::new();
 
         if let Some(block) = self.cfg.blocks.get(&block_id) {
             let predecessors = block.predecessors.clone();
@@ -894,7 +894,7 @@ impl ControlFlowAnalyzer {
         let mut changed = false;
 
         // Merge null states from predecessors
-        let mut entry_states = HashMap::new();
+        let mut entry_states = BTreeMap::new();
 
         if let Some(block) = self.cfg.blocks.get(&block_id) {
             let predecessors = block.predecessors.clone();
@@ -1122,8 +1122,8 @@ impl ControlFlowAnalyzer {
             return;
         }
 
-        let mut declared_vars = HashSet::new();
-        let mut used_vars = HashSet::new();
+        let mut declared_vars = BTreeSet::new();
+        let mut used_vars = BTreeSet::new();
 
         // Collect all variable declarations and uses
         for (_, block) in &self.cfg.blocks {

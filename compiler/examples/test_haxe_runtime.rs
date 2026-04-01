@@ -49,8 +49,8 @@ fn main() {
     // Display all registered functions by category
     println!("📋 Available Runtime Functions:\n");
 
-    let mut categories: std::collections::HashMap<&str, Vec<&str>> =
-        std::collections::HashMap::new();
+    let mut categories: std::collections::BTreeMap<&str, Vec<&str>> =
+        std::collections::BTreeMap::new();
 
     for (name, _) in &symbols {
         let category = if name.starts_with("haxe_string_") {

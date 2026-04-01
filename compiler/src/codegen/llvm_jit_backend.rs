@@ -42,7 +42,7 @@ use crate::ir::{
     IrInstruction, IrModule, IrPhiNode, IrTerminator, IrType, IrValue, UnaryOp, VectorMinMaxKind,
     VectorUnaryOpKind,
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::{Mutex, Once};
 
 /// Static Once for thread-safe LLVM initialization
@@ -69,7 +69,7 @@ static LLVM_GLOBAL_COMPILED: std::sync::atomic::AtomicBool =
 /// Key is function name (stable across backends), value is function pointer.
 /// Uses Mutex<Option<>> instead of OnceLock to allow reset for benchmarking.
 #[cfg(feature = "llvm-backend")]
-static LLVM_GLOBAL_POINTERS: std::sync::Mutex<Option<HashMap<String, usize>>> =
+static LLVM_GLOBAL_POINTERS: std::sync::Mutex<Option<BTreeMap<String, usize>>> =
     std::sync::Mutex::new(None);
 
 /// Check if LLVM compilation has already been done globally
@@ -80,7 +80,7 @@ pub fn is_llvm_compiled_globally() -> bool {
 
 /// Mark LLVM compilation as done globally and store the function pointers
 #[cfg(feature = "llvm-backend")]
-pub fn mark_llvm_compiled_globally_with_pointers(pointers: HashMap<String, usize>) {
+pub fn mark_llvm_compiled_globally_with_pointers(pointers: BTreeMap<String, usize>) {
     *LLVM_GLOBAL_POINTERS.lock().unwrap() = Some(pointers);
     LLVM_GLOBAL_COMPILED.store(true, std::sync::atomic::Ordering::Release);
 }
@@ -88,7 +88,7 @@ pub fn mark_llvm_compiled_globally_with_pointers(pointers: HashMap<String, usize
 /// Get the globally stored LLVM function pointers (if available)
 /// Returns a clone to avoid holding the lock
 #[cfg(feature = "llvm-backend")]
-pub fn get_global_llvm_pointers() -> Option<HashMap<String, usize>> {
+pub fn get_global_llvm_pointers() -> Option<BTreeMap<String, usize>> {
     LLVM_GLOBAL_POINTERS.lock().unwrap().clone()
 }
 
@@ -148,19 +148,19 @@ pub struct LLVMJitBackend<'ctx> {
     execution_engine: Option<ExecutionEngine<'ctx>>,
 
     /// Maps MIR value IDs to LLVM values
-    value_map: HashMap<IrId, BasicValueEnum<'ctx>>,
+    value_map: BTreeMap<IrId, BasicValueEnum<'ctx>>,
 
     /// Maps MIR function IDs to LLVM functions
-    function_map: HashMap<IrFunctionId, FunctionValue<'ctx>>,
+    function_map: BTreeMap<IrFunctionId, FunctionValue<'ctx>>,
 
     /// Maps MIR block IDs to LLVM basic blocks
-    block_map: HashMap<IrBlockId, BasicBlock<'ctx>>,
+    block_map: BTreeMap<IrBlockId, BasicBlock<'ctx>>,
 
     /// Maps phi node destination IDs to LLVM phi instructions
-    phi_map: HashMap<IrId, PhiValue<'ctx>>,
+    phi_map: BTreeMap<IrId, PhiValue<'ctx>>,
 
     /// Function pointers cache (usize for thread safety)
-    function_pointers: HashMap<IrFunctionId, usize>,
+    function_pointers: BTreeMap<IrFunctionId, usize>,
 
     /// Optimization level
     opt_level: OptimizationLevel,
@@ -169,13 +169,13 @@ pub struct LLVMJitBackend<'ctx> {
     target_data: Option<TargetData>,
 
     /// Runtime symbols (name -> pointer) for FFI calls
-    runtime_symbols: HashMap<String, usize>,
+    runtime_symbols: BTreeMap<String, usize>,
 
     /// Extern function IDs (no hidden env parameter)
-    extern_function_ids: std::collections::HashSet<IrFunctionId>,
+    extern_function_ids: std::collections::BTreeSet<IrFunctionId>,
 
     /// Functions that use sret (struct return via hidden pointer parameter)
-    sret_function_ids: std::collections::HashSet<IrFunctionId>,
+    sret_function_ids: std::collections::BTreeSet<IrFunctionId>,
 
     /// Current sret pointer for the function being compiled
     /// Set at the start of compile_function_body, used in Return terminator
@@ -187,7 +187,7 @@ pub struct LLVMJitBackend<'ctx> {
 
     /// IrIds that were allocated via alloca (stack). Free instructions targeting
     /// these are no-ops. All other Free instructions call libc free().
-    alloca_ids: std::collections::HashSet<IrId>,
+    alloca_ids: std::collections::BTreeSet<IrId>,
 
     /// LLVM global variables for Haxe static fields (inline access, no FFI)
     /// Vec indexed by IrGlobalId.0 for O(1) lookup (no hashing overhead)
@@ -246,19 +246,19 @@ impl<'ctx> LLVMJitBackend<'ctx> {
             module,
             builder,
             execution_engine: None,
-            value_map: HashMap::new(),
-            function_map: HashMap::new(),
-            block_map: HashMap::new(),
-            phi_map: HashMap::new(),
-            function_pointers: HashMap::new(),
+            value_map: BTreeMap::new(),
+            function_map: BTreeMap::new(),
+            block_map: BTreeMap::new(),
+            phi_map: BTreeMap::new(),
+            function_pointers: BTreeMap::new(),
             opt_level,
             target_data: Some(target_data),
-            runtime_symbols: HashMap::new(),
-            extern_function_ids: std::collections::HashSet::new(),
-            sret_function_ids: std::collections::HashSet::new(),
+            runtime_symbols: BTreeMap::new(),
+            extern_function_ids: std::collections::BTreeSet::new(),
+            sret_function_ids: std::collections::BTreeSet::new(),
             current_sret_ptr: None,
             aot_mode: false,
-            alloca_ids: std::collections::HashSet::new(),
+            alloca_ids: std::collections::BTreeSet::new(),
             global_vars: Vec::new(),
         })
     }
@@ -514,7 +514,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         None
     }
 
-    pub fn get_all_function_pointers(&mut self) -> Result<HashMap<IrFunctionId, usize>, String> {
+    pub fn get_all_function_pointers(&mut self) -> Result<BTreeMap<IrFunctionId, usize>, String> {
         let engine = self
             .execution_engine
             .as_ref()
@@ -1258,7 +1258,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     /// Get all function symbol names that will be exported in the dylib
     ///
     /// Returns a map of IrFunctionId -> symbol name for loading from the dylib
-    pub fn get_function_symbols(&self) -> HashMap<IrFunctionId, String> {
+    pub fn get_function_symbols(&self) -> BTreeMap<IrFunctionId, String> {
         self.function_map
             .iter()
             .filter(|(id, _)| !self.extern_function_ids.contains(id))
@@ -1875,7 +1875,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
         // with higher IDs in the middle of control flow.
         let sorted_blocks = {
             let mut rpo = Vec::new();
-            let mut visited = std::collections::HashSet::new();
+            let mut visited = std::collections::BTreeSet::new();
             let mut stack = vec![(function.cfg.entry_block, false)];
             while let Some((block_id, processed)) = stack.pop() {
                 if processed {
@@ -2109,7 +2109,7 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     fn compile_instruction(
         &mut self,
         inst: &IrInstruction,
-        register_types: &HashMap<IrId, IrType>,
+        register_types: &BTreeMap<IrId, IrType>,
     ) -> Result<(), String> {
         match inst {
             IrInstruction::Const { dest, value } => {

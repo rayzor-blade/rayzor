@@ -14,12 +14,12 @@ use super::{
     symbol_cache::SymbolResolutionCache, InternedString, LifetimeId, ScopeId, StringInterner,
     SymbolId, TypeId, TypedArena,
 };
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::rc::Rc;
 
 /// The kind of symbol (variable, function, class, etc.)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SymbolKind {
     /// Local variable or parameter
     Variable,
@@ -547,27 +547,27 @@ pub struct SymbolTable {
     /// Arena for symbol storage
     symbols_arena: TypedArena<Symbol>,
     /// Map from symbol ID to symbol reference
-    symbols_by_id: HashMap<SymbolId, &'static Symbol>,
+    symbols_by_id: BTreeMap<SymbolId, &'static Symbol>,
     /// Map from (scope, name) to symbol ID for fast name lookup
-    symbols_by_name: HashMap<(ScopeId, InternedString), SymbolId>,
+    symbols_by_name: BTreeMap<(ScopeId, InternedString), SymbolId>,
     /// Symbols grouped by scope for iteration
-    symbols_by_scope: HashMap<ScopeId, Vec<SymbolId>>,
+    symbols_by_scope: BTreeMap<ScopeId, Vec<SymbolId>>,
     /// Symbols grouped by kind
-    symbols_by_kind: HashMap<SymbolKind, Vec<SymbolId>>,
+    symbols_by_kind: BTreeMap<SymbolKind, Vec<SymbolId>>,
     /// Separate usage tracking (more cache-friendly than interior mutability)
-    used_symbols: HashSet<SymbolId>,
+    used_symbols: BTreeSet<SymbolId>,
     /// Statistics
     total_symbols: usize,
     /// Class hierarchy information indexed by symbol ID
-    pub(crate) class_hierarchies: HashMap<SymbolId, ClassHierarchyInfo>,
+    pub(crate) class_hierarchies: BTreeMap<SymbolId, ClassHierarchyInfo>,
     /// Type ID to Symbol ID mapping for hierarchy lookups
-    type_to_symbol: HashMap<TypeId, SymbolId>,
+    type_to_symbol: BTreeMap<TypeId, SymbolId>,
     /// Symbol ID to Type ID reverse mapping for fast lookups
-    symbol_to_type: HashMap<SymbolId, TypeId>,
+    symbol_to_type: BTreeMap<SymbolId, TypeId>,
     /// Cache for computed hierarchy queries
-    supertype_cache: HashMap<SymbolId, HashSet<TypeId>>,
+    supertype_cache: BTreeMap<SymbolId, BTreeSet<TypeId>>,
     /// Map from enum symbol to its variants
-    enum_variants: HashMap<SymbolId, Vec<SymbolId>>,
+    enum_variants: BTreeMap<SymbolId, Vec<SymbolId>>,
     /// Enhanced symbol resolution cache
     symbol_cache: Rc<SymbolResolutionCache>,
 }
@@ -577,17 +577,17 @@ impl SymbolTable {
     pub fn new() -> Self {
         Self {
             symbols_arena: TypedArena::new(),
-            symbols_by_id: HashMap::new(),
-            symbols_by_name: HashMap::new(),
-            symbols_by_scope: HashMap::new(),
-            symbols_by_kind: HashMap::new(),
-            used_symbols: HashSet::new(),
+            symbols_by_id: BTreeMap::new(),
+            symbols_by_name: BTreeMap::new(),
+            symbols_by_scope: BTreeMap::new(),
+            symbols_by_kind: BTreeMap::new(),
+            used_symbols: BTreeSet::new(),
             total_symbols: 0,
-            class_hierarchies: HashMap::new(),
-            type_to_symbol: HashMap::new(),
-            symbol_to_type: HashMap::new(),
-            supertype_cache: HashMap::new(),
-            enum_variants: HashMap::new(),
+            class_hierarchies: BTreeMap::new(),
+            type_to_symbol: BTreeMap::new(),
+            symbol_to_type: BTreeMap::new(),
+            supertype_cache: BTreeMap::new(),
+            enum_variants: BTreeMap::new(),
             symbol_cache: Rc::new(SymbolResolutionCache::new(1000)),
         }
     }
@@ -596,17 +596,17 @@ impl SymbolTable {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             symbols_arena: TypedArena::with_capacity(capacity),
-            symbols_by_id: HashMap::with_capacity(capacity),
-            symbols_by_name: HashMap::with_capacity(capacity),
-            symbols_by_scope: HashMap::with_capacity(capacity / 10), // Estimate 10 symbols per scope
-            symbols_by_kind: HashMap::with_capacity(SymbolKind::Metadata as usize + 1),
-            used_symbols: HashSet::with_capacity(capacity / 2), // Estimate half of symbols get used
+            symbols_by_id: BTreeMap::new(),
+            symbols_by_name: BTreeMap::new(),
+            symbols_by_scope: BTreeMap::new(), // Estimate 10 symbols per scope
+            symbols_by_kind: BTreeMap::new(),
+            used_symbols: BTreeSet::new(), // Estimate half of symbols get used
             total_symbols: 0,
-            class_hierarchies: HashMap::with_capacity(capacity),
-            type_to_symbol: HashMap::with_capacity(capacity),
-            symbol_to_type: HashMap::with_capacity(capacity),
-            supertype_cache: HashMap::with_capacity(capacity),
-            enum_variants: HashMap::with_capacity(capacity / 20), // Estimate fewer enums
+            class_hierarchies: BTreeMap::new(),
+            type_to_symbol: BTreeMap::new(),
+            symbol_to_type: BTreeMap::new(),
+            supertype_cache: BTreeMap::new(),
+            enum_variants: BTreeMap::new(), // Estimate fewer enums
             symbol_cache: Rc::new(SymbolResolutionCache::with_sizes(capacity, capacity / 2)),
         }
     }
@@ -1375,7 +1375,7 @@ impl SymbolTable {
     /// Get all interfaces implemented by a class (including inherited)
     pub fn get_all_interfaces(&self, class_id: SymbolId) -> Vec<SymbolId> {
         let mut interfaces = Vec::with_capacity(8); // Estimate for interface collection
-        let mut seen = HashSet::new();
+        let mut seen = BTreeSet::new();
         let mut queue = VecDeque::new();
         queue.push_back(class_id);
 
@@ -1455,7 +1455,7 @@ impl SymbolTable {
 
     /// Check if there's an inheritance cycle starting from the given class
     fn has_inheritance_cycle(&self, start: SymbolId) -> bool {
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
         let mut current = start;
 
         loop {
@@ -1669,7 +1669,7 @@ pub struct ClassTypeInfo {
     pub kind: SymbolKind,
     pub superclass: Option<TypeId>,
     pub interfaces: Vec<TypeId>,
-    pub all_supertypes: HashSet<TypeId>,
+    pub all_supertypes: BTreeSet<TypeId>,
     pub depth: usize,
 }
 
@@ -1695,16 +1695,16 @@ impl ClassHierarchyRegistry for SymbolTable {
         self.class_hierarchies.get(&class_id)
     }
 
-    fn compute_all_supertypes(&self, class_id: SymbolId) -> HashSet<TypeId> {
+    fn compute_all_supertypes(&self, class_id: SymbolId) -> BTreeSet<TypeId> {
         // Check cache first
         if let Some(cached) = self.supertype_cache.get(&class_id) {
             return cached.clone();
         }
 
         // Compute supertypes using BFS
-        let mut supertypes = HashSet::new();
+        let mut supertypes = BTreeSet::new();
         let mut queue = VecDeque::new();
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
 
         // Start with direct superclass and interfaces
         if let Some(hierarchy) = self.get_class_hierarchy(class_id) {
@@ -1756,7 +1756,7 @@ pub struct SymbolTableStats {
     pub total_symbols: usize,
     pub used_symbols: usize,
     pub unused_symbols: usize,
-    pub symbols_by_kind: HashMap<SymbolKind, usize>,
+    pub symbols_by_kind: BTreeMap<SymbolKind, usize>,
     pub scopes_with_symbols: usize,
     pub arena_stats: super::ArenaStats,
     pub memory_usage: usize,
@@ -2250,7 +2250,7 @@ mod tests {
             ClassHierarchyInfo {
                 superclass: None,
                 interfaces: vec![],
-                all_supertypes: HashSet::new(),
+                all_supertypes: BTreeSet::new(),
                 depth: 0,
                 is_final: false,
                 is_abstract: false,

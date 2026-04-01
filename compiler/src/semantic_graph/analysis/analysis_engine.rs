@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use crate::semantic_graph::analysis::deadcode_analyzer::{
@@ -453,9 +453,9 @@ impl AnalysisEngine {
 #[derive(Debug, Clone)]
 pub struct AnalysisResults {
     // Per-function results
-    pub function_lifetime_constraints: HashMap<SymbolId, Vec<LifetimeConstraint>>,
-    pub function_ownership_violations: HashMap<SymbolId, Vec<OwnershipViolation>>,
-    pub dead_code_by_function: HashMap<SymbolId, Vec<DeadCodeRegion>>,
+    pub function_lifetime_constraints: BTreeMap<SymbolId, Vec<LifetimeConstraint>>,
+    pub function_ownership_violations: BTreeMap<SymbolId, Vec<OwnershipViolation>>,
+    pub dead_code_by_function: BTreeMap<SymbolId, Vec<DeadCodeRegion>>,
 
     // Global results
     pub global_lifetime_constraints: GlobalLifetimeConstraints,
@@ -463,20 +463,20 @@ pub struct AnalysisResults {
     pub escape_analysis: EscapeAnalysisResults,
 
     // Cross-function results
-    pub function_results: HashMap<SymbolId, FunctionAnalysisResults>,
+    pub function_results: BTreeMap<SymbolId, FunctionAnalysisResults>,
     pub optimization_hints: Vec<OptimizationHint>,
 }
 
 impl AnalysisResults {
     pub fn new() -> Self {
         Self {
-            function_lifetime_constraints: HashMap::new(),
-            function_ownership_violations: HashMap::new(),
-            dead_code_by_function: HashMap::new(),
+            function_lifetime_constraints: BTreeMap::new(),
+            function_ownership_violations: BTreeMap::new(),
+            dead_code_by_function: BTreeMap::new(),
             global_lifetime_constraints: GlobalLifetimeConstraints::new(),
             ownership_violations: Vec::new(),
             escape_analysis: EscapeAnalysisResults::new(),
-            function_results: HashMap::new(),
+            function_results: BTreeMap::new(),
             optimization_hints: Vec::new(),
         }
     }

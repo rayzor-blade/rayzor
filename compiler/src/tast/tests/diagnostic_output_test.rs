@@ -162,8 +162,8 @@ class Circle extends Shape implements IColorable {
         println!("\n=== All Error Codes Demonstration ===\n");
 
         // Group by error code
-        let mut errors_by_code: std::collections::HashMap<String, Vec<&_>> =
-            std::collections::HashMap::new();
+        let mut errors_by_code: std::collections::BTreeMap<String, Vec<&_>> =
+            std::collections::BTreeMap::new();
 
         for error in &result.errors {
             if let Some(code_match) = error.message.find("[E") {

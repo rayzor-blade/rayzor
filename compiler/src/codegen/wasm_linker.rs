@@ -32,7 +32,7 @@
 //! 5. Emit the merged module via `wasm-encoder`.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use wasm_encoder::{
     CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection, Function,
@@ -50,7 +50,7 @@ impl WasmLinker {
     /// Link a user WASM module with the pre-built runtime WASM.
     /// Returns a single self-contained `.wasm` binary with only WASI imports remaining.
     pub fn link(user_wasm: &[u8], runtime_wasm: &[u8]) -> Result<Vec<u8>, String> {
-        Self::link_with_hosts(user_wasm, runtime_wasm, &HashMap::new())
+        Self::link_with_hosts(user_wasm, runtime_wasm, &BTreeMap::new())
     }
 
     /// Link with host module function map.
@@ -60,7 +60,7 @@ impl WasmLinker {
     pub fn link_with_hosts(
         user_wasm: &[u8],
         runtime_wasm: &[u8],
-        host_functions: &HashMap<String, String>,
+        host_functions: &BTreeMap<String, String>,
     ) -> Result<Vec<u8>, String> {
         // 1. Parse both modules.
         let rt = ParsedModule::parse(runtime_wasm, "runtime")?;
@@ -97,7 +97,7 @@ impl WasmLinker {
 // ---------------------------------------------------------------------------
 
 /// A function signature: (params, results).
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 struct FuncSig {
     params: Vec<ValType>,
     results: Vec<ValType>,
@@ -177,7 +177,7 @@ struct ParsedModule {
     code_bodies: Vec<Vec<u8>>,
     exports: Vec<ParsedExport>,
     /// Export name -> original function index (in this module's index space).
-    export_func_map: HashMap<String, u32>,
+    export_func_map: BTreeMap<String, u32>,
     memory: Option<(u64, Option<u64>)>,
     globals: Vec<ParsedGlobal>,
     data_segments: Vec<ParsedData>,
@@ -198,7 +198,7 @@ impl ParsedModule {
         let mut functions = Vec::new();
         let mut code_bodies = Vec::new();
         let mut exports = Vec::new();
-        let mut export_func_map = HashMap::new();
+        let mut export_func_map = BTreeMap::new();
         let mut memory = None;
         let mut globals = Vec::new();
         let mut tables = Vec::new();
@@ -405,23 +405,23 @@ impl ParsedModule {
 struct LinkerCtx {
     /// Merged type section (deduplicated).
     merged_types: Vec<FuncSig>,
-    type_map: HashMap<FuncSig, u32>,
+    type_map: BTreeMap<FuncSig, u32>,
 
     // Index remapping for the runtime module.
     /// runtime original func idx -> merged func idx.
-    rt_func_remap: HashMap<u32, u32>,
+    rt_func_remap: BTreeMap<u32, u32>,
     /// runtime original global idx -> merged global idx.
-    rt_global_remap: HashMap<u32, u32>,
+    rt_global_remap: BTreeMap<u32, u32>,
     /// runtime original type idx -> merged type idx.
-    rt_type_remap: HashMap<u32, u32>,
+    rt_type_remap: BTreeMap<u32, u32>,
 
     // Index remapping for the user module.
     /// user original func idx -> merged func idx.
-    user_func_remap: HashMap<u32, u32>,
+    user_func_remap: BTreeMap<u32, u32>,
     /// user original global idx -> merged global idx.
-    user_global_remap: HashMap<u32, u32>,
+    user_global_remap: BTreeMap<u32, u32>,
     /// user original type idx -> merged type idx.
-    user_type_remap: HashMap<u32, u32>,
+    user_type_remap: BTreeMap<u32, u32>,
 
     /// Number of WASI imports in the merged module.
     n_wasi_imports: u32,
@@ -438,7 +438,7 @@ struct LinkerCtx {
 
     /// Host function map: function_name → host_module_name.
     /// "rayzor" imports matching this map are preserved instead of stubbed.
-    host_functions: HashMap<String, String>,
+    host_functions: BTreeMap<String, String>,
     /// Total merged function count (set after merge).
     total_func_count: u32,
 }
@@ -456,18 +456,18 @@ impl LinkerCtx {
     fn new() -> Self {
         Self {
             merged_types: Vec::new(),
-            type_map: HashMap::new(),
-            rt_func_remap: HashMap::new(),
-            rt_global_remap: HashMap::new(),
-            rt_type_remap: HashMap::new(),
-            user_func_remap: HashMap::new(),
-            user_global_remap: HashMap::new(),
-            user_type_remap: HashMap::new(),
+            type_map: BTreeMap::new(),
+            rt_func_remap: BTreeMap::new(),
+            rt_global_remap: BTreeMap::new(),
+            rt_type_remap: BTreeMap::new(),
+            user_func_remap: BTreeMap::new(),
+            user_global_remap: BTreeMap::new(),
+            user_type_remap: BTreeMap::new(),
             n_wasi_imports: 0,
             stub_type_indices: Vec::new(),
             unresolved_imports: Vec::new(),
             preserved_imports: Vec::new(),
-            host_functions: HashMap::new(),
+            host_functions: BTreeMap::new(),
             total_func_count: 0,
         }
     }
@@ -514,7 +514,7 @@ impl LinkerCtx {
 
         // 2c. Resolve user imports against runtime exports.
         // Build runtime export name -> merged function index map.
-        let mut rt_export_to_merged: HashMap<&str, u32> = HashMap::new();
+        let mut rt_export_to_merged: BTreeMap<&str, u32> = BTreeMap::new();
         for export in &rt.exports {
             if export.kind == ExportItemKind::Func {
                 if let Some(&merged_idx) = self.rt_func_remap.get(&export.index) {
@@ -981,9 +981,9 @@ impl LinkerCtx {
 /// with remapped indices.
 fn reencode_function_body(
     body_bytes: &[u8],
-    func_remap: &HashMap<u32, u32>,
-    global_remap: &HashMap<u32, u32>,
-    type_remap: &HashMap<u32, u32>,
+    func_remap: &BTreeMap<u32, u32>,
+    global_remap: &BTreeMap<u32, u32>,
+    type_remap: &BTreeMap<u32, u32>,
     label: &str,
 ) -> Result<Function, String> {
     use wasmparser::{BinaryReader, FunctionBody};
@@ -1021,9 +1021,9 @@ fn reencode_function_body(
 /// remapping function, global, and type indices as needed.
 fn translate_operator<'a>(
     op: &wasmparser::Operator<'a>,
-    func_remap: &HashMap<u32, u32>,
-    global_remap: &HashMap<u32, u32>,
-    type_remap: &HashMap<u32, u32>,
+    func_remap: &BTreeMap<u32, u32>,
+    global_remap: &BTreeMap<u32, u32>,
+    type_remap: &BTreeMap<u32, u32>,
 ) -> Instruction<'static> {
     use wasmparser::Operator as Op;
 
@@ -1837,7 +1837,7 @@ fn convert_heap_type(ht: &wasmparser::HeapType) -> wasm_encoder::HeapType {
 /// Convert wasmparser BlockType to wasm-encoder BlockType, remapping type indices.
 fn convert_block_type(
     bt: &wasmparser::BlockType,
-    type_remap: &HashMap<u32, u32>,
+    type_remap: &BTreeMap<u32, u32>,
 ) -> wasm_encoder::BlockType {
     match bt {
         wasmparser::BlockType::Empty => wasm_encoder::BlockType::Empty,
@@ -1878,7 +1878,7 @@ fn parse_const_expr(expr: &wasmparser::ConstExpr) -> GlobalInit {
 }
 
 /// Encode a GlobalInit as a wasm-encoder ConstExpr, remapping global references.
-fn encode_global_init(init: &GlobalInit, global_remap: &HashMap<u32, u32>) -> ConstExpr {
+fn encode_global_init(init: &GlobalInit, global_remap: &BTreeMap<u32, u32>) -> ConstExpr {
     match init {
         GlobalInit::I32(v) => ConstExpr::i32_const(*v),
         GlobalInit::I64(v) => ConstExpr::i64_const(*v),

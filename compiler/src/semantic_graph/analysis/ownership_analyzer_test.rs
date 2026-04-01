@@ -4,7 +4,7 @@
 //! Phase 5 specifications, including move semantics, borrow checking, and performance
 //! targets.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
 use crate::semantic_graph::analysis::ownership_analyzer::{

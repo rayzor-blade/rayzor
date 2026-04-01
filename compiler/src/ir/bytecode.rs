@@ -54,7 +54,7 @@
 //!     .read_module()?;
 //! ```
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::io::{self, Write, Read};
 use crate::ir::{IrModule, IrFunction, IrFunctionId, IrInstruction, IrTerminator, IrBlockId, IrId, IrType};
 use crate::ir::cfg::ControlFlowGraph;
@@ -464,8 +464,8 @@ impl<'a> BytecodeReader<'a> {
 
         let module = IrModule {
             functions,
-            globals: HashMap::new(), // TODO: Serialize globals
-            structs: HashMap::new(),  // TODO: Serialize structs
+            globals: BTreeMap::new(), // TODO: Serialize globals
+            structs: BTreeMap::new(),  // TODO: Serialize structs
         };
 
         Ok((module, metadata))
@@ -515,9 +515,9 @@ impl<'a> BytecodeReader<'a> {
         Ok(())
     }
 
-    fn read_function_table(&mut self) -> Result<HashMap<IrFunctionId, IrFunction>, BytecodeError> {
+    fn read_function_table(&mut self) -> Result<BTreeMap<IrFunctionId, IrFunction>, BytecodeError> {
         let count = self.read_u32()? as usize;
-        let mut functions = HashMap::new();
+        let mut functions = BTreeMap::new();
 
         for _ in 0..count {
             let func_id = self.read_function_id()?;
@@ -543,7 +543,7 @@ impl<'a> BytecodeReader<'a> {
                     return_type,
                 },
                 cfg: ControlFlowGraph::new(), // Will be filled in read_cfg_data
-                locals: HashMap::new(), // TODO: Read locals
+                locals: BTreeMap::new(), // TODO: Read locals
             };
 
             functions.insert(func_id, function);
@@ -552,7 +552,7 @@ impl<'a> BytecodeReader<'a> {
         Ok(functions)
     }
 
-    fn read_cfg_data(&mut self, _functions: &HashMap<IrFunctionId, IrFunction>) -> Result<(), BytecodeError> {
+    fn read_cfg_data(&mut self, _functions: &BTreeMap<IrFunctionId, IrFunction>) -> Result<(), BytecodeError> {
         // TODO: Read CFG data for each function
         Ok(())
     }
@@ -718,9 +718,9 @@ mod tests {
             });
 
         let module = IrModule {
-            functions: HashMap::new(),
-            globals: HashMap::new(),
-            structs: HashMap::new(),
+            functions: BTreeMap::new(),
+            globals: BTreeMap::new(),
+            structs: BTreeMap::new(),
         };
 
         let bytecode = writer.write_module(&module).unwrap().to_bytes();
@@ -745,9 +745,9 @@ mod tests {
         };
 
         let module = IrModule {
-            functions: HashMap::new(),
-            globals: HashMap::new(),
-            structs: HashMap::new(),
+            functions: BTreeMap::new(),
+            globals: BTreeMap::new(),
+            structs: BTreeMap::new(),
         };
 
         // Serialize

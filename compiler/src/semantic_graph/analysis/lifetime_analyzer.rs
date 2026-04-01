@@ -4,7 +4,7 @@
 //! It implements constraint generation, solving, and violation detection to ensure
 //! all references remain valid throughout their usage.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use crate::semantic_graph::analysis::analysis_engine::{AnalysisError, FunctionAnalysisContext};
@@ -47,13 +47,13 @@ pub struct LifetimeAnalyzer {
     pub(crate) constraint_solver: LifetimeConstraintSolver,
 
     /// Mapping from variables to their assigned lifetimes
-    pub(crate) lifetime_assignments: HashMap<SymbolId, LifetimeId>,
+    pub(crate) lifetime_assignments: BTreeMap<SymbolId, LifetimeId>,
 
     /// Lifetime assignments for call sites
-    pub(crate) call_site_lifetimes: HashMap<CallSiteId, Vec<LifetimeId>>,
+    pub(crate) call_site_lifetimes: BTreeMap<CallSiteId, Vec<LifetimeId>>,
 
     /// Active regions (for region-based analysis)
-    pub(crate) active_regions: HashMap<ScopeId, LifetimeRegion>,
+    pub(crate) active_regions: BTreeMap<ScopeId, LifetimeRegion>,
 
     /// Dominance tree for loop detection
     pub(crate) dominance_tree: Option<crate::semantic_graph::dominance::DominanceTree>,
@@ -135,7 +135,7 @@ pub struct LifetimeRegion {
     pub scope: ScopeId,
 
     /// Variables whose lifetime is bounded by this region
-    pub variables: HashSet<SymbolId>,
+    pub variables: BTreeSet<SymbolId>,
 
     /// Parent region (for nested scopes)
     pub parent: Option<LifetimeId>,
@@ -181,7 +181,7 @@ pub enum EqualityReason {
 #[derive(Debug, Clone)]
 pub struct LifetimeAnalysisResult {
     /// Successful lifetime assignments
-    pub lifetime_assignments: HashMap<SymbolId, LifetimeId>,
+    pub lifetime_assignments: BTreeMap<SymbolId, LifetimeId>,
 
     /// Detected lifetime violations
     pub violations: Vec<LifetimeViolation>,
@@ -269,9 +269,9 @@ impl LifetimeAnalyzer {
     pub fn new() -> Self {
         Self {
             constraint_solver: LifetimeConstraintSolver::new(),
-            lifetime_assignments: HashMap::new(),
-            call_site_lifetimes: HashMap::new(),
-            active_regions: HashMap::new(),
+            lifetime_assignments: BTreeMap::new(),
+            call_site_lifetimes: BTreeMap::new(),
+            active_regions: BTreeMap::new(),
             dominance_tree: None,
             analysis_stats: LifetimeAnalysisStats::default(),
         }
@@ -585,7 +585,7 @@ impl LifetimeAnalyzer {
         let global_region = LifetimeRegion {
             id: LifetimeId::global(),
             scope: ScopeId::from_raw(0), // Global scope
-            variables: HashSet::new(),
+            variables: BTreeSet::new(),
             parent: None,
             children: Vec::new(),
             start_location: SourceLocation::unknown(),
@@ -599,7 +599,7 @@ impl LifetimeAnalyzer {
         let function_region = LifetimeRegion {
             id: function_lifetime,
             scope: ScopeId::from_raw(1), // Function scope
-            variables: HashSet::new(),
+            variables: BTreeSet::new(),
             parent: Some(LifetimeId::global()),
             children: Vec::new(),
             start_location: SourceLocation::unknown(),
@@ -616,7 +616,7 @@ impl LifetimeAnalyzer {
                 let block_region = LifetimeRegion {
                     id: block_lifetime,
                     scope: ScopeId::from_raw(block_id.as_raw() + 100), // Offset to avoid conflicts
-                    variables: HashSet::new(),
+                    variables: BTreeSet::new(),
                     parent: Some(function_lifetime), // Most blocks are children of function scope
                     children: Vec::new(),
                     start_location: block.source_location.clone(),
@@ -684,7 +684,7 @@ impl LifetimeAnalyzer {
         ownership_graph: &OwnershipGraph,
     ) -> Result<(), LifetimeAnalysisError> {
         // Build a mapping from scopes to lifetime regions
-        let mut scope_to_lifetime: HashMap<ScopeId, LifetimeId> = HashMap::new();
+        let mut scope_to_lifetime: BTreeMap<ScopeId, LifetimeId> = BTreeMap::new();
         for region in regions {
             scope_to_lifetime.insert(region.scope, region.id);
         }
@@ -1601,7 +1601,7 @@ impl LifetimeAnalyzer {
         def_node: &DataFlowNode,
         dfg: &DataFlowGraph,
         regions: &[LifetimeRegion],
-        scope_to_lifetime: &HashMap<ScopeId, LifetimeId>,
+        scope_to_lifetime: &BTreeMap<ScopeId, LifetimeId>,
     ) -> Result<LifetimeId, LifetimeAnalysisError> {
         // **Real implementation**: Use dominance tree to determine lifetime scope
 
@@ -1622,7 +1622,7 @@ impl LifetimeAnalyzer {
         &self,
         block_id: BlockId,
         regions: &[LifetimeRegion],
-        scope_to_lifetime: &HashMap<ScopeId, LifetimeId>,
+        scope_to_lifetime: &BTreeMap<ScopeId, LifetimeId>,
     ) -> LifetimeId {
         // Map block to its corresponding scope
         let block_scope = ScopeId::from_raw(block_id.as_raw() + 100);
@@ -1668,7 +1668,7 @@ impl LifetimeAnalyzer {
 
         // If we found uses, potentially extend lifetime to cover them
         if let Some(last_block) = latest_use_block {
-            let last_block_lifetime = self.get_block_lifetime(last_block, regions, &HashMap::new());
+            let last_block_lifetime = self.get_block_lifetime(last_block, regions, &BTreeMap::new());
 
             // In a real implementation, we would compare lifetimes and potentially extend
             // For now, keep the more conservative (longer) lifetime
@@ -1721,7 +1721,7 @@ impl LifetimeAnalyzer {
         &mut self,
         dfg: &DataFlowGraph,
         regions: &[LifetimeRegion],
-        scope_to_lifetime: &HashMap<ScopeId, LifetimeId>,
+        scope_to_lifetime: &BTreeMap<ScopeId, LifetimeId>,
     ) -> Result<(), LifetimeAnalysisError> {
         // **Real implementation**: Handle reference-specific lifetime assignment
 

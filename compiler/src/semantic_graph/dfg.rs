@@ -15,7 +15,7 @@ use crate::tast::{DataFlowNodeId, InternedString, ScopeId, SsaVariableId, TypeId
 
 use super::{BlockId, SourceLocation, SymbolId};
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 
 /// A data flow graph representing value flow in SSA form
@@ -240,6 +240,46 @@ impl std::hash::Hash for ConstantValue {
     }
 }
 
+impl PartialOrd for ConstantValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ConstantValue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        use std::cmp::Ordering;
+        // Order by discriminant first, then by value within the same variant
+        let disc_self = core::mem::discriminant(self);
+        let disc_other = core::mem::discriminant(other);
+        if disc_self != disc_other {
+            // Use a consistent ordering based on variant index
+            let idx = |v: &ConstantValue| -> u8 {
+                match v {
+                    ConstantValue::Void => 0,
+                    ConstantValue::Bool(_) => 1,
+                    ConstantValue::Int(_) => 2,
+                    ConstantValue::Float(_) => 3,
+                    ConstantValue::String(_) => 4,
+                    ConstantValue::Null => 5,
+                }
+            };
+            return idx(self).cmp(&idx(other));
+        }
+        match (self, other) {
+            (ConstantValue::Void, ConstantValue::Void) => Ordering::Equal,
+            (ConstantValue::Null, ConstantValue::Null) => Ordering::Equal,
+            (ConstantValue::Bool(a), ConstantValue::Bool(b)) => a.cmp(b),
+            (ConstantValue::Int(a), ConstantValue::Int(b)) => a.cmp(b),
+            (ConstantValue::Float(a), ConstantValue::Float(b)) => {
+                a.total_cmp(b)
+            }
+            (ConstantValue::String(a), ConstantValue::String(b)) => a.cmp(b),
+            _ => Ordering::Equal,
+        }
+    }
+}
+
 /// Types of function calls
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CallType {
@@ -356,17 +396,17 @@ pub struct DefUseChains {
 #[derive(Debug, Default, Clone)]
 pub struct ValueNumbering {
     /// Map from value number to canonical expression
-    pub value_to_expr: HashMap<ValueNumber, CanonicalExpression>,
+    pub value_to_expr: BTreeMap<ValueNumber, CanonicalExpression>,
 
     /// Map from expression to value number
-    pub expr_to_value: HashMap<CanonicalExpression, ValueNumber>,
+    pub expr_to_value: BTreeMap<CanonicalExpression, ValueNumber>,
 
     /// Next available value number
     next_value_number: u32,
 }
 
 /// Value number for optimization
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ValueNumber(u32);
 
 impl ValueNumber {
@@ -379,7 +419,7 @@ impl ValueNumber {
 }
 
 /// Canonical expression for value numbering
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CanonicalExpression {
     Constant(ConstantValue),
     BinaryOp {
@@ -414,7 +454,7 @@ pub struct NodeMetadata {
     pub execution_frequency: f64,
 
     /// Analysis annotations
-    pub annotations: HashMap<String, String>,
+    pub annotations: BTreeMap<String, String>,
 }
 
 /// DFG construction metadata

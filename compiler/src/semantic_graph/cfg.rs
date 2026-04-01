@@ -9,7 +9,7 @@
 //! - Optimized for common analysis patterns
 //! - Comprehensive validation and debugging support
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
 use crate::tast::collections::{new_id_map, new_id_set, IdMap, IdSet};
@@ -123,7 +123,7 @@ pub struct BlockMetadata {
     pub dominance_info: Option<DominanceInfo>,
 
     /// Analysis-specific annotations
-    pub annotations: HashMap<String, AnalysisAnnotation>,
+    pub annotations: BTreeMap<String, AnalysisAnnotation>,
 }
 
 /// Dominance relationship information
@@ -198,7 +198,7 @@ pub struct ControlFlowGraph {
     pub exit_blocks: IdSet<BlockId>,
 
     /// Exception handler blocks
-    pub exception_handlers: HashMap<BlockId, ExceptionHandlerInfo>,
+    pub exception_handlers: BTreeMap<BlockId, ExceptionHandlerInfo>,
 
     /// Function this CFG represents
     pub function_id: SymbolId,
@@ -362,7 +362,7 @@ impl ControlFlowGraph {
     pub fn new(function_id: SymbolId, entry_block: BlockId) -> Self {
         let mut blocks = new_id_map();
         let exit_blocks = new_id_set();
-        let exception_handlers = HashMap::new();
+        let exception_handlers = BTreeMap::new();
 
         Self {
             blocks,
@@ -448,7 +448,7 @@ impl ControlFlowGraph {
 
     /// Perform depth-first traversal from entry block
     pub fn dfs_traversal(&self) -> Vec<BlockId> {
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
         let mut result = Vec::new();
         let mut stack = vec![self.entry_block];
 
@@ -472,7 +472,7 @@ impl ControlFlowGraph {
 
     /// Perform breadth-first traversal from entry block
     pub fn bfs_traversal(&self) -> Vec<BlockId> {
-        let mut visited = HashSet::new();
+        let mut visited = BTreeSet::new();
         let mut result = Vec::new();
         let mut queue = VecDeque::new();
 
@@ -496,7 +496,7 @@ impl ControlFlowGraph {
 
     /// Find all unreachable blocks
     pub fn find_unreachable_blocks(&self) -> Vec<BlockId> {
-        let reachable: HashSet<_> = self.dfs_traversal().into_iter().collect();
+        let reachable: BTreeSet<_> = self.dfs_traversal().into_iter().collect();
 
         self.blocks
             .keys()

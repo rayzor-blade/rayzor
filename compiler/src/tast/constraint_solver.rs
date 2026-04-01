@@ -2,7 +2,7 @@
 // Unification and constraint propagation
 
 use std::cell::RefCell;
-use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicU32, Ordering};
 
@@ -87,16 +87,16 @@ pub enum UnificationResult {
 /// Unification table for managing type variable assignments
 pub struct UnificationTable {
     /// Maps unification variables to their current assignments
-    assignments: HashMap<UnificationVar, TypeId>,
+    assignments: BTreeMap<UnificationVar, TypeId>,
 
     /// Maps type IDs to unification variables
-    type_to_var: HashMap<TypeId, UnificationVar>,
+    type_to_var: BTreeMap<TypeId, UnificationVar>,
 
     /// Tracks the "rank" of each variable for union-find optimization
-    ranks: HashMap<UnificationVar, u32>,
+    ranks: BTreeMap<UnificationVar, u32>,
 
     /// Parent pointers for union-find structure
-    parents: HashMap<UnificationVar, UnificationVar>,
+    parents: BTreeMap<UnificationVar, UnificationVar>,
 
     /// Active constraints being solved
     active_constraints: VecDeque<UnificationConstraint>,
@@ -120,10 +120,10 @@ pub struct UnificationStats {
 impl UnificationTable {
     pub fn new() -> Self {
         Self {
-            assignments: HashMap::new(),
-            type_to_var: HashMap::new(),
-            ranks: HashMap::new(),
-            parents: HashMap::new(),
+            assignments: BTreeMap::new(),
+            type_to_var: BTreeMap::new(),
+            ranks: BTreeMap::new(),
+            parents: BTreeMap::new(),
             active_constraints: VecDeque::new(),
             stats: UnificationStats::default(),
         }
@@ -303,14 +303,14 @@ impl UnificationTable {
     // === Private helper methods ===
 
     fn occurs_check(&mut self, var: UnificationVar, type_id: TypeId) -> bool {
-        self.occurs_check_recursive(var, type_id, &mut std::collections::HashSet::new())
+        self.occurs_check_recursive(var, type_id, &mut std::collections::BTreeSet::new())
     }
 
     fn occurs_check_recursive(
         &mut self,
         var: UnificationVar,
         type_id: TypeId,
-        visited: &mut std::collections::HashSet<TypeId>,
+        visited: &mut std::collections::BTreeSet<TypeId>,
     ) -> bool {
         // Prevent infinite recursion
         if visited.contains(&type_id) {
@@ -336,7 +336,7 @@ impl UnificationTable {
         type_id: TypeId,
         type_table: &RefCell<TypeTable>,
     ) -> bool {
-        let mut visited = std::collections::HashSet::new();
+        let mut visited = std::collections::BTreeSet::new();
         self.occurs_check_recursive_with_types(var, type_id, type_table, &mut visited)
     }
 
@@ -345,7 +345,7 @@ impl UnificationTable {
         var: UnificationVar,
         type_id: TypeId,
         type_table: &RefCell<TypeTable>,
-        visited: &mut std::collections::HashSet<TypeId>,
+        visited: &mut std::collections::BTreeSet<TypeId>,
     ) -> bool {
         // Prevent infinite recursion
         if visited.contains(&type_id) {
@@ -775,7 +775,7 @@ pub struct ConstraintPropagationEngine {
     propagation_rules: Vec<PropagationRule>,
 
     /// Cache for propagation results (using content hash as key)
-    propagation_cache: HashMap<u64, ConstraintSet>,
+    propagation_cache: BTreeMap<u64, ConstraintSet>,
 
     /// Statistics
     stats: PropagationStats,
@@ -801,7 +801,7 @@ impl ConstraintPropagationEngine {
     pub fn new() -> Self {
         let mut engine = Self {
             propagation_rules: Vec::new(),
-            propagation_cache: HashMap::new(),
+            propagation_cache: BTreeMap::new(),
             stats: PropagationStats::default(),
         };
 
@@ -1926,10 +1926,10 @@ impl<'a> ConstraintSolver<'a> {
     /// Extract type substitutions from the unification table
     fn extract_substitutions(&mut self) -> Vec<(TypeId, TypeId)> {
         let mut substitutions = Vec::new();
-        let mut processed = HashSet::new();
+        let mut processed = BTreeSet::new();
 
         // First, resolve all variables to their roots
-        let mut var_to_type = HashMap::new();
+        let mut var_to_type = BTreeMap::new();
         let assignments = self.unification_table.assignments.clone();
         for (&var, &type_id) in &assignments {
             let root = self.unification_table.find(var);

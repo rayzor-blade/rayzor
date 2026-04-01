@@ -19,7 +19,7 @@ use crate::tast::{
 };
 use parser::{HaxeFile, Type as ParserType, TypeDeclaration};
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
 
 /// Forward reference information for a type
@@ -49,10 +49,10 @@ pub struct TypeResolver<'a> {
     scope_tree: &'a mut ScopeTree,
 
     // Forward references collected in pass 1
-    forward_references: HashMap<InternedString, ForwardTypeReference>,
+    forward_references: BTreeMap<InternedString, ForwardTypeReference>,
 
     // Type dependencies for topological sorting
-    type_dependencies: HashMap<InternedString, HashSet<InternedString>>,
+    type_dependencies: BTreeMap<InternedString, BTreeSet<InternedString>>,
 
     // Resolution order after dependency analysis
     resolution_order: Vec<InternedString>,
@@ -98,8 +98,8 @@ impl<'a> TypeResolver<'a> {
             symbol_table,
             type_table,
             scope_tree,
-            forward_references: HashMap::new(),
-            type_dependencies: HashMap::new(),
+            forward_references: BTreeMap::new(),
+            type_dependencies: BTreeMap::new(),
             resolution_order: Vec::new(),
             errors: Vec::new(),
         }
@@ -279,10 +279,10 @@ impl<'a> TypeResolver<'a> {
         ast_file: &HaxeFile,
     ) -> Result<(), Vec<TypeResolutionError>> {
         // Initialize dependency map
-        let declared_names: HashSet<InternedString> =
+        let declared_names: BTreeSet<InternedString> =
             self.forward_references.keys().cloned().collect();
         for name in &declared_names {
-            self.type_dependencies.insert(*name, HashSet::new());
+            self.type_dependencies.insert(*name, BTreeSet::new());
         }
 
         // Walk AST declarations to collect type dependencies
@@ -290,7 +290,7 @@ impl<'a> TypeResolver<'a> {
             let (decl_name, type_refs) = match decl {
                 TypeDeclaration::Class(class) => {
                     let name = self.string_interner.intern(&class.name);
-                    let mut deps = HashSet::new();
+                    let mut deps = BTreeSet::new();
                     if let Some(extends) = &class.extends {
                         self.collect_type_refs_from_parser_type(
                             extends,
@@ -305,7 +305,7 @@ impl<'a> TypeResolver<'a> {
                 }
                 TypeDeclaration::Interface(iface) => {
                     let name = self.string_interner.intern(&iface.name);
-                    let mut deps = HashSet::new();
+                    let mut deps = BTreeSet::new();
                     for ext in &iface.extends {
                         self.collect_type_refs_from_parser_type(ext, &mut deps, &declared_names);
                     }
@@ -313,7 +313,7 @@ impl<'a> TypeResolver<'a> {
                 }
                 TypeDeclaration::Typedef(typedef) => {
                     let name = self.string_interner.intern(&typedef.name);
-                    let mut deps = HashSet::new();
+                    let mut deps = BTreeSet::new();
                     self.collect_type_refs_from_parser_type(
                         &typedef.type_def,
                         &mut deps,
@@ -323,7 +323,7 @@ impl<'a> TypeResolver<'a> {
                 }
                 TypeDeclaration::Abstract(abstract_decl) => {
                     let name = self.string_interner.intern(&abstract_decl.name);
-                    let mut deps = HashSet::new();
+                    let mut deps = BTreeSet::new();
                     if let Some(underlying) = &abstract_decl.underlying {
                         self.collect_type_refs_from_parser_type(
                             underlying,
@@ -341,7 +341,7 @@ impl<'a> TypeResolver<'a> {
                 }
                 TypeDeclaration::Enum(enum_decl) => {
                     let name = self.string_interner.intern(&enum_decl.name);
-                    (name, HashSet::new())
+                    (name, BTreeSet::new())
                 }
                 TypeDeclaration::Conditional(_) => continue,
             };
@@ -354,7 +354,7 @@ impl<'a> TypeResolver<'a> {
         }
 
         // Topological sort using Kahn's algorithm
-        let mut in_degree: HashMap<InternedString, usize> = HashMap::new();
+        let mut in_degree: BTreeMap<InternedString, usize> = BTreeMap::new();
         for name in &declared_names {
             in_degree.insert(*name, 0);
         }
@@ -406,8 +406,8 @@ impl<'a> TypeResolver<'a> {
     fn collect_type_refs_from_parser_type(
         &self,
         parser_type: &ParserType,
-        deps: &mut HashSet<InternedString>,
-        declared_names: &HashSet<InternedString>,
+        deps: &mut BTreeSet<InternedString>,
+        declared_names: &BTreeSet<InternedString>,
     ) {
         match parser_type {
             ParserType::Path { path, params, .. } => {

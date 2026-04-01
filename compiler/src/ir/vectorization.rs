@@ -13,7 +13,7 @@ use super::{
     BinaryOp, CompareOp, IrBlockId, IrControlFlowGraph, IrFunction, IrFunctionId, IrId,
     IrInstruction, IrModule, IrType, IrValue,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// SIMD vector width in bits (target 128-bit for SSE/NEON compatibility)
 pub const SIMD_WIDTH_BITS: usize = 128;
@@ -212,7 +212,7 @@ pub struct VectorizationAnalysis {
     pub reductions: Vec<Reduction>,
 
     /// Instructions that must remain scalar (e.g., loop control)
-    pub scalar_instructions: HashSet<IrId>,
+    pub scalar_instructions: BTreeSet<IrId>,
 
     /// Estimated speedup from vectorization
     pub estimated_speedup: f64,
@@ -302,7 +302,7 @@ impl LoopVectorizationPass {
             induction_var: None,
             vectorizable_accesses: Vec::new(),
             reductions: Vec::new(),
-            scalar_instructions: HashSet::new(),
+            scalar_instructions: BTreeSet::new(),
             estimated_speedup: 1.0,
         };
 
@@ -958,7 +958,7 @@ impl LoopVectorizationPass {
         let mut reg_id = function.next_reg_id;
 
         for iteration in 0..remainder {
-            let mut reg_map: HashMap<IrId, IrId> = HashMap::new();
+            let mut reg_map: BTreeMap<IrId, IrId> = BTreeMap::new();
 
             for inst in &scalar_body {
                 let new_inst =
@@ -1044,15 +1044,15 @@ impl LoopVectorizationPass {
     fn remap_epilogue_instruction(
         &self,
         inst: &IrInstruction,
-        reg_map: &mut HashMap<IrId, IrId>,
+        reg_map: &mut BTreeMap<IrId, IrId>,
         next_reg: &mut u32,
         function: &mut IrFunction,
     ) -> IrInstruction {
         let map_use =
-            |r: IrId, map: &HashMap<IrId, IrId>| -> IrId { map.get(&r).copied().unwrap_or(r) };
+            |r: IrId, map: &BTreeMap<IrId, IrId>| -> IrId { map.get(&r).copied().unwrap_or(r) };
         let alloc_new = |old: IrId,
                          next: &mut u32,
-                         map: &mut HashMap<IrId, IrId>,
+                         map: &mut BTreeMap<IrId, IrId>,
                          func: &mut IrFunction|
          -> IrId {
             if let Some(&existing) = map.get(&old) {

@@ -12,7 +12,7 @@ use super::{
     IrPhiNode, IrSourceLocation, IrTerminator, IrType, IrTypeParam, IrValue, UnaryOp,
 };
 use crate::tast::SymbolId;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// HIR builder for constructing IR modules
 pub struct IrBuilder {

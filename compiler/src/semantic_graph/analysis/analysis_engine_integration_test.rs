@@ -6,7 +6,7 @@
 
 #[cfg(test)]
 mod integration_tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, BTreeSet};
     use std::time::{Duration, Instant};
 
     use crate::semantic_graph::analysis::analysis_engine::{
@@ -412,7 +412,7 @@ mod integration_tests {
             id: entry_block,
             statements: vec![],
             terminator: Terminator::Return { value: None },
-            predecessors: HashSet::new(),
+            predecessors: BTreeSet::new(),
             successors: vec![],
             source_location: SourceLocation::new(0, 1, 1, 0),
             metadata: Default::default(),
@@ -480,7 +480,7 @@ mod integration_tests {
             id: entry_block,
             statements: vec![],
             terminator: Terminator::Return { value: None },
-            predecessors: HashSet::new(),
+            predecessors: BTreeSet::new(),
             successors: vec![],
             source_location: SourceLocation::new(0, 1, 1, 0),
             metadata: Default::default(),
@@ -645,7 +645,7 @@ mod integration_tests {
             id: entry_block,
             statements: vec![],
             terminator: Terminator::Return { value: None },
-            predecessors: HashSet::new(),
+            predecessors: BTreeSet::new(),
             successors: vec![],
             source_location: SourceLocation::new(0, 1, 1, 0),
             metadata: Default::default(),
@@ -743,7 +743,7 @@ mod integration_tests {
                 id: entry_block,
                 statements: vec![],
                 terminator: Terminator::Return { value: None },
-                predecessors: HashSet::new(),
+                predecessors: BTreeSet::new(),
                 successors: vec![],
                 source_location: SourceLocation::new(0, i as u32 + 1, 1, 0),
                 metadata: Default::default(),

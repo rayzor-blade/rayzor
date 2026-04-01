@@ -8,7 +8,7 @@
 use super::blocks::IrBlockId;
 use super::instructions::IrInstruction;
 use super::{IrControlFlowGraph, IrId};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 /// Result of escape analysis for a single Alloc within a loop.
 #[derive(Debug)]
@@ -32,7 +32,7 @@ pub struct AllocEscapeInfo {
 /// 4. It has exactly one matching Free in the loop body
 pub fn analyze_alloc_escapes(
     cfg: &IrControlFlowGraph,
-    loop_blocks: &HashSet<IrBlockId>,
+    loop_blocks: &BTreeSet<IrBlockId>,
     loop_header: IrBlockId,
     back_edge_sources: &[IrBlockId],
 ) -> Vec<AllocEscapeInfo> {
@@ -79,7 +79,7 @@ pub fn analyze_alloc_escapes(
 fn is_defined_in_loop(
     id: IrId,
     cfg: &IrControlFlowGraph,
-    loop_blocks: &HashSet<IrBlockId>,
+    loop_blocks: &BTreeSet<IrBlockId>,
 ) -> bool {
     for &block_id in loop_blocks {
         if let Some(block) = cfg.get_block(block_id) {
@@ -103,7 +103,7 @@ fn analyze_single_alloc(
     alloc_dest: IrId,
     alloc_location: (IrBlockId, usize),
     cfg: &IrControlFlowGraph,
-    loop_blocks: &HashSet<IrBlockId>,
+    loop_blocks: &BTreeSet<IrBlockId>,
     loop_header: IrBlockId,
     back_edge_sources: &[IrBlockId],
 ) -> AllocEscapeInfo {
@@ -147,9 +147,9 @@ fn analyze_single_alloc(
 fn build_tracked_pointers(
     alloc_dest: IrId,
     cfg: &IrControlFlowGraph,
-    loop_blocks: &HashSet<IrBlockId>,
-) -> HashSet<IrId> {
-    let mut tracked = HashSet::new();
+    loop_blocks: &BTreeSet<IrBlockId>,
+) -> BTreeSet<IrId> {
+    let mut tracked = BTreeSet::new();
     tracked.insert(alloc_dest);
 
     // Iterate until fixpoint (derived pointers can chain)
@@ -189,13 +189,13 @@ fn build_tracked_pointers(
 
 /// Check if any tracked pointer escapes the loop iteration.
 fn check_escapes(
-    tracked: &HashSet<IrId>,
+    tracked: &BTreeSet<IrId>,
     cfg: &IrControlFlowGraph,
-    loop_blocks: &HashSet<IrBlockId>,
+    loop_blocks: &BTreeSet<IrBlockId>,
     loop_header: IrBlockId,
     back_edge_sources: &[IrBlockId],
 ) -> bool {
-    let back_edge_set: HashSet<IrBlockId> = back_edge_sources.iter().copied().collect();
+    let back_edge_set: BTreeSet<IrBlockId> = back_edge_sources.iter().copied().collect();
 
     for &block_id in loop_blocks {
         let block = match cfg.get_block(block_id) {
@@ -276,9 +276,9 @@ fn check_escapes(
 /// Find exactly one matching Free for the tracked pointers in the loop body.
 /// Returns None if zero or more than one Free is found.
 fn find_matching_free(
-    tracked: &HashSet<IrId>,
+    tracked: &BTreeSet<IrId>,
     cfg: &IrControlFlowGraph,
-    loop_blocks: &HashSet<IrBlockId>,
+    loop_blocks: &BTreeSet<IrBlockId>,
 ) -> Option<(IrBlockId, usize)> {
     let mut found: Option<(IrBlockId, usize)> = None;
 

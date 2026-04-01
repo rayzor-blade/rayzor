@@ -10,7 +10,7 @@
 
 use super::optimization::{OptimizationPass, OptimizationResult};
 use super::{IrFunction, IrFunctionId, IrId, IrInstruction, IrModule, IrType, IrValue};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 pub struct DevirtualizationPass;
 
@@ -40,7 +40,7 @@ impl OptimizationPass for DevirtualizationPass {
         let mut result = OptimizationResult::unchanged();
 
         // Collect all function names → IrFunctionId for resolving function refs
-        let func_name_to_id: HashMap<String, IrFunctionId> = module
+        let func_name_to_id: BTreeMap<String, IrFunctionId> = module
             .functions
             .iter()
             .map(|(&id, f)| (f.name.clone(), id))
@@ -61,12 +61,12 @@ impl OptimizationPass for DevirtualizationPass {
 
 fn devirtualize_function(
     function: &mut IrFunction,
-    _func_name_to_id: &HashMap<String, IrFunctionId>,
+    _func_name_to_id: &BTreeMap<String, IrFunctionId>,
 ) -> OptimizationResult {
     // Phase 1: Analyze — build value origin map across all blocks
-    let mut origins: HashMap<IrId, ValueOrigin> = HashMap::new();
+    let mut origins: BTreeMap<IrId, ValueOrigin> = BTreeMap::new();
     // Track stores: (base_ptr, offset) → stored value register
-    let mut stores: HashMap<(IrId, i64), IrId> = HashMap::new();
+    let mut stores: BTreeMap<(IrId, i64), IrId> = BTreeMap::new();
 
     let block_ids: Vec<_> = function.cfg.blocks.keys().copied().collect();
 

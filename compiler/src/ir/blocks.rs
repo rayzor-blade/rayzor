@@ -6,7 +6,7 @@
 
 use super::{IrId, IrInstruction, IrSourceLocation};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// A basic block in the HIR
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -605,7 +605,7 @@ mod tests {
 
     #[test]
     fn test_value_to_class_field_simple() {
-        let mut obj = std::collections::HashMap::new();
+        let mut obj = std::collections::BTreeMap::new();
         obj.insert("name".to_string(), MacroValue::from_str("myVar"));
         let field = value_to_class_field(&MacroValue::Object(Arc::new(obj)));
         assert!(field.is_some());
@@ -618,7 +618,7 @@ mod tests {
 
     #[test]
     fn test_value_to_class_field_with_access() {
-        let mut obj = std::collections::HashMap::new();
+        let mut obj = std::collections::BTreeMap::new();
         obj.insert("name".to_string(), MacroValue::from_str("test"));
         obj.insert(
             "access".to_string(),

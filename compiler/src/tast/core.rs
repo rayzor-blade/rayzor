@@ -15,7 +15,7 @@ use super::{
     type_cache::{TypeCache, TypeCacheKey},
     InternedString, LifetimeId, ScopeId, StringInterner, SymbolId, TypeId, TypedArena,
 };
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 
@@ -391,13 +391,13 @@ pub struct TypeTable {
     types: Vec<&'static Type>,
 
     /// Reverse lookup: type kind hash -> type IDs (for deduplication)
-    kind_index: HashMap<u64, Vec<TypeId>>,
+    kind_index: BTreeMap<u64, Vec<TypeId>>,
 
     /// Named types by symbol ID
     symbol_index: IdMap<SymbolId, Vec<TypeId>>,
 
     /// Generic instances cache for performance
-    generic_cache: HashMap<(TypeId, Vec<TypeId>), TypeId>,
+    generic_cache: BTreeMap<(TypeId, Vec<TypeId>), TypeId>,
 
     /// Type usage tracking for analysis
     usage_stats: IdMap<TypeId, TypeUsageStats>,
@@ -441,9 +441,9 @@ impl TypeTable {
     pub fn new() -> Self {
         let arena = TypedArena::new();
         let types = Vec::new();
-        let kind_index = HashMap::new();
+        let kind_index = BTreeMap::new();
         let symbol_index = new_id_map();
-        let generic_cache = HashMap::new();
+        let generic_cache = BTreeMap::new();
         let usage_stats = new_id_map();
 
         let mut table = Self {
@@ -487,9 +487,9 @@ impl TypeTable {
     pub fn with_capacity(capacity: usize) -> Self {
         let arena = TypedArena::with_capacity(capacity);
         let types = Vec::with_capacity(capacity);
-        let kind_index = HashMap::with_capacity(capacity / 4);
+        let kind_index = BTreeMap::new();
         let symbol_index = new_id_map();
-        let generic_cache = HashMap::new();
+        let generic_cache = BTreeMap::new();
         let usage_stats = new_id_map();
 
         let mut table = Self {

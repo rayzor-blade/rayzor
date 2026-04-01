@@ -21,7 +21,7 @@ pub mod pack;
 pub mod registry;
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 // ---------------------------------------------------------------------------
@@ -112,7 +112,7 @@ pub struct LoadedRpkg {
     /// Method descriptors (empty if no MethodTable entry)
     pub methods: Vec<MethodDescEntry>,
     /// Haxe source files: module_path → source text
-    pub haxe_sources: HashMap<String, String>,
+    pub haxe_sources: BTreeMap<String, String>,
     /// Raw native lib bytes for the current platform (if present)
     pub native_lib_bytes: Option<Vec<u8>>,
     /// WASM component bytes (universal fallback when no native lib matches)
@@ -120,9 +120,9 @@ pub struct LoadedRpkg {
     /// Plugin name from method table entry
     pub plugin_name: Option<String>,
     /// JS host modules: @:jsImport module name → JS source code
-    pub js_hosts: HashMap<String, String>,
+    pub js_hosts: BTreeMap<String, String>,
     /// Companion WASM binaries for JS hosts: module name → _bg.wasm bytes
-    pub js_host_wasms: HashMap<String, Vec<u8>>,
+    pub js_host_wasms: BTreeMap<String, Vec<u8>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -231,12 +231,12 @@ pub fn load_rpkg(path: &Path) -> Result<LoadedRpkg, RpkgError> {
     let arch = current_arch();
 
     let mut methods = Vec::new();
-    let mut haxe_sources = HashMap::new();
+    let mut haxe_sources = BTreeMap::new();
     let mut native_lib_bytes = None;
     let mut wasm_component_bytes = None;
     let mut plugin_name = None;
-    let mut js_hosts = HashMap::new();
-    let mut js_host_wasms = HashMap::new();
+    let mut js_hosts = BTreeMap::new();
+    let mut js_host_wasms = BTreeMap::new();
 
     for entry in &toc.entries {
         let start = entry.offset as usize;

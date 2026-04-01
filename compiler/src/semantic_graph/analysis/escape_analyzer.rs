@@ -12,7 +12,7 @@
 //! - Stack allocation opportunity identification
 //! - Integration with existing semantic graph infrastructure
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
 use crate::semantic_graph::analysis::ownership_analyzer::FunctionAnalysisContext;
@@ -45,7 +45,7 @@ pub struct EscapeAnalyzer {
 #[derive(Debug, Default)]
 pub struct AllocationTracker {
     /// Cache of detected allocation sites
-    allocation_cache: HashMap<DataFlowNodeId, AllocationInfo>,
+    allocation_cache: BTreeMap<DataFlowNodeId, AllocationInfo>,
 
     /// Statistics for cache efficiency
     cache_hits: usize,
@@ -56,20 +56,20 @@ pub struct AllocationTracker {
 #[derive(Debug, Default)]
 pub struct CallEscapeAnalyzer {
     /// Known escape patterns for function calls
-    escape_patterns: HashMap<SymbolId, CallEscapePattern>,
+    escape_patterns: BTreeMap<SymbolId, CallEscapePattern>,
 
     /// Cache for call analysis results
-    call_analysis_cache: HashMap<DataFlowNodeId, CallEscapeResult>,
+    call_analysis_cache: BTreeMap<DataFlowNodeId, CallEscapeResult>,
 }
 
 /// Generates optimization hints for HIR lowering
 #[derive(Debug, Default)]
 pub struct OptimizationHintGenerator {
     /// Functions safe for inlining
-    inlinable_functions: HashSet<SymbolId>,
+    inlinable_functions: BTreeSet<SymbolId>,
 
     /// Stack allocatable objects
-    stack_allocatable: HashSet<DataFlowNodeId>,
+    stack_allocatable: BTreeSet<DataFlowNodeId>,
 }
 
 /// Information about an allocation site
@@ -98,10 +98,10 @@ pub struct AllocationInfo {
 #[derive(Debug, Clone)]
 pub struct EscapeAnalysisResults {
     /// All detected allocation sites
-    pub allocation_sites: HashMap<DataFlowNodeId, AllocationInfo>,
+    pub allocation_sites: BTreeMap<DataFlowNodeId, AllocationInfo>,
 
     /// Escape status for each allocation
-    pub escape_status: HashMap<DataFlowNodeId, EscapeStatus>,
+    pub escape_status: BTreeMap<DataFlowNodeId, EscapeStatus>,
 
     /// Allocations that can use stack allocation
     pub stack_allocatable: Vec<DataFlowNodeId>,
@@ -249,7 +249,7 @@ impl EscapeAnalyzer {
         let allocations = self.find_allocation_sites(context.dfg)?;
 
         // 2. Analyze escape status for each allocation
-        let mut escape_status = HashMap::new();
+        let mut escape_status = BTreeMap::new();
         let mut stack_allocatable = Vec::new();
 
         for allocation in &allocations {
@@ -293,7 +293,7 @@ impl EscapeAnalyzer {
             0.0
         };
 
-        let allocation_sites: HashMap<DataFlowNodeId, AllocationInfo> = allocations
+        let allocation_sites: BTreeMap<DataFlowNodeId, AllocationInfo> = allocations
             .into_iter()
             .map(|alloc| (alloc.allocation_site, alloc))
             .collect();
@@ -326,8 +326,8 @@ impl EscapeAnalyzer {
         self.stats.analysis_time += start_time.elapsed();
 
         Ok(EscapeAnalysisResults {
-            allocation_sites: HashMap::new(),
-            escape_status: HashMap::new(),
+            allocation_sites: BTreeMap::new(),
+            escape_status: BTreeMap::new(),
             stack_allocatable: Vec::new(),
             inlinable_functions: self
                 .optimization_generator
@@ -544,7 +544,7 @@ impl EscapeAnalyzer {
     fn generate_optimization_hints(
         &self,
         allocations: &[AllocationInfo],
-        escape_status: &HashMap<DataFlowNodeId, EscapeStatus>,
+        escape_status: &BTreeMap<DataFlowNodeId, EscapeStatus>,
     ) -> Vec<OptimizationHint> {
         let mut hints = Vec::new();
 
@@ -581,8 +581,8 @@ impl EscapeAnalysisResults {
     /// Create new empty results
     pub fn new() -> Self {
         Self {
-            allocation_sites: HashMap::new(),
-            escape_status: HashMap::new(),
+            allocation_sites: BTreeMap::new(),
+            escape_status: BTreeMap::new(),
             stack_allocatable: Vec::new(),
             inlinable_functions: Vec::new(),
             optimization_hints: Vec::new(),

@@ -156,7 +156,7 @@ impl<'a> TypeCheckingPhase<'a> {
     /// Check all type declarations for validity
     fn check_type_declarations(&mut self, typed_file: &TypedFile) -> Result<(), String> {
         // Check for duplicate type names
-        let mut type_names = std::collections::HashSet::new();
+        let mut type_names = std::collections::BTreeSet::new();
 
         for class in &typed_file.classes {
             if !type_names.insert(&class.name) {
@@ -1542,7 +1542,7 @@ impl<'a> TypeCheckingPhase<'a> {
             }
             TypedExpressionKind::ObjectLiteral { fields } => {
                 // Track field names to detect duplicates
-                let mut field_names = std::collections::HashSet::new();
+                let mut field_names = std::collections::BTreeSet::new();
 
                 // Check each field
                 for field in fields {
@@ -2318,7 +2318,7 @@ impl<'a> TypeCheckingPhase<'a> {
             let first_value_type = self.check_expression(&entries[0].value)?;
 
             // Track duplicate keys if they're compile-time constants
-            let mut constant_keys = std::collections::HashSet::new();
+            let mut constant_keys = std::collections::BTreeSet::new();
 
             // Check remaining entries for type consistency
             for (index, entry) in entries.iter().enumerate() {

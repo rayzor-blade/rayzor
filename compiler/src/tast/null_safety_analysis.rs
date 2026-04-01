@@ -11,7 +11,7 @@ use crate::tast::{
     SourceLocation, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Null state of a variable or expression
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,14 +80,14 @@ pub struct NullSafetyAnalyzer<'a> {
     /// Control flow graph
     cfg: &'a ControlFlowGraph,
     /// Null states for each variable at each program point
-    null_states: HashMap<BlockId, HashMap<SymbolId, NullState>>,
+    null_states: BTreeMap<BlockId, BTreeMap<SymbolId, NullState>>,
     /// Detected violations
     violations: Vec<NullSafetyViolation>,
     /// Null checks found in the code
-    null_checks: HashMap<BlockId, Vec<NullCheck>>,
+    null_checks: BTreeMap<BlockId, Vec<NullCheck>>,
     /// Scoped null narrowing stack — branch-sensitive refinements.
     /// Each entry maps a variable to its narrowed NullState within the current scope.
-    narrowing_stack: Vec<HashMap<SymbolId, NullState>>,
+    narrowing_stack: Vec<BTreeMap<SymbolId, NullState>>,
 }
 
 impl<'a> NullSafetyAnalyzer<'a> {
@@ -101,9 +101,9 @@ impl<'a> NullSafetyAnalyzer<'a> {
             type_table,
             symbol_table,
             cfg,
-            null_states: HashMap::new(),
+            null_states: BTreeMap::new(),
             violations: Vec::new(),
-            null_checks: HashMap::new(),
+            null_checks: BTreeMap::new(),
             narrowing_stack: Vec::new(),
         }
     }
@@ -139,7 +139,7 @@ impl<'a> NullSafetyAnalyzer<'a> {
         let entry_block = self.cfg.entry_block;
 
         // Collect parameter states first
-        let mut param_states = HashMap::new();
+        let mut param_states = BTreeMap::new();
         for param in &function.parameters {
             let null_state = if self.is_symbol_not_null(param.symbol_id) {
                 // @:notNull parameters are guaranteed non-null
@@ -156,7 +156,7 @@ impl<'a> NullSafetyAnalyzer<'a> {
         let entry_states = self
             .null_states
             .entry(entry_block)
-            .or_insert_with(HashMap::new);
+            .or_insert_with(BTreeMap::new);
         entry_states.extend(param_states);
     }
 
@@ -343,7 +343,7 @@ impl<'a> NullSafetyAnalyzer<'a> {
         // Get predecessors and merge their exit states
         if let Some(block) = self.cfg.blocks.get(&block_id) {
             let predecessors = block.predecessors.clone();
-            let mut merged_states = HashMap::new();
+            let mut merged_states = BTreeMap::new();
 
             for &pred_id in &predecessors {
                 if let Some(pred_states) = self.null_states.get(&pred_id) {
@@ -457,7 +457,7 @@ impl<'a> NullSafetyAnalyzer<'a> {
                     } else {
                         NullState::Null
                     };
-                    let mut then_refinements = HashMap::new();
+                    let mut then_refinements = BTreeMap::new();
                     then_refinements.insert(var_id, then_state);
                     self.push_narrowing(then_refinements);
                     self.check_violations_in_statement(then_branch, function);
@@ -470,7 +470,7 @@ impl<'a> NullSafetyAnalyzer<'a> {
                         } else {
                             NullState::NotNull
                         };
-                        let mut else_refinements = HashMap::new();
+                        let mut else_refinements = BTreeMap::new();
                         else_refinements.insert(var_id, else_state);
                         self.push_narrowing(else_refinements);
                         self.check_violations_in_statement(else_stmt, function);
@@ -597,7 +597,7 @@ impl<'a> NullSafetyAnalyzer<'a> {
     }
 
     /// Push a narrowing scope with refined null states
-    fn push_narrowing(&mut self, refinements: HashMap<SymbolId, NullState>) {
+    fn push_narrowing(&mut self, refinements: BTreeMap<SymbolId, NullState>) {
         self.narrowing_stack.push(refinements);
     }
 

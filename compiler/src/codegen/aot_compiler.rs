@@ -856,11 +856,11 @@ fn find_startup_llvm_names(
     backend: &crate::codegen::llvm_jit_backend::LLVMJitBackend,
     modules: &[crate::ir::IrModule],
 ) -> Vec<String> {
-    use std::collections::HashSet;
+    use std::collections::BTreeSet;
 
     let symbols = backend.get_function_symbols();
     let mut startup_names = Vec::new();
-    let mut seen = HashSet::new();
+    let mut seen = BTreeSet::new();
 
     for module in modules {
         for hook_name in ["__vtable_init__", "__init__"] {
