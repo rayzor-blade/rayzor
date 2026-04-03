@@ -3911,10 +3911,11 @@ const rayzor = {{
     // Return as Haxe Array (simplified — returns first part for now)
     return writeString(parts.join(','));
   }},
-  haxe_ereg_replace: (h, withPtr) => {{
-    const obj = rayzor._reGet(h); if (!obj?.lastMatch) return 0;
+  haxe_ereg_replace: (h, strPtr, withPtr) => {{
+    const obj = rayzor._reGet(h); if (!obj) return 0;
+    const s = readString(strPtr);
     const replacement = readString(withPtr);
-    return writeString(obj.input.replace(obj.re, replacement));
+    return writeString(s.replace(obj.re, replacement));
   }},
   haxe_ereg_map: (_h, _fn) => 0,
   haxe_ereg_escape: (strPtr) => {{
