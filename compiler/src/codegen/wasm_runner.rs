@@ -92,11 +92,14 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
     /// Unbox a DynamicValue pointer from WASM memory → i32.
     /// DynamicValue = { type_id: u32, value_ptr: u32 }. Types: 2=Bool, 3=Int.
     fn unbox_int_from_memory(caller: &mut Caller<'_, WasmState>, raw: i32) -> i32 {
-        if raw > 65536 {
+        // Heuristic: DynamicValue pointers are heap-allocated (> 64KB) and 4-byte aligned.
+        // DynamicValue = { type_id: u32 (0-5), value_ptr: u32 }
+        if raw > 65536 && (raw & 3) == 0 {
             if let Some(dv) = read_wasm_mem(caller, raw as usize, 8) {
                 let type_id = u32::from_le_bytes(dv[0..4].try_into().unwrap());
                 let value_ptr = u32::from_le_bytes(dv[4..8].try_into().unwrap()) as usize;
-                if matches!(type_id, 2 | 3) { // Bool or Int
+                // Valid DynamicValue type_ids: 0=Void, 1=Null, 2=Bool, 3=Int, 4=Float, 5=String
+                if matches!(type_id, 2 | 3) && value_ptr > 0 && value_ptr < 0x10000000 {
                     if let Some(vb) = read_wasm_mem(caller, value_ptr, 4) {
                         return i32::from_le_bytes(vb[0..4].try_into().unwrap());
                     }
@@ -107,18 +110,18 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
     }
 
     fn unbox_f64_from_memory(caller: &mut Caller<'_, WasmState>, raw: i32) -> f64 {
-        if raw > 65536 {
+        if raw > 65536 && (raw & 3) == 0 {
             if let Some(dv) = read_wasm_mem(caller, raw as usize, 8) {
                 let type_id = u32::from_le_bytes(dv[0..4].try_into().unwrap());
                 let value_ptr = u32::from_le_bytes(dv[4..8].try_into().unwrap()) as usize;
-                if type_id == 4 { // Float
+                if type_id == 4 && value_ptr > 0 && value_ptr < 0x10000000 {
                     if let Some(vb) = read_wasm_mem(caller, value_ptr, 8) {
                         return f64::from_le_bytes(vb[0..8].try_into().unwrap());
                     }
                 }
             }
         }
-        0.0
+        raw as f64
     }
 
     // -- Engine & module setup --
@@ -326,7 +329,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                                 v[pos] = val;
                             }
                         }
-                        let _ = results; // void
+                        if !results.is_empty() { results[0] = Val::I32(0); }
                         Ok(())
                     })
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
@@ -367,7 +370,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                                 v[pos..pos + 2].copy_from_slice(&val.to_le_bytes());
                             }
                         }
-                        let _ = results;
+                        if !results.is_empty() { results[0] = Val::I32(0); }
                         Ok(())
                     })
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
@@ -408,7 +411,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                                 v[pos..pos + 4].copy_from_slice(&val.to_le_bytes());
                             }
                         }
-                        let _ = results;
+                        if !results.is_empty() { results[0] = Val::I32(0); }
                         Ok(())
                     })
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
@@ -453,7 +456,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                                 v[pos..pos + 8].copy_from_slice(&val.to_le_bytes());
                             }
                         }
-                        let _ = results;
+                        if !results.is_empty() { results[0] = Val::I32(0); }
                         Ok(())
                     })
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
@@ -494,7 +497,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                                 v[pos..pos + 4].copy_from_slice(&val.to_le_bytes());
                             }
                         }
-                        let _ = results;
+                        if !results.is_empty() { results[0] = Val::I32(0); }
                         Ok(())
                     })
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
@@ -535,7 +538,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                                 v[pos..pos + 8].copy_from_slice(&val.to_le_bytes());
                             }
                         }
-                        let _ = results;
+                        if !results.is_empty() { results[0] = Val::I32(0); }
                         Ok(())
                     })
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
@@ -558,7 +561,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                                 v[pos..end].fill(val);
                             }
                         }
-                        let _ = results;
+                        if !results.is_empty() { results[0] = Val::I32(0); }
                         Ok(())
                     })
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
@@ -597,7 +600,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                                     .copy_from_slice(&src_bytes[..copy_len]);
                             }
                         }
-                        let _ = results;
+                        if !results.is_empty() { results[0] = Val::I32(0); }
                         Ok(())
                     })
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
