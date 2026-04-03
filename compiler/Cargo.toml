@@ -48,6 +48,7 @@ wasi-common = { git = "https://github.com/darmie/wasmtime", branch = "fix-plt-aa
 # LLVM backend (optional, for Tier 3 optimization and AOT)
 inkwell = { version = "0.5", features = ["llvm18-0"], optional = true}
 llvm-sys = { version = "180", optional = true }
+regex = "1.12.3"
 
 
 [build-dependencies]
