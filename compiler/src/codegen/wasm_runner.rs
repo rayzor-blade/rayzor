@@ -14,9 +14,27 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         wasi_ctx: wasi_common::p1::WasiP1Ctx,
         bytes_handles: BTreeMap<i32, Vec<u8>>,
         next_bytes_id: i32,
+        /// EReg handle table: handle_id → ERegState
+        ereg_handles: BTreeMap<i32, ERegState>,
+        next_ereg_id: i32,
         /// Host-side bump allocator: allocates downward from top of WASM memory.
         /// Used to write DynamicValue return structs into WASM linear memory.
         host_alloc_ptr: u32,
+    }
+
+    struct ERegState {
+        pattern: String,
+        flags: String,
+        regex: regex::Regex,
+        /// Last input string (set by match/matchSub)
+        last_input: Option<String>,
+        /// Last match result
+        last_match: Option<regex::Match<'static>>,
+        /// Capture groups from last match (owned strings)
+        last_captures: Vec<Option<String>>,
+        /// Positions for matchedLeft/Right
+        match_start: usize,
+        match_end: usize,
     }
 
     fn val_i32(v: &Val) -> i32 {
@@ -171,6 +189,33 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         dv_addr as i32
     }
 
+    /// Read a HaxeString { data_ptr: u32, len: u32 } from WASM memory → Rust String.
+    fn read_haxe_string(caller: &mut Caller<'_, WasmState>, str_ptr: i32) -> String {
+        let ptr = unbox_int_from_memory(caller, str_ptr) as usize;
+        if ptr == 0 { return String::new(); }
+        if let Some(header) = read_wasm_mem(caller, ptr, 8) {
+            let data_ptr = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
+            let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+            if let Some(bytes) = read_wasm_mem(caller, data_ptr, len) {
+                return String::from_utf8_lossy(&bytes).to_string();
+            }
+        }
+        String::new()
+    }
+
+    /// Write a Rust string into WASM memory as HaxeString { data_ptr, len, cap }.
+    /// Returns the HaxeString struct pointer.
+    fn write_haxe_string(caller: &mut Caller<'_, WasmState>, s: &str) -> i32 {
+        let bytes = s.as_bytes();
+        let data_addr = host_alloc(caller, bytes.len() as u32);
+        write_wasm_mem(caller, data_addr, bytes);
+        let struct_addr = host_alloc(caller, 12);
+        write_wasm_mem(caller, struct_addr, &data_addr.to_le_bytes());
+        write_wasm_mem(caller, struct_addr + 4, &(bytes.len() as u32).to_le_bytes());
+        write_wasm_mem(caller, struct_addr + 8, &(bytes.len() as u32).to_le_bytes());
+        struct_addr as i32
+    }
+
     // -- Engine & module setup --
     let mut config = Config::new();
     config.wasm_simd(true);
@@ -193,8 +238,10 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
     let state = WasmState {
         wasi_ctx: builder.build_p1(),
         bytes_handles: BTreeMap::new(),
-        next_bytes_id: 1, // 0 = null handle
-        host_alloc_ptr: 0, // initialized after instantiation
+        next_bytes_id: 1,
+        ereg_handles: BTreeMap::new(),
+        next_ereg_id: 1,
+        host_alloc_ptr: 0,
     };
     let mut store = Store::new(&engine, state);
 
@@ -721,6 +768,171 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
             _ => continue,
         }
 
+        registered.insert(name.clone());
+    }
+
+    // -- Register EReg host functions --
+    for (name, func_ty) in &rayzor_imports {
+        if registered.contains(name) { continue; }
+        let is_ereg = matches!(name.as_str(),
+            "haxe_ereg_new" | "haxe_ereg_match" | "haxe_ereg_matched"
+            | "haxe_ereg_matched_left" | "haxe_ereg_matched_right"
+            | "haxe_ereg_matched_pos" | "haxe_ereg_matched_pos_anon"
+            | "haxe_ereg_match_sub" | "haxe_ereg_replace" | "haxe_ereg_escape"
+            | "haxe_ereg_split" | "haxe_ereg_map"
+        );
+        if !is_ereg { continue; }
+
+        match name.as_str() {
+            // new(pattern, flags) -> handle
+            "haxe_ereg_new" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let pattern = read_haxe_string(&mut caller, val_i32(&params[0]));
+                    let flags = read_haxe_string(&mut caller, val_i32(&params[1]));
+                    let mut re_pattern = pattern.clone();
+                    // Convert Haxe regex flags to Rust regex flags
+                    let case_insensitive = flags.contains('i');
+                    let multiline = flags.contains('m');
+                    let dotall = flags.contains('s');
+                    if case_insensitive || multiline || dotall {
+                        let mut prefix = String::from("(?");
+                        if case_insensitive { prefix.push('i'); }
+                        if multiline { prefix.push('m'); }
+                        if dotall { prefix.push('s'); }
+                        prefix.push(')');
+                        re_pattern = format!("{}{}", prefix, re_pattern);
+                    }
+                    let regex = match regex::Regex::new(&re_pattern) {
+                        Ok(r) => r,
+                        Err(_) => { results[0] = Val::I32(0); return Ok(()); }
+                    };
+                    let s = caller.data_mut();
+                    let id = s.next_ereg_id;
+                    s.next_ereg_id += 1;
+                    s.ereg_handles.insert(id, ERegState {
+                        pattern, flags, regex,
+                        last_input: None, last_match: None, last_captures: vec![],
+                        match_start: 0, match_end: 0,
+                    });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // match(this, s) -> bool (boxed)
+            "haxe_ereg_match" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let s = read_haxe_string(&mut caller, val_i32(&params[1]));
+                    let matched = {
+                        if let Some(st) = caller.data_mut().ereg_handles.get_mut(&h) {
+                            if let Some(caps) = st.regex.captures(&s) {
+                                st.match_start = caps.get(0).map(|m| m.start()).unwrap_or(0);
+                                st.match_end = caps.get(0).map(|m| m.end()).unwrap_or(0);
+                                st.last_captures = (0..caps.len()).map(|i| caps.get(i).map(|m| m.as_str().to_string())).collect();
+                                st.last_input = Some(s);
+                                true
+                            } else {
+                                st.last_input = Some(s);
+                                st.last_captures.clear();
+                                false
+                            }
+                        } else { false }
+                    };
+                    let boxed = box_int_in_wasm(&mut caller, if matched { 1 } else { 0 });
+                    results[0] = Val::I32(boxed);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // matched(this, n) -> String
+            "haxe_ereg_matched" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let n = unbox_int_from_memory(&mut caller, val_i32(&params[1])) as usize;
+                    let val = caller.data().ereg_handles.get(&h)
+                        .and_then(|st| st.last_captures.get(n).cloned().flatten())
+                        .unwrap_or_default();
+                    let ptr = write_haxe_string(&mut caller, &val);
+                    results[0] = Val::I32(ptr);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // matchedLeft(this) -> String
+            "haxe_ereg_matched_left" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let val = caller.data().ereg_handles.get(&h)
+                        .and_then(|st| st.last_input.as_ref().map(|s| s[..st.match_start].to_string()))
+                        .unwrap_or_default();
+                    let ptr = write_haxe_string(&mut caller, &val);
+                    results[0] = Val::I32(ptr);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // matchedRight(this) -> String
+            "haxe_ereg_matched_right" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let val = caller.data().ereg_handles.get(&h)
+                        .and_then(|st| st.last_input.as_ref().map(|s| s[st.match_end..].to_string()))
+                        .unwrap_or_default();
+                    let ptr = write_haxe_string(&mut caller, &val);
+                    results[0] = Val::I32(ptr);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // replace(this, s, by) -> String
+            "haxe_ereg_replace" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let s = read_haxe_string(&mut caller, val_i32(&params[1]));
+                    let by = read_haxe_string(&mut caller, val_i32(&params[2]));
+                    let replaced = caller.data().ereg_handles.get(&h)
+                        .map(|st| {
+                            if st.flags.contains('g') {
+                                st.regex.replace_all(&s, by.as_str()).to_string()
+                            } else {
+                                st.regex.replace(&s, by.as_str()).to_string()
+                            }
+                        })
+                        .unwrap_or(s);
+                    let ptr = write_haxe_string(&mut caller, &replaced);
+                    results[0] = Val::I32(ptr);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // static escape(s) -> String
+            "haxe_ereg_escape" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let s = read_haxe_string(&mut caller, val_i32(&params[0]));
+                    let escaped = regex::escape(&s);
+                    let ptr = write_haxe_string(&mut caller, &escaped);
+                    results[0] = Val::I32(ptr);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // matchSub, matchedPos, split, map — return stubs for now
+            _ => {
+                let results_tys: Vec<ValType> = func_ty.results().collect();
+                linker.func_new("rayzor", name, func_ty.clone(), move |_caller, _params, out| {
+                    for (i, r) in results_tys.iter().enumerate() {
+                        out[i] = match r {
+                            ValType::I64 => Val::I64(0),
+                            ValType::F32 => Val::F32(0),
+                            ValType::F64 => Val::F64(0),
+                            _ => Val::I32(0),
+                        };
+                    }
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+        }
         registered.insert(name.clone());
     }
 
