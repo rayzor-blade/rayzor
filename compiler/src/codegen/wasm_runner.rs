@@ -14,6 +14,9 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         wasi_ctx: wasi_common::p1::WasiP1Ctx,
         bytes_handles: BTreeMap<i32, Vec<u8>>,
         next_bytes_id: i32,
+        /// Host-side bump allocator: allocates downward from top of WASM memory.
+        /// Used to write DynamicValue return structs into WASM linear memory.
+        host_alloc_ptr: u32,
     }
 
     fn val_i32(v: &Val) -> i32 {
@@ -124,6 +127,50 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         raw as f64
     }
 
+    /// Allocate `size` bytes from the host-side bump allocator (top of WASM memory, grows down).
+    /// Returns the WASM linear memory address.
+    fn host_alloc(caller: &mut Caller<'_, WasmState>, size: u32) -> u32 {
+        let ptr = caller.data().host_alloc_ptr;
+        let new_ptr = ptr.wrapping_sub(size);
+        // Align down to 4 bytes
+        let new_ptr = new_ptr & !3;
+        caller.data_mut().host_alloc_ptr = new_ptr;
+        new_ptr
+    }
+
+    /// Write bytes into WASM linear memory at `addr`.
+    fn write_wasm_mem(caller: &mut Caller<'_, WasmState>, addr: u32, bytes: &[u8]) {
+        if let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) {
+            let data = mem.data_mut(&mut *caller);
+            let a = addr as usize;
+            if a + bytes.len() <= data.len() {
+                data[a..a + bytes.len()].copy_from_slice(bytes);
+            }
+        }
+    }
+
+    /// Box an i32 value as a DynamicValue in WASM memory.
+    /// Layout: allocate 4 bytes for value, 8 bytes for header {type_id=3, value_ptr}.
+    /// Returns the DynamicValue pointer (WASM address).
+    fn box_int_in_wasm(caller: &mut Caller<'_, WasmState>, val: i32) -> i32 {
+        let val_addr = host_alloc(caller, 4);
+        write_wasm_mem(caller, val_addr, &val.to_le_bytes());
+        let dv_addr = host_alloc(caller, 8);
+        write_wasm_mem(caller, dv_addr, &3u32.to_le_bytes()); // type_id = 3 (Int)
+        write_wasm_mem(caller, dv_addr + 4, &val_addr.to_le_bytes()); // value_ptr
+        dv_addr as i32
+    }
+
+    /// Box an f64 value as a DynamicValue in WASM memory.
+    fn box_float_in_wasm(caller: &mut Caller<'_, WasmState>, val: f64) -> i32 {
+        let val_addr = host_alloc(caller, 8);
+        write_wasm_mem(caller, val_addr, &val.to_le_bytes());
+        let dv_addr = host_alloc(caller, 8);
+        write_wasm_mem(caller, dv_addr, &4u32.to_le_bytes()); // type_id = 4 (Float)
+        write_wasm_mem(caller, dv_addr + 4, &val_addr.to_le_bytes()); // value_ptr
+        dv_addr as i32
+    }
+
     // -- Engine & module setup --
     let mut config = Config::new();
     config.wasm_simd(true);
@@ -147,6 +194,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         wasi_ctx: builder.build_p1(),
         bytes_handles: BTreeMap::new(),
         next_bytes_id: 1, // 0 = null handle
+        host_alloc_ptr: 0, // initialized after instantiation
     };
     let mut store = Store::new(&engine, state);
 
@@ -231,10 +279,13 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
                         let size = val_i32(&params[0]).max(0) as usize;
-                        let s = caller.data_mut();
-                        let id = s.next_bytes_id;
-                        s.next_bytes_id += 1;
-                        s.bytes_handles.insert(id, vec![0u8; size]);
+                        let id = {
+                            let s = caller.data_mut();
+                            let id = s.next_bytes_id;
+                            s.next_bytes_id += 1;
+                            s.bytes_handles.insert(id, vec![0u8; size]);
+                            id
+                        };
                         results[0] = ret_int(id, &rt);
                         Ok(())
                     })
@@ -246,7 +297,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                 let rt = ret_ty.clone();
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let h = val_i32(&params[0]);
+                        let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                         let len = caller.data().bytes_handles.get(&h).map(|v| v.len() as i32).unwrap_or(0);
                         results[0] = ret_int(len, &rt);
                         Ok(())
@@ -284,10 +335,13 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                                 vec![]
                             }
                         };
-                        let s = caller.data_mut();
-                        let id = s.next_bytes_id;
-                        s.next_bytes_id += 1;
-                        s.bytes_handles.insert(id, bytes);
+                        let id = {
+                            let s = caller.data_mut();
+                            let id = s.next_bytes_id;
+                            s.next_bytes_id += 1;
+                            s.bytes_handles.insert(id, bytes);
+                            id
+                        };
                         results[0] = ret_int(id, &rt);
                         Ok(())
                     })
@@ -299,7 +353,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                 let rt = ret_ty.clone();
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let h = val_i32(&params[0]);
+                        let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                         let raw_pos = val_i32(&params[1]);
                         let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
                         let val = caller
@@ -309,7 +363,8 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                             .and_then(|v| v.get(pos))
                             .copied()
                             .unwrap_or(0) as i32;
-                        results[0] = ret_int(val, &rt);
+                        let boxed = box_int_in_wasm(&mut caller, val);
+                        results[0] = ret_int(boxed, &rt);
                         Ok(())
                     })
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
@@ -319,7 +374,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
             "haxe_bytes_set" => {
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let h = val_i32(&params[0]);
+                        let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                         let raw_pos = val_i32(&params[1]);
                         let raw_val = val_i32(&params[2]);
                         let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
@@ -340,7 +395,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                 let rt = ret_ty.clone();
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let h = val_i32(&params[0]);
+                        let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                         let raw_pos = val_i32(&params[1]);
                         let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
                         let val = caller.data().bytes_handles.get(&h).map(|v| {
@@ -350,7 +405,8 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                                 0
                             }
                         }).unwrap_or(0);
-                        results[0] = ret_int(val, &rt);
+                        let boxed = box_int_in_wasm(&mut caller, val);
+                        results[0] = ret_int(boxed, &rt);
                         Ok(())
                     })
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
@@ -360,7 +416,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
             "haxe_bytes_set_int16" => {
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let h = val_i32(&params[0]);
+                        let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                         let raw_pos = val_i32(&params[1]);
                         let raw_val = val_i32(&params[2]);
                         let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
@@ -381,7 +437,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                 let rt = ret_ty.clone();
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let h = val_i32(&params[0]);
+                        let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                         let raw_pos = val_i32(&params[1]);
                         let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
                         let val = caller.data().bytes_handles.get(&h).map(|v| {
@@ -391,7 +447,8 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                                 0
                             }
                         }).unwrap_or(0);
-                        results[0] = ret_int(val, &rt);
+                        let boxed = box_int_in_wasm(&mut caller, val);
+                        results[0] = ret_int(boxed, &rt);
                         Ok(())
                     })
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
@@ -401,7 +458,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
             "haxe_bytes_set_int32" => {
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let h = val_i32(&params[0]);
+                        let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                         let raw_pos = val_i32(&params[1]);
                         let raw_val = val_i32(&params[2]);
                         let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
@@ -422,7 +479,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                 let rt = ret_ty.clone();
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let h = val_i32(&params[0]);
+                        let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                         let raw_pos = val_i32(&params[1]);
                         let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
                         let val = caller.data().bytes_handles.get(&h).map(|v| {
@@ -432,11 +489,8 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                                 0
                             }
                         }).unwrap_or(0);
-                        results[0] = match rt {
-                            ValType::I64 => Val::I64(val),
-                            ValType::I32 => Val::I32(val as i32),
-                            _ => Val::I64(val),
-                        };
+                        let boxed = box_int_in_wasm(&mut caller, val as i32);
+                        results[0] = ret_int(boxed, &rt);
                         Ok(())
                     })
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
@@ -446,7 +500,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
             "haxe_bytes_set_int64" => {
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let h = val_i32(&params[0]);
+                        let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                         let raw_pos = val_i32(&params[1]);
                         let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
                         let raw_val = val_i32(&params[2]);
@@ -467,7 +521,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                 let rt = ret_ty.clone();
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let h = val_i32(&params[0]);
+                        let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                         let raw_pos = val_i32(&params[1]);
                         let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
                         let val = caller.data().bytes_handles.get(&h).map(|v| {
@@ -477,7 +531,8 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                                 0.0
                             }
                         }).unwrap_or(0.0);
-                        results[0] = ret_f32(val, &rt);
+                        let boxed = box_float_in_wasm(&mut caller, val as f64);
+                        results[0] = ret_int(boxed, &rt);
                         Ok(())
                     })
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
@@ -487,7 +542,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
             "haxe_bytes_set_float" => {
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let h = val_i32(&params[0]);
+                        let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                         let raw_pos = val_i32(&params[1]);
                         let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
                         let raw_val = val_i32(&params[2]);
@@ -508,7 +563,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                 let rt = ret_ty.clone();
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let h = val_i32(&params[0]);
+                        let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                         let raw_pos = val_i32(&params[1]);
                         let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
                         let val = caller.data().bytes_handles.get(&h).map(|v| {
@@ -518,7 +573,8 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                                 0.0
                             }
                         }).unwrap_or(0.0);
-                        results[0] = ret_f64(val, &rt);
+                        let boxed = box_float_in_wasm(&mut caller, val);
+                        results[0] = ret_int(boxed, &rt);
                         Ok(())
                     })
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
@@ -528,7 +584,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
             "haxe_bytes_set_double" => {
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let h = val_i32(&params[0]);
+                        let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                         let raw_pos = val_i32(&params[1]);
                         let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
                         let raw_val = val_i32(&params[2]);
@@ -548,7 +604,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
             "haxe_bytes_fill" => {
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let h = val_i32(&params[0]);
+                        let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                         let raw_pos = val_i32(&params[1]);
                         let raw_len = val_i32(&params[2]);
                         let raw_val = val_i32(&params[3]);
@@ -571,9 +627,9 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
             "haxe_bytes_blit" => {
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let dest_h = val_i32(&params[0]);
+                        let dest_h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                         let raw_dest_pos = val_i32(&params[1]);
-                        let src_h = val_i32(&params[2]);
+                        let src_h = unbox_int_from_memory(&mut caller, val_i32(&params[2]));
                         let raw_src_pos = val_i32(&params[3]);
                         let raw_len = val_i32(&params[4]);
                         let dest_pos = unbox_int_from_memory(&mut caller, raw_dest_pos) as usize;
@@ -611,13 +667,16 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                 let rt = ret_ty.clone();
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let a_h = val_i32(&params[0]);
-                        let b_h = val_i32(&params[1]);
-                        let s = caller.data();
-                        let a = s.bytes_handles.get(&a_h).map(|v| v.as_slice()).unwrap_or(&[]);
-                        let b = s.bytes_handles.get(&b_h).map(|v| v.as_slice()).unwrap_or(&[]);
-                        let cmp = a.cmp(b) as i32;
-                        results[0] = ret_int(cmp, &rt);
+                        let a_h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                        let b_h = unbox_int_from_memory(&mut caller, val_i32(&params[1]));
+                        let cmp = {
+                            let s = caller.data();
+                            let a = s.bytes_handles.get(&a_h).map(|v| v.as_slice()).unwrap_or(&[]);
+                            let b = s.bytes_handles.get(&b_h).map(|v| v.as_slice()).unwrap_or(&[]);
+                            a.cmp(b) as i32
+                        };
+                        let boxed = box_int_in_wasm(&mut caller, cmp);
+                        results[0] = ret_int(boxed, &rt);
                         Ok(())
                     })
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
@@ -628,7 +687,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                 let rt = ret_ty.clone();
                 linker
                     .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
-                        let h = val_i32(&params[0]);
+                        let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                         let raw_pos = val_i32(&params[1]);
                         let raw_len = val_i32(&params[2]);
                         let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
@@ -646,10 +705,13 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                                 }
                             })
                             .unwrap_or_else(|| vec![0u8; len]);
-                        let s = caller.data_mut();
-                        let id = s.next_bytes_id;
-                        s.next_bytes_id += 1;
-                        s.bytes_handles.insert(id, sub);
+                        let id = {
+                            let s = caller.data_mut();
+                            let id = s.next_bytes_id;
+                            s.next_bytes_id += 1;
+                            s.bytes_handles.insert(id, sub);
+                            id
+                        };
                         results[0] = ret_int(id, &rt);
                         Ok(())
                     })
@@ -694,6 +756,13 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
     let instance = linker
         .instantiate(&mut store, &module)
         .map_err(|e| format!("WASM instantiation failed: {}", e))?;
+
+    // Initialize host-side bump allocator at top of WASM linear memory
+    if let Some(mem) = instance.get_memory(&mut store, "memory") {
+        let mem_size = mem.data_size(&store) as u32;
+        // Reserve top 256KB for host allocations (boxed return values)
+        store.data_mut().host_alloc_ptr = mem_size - 16; // start near top, 16-byte aligned
+    }
 
     let start = instance
         .get_typed_func::<(), ()>(&mut store, "_start")
