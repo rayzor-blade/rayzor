@@ -365,21 +365,48 @@ impl CompileCtx {
         // Use BTreeMap for deterministic iteration.
         let mut import_entries: BTreeMap<String, (Vec<ValType>, Vec<ValType>)> = BTreeMap::new();
 
-        // From extern_functions
+        // From extern_functions — redirect bare names to qualified forms
+        let mut bare_to_qualified: BTreeMap<String, String> = BTreeMap::new();
         for module in modules {
             for (_id, ext) in &module.extern_functions {
                 if has_code.contains(&ext.id) { continue; }
+                let is_bare = !ext.name.contains('_') && !ext.name.contains('.');
+                if is_bare {
+                    let snake: String = ext.name.chars().enumerate().fold(String::new(), |mut s, (i, c)| {
+                        if c.is_uppercase() && i > 0 { s.push('_'); }
+                        s.push(c.to_ascii_lowercase());
+                        s
+                    });
+                    // Known Bytes method names → synthesize qualified import
+                    let bytes_qualified = match ext.name.as_str() {
+                        "get" | "set" | "sub" | "blit" | "fill" | "compare"
+                        | "getInt16" | "setInt16" | "getInt32" | "setInt32"
+                        | "getInt64" | "setInt64" | "getFloat" | "setFloat"
+                        | "getDouble" | "setDouble" | "length"
+                        | "alloc" | "ofString" | "toString" => {
+                            Some(format!("haxe_bytes_{}", snake))
+                        }
+                        _ => None,
+                    };
+                    if let Some(qname) = bytes_qualified {
+                        bare_to_qualified.insert(ext.name.clone(), qname.clone());
+                        import_entries.entry(qname)
+                            .or_insert_with(|| Self::sig_to_wasm(&ext.signature));
+                        continue;
+                    }
+                }
                 import_entries.entry(ext.name.clone())
                     .or_insert_with(|| Self::sig_to_wasm(&ext.signature));
             }
         }
 
         // From empty-body functions in module.functions
+        // bare_to_qualified is shared with the extern_functions phase above.
         for module in modules {
             for (_id, func) in &module.functions {
                 if !func.cfg.blocks.is_empty() { continue; }
-                // Redirect bare-name stubs to qualified haxe_* imports if available.
-                // "get" → if "haxe_bytes_get" exists, don't create a "get" import.
+                // Redirect bare-name stubs to qualified haxe_* imports.
+                // "setInt32" → "haxe_bytes_set_int32" (either existing or synthesized).
                 let is_bare = !func.name.contains('_') && !func.name.contains('.');
                 if is_bare {
                     let snake: String = func.name.chars().enumerate().fold(String::new(), |mut s, (i, c)| {
@@ -388,10 +415,42 @@ impl CompileCtx {
                         s
                     });
                     let suffix = format!("_{}", snake);
-                    let has_haxe_qualified = import_entries.keys()
-                        .any(|k| k.starts_with("haxe_") && k.ends_with(&suffix));
-                    if has_haxe_qualified {
+                    // Check if a qualified haxe_* import already exists
+                    let existing_qualified = import_entries.keys()
+                        .find(|k| k.starts_with("haxe_") && k.ends_with(&suffix))
+                        .cloned();
+                    if let Some(qname) = existing_qualified {
+                        bare_to_qualified.insert(func.name.clone(), qname);
                         continue; // Will be mapped in Phase 3
+                    }
+                    // No qualified version exists — try to synthesize one from the
+                    // function's qualified_name or a known class prefix.
+                    if let Some(ref qn) = func.qualified_name {
+                        // e.g., "rayzor.Bytes.setInt32" → "haxe_bytes_set_int32"
+                        let qualified_import = qn.replace('.', "_").to_lowercase();
+                        if qualified_import != func.name {
+                            bare_to_qualified.insert(func.name.clone(), qualified_import.clone());
+                            import_entries.entry(qualified_import)
+                                .or_insert_with(|| Self::sig_to_wasm(&func.signature));
+                            continue;
+                        }
+                    }
+                    // Last resort: use "haxe_bytes_" prefix for known Bytes method names
+                    let bytes_qualified = match func.name.as_str() {
+                        "get" | "set" | "sub" | "blit" | "fill" | "compare"
+                        | "getInt16" | "setInt16" | "getInt32" | "setInt32"
+                        | "getInt64" | "setInt64" | "getFloat" | "setFloat"
+                        | "getDouble" | "setDouble" | "length"
+                        | "alloc" | "ofString" | "toString" => {
+                            Some(format!("haxe_bytes_{}", snake))
+                        }
+                        _ => None,
+                    };
+                    if let Some(qname) = bytes_qualified {
+                        bare_to_qualified.insert(func.name.clone(), qname.clone());
+                        import_entries.entry(qname)
+                            .or_insert_with(|| Self::sig_to_wasm(&func.signature));
+                        continue;
                     }
                 }
                 import_entries.entry(func.name.clone())
@@ -422,10 +481,12 @@ impl CompileCtx {
             // Map extern function IDs
             for (_id, ext) in &module.extern_functions {
                 if has_code.contains(&ext.id) { continue; }
-                if let Some(&idx) = name_to_idx.get(&ext.name) {
+                // Try direct name, then bare→qualified redirect
+                let resolved_name = bare_to_qualified.get(&ext.name).unwrap_or(&ext.name);
+                if let Some(&idx) = name_to_idx.get(resolved_name) {
                     self.ir_func_to_idx.entry(ext.id).or_insert(idx);
                     let (params, _) = Self::sig_to_wasm(&ext.signature);
-                    let ret = if let Some((_, results)) = import_entries.get(&ext.name) {
+                    let ret = if let Some((_, results)) = import_entries.get(resolved_name) {
                         if results.is_empty() { ValType::I32 } else { results[0] }
                     } else { ValType::I32 };
                     self.func_param_types.entry(ext.id).or_insert(params);
@@ -441,7 +502,14 @@ impl CompileCtx {
                     self.ir_func_to_idx.insert(*func_id, idx);
                     continue;
                 }
-                // Bare-name redirect: "get" → "haxe_bytes_get"
+                // Bare→qualified redirect from Phase 1
+                if let Some(qname) = bare_to_qualified.get(&func.name) {
+                    if let Some(&idx) = name_to_idx.get(qname) {
+                        self.ir_func_to_idx.insert(*func_id, idx);
+                        continue;
+                    }
+                }
+                // Bare-name redirect: "get" → "haxe_bytes_get" (fallback scan)
                 if !func.name.contains('_') && !func.name.contains('.') {
                     let snake: String = func.name.chars().enumerate().fold(String::new(), |mut s, (i, c)| {
                         if c.is_uppercase() && i > 0 { s.push('_'); }
@@ -449,7 +517,7 @@ impl CompileCtx {
                         s
                     });
                     let suffix = format!("_{}", snake);
-                    if let Some((&ref qname, &idx)) = name_to_idx.iter()
+                    if let Some((&ref _qname, &idx)) = name_to_idx.iter()
                         .filter(|(k, _)| k.starts_with("haxe_") && k.ends_with(&suffix))
                         .min_by_key(|(k, _)| k.len())
                     {
