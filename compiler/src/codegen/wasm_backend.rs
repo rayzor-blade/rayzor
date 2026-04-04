@@ -377,8 +377,8 @@ impl CompileCtx {
                         s.push(c.to_ascii_lowercase());
                         s
                     });
-                    // Known Bytes method names → synthesize qualified import
-                    let bytes_qualified = match ext.name.as_str() {
+                    // Known bare method names → synthesize qualified import
+                    let qualified = match ext.name.as_str() {
                         "get" | "set" | "sub" | "blit" | "fill" | "compare"
                         | "getInt16" | "setInt16" | "getInt32" | "setInt32"
                         | "getInt64" | "setInt64" | "getFloat" | "setFloat"
@@ -386,9 +386,12 @@ impl CompileCtx {
                         | "alloc" | "ofString" | "toString" => {
                             Some(format!("haxe_bytes_{}", snake))
                         }
+                        "lock" | "unlock" | "isLocked" | "tryLock" => {
+                            Some(format!("rayzor_mutex_{}", snake))
+                        }
                         _ => None,
                     };
-                    if let Some(qname) = bytes_qualified {
+                    if let Some(qname) = qualified {
                         bare_to_qualified.insert(ext.name.clone(), qname.clone());
                         import_entries.entry(qname)
                             .or_insert_with(|| Self::sig_to_wasm(&ext.signature));
@@ -415,9 +418,9 @@ impl CompileCtx {
                         s
                     });
                     let suffix = format!("_{}", snake);
-                    // Check if a qualified haxe_* import already exists
+                    // Check if a qualified import already exists (haxe_* or rayzor_*)
                     let existing_qualified = import_entries.keys()
-                        .find(|k| k.starts_with("haxe_") && k.ends_with(&suffix))
+                        .find(|k| (k.starts_with("haxe_") || k.starts_with("rayzor_")) && k.ends_with(&suffix))
                         .cloned();
                     if let Some(qname) = existing_qualified {
                         bare_to_qualified.insert(func.name.clone(), qname);
@@ -436,7 +439,7 @@ impl CompileCtx {
                         }
                     }
                     // Last resort: use "haxe_bytes_" prefix for known Bytes method names
-                    let bytes_qualified = match func.name.as_str() {
+                    let qualified = match func.name.as_str() {
                         "get" | "set" | "sub" | "blit" | "fill" | "compare"
                         | "getInt16" | "setInt16" | "getInt32" | "setInt32"
                         | "getInt64" | "setInt64" | "getFloat" | "setFloat"
@@ -444,9 +447,12 @@ impl CompileCtx {
                         | "alloc" | "ofString" | "toString" => {
                             Some(format!("haxe_bytes_{}", snake))
                         }
+                        "lock" | "unlock" | "isLocked" | "tryLock" => {
+                            Some(format!("rayzor_mutex_{}", snake))
+                        }
                         _ => None,
                     };
-                    if let Some(qname) = bytes_qualified {
+                    if let Some(qname) = qualified {
                         bare_to_qualified.insert(func.name.clone(), qname.clone());
                         import_entries.entry(qname)
                             .or_insert_with(|| Self::sig_to_wasm(&func.signature));
@@ -518,7 +524,7 @@ impl CompileCtx {
                     });
                     let suffix = format!("_{}", snake);
                     if let Some((&ref _qname, &idx)) = name_to_idx.iter()
-                        .filter(|(k, _)| k.starts_with("haxe_") && k.ends_with(&suffix))
+                        .filter(|(k, _)| (k.starts_with("haxe_") || k.starts_with("rayzor_")) && k.ends_with(&suffix))
                         .min_by_key(|(k, _)| k.len())
                     {
                         self.ir_func_to_idx.insert(*func_id, idx);

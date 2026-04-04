@@ -14,12 +14,12 @@ class ThreadDemo {
         var mtx = new Mutex(0);
         trace("Mutex created");
 
-        mtx.lock();
+        var guard = mtx.lock();
         trace("Mutex locked");
 
         if (mtx.isLocked()) trace("Is locked: true"); else trace("Is locked: false");
 
-        mtx.unlock();
+        guard.unlock();
         trace("Mutex unlocked");
 
         if (mtx.isLocked()) trace("Is locked: true"); else trace("Is locked: false");
