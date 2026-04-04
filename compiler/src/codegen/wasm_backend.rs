@@ -1379,9 +1379,10 @@ impl<'a> FunctionLowerer<'a> {
                         // Comparisons always produce i32 (boolean)
                         IrInstruction::Cmp { .. } => Some(ValType::I32),
 
-                        // CallDirect: use callee return type
-                        IrInstruction::CallDirect { func_id, .. } => {
+                        // CallDirect: use callee return type, fallback to dest register type
+                        IrInstruction::CallDirect { dest, func_id, .. } => {
                             self.ctx.func_return_types.get(func_id).copied()
+                                .or_else(|| dest.and_then(|d| self.ir_func.register_types.get(&d)).map(|t| ir_type_to_wasm(t)))
                         }
 
                         // BinOp: float if any operand is float
@@ -1418,6 +1419,11 @@ impl<'a> FunctionLowerer<'a> {
                             } else {
                                 None
                             }
+                        }
+
+                        // CallIndirect: use dest register type
+                        IrInstruction::CallIndirect { dest, .. } => {
+                            dest.and_then(|d| self.ir_func.register_types.get(&d)).map(|t| ir_type_to_wasm(t))
                         }
 
                         // GEP, PtrAdd, Alloc: always i32 (pointer)
@@ -1471,6 +1477,54 @@ impl<'a> FunctionLowerer<'a> {
             }
             if !changed {
                 break;
+            }
+        }
+
+        // Step 3: Final sweep — use register_types as authoritative fallback.
+        // Catches cases where MIR type info is more specific than producer inference
+        // (e.g., extern function wrappers returning F64 via PtrVoid MIR type).
+        // Also scan Const instructions directly to catch F64 consts in I32-typed registers.
+        for block in self.ir_func.cfg.blocks.values() {
+            for inst in &block.instructions {
+                if let IrInstruction::Const { dest, value } = inst {
+                    let const_ty = match value {
+                        IrValue::F32(_) => ValType::F32,
+                        IrValue::F64(_) => ValType::F64,
+                        _ => ValType::I32,
+                    };
+                    if const_ty != ValType::I32 {
+                        let current = self.local_type_of(*dest);
+                        if current == Some(ValType::I32) || current.is_none() {
+                            if current.is_some() {
+                                self.set_local_type(*dest, const_ty);
+                            }
+                        }
+                    }
+                }
+            }
+            // Also upgrade phi dests if any incoming value is float
+            for phi in &block.phi_nodes {
+                for (_pred, val) in &phi.incoming {
+                    if let Some(vt) = self.local_type_of(*val) {
+                        if vt != ValType::I32 {
+                            if let Some(dt) = self.local_type_of(phi.dest) {
+                                if dt == ValType::I32 {
+                                    self.set_local_type(phi.dest, vt);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for (&reg, mir_ty) in &self.ir_func.register_types {
+            let wt = ir_type_to_wasm(mir_ty);
+            if wt != ValType::I32 {
+                if let Some(current) = self.local_type_of(reg) {
+                    if current == ValType::I32 {
+                        self.set_local_type(reg, wt);
+                    }
+                }
             }
         }
     }
@@ -1826,8 +1880,10 @@ impl<'a> FunctionLowerer<'a> {
             | IrInstruction::BorrowImmutable { dest, src, .. }
             | IrInstruction::BorrowMutable { dest, src, .. }
             | IrInstruction::Clone { dest, src } => {
+                let src_ty = self.reg_wasm_type(*src);
+                let dest_ty = self.reg_wasm_type(*dest);
                 self.get_reg(f, *src);
-                self.emit_type_coerce(f, self.reg_wasm_type(*src), self.reg_wasm_type(*dest));
+                self.emit_type_coerce(f, src_ty, dest_ty);
                 self.set_reg(f, *dest);
             }
 
