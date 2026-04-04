@@ -1326,7 +1326,9 @@ impl<'a> FunctionLowerer<'a> {
     // ------------------------------------------------------------------
 
     fn allocate_locals(&mut self) {
-        // Step 1: Allocate all locals as I32 (default WASM32 type).
+        // Step 1: Allocate all locals, using register_types for initial type when available.
+        // This ensures F64 registers get F64 locals from the start, preventing
+        // type mismatches in Copy/phi resolution that bypass producer inference.
         let mut seen = BTreeSet::new();
         for p in &self.ir_func.signature.parameters {
             seen.insert(p.reg);
@@ -1334,13 +1336,33 @@ impl<'a> FunctionLowerer<'a> {
         for block in self.ir_func.cfg.blocks.values() {
             for phi in &block.phi_nodes {
                 if seen.insert(phi.dest) {
-                    self.alloc_local(phi.dest, ValType::I32);
+                    let ty = self.ir_func.register_types.get(&phi.dest)
+                        .map(|t| ir_type_to_wasm(t))
+                        .unwrap_or(ValType::I32);
+                    self.alloc_local(phi.dest, ty);
                 }
             }
             for inst in &block.instructions {
                 if let Some(dest) = inst.dest() {
                     if seen.insert(dest) {
-                        self.alloc_local(dest, ValType::I32);
+                        // Use the actual value type for Const/BitCast instructions — the MIR
+                        // register_types may say I32/PtrVoid even for F64 constants.
+                        let ty = match inst {
+                            IrInstruction::Const { value, .. } => match value {
+                                IrValue::F32(_) => ValType::F32,
+                                IrValue::F64(_) => ValType::F64,
+                                _ => ValType::I32,
+                            },
+                            // BitCast to I64/U64 from F64: need I64 local to hold 64 bits
+                            IrInstruction::BitCast { ty, .. } => match ty {
+                                IrType::I64 | IrType::U64 => ValType::I64,
+                                _ => ir_type_to_wasm(ty),
+                            },
+                            _ => self.ir_func.register_types.get(&dest)
+                                .map(|t| ir_type_to_wasm(t))
+                                .unwrap_or(ValType::I32),
+                        };
+                        self.alloc_local(dest, ty);
                     }
                 }
             }
@@ -2004,10 +2026,14 @@ impl<'a> FunctionLowerer<'a> {
             }
 
             // === BitCast ===
-            IrInstruction::BitCast { dest, src, .. } => {
+            IrInstruction::BitCast { dest, src, ty } => {
                 self.get_reg(f, *src);
                 let from_vt = self.reg_wasm_type(*src);
                 let to_vt = self.reg_wasm_type(*dest);
+                // On WASM32, BitCast between F64 and I32 is lossy but must be valid.
+                // If the dest is I32 but src is F64, use the cross-width bitcast.
+                // If the MIR target type is I64/U64, use reinterpret to keep full bits
+                // (only works if the local was allocated as I64).
                 emit_bitcast(f, from_vt, to_vt);
                 self.set_reg(f, *dest);
             }
@@ -3241,6 +3267,20 @@ impl<'a> FunctionLowerer<'a> {
             (ValType::F64, ValType::F32) => {
                 f.instruction(&Instruction::F32DemoteF64);
             }
+            // Integer width conversions
+            (ValType::I64, ValType::I32) => {
+                f.instruction(&Instruction::I32WrapI64);
+            }
+            (ValType::I32, ValType::I64) => {
+                f.instruction(&Instruction::I64ExtendI32S);
+            }
+            // Float↔I64 conversions
+            (ValType::I64, ValType::F64) => {
+                f.instruction(&Instruction::F64ConvertI64S);
+            }
+            (ValType::F64, ValType::I64) => {
+                f.instruction(&Instruction::I64TruncF64S);
+            }
             _ => {}
         }
     }
@@ -3354,6 +3394,15 @@ fn emit_bitcast(f: &mut Function, from: ValType, to: ValType) {
         }
         (ValType::I64, ValType::I32) => {
             f.instruction(&Instruction::I32WrapI64);
+        }
+        // Cross-width bitcasts (through I64 intermediate)
+        (ValType::F64, ValType::I32) => {
+            f.instruction(&Instruction::I64ReinterpretF64);
+            f.instruction(&Instruction::I32WrapI64);
+        }
+        (ValType::I32, ValType::F64) => {
+            f.instruction(&Instruction::I64ExtendI32U);
+            f.instruction(&Instruction::F64ReinterpretI64);
         }
         _ => {} // no-op best effort
     }
