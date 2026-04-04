@@ -17,9 +17,17 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         /// EReg handle table: handle_id → ERegState
         ereg_handles: BTreeMap<i32, ERegState>,
         next_ereg_id: i32,
+        /// Mutex handle table: handle_id → MutexState
+        mutex_handles: BTreeMap<i32, MutexState>,
+        next_mutex_id: i32,
         /// Host-side bump allocator: allocates downward from top of WASM memory.
         /// Used to write DynamicValue return structs into WASM linear memory.
         host_alloc_ptr: u32,
+    }
+
+    struct MutexState {
+        locked: bool,
+        value: i32, // stored value (for guard_get)
     }
 
     struct ERegState {
@@ -179,6 +187,16 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         dv_addr as i32
     }
 
+    /// Box a bool (i32 0/1) as a DynamicValue with type_id=2 (Bool).
+    fn box_bool_in_wasm(caller: &mut Caller<'_, WasmState>, val: i32) -> i32 {
+        let val_addr = host_alloc(caller, 4);
+        write_wasm_mem(caller, val_addr, &val.to_le_bytes());
+        let dv_addr = host_alloc(caller, 8);
+        write_wasm_mem(caller, dv_addr, &2u32.to_le_bytes()); // type_id = 2 (Bool)
+        write_wasm_mem(caller, dv_addr + 4, &val_addr.to_le_bytes());
+        dv_addr as i32
+    }
+
     /// Box an f64 value as a DynamicValue in WASM memory.
     fn box_float_in_wasm(caller: &mut Caller<'_, WasmState>, val: f64) -> i32 {
         let val_addr = host_alloc(caller, 8);
@@ -241,6 +259,8 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         next_bytes_id: 1,
         ereg_handles: BTreeMap::new(),
         next_ereg_id: 1,
+        mutex_handles: BTreeMap::new(),
+        next_mutex_id: 1,
         host_alloc_ptr: 0,
     };
     let mut store = Store::new(&engine, state);
@@ -932,6 +952,159 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                     Ok(())
                 }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
             }
+        }
+        registered.insert(name.clone());
+    }
+
+    // -- Register Mutex/Arc/Box host functions --
+    fn canonical_sync_name(name: &str) -> Option<&str> {
+        match name {
+            // Qualified names
+            "rayzor_mutex_init" | "rayzor_mutex_lock" | "rayzor_mutex_try_lock"
+            | "rayzor_mutex_is_locked" | "rayzor_mutex_unlock" | "rayzor_mutex_guard_get"
+            | "mutex_guard_unlock" | "MutexGuard_unlock"
+            | "rayzor_arc_init" | "rayzor_arc_clone" | "rayzor_arc_get"
+            | "rayzor_arc_as_ptr" | "rayzor_arc_try_unwrap" | "rayzor_arc_strong_count"
+            | "rayzor_box_init" | "rayzor_box_unbox" | "rayzor_box_raw" | "rayzor_box_free"
+                => Some(name),
+            // Bare names from runtime-wasm (may appear as camelCase or snake_case)
+            "lock" => Some("rayzor_mutex_lock"),
+            "unlock" | "MutexGuard_unlock" | "mutex_guard_unlock" => Some("rayzor_mutex_unlock"),
+            "isLocked" | "is_locked" => Some("rayzor_mutex_is_locked"),
+            "tryLock" | "try_lock" => Some("rayzor_mutex_try_lock"),
+            "guard_get" => Some("rayzor_mutex_guard_get"),
+            _ => None,
+        }
+    }
+    for (name, func_ty) in &rayzor_imports {
+        if registered.contains(name) { continue; }
+        let canon = match canonical_sync_name(name) {
+            Some(c) => c,
+            None => continue,
+        };
+
+        match canon {
+            // -- rayzor_mutex_init(val) -> handle (raw, NOT boxed) --
+            "rayzor_mutex_init" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let val = val_i32(&params[0]);
+                    let s = caller.data_mut();
+                    let id = s.next_mutex_id;
+                    s.next_mutex_id += 1;
+                    s.mutex_handles.insert(id, MutexState { locked: false, value: val });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_mutex_lock(handle) -> boxed guard handle --
+            "rayzor_mutex_lock" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    if let Some(st) = caller.data_mut().mutex_handles.get_mut(&h) {
+                        st.locked = true;
+                    }
+                    let boxed = box_int_in_wasm(&mut caller, h);
+                    results[0] = Val::I32(boxed);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_mutex_try_lock(handle) -> boxed 1 if acquired, boxed 0 if already locked --
+            "rayzor_mutex_try_lock" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let acquired = {
+                        if let Some(st) = caller.data_mut().mutex_handles.get_mut(&h) {
+                            if !st.locked {
+                                st.locked = true;
+                                1
+                            } else {
+                                0
+                            }
+                        } else {
+                            0
+                        }
+                    };
+                    let boxed = box_bool_in_wasm(&mut caller, acquired);
+                    results[0] = Val::I32(boxed);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_mutex_is_locked(handle) -> boxed 1 if locked, boxed 0 if not --
+            "rayzor_mutex_is_locked" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let locked = caller.data().mutex_handles.get(&h)
+                        .map(|st| if st.locked { 1 } else { 0 })
+                        .unwrap_or(0);
+                    let boxed = box_bool_in_wasm(&mut caller, locked);
+                    results[0] = Val::I32(boxed);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_mutex_unlock(handle) -> void --
+            "rayzor_mutex_unlock" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    if let Some(st) = caller.data_mut().mutex_handles.get_mut(&h) {
+                        st.locked = false;
+                    }
+                    if !results.is_empty() { results[0] = Val::I32(0); }
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_mutex_guard_get(handle) -> boxed value --
+            "rayzor_mutex_guard_get" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let val = caller.data().mutex_handles.get(&h)
+                        .map(|st| st.value)
+                        .unwrap_or(0);
+                    let boxed = box_int_in_wasm(&mut caller, val);
+                    results[0] = Val::I32(boxed);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- Arc: identity pass-through --
+            "rayzor_arc_init" | "rayzor_arc_clone" | "rayzor_arc_get"
+            | "rayzor_arc_as_ptr" | "rayzor_arc_try_unwrap" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |_caller, params, results| {
+                    results[0] = params[0].clone();
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_arc_strong_count -> boxed 1 --
+            "rayzor_arc_strong_count" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, _params, results| {
+                    let boxed = box_int_in_wasm(&mut caller, 1);
+                    results[0] = Val::I32(boxed);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- Box: identity pass-through --
+            "rayzor_box_init" | "rayzor_box_unbox" | "rayzor_box_raw" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |_caller, params, results| {
+                    results[0] = params[0].clone();
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_box_free -> no-op --
+            "rayzor_box_free" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |_caller, _params, results| {
+                    if !results.is_empty() { results[0] = Val::I32(0); }
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            _ => continue,
         }
         registered.insert(name.clone());
     }

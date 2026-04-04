@@ -3776,11 +3776,11 @@ const rayzor = {{
 
   // Mutex — Atomics.compareExchange on shared memory
   rayzor_mutex_init: (val) => {{ if (!memory) return 0; const p = heapBase; heapBase = align8(heapBase + 8); new DataView(memory.buffer).setInt32(p, 0, true); return p; }},
-  rayzor_mutex_lock: (id) => {{ if (!memory) return; new DataView(memory.buffer).setInt32(id, 1, true); }},
-  rayzor_mutex_try_lock: (id) => {{ if (!memory) return 0; const v = new DataView(memory.buffer); return v.getInt32(id, true) === 0 ? (v.setInt32(id, 1, true), 1) : 0; }},
-  rayzor_mutex_is_locked: (id) => {{ if (!memory) return 0; return new DataView(memory.buffer).getInt32(id, true) !== 0 ? 1 : 0; }},
-  rayzor_mutex_guard_get: (id) => {{ if (!memory) return 0; return new DataView(memory.buffer).getUint32(id + 4, true); }},
-  rayzor_mutex_unlock: (id) => {{ if (!memory) return; new DataView(memory.buffer).setInt32(id, 0, true); }},
+  rayzor_mutex_lock: (id) => {{ id = rayzor._unboxInt(id); if (!memory) return 0; new DataView(memory.buffer).setInt32(id, 1, true); return id; }},
+  rayzor_mutex_try_lock: (id) => {{ id = rayzor._unboxInt(id); if (!memory) return 0; const v = new DataView(memory.buffer); return rayzor._boxBool(v.getInt32(id, true) === 0 ? (v.setInt32(id, 1, true), 1) : 0); }},
+  rayzor_mutex_is_locked: (id) => {{ id = rayzor._unboxInt(id); if (!memory) return 0; return rayzor._boxBool(new DataView(memory.buffer).getInt32(id, true) !== 0 ? 1 : 0); }},
+  rayzor_mutex_guard_get: (id) => {{ id = rayzor._unboxInt(id); if (!memory) return 0; return rayzor._boxInt(new DataView(memory.buffer).getUint32(id + 4, true)); }},
+  rayzor_mutex_unlock: (id) => {{ id = rayzor._unboxInt(id); if (!memory) return; new DataView(memory.buffer).setInt32(id, 0, true); }},
   // Box a value as DynamicValue: {{type_id: i32, value_ptr: i32}}
   // type_id: 0=Int, 1=Float, 2=Bool, 3=String, 4=Object
   _boxBool: function(val) {{
