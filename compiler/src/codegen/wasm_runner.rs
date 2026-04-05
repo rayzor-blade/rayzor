@@ -20,9 +20,17 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         /// Mutex handle table: handle_id → MutexState
         mutex_handles: BTreeMap<i32, MutexState>,
         next_mutex_id: i32,
+        /// Tensor handle table: handle_id → TensorState
+        tensor_handles: BTreeMap<i32, TensorState>,
+        next_tensor_id: i32,
         /// Host-side bump allocator: allocates downward from top of WASM memory.
         /// Used to write DynamicValue return structs into WASM linear memory.
         host_alloc_ptr: u32,
+    }
+
+    struct TensorState {
+        data: Vec<f64>,
+        shape: Vec<i32>,
     }
 
     struct MutexState {
@@ -234,6 +242,55 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         struct_addr as i32
     }
 
+    /// Read a HaxeArray of i32 values from WASM memory.
+    /// HaxeArray layout: { data_ptr: u32, len: u32, cap: u32, elem_size: u32 }.
+    fn read_haxe_array_i32(caller: &mut Caller<'_, WasmState>, arr_ptr: i32) -> Vec<i32> {
+        let ptr = unbox_int_from_memory(caller, arr_ptr) as usize;
+        if ptr == 0 { return vec![]; }
+        if let Some(header) = read_wasm_mem(caller, ptr, 16) {
+            let data_ptr = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
+            let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
+            let elem_size = u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize;
+            let actual_size = if elem_size > 0 { elem_size } else { 4 };
+            if let Some(data) = read_wasm_mem(caller, data_ptr, len * actual_size) {
+                return (0..len).map(|i| {
+                    i32::from_le_bytes(data[i*actual_size..i*actual_size+4].try_into().unwrap_or([0;4]))
+                }).collect();
+            }
+        }
+        vec![]
+    }
+
+    /// Read a HaxeArray of f64 values from WASM memory.
+    /// HaxeArray layout: { data_ptr: u32, len: u32, cap: u32, elem_size: u32 }.
+    fn read_haxe_array_f64(caller: &mut Caller<'_, WasmState>, arr_ptr: i32) -> Vec<f64> {
+        let ptr = unbox_int_from_memory(caller, arr_ptr) as usize;
+        if ptr == 0 { return vec![]; }
+        // Read HaxeArray header: { data_ptr, len, cap, elem_size }
+        let (data_ptr, len, elem_size) = if let Some(header) = read_wasm_mem(caller, ptr, 16) {
+            (
+                u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize,
+                u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize,
+                u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize,
+            )
+        } else {
+            return vec![];
+        };
+        let actual_size = if elem_size > 0 { elem_size } else { 4 };
+        if let Some(data) = read_wasm_mem(caller, data_ptr, len * actual_size) {
+            // Each element may be a DynamicValue pointer (i32) that wraps an f64
+            let raw_vals: Vec<i32> = (0..len).map(|i| {
+                i32::from_le_bytes(data[i*actual_size..i*actual_size+4].try_into().unwrap_or([0;4]))
+            }).collect();
+            // Try to unbox each element as a DynamicValue Float
+            let result: Vec<f64> = raw_vals.iter().map(|&raw| {
+                unbox_f64_from_memory(caller, raw)
+            }).collect();
+            return result;
+        }
+        vec![]
+    }
+
     // -- Engine & module setup --
     let mut config = Config::new();
     config.wasm_simd(true);
@@ -261,6 +318,8 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         next_ereg_id: 1,
         mutex_handles: BTreeMap::new(),
         next_mutex_id: 1,
+        tensor_handles: BTreeMap::new(),
+        next_tensor_id: 1,
         host_alloc_ptr: 0,
     };
     let mut store = Store::new(&engine, state);
@@ -1105,6 +1164,541 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
             }
 
             _ => continue,
+        }
+        registered.insert(name.clone());
+    }
+
+    // -- Register Tensor host functions --
+    fn canonical_tensor_name(name: &str) -> Option<&str> {
+        match name {
+            "rayzor_tensor_zeros" | "Tensor_zeros" => Some("rayzor_tensor_zeros"),
+            "rayzor_tensor_ones" | "Tensor_ones" => Some("rayzor_tensor_ones"),
+            "rayzor_tensor_full" | "Tensor_full" => Some("rayzor_tensor_full"),
+            "rayzor_tensor_from_array" | "Tensor_fromArray" | "Tensor_from_array" => Some("rayzor_tensor_from_array"),
+            "rayzor_tensor_rand" | "Tensor_rand" => Some("rayzor_tensor_rand"),
+            "rayzor_tensor_ndim" => Some("rayzor_tensor_ndim"),
+            "rayzor_tensor_numel" => Some("rayzor_tensor_numel"),
+            "rayzor_tensor_dtype" => Some("rayzor_tensor_dtype"),
+            "rayzor_tensor_get" => Some("rayzor_tensor_get"),
+            "rayzor_tensor_set" => Some("rayzor_tensor_set"),
+            "rayzor_tensor_reshape" => Some("rayzor_tensor_reshape"),
+            "rayzor_tensor_transpose" => Some("rayzor_tensor_transpose"),
+            "rayzor_tensor_add" | "Tensor_add" => Some("rayzor_tensor_add"),
+            "rayzor_tensor_sub" | "Tensor_sub" => Some("rayzor_tensor_sub"),
+            "rayzor_tensor_mul" | "Tensor_mul" => Some("rayzor_tensor_mul"),
+            "rayzor_tensor_div" | "Tensor_div" => Some("rayzor_tensor_div"),
+            "rayzor_tensor_matmul" => Some("rayzor_tensor_matmul"),
+            "rayzor_tensor_dot" => Some("rayzor_tensor_dot"),
+            "rayzor_tensor_sum" => Some("rayzor_tensor_sum"),
+            "rayzor_tensor_mean" => Some("rayzor_tensor_mean"),
+            "rayzor_tensor_sqrt" => Some("rayzor_tensor_sqrt"),
+            "rayzor_tensor_exp" => Some("rayzor_tensor_exp"),
+            "rayzor_tensor_log" => Some("rayzor_tensor_log"),
+            "rayzor_tensor_relu" => Some("rayzor_tensor_relu"),
+            "rayzor_tensor_free" => Some("rayzor_tensor_free"),
+            "rayzor_tensor_data" | "rayzor_tensor_shape" | "rayzor_tensor_shape_ptr"
+            | "rayzor_tensor_shape_ndim" => Some(name),
+            _ => None,
+        }
+    }
+
+    for (name, func_ty) in &rayzor_imports {
+        if registered.contains(name) { continue; }
+        let canon = match canonical_tensor_name(name) {
+            Some(c) => c,
+            None => continue,
+        };
+        let ret_ty: ValType = func_ty.results().next().unwrap_or(ValType::I32);
+
+        match canon {
+            // -- rayzor_tensor_zeros(shapePtr, dtype) -> handle --
+            "rayzor_tensor_zeros" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let shape_ptr = val_i32(&params[0]);
+                    let shape = read_haxe_array_i32(&mut caller, shape_ptr);
+                    let numel: usize = shape.iter().map(|&s| s.max(0) as usize).product();
+                    let s = caller.data_mut();
+                    let id = s.next_tensor_id;
+                    s.next_tensor_id += 1;
+                    s.tensor_handles.insert(id, TensorState { data: vec![0.0; numel], shape });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_ones(shapePtr, dtype) -> handle --
+            "rayzor_tensor_ones" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let shape_ptr = val_i32(&params[0]);
+                    let shape = read_haxe_array_i32(&mut caller, shape_ptr);
+                    let numel: usize = shape.iter().map(|&s| s.max(0) as usize).product();
+                    let s = caller.data_mut();
+                    let id = s.next_tensor_id;
+                    s.next_tensor_id += 1;
+                    s.tensor_handles.insert(id, TensorState { data: vec![1.0; numel], shape });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_full(shapePtr, value, dtype) -> handle --
+            "rayzor_tensor_full" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let shape_ptr = val_i32(&params[0]);
+                    let value = val_f64(&params[1]);
+                    let shape = read_haxe_array_i32(&mut caller, shape_ptr);
+                    let numel: usize = shape.iter().map(|&s| s.max(0) as usize).product();
+                    let s = caller.data_mut();
+                    let id = s.next_tensor_id;
+                    s.next_tensor_id += 1;
+                    s.tensor_handles.insert(id, TensorState { data: vec![value; numel], shape });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_from_array(dataPtr, dtype) -> handle --
+            "rayzor_tensor_from_array" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let data_ptr = val_i32(&params[0]);
+                    let data = read_haxe_array_f64(&mut caller, data_ptr);
+                    let len = data.len() as i32;
+                    let s = caller.data_mut();
+                    let id = s.next_tensor_id;
+                    s.next_tensor_id += 1;
+                    s.tensor_handles.insert(id, TensorState { data, shape: vec![len] });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_rand(shapePtr, dtype) -> handle --
+            "rayzor_tensor_rand" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let shape_ptr = val_i32(&params[0]);
+                    let shape = read_haxe_array_i32(&mut caller, shape_ptr);
+                    let numel: usize = shape.iter().map(|&s| s.max(0) as usize).product();
+                    // Simple LCG pseudo-random for determinism in WASM
+                    let mut seed: u64 = 12345;
+                    let data: Vec<f64> = (0..numel).map(|_| {
+                        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                        (seed >> 33) as f64 / (1u64 << 31) as f64
+                    }).collect();
+                    let s = caller.data_mut();
+                    let id = s.next_tensor_id;
+                    s.next_tensor_id += 1;
+                    s.tensor_handles.insert(id, TensorState { data, shape });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_ndim(handle) -> raw int --
+            "rayzor_tensor_ndim" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let ndim = caller.data().tensor_handles.get(&h)
+                        .map(|t| t.shape.len() as i32)
+                        .unwrap_or(0);
+                    results[0] = Val::I32(ndim);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_numel(handle) -> int --
+            "rayzor_tensor_numel" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let numel = caller.data().tensor_handles.get(&h)
+                        .map(|t| t.data.len() as i32)
+                        .unwrap_or(0);
+                    results[0] = Val::I32(numel);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_dtype(handle) -> raw int (0 = Float64) --
+            "rayzor_tensor_dtype" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, _params, results| {
+                    results[0] = Val::I32(0); // Float64 = 0
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_get(handle, idx) -> f64 --
+            "rayzor_tensor_get" => {
+                let rt = ret_ty.clone();
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let idx = unbox_int_from_memory(&mut caller, val_i32(&params[1])) as usize;
+                    let val = caller.data().tensor_handles.get(&h)
+                        .and_then(|t| t.data.get(idx).copied())
+                        .unwrap_or(0.0);
+                    results[0] = ret_f64(val, &rt);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_set(handle, idx, value) -> void --
+            "rayzor_tensor_set" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let idx = unbox_int_from_memory(&mut caller, val_i32(&params[1])) as usize;
+                    let value = val_f64(&params[2]);
+                    if let Some(t) = caller.data_mut().tensor_handles.get_mut(&h) {
+                        if idx < t.data.len() {
+                            t.data[idx] = value;
+                        }
+                    }
+                    if !results.is_empty() { results[0] = Val::I32(0); }
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_reshape(handle, shapePtr) -> handle --
+            "rayzor_tensor_reshape" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let shape_ptr = val_i32(&params[1]);
+                    let new_shape = read_haxe_array_i32(&mut caller, shape_ptr);
+                    let data = caller.data().tensor_handles.get(&h)
+                        .map(|t| t.data.clone())
+                        .unwrap_or_default();
+                    let s = caller.data_mut();
+                    let id = s.next_tensor_id;
+                    s.next_tensor_id += 1;
+                    s.tensor_handles.insert(id, TensorState { data, shape: new_shape });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_transpose(handle) -> handle --
+            "rayzor_tensor_transpose" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let (data, new_shape) = {
+                        if let Some(t) = caller.data().tensor_handles.get(&h) {
+                            if t.shape.len() == 2 {
+                                let rows = t.shape[0] as usize;
+                                let cols = t.shape[1] as usize;
+                                let mut transposed = vec![0.0; rows * cols];
+                                for r in 0..rows {
+                                    for c in 0..cols {
+                                        transposed[c * rows + r] = t.data[r * cols + c];
+                                    }
+                                }
+                                (transposed, vec![t.shape[1], t.shape[0]])
+                            } else {
+                                // For non-2D tensors, just reverse the shape and clone data
+                                let mut rev_shape = t.shape.clone();
+                                rev_shape.reverse();
+                                (t.data.clone(), rev_shape)
+                            }
+                        } else {
+                            (vec![], vec![])
+                        }
+                    };
+                    let s = caller.data_mut();
+                    let id = s.next_tensor_id;
+                    s.next_tensor_id += 1;
+                    s.tensor_handles.insert(id, TensorState { data, shape: new_shape });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_add(a, b) -> handle --
+            "rayzor_tensor_add" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let a_h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let b_h = unbox_int_from_memory(&mut caller, val_i32(&params[1]));
+                    let (data, shape) = {
+                        let s = caller.data();
+                        let a = s.tensor_handles.get(&a_h);
+                        let b = s.tensor_handles.get(&b_h);
+                        match (a, b) {
+                            (Some(a), Some(b)) => {
+                                let len = a.data.len().min(b.data.len());
+                                let data: Vec<f64> = (0..len).map(|i| a.data[i] + b.data[i]).collect();
+                                (data, a.shape.clone())
+                            }
+                            _ => (vec![], vec![]),
+                        }
+                    };
+                    let s = caller.data_mut();
+                    let id = s.next_tensor_id;
+                    s.next_tensor_id += 1;
+                    s.tensor_handles.insert(id, TensorState { data, shape });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_sub(a, b) -> handle --
+            "rayzor_tensor_sub" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let a_h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let b_h = unbox_int_from_memory(&mut caller, val_i32(&params[1]));
+                    let (data, shape) = {
+                        let s = caller.data();
+                        let a = s.tensor_handles.get(&a_h);
+                        let b = s.tensor_handles.get(&b_h);
+                        match (a, b) {
+                            (Some(a), Some(b)) => {
+                                let len = a.data.len().min(b.data.len());
+                                let data: Vec<f64> = (0..len).map(|i| a.data[i] - b.data[i]).collect();
+                                (data, a.shape.clone())
+                            }
+                            _ => (vec![], vec![]),
+                        }
+                    };
+                    let s = caller.data_mut();
+                    let id = s.next_tensor_id;
+                    s.next_tensor_id += 1;
+                    s.tensor_handles.insert(id, TensorState { data, shape });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_mul(a, b) -> handle --
+            "rayzor_tensor_mul" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let a_h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let b_h = unbox_int_from_memory(&mut caller, val_i32(&params[1]));
+                    let (data, shape) = {
+                        let s = caller.data();
+                        let a = s.tensor_handles.get(&a_h);
+                        let b = s.tensor_handles.get(&b_h);
+                        match (a, b) {
+                            (Some(a), Some(b)) => {
+                                let len = a.data.len().min(b.data.len());
+                                let data: Vec<f64> = (0..len).map(|i| a.data[i] * b.data[i]).collect();
+                                (data, a.shape.clone())
+                            }
+                            _ => (vec![], vec![]),
+                        }
+                    };
+                    let s = caller.data_mut();
+                    let id = s.next_tensor_id;
+                    s.next_tensor_id += 1;
+                    s.tensor_handles.insert(id, TensorState { data, shape });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_div(a, b) -> handle --
+            "rayzor_tensor_div" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let a_h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let b_h = unbox_int_from_memory(&mut caller, val_i32(&params[1]));
+                    let (data, shape) = {
+                        let s = caller.data();
+                        let a = s.tensor_handles.get(&a_h);
+                        let b = s.tensor_handles.get(&b_h);
+                        match (a, b) {
+                            (Some(a), Some(b)) => {
+                                let len = a.data.len().min(b.data.len());
+                                let data: Vec<f64> = (0..len).map(|i| {
+                                    if b.data[i] != 0.0 { a.data[i] / b.data[i] } else { f64::NAN }
+                                }).collect();
+                                (data, a.shape.clone())
+                            }
+                            _ => (vec![], vec![]),
+                        }
+                    };
+                    let s = caller.data_mut();
+                    let id = s.next_tensor_id;
+                    s.next_tensor_id += 1;
+                    s.tensor_handles.insert(id, TensorState { data, shape });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_matmul(a, b) -> handle --
+            "rayzor_tensor_matmul" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let a_h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let b_h = unbox_int_from_memory(&mut caller, val_i32(&params[1]));
+                    let (data, shape) = {
+                        let s = caller.data();
+                        let a = s.tensor_handles.get(&a_h);
+                        let b = s.tensor_handles.get(&b_h);
+                        match (a, b) {
+                            (Some(a), Some(b)) if a.shape.len() == 2 && b.shape.len() == 2 => {
+                                let m = a.shape[0] as usize;
+                                let k = a.shape[1] as usize;
+                                let n = b.shape[1] as usize;
+                                let mut result = vec![0.0; m * n];
+                                if k == b.shape[0] as usize {
+                                    for i in 0..m {
+                                        for j in 0..n {
+                                            let mut sum = 0.0;
+                                            for p in 0..k {
+                                                sum += a.data[i * k + p] * b.data[p * n + j];
+                                            }
+                                            result[i * n + j] = sum;
+                                        }
+                                    }
+                                }
+                                (result, vec![m as i32, n as i32])
+                            }
+                            _ => (vec![], vec![]),
+                        }
+                    };
+                    let s = caller.data_mut();
+                    let id = s.next_tensor_id;
+                    s.next_tensor_id += 1;
+                    s.tensor_handles.insert(id, TensorState { data, shape });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_dot(a, b) -> f64 --
+            "rayzor_tensor_dot" => {
+                let rt = ret_ty.clone();
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let a_h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let b_h = unbox_int_from_memory(&mut caller, val_i32(&params[1]));
+                    let dot = {
+                        let s = caller.data();
+                        let a = s.tensor_handles.get(&a_h);
+                        let b = s.tensor_handles.get(&b_h);
+                        match (a, b) {
+                            (Some(a), Some(b)) => {
+                                let len = a.data.len().min(b.data.len());
+                                (0..len).map(|i| a.data[i] * b.data[i]).sum::<f64>()
+                            }
+                            _ => 0.0,
+                        }
+                    };
+                    results[0] = ret_f64(dot, &rt);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_sum(handle) -> f64 --
+            "rayzor_tensor_sum" => {
+                let rt = ret_ty.clone();
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let sum = caller.data().tensor_handles.get(&h)
+                        .map(|t| t.data.iter().sum::<f64>())
+                        .unwrap_or(0.0);
+                    results[0] = ret_f64(sum, &rt);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_mean(handle) -> f64 --
+            "rayzor_tensor_mean" => {
+                let rt = ret_ty.clone();
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let mean = caller.data().tensor_handles.get(&h)
+                        .map(|t| {
+                            if t.data.is_empty() { 0.0 }
+                            else { t.data.iter().sum::<f64>() / t.data.len() as f64 }
+                        })
+                        .unwrap_or(0.0);
+                    results[0] = ret_f64(mean, &rt);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_sqrt(handle) -> handle --
+            "rayzor_tensor_sqrt" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let (data, shape) = caller.data().tensor_handles.get(&h)
+                        .map(|t| (t.data.iter().map(|x| x.sqrt()).collect::<Vec<_>>(), t.shape.clone()))
+                        .unwrap_or((vec![], vec![]));
+                    let s = caller.data_mut();
+                    let id = s.next_tensor_id;
+                    s.next_tensor_id += 1;
+                    s.tensor_handles.insert(id, TensorState { data, shape });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_exp(handle) -> handle --
+            "rayzor_tensor_exp" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let (data, shape) = caller.data().tensor_handles.get(&h)
+                        .map(|t| (t.data.iter().map(|x| x.exp()).collect::<Vec<_>>(), t.shape.clone()))
+                        .unwrap_or((vec![], vec![]));
+                    let s = caller.data_mut();
+                    let id = s.next_tensor_id;
+                    s.next_tensor_id += 1;
+                    s.tensor_handles.insert(id, TensorState { data, shape });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_log(handle) -> handle --
+            "rayzor_tensor_log" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let (data, shape) = caller.data().tensor_handles.get(&h)
+                        .map(|t| (t.data.iter().map(|x| x.ln()).collect::<Vec<_>>(), t.shape.clone()))
+                        .unwrap_or((vec![], vec![]));
+                    let s = caller.data_mut();
+                    let id = s.next_tensor_id;
+                    s.next_tensor_id += 1;
+                    s.tensor_handles.insert(id, TensorState { data, shape });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_relu(handle) -> handle --
+            "rayzor_tensor_relu" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    let (data, shape) = caller.data().tensor_handles.get(&h)
+                        .map(|t| (t.data.iter().map(|&x| if x > 0.0 { x } else { 0.0 }).collect::<Vec<_>>(), t.shape.clone()))
+                        .unwrap_or((vec![], vec![]));
+                    let s = caller.data_mut();
+                    let id = s.next_tensor_id;
+                    s.next_tensor_id += 1;
+                    s.tensor_handles.insert(id, TensorState { data, shape });
+                    results[0] = Val::I32(id);
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_free(handle) -> void --
+            "rayzor_tensor_free" => {
+                linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                    let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                    caller.data_mut().tensor_handles.remove(&h);
+                    if !results.is_empty() { results[0] = Val::I32(0); }
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_data, rayzor_tensor_shape, etc. — stubs returning 0 --
+            _ => {
+                let results_tys: Vec<ValType> = func_ty.results().collect();
+                linker.func_new("rayzor", name, func_ty.clone(), move |_caller, _params, out| {
+                    for (i, r) in results_tys.iter().enumerate() {
+                        out[i] = match r {
+                            ValType::I64 => Val::I64(0),
+                            ValType::F32 => Val::F32(0),
+                            ValType::F64 => Val::F64(0),
+                            _ => Val::I32(0),
+                        };
+                    }
+                    Ok(())
+                }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
         }
         registered.insert(name.clone());
     }
