@@ -604,8 +604,10 @@ dependencies = [
  "log",
  "memmap2",
  "parser",
+ "pollster",
  "postcard",
  "rayon",
+ "rayzor-gpu",
  "rayzor-plugin",
  "rayzor-runtime",
  "regex",
@@ -621,6 +623,7 @@ dependencies = [
  "wasmparser",
  "wasmtime",
  "wasmtime-wasi",
+ "wgpu",
  "wit-component",
  "zstd",
 ]

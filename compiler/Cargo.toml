@@ -45,6 +45,11 @@ wit-component = "0.245"  # WASI P2 Component wrapping (core module → component
 wasmtime = { git = "https://github.com/darmie/wasmtime", branch = "fix-plt-aarch64", package = "wasmtime", optional = true }
 wasi-common = { git = "https://github.com/darmie/wasmtime", branch = "fix-plt-aarch64", package = "wasmtime-wasi", optional = true }
 
+# wgpu-backed Tensor compute for `rayzor run --wasm` (native compute via Metal/Vulkan/DX12)
+rayzor-gpu = { path = "../gpu", default-features = false, features = ["webgpu-backend"], optional = true }
+pollster = { version = "0.4", optional = true }
+wgpu = { version = "24", optional = true }
+
 # LLVM backend (optional, for Tier 3 optimization and AOT)
 inkwell = { version = "0.5", features = ["llvm18-0"], optional = true}
 llvm-sys = { version = "180", optional = true }
@@ -71,7 +76,7 @@ harness = false
 default = ["cranelift-backend", "wasm-runtime"]
 cranelift-backend = []
 llvm-backend = ["inkwell", "llvm-sys"]
-wasm-runtime = ["wasmtime", "wasi-common"]
+wasm-runtime = ["wasmtime", "wasi-common", "rayzor-gpu", "pollster", "wgpu"]
 all-backends = ["cranelift-backend", "llvm-backend"]
 
 [[bin]]
