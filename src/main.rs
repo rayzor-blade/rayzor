@@ -3960,11 +3960,39 @@ const rayzor = {{
     }}
   }},
   _tAlloc: function(data, shape) {{
+    // CPU path: store Float64Array directly
     const h = rayzor._tensorNext++;
     rayzor._tensorHandles.set(h, {{ data, shape }});
     return h;
   }},
+  // GPU path: allocate GPU buffer, upload data, return tensor handle wrapping buf_h + shape.
+  _tAllocGpu: function(data, shape) {{
+    const dev = rayzor._gpuDeviceH;
+    const numel = data.length;
+    const buf_h = rayzor._gpuMod.rayzor_gpu_compute_alloc_buffer(dev, numel, 1); // dtype 1 = F32
+    if (!buf_h) return 0;
+    // Upload data as f32
+    const f32 = new Float32Array(numel);
+    for (let i = 0; i < numel; i++) f32[i] = data[i];
+    rayzor._gpuMod.rayzor_gpu_compute_buffer_write_f32(dev, buf_h, f32);
+    const h = rayzor._tensorNext++;
+    rayzor._tensorHandles.set(h, {{ buf_h, shape, gpu: true }});
+    return h;
+  }},
   _tGet: function(h) {{ return rayzor._tensorHandles.get(rayzor._unboxInt(h)); }},
+  // Get numel from a tensor (works for both CPU and GPU paths)
+  _tNumel: function(t) {{
+    if (!t) return 0;
+    if (t.gpu) return t.shape.reduce((a, b) => a * b, 1);
+    return t.data.length;
+  }},
+  // Read a single element from a GPU tensor by flat index
+  _tReadGpu: function(t, idx) {{
+    if (!t || !t.gpu) return 0;
+    return rayzor._gpuMod.rayzor_gpu_compute_buffer_read_f32(rayzor._gpuDeviceH, t.buf_h, idx);
+  }},
+  // Use GPU when device is available
+  _useGpu: function() {{ return rayzor._gpuDeviceH > 0 && rayzor._gpuMod; }},
   // Read a HaxeArray of i32 (shape) — 32-byte header at MIR layout (8-byte stride)
   _readShapeI32: function(arrPtr) {{
     arrPtr = rayzor._unboxInt(arrPtr);
@@ -4000,52 +4028,51 @@ const rayzor = {{
   rayzor_tensor_zeros: (shapePtr, dtype) => {{
     const sh = rayzor._readShapeI32(shapePtr);
     const numel = sh.reduce((a, b) => a * b, 1);
-    return rayzor._tAlloc(new Float64Array(numel), sh);
+    const data = new Float64Array(numel);
+    return rayzor._useGpu() ? rayzor._tAllocGpu(data, sh) : rayzor._tAlloc(data, sh);
   }},
   rayzor_tensor_ones: (shapePtr, dtype) => {{
     const sh = rayzor._readShapeI32(shapePtr);
     const numel = sh.reduce((a, b) => a * b, 1);
     const data = new Float64Array(numel); data.fill(1);
-    return rayzor._tAlloc(data, sh);
+    return rayzor._useGpu() ? rayzor._tAllocGpu(data, sh) : rayzor._tAlloc(data, sh);
   }},
   rayzor_tensor_rand: (shapePtr, dtype) => {{
     const sh = rayzor._readShapeI32(shapePtr);
     const numel = sh.reduce((a, b) => a * b, 1);
     const data = new Float64Array(numel);
     for (let i = 0; i < numel; i++) data[i] = Math.random();
-    return rayzor._tAlloc(data, sh);
+    return rayzor._useGpu() ? rayzor._tAllocGpu(data, sh) : rayzor._tAlloc(data, sh);
   }},
   rayzor_tensor_full: (shapePtr, val, dtype) => {{
-    // val is f64 — passed directly (not boxed) since import sig is (i32, f64, i32)
     const sh = rayzor._readShapeI32(shapePtr);
     const numel = sh.reduce((a, b) => a * b, 1);
     const data = new Float64Array(numel); data.fill(val);
-    return rayzor._tAlloc(data, sh);
+    return rayzor._useGpu() ? rayzor._tAllocGpu(data, sh) : rayzor._tAlloc(data, sh);
   }},
   rayzor_tensor_from_array: (dataArrPtr, dtype) => {{
     const data = rayzor._readDataF64(dataArrPtr);
-    return rayzor._tAlloc(data, [data.length]);
+    return rayzor._useGpu() ? rayzor._tAllocGpu(data, [data.length]) : rayzor._tAlloc(data, [data.length]);
   }},
   rayzor_tensor_shape: (h) => 0, // returns Array<Int> — complex, stub for now
   rayzor_tensor_ndim: (h) => {{ const t = rayzor._tGet(h); return t ? t.shape.length : 0; }},
-  rayzor_tensor_numel: (h) => {{ const t = rayzor._tGet(h); return t ? t.data.length : 0; }},
-  rayzor_tensor_dtype: (h) => 0, // f64 = 0
+  rayzor_tensor_numel: (h) => {{ return rayzor._tNumel(rayzor._tGet(h)); }},
+  rayzor_tensor_dtype: (h) => 0,
   rayzor_tensor_shape_ptr: (h) => 0,
   rayzor_tensor_shape_ndim: (h) => {{ const t = rayzor._tGet(h); return t ? t.shape.length : 0; }},
   rayzor_tensor_get: (h, idxArrPtr) => {{
     const t = rayzor._tGet(h); if (!t) return 0;
-    // idxArrPtr is an Array<Int> of indices
     const idx = rayzor._readShapeI32(idxArrPtr);
-    // Compute flat index from multi-dim indices
     let flat = 0, stride = 1;
     for (let i = t.shape.length - 1; i >= 0; i--) {{
       flat += (idx[i] || 0) * stride;
       stride *= t.shape[i];
     }}
+    if (t.gpu) return rayzor._tReadGpu(t, flat);
     return t.data[flat] || 0;
   }},
   rayzor_tensor_set: (h, idxArrPtr, val) => {{
-    const t = rayzor._tGet(h); if (!t) return;
+    const t = rayzor._tGet(h); if (!t || t.gpu) return; // GPU set requires write_buffer; not yet
     const idx = rayzor._readShapeI32(idxArrPtr);
     let flat = 0, stride = 1;
     for (let i = t.shape.length - 1; i >= 0; i--) {{
@@ -4066,32 +4093,63 @@ const rayzor = {{
     for (let i = 0; i < m; i++) for (let j = 0; j < n; j++) d[j * m + i] = t.data[i * n + j];
     return rayzor._tAlloc(d, [n, m]);
   }},
+  // Binary elementwise — GPU dispatch when both inputs GPU, else CPU
   rayzor_tensor_add: (a, b) => {{
     const at = rayzor._tGet(a), bt = rayzor._tGet(b); if (!at || !bt) return 0;
+    if (at.gpu && bt.gpu) {{
+      const buf_h = rayzor._gpuMod.rayzor_gpu_compute_add(rayzor._gpuDeviceH, at.buf_h, bt.buf_h);
+      const h = rayzor._tensorNext++;
+      rayzor._tensorHandles.set(h, {{ buf_h, shape: [...at.shape], gpu: true }});
+      return h;
+    }}
     const d = new Float64Array(at.data.length);
     for (let i = 0; i < at.data.length; i++) d[i] = at.data[i] + bt.data[i];
     return rayzor._tAlloc(d, [...at.shape]);
   }},
   rayzor_tensor_sub: (a, b) => {{
     const at = rayzor._tGet(a), bt = rayzor._tGet(b); if (!at || !bt) return 0;
+    if (at.gpu && bt.gpu) {{
+      const buf_h = rayzor._gpuMod.rayzor_gpu_compute_sub(rayzor._gpuDeviceH, at.buf_h, bt.buf_h);
+      const h = rayzor._tensorNext++;
+      rayzor._tensorHandles.set(h, {{ buf_h, shape: [...at.shape], gpu: true }});
+      return h;
+    }}
     const d = new Float64Array(at.data.length);
     for (let i = 0; i < at.data.length; i++) d[i] = at.data[i] - bt.data[i];
     return rayzor._tAlloc(d, [...at.shape]);
   }},
   rayzor_tensor_mul: (a, b) => {{
     const at = rayzor._tGet(a), bt = rayzor._tGet(b); if (!at || !bt) return 0;
+    if (at.gpu && bt.gpu) {{
+      const buf_h = rayzor._gpuMod.rayzor_gpu_compute_mul(rayzor._gpuDeviceH, at.buf_h, bt.buf_h);
+      const h = rayzor._tensorNext++;
+      rayzor._tensorHandles.set(h, {{ buf_h, shape: [...at.shape], gpu: true }});
+      return h;
+    }}
     const d = new Float64Array(at.data.length);
     for (let i = 0; i < at.data.length; i++) d[i] = at.data[i] * bt.data[i];
     return rayzor._tAlloc(d, [...at.shape]);
   }},
   rayzor_tensor_div: (a, b) => {{
     const at = rayzor._tGet(a), bt = rayzor._tGet(b); if (!at || !bt) return 0;
+    if (at.gpu && bt.gpu) {{
+      const buf_h = rayzor._gpuMod.rayzor_gpu_compute_div(rayzor._gpuDeviceH, at.buf_h, bt.buf_h);
+      const h = rayzor._tensorNext++;
+      rayzor._tensorHandles.set(h, {{ buf_h, shape: [...at.shape], gpu: true }});
+      return h;
+    }}
     const d = new Float64Array(at.data.length);
     for (let i = 0; i < at.data.length; i++) d[i] = bt.data[i] !== 0 ? at.data[i] / bt.data[i] : 0;
     return rayzor._tAlloc(d, [...at.shape]);
   }},
   rayzor_tensor_matmul: (a, b) => {{
     const at = rayzor._tGet(a), bt = rayzor._tGet(b); if (!at || !bt) return 0;
+    if (at.gpu && bt.gpu) {{
+      const buf_h = rayzor._gpuMod.rayzor_gpu_compute_matmul(rayzor._gpuDeviceH, at.buf_h, bt.buf_h, at.shape[0], at.shape[1], bt.shape[1]);
+      const h = rayzor._tensorNext++;
+      rayzor._tensorHandles.set(h, {{ buf_h, shape: [at.shape[0], bt.shape[1]], gpu: true }});
+      return h;
+    }}
     const m = at.shape[0], k = at.shape[1], n = bt.shape[1];
     const d = new Float64Array(m * n);
     for (let i = 0; i < m; i++) for (let j = 0; j < n; j++) {{
@@ -4100,48 +4158,84 @@ const rayzor = {{
     }}
     return rayzor._tAlloc(d, [m, n]);
   }},
+  // Unary ops — GPU dispatch when input GPU, else CPU
   rayzor_tensor_sqrt: (h) => {{
     const t = rayzor._tGet(h); if (!t) return 0;
+    if (t.gpu) {{
+      const buf_h = rayzor._gpuMod.rayzor_gpu_compute_sqrt(rayzor._gpuDeviceH, t.buf_h);
+      const nh = rayzor._tensorNext++;
+      rayzor._tensorHandles.set(nh, {{ buf_h, shape: [...t.shape], gpu: true }});
+      return nh;
+    }}
     const d = new Float64Array(t.data.length);
     for (let i = 0; i < t.data.length; i++) d[i] = Math.sqrt(t.data[i]);
     return rayzor._tAlloc(d, [...t.shape]);
   }},
   rayzor_tensor_exp: (h) => {{
     const t = rayzor._tGet(h); if (!t) return 0;
+    if (t.gpu) {{
+      const buf_h = rayzor._gpuMod.rayzor_gpu_compute_exp(rayzor._gpuDeviceH, t.buf_h);
+      const nh = rayzor._tensorNext++;
+      rayzor._tensorHandles.set(nh, {{ buf_h, shape: [...t.shape], gpu: true }});
+      return nh;
+    }}
     const d = new Float64Array(t.data.length);
     for (let i = 0; i < t.data.length; i++) d[i] = Math.exp(t.data[i]);
     return rayzor._tAlloc(d, [...t.shape]);
   }},
   rayzor_tensor_log: (h) => {{
     const t = rayzor._tGet(h); if (!t) return 0;
+    if (t.gpu) {{
+      const buf_h = rayzor._gpuMod.rayzor_gpu_compute_log(rayzor._gpuDeviceH, t.buf_h);
+      const nh = rayzor._tensorNext++;
+      rayzor._tensorHandles.set(nh, {{ buf_h, shape: [...t.shape], gpu: true }});
+      return nh;
+    }}
     const d = new Float64Array(t.data.length);
     for (let i = 0; i < t.data.length; i++) d[i] = Math.log(t.data[i]);
     return rayzor._tAlloc(d, [...t.shape]);
   }},
   rayzor_tensor_relu: (h) => {{
     const t = rayzor._tGet(h); if (!t) return 0;
+    if (t.gpu) {{
+      const buf_h = rayzor._gpuMod.rayzor_gpu_compute_relu(rayzor._gpuDeviceH, t.buf_h);
+      const nh = rayzor._tensorNext++;
+      rayzor._tensorHandles.set(nh, {{ buf_h, shape: [...t.shape], gpu: true }});
+      return nh;
+    }}
     const d = new Float64Array(t.data.length);
     for (let i = 0; i < t.data.length; i++) d[i] = Math.max(0, t.data[i]);
     return rayzor._tAlloc(d, [...t.shape]);
   }},
+  // Reductions — sync read via wgpu device.poll(Wait)
   rayzor_tensor_sum: (h) => {{
     const t = rayzor._tGet(h); if (!t) return 0;
+    if (t.gpu) return rayzor._gpuMod.rayzor_gpu_compute_sum(rayzor._gpuDeviceH, t.buf_h);
     let s = 0; for (let i = 0; i < t.data.length; i++) s += t.data[i];
     return s;
   }},
   rayzor_tensor_mean: (h) => {{
-    const t = rayzor._tGet(h); if (!t || t.data.length === 0) return 0;
+    const t = rayzor._tGet(h); if (!t || rayzor._tNumel(t) === 0) return 0;
+    if (t.gpu) return rayzor._gpuMod.rayzor_gpu_compute_mean(rayzor._gpuDeviceH, t.buf_h);
     let s = 0; for (let i = 0; i < t.data.length; i++) s += t.data[i];
     return s / t.data.length;
   }},
   rayzor_tensor_dot: (a, b) => {{
     const at = rayzor._tGet(a), bt = rayzor._tGet(b); if (!at || !bt) return 0;
+    if (at.gpu && bt.gpu) return rayzor._gpuMod.rayzor_gpu_compute_dot(rayzor._gpuDeviceH, at.buf_h, bt.buf_h);
     let s = 0; const n = Math.min(at.data.length, bt.data.length);
     for (let i = 0; i < n; i++) s += at.data[i] * bt.data[i];
     return s;
   }},
   rayzor_tensor_data: (h) => 0,
-  rayzor_tensor_free: (h) => {{ rayzor._tensorHandles.delete(rayzor._unboxInt(h)); }},
+  rayzor_tensor_free: (h) => {{
+    h = rayzor._unboxInt(h);
+    const t = rayzor._tensorHandles.get(h);
+    if (t && t.gpu && rayzor._gpuMod) {{
+      rayzor._gpuMod.rayzor_gpu_compute_free_buffer(rayzor._gpuDeviceH, t.buf_h);
+    }}
+    rayzor._tensorHandles.delete(h);
+  }},
   // Bare-name aliases for forwarder stubs
   Tensor_zeros: (...a) => rayzor.rayzor_tensor_zeros(...a),
   Tensor_ones: (...a) => rayzor.rayzor_tensor_ones(...a),
