@@ -972,6 +972,70 @@ pub fn compute_buffer_dtype(buf_h: i32) -> i32 {
     }
 }
 
+/// Write an f32 array into a compute buffer (uploads via queue.write_buffer).
+/// `data` is a JS Float32Array (zero-copy view into WASM memory).
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_buffer_write_f32")]
+pub fn compute_buffer_write_f32(dev_h: i32, buf_h: i32, data: &[f32]) {
+    let ht = HANDLES.lock().unwrap();
+    let ctx = match ht.get(dev_h) {
+        Some(GpuObject::GfxContext(c)) => c,
+        _ => return,
+    };
+    let buf = match ht.get(buf_h) {
+        Some(GpuObject::ComputeBuffer(b)) => &b.buffer.buffer,
+        _ => return,
+    };
+    let bytes: &[u8] = f32_slice_as_bytes(data);
+    ctx.queue.write_buffer(buf, 0, bytes);
+}
+
+/// Read a single f32 element from a compute buffer.
+/// Synchronous via device.poll(Maintain::Wait).
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_buffer_read_f32")]
+pub fn compute_buffer_read_f32(dev_h: i32, buf_h: i32, idx: i32) -> f64 {
+    let ht = HANDLES.lock().unwrap();
+    let ctx = match ht.get(dev_h) {
+        Some(GpuObject::GfxContext(c)) => c,
+        _ => return 0.0,
+    };
+    let (buf, numel) = match ht.get(buf_h) {
+        Some(GpuObject::ComputeBuffer(b)) => (&b.buffer.buffer, b.numel as i32),
+        _ => return 0.0,
+    };
+    if idx < 0 || idx >= numel {
+        return 0.0;
+    }
+    let read_buf = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: None,
+        size: 4,
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut encoder = ctx.device.create_command_encoder(&Default::default());
+    encoder.copy_buffer_to_buffer(buf, (idx as u64) * 4, &read_buf, 0, 4);
+    ctx.queue.submit(std::iter::once(encoder.finish()));
+    let slice = read_buf.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    ctx.device.poll(wgpu::Maintain::Wait);
+    let data = slice.get_mapped_range();
+    let result = f32::from_le_bytes([data[0], data[1], data[2], data[3]]) as f64;
+    drop(data);
+    read_buf.unmap();
+    result
+}
+
+/// Create a compute buffer initialized with a constant f32 value.
+#[wasm_bindgen(js_name = "rayzor_gpu_compute_full_f32")]
+pub fn compute_full_f32(dev_h: i32, numel: i32, value: f32) -> i32 {
+    let buf_h = compute_alloc_buffer(dev_h, numel, 1); // F32
+    if buf_h == 0 {
+        return 0;
+    }
+    let data = vec![value; numel as usize];
+    compute_buffer_write_f32(dev_h, buf_h, &data);
+    buf_h
+}
+
 // ============================================================================
 // Compute elementwise ops — compile WGSL + dispatch
 // ============================================================================
@@ -1549,5 +1613,9 @@ pub fn compute_matmul(dev_h: i32, a_h: i32, b_h: i32, m: i32, k: i32, n: i32) ->
 
 /// Safe cast for uniform buffer data
 fn bytemuck_cast_slice(data: &[u32]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) }
+}
+
+fn f32_slice_as_bytes(data: &[f32]) -> &[u8] {
     unsafe { std::slice::from_raw_parts(data.as_ptr() as *const u8, data.len() * 4) }
 }

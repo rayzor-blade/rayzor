@@ -1,0 +1,8 @@
+[project]
+name = "wasm-features"
+
+[build]
+class-paths = [".", "../../compiler/haxe-std"]
+
+[wasm]
+hosts = { "rayzor-gpu" = "../../gpu/pkg/rayzor_gpu.js" }
