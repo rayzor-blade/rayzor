@@ -11,6 +11,18 @@ export function rayzor_gpu_compute_buffer_dtype(buf_h: number): number;
 
 export function rayzor_gpu_compute_buffer_numel(buf_h: number): number;
 
+/**
+ * Read a single f32 element from a compute buffer.
+ * Synchronous via device.poll(Maintain::Wait).
+ */
+export function rayzor_gpu_compute_buffer_read_f32(dev_h: number, buf_h: number, idx: number): number;
+
+/**
+ * Write an f32 array into a compute buffer (uploads via queue.write_buffer).
+ * `data` is a JS Float32Array (zero-copy view into WASM memory).
+ */
+export function rayzor_gpu_compute_buffer_write_f32(dev_h: number, buf_h: number, data: Float32Array): void;
+
 export function rayzor_gpu_compute_create(): Promise<number>;
 
 export function rayzor_gpu_compute_destroy(h: number): void;
@@ -22,6 +34,11 @@ export function rayzor_gpu_compute_dot(dev_h: number, a_h: number, b_h: number):
 export function rayzor_gpu_compute_exp(dev: number, a: number): number;
 
 export function rayzor_gpu_compute_free_buffer(_dev_h: number, buf_h: number): void;
+
+/**
+ * Create a compute buffer initialized with a constant f32 value.
+ */
+export function rayzor_gpu_compute_full_f32(dev_h: number, numel: number, value: number): number;
 
 export function rayzor_gpu_compute_gelu(dev: number, a: number): number;
 
@@ -162,12 +179,15 @@ export interface InitOutput {
   readonly rayzor_gpu_compute_alloc_buffer: (a: number, b: number, c: number) => number;
   readonly rayzor_gpu_compute_buffer_dtype: (a: number) => number;
   readonly rayzor_gpu_compute_buffer_numel: (a: number) => number;
+  readonly rayzor_gpu_compute_buffer_read_f32: (a: number, b: number, c: number) => number;
+  readonly rayzor_gpu_compute_buffer_write_f32: (a: number, b: number, c: number, d: number) => void;
   readonly rayzor_gpu_compute_create: () => any;
   readonly rayzor_gpu_compute_destroy: (a: number) => void;
   readonly rayzor_gpu_compute_div: (a: number, b: number, c: number) => number;
   readonly rayzor_gpu_compute_dot: (a: number, b: number, c: number) => number;
   readonly rayzor_gpu_compute_exp: (a: number, b: number) => number;
   readonly rayzor_gpu_compute_free_buffer: (a: number, b: number) => void;
+  readonly rayzor_gpu_compute_full_f32: (a: number, b: number, c: number) => number;
   readonly rayzor_gpu_compute_gelu: (a: number, b: number) => number;
   readonly rayzor_gpu_compute_is_available: () => number;
   readonly rayzor_gpu_compute_log: (a: number, b: number) => number;
@@ -233,10 +253,10 @@ export interface InitOutput {
   readonly rayzor_gpu_gfx_texture_destroy: (a: number) => void;
   readonly rayzor_gpu_gfx_texture_get_view: (a: number) => number;
   readonly rayzor_gpu_gfx_texture_write: (a: number, b: number, c: number, d: number, e: number, f: number) => void;
-  readonly wasm_bindgen_335648ada7beb221___convert__closures_____invoke___wasm_bindgen_335648ada7beb221___JsValue_____: (a: number, b: number, c: any) => void;
-  readonly wasm_bindgen_335648ada7beb221___closure__destroy___dyn_core_e0615fd90a40850c___ops__function__FnMut__wasm_bindgen_335648ada7beb221___JsValue____Output_______: (a: number, b: number) => void;
   readonly wasm_bindgen_335648ada7beb221___convert__closures_____invoke___wgpu_357224c008ed929d___backend__webgpu__webgpu_sys__gen_GpuUncapturedErrorEvent__GpuUncapturedErrorEvent_____: (a: number, b: number, c: any) => void;
   readonly wasm_bindgen_335648ada7beb221___closure__destroy___dyn_core_e0615fd90a40850c___ops__function__FnMut__wgpu_357224c008ed929d___backend__webgpu__webgpu_sys__gen_GpuUncapturedErrorEvent__GpuUncapturedErrorEvent____Output_______: (a: number, b: number) => void;
+  readonly wasm_bindgen_335648ada7beb221___convert__closures_____invoke___wasm_bindgen_335648ada7beb221___JsValue_____: (a: number, b: number, c: any) => void;
+  readonly wasm_bindgen_335648ada7beb221___closure__destroy___dyn_core_e0615fd90a40850c___ops__function__FnMut__wasm_bindgen_335648ada7beb221___JsValue____Output_______: (a: number, b: number) => void;
   readonly wasm_bindgen_335648ada7beb221___convert__closures_____invoke___bool_: (a: number, b: number) => number;
   readonly wasm_bindgen_335648ada7beb221___convert__closures_____invoke___js_sys_fbc68f94bd5fe60e___Function__js_sys_fbc68f94bd5fe60e___Function_____: (a: number, b: number, c: any, d: any) => void;
   readonly __wbindgen_malloc: (a: number, b: number) => number;

@@ -3934,48 +3934,31 @@ const rayzor = {{
   rayzor_uncompress_set_flush: () => {{}},
   rayzor_uncompress_close: () => {{}},
 
-  // Tensor — Float64 typed-array compute with WebGPU acceleration.
-  // When navigator.gpu is available, WebGPU is initialized at startup and
-  // used for compute-heavy ops (matmul). Sync reads (sum, mean, dot, get)
-  // use CPU shadow data to satisfy the synchronous WASM ABI.
-  _tensorHandles: new Map(),
+  // Tensor — uses rayzor-gpu wgpu compute backend when available, CPU fallback otherwise.
+  // The wgpu host module (gpu/pkg/rayzor_gpu.js) provides synchronous compute via
+  // device.poll(Maintain::Wait) inside the wasm-host crate. Tensors are GPU buffer
+  // handles + shape; sync reads work because wgpu handles them synchronously in WASM.
+  _tensorHandles: new Map(), // tensor_id -> {{ gpu_buf, shape, cpu_data? }}
   _tensorNext: 1,
-  _gpu: null, // {{ adapter, device }} when WebGPU available
-  _gpuPipelines: null, // compute pipelines (matmul, elementwise) — created in _gpuInit
+  _gpuDeviceH: 0, // rayzor-gpu compute device handle (set after _gpuInit)
+  _gpuMod: null,  // _rayzor_gpu module ref (set after host init)
   _gpuInit: function() {{
-    if (!rayzor._gpu) return;
-    const device = rayzor._gpu.device;
-    // Matmul compute shader (M x K @ K x N -> M x N, f32)
-    const matmulShader = device.createShaderModule({{
-      code: `
-        struct Dims {{ M: u32, K: u32, N: u32, _pad: u32 }};
-        @group(0) @binding(0) var<uniform> dims: Dims;
-        @group(0) @binding(1) var<storage, read> a: array<f32>;
-        @group(0) @binding(2) var<storage, read> b: array<f32>;
-        @group(0) @binding(3) var<storage, read_write> c: array<f32>;
-        @compute @workgroup_size(8, 8)
-        fn main(@builtin(global_invocation_id) gid: vec3<u32>) {{
-          let row = gid.x; let col = gid.y;
-          if (row >= dims.M || col >= dims.N) {{ return; }}
-          var sum: f32 = 0.0;
-          for (var k: u32 = 0u; k < dims.K; k = k + 1u) {{
-            sum = sum + a[row * dims.K + k] * b[k * dims.N + col];
-          }}
-          c[row * dims.N + col] = sum;
-        }}
-      `
-    }});
-    rayzor._gpuPipelines = {{
-      matmul: device.createComputePipeline({{
-        layout: "auto",
-        compute: {{ module: matmulShader, entryPoint: "main" }}
-      }}),
-    }};
+    // Called after wasm-bindgen host init. If rayzor-gpu is loaded, create the compute device.
+    if (typeof _rayzor_gpu === 'undefined') return;
+    rayzor._gpuMod = _rayzor_gpu;
+    // compute_create is async — pre-resolved by _precall_async into the adapter.
+    // The host adapter exposes it as a sync function returning the cached result.
+    if (typeof _rayzor_gpu.rayzor_gpu_compute_create === 'function') {{
+      const result = _rayzor_gpu.rayzor_gpu_compute_create();
+      // Result may be a Promise (if not pre-resolved) or a number
+      if (typeof result === 'number') {{
+        rayzor._gpuDeviceH = result;
+      }}
+    }}
+    if (rayzor._gpuDeviceH > 0) {{
+      console.log('[rayzor] Tensor: using wgpu compute backend (device handle ' + rayzor._gpuDeviceH + ')');
+    }}
   }},
-  // GPU matmul: dispatches compute to GPU and stores result in destination CPU buffer.
-  // Returns a Promise; caller uses CPU result for sync API.
-  // For sync WASM ABI, we use CPU compute as the source of truth and GPU as
-  // verification/acceleration when batching is added.
   _tAlloc: function(data, shape) {{
     const h = rayzor._tensorNext++;
     rayzor._tensorHandles.set(h, {{ data, shape }});
@@ -4558,23 +4541,11 @@ async function run() {{
     get: (target, prop) => target[prop] ?? ((...args) => 0),
   }});
 
-  // Initialize wasm-bindgen host modules
+  // Initialize wasm-bindgen host modules (loads _bg.wasm, pre-resolves async)
   {host_init}
 
-  // -- WebGPU compute backend init (mandatory when navigator.gpu available) --
-  if (typeof navigator !== "undefined" && navigator.gpu) {{
-    try {{
-      const adapter = await navigator.gpu.requestAdapter();
-      if (adapter) {{
-        const device = await adapter.requestDevice();
-        rayzor._gpu = {{ adapter, device }};
-        rayzor._gpuInit();
-        console.log("[rayzor] WebGPU compute backend initialized");
-      }}
-    }} catch (e) {{
-      console.warn("[rayzor] WebGPU init failed, falling back to CPU:", e);
-    }}
-  }}
+  // Initialize Tensor compute backend (uses rayzor-gpu host if available)
+  if (typeof rayzor._gpuInit === 'function') rayzor._gpuInit();
 
   const {{ instance }} = await WebAssembly.instantiate(wasmBytes, {{
     rayzor: rayzorProxy,
