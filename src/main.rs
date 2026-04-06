@@ -3934,40 +3934,199 @@ const rayzor = {{
   rayzor_uncompress_set_flush: () => {{}},
   rayzor_uncompress_close: () => {{}},
 
-  // Tensor — WASM SIMD + WebGPU compute (with WebGL2 fallback)
-  // Tensor data lives in WASM linear memory for SIMD ops.
-  // GPU offload uses the rayzor-gpu host module.
+  // Tensor — Float64 typed-array compute with optional WebGPU offload.
+  // Tensors are stored in a JS Map by handle ID. Data is f64 (matching native).
   _tensorHandles: new Map(),
   _tensorNext: 1,
-  rayzor_tensor_zeros: (shapePtr, dtype) => 0,
-  rayzor_tensor_ones: (shapePtr, dtype) => 0,
-  rayzor_tensor_rand: (shapePtr, dtype) => 0,
-  rayzor_tensor_full: (shapePtr, dtype, val) => 0,
-  rayzor_tensor_from_array: (dataPtr, shapePtr, dtype) => 0,
-  rayzor_tensor_shape: (t) => 0,
-  rayzor_tensor_ndim: (t) => 0,
-  rayzor_tensor_numel: (t) => 0,
-  rayzor_tensor_dtype: (t) => 0,
-  rayzor_tensor_shape_ptr: (t) => 0,
-  rayzor_tensor_shape_ndim: (t) => 0,
-  rayzor_tensor_get: (t, idx) => 0,
-  rayzor_tensor_set: (t, idx, val) => {{}},
-  rayzor_tensor_reshape: (t, shapePtr) => 0,
-  rayzor_tensor_transpose: (t) => 0,
-  rayzor_tensor_add: (a, b) => 0,
-  rayzor_tensor_sub: (a, b) => 0,
-  rayzor_tensor_mul: (a, b) => 0,
-  rayzor_tensor_div: (a, b) => 0,
-  rayzor_tensor_matmul: (a, b) => 0,
-  rayzor_tensor_sqrt: (t) => 0,
-  rayzor_tensor_exp: (t) => 0,
-  rayzor_tensor_log: (t) => 0,
-  rayzor_tensor_relu: (t) => 0,
-  rayzor_tensor_sum: (t) => 0,
-  rayzor_tensor_mean: (t) => 0,
-  rayzor_tensor_dot: (a, b) => 0,
-  rayzor_tensor_data: (t) => 0,
-  rayzor_tensor_free: (t) => {{}},
+  _tAlloc: function(data, shape) {{
+    const h = rayzor._tensorNext++;
+    rayzor._tensorHandles.set(h, {{ data, shape }});
+    return h;
+  }},
+  _tGet: function(h) {{ return rayzor._tensorHandles.get(rayzor._unboxInt(h)); }},
+  // Read a HaxeArray of i32 (shape) — 32-byte header at MIR layout (8-byte stride)
+  _readShapeI32: function(arrPtr) {{
+    arrPtr = rayzor._unboxInt(arrPtr);
+    if (!memory || !arrPtr) return [];
+    const v = new DataView(memory.buffer);
+    const dataPtr = v.getUint32(arrPtr, true);
+    const len = v.getUint32(arrPtr + 8, true);
+    const elemSize = v.getUint32(arrPtr + 24, true) || 8;
+    const out = [];
+    for (let i = 0; i < len; i++) {{
+      out.push(v.getInt32(dataPtr + i * elemSize, true));
+    }}
+    return out;
+  }},
+  // Read a HaxeArray of f64 (data) from WASM memory
+  _readDataF64: function(arrPtr) {{
+    arrPtr = rayzor._unboxInt(arrPtr);
+    if (!memory || !arrPtr) return [];
+    const v = new DataView(memory.buffer);
+    const dataPtr = v.getUint32(arrPtr, true);
+    const len = v.getUint32(arrPtr + 8, true);
+    const elemSize = v.getUint32(arrPtr + 24, true) || 8;
+    const out = new Float64Array(len);
+    for (let i = 0; i < len; i++) {{
+      if (elemSize >= 8) {{
+        out[i] = v.getFloat64(dataPtr + i * elemSize, true);
+      }} else {{
+        out[i] = v.getFloat32(dataPtr + i * elemSize, true);
+      }}
+    }}
+    return out;
+  }},
+  rayzor_tensor_zeros: (shapePtr, dtype) => {{
+    const sh = rayzor._readShapeI32(shapePtr);
+    const numel = sh.reduce((a, b) => a * b, 1);
+    return rayzor._tAlloc(new Float64Array(numel), sh);
+  }},
+  rayzor_tensor_ones: (shapePtr, dtype) => {{
+    const sh = rayzor._readShapeI32(shapePtr);
+    const numel = sh.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(numel); data.fill(1);
+    return rayzor._tAlloc(data, sh);
+  }},
+  rayzor_tensor_rand: (shapePtr, dtype) => {{
+    const sh = rayzor._readShapeI32(shapePtr);
+    const numel = sh.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(numel);
+    for (let i = 0; i < numel; i++) data[i] = Math.random();
+    return rayzor._tAlloc(data, sh);
+  }},
+  rayzor_tensor_full: (shapePtr, val, dtype) => {{
+    // val is f64 — passed directly (not boxed) since import sig is (i32, f64, i32)
+    const sh = rayzor._readShapeI32(shapePtr);
+    const numel = sh.reduce((a, b) => a * b, 1);
+    const data = new Float64Array(numel); data.fill(val);
+    return rayzor._tAlloc(data, sh);
+  }},
+  rayzor_tensor_from_array: (dataArrPtr, dtype) => {{
+    const data = rayzor._readDataF64(dataArrPtr);
+    return rayzor._tAlloc(data, [data.length]);
+  }},
+  rayzor_tensor_shape: (h) => 0, // returns Array<Int> — complex, stub for now
+  rayzor_tensor_ndim: (h) => {{ const t = rayzor._tGet(h); return t ? t.shape.length : 0; }},
+  rayzor_tensor_numel: (h) => {{ const t = rayzor._tGet(h); return t ? t.data.length : 0; }},
+  rayzor_tensor_dtype: (h) => 0, // f64 = 0
+  rayzor_tensor_shape_ptr: (h) => 0,
+  rayzor_tensor_shape_ndim: (h) => {{ const t = rayzor._tGet(h); return t ? t.shape.length : 0; }},
+  rayzor_tensor_get: (h, idxArrPtr) => {{
+    const t = rayzor._tGet(h); if (!t) return 0;
+    // idxArrPtr is an Array<Int> of indices
+    const idx = rayzor._readShapeI32(idxArrPtr);
+    // Compute flat index from multi-dim indices
+    let flat = 0, stride = 1;
+    for (let i = t.shape.length - 1; i >= 0; i--) {{
+      flat += (idx[i] || 0) * stride;
+      stride *= t.shape[i];
+    }}
+    return t.data[flat] || 0;
+  }},
+  rayzor_tensor_set: (h, idxArrPtr, val) => {{
+    const t = rayzor._tGet(h); if (!t) return;
+    const idx = rayzor._readShapeI32(idxArrPtr);
+    let flat = 0, stride = 1;
+    for (let i = t.shape.length - 1; i >= 0; i--) {{
+      flat += (idx[i] || 0) * stride;
+      stride *= t.shape[i];
+    }}
+    t.data[flat] = val;
+  }},
+  rayzor_tensor_reshape: (h, shapePtr) => {{
+    const t = rayzor._tGet(h); if (!t) return 0;
+    const sh = rayzor._readShapeI32(shapePtr);
+    return rayzor._tAlloc(new Float64Array(t.data), sh);
+  }},
+  rayzor_tensor_transpose: (h) => {{
+    const t = rayzor._tGet(h); if (!t || t.shape.length !== 2) return 0;
+    const [m, n] = t.shape;
+    const d = new Float64Array(m * n);
+    for (let i = 0; i < m; i++) for (let j = 0; j < n; j++) d[j * m + i] = t.data[i * n + j];
+    return rayzor._tAlloc(d, [n, m]);
+  }},
+  rayzor_tensor_add: (a, b) => {{
+    const at = rayzor._tGet(a), bt = rayzor._tGet(b); if (!at || !bt) return 0;
+    const d = new Float64Array(at.data.length);
+    for (let i = 0; i < at.data.length; i++) d[i] = at.data[i] + bt.data[i];
+    return rayzor._tAlloc(d, [...at.shape]);
+  }},
+  rayzor_tensor_sub: (a, b) => {{
+    const at = rayzor._tGet(a), bt = rayzor._tGet(b); if (!at || !bt) return 0;
+    const d = new Float64Array(at.data.length);
+    for (let i = 0; i < at.data.length; i++) d[i] = at.data[i] - bt.data[i];
+    return rayzor._tAlloc(d, [...at.shape]);
+  }},
+  rayzor_tensor_mul: (a, b) => {{
+    const at = rayzor._tGet(a), bt = rayzor._tGet(b); if (!at || !bt) return 0;
+    const d = new Float64Array(at.data.length);
+    for (let i = 0; i < at.data.length; i++) d[i] = at.data[i] * bt.data[i];
+    return rayzor._tAlloc(d, [...at.shape]);
+  }},
+  rayzor_tensor_div: (a, b) => {{
+    const at = rayzor._tGet(a), bt = rayzor._tGet(b); if (!at || !bt) return 0;
+    const d = new Float64Array(at.data.length);
+    for (let i = 0; i < at.data.length; i++) d[i] = bt.data[i] !== 0 ? at.data[i] / bt.data[i] : 0;
+    return rayzor._tAlloc(d, [...at.shape]);
+  }},
+  rayzor_tensor_matmul: (a, b) => {{
+    const at = rayzor._tGet(a), bt = rayzor._tGet(b); if (!at || !bt) return 0;
+    const m = at.shape[0], k = at.shape[1], n = bt.shape[1];
+    const d = new Float64Array(m * n);
+    for (let i = 0; i < m; i++) for (let j = 0; j < n; j++) {{
+      let s = 0; for (let p = 0; p < k; p++) s += at.data[i * k + p] * bt.data[p * n + j];
+      d[i * n + j] = s;
+    }}
+    return rayzor._tAlloc(d, [m, n]);
+  }},
+  rayzor_tensor_sqrt: (h) => {{
+    const t = rayzor._tGet(h); if (!t) return 0;
+    const d = new Float64Array(t.data.length);
+    for (let i = 0; i < t.data.length; i++) d[i] = Math.sqrt(t.data[i]);
+    return rayzor._tAlloc(d, [...t.shape]);
+  }},
+  rayzor_tensor_exp: (h) => {{
+    const t = rayzor._tGet(h); if (!t) return 0;
+    const d = new Float64Array(t.data.length);
+    for (let i = 0; i < t.data.length; i++) d[i] = Math.exp(t.data[i]);
+    return rayzor._tAlloc(d, [...t.shape]);
+  }},
+  rayzor_tensor_log: (h) => {{
+    const t = rayzor._tGet(h); if (!t) return 0;
+    const d = new Float64Array(t.data.length);
+    for (let i = 0; i < t.data.length; i++) d[i] = Math.log(t.data[i]);
+    return rayzor._tAlloc(d, [...t.shape]);
+  }},
+  rayzor_tensor_relu: (h) => {{
+    const t = rayzor._tGet(h); if (!t) return 0;
+    const d = new Float64Array(t.data.length);
+    for (let i = 0; i < t.data.length; i++) d[i] = Math.max(0, t.data[i]);
+    return rayzor._tAlloc(d, [...t.shape]);
+  }},
+  rayzor_tensor_sum: (h) => {{
+    const t = rayzor._tGet(h); if (!t) return 0;
+    let s = 0; for (let i = 0; i < t.data.length; i++) s += t.data[i];
+    return s;
+  }},
+  rayzor_tensor_mean: (h) => {{
+    const t = rayzor._tGet(h); if (!t || t.data.length === 0) return 0;
+    let s = 0; for (let i = 0; i < t.data.length; i++) s += t.data[i];
+    return s / t.data.length;
+  }},
+  rayzor_tensor_dot: (a, b) => {{
+    const at = rayzor._tGet(a), bt = rayzor._tGet(b); if (!at || !bt) return 0;
+    let s = 0; const n = Math.min(at.data.length, bt.data.length);
+    for (let i = 0; i < n; i++) s += at.data[i] * bt.data[i];
+    return s;
+  }},
+  rayzor_tensor_data: (h) => 0,
+  rayzor_tensor_free: (h) => {{ rayzor._tensorHandles.delete(rayzor._unboxInt(h)); }},
+  // Bare-name aliases for forwarder stubs
+  Tensor_zeros: (...a) => rayzor.rayzor_tensor_zeros(...a),
+  Tensor_ones: (...a) => rayzor.rayzor_tensor_ones(...a),
+  Tensor_full: (...a) => rayzor.rayzor_tensor_full(...a),
+  Tensor_fromArray: (...a) => rayzor.rayzor_tensor_from_array(...a),
+  Tensor_rand: (...a) => rayzor.rayzor_tensor_rand(...a),
 
   // Networking — fetch + WebSocket for browser
   rayzor_socket_new: () => 0,
