@@ -682,11 +682,14 @@ const ARRAY_ELEM_SIZE: u32 = 4; // i32 elements for basic array
 #[no_mangle]
 pub extern "C" fn haxe_array_new() -> i32 {
     unsafe {
-        // Allocate the HaxeArray header (16 bytes) via rt_alloc
-        let header = rt_alloc(16);
+        // Allocate the HaxeArray header (32 bytes to match MIR layout with i64 fields)
+        let header = rt_alloc(32);
         if header == 0 {
             return 0;
         }
+
+        // Zero the header
+        core::ptr::write_bytes(header as *mut u8, 0, 32);
 
         // Allocate data buffer via rt_alloc
         let data_size = (ARRAY_INITIAL_CAP * ARRAY_ELEM_SIZE) as usize;
@@ -695,32 +698,37 @@ pub extern "C" fn haxe_array_new() -> i32 {
             return 0;
         }
 
-        // Initialize header: { ptr, len, cap, elem_size }
-        let h = header as *mut u32;
-        *h = data as u32;           // ptr
-        *h.add(1) = 0;              // len
-        *h.add(2) = ARRAY_INITIAL_CAP; // cap
-        *h.add(3) = ARRAY_ELEM_SIZE;   // elem_size
+        // Initialize header via write_array (uses 8-byte strides matching MIR)
+        write_array(header, data as u32, 0, ARRAY_INITIAL_CAP, ARRAY_ELEM_SIZE);
 
         header as i32
     }
 }
 
 /// Internal: read array header. Returns (data_ptr, len, cap, elem_size).
+///
+/// The MIR lowering uses a 32-byte HaxeArray struct with i64 fields at
+/// offsets 0, 8, 16, 24 (matching the native Rust struct layout on x86_64).
+/// On WASM32 we read only the low 32 bits of each i64 field.
 #[inline]
 unsafe fn read_array(arr: i32) -> (u32, u32, u32, u32) {
     let h = arr as *const u32;
-    (*h, *h.add(1), *h.add(2), *h.add(3))
+    // Field stride is 8 bytes (2 * u32) to match the MIR i64 GEP layout.
+    (*h, *h.add(2), *h.add(4), *h.add(6))
 }
 
 /// Internal: write array header fields.
+///
+/// Writes u32 values at 8-byte strides to match the MIR's 32-byte struct layout.
+/// The upper 32 bits of each 8-byte slot are left untouched (they'll be zero
+/// from initial zeroing by the MIR).
 #[inline]
 unsafe fn write_array(arr: i32, data_ptr: u32, len: u32, cap: u32, elem_size: u32) {
     let h = arr as *mut u32;
     *h = data_ptr;
-    *h.add(1) = len;
-    *h.add(2) = cap;
-    *h.add(3) = elem_size;
+    *h.add(2) = len;
+    *h.add(4) = cap;
+    *h.add(6) = elem_size;
 }
 
 /// Ensure the array has capacity for at least one more element.
@@ -730,9 +738,16 @@ unsafe fn array_ensure_capacity(arr: i32) {
     if len < cap {
         return;
     }
+    // Default elem_size to 8 bytes (MIR's HaxeArray slot size) if not set
+    let es = if elem_size == 0 { 8 } else { elem_size };
+    if elem_size == 0 {
+        // Update header so subsequent reads see the correct elem_size
+        let h = arr as *mut u32;
+        *h.add(6) = es;
+    }
     let new_cap = if cap == 0 { ARRAY_INITIAL_CAP } else { cap * 2 };
-    let old_size = (cap * elem_size) as usize;
-    let new_size = (new_cap * elem_size) as usize;
+    let old_size = (cap * es) as usize;
+    let new_size = (new_cap * es) as usize;
 
     // Allocate new buffer via rt_alloc (consistent with all other allocations)
     let new_data = rt_alloc(new_size);
@@ -753,11 +768,15 @@ unsafe fn array_ensure_capacity(arr: i32) {
     core::ptr::write_bytes((new_data as *mut u8).add(old_size), 0, new_size - old_size);
 
     let h = arr as *mut u32;
-    *h = new_data as u32;    // ptr
-    *h.add(2) = new_cap;    // cap
+    *h = new_data as u32;      // ptr at offset 0
+    *h.add(4) = new_cap;       // cap at offset 16 (8-byte stride * 2)
 }
 
 /// Push an i32 value onto the array.
+/// Note: signature is (i32, i32) to match MIR's `(I32 from Ptr, I32 from I64)`.
+/// On WASM32, MIR's IrType::I64 lowers to WASM i32, so we receive only the
+/// low 32 bits of the 64-bit value. For float arrays, callers must use
+/// haxe_array_push_f64 instead.
 #[no_mangle]
 pub extern "C" fn haxe_array_push_i64(arr: i32, val: i32) {
     if arr == 0 {
@@ -765,28 +784,57 @@ pub extern "C" fn haxe_array_push_i64(arr: i32, val: i32) {
     }
     unsafe {
         array_ensure_capacity(arr);
-        let (data_ptr, len, _, _) = read_array(arr);
-        let slot = (data_ptr as *mut i32).add(len as usize);
-        *slot = val;
-        // Update len
+        let (data_ptr, len, _, elem_size) = read_array(arr);
+        let es = if elem_size == 0 { 8 } else { elem_size };
+        let slot_addr = data_ptr + len * es;
+        *(slot_addr as *mut i32) = val;
+        if es >= 8 {
+            *((slot_addr + 4) as *mut i32) = 0; // zero high bits
+        }
         let h = arr as *mut u32;
-        *h.add(1) = len + 1;
+        *h.add(2) = len + 1;
     }
 }
 
-/// Get an i32 element at index. Returns 0 if out of bounds.
+/// Push an f64 value onto the array. Used for float array literals on WASM32.
+/// Stores the full 64-bit value at the slot.
+#[no_mangle]
+pub extern "C" fn haxe_array_push_f64(arr: i32, val: f64) {
+    if arr == 0 {
+        return;
+    }
+    unsafe {
+        array_ensure_capacity(arr);
+        let (data_ptr, len, _, elem_size) = read_array(arr);
+        let es = if elem_size == 0 { 8 } else { elem_size };
+        let slot_addr = data_ptr + len * es;
+        if es >= 8 {
+            *(slot_addr as *mut f64) = val;
+        } else {
+            // Truncate to f32 for 4-byte slots (lossy)
+            *(slot_addr as *mut f32) = val as f32;
+        }
+        let h = arr as *mut u32;
+        *h.add(2) = len + 1;
+    }
+}
+
+/// Get the low 32 bits of an element at index. Returns 0 if out of bounds.
+/// Reads from `data_ptr + idx * elem_size`.
 #[no_mangle]
 pub extern "C" fn haxe_array_get_i64(arr: i32, idx: i32) -> i32 {
     if arr == 0 || idx < 0 {
         return 0;
     }
     unsafe {
-        let (data_ptr, len, _, _) = read_array(arr);
+        let (data_ptr, len, _, elem_size) = read_array(arr);
         let index = idx as u32;
         if index >= len {
             return 0;
         }
-        *(data_ptr as *const i32).add(index as usize)
+        let es = if elem_size == 0 { 8 } else { elem_size };
+        let slot_addr = data_ptr + index * es;
+        *(slot_addr as *const i32)
     }
 }
 
@@ -1410,7 +1458,7 @@ pub extern "C" fn haxe_array_pop_i64(arr: i32) -> i32 {
         let val = *(data_ptr as *const i32).add((len - 1) as usize);
         // Decrement length
         let h = arr as *mut u32;
-        *h.add(1) = len - 1;
+        *h.add(2) = len - 1;
         val
     }
 }
@@ -1439,7 +1487,7 @@ pub extern "C" fn haxe_array_shift(arr: i32) -> i32 {
             ptr::copy(data.add(1), data, (len - 1) as usize);
         }
         let h = arr as *mut u32;
-        *h.add(1) = len - 1;
+        *h.add(2) = len - 1;
         val
     }
 }
@@ -1466,7 +1514,7 @@ pub extern "C" fn haxe_array_unshift(arr: i32, val: i32) {
         }
         *data = val;
         let h = arr as *mut u32;
-        *h.add(1) = len + 1;
+        *h.add(2) = len + 1;
     }
 }
 
@@ -1622,7 +1670,7 @@ pub extern "C" fn haxe_array_resize(arr: i32, new_len: i32) {
         if nl <= len {
             // Truncate
             let h = arr as *mut u32;
-            *h.add(1) = nl;
+            *h.add(2) = nl;
             return;
         }
 
@@ -1642,7 +1690,7 @@ pub extern "C" fn haxe_array_resize(arr: i32, new_len: i32) {
             }
             let h = arr as *mut u32;
             *h = new_data as u32;
-            *h.add(2) = new_cap;
+            *h.add(4) = new_cap;
         }
 
         // Zero-fill new elements
@@ -1652,7 +1700,7 @@ pub extern "C" fn haxe_array_resize(arr: i32, new_len: i32) {
         ptr::write_bytes((data_ptr2 as *mut u8).add(fill_start), 0, fill_end - fill_start);
 
         let h = arr as *mut u32;
-        *h.add(1) = nl;
+        *h.add(2) = nl;
     }
 }
 
@@ -1815,7 +1863,7 @@ pub extern "C" fn haxe_array_splice(out: i32, arr: i32, pos: i32, len: i32) {
         }
 
         let h = arr as *mut u32;
-        *h.add(1) = (slen - actual_len) as u32;
+        *h.add(2) = (slen - actual_len) as u32;
 
         if out != 0 {
             let (dp, l, c, es) = read_array(removed);
