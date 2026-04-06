@@ -30494,11 +30494,12 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // For non-empty arrays, push each element using haxe_array_push_i64
-        // This is inefficient but works correctly with the HaxeArray runtime
+        // For non-empty arrays, push each element using the appropriate
+        // typed runtime function. This avoids cross-type bitcasts that lose
+        // precision on WASM32 (where IrType::I64 lowers to WASM i32).
         if element_count > 0 {
             // Register haxe_array_push_i64: fn(arr: *HaxeArray, val: i64) -> void
-            let push_func_id = self.get_or_register_extern_function(
+            let push_i64_func_id = self.get_or_register_extern_function(
                 "haxe_array_push_i64",
                 vec![
                     IrType::Ptr(Box::new(IrType::I64)), // arr pointer
@@ -30506,12 +30507,32 @@ impl<'a> HirToMirContext<'a> {
                 ],
                 IrType::Void,
             );
+            // Register haxe_array_push_f64: fn(arr: *HaxeArray, val: f64) -> void
+            let push_f64_func_id = self.get_or_register_extern_function(
+                "haxe_array_push_f64",
+                vec![
+                    IrType::Ptr(Box::new(IrType::I64)),
+                    IrType::F64,
+                ],
+                IrType::Void,
+            );
 
             for elem in elements.iter() {
                 let elem_val = self.lower_expression(elem)?;
+                let elem_type = self.builder.get_register_type(elem_val);
+
+                // For F64 elements, use the dedicated f64 push function to
+                // preserve the full 64 bits on WASM32.
+                if matches!(elem_type, Some(IrType::F64)) {
+                    self.builder.build_call_direct(
+                        push_f64_func_id,
+                        vec![array_ptr, elem_val],
+                        IrType::Void,
+                    );
+                    continue;
+                }
 
                 // Convert element to i64 to match haxe_array_push_i64's signature.
-                let elem_type = self.builder.get_register_type(elem_val);
                 let push_val = match &elem_type {
                     Some(IrType::Ptr(_)) => {
                         // Pointer → i64: bitcast (reinterpret pointer as integer)
@@ -30525,28 +30546,25 @@ impl<'a> HirToMirContext<'a> {
                             .build_cast(elem_val, IrType::I32, IrType::I64)
                             .unwrap_or(elem_val)
                     }
-                    Some(IrType::F64) => {
-                        // F64 → I64: bitcast (reinterpret bits as integer)
-                        self.builder
-                            .build_bitcast(elem_val, IrType::I64)
-                            .unwrap_or(elem_val)
-                    }
                     Some(IrType::F32) => {
-                        // F32 → I32 → I64
-                        let as_i32 = self
+                        // F32 → F64 → push_f64 (use the float path)
+                        let as_f64 = self
                             .builder
-                            .build_bitcast(elem_val, IrType::I32)
+                            .build_cast(elem_val, IrType::F32, IrType::F64)
                             .unwrap_or(elem_val);
-                        self.builder
-                            .build_cast(as_i32, IrType::I32, IrType::I64)
-                            .unwrap_or(as_i32)
+                        self.builder.build_call_direct(
+                            push_f64_func_id,
+                            vec![array_ptr, as_f64],
+                            IrType::Void,
+                        );
+                        continue;
                     }
                     _ => elem_val,
                 };
 
                 // Call haxe_array_push_i64(arr, val) - this is a void function, so ignore the None return
                 self.builder.build_call_direct(
-                    push_func_id,
+                    push_i64_func_id,
                     vec![array_ptr, push_val],
                     IrType::Void,
                 );

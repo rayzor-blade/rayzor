@@ -247,11 +247,13 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
     fn read_haxe_array_i32(caller: &mut Caller<'_, WasmState>, arr_ptr: i32) -> Vec<i32> {
         let ptr = unbox_int_from_memory(caller, arr_ptr) as usize;
         if ptr == 0 { return vec![]; }
-        if let Some(header) = read_wasm_mem(caller, ptr, 16) {
+        // HaxeArray layout (32 bytes, MIR i64 stride):
+        // ptr at offset 0, len at offset 8, cap at offset 16, elem_size at offset 24
+        if let Some(header) = read_wasm_mem(caller, ptr, 32) {
             let data_ptr = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
-            let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
-            let elem_size = u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize;
-            let actual_size = if elem_size > 0 { elem_size } else { 4 };
+            let len = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
+            let elem_size = u32::from_le_bytes(header[24..28].try_into().unwrap()) as usize;
+            let actual_size = if elem_size > 0 { elem_size } else { 8 };
             if let Some(data) = read_wasm_mem(caller, data_ptr, len * actual_size) {
                 return (0..len).map(|i| {
                     i32::from_le_bytes(data[i*actual_size..i*actual_size+4].try_into().unwrap_or([0;4]))
@@ -262,31 +264,30 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
     }
 
     /// Read a HaxeArray of f64 values from WASM memory.
-    /// HaxeArray layout: { data_ptr: u32, len: u32, cap: u32, elem_size: u32 }.
+    /// HaxeArray layout (32 bytes, MIR i64 stride):
+    /// ptr at offset 0, len at offset 8, cap at offset 16, elem_size at offset 24
     fn read_haxe_array_f64(caller: &mut Caller<'_, WasmState>, arr_ptr: i32) -> Vec<f64> {
         let ptr = unbox_int_from_memory(caller, arr_ptr) as usize;
         if ptr == 0 { return vec![]; }
-        // Read HaxeArray header: { data_ptr, len, cap, elem_size }
-        let (data_ptr, len, elem_size) = if let Some(header) = read_wasm_mem(caller, ptr, 16) {
+        let (data_ptr, len, elem_size) = if let Some(header) = read_wasm_mem(caller, ptr, 32) {
             (
                 u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize,
-                u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize,
-                u32::from_le_bytes(header[12..16].try_into().unwrap()) as usize,
+                u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize,
+                u32::from_le_bytes(header[24..28].try_into().unwrap()) as usize,
             )
         } else {
             return vec![];
         };
-        let actual_size = if elem_size > 0 { elem_size } else { 4 };
+        let actual_size = if elem_size > 0 { elem_size } else { 8 };
         if let Some(data) = read_wasm_mem(caller, data_ptr, len * actual_size) {
-            // Each element may be a DynamicValue pointer (i32) that wraps an f64
-            let raw_vals: Vec<i32> = (0..len).map(|i| {
-                i32::from_le_bytes(data[i*actual_size..i*actual_size+4].try_into().unwrap_or([0;4]))
+            // Elements stored as f64 directly (from haxe_array_push_f64) for 8-byte slots
+            return (0..len).map(|i| {
+                if actual_size >= 8 {
+                    f64::from_le_bytes(data[i*actual_size..i*actual_size+8].try_into().unwrap_or([0;8]))
+                } else {
+                    f32::from_le_bytes(data[i*actual_size..i*actual_size+4].try_into().unwrap_or([0;4])) as f64
+                }
             }).collect();
-            // Try to unbox each element as a DynamicValue Float
-            let result: Vec<f64> = raw_vals.iter().map(|&raw| {
-                unbox_f64_from_memory(caller, raw)
-            }).collect();
-            return result;
         }
         vec![]
     }

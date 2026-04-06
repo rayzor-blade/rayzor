@@ -524,11 +524,34 @@ impl LinkerCtx {
         }
 
         // Alias mappings: user imports these names, runtime exports prefixed versions.
-        // This avoids libc symbol collisions in the runtime crate.
+        // This avoids libc symbol collisions in the runtime crate and maps
+        // MIR stdlib wrapper names (e.g., `array_length`) to their runtime-wasm
+        // implementations (e.g., `haxe_array_length`).
         let aliases: &[(&str, &str)] = &[
             ("malloc", "rayzor_malloc"),
             ("free", "rayzor_free"),
             ("realloc", "rayzor_realloc"),
+            // Array methods — MIR wrappers use bare `array_*` names
+            ("array_length", "haxe_array_length"),
+            ("array_push", "haxe_array_push_i64"),
+            ("array_push_f64", "haxe_array_push_f64"),
+            ("array_pop", "haxe_array_pop_i64"),
+            ("array_get", "haxe_array_get_i64"),
+            ("array_set", "haxe_array_set_i64"),
+            ("array_concat", "haxe_array_concat"),
+            ("array_copy", "haxe_array_copy"),
+            ("array_reverse", "haxe_array_reverse"),
+            ("array_slice", "haxe_array_slice"),
+            ("array_join", "haxe_array_join"),
+            ("array_index_of", "haxe_array_index_of"),
+            ("array_last_index_of", "haxe_array_last_index_of"),
+            ("array_contains", "haxe_array_contains"),
+            ("array_shift", "haxe_array_shift"),
+            ("array_unshift", "haxe_array_unshift"),
+            ("array_splice", "haxe_array_splice"),
+            ("array_resize", "haxe_array_resize"),
+            ("array_filter", "haxe_array_filter"),
+            ("array_map", "haxe_array_map"),
         ];
         for &(user_name, rt_name) in aliases {
             if let Some(&idx) = rt_export_to_merged.get(rt_name) {
