@@ -23,9 +23,155 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         /// Tensor handle table: handle_id → TensorState
         tensor_handles: BTreeMap<i32, TensorState>,
         next_tensor_id: i32,
+        /// wgpu device + queue for native GPU compute (Metal/Vulkan/DX12)
+        wgpu_ctx: Option<WgpuComputeCtx>,
         /// Host-side bump allocator: allocates downward from top of WASM memory.
         /// Used to write DynamicValue return structs into WASM linear memory.
         host_alloc_ptr: u32,
+    }
+
+    /// wgpu device + queue + compiled compute pipelines.
+    /// Created once at startup, used by tensor host functions.
+    struct WgpuComputeCtx {
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+    }
+
+    impl WgpuComputeCtx {
+        fn new() -> Option<Self> {
+            let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+                backends: wgpu::Backends::all(),
+                ..Default::default()
+            });
+            let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+                power_preference: wgpu::PowerPreference::HighPerformance,
+                compatible_surface: None,
+                force_fallback_adapter: false,
+            }))?;
+            let (device, queue) = pollster::block_on(adapter.request_device(
+                &wgpu::DeviceDescriptor {
+                    label: Some("rayzor_wasmtime_compute"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits: wgpu::Limits::default(),
+                    ..Default::default()
+                },
+                None,
+            )).ok()?;
+            Some(WgpuComputeCtx { device, queue })
+        }
+
+        /// Run a matmul A (MxK) @ B (KxN) -> C (MxN) on the GPU.
+        /// Uploads inputs, dispatches compute, downloads result. Synchronous.
+        fn matmul(&self, a: &[f64], b: &[f64], m: u32, k: u32, n: u32) -> Vec<f64> {
+            // Convert f64 -> f32 (wgpu doesn't support f64 in shaders by default)
+            let a_f32: Vec<f32> = a.iter().map(|&x| x as f32).collect();
+            let b_f32: Vec<f32> = b.iter().map(|&x| x as f32).collect();
+            let a_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(a_f32.as_ptr() as *const u8, a_f32.len() * 4)
+            };
+            let b_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(b_f32.as_ptr() as *const u8, b_f32.len() * 4)
+            };
+
+            let a_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("matmul_a"),
+                size: a_bytes.len() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let b_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("matmul_b"),
+                size: b_bytes.len() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let c_size = (m * n * 4) as u64;
+            let c_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("matmul_c"),
+                size: c_size,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let read_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("matmul_read"),
+                size: c_size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let dims_buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("matmul_dims"),
+                size: 16,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+
+            self.queue.write_buffer(&a_buf, 0, a_bytes);
+            self.queue.write_buffer(&b_buf, 0, b_bytes);
+            let dims = [m, k, n, 0u32];
+            let dims_bytes: &[u8] = unsafe {
+                std::slice::from_raw_parts(dims.as_ptr() as *const u8, 16)
+            };
+            self.queue.write_buffer(&dims_buf, 0, dims_bytes);
+
+            let shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("matmul_shader"),
+                source: wgpu::ShaderSource::Wgsl(
+                    "struct Dims { M: u32, K: u32, N: u32, _pad: u32 };\n\
+                     @group(0) @binding(0) var<uniform> dims: Dims;\n\
+                     @group(0) @binding(1) var<storage, read> a: array<f32>;\n\
+                     @group(0) @binding(2) var<storage, read> b: array<f32>;\n\
+                     @group(0) @binding(3) var<storage, read_write> c: array<f32>;\n\
+                     @compute @workgroup_size(8, 8) fn main(@builtin(global_invocation_id) gid: vec3<u32>) {\n\
+                       let row = gid.x; let col = gid.y;\n\
+                       if (row >= dims.M || col >= dims.N) { return; }\n\
+                       var s: f32 = 0.0;\n\
+                       for (var p: u32 = 0u; p < dims.K; p = p + 1u) {\n\
+                         s = s + a[row * dims.K + p] * b[p * dims.N + col];\n\
+                       }\n\
+                       c[row * dims.N + col] = s;\n\
+                     }".into()
+                ),
+            });
+            let pipeline = self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("matmul_pipeline"),
+                layout: None,
+                module: &shader,
+                entry_point: Some("main"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+            let bg = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: dims_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 1, resource: a_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 2, resource: b_buf.as_entire_binding() },
+                    wgpu::BindGroupEntry { binding: 3, resource: c_buf.as_entire_binding() },
+                ],
+            });
+            let mut encoder = self.device.create_command_encoder(&Default::default());
+            {
+                let mut pass = encoder.begin_compute_pass(&Default::default());
+                pass.set_pipeline(&pipeline);
+                pass.set_bind_group(0, Some(&bg), &[]);
+                pass.dispatch_workgroups((m + 7) / 8, (n + 7) / 8, 1);
+            }
+            encoder.copy_buffer_to_buffer(&c_buf, 0, &read_buf, 0, c_size);
+            self.queue.submit(std::iter::once(encoder.finish()));
+
+            let slice = read_buf.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            self.device.poll(wgpu::Maintain::Wait);
+            let data = slice.get_mapped_range();
+            let f32_slice: &[f32] = unsafe {
+                std::slice::from_raw_parts(data.as_ptr() as *const f32, (m * n) as usize)
+            };
+            let result: Vec<f64> = f32_slice.iter().map(|&x| x as f64).collect();
+            drop(data);
+            read_buf.unmap();
+            result
+        }
     }
 
     struct TensorState {
@@ -321,6 +467,13 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         next_mutex_id: 1,
         tensor_handles: BTreeMap::new(),
         next_tensor_id: 1,
+        wgpu_ctx: {
+            let ctx = WgpuComputeCtx::new();
+            if ctx.is_some() {
+                eprintln!("[wasm-runner] wgpu compute backend initialized (Metal/Vulkan/DX12)");
+            }
+            ctx
+        },
         host_alloc_ptr: 0,
     };
     let mut store = Store::new(&engine, state);
@@ -1519,7 +1672,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                 }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
             }
 
-            // -- rayzor_tensor_matmul(a, b) -> handle --
+            // -- rayzor_tensor_matmul(a, b) -> handle (uses wgpu when available) --
             "rayzor_tensor_matmul" => {
                 linker.func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
                     let a_h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
@@ -1530,21 +1683,30 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                         let b = s.tensor_handles.get(&b_h);
                         match (a, b) {
                             (Some(a), Some(b)) if a.shape.len() == 2 && b.shape.len() == 2 => {
-                                let m = a.shape[0] as usize;
-                                let k = a.shape[1] as usize;
-                                let n = b.shape[1] as usize;
-                                let mut result = vec![0.0; m * n];
-                                if k == b.shape[0] as usize {
-                                    for i in 0..m {
-                                        for j in 0..n {
-                                            let mut sum = 0.0;
-                                            for p in 0..k {
-                                                sum += a.data[i * k + p] * b.data[p * n + j];
+                                let m = a.shape[0] as u32;
+                                let k = a.shape[1] as u32;
+                                let n = b.shape[1] as u32;
+                                let result = if k == b.shape[0] as u32 {
+                                    if let Some(ref ctx) = s.wgpu_ctx {
+                                        // GPU path
+                                        ctx.matmul(&a.data, &b.data, m, k, n)
+                                    } else {
+                                        // CPU fallback
+                                        let mut r = vec![0.0; (m * n) as usize];
+                                        for i in 0..m as usize {
+                                            for j in 0..n as usize {
+                                                let mut sum = 0.0;
+                                                for p in 0..k as usize {
+                                                    sum += a.data[i * k as usize + p] * b.data[p * n as usize + j];
+                                                }
+                                                r[i * n as usize + j] = sum;
                                             }
-                                            result[i * n + j] = sum;
                                         }
+                                        r
                                     }
-                                }
+                                } else {
+                                    vec![]
+                                };
                                 (result, vec![m as i32, n as i32])
                             }
                             _ => (vec![], vec![]),
