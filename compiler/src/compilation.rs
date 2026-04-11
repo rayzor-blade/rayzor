@@ -5506,6 +5506,13 @@ impl CompilationUnit {
         use crate::compiler_plugin::NativePlugin;
         use crate::rpkg::MethodDescEntry;
 
+        // Snapshot the builtin stdlib mapping so we can skip classes that already have
+        // explicit MIR wrapper mappings (e.g., rayzor.concurrent.Thread, rayzor.Bytes).
+        // Without this skip, naive @:native("spawn") auto-registration overrides the
+        // correct Thread_spawn MIR wrapper with a bare "spawn" bare-name symbol, which
+        // then fails to resolve at JIT time ("can't resolve symbol spawn").
+        let builtin_mapping = crate::stdlib::runtime_mapping::StdlibMapping::new();
+
         let mut entries: Vec<MethodDescEntry> = Vec::new();
 
         for class in &typed_file.classes {
@@ -5545,6 +5552,7 @@ impl CompilationUnit {
             // Also get the dot-separated qualified name for stdlib mapping lookups
             // (MIR lowerer queries with dots, not ::)
             let class_dot_name = class_native_name.replace("::", ".");
+            let underscore_class_name = class_native_name.replace("::", "_");
 
             // Extract method entries
             for method in &class.methods {
@@ -5563,6 +5571,45 @@ impl CompilationUnit {
                     .unwrap_or_else(|| method_name.clone());
 
                 if symbol_name.is_empty() {
+                    continue;
+                }
+
+                // If the builtin stdlib already has a mapping for this (class,
+                // method), use the builtin's canonical runtime_name instead of the
+                // bare @:native value. The BuiltinPlugin (priority 0) carries the
+                // correct symbol names for all stdlib methods:
+                //   - MIR wrappers:      Thread_spawn, Channel_send, ...
+                //   - Extern C functions: haxe_bytes_get, sys_thread_join, ...
+                //
+                // Without this override, the NativePlugin auto-registration
+                // (priority 10) would replace them with bare @:native symbols
+                // ("spawn", "join"), which then fail at JIT link time
+                // ("can't resolve symbol spawn"). For MIR wrappers we also skip
+                // the NativePlugin entry entirely since the builtin path handles
+                // them via stdlib MIR module merging.
+                let builtin_match =
+                    builtin_mapping.find_by_name(&underscore_class_name, &method_name);
+                if let Some((_sig, call)) = builtin_match {
+                    // Record the mapping under the Haxe-qualified name so the
+                    // WASM backend stub redirect still finds a canonical symbol.
+                    let class_haxe_name = self
+                        .symbol_table
+                        .get_symbol(class.symbol_id)
+                        .and_then(|s| {
+                            s.qualified_name
+                                .and_then(|n| self.string_interner.get(n).map(|s| s.to_string()))
+                        })
+                        .unwrap_or_default();
+                    if !class_haxe_name.is_empty() {
+                        let qualified = format!("{}.{}", class_haxe_name, method_name);
+                        self.qualified_method_map
+                            .insert(qualified, call.runtime_name.to_string());
+                    }
+                    if call.is_mir_wrapper {
+                        continue;
+                    }
+                    // Non-MIR-wrapper (extern C): skip the NativePlugin entry too so
+                    // that MIR lowering uses the builtin's correctly-typed mapping.
                     continue;
                 }
 
