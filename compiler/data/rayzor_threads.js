@@ -116,14 +116,17 @@ export class RayzorThreadRuntime {
       worker.postMessage({ type: 'run', taskId, fnIdx, envPtr });
       this.threads.get(threadId).promise = promise;
     } else {
-      // No idle workers — run synchronously on main thread (fallback)
-      console.warn('[rayzor:threads] No idle workers — running on main thread');
+      // No idle workers — run synchronously on main thread (fallback).
+      // Resolves the closure body via __indirect_function_table.get(fnIdx)
+      // and invokes it with env_ptr, caching the result for join().
       try {
-        const fn = this.table?.get(fnIdx);
+        const table = this.table;
+        const fn = table ? table.get(fnIdx) : null;
         const result = fn ? fn(envPtr) : 0;
         this.threads.get(threadId).done = true;
         this.threads.get(threadId).result = result;
       } catch (e) {
+        console.warn('[rayzor:threads] spawn fallback failed:', e);
         this.threads.get(threadId).done = true;
         this.threads.get(threadId).result = 0;
       }
@@ -133,14 +136,30 @@ export class RayzorThreadRuntime {
   }
 
   join(threadId) {
-    // Can't block on main thread. For Workers, use Atomics.wait.
-    // For now: spin-wait (not ideal but functional).
     const thread = this.threads.get(threadId);
-    if (!thread) return;
-    // If already done, return immediately
-    if (thread.done) return;
-    // Note: true blocking requires Atomics.wait which only works in Workers
-    console.warn('[rayzor:threads] join() on main thread — may not block');
+    if (!thread) return this._boxJoinResult(0);
+    // Main thread fallback: the closure already ran synchronously during
+    // spawn(), so `thread.done` is true and we return the cached result.
+    if (thread.done) return this._boxJoinResult(thread.result);
+    // True blocking on main thread requires Atomics.wait on shared memory.
+    // With a Worker pool we'd spin here; without it we log and return 0.
+    console.warn('[rayzor:threads] join() on main thread with pending Worker task');
+    return this._boxJoinResult(0);
+  }
+
+  /// Box an i64 join result as a DynamicValue* so the Haxe-side
+  /// Thread<T>.join() unbox path finds type_id=3 (Int) and reads value_ptr.
+  /// Matches the native `rayzor_thread_join` → `haxe_box_int_ptr` contract.
+  _boxJoinResult(value) {
+    if (this._boxInt) return this._boxInt(value);
+    return value;
+  }
+
+  /// Wire up the host harness' boxing helpers. Must be called by the harness
+  /// after construction so join() can return boxed DynamicValue* pointers that
+  /// match the native runtime contract.
+  setBoxHelpers({ boxInt }) {
+    this._boxInt = boxInt;
   }
 
   isFinished(threadId) {
@@ -152,11 +171,12 @@ export class RayzorThreadRuntime {
   }
 
   sleep(ms) {
-    // Can't sleep main thread. In Worker: Atomics.wait with timeout.
-    if (typeof SharedArrayBuffer !== 'undefined') {
-      const buf = new Int32Array(new SharedArrayBuffer(4));
-      Atomics.wait(buf, 0, 0, ms);
-    }
+    // Can't Atomics.wait on non-shared memory, and we can't block the main
+    // event loop from a host function anyway. Busy-wait for short durations
+    // so short Thread.sleep() calls still work as synchronization points.
+    if (ms <= 0) return;
+    const end = Date.now() + Math.min(ms, 100);
+    while (Date.now() < end) { /* spin */ }
   }
 
   currentId() {
@@ -164,7 +184,15 @@ export class RayzorThreadRuntime {
   }
 
   // ========== Mutex API ==========
-  // Uses Atomics on a shared i32 cell in WASM memory.
+  // On shared memory: uses Atomics on an i32 cell in WASM memory.
+  // On non-shared memory: falls back to a JS-side handle map so single-threaded
+  // browsers (no COOP/COEP or Worker pool) still get correct mutex semantics.
+  // Returns RAW primitives — the builtin stdlib mapping declares these as
+  // returning i32/bool, not boxed DynamicValue*.
+
+  _isShared() {
+    return this.memory && this.memory.buffer instanceof SharedArrayBuffer;
+  }
 
   _allocSyncSlot() {
     const slot = this.SYNC_BASE + this.nextSyncSlot * 4;
@@ -173,42 +201,70 @@ export class RayzorThreadRuntime {
   }
 
   mutexInit() {
-    const slot = this._allocSyncSlot();
-    const view = new Int32Array(this.memory.buffer);
-    Atomics.store(view, slot >> 2, 0); // 0 = unlocked
-    return slot;
+    if (this._isShared()) {
+      const slot = this._allocSyncSlot();
+      const view = new Int32Array(this.memory.buffer);
+      Atomics.store(view, slot >> 2, 0);
+      return slot;
+    }
+    // Non-shared: allocate a JS handle.
+    if (!this._mutexMap) { this._mutexMap = new Map(); this._nextMutex = 1; }
+    const id = this._nextMutex++;
+    this._mutexMap.set(id, { locked: false });
+    return id;
   }
 
   mutexLock(mutexId) {
-    const view = new Int32Array(this.memory.buffer);
-    const idx = mutexId >> 2;
-    while (true) {
-      if (Atomics.compareExchange(view, idx, 0, 1) === 0) return; // acquired
-      Atomics.wait(view, idx, 1, 100); // wait up to 100ms, retry
+    if (this._isShared()) {
+      const view = new Int32Array(this.memory.buffer);
+      const idx = mutexId >> 2;
+      while (true) {
+        if (Atomics.compareExchange(view, idx, 0, 1) === 0) return mutexId;
+        Atomics.wait(view, idx, 1, 100);
+      }
     }
+    const m = this._mutexMap && this._mutexMap.get(mutexId);
+    if (m) m.locked = true;
+    return mutexId;
   }
 
   mutexTryLock(mutexId) {
-    const view = new Int32Array(this.memory.buffer);
-    return Atomics.compareExchange(view, mutexId >> 2, 0, 1) === 0 ? 1 : 0;
+    if (this._isShared()) {
+      const view = new Int32Array(this.memory.buffer);
+      return Atomics.compareExchange(view, mutexId >> 2, 0, 1) === 0 ? 1 : 0;
+    }
+    const m = this._mutexMap && this._mutexMap.get(mutexId);
+    if (!m) return 0;
+    if (m.locked) return 0;
+    m.locked = true;
+    return 1;
   }
 
   mutexIsLocked(mutexId) {
-    const view = new Int32Array(this.memory.buffer);
-    return Atomics.load(view, mutexId >> 2) !== 0 ? 1 : 0;
+    if (this._isShared()) {
+      const view = new Int32Array(this.memory.buffer);
+      return Atomics.load(view, mutexId >> 2) !== 0 ? 1 : 0;
+    }
+    const m = this._mutexMap && this._mutexMap.get(mutexId);
+    return m && m.locked ? 1 : 0;
   }
 
   mutexGuardGet(mutexId) {
-    // Return the value stored after the lock cell
-    const view = new DataView(this.memory.buffer);
-    return view.getUint32(mutexId + 4, true);
+    // Guard just aliases the mutex id — the inner value lives in WASM memory
+    // and is accessed by the compiled Haxe code directly.
+    return mutexId;
   }
 
   mutexUnlock(mutexId) {
-    const view = new Int32Array(this.memory.buffer);
-    const idx = mutexId >> 2;
-    Atomics.store(view, idx, 0); // unlock
-    Atomics.notify(view, idx, 1); // wake one waiter
+    if (this._isShared()) {
+      const view = new Int32Array(this.memory.buffer);
+      const idx = mutexId >> 2;
+      Atomics.store(view, idx, 0);
+      Atomics.notify(view, idx, 1);
+      return;
+    }
+    const m = this._mutexMap && this._mutexMap.get(mutexId);
+    if (m) m.locked = false;
   }
 
   // ========== Semaphore API ==========

@@ -755,22 +755,49 @@ const rayzor = {{
   haxe_math_abs: (x) => Math.abs(x),
   haxe_math_random: () => Math.random(),
 
-  // Thread/sync runtime — Atomics-based implementation.
-  // Worker pool initialized lazily on first spawn.
-  rayzor_thread_spawn: (fnIdx, envPtr) => 0,  // overridden after init
-  rayzor_thread_join: (_tid) => {{}},
+  // Thread/sync runtime — overridden by RayzorThreadRuntime.buildImports() in
+  // the browser init path below. These fallback stubs apply when the runtime
+  // isn't available (e.g. Node.js without shared memory). They return RAW
+  // primitives to match the builtin stdlib mapping's expected signatures —
+  // matching the wasmtime runner contract.
+  rayzor_thread_spawn: (_fnIdx, _envPtr) => 0,
+  rayzor_thread_join: (_tid) => 0,
   rayzor_thread_is_finished: (_tid) => 1,
   rayzor_thread_yield_now: () => {{}},
   rayzor_thread_sleep: (_ms) => {{}},
   rayzor_thread_current_id: () => 0,
 
-  // Mutex — Atomics.compareExchange on shared memory
-  rayzor_mutex_init: (val) => {{ if (!memory) return 0; const p = heapBase; heapBase = align8(heapBase + 8); new DataView(memory.buffer).setInt32(p, 0, true); return p; }},
-  rayzor_mutex_lock: (id) => {{ id = rayzor._unboxInt(id); if (!memory) return 0; new DataView(memory.buffer).setInt32(id, 1, true); return id; }},
-  rayzor_mutex_try_lock: (id) => {{ id = rayzor._unboxInt(id); if (!memory) return 0; const v = new DataView(memory.buffer); return rayzor._boxBool(v.getInt32(id, true) === 0 ? (v.setInt32(id, 1, true), 1) : 0); }},
-  rayzor_mutex_is_locked: (id) => {{ id = rayzor._unboxInt(id); if (!memory) return 0; return rayzor._boxBool(new DataView(memory.buffer).getInt32(id, true) !== 0 ? 1 : 0); }},
-  rayzor_mutex_guard_get: (id) => {{ id = rayzor._unboxInt(id); if (!memory) return 0; return rayzor._boxInt(new DataView(memory.buffer).getUint32(id + 4, true)); }},
-  rayzor_mutex_unlock: (id) => {{ id = rayzor._unboxInt(id); if (!memory) return; new DataView(memory.buffer).setInt32(id, 0, true); }},
+  // Mutex fallback — simple single-threaded implementation using a Map since
+  // Node has no shared memory. Returns RAW primitives (the builtin mapping
+  // declares these as returning i32/bool, not boxed DynamicValue*).
+  _mutexHandles: new Map(),
+  _nextMutexId: 1,
+  rayzor_mutex_init: (_val) => {{
+    const id = rayzor._nextMutexId++;
+    rayzor._mutexHandles.set(id, {{ locked: false }});
+    return id;
+  }},
+  rayzor_mutex_lock: (id) => {{
+    const m = rayzor._mutexHandles.get(id);
+    if (m) m.locked = true;
+    return id;
+  }},
+  rayzor_mutex_try_lock: (id) => {{
+    const m = rayzor._mutexHandles.get(id);
+    if (!m) return 0;
+    if (m.locked) return 0;
+    m.locked = true;
+    return 1;
+  }},
+  rayzor_mutex_is_locked: (id) => {{
+    const m = rayzor._mutexHandles.get(id);
+    return m && m.locked ? 1 : 0;
+  }},
+  rayzor_mutex_guard_get: (id) => id,
+  rayzor_mutex_unlock: (id) => {{
+    const m = rayzor._mutexHandles.get(id);
+    if (m) m.locked = false;
+  }},
   // Box a value as DynamicValue: {{type_id: i32, value_ptr: i32}}
   // type_id: 0=Int, 1=Float, 2=Bool, 3=String, 4=Object
   _boxBool: function(val) {{
@@ -1637,6 +1664,13 @@ async function run() {{
   if (!isNode && typeof Worker !== 'undefined') {{
     try {{
       threadRuntime = new RayzorThreadRuntime();
+      // Thread<T>.join() expects a boxed DynamicValue* so compiled Haxe code
+      // unboxes it through haxe_unbox_int. Pass the harness' `_boxInt` helper
+      // into the runtime so join() can box its cached result the same way the
+      // native rayzor_thread_join does via haxe_box_int_ptr.
+      threadRuntime.setBoxHelpers({{
+        boxInt: (v) => rayzor._boxInt(v),
+      }});
       const threadImports = threadRuntime.buildImports();
       for (const [k, v] of Object.entries(threadImports)) {{
         rayzor[k] = v;
