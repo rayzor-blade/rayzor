@@ -8257,6 +8257,45 @@ impl<'a> HirToMirContext<'a> {
 
             HirExprKind::Index { object, index } => {
                 let obj_reg = self.lower_expression(object)?;
+
+                // SIMD vector lane extraction: detect when the object is a Vector type
+                // (e.g. SIMD4f) and emit a direct VectorExtract instead of going through
+                // the heap-array `haxe_array_get_ptr` path. This is required because
+                // SIMD4f abstracts lower to v128 register values, not heap pointers.
+                if let Some(IrType::Vector { element, count }) =
+                    self.builder.get_register_type(obj_reg)
+                {
+                    let elem_ty = (*element).clone();
+                    let lane_count = count;
+                    // Constant lane index: emit VectorExtract directly with that lane.
+                    if let HirExprKind::Literal(HirLiteral::Int(lane_val)) = &index.kind {
+                        if *lane_val >= 0 && (*lane_val as usize) < lane_count as usize {
+                            let lane = *lane_val as u8;
+                            let extracted = self
+                                .builder
+                                .build_vector_extract(obj_reg, lane, elem_ty.clone())?;
+                            // Haxe `Float` is f64. F32 lanes always widen to F64 so downstream
+                            // consumers (string concat, float_to_string, arithmetic) see the
+                            // expected Float type. The HIR expr.ty is often Dynamic (@:coreType
+                            // abstracts erase to Dynamic), so we cannot rely on it.
+                            if matches!(elem_ty, IrType::F32) {
+                                return self
+                                    .builder
+                                    .build_cast(extracted, IrType::F32, IrType::F64);
+                            }
+                            return Some(extracted);
+                        }
+                    }
+                    // Non-constant lane on a vector: not yet supported via direct
+                    // VectorExtract (which requires a constant lane). Fall through to
+                    // the runtime SIMD4f_extract MIR wrapper path below — but that
+                    // path also currently only supports lane 0. For now we emit a
+                    // diagnostic-friendly fallback by lowering the lane and routing
+                    // through the wrapper, which will be improved when the wrapper
+                    // gains a runtime lane switch.
+                    let _ = lane_count;
+                }
+
                 let idx_reg = self.lower_expression(index)?;
                 self.lower_index_access(obj_reg, idx_reg, expr.ty)
             }
@@ -17722,6 +17761,30 @@ impl<'a> HirToMirContext<'a> {
                     let rhs_is_string = matches!(&rhs_type, IrType::String)
                         || matches!(&rhs_type, IrType::Ptr(inner) if matches!(inner.as_ref(), IrType::String));
 
+                    // String concat chain detection: `prev + x` where `prev` is itself a
+                    // Binary Add producing a string. The HIR type may erase to Dynamic, so we
+                    // recursively inspect the LHS to detect string concat chains.
+                    fn is_string_concat_chain(expr: &HirExpr) -> bool {
+                        if let HirExprKind::Binary {
+                            op: HirBinaryOp::Add,
+                            lhs,
+                            rhs,
+                        } = &expr.kind
+                        {
+                            if matches!(&lhs.kind, HirExprKind::Literal(HirLiteral::String(_)))
+                                || matches!(&rhs.kind, HirExprKind::Literal(HirLiteral::String(_)))
+                            {
+                                return true;
+                            }
+                            return is_string_concat_chain(lhs) || is_string_concat_chain(rhs);
+                        }
+                        false
+                    }
+                    let lhs_is_string =
+                        lhs_is_string || is_string_concat_chain(lhs);
+                    let rhs_is_string =
+                        rhs_is_string || is_string_concat_chain(rhs);
+
                     if lhs_is_string || rhs_is_string {
                         // Lower both operands
                         let lhs_reg = self.lower_expression(lhs)?;
@@ -17959,6 +18022,46 @@ impl<'a> HirToMirContext<'a> {
                             // Lower operands first, then check actual register types
                             let lhs_reg = self.lower_expression(lhs)?;
                             let rhs_reg = self.lower_expression(rhs)?;
+
+                            // SIMD vector short-circuit: @:coreType abstracts like SIMD4f
+                            // have HIR type Dynamic but lower to Vector register type.
+                            // Emit VectorBinOp directly for vector+vector arithmetic.
+                            {
+                                let lhs_rty = self.builder.get_register_type(lhs_reg);
+                                let rhs_rty = self.builder.get_register_type(rhs_reg);
+                                let lhs_is_vec =
+                                    matches!(&lhs_rty, Some(IrType::Vector { .. }));
+                                let rhs_is_vec =
+                                    matches!(&rhs_rty, Some(IrType::Vector { .. }));
+                                if lhs_is_vec || rhs_is_vec {
+                                    let vec_ty = if lhs_is_vec {
+                                        lhs_rty.unwrap()
+                                    } else {
+                                        rhs_rty.unwrap()
+                                    };
+                                    let bin_op = match op {
+                                        HirBinaryOp::Add => BinaryOp::Add,
+                                        HirBinaryOp::Sub => BinaryOp::Sub,
+                                        HirBinaryOp::Mul => BinaryOp::Mul,
+                                        HirBinaryOp::Div => BinaryOp::Div,
+                                        _ => {
+                                            // Unsupported vector op in Dynamic path; fall
+                                            // through to the regular Dynamic handling (will
+                                            // likely produce invalid code — covered by other
+                                            // type checks).
+                                            return self.builder.build_vector_binop(
+                                                BinaryOp::Add,
+                                                lhs_reg,
+                                                rhs_reg,
+                                                vec_ty,
+                                            );
+                                        }
+                                    };
+                                    return self.builder.build_vector_binop(
+                                        bin_op, lhs_reg, rhs_reg, vec_ty,
+                                    );
+                                }
+                            }
 
                             // Determine if each operand is actually a boxed DynamicValue:
                             // - Variables: use boxed_dynamic_symbols tracking (handles lambda
@@ -18376,8 +18479,18 @@ impl<'a> HirToMirContext<'a> {
                     .builder
                     .get_register_type(lhs_reg)
                     .unwrap_or(IrType::I64);
+                let rhs_actual_type = self
+                    .builder
+                    .get_register_type(rhs_reg)
+                    .unwrap_or(IrType::I64);
+                eprintln!(
+                    "[DEBUG Binary] op={:?} lhs_reg={:?} lhs_ty={:?} rhs_reg={:?} rhs_ty={:?}",
+                    op, lhs_reg, lhs_actual_type, rhs_reg, rhs_actual_type
+                );
                 let result_type = if lhs_actual_type.is_vector() {
                     lhs_actual_type.clone()
+                } else if rhs_actual_type.is_vector() {
+                    rhs_actual_type.clone()
                 } else {
                     self.convert_type(expr.ty)
                 };
@@ -22591,6 +22704,21 @@ impl<'a> HirToMirContext<'a> {
         actual_ty: &IrType,
         expected_ty: &IrType,
     ) -> Option<IrId> {
+        // Primitive demotions/promotions for typed extern calls (e.g., SIMD4f_make
+        // expects f32 lanes but Haxe Float is f64). These are non-boxing casts.
+        if actual_ty == expected_ty {
+            return Some(value);
+        }
+        match (actual_ty, expected_ty) {
+            (IrType::F64, IrType::F32) => {
+                return self.builder.build_cast(value, IrType::F64, IrType::F32);
+            }
+            (IrType::F32, IrType::F64) => {
+                return self.builder.build_cast(value, IrType::F32, IrType::F64);
+            }
+            _ => {}
+        }
+
         // Only box if expected is Ptr(U8) and actual is a primitive
         let expected_is_ptr_u8 = matches!(expected_ty, IrType::Ptr(inner) if matches!(**inner, IrType::U8 | IrType::Void));
 

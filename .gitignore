@@ -53,3 +53,5 @@ compiler/benchmarks/charts/*.html
 
 # Thread stress test logs
 ci/thread-test/logs/
+examples/**/.rayzor/
+**/.rayzor/build/

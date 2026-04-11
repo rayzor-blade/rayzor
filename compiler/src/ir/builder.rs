@@ -308,6 +308,23 @@ impl IrBuilder {
         Some(dest)
     }
 
+    /// Build a SIMD vector lane extract (constant lane).
+    pub fn build_vector_extract(
+        &mut self,
+        vector: IrId,
+        index: u8,
+        elem_ty: IrType,
+    ) -> Option<IrId> {
+        let dest = self.alloc_reg()?;
+        self.set_register_type(dest, elem_ty);
+        self.add_instruction(IrInstruction::VectorExtract {
+            dest,
+            vector,
+            index,
+        })?;
+        Some(dest)
+    }
+
     /// Build a function call
     /// Build a direct function call (callee known at compile time)
     pub fn build_call_direct(
