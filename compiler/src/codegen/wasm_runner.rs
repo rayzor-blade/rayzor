@@ -23,11 +23,32 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         /// Tensor handle table: handle_id → TensorState
         tensor_handles: BTreeMap<i32, TensorState>,
         next_tensor_id: i32,
+        /// Thread handle table. Wasmtime instances are !Send so real OS threads
+        /// aren't possible without shared memory; we execute spawn() closures
+        /// synchronously on the current call and cache the result, matching the
+        /// browser fallback when no Web Worker pool is available.
+        thread_handles: BTreeMap<i32, ThreadState>,
+        next_thread_id: i32,
+        /// Queue of pending thread spawn requests that will run synchronously on
+        /// the next join/is_finished call. The closure has already had its fn_idx
+        /// and env_ptr extracted from the closure struct.
+        pending_threads: Vec<PendingThread>,
         /// wgpu device + queue for native GPU compute (Metal/Vulkan/DX12)
         wgpu_ctx: Option<WgpuComputeCtx>,
         /// Host-side bump allocator: allocates downward from top of WASM memory.
         /// Used to write DynamicValue return structs into WASM linear memory.
         host_alloc_ptr: u32,
+    }
+
+    struct ThreadState {
+        done: bool,
+        result: i64,
+    }
+
+    struct PendingThread {
+        thread_id: i32,
+        fn_idx: u32,
+        env_ptr: i32,
     }
 
     /// wgpu device + queue + compiled compute pipelines.
@@ -292,6 +313,56 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         raw
     }
 
+    /// Drain the pending_threads queue by invoking each closure synchronously
+    /// via the indirect function table. The closure signature is
+    /// `(env_ptr: i32) -> i64`, matching the Haxe lambda ABI in WASM.
+    fn run_pending_threads(caller: &mut Caller<'_, WasmState>) -> wasmtime::Result<()> {
+        loop {
+            let pending = caller.data_mut().pending_threads.pop();
+            let Some(task) = pending else { break };
+            let table = match caller.get_export("__indirect_function_table") {
+                Some(wasmtime::Extern::Table(t)) => t,
+                _ => {
+                    // No indirect table exported — record thread as done with result 0.
+                    if let Some(state) = caller.data_mut().thread_handles.get_mut(&task.thread_id) {
+                        state.done = true;
+                        state.result = 0;
+                    }
+                    continue;
+                }
+            };
+            let func_ref = table
+                .get(&mut *caller, task.fn_idx as u64)
+                .and_then(|v| match v {
+                    wasmtime::Ref::Func(Some(f)) => Some(f),
+                    _ => None,
+                });
+            let Some(func) = func_ref else {
+                if let Some(state) = caller.data_mut().thread_handles.get_mut(&task.thread_id) {
+                    state.done = true;
+                    state.result = 0;
+                }
+                continue;
+            };
+            // Try i32->i64 (most lambdas), then i32->i32, then i32->() as fallbacks.
+            let result = if let Ok(typed) = func.typed::<i32, i64>(&*caller) {
+                typed.call(&mut *caller, task.env_ptr).unwrap_or(0)
+            } else if let Ok(typed) = func.typed::<i32, i32>(&*caller) {
+                typed.call(&mut *caller, task.env_ptr).unwrap_or(0) as i64
+            } else if let Ok(typed) = func.typed::<i32, ()>(&*caller) {
+                let _ = typed.call(&mut *caller, task.env_ptr);
+                0
+            } else {
+                0
+            };
+            if let Some(state) = caller.data_mut().thread_handles.get_mut(&task.thread_id) {
+                state.done = true;
+                state.result = result;
+            }
+        }
+        Ok(())
+    }
+
     fn unbox_f64_from_memory(caller: &mut Caller<'_, WasmState>, raw: i32) -> f64 {
         if raw > 65536 && (raw & 3) == 0 {
             if let Some(dv) = read_wasm_mem(caller, raw as usize, 8) {
@@ -467,6 +538,9 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         next_mutex_id: 1,
         tensor_handles: BTreeMap::new(),
         next_tensor_id: 1,
+        thread_handles: BTreeMap::new(),
+        next_thread_id: 1,
+        pending_threads: Vec::new(),
         wgpu_ctx: {
             let ctx = WgpuComputeCtx::new();
             if ctx.is_some() {
@@ -1290,6 +1364,154 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                     if !results.is_empty() { results[0] = Val::I32(0); }
                     Ok(())
                 }).map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            _ => continue,
+        }
+        registered.insert(name.clone());
+    }
+
+    // -- Register Thread host functions --
+    //
+    // Wasmtime Store is !Send, so real OS threads aren't possible without
+    // shared memory. Instead, spawn() queues a pending task that runs
+    // synchronously the next time the main thread calls join() or
+    // is_finished(). This matches the browser fallback in rayzor_threads.js
+    // when no Web Worker pool is available.
+    fn canonical_thread_name(name: &str) -> Option<&str> {
+        match name {
+            "rayzor_thread_spawn" => Some("rayzor_thread_spawn"),
+            "rayzor_thread_join" => Some("rayzor_thread_join"),
+            "rayzor_thread_is_finished" => Some("rayzor_thread_is_finished"),
+            "rayzor_thread_yield_now" => Some("rayzor_thread_yield_now"),
+            "rayzor_thread_sleep" => Some("rayzor_thread_sleep"),
+            "rayzor_thread_current_id" => Some("rayzor_thread_current_id"),
+            _ => None,
+        }
+    }
+    for (name, func_ty) in &rayzor_imports {
+        if registered.contains(name) {
+            continue;
+        }
+        let canon = match canonical_thread_name(name) {
+            Some(c) => c,
+            None => continue,
+        };
+        let ret_ty: ValType = func_ty.results().next().unwrap_or(ValType::I32);
+
+        match canon {
+            // spawn(fn_idx, env_ptr) -> thread_handle
+            // The Thread_spawn MIR wrapper extracts fn_idx from closure+0 and
+            // env_ptr from closure+8 and passes them to us. We queue a pending
+            // task and return a fresh thread id; the closure body runs during
+            // the next join()/is_finished() call.
+            "rayzor_thread_spawn" => {
+                let rt = ret_ty.clone();
+                linker
+                    .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                        let fn_idx = val_i32(&params[0]) as u32;
+                        let env_ptr = val_i32(&params[1]);
+                        let id = {
+                            let s = caller.data_mut();
+                            let id = s.next_thread_id;
+                            s.next_thread_id += 1;
+                            s.thread_handles
+                                .insert(id, ThreadState { done: false, result: 0 });
+                            s.pending_threads.push(PendingThread {
+                                thread_id: id,
+                                fn_idx,
+                                env_ptr,
+                            });
+                            id
+                        };
+                        results[0] = ret_int(id, &rt);
+                        Ok(())
+                    })
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // join(handle) -> boxed result
+            // Runs any pending thread work, then returns the cached result.
+            // The result is boxed as DynamicValue* to match the native
+            // rayzor_thread_join contract (Thread<T>.join() unbox path).
+            "rayzor_thread_join" => {
+                let rt = ret_ty.clone();
+                linker
+                    .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                        let h = val_i32(&params[0]);
+                        run_pending_threads(&mut caller)?;
+                        let result = caller
+                            .data()
+                            .thread_handles
+                            .get(&h)
+                            .map(|t| t.result)
+                            .unwrap_or(0);
+                        let boxed = box_int_in_wasm(&mut caller, result as i32);
+                        results[0] = ret_int(boxed, &rt);
+                        Ok(())
+                    })
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // is_finished(handle) -> bool
+            "rayzor_thread_is_finished" => {
+                let rt = ret_ty.clone();
+                linker
+                    .func_new("rayzor", name, func_ty.clone(), move |mut caller, params, results| {
+                        let h = val_i32(&params[0]);
+                        run_pending_threads(&mut caller)?;
+                        let done = caller
+                            .data()
+                            .thread_handles
+                            .get(&h)
+                            .map(|t| if t.done { 1 } else { 0 })
+                            .unwrap_or(0);
+                        results[0] = ret_int(done, &rt);
+                        Ok(())
+                    })
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // yield_now() -> void
+            "rayzor_thread_yield_now" => {
+                linker
+                    .func_new("rayzor", name, func_ty.clone(), move |_caller, _params, results| {
+                        if !results.is_empty() {
+                            results[0] = Val::I32(0);
+                        }
+                        Ok(())
+                    })
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // sleep(ms) -> void
+            "rayzor_thread_sleep" => {
+                linker
+                    .func_new("rayzor", name, func_ty.clone(), move |_caller, params, results| {
+                        let ms = val_i32(&params[0]).max(0) as u64;
+                        std::thread::sleep(std::time::Duration::from_millis(ms));
+                        if !results.is_empty() {
+                            results[0] = Val::I32(0);
+                        }
+                        Ok(())
+                    })
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // current_id() -> i64
+            "rayzor_thread_current_id" => {
+                let rt = ret_ty.clone();
+                linker
+                    .func_new("rayzor", name, func_ty.clone(), move |_caller, _params, results| {
+                        // Main thread = 1 (non-zero so user code can distinguish it).
+                        let id = 1i64;
+                        results[0] = match &rt {
+                            ValType::I64 => Val::I64(id),
+                            _ => ret_int(id as i32, &rt),
+                        };
+                        Ok(())
+                    })
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
             }
 
             _ => continue,

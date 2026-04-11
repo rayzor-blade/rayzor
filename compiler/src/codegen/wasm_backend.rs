@@ -2411,55 +2411,39 @@ impl<'a> FunctionLowerer<'a> {
                 func_id,
                 captured_values,
             } => {
-                // Layout: [fn_idx: i32(4)] [padding: i32(4)] [captures: 8 bytes each...]
-                // Captures use 8-byte slots to match EnvironmentLayout (storage_ty = I64).
-                let alloc_size = (8 + captured_values.len() * 8) as i32;
+                // Layout matches native Cranelift backend: { fn_ptr, env_ptr } 16 bytes,
+                // with fn_idx at offset 0 and env_ptr at offset 8. The environment struct
+                // is allocated separately and holds captured values at 8-byte strides.
+                // This matches Thread_spawn / Future_create MIR wrappers which load the
+                // env_ptr from `*(closure + 8)`.
 
-                // Heap-allocate closure (NOT stack!) — closures may outlive their
-                // creating function (e.g. callbacks passed to async APIs like runLoop).
-                f.instruction(&Instruction::I32Const(alloc_size));
-                // Call malloc (import)
+                let fn_idx = self.ctx.ir_func_to_idx.get(func_id).copied().unwrap_or(0);
+
+                // 1. Allocate closure struct (16 bytes).
+                f.instruction(&Instruction::I32Const(16));
                 if let Some(&malloc_idx) = self.ctx.import_name_to_idx.get("malloc") {
                     f.instruction(&Instruction::Call(malloc_idx));
                 } else if let Some(&malloc_idx) = self.ctx.func_name_to_idx.get("malloc") {
                     f.instruction(&Instruction::Call(malloc_idx));
                 } else {
-                    // Fallback: bump shadow stack (less safe but works for sync closures)
                     f.instruction(&Instruction::Drop);
                     f.instruction(&Instruction::GlobalGet(STACK_PTR_GLOBAL));
-                    f.instruction(&Instruction::I32Const(alloc_size));
+                    f.instruction(&Instruction::I32Const(16));
                     f.instruction(&Instruction::I32Sub);
                     f.instruction(&Instruction::GlobalSet(STACK_PTR_GLOBAL));
                     f.instruction(&Instruction::GlobalGet(STACK_PTR_GLOBAL));
                 }
-
-                // The malloc result (closure pointer) is on the stack.
-                // Store to dest register first, then use it for field stores.
                 self.set_reg(f, *dest);
 
-                // Store func index at offset 0.
-                // IMPORTANT: We store the function index as i32.const, which the linker
-                // does NOT remap. We use a special marker: store via table.get(i32.const idx)
-                // pattern that we DON'T actually need. Instead, we embed the func index in a
-                // RefFunc instruction that the linker DOES remap, and extract it back.
-                // Pattern: ref.func idx → table.set(idx) → i32.const idx → i32.store
-                // The linker remaps both ref.func AND the i32.const in the same pattern.
-                //
-                // Actually: use our own mechanism. Store the pre-link index, and let the
-                // element section handle the mapping (table[pre_link_idx] = merged_func).
-                // At runtime, table.get(stored_idx) resolves correctly because the element
-                // section was also remapped by the linker.
-                // Store the function in the indirect function table and record its slot.
-                // Use ref.func (which the linker remaps) to ensure correctness post-linking.
-                let fn_idx = self.ctx.ir_func_to_idx.get(func_id).copied().unwrap_or(0);
-                // table.set(fn_idx, ref.func(fn_idx)) — ensures table[fn_idx] = correct func
+                // 2. Ensure the indirect function table has our fn_idx slot populated.
+                // `ref.func` is what the linker remaps during module merging, so emitting
+                // `table.set(fn_idx, ref.func(fn_idx))` lets subsequent table.get calls
+                // resolve to the correct post-link function.
                 f.instruction(&Instruction::I32Const(fn_idx as i32));
                 f.instruction(&Instruction::RefFunc(fn_idx));
                 f.instruction(&Instruction::TableSet(0));
-                // Store fn_idx in closure struct. The i32.const isn't remapped by the linker,
-                // BUT we just set table[fn_idx] = ref.func(fn_idx) which IS remapped.
-                // After linking: i32.const still says old fn_idx, BUT table[old_fn_idx]
-                // was set to the REMAPPED function ref. So table.get(old_fn_idx) → correct func.
+
+                // 3. Store fn_idx at closure offset 0.
                 self.get_reg(f, *dest);
                 f.instruction(&Instruction::I32Const(fn_idx as i32));
                 f.instruction(&Instruction::I32Store(MemArg {
@@ -2468,15 +2452,55 @@ impl<'a> FunctionLowerer<'a> {
                     memory_index: 0,
                 }));
 
-                // Store captured values at 8-byte intervals starting at offset 8.
-                // EnvironmentLayout uses I64 storage with 8-byte alignment.
-                // On WASM32, values are i32 but we store them in 8-byte slots.
-                for (i, cap) in captured_values.iter().enumerate() {
+                // 4. Allocate environment and store env_ptr at closure offset 8.
+                //    We leave the closure pointer on the WASM stack, malloc the env,
+                //    then i32.store the env pointer directly at closure+8.
+                if !captured_values.is_empty() {
+                    let env_size = (captured_values.len() * 8) as i32;
+                    // Push closure pointer (for the env_ptr store).
                     self.get_reg(f, *dest);
-                    self.get_reg(f, *cap);
-                    // Store as i32 at the start of each 8-byte slot
+                    // Call malloc(env_size) — result (env_ptr) is on stack.
+                    f.instruction(&Instruction::I32Const(env_size));
+                    if let Some(&malloc_idx) = self.ctx.import_name_to_idx.get("malloc") {
+                        f.instruction(&Instruction::Call(malloc_idx));
+                    } else if let Some(&malloc_idx) = self.ctx.func_name_to_idx.get("malloc") {
+                        f.instruction(&Instruction::Call(malloc_idx));
+                    } else {
+                        f.instruction(&Instruction::Drop);
+                        f.instruction(&Instruction::GlobalGet(STACK_PTR_GLOBAL));
+                        f.instruction(&Instruction::I32Const(env_size));
+                        f.instruction(&Instruction::I32Sub);
+                        f.instruction(&Instruction::GlobalSet(STACK_PTR_GLOBAL));
+                        f.instruction(&Instruction::GlobalGet(STACK_PTR_GLOBAL));
+                    }
+                    // Stack: [closure_ptr, env_ptr] — store env_ptr at closure+8.
                     f.instruction(&Instruction::I32Store(MemArg {
-                        offset: (8 + i * 8) as u64,
+                        offset: 8,
+                        align: 2,
+                        memory_index: 0,
+                    }));
+
+                    // Now store each capture in env by reloading env_ptr from closure+8.
+                    for (i, cap) in captured_values.iter().enumerate() {
+                        self.get_reg(f, *dest);
+                        f.instruction(&Instruction::I32Load(MemArg {
+                            offset: 8,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                        self.get_reg(f, *cap);
+                        f.instruction(&Instruction::I32Store(MemArg {
+                            offset: (i * 8) as u64,
+                            align: 2,
+                            memory_index: 0,
+                        }));
+                    }
+                } else {
+                    // No captures: store null env_ptr at offset 8.
+                    self.get_reg(f, *dest);
+                    f.instruction(&Instruction::I32Const(0));
+                    f.instruction(&Instruction::I32Store(MemArg {
+                        offset: 8,
                         align: 2,
                         memory_index: 0,
                     }));
@@ -2496,10 +2520,13 @@ impl<'a> FunctionLowerer<'a> {
 
             // === ClosureEnv ===
             IrInstruction::ClosureEnv { dest, closure } => {
-                // Env starts at offset 8 in our closure layout.
+                // Env is a separately-allocated struct pointer stored at offset 8.
                 self.get_reg(f, *closure);
-                f.instruction(&Instruction::I32Const(8));
-                f.instruction(&Instruction::I32Add);
+                f.instruction(&Instruction::I32Load(MemArg {
+                    offset: 8,
+                    align: 2,
+                    memory_index: 0,
+                }));
                 self.set_reg(f, *dest);
             }
 

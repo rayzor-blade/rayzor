@@ -18483,10 +18483,6 @@ impl<'a> HirToMirContext<'a> {
                     .builder
                     .get_register_type(rhs_reg)
                     .unwrap_or(IrType::I64);
-                eprintln!(
-                    "[DEBUG Binary] op={:?} lhs_reg={:?} lhs_ty={:?} rhs_reg={:?} rhs_ty={:?}",
-                    op, lhs_reg, lhs_actual_type, rhs_reg, rhs_actual_type
-                );
                 let result_type = if lhs_actual_type.is_vector() {
                     lhs_actual_type.clone()
                 } else if rhs_actual_type.is_vector() {
