@@ -30,7 +30,7 @@ use wasm_encoder::{
 
 use crate::ir::blocks::{IrBasicBlock, IrBlockId, IrTerminator};
 use crate::ir::functions::{IrFunction, IrFunctionId, IrFunctionSignature};
-use crate::ir::instructions::{BinaryOp, CompareOp, IrInstruction, UnaryOp};
+use crate::ir::instructions::{BinaryOp, CompareOp, IrInstruction, UnaryOp, VectorMinMaxKind, VectorUnaryOpKind};
 use crate::ir::modules::{IrGlobalId, IrModule};
 use crate::ir::{IrId, IrType, IrValue};
 
@@ -1407,7 +1407,9 @@ impl<'a> FunctionLowerer<'a> {
                                 .or_else(|| dest.and_then(|d| self.ir_func.register_types.get(&d)).map(|t| ir_type_to_wasm(t)))
                         }
 
-                        // BinOp: float if any operand is float
+                        // BinOp: choose result type from operand types. Prefer the
+                        // highest precision F64 operand; otherwise F32 if any operand
+                        // is F32 (or it's a float op), otherwise I32.
                         IrInstruction::BinOp {
                             op, left, right, ..
                         } => {
@@ -1421,22 +1423,23 @@ impl<'a> FunctionLowerer<'a> {
                             );
                             let lt = self.local_type_of(*left).unwrap_or(ValType::I32);
                             let rt = self.local_type_of(*right).unwrap_or(ValType::I32);
-                            if is_fop || lt == ValType::F64 || rt == ValType::F64 {
+                            if lt == ValType::F64 || rt == ValType::F64 {
                                 Some(ValType::F64)
-                            } else if lt == ValType::F32 || rt == ValType::F32 {
+                            } else if is_fop || lt == ValType::F32 || rt == ValType::F32 {
                                 Some(ValType::F32)
                             } else {
                                 None // keep I32
                             }
                         }
 
-                        // UnOp: inherit operand type
+                        // UnOp: inherit operand type. Prefer operand precision over
+                        // unconditional F64 promotion.
                         IrInstruction::UnOp { op, operand, .. } => {
                             let is_fop = matches!(op, UnaryOp::FNeg);
                             let ot = self.local_type_of(*operand).unwrap_or(ValType::I32);
-                            if is_fop || ot == ValType::F64 {
+                            if ot == ValType::F64 {
                                 Some(ValType::F64)
-                            } else if ot == ValType::F32 {
+                            } else if is_fop || ot == ValType::F32 {
                                 Some(ValType::F32)
                             } else {
                                 None
@@ -1920,7 +1923,9 @@ impl<'a> FunctionLowerer<'a> {
                 let right_ty = self.reg_wasm_type(*right);
                 let dest_ty = self.reg_wasm_type(*dest);
 
-                // Determine the operation type
+                // Determine the operation type. For floating-point ops, prefer
+                // the highest-precision operand type. Both operands F32 → F32 op;
+                // any F64 operand → F64 op (with promotion). Otherwise integer.
                 let is_fop = matches!(
                     op,
                     BinaryOp::FAdd
@@ -1929,13 +1934,13 @@ impl<'a> FunctionLowerer<'a> {
                         | BinaryOp::FDiv
                         | BinaryOp::FRem
                 );
-                let op_ty = if is_fop
-                    || dest_ty == ValType::F64
+                let op_ty = if dest_ty == ValType::F64
                     || left_ty == ValType::F64
                     || right_ty == ValType::F64
                 {
                     ValType::F64
-                } else if dest_ty == ValType::F32
+                } else if is_fop
+                    || dest_ty == ValType::F32
                     || left_ty == ValType::F32
                     || right_ty == ValType::F32
                 {
@@ -2652,18 +2657,168 @@ impl<'a> FunctionLowerer<'a> {
             | IrInstruction::Branch { .. }
             | IrInstruction::Switch { .. } => {}
 
-            // === InlineAsm / SIMD (unsupported in Phase 1) ===
-            IrInstruction::InlineAsm { .. }
-            | IrInstruction::VectorLoad { .. }
-            | IrInstruction::VectorStore { .. }
-            | IrInstruction::VectorBinOp { .. }
-            | IrInstruction::VectorSplat { .. }
-            | IrInstruction::VectorExtract { .. }
-            | IrInstruction::VectorInsert { .. }
-            | IrInstruction::VectorReduce { .. }
-            | IrInstruction::VectorUnaryOp { .. }
-            | IrInstruction::VectorMinMax { .. } => {
+            // === InlineAsm (still unsupported) ===
+            IrInstruction::InlineAsm { .. } => {
                 f.instruction(&Instruction::Unreachable);
+            }
+
+            // === SIMD vector instructions → WASM SIMD128 ===
+            // Currently only f32x4 (16 bytes, 4 lanes) is exercised by SIMD4f.
+            // The lowering pattern: get_reg(operands) → emit f32x4.* → set_reg(dest).
+            // Locals/params with IrType::Vector{F32,4} are typed as ValType::V128
+            // via ir_type_to_wasm.
+
+            // Splat: scalar f32 → vec
+            IrInstruction::VectorSplat { dest, scalar, .. } => {
+                self.get_reg(f, *scalar);
+                f.instruction(&Instruction::F32x4Splat);
+                self.set_reg(f, *dest);
+            }
+
+            // Element-wise binary ops (add/sub/mul/div)
+            IrInstruction::VectorBinOp { dest, op, left, right, .. } => {
+                self.get_reg(f, *left);
+                self.get_reg(f, *right);
+                match op {
+                    BinaryOp::Add | BinaryOp::FAdd => {
+                        f.instruction(&Instruction::F32x4Add);
+                    }
+                    BinaryOp::Sub | BinaryOp::FSub => {
+                        f.instruction(&Instruction::F32x4Sub);
+                    }
+                    BinaryOp::Mul | BinaryOp::FMul => {
+                        f.instruction(&Instruction::F32x4Mul);
+                    }
+                    BinaryOp::Div | BinaryOp::FDiv => {
+                        f.instruction(&Instruction::F32x4Div);
+                    }
+                    _ => {
+                        // Unsupported vector binop (And/Or/Xor/Shl on f32 not meaningful)
+                        f.instruction(&Instruction::Unreachable);
+                    }
+                }
+                self.set_reg(f, *dest);
+            }
+
+            // Extract a single lane (compile-time index)
+            IrInstruction::VectorExtract { dest, vector, index } => {
+                self.get_reg(f, *vector);
+                f.instruction(&Instruction::F32x4ExtractLane(*index));
+                self.set_reg(f, *dest);
+            }
+
+            // Insert a single lane (compile-time index)
+            IrInstruction::VectorInsert { dest, vector, scalar, index } => {
+                self.get_reg(f, *vector);
+                self.get_reg(f, *scalar);
+                f.instruction(&Instruction::F32x4ReplaceLane(*index));
+                self.set_reg(f, *dest);
+            }
+
+            // Element-wise unary ops
+            IrInstruction::VectorUnaryOp { dest, op, operand, .. } => {
+                self.get_reg(f, *operand);
+                match op {
+                    VectorUnaryOpKind::Sqrt => {
+                        f.instruction(&Instruction::F32x4Sqrt);
+                    }
+                    VectorUnaryOpKind::Abs => {
+                        f.instruction(&Instruction::F32x4Abs);
+                    }
+                    VectorUnaryOpKind::Neg => {
+                        f.instruction(&Instruction::F32x4Neg);
+                    }
+                    VectorUnaryOpKind::Ceil => {
+                        f.instruction(&Instruction::F32x4Ceil);
+                    }
+                    VectorUnaryOpKind::Floor => {
+                        f.instruction(&Instruction::F32x4Floor);
+                    }
+                    VectorUnaryOpKind::Trunc => {
+                        f.instruction(&Instruction::F32x4Trunc);
+                    }
+                    VectorUnaryOpKind::Round => {
+                        f.instruction(&Instruction::F32x4Nearest);
+                    }
+                }
+                self.set_reg(f, *dest);
+            }
+
+            // Element-wise min/max
+            IrInstruction::VectorMinMax { dest, op, left, right, .. } => {
+                self.get_reg(f, *left);
+                self.get_reg(f, *right);
+                match op {
+                    VectorMinMaxKind::Min => {
+                        f.instruction(&Instruction::F32x4Min);
+                    }
+                    VectorMinMaxKind::Max => {
+                        f.instruction(&Instruction::F32x4Max);
+                    }
+                }
+                self.set_reg(f, *dest);
+            }
+
+            // Horizontal reduction. WASM has no native f32x4 horizontal reduce,
+            // so we extract all 4 lanes and sum them.
+            IrInstruction::VectorReduce { dest, op, vector } => {
+                match op {
+                    BinaryOp::Add | BinaryOp::FAdd => {
+                        // s = lane0 + lane1 + lane2 + lane3
+                        self.get_reg(f, *vector);
+                        f.instruction(&Instruction::F32x4ExtractLane(0));
+                        self.get_reg(f, *vector);
+                        f.instruction(&Instruction::F32x4ExtractLane(1));
+                        f.instruction(&Instruction::F32Add);
+                        self.get_reg(f, *vector);
+                        f.instruction(&Instruction::F32x4ExtractLane(2));
+                        f.instruction(&Instruction::F32Add);
+                        self.get_reg(f, *vector);
+                        f.instruction(&Instruction::F32x4ExtractLane(3));
+                        f.instruction(&Instruction::F32Add);
+                    }
+                    BinaryOp::Mul | BinaryOp::FMul => {
+                        self.get_reg(f, *vector);
+                        f.instruction(&Instruction::F32x4ExtractLane(0));
+                        self.get_reg(f, *vector);
+                        f.instruction(&Instruction::F32x4ExtractLane(1));
+                        f.instruction(&Instruction::F32Mul);
+                        self.get_reg(f, *vector);
+                        f.instruction(&Instruction::F32x4ExtractLane(2));
+                        f.instruction(&Instruction::F32Mul);
+                        self.get_reg(f, *vector);
+                        f.instruction(&Instruction::F32x4ExtractLane(3));
+                        f.instruction(&Instruction::F32Mul);
+                    }
+                    _ => {
+                        f.instruction(&Instruction::Unreachable);
+                    }
+                }
+                self.set_reg(f, *dest);
+            }
+
+            // Load 16 bytes from memory into a v128
+            IrInstruction::VectorLoad { dest, ptr, .. } => {
+                self.get_reg(f, *ptr);
+                let ma = MemArg {
+                    offset: 0,
+                    align: 0,
+                    memory_index: 0,
+                };
+                f.instruction(&Instruction::V128Load(ma));
+                self.set_reg(f, *dest);
+            }
+
+            // Store v128 to 16 bytes of memory
+            IrInstruction::VectorStore { ptr, value, .. } => {
+                self.get_reg(f, *ptr);
+                self.get_reg(f, *value);
+                let ma = MemArg {
+                    offset: 0,
+                    align: 0,
+                    memory_index: 0,
+                };
+                f.instruction(&Instruction::V128Store(ma));
             }
 
             // Catch-all for anything else.
@@ -3311,6 +3466,10 @@ fn ir_type_to_wasm(ty: &IrType) -> ValType {
     match ty {
         IrType::F32 => ValType::F32,
         IrType::F64 => ValType::F64,
+        // SIMD vectors map to WASM v128. Currently only f32x4 (16 bytes) is
+        // exercised by SIMD4f, but the same lowering applies to any 16-byte
+        // vector type (i32x4, i16x8, i8x16, f64x2).
+        IrType::Vector { .. } => ValType::V128,
         // Everything else is i32 in WASM32: integers, pointers, booleans,
         // strings, arrays, structs, unions, opaques, function refs.
         _ => ValType::I32,
