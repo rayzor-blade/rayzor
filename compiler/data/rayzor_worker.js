@@ -10,34 +10,64 @@ self.onmessage = async (e) => {
   const msg = e.data;
 
   if (msg.type === 'init') {
-    // Initialize worker with shared memory and WASM module
+    // Initialize worker with shared memory and WASM module. Note: we do
+    // NOT receive the `__indirect_function_table` from the main thread
+    // — `WebAssembly.Table` is not structured-cloneable. Each worker
+    // gets its own table from `instance.exports.__indirect_function_table`
+    // after instantiating the module below; because the module is the
+    // same compiled `WebAssembly.Module`, the table has identical func
+    // indices, so closures spawned via `Thread.spawn` look up the same
+    // function on the worker side.
     threadId = msg.threadId;
     wasmMemory = msg.memory;
 
-    // Instantiate the same WASM module with shared memory
-    const imports = buildImports(wasmMemory, msg.table);
+    const imports = buildImports(wasmMemory);
     const { instance } = await WebAssembly.instantiate(msg.module, imports);
     wasmInstance = instance;
 
-    // Override memory with shared memory (already set via imports)
     self.postMessage({ type: 'ready', threadId });
   }
 
   else if (msg.type === 'run') {
-    // Execute a closure: table.get(fnIdx)(envPtr)
-    const { taskId, fnIdx, envPtr } = msg;
+    // Execute a closure: table.get(fnIdx)(envPtr). The result must be
+    // delivered back to the main thread via the shared-memory slot the
+    // main thread allocated, not via postMessage — the main thread is
+    // blocked inside a synchronous WASM call and can't pump its event
+    // loop to receive `postMessage` until `join()` returns. Layout:
+    //   +0  i32 ready flag (0 = pending, 1 = done)
+    //   +8  i64 closure result
+    const { threadId: tid, fnIdx, envPtr, slot } = msg;
     try {
       const table = wasmInstance.exports.__indirect_function_table;
       const fn = table.get(fnIdx);
-      const result = fn ? fn(envPtr) : 0;
-      self.postMessage({ type: 'done', taskId, threadId, result });
+      let result = 0;
+      if (typeof fn === 'function') {
+        result = fn(envPtr);
+      } else {
+        console.error(`[worker ${threadId}] table slot ${fnIdx} is not callable`);
+      }
+      // Write the result first, then publish the ready flag — matches
+      // the acquire-release pattern the main thread spins on.
+      const dv = new DataView(wasmMemory.buffer);
+      dv.setBigInt64(slot + 8, BigInt(result), true);
+      const view = new Int32Array(wasmMemory.buffer);
+      Atomics.store(view, slot >> 2, 1);
+      Atomics.notify(view, slot >> 2, 1);
     } catch (err) {
-      self.postMessage({ type: 'error', taskId, threadId, error: err.message });
+      console.error(`[worker ${threadId}] closure threw:`, err);
+      // Publish the ready flag even on failure so join() doesn't spin
+      // forever. Result slot stays 0, which matches the legacy behavior.
+      try {
+        const view = new Int32Array(wasmMemory.buffer);
+        Atomics.store(view, slot >> 2, 1);
+        Atomics.notify(view, slot >> 2, 1);
+      } catch (_) { /* nothing we can do */ }
+      self.postMessage({ type: 'error', threadId: tid, error: err.message });
     }
   }
 };
 
-function buildImports(memory, table) {
+function buildImports(memory) {
   // Minimal rayzor runtime for worker threads.
   // Workers share memory but need their own import stubs.
   const rayzor = new Proxy({
@@ -90,7 +120,12 @@ function buildImports(memory, table) {
     get: (target, prop) => target[prop] ?? (() => 0),
   });
 
+  // The Rayzor runtime-wasm library imports its linear memory from
+  // `env.memory`. Workers must provide the SAME `WebAssembly.Memory` handle
+  // the main thread allocated — this is how all wasm instances end up
+  // sharing the SharedArrayBuffer that backs the heap and sync primitives.
   return {
+    env: { memory },
     rayzor,
     wasi_snapshot_preview1: wasi,
   };

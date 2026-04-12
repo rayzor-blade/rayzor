@@ -30,7 +30,9 @@ use wasm_encoder::{
 
 use crate::ir::blocks::{IrBasicBlock, IrBlockId, IrTerminator};
 use crate::ir::functions::{IrFunction, IrFunctionId, IrFunctionSignature};
-use crate::ir::instructions::{BinaryOp, CompareOp, IrInstruction, UnaryOp, VectorMinMaxKind, VectorUnaryOpKind};
+use crate::ir::instructions::{
+    BinaryOp, CompareOp, IrInstruction, UnaryOp, VectorMinMaxKind, VectorUnaryOpKind,
+};
 use crate::ir::modules::{IrGlobalId, IrModule};
 use crate::ir::{IrId, IrType, IrValue};
 
@@ -104,8 +106,12 @@ impl WasmBackend {
         if ctx.all_module_funcs.is_empty() {
             for m in modules {
                 let mut map = BTreeMap::new();
-                for (id, f) in &m.functions { map.insert(*id, f.name.clone()); }
-                for (_, f) in &m.extern_functions { map.insert(f.id, f.name.clone()); }
+                for (id, f) in &m.functions {
+                    map.insert(*id, f.name.clone());
+                }
+                for (_, f) in &m.extern_functions {
+                    map.insert(f.id, f.name.clone());
+                }
                 ctx.all_module_funcs.push(map);
             }
         }
@@ -135,7 +141,8 @@ impl WasmBackend {
         let mut ctx = CompileCtx::new();
         // Pre-populate js_import_modules from extern class @:jsImport mappings
         for (func_name, module_name) in extern_js_modules {
-            ctx.js_import_modules.insert(func_name.clone(), (module_name.clone(), func_name.clone()));
+            ctx.js_import_modules
+                .insert(func_name.clone(), (module_name.clone(), func_name.clone()));
         }
         ctx.collect_imports(modules);
         ctx.collect_functions(modules);
@@ -162,8 +169,12 @@ impl WasmBackend {
         if ctx.all_module_funcs.is_empty() {
             for m in modules {
                 let mut map = BTreeMap::new();
-                for (id, f) in &m.functions { map.insert(*id, f.name.clone()); }
-                for (_, f) in &m.extern_functions { map.insert(f.id, f.name.clone()); }
+                for (id, f) in &m.functions {
+                    map.insert(*id, f.name.clone());
+                }
+                for (_, f) in &m.extern_functions {
+                    map.insert(f.id, f.name.clone());
+                }
                 ctx.all_module_funcs.push(map);
             }
         }
@@ -189,7 +200,12 @@ impl WasmBackend {
         entry_function: Option<&str>,
         extra_exports: &[&str],
     ) -> Result<Vec<u8>, String> {
-        Self::compile_with_js_modules(modules, entry_function, extra_exports, &std::collections::BTreeMap::new())
+        Self::compile_with_js_modules(
+            modules,
+            entry_function,
+            extra_exports,
+            &std::collections::BTreeMap::new(),
+        )
     }
 }
 
@@ -369,20 +385,27 @@ impl CompileCtx {
         let mut bare_to_qualified: BTreeMap<String, String> = BTreeMap::new();
         for module in modules {
             for (_id, ext) in &module.extern_functions {
-                if has_code.contains(&ext.id) { continue; }
+                if has_code.contains(&ext.id) {
+                    continue;
+                }
                 let is_bare = !ext.name.contains('_') && !ext.name.contains('.');
                 if is_bare {
-                    let snake: String = ext.name.chars().enumerate().fold(String::new(), |mut s, (i, c)| {
-                        if c.is_uppercase() && i > 0 { s.push('_'); }
-                        s.push(c.to_ascii_lowercase());
-                        s
-                    });
+                    let snake: String =
+                        ext.name
+                            .chars()
+                            .enumerate()
+                            .fold(String::new(), |mut s, (i, c)| {
+                                if c.is_uppercase() && i > 0 {
+                                    s.push('_');
+                                }
+                                s.push(c.to_ascii_lowercase());
+                                s
+                            });
                     // Known bare method names → synthesize qualified import
                     let qualified = match ext.name.as_str() {
-                        "get" | "set" | "sub" | "blit" | "fill" | "compare"
-                        | "getInt16" | "setInt16" | "getInt32" | "setInt32"
-                        | "getInt64" | "setInt64" | "getFloat" | "setFloat"
-                        | "getDouble" | "setDouble" | "length"
+                        "get" | "set" | "sub" | "blit" | "fill" | "compare" | "getInt16"
+                        | "setInt16" | "getInt32" | "setInt32" | "getInt64" | "setInt64"
+                        | "getFloat" | "setFloat" | "getDouble" | "setDouble" | "length"
                         | "alloc" | "ofString" | "toString" => {
                             Some(format!("haxe_bytes_{}", snake))
                         }
@@ -393,12 +416,14 @@ impl CompileCtx {
                     };
                     if let Some(qname) = qualified {
                         bare_to_qualified.insert(ext.name.clone(), qname.clone());
-                        import_entries.entry(qname)
+                        import_entries
+                            .entry(qname)
                             .or_insert_with(|| Self::sig_to_wasm(&ext.signature));
                         continue;
                     }
                 }
-                import_entries.entry(ext.name.clone())
+                import_entries
+                    .entry(ext.name.clone())
                     .or_insert_with(|| Self::sig_to_wasm(&ext.signature));
             }
         }
@@ -407,20 +432,32 @@ impl CompileCtx {
         // bare_to_qualified is shared with the extern_functions phase above.
         for module in modules {
             for (_id, func) in &module.functions {
-                if !func.cfg.blocks.is_empty() { continue; }
+                if !func.cfg.blocks.is_empty() {
+                    continue;
+                }
                 // Redirect bare-name stubs to qualified haxe_* imports.
                 // "setInt32" → "haxe_bytes_set_int32" (either existing or synthesized).
                 let is_bare = !func.name.contains('_') && !func.name.contains('.');
                 if is_bare {
-                    let snake: String = func.name.chars().enumerate().fold(String::new(), |mut s, (i, c)| {
-                        if c.is_uppercase() && i > 0 { s.push('_'); }
-                        s.push(c.to_ascii_lowercase());
-                        s
-                    });
+                    let snake: String =
+                        func.name
+                            .chars()
+                            .enumerate()
+                            .fold(String::new(), |mut s, (i, c)| {
+                                if c.is_uppercase() && i > 0 {
+                                    s.push('_');
+                                }
+                                s.push(c.to_ascii_lowercase());
+                                s
+                            });
                     let suffix = format!("_{}", snake);
                     // Check if a qualified import already exists (haxe_* or rayzor_*)
-                    let existing_qualified = import_entries.keys()
-                        .find(|k| (k.starts_with("haxe_") || k.starts_with("rayzor_")) && k.ends_with(&suffix))
+                    let existing_qualified = import_entries
+                        .keys()
+                        .find(|k| {
+                            (k.starts_with("haxe_") || k.starts_with("rayzor_"))
+                                && k.ends_with(&suffix)
+                        })
                         .cloned();
                     if let Some(qname) = existing_qualified {
                         bare_to_qualified.insert(func.name.clone(), qname);
@@ -433,17 +470,17 @@ impl CompileCtx {
                         let qualified_import = qn.replace('.', "_").to_lowercase();
                         if qualified_import != func.name {
                             bare_to_qualified.insert(func.name.clone(), qualified_import.clone());
-                            import_entries.entry(qualified_import)
+                            import_entries
+                                .entry(qualified_import)
                                 .or_insert_with(|| Self::sig_to_wasm(&func.signature));
                             continue;
                         }
                     }
                     // Last resort: use "haxe_bytes_" prefix for known Bytes method names
                     let qualified = match func.name.as_str() {
-                        "get" | "set" | "sub" | "blit" | "fill" | "compare"
-                        | "getInt16" | "setInt16" | "getInt32" | "setInt32"
-                        | "getInt64" | "setInt64" | "getFloat" | "setFloat"
-                        | "getDouble" | "setDouble" | "length"
+                        "get" | "set" | "sub" | "blit" | "fill" | "compare" | "getInt16"
+                        | "setInt16" | "getInt32" | "setInt32" | "getInt64" | "setInt64"
+                        | "getFloat" | "setFloat" | "getDouble" | "setDouble" | "length"
                         | "alloc" | "ofString" | "toString" => {
                             Some(format!("haxe_bytes_{}", snake))
                         }
@@ -454,12 +491,14 @@ impl CompileCtx {
                     };
                     if let Some(qname) = qualified {
                         bare_to_qualified.insert(func.name.clone(), qname.clone());
-                        import_entries.entry(qname)
+                        import_entries
+                            .entry(qname)
                             .or_insert_with(|| Self::sig_to_wasm(&func.signature));
                         continue;
                     }
                 }
-                import_entries.entry(func.name.clone())
+                import_entries
+                    .entry(func.name.clone())
                     .or_insert_with(|| Self::sig_to_wasm(&func.signature));
             }
         }
@@ -469,7 +508,11 @@ impl CompileCtx {
         let mut name_to_idx: BTreeMap<String, u32> = BTreeMap::new();
         for (name, (params, results)) in &import_entries {
             let param_types = params.clone();
-            let ret_type = if results.is_empty() { ValType::I32 } else { results[0] };
+            let ret_type = if results.is_empty() {
+                ValType::I32
+            } else {
+                results[0]
+            };
             let type_idx = self.intern_type(params.clone(), results.clone());
             let func_idx = self.next_func_idx;
             self.next_func_idx += 1;
@@ -486,23 +529,35 @@ impl CompileCtx {
         for module in modules {
             // Map extern function IDs
             for (_id, ext) in &module.extern_functions {
-                if has_code.contains(&ext.id) { continue; }
+                if has_code.contains(&ext.id) {
+                    continue;
+                }
                 // Try direct name, then bare→qualified redirect
                 let resolved_name = bare_to_qualified.get(&ext.name).unwrap_or(&ext.name);
                 if let Some(&idx) = name_to_idx.get(resolved_name) {
                     self.ir_func_to_idx.entry(ext.id).or_insert(idx);
                     let (params, _) = Self::sig_to_wasm(&ext.signature);
                     let ret = if let Some((_, results)) = import_entries.get(resolved_name) {
-                        if results.is_empty() { ValType::I32 } else { results[0] }
-                    } else { ValType::I32 };
+                        if results.is_empty() {
+                            ValType::I32
+                        } else {
+                            results[0]
+                        }
+                    } else {
+                        ValType::I32
+                    };
                     self.func_param_types.entry(ext.id).or_insert(params);
                     self.func_return_types.entry(ext.id).or_insert(ret);
                 }
             }
             // Map empty-body function IDs
             for (func_id, func) in &module.functions {
-                if !func.cfg.blocks.is_empty() { continue; }
-                if self.ir_func_to_idx.contains_key(func_id) { continue; }
+                if !func.cfg.blocks.is_empty() {
+                    continue;
+                }
+                if self.ir_func_to_idx.contains_key(func_id) {
+                    continue;
+                }
                 // Direct name match
                 if let Some(&idx) = name_to_idx.get(&func.name) {
                     self.ir_func_to_idx.insert(*func_id, idx);
@@ -517,14 +572,24 @@ impl CompileCtx {
                 }
                 // Bare-name redirect: "get" → "haxe_bytes_get" (fallback scan)
                 if !func.name.contains('_') && !func.name.contains('.') {
-                    let snake: String = func.name.chars().enumerate().fold(String::new(), |mut s, (i, c)| {
-                        if c.is_uppercase() && i > 0 { s.push('_'); }
-                        s.push(c.to_ascii_lowercase());
-                        s
-                    });
+                    let snake: String =
+                        func.name
+                            .chars()
+                            .enumerate()
+                            .fold(String::new(), |mut s, (i, c)| {
+                                if c.is_uppercase() && i > 0 {
+                                    s.push('_');
+                                }
+                                s.push(c.to_ascii_lowercase());
+                                s
+                            });
                     let suffix = format!("_{}", snake);
-                    if let Some((&ref _qname, &idx)) = name_to_idx.iter()
-                        .filter(|(k, _)| (k.starts_with("haxe_") || k.starts_with("rayzor_")) && k.ends_with(&suffix))
+                    if let Some((&ref _qname, &idx)) = name_to_idx
+                        .iter()
+                        .filter(|(k, _)| {
+                            (k.starts_with("haxe_") || k.starts_with("rayzor_"))
+                                && k.ends_with(&suffix)
+                        })
                         .min_by_key(|(k, _)| k.len())
                     {
                         self.ir_func_to_idx.insert(*func_id, idx);
@@ -555,92 +620,111 @@ impl CompileCtx {
     fn collect_functions(&mut self, modules: &[&IrModule]) {
         // Sort functions by name for deterministic index assignment.
         // IrFunctionIds vary between builds, but names are stable.
-        let mut all_funcs: Vec<(usize, IrFunctionId, &IrFunction)> = modules.iter()
+        let mut all_funcs: Vec<(usize, IrFunctionId, &IrFunction)> = modules
+            .iter()
             .enumerate()
             .flat_map(|(mod_idx, module)| {
-                module.functions.iter().map(move |(fid, f)| (mod_idx, *fid, f))
+                module
+                    .functions
+                    .iter()
+                    .map(move |(fid, f)| (mod_idx, *fid, f))
             })
             .collect();
         all_funcs.sort_by(|a, b| a.2.name.cmp(&b.2.name).then(a.1.cmp(&b.1)));
 
         for &(mod_idx, func_id, func) in &all_funcs {
             let func_id = &func_id; // match old code's reference pattern
-                // Skip functions already registered as imports (by ID or name).
-                // Always register return type for CallDirect type inference
-                // If this function maps to an import, use the import's signature for param types
-                // (the import type is authoritative — it may have f64 for Float params while
-                // the IrFunction might have Ptr/i32 from an older compilation context).
-                let (param_vts, ret_vt) = if let Some(&idx) = self.ir_func_to_idx.get(func_id) {
-                    if (idx as usize) < self.imports.len() {
-                        let imp = &self.imports[idx as usize];
-                        self.types.get(imp.type_idx as usize)
-                            .map(|(p, r)| (p.clone(), r.first().copied().unwrap_or(ValType::I32)))
-                            .unwrap_or_else(|| {
-                                let p: Vec<ValType> = func.signature.parameters.iter().map(|p| ir_type_to_wasm(&p.ty)).collect();
-                                (p, ir_type_to_wasm(&func.signature.return_type))
-                            })
-                    } else {
-                        let p: Vec<ValType> = func.signature.parameters.iter().map(|p| ir_type_to_wasm(&p.ty)).collect();
-                        (p, ir_type_to_wasm(&func.signature.return_type))
-                    }
+                                    // Skip functions already registered as imports (by ID or name).
+                                    // Always register return type for CallDirect type inference
+                                    // If this function maps to an import, use the import's signature for param types
+                                    // (the import type is authoritative — it may have f64 for Float params while
+                                    // the IrFunction might have Ptr/i32 from an older compilation context).
+            let (param_vts, ret_vt) = if let Some(&idx) = self.ir_func_to_idx.get(func_id) {
+                if (idx as usize) < self.imports.len() {
+                    let imp = &self.imports[idx as usize];
+                    self.types
+                        .get(imp.type_idx as usize)
+                        .map(|(p, r)| (p.clone(), r.first().copied().unwrap_or(ValType::I32)))
+                        .unwrap_or_else(|| {
+                            let p: Vec<ValType> = func
+                                .signature
+                                .parameters
+                                .iter()
+                                .map(|p| ir_type_to_wasm(&p.ty))
+                                .collect();
+                            (p, ir_type_to_wasm(&func.signature.return_type))
+                        })
                 } else {
-                    let p: Vec<ValType> = func.signature.parameters.iter().map(|p| ir_type_to_wasm(&p.ty)).collect();
+                    let p: Vec<ValType> = func
+                        .signature
+                        .parameters
+                        .iter()
+                        .map(|p| ir_type_to_wasm(&p.ty))
+                        .collect();
                     (p, ir_type_to_wasm(&func.signature.return_type))
-                };
-                self.func_return_types.insert(*func_id, ret_vt);
-                self.func_param_types.insert(*func_id, param_vts);
+                }
+            } else {
+                let p: Vec<ValType> = func
+                    .signature
+                    .parameters
+                    .iter()
+                    .map(|p| ir_type_to_wasm(&p.ty))
+                    .collect();
+                (p, ir_type_to_wasm(&func.signature.return_type))
+            };
+            self.func_return_types.insert(*func_id, ret_vt);
+            self.func_param_types.insert(*func_id, param_vts);
 
-                if self.ir_func_to_idx.contains_key(func_id) {
-                    let idx = *self.ir_func_to_idx.get(func_id).unwrap();
-                    self.func_name_to_idx.insert(func.name.clone(), idx);
-                    continue;
-                }
+            if self.ir_func_to_idx.contains_key(func_id) {
+                let idx = *self.ir_func_to_idx.get(func_id).unwrap();
+                self.func_name_to_idx.insert(func.name.clone(), idx);
+                continue;
+            }
 
-                // @:jsImport functions become WASM imports from a named JS module
-                if let Some((ref js_module, ref js_name)) = func.js_import {
-                    let (params, results) = Self::sig_to_wasm(&func.signature);
-                    let type_idx = self.intern_type(params, results);
-                    let func_idx = self.next_func_idx;
-                    self.next_func_idx += 1;
-                    self.imports.push(ImportedFunc {
-                        name: func.name.clone(),
-                        type_idx,
-                    });
-                    // Store the JS module name for this import (used in import section encoding)
-                    self.js_import_modules
-                        .insert(func.name.clone(), (js_module.clone(), js_name.clone()));
-                    self.import_name_to_idx.insert(func.name.clone(), func_idx);
-                    self.ir_func_to_idx.insert(*func_id, func_idx);
-                    self.func_name_to_idx.insert(func.name.clone(), func_idx);
-                    continue;
-                }
-                if let Some(&idx) = self.import_name_to_idx.get(&func.name) {
-                    self.ir_func_to_idx.insert(*func_id, idx);
-                    self.func_name_to_idx.insert(func.name.clone(), idx);
-                    continue;
-                }
-                // Map CallDirect targets in this function to import indices.
-                // This doesn't remove the function — it just ensures the func_id→idx
-                // mapping for any CallDirect targets is available.
-                {
-                    use crate::ir::IrInstruction;
-                    for block in func.cfg.blocks.values() {
-                        for inst in &block.instructions {
-                            if let IrInstruction::CallDirect { func_id: fid, .. } = inst {
-                                if !self.ir_func_to_idx.contains_key(fid) {
-                                    // Try to resolve the target by name across all modules
-                                    'resolve: for m2 in modules.iter() {
-                                        if let Some(tf) = m2.extern_functions.get(fid) {
-                                            if let Some(&idx) = self.import_name_to_idx.get(&tf.name) {
-                                                self.ir_func_to_idx.insert(*fid, idx);
-                                                break 'resolve;
-                                            }
+            // @:jsImport functions become WASM imports from a named JS module
+            if let Some((ref js_module, ref js_name)) = func.js_import {
+                let (params, results) = Self::sig_to_wasm(&func.signature);
+                let type_idx = self.intern_type(params, results);
+                let func_idx = self.next_func_idx;
+                self.next_func_idx += 1;
+                self.imports.push(ImportedFunc {
+                    name: func.name.clone(),
+                    type_idx,
+                });
+                // Store the JS module name for this import (used in import section encoding)
+                self.js_import_modules
+                    .insert(func.name.clone(), (js_module.clone(), js_name.clone()));
+                self.import_name_to_idx.insert(func.name.clone(), func_idx);
+                self.ir_func_to_idx.insert(*func_id, func_idx);
+                self.func_name_to_idx.insert(func.name.clone(), func_idx);
+                continue;
+            }
+            if let Some(&idx) = self.import_name_to_idx.get(&func.name) {
+                self.ir_func_to_idx.insert(*func_id, idx);
+                self.func_name_to_idx.insert(func.name.clone(), idx);
+                continue;
+            }
+            // Map CallDirect targets in this function to import indices.
+            // This doesn't remove the function — it just ensures the func_id→idx
+            // mapping for any CallDirect targets is available.
+            {
+                use crate::ir::IrInstruction;
+                for block in func.cfg.blocks.values() {
+                    for inst in &block.instructions {
+                        if let IrInstruction::CallDirect { func_id: fid, .. } = inst {
+                            if !self.ir_func_to_idx.contains_key(fid) {
+                                // Try to resolve the target by name across all modules
+                                'resolve: for m2 in modules.iter() {
+                                    if let Some(tf) = m2.extern_functions.get(fid) {
+                                        if let Some(&idx) = self.import_name_to_idx.get(&tf.name) {
+                                            self.ir_func_to_idx.insert(*fid, idx);
+                                            break 'resolve;
                                         }
-                                        if let Some(tf) = m2.functions.get(fid) {
-                                            if let Some(&idx) = self.import_name_to_idx.get(&tf.name) {
-                                                self.ir_func_to_idx.insert(*fid, idx);
-                                                break 'resolve;
-                                            }
+                                    }
+                                    if let Some(tf) = m2.functions.get(fid) {
+                                        if let Some(&idx) = self.import_name_to_idx.get(&tf.name) {
+                                            self.ir_func_to_idx.insert(*fid, idx);
+                                            break 'resolve;
                                         }
                                     }
                                 }
@@ -648,25 +732,26 @@ impl CompileCtx {
                         }
                     }
                 }
-                let (params, results) = Self::sig_to_wasm(&func.signature);
-                let type_idx = self.intern_type(params, results);
-                let func_idx = self.next_func_idx;
-                self.next_func_idx += 1;
-                self.internals.push(InternalFunc {
-                    ir_id: *func_id,
-                    module_idx: mod_idx,
-                    type_idx,
-                    func_idx,
-                });
-                self.ir_func_to_idx.insert(*func_id, func_idx);
-                self.func_name_to_idx.insert(func.name.clone(), func_idx);
-                // Also register qualified name (ClassName.method)
-                if let Some(ref qn) = func.qualified_name {
-                    self.func_name_to_idx.insert(qn.clone(), func_idx);
-                }
-                // Store return type for CallDirect type inference
-                let ret_ty = ir_type_to_wasm(&func.signature.return_type);
-                self.func_return_types.insert(*func_id, ret_ty);
+            }
+            let (params, results) = Self::sig_to_wasm(&func.signature);
+            let type_idx = self.intern_type(params, results);
+            let func_idx = self.next_func_idx;
+            self.next_func_idx += 1;
+            self.internals.push(InternalFunc {
+                ir_id: *func_id,
+                module_idx: mod_idx,
+                type_idx,
+                func_idx,
+            });
+            self.ir_func_to_idx.insert(*func_id, func_idx);
+            self.func_name_to_idx.insert(func.name.clone(), func_idx);
+            // Also register qualified name (ClassName.method)
+            if let Some(ref qn) = func.qualified_name {
+                self.func_name_to_idx.insert(qn.clone(), func_idx);
+            }
+            // Store return type for CallDirect type inference
+            let ret_ty = ir_type_to_wasm(&func.signature.return_type);
+            self.func_return_types.insert(*func_id, ret_ty);
         }
 
         // Cross-module extern->internal resolution by name.
@@ -729,7 +814,8 @@ impl CompileCtx {
     /// then resolves them by name across all modules' extern_functions and functions.
     fn build_func_id_fallback(&mut self, modules: &[&IrModule]) {
         use crate::ir::IrInstruction;
-        let mut unresolved: std::collections::BTreeSet<IrFunctionId> = std::collections::BTreeSet::new();
+        let mut unresolved: std::collections::BTreeSet<IrFunctionId> =
+            std::collections::BTreeSet::new();
 
         // Collect all unresolved CallDirect targets
         for module in modules {
@@ -1141,40 +1227,66 @@ impl CompileCtx {
             // (same param count as the import). Instance method wrappers have complex bodies
             // that extract handles from `this` — those must compile normally.
             let all_unreachable = !ir_func.cfg.blocks.is_empty()
-                && ir_func.cfg.blocks.values().all(|b|
-                    matches!(b.terminator, crate::ir::IrTerminator::Unreachable | crate::ir::IrTerminator::NoReturn { .. })
-                );
-            let has_import = all_unreachable && (
-                self.import_name_to_idx.contains_key(&ir_func.name)
-                || self.qualified_to_import.contains_key(&ir_func.name)
-                || ir_func.qualified_name.as_ref().map_or(false, |qn| self.qualified_to_import.contains_key(qn)));
+                && ir_func.cfg.blocks.values().all(|b| {
+                    matches!(
+                        b.terminator,
+                        crate::ir::IrTerminator::Unreachable
+                            | crate::ir::IrTerminator::NoReturn { .. }
+                    )
+                });
+            let has_import = all_unreachable
+                && (self.import_name_to_idx.contains_key(&ir_func.name)
+                    || self.qualified_to_import.contains_key(&ir_func.name)
+                    || ir_func
+                        .qualified_name
+                        .as_ref()
+                        .map_or(false, |qn| self.qualified_to_import.contains_key(qn)));
             // Also check: if ALL blocks have Unreachable/NoReturn terminator,
             // this is an unresolved extern wrapper. Try to match by method name.
             let has_import = has_import || {
-                let all_unreachable = !ir_func.cfg.blocks.is_empty() && ir_func.cfg.blocks.values().all(|b|
-                    matches!(b.terminator, crate::ir::IrTerminator::Unreachable | crate::ir::IrTerminator::NoReturn { .. })
-                );
+                let all_unreachable = !ir_func.cfg.blocks.is_empty()
+                    && ir_func.cfg.blocks.values().all(|b| {
+                        matches!(
+                            b.terminator,
+                            crate::ir::IrTerminator::Unreachable
+                                | crate::ir::IrTerminator::NoReturn { .. }
+                        )
+                    });
                 if all_unreachable {
                     let method = ir_func.name.rsplit('.').next().unwrap_or(&ir_func.name);
                     // Search qualified_to_import for any entry ending with this method
-                    self.qualified_to_import.keys().any(|k| k.rsplit('.').next() == Some(method))
-                        || self.import_name_to_idx.keys().any(|k| k.rsplit('_').next() == Some(method))
+                    self.qualified_to_import
+                        .keys()
+                        .any(|k| k.rsplit('.').next() == Some(method))
+                        || self
+                            .import_name_to_idx
+                            .keys()
+                            .any(|k| k.rsplit('_').next() == Some(method))
                 } else {
                     false
                 }
             };
             if has_import {
                 // Try direct name, qualified name, bare method name, then CallDirect scan
-                let import_idx = self.import_name_to_idx.get(&ir_func.name).copied()
+                let import_idx = self
+                    .import_name_to_idx
+                    .get(&ir_func.name)
+                    .copied()
                     .or_else(|| self.qualified_to_import.get(&ir_func.name).copied())
-                    .or_else(|| ir_func.qualified_name.as_ref().and_then(|qn| self.qualified_to_import.get(qn).copied()))
+                    .or_else(|| {
+                        ir_func
+                            .qualified_name
+                            .as_ref()
+                            .and_then(|qn| self.qualified_to_import.get(qn).copied())
+                    })
                     // Match by bare method name: "rayzor.concurrent.Mutex.unlock" → find "*.unlock"
                     .or_else(|| {
                         let method = ir_func.name.rsplit('.').next()?;
                         // Match by bare method name across all qualified_to_import entries.
                         // No class prefix filter — wrapper class may differ from registered class
                         // (e.g., Mutex.unlock vs MutexGuard.unlock).
-                        self.qualified_to_import.iter()
+                        self.qualified_to_import
+                            .iter()
                             .find(|(k, _)| k.rsplit('.').next() == Some(method))
                             .map(|(_, &idx)| idx)
                     })
@@ -1197,14 +1309,16 @@ impl CompileCtx {
                 if let Some(import_idx) = import_idx {
                     // Generate a thin forwarder that calls the import with type coercion.
                     let (stub_params, stub_results) = Self::sig_to_wasm(&ir_func.signature);
-                    let (import_params, import_results) = if (import_idx as usize) < self.imports.len() {
-                        let imp = &self.imports[import_idx as usize];
-                        self.types.get(imp.type_idx as usize)
-                            .cloned()
-                            .unwrap_or_default()
-                    } else {
-                        (stub_params.clone(), stub_results.clone())
-                    };
+                    let (import_params, import_results) =
+                        if (import_idx as usize) < self.imports.len() {
+                            let imp = &self.imports[import_idx as usize];
+                            self.types
+                                .get(imp.type_idx as usize)
+                                .cloned()
+                                .unwrap_or_default()
+                        } else {
+                            (stub_params.clone(), stub_results.clone())
+                        };
                     let mut func = Function::new(std::iter::empty::<(u32, ValType)>());
                     // Pass params with type coercion (f64→i32 conversion for flattened signatures)
                     let n_args = stub_params.len().min(import_params.len());
@@ -1213,12 +1327,24 @@ impl CompileCtx {
                         // Coerce type if needed
                         match (stub_params[i], import_params[i]) {
                             (a, b) if a == b => {} // same type, no conversion
-                            (ValType::F64, ValType::I32) => { func.instruction(&Instruction::I32TruncF64S); }
-                            (ValType::F64, ValType::I64) => { func.instruction(&Instruction::I64TruncF64S); }
-                            (ValType::I32, ValType::F64) => { func.instruction(&Instruction::F64ConvertI32S); }
-                            (ValType::I64, ValType::F64) => { func.instruction(&Instruction::F64ConvertI64S); }
-                            (ValType::F32, ValType::I32) => { func.instruction(&Instruction::I32TruncF32S); }
-                            (ValType::I32, ValType::F32) => { func.instruction(&Instruction::F32ConvertI32S); }
+                            (ValType::F64, ValType::I32) => {
+                                func.instruction(&Instruction::I32TruncF64S);
+                            }
+                            (ValType::F64, ValType::I64) => {
+                                func.instruction(&Instruction::I64TruncF64S);
+                            }
+                            (ValType::I32, ValType::F64) => {
+                                func.instruction(&Instruction::F64ConvertI32S);
+                            }
+                            (ValType::I64, ValType::F64) => {
+                                func.instruction(&Instruction::F64ConvertI64S);
+                            }
+                            (ValType::F32, ValType::I32) => {
+                                func.instruction(&Instruction::I32TruncF32S);
+                            }
+                            (ValType::I32, ValType::F32) => {
+                                func.instruction(&Instruction::F32ConvertI32S);
+                            }
                             _ => {} // other conversions: pass through
                         }
                     }
@@ -1336,7 +1462,10 @@ impl<'a> FunctionLowerer<'a> {
         for block in self.ir_func.cfg.blocks.values() {
             for phi in &block.phi_nodes {
                 if seen.insert(phi.dest) {
-                    let ty = self.ir_func.register_types.get(&phi.dest)
+                    let ty = self
+                        .ir_func
+                        .register_types
+                        .get(&phi.dest)
                         .map(|t| ir_type_to_wasm(t))
                         .unwrap_or(ValType::I32);
                     self.alloc_local(phi.dest, ty);
@@ -1358,7 +1487,10 @@ impl<'a> FunctionLowerer<'a> {
                                 IrType::I64 | IrType::U64 => ValType::I64,
                                 _ => ir_type_to_wasm(ty),
                             },
-                            _ => self.ir_func.register_types.get(&dest)
+                            _ => self
+                                .ir_func
+                                .register_types
+                                .get(&dest)
                                 .map(|t| ir_type_to_wasm(t))
                                 .unwrap_or(ValType::I32),
                         };
@@ -1402,10 +1534,15 @@ impl<'a> FunctionLowerer<'a> {
                         IrInstruction::Cmp { .. } => Some(ValType::I32),
 
                         // CallDirect: use callee return type, fallback to dest register type
-                        IrInstruction::CallDirect { dest, func_id, .. } => {
-                            self.ctx.func_return_types.get(func_id).copied()
-                                .or_else(|| dest.and_then(|d| self.ir_func.register_types.get(&d)).map(|t| ir_type_to_wasm(t)))
-                        }
+                        IrInstruction::CallDirect { dest, func_id, .. } => self
+                            .ctx
+                            .func_return_types
+                            .get(func_id)
+                            .copied()
+                            .or_else(|| {
+                                dest.and_then(|d| self.ir_func.register_types.get(&d))
+                                    .map(|t| ir_type_to_wasm(t))
+                            }),
 
                         // BinOp: choose result type from operand types. Prefer the
                         // highest precision F64 operand; otherwise F32 if any operand
@@ -1447,9 +1584,9 @@ impl<'a> FunctionLowerer<'a> {
                         }
 
                         // CallIndirect: use dest register type
-                        IrInstruction::CallIndirect { dest, .. } => {
-                            dest.and_then(|d| self.ir_func.register_types.get(&d)).map(|t| ir_type_to_wasm(t))
-                        }
+                        IrInstruction::CallIndirect { dest, .. } => dest
+                            .and_then(|d| self.ir_func.register_types.get(&d))
+                            .map(|t| ir_type_to_wasm(t)),
 
                         // GEP, PtrAdd, Alloc: always i32 (pointer)
                         IrInstruction::GetElementPtr { .. }
@@ -2246,7 +2383,11 @@ impl<'a> FunctionLowerer<'a> {
                         }
                     }
                 }
-                let resolved_idx = self.ctx.ir_func_to_idx.get(func_id).copied()
+                let resolved_idx = self
+                    .ctx
+                    .ir_func_to_idx
+                    .get(func_id)
+                    .copied()
                     .or_else(|| self.ctx.func_id_fallback.get(func_id).copied())
                     // Last resort: look up by function name from any module
                     .or_else(|| {
@@ -2266,7 +2407,9 @@ impl<'a> FunctionLowerer<'a> {
                                 let bare = name.rsplit('.').next().unwrap_or(name);
                                 let bare_underscore = name.rsplit('_').next().unwrap_or(name);
                                 for (imp_name, &idx) in &self.ctx.import_name_to_idx {
-                                    if imp_name.ends_with(bare) || imp_name.ends_with(bare_underscore) {
+                                    if imp_name.ends_with(bare)
+                                        || imp_name.ends_with(bare_underscore)
+                                    {
                                         return Some(idx);
                                     }
                                 }
@@ -2703,7 +2846,13 @@ impl<'a> FunctionLowerer<'a> {
             }
 
             // Element-wise binary ops (add/sub/mul/div)
-            IrInstruction::VectorBinOp { dest, op, left, right, .. } => {
+            IrInstruction::VectorBinOp {
+                dest,
+                op,
+                left,
+                right,
+                ..
+            } => {
                 self.get_reg(f, *left);
                 self.get_reg(f, *right);
                 match op {
@@ -2728,14 +2877,23 @@ impl<'a> FunctionLowerer<'a> {
             }
 
             // Extract a single lane (compile-time index)
-            IrInstruction::VectorExtract { dest, vector, index } => {
+            IrInstruction::VectorExtract {
+                dest,
+                vector,
+                index,
+            } => {
                 self.get_reg(f, *vector);
                 f.instruction(&Instruction::F32x4ExtractLane(*index));
                 self.set_reg(f, *dest);
             }
 
             // Insert a single lane (compile-time index)
-            IrInstruction::VectorInsert { dest, vector, scalar, index } => {
+            IrInstruction::VectorInsert {
+                dest,
+                vector,
+                scalar,
+                index,
+            } => {
                 self.get_reg(f, *vector);
                 self.get_reg(f, *scalar);
                 f.instruction(&Instruction::F32x4ReplaceLane(*index));
@@ -2743,7 +2901,9 @@ impl<'a> FunctionLowerer<'a> {
             }
 
             // Element-wise unary ops
-            IrInstruction::VectorUnaryOp { dest, op, operand, .. } => {
+            IrInstruction::VectorUnaryOp {
+                dest, op, operand, ..
+            } => {
                 self.get_reg(f, *operand);
                 match op {
                     VectorUnaryOpKind::Sqrt => {
@@ -2772,7 +2932,13 @@ impl<'a> FunctionLowerer<'a> {
             }
 
             // Element-wise min/max
-            IrInstruction::VectorMinMax { dest, op, left, right, .. } => {
+            IrInstruction::VectorMinMax {
+                dest,
+                op,
+                left,
+                right,
+                ..
+            } => {
                 self.get_reg(f, *left);
                 self.get_reg(f, *right);
                 match op {

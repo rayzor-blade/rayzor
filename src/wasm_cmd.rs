@@ -8,7 +8,6 @@ use std::path::PathBuf;
 
 use crate::compile_helpers::{compile_haxe_to_mir, compile_haxe_to_mir_with_defines};
 
-
 pub fn cmd_run_wasm(
     file: Option<PathBuf>,
     _rpkg_files: Vec<PathBuf>,
@@ -131,8 +130,14 @@ pub fn cmd_build_wasm(
         let mut map = std::collections::BTreeMap::new();
         for (module_name, js_path) in &config_hosts {
             if let Ok(js_source) = std::fs::read_to_string(js_path) {
-                let exports = compiler::codegen::wasm_linker::WasmLinker::scan_js_exports(&js_source);
-                println!("  host: {} ({} exports from {})", module_name, exports.len(), js_path.display());
+                let exports =
+                    compiler::codegen::wasm_linker::WasmLinker::scan_js_exports(&js_source);
+                println!(
+                    "  host: {} ({} exports from {})",
+                    module_name,
+                    exports.len(),
+                    js_path.display()
+                );
                 for name in exports {
                     map.insert(name, module_name.clone());
                 }
@@ -151,7 +156,11 @@ pub fn cmd_build_wasm(
             rt_path.display(),
             rt_bytes.len() as f64 / 1024.0
         );
-        compiler::codegen::wasm_linker::WasmLinker::link_with_hosts(&user_wasm, &rt_bytes, &host_functions)?
+        compiler::codegen::wasm_linker::WasmLinker::link_with_hosts(
+            &user_wasm,
+            &rt_bytes,
+            &host_functions,
+        )?
     } else {
         println!("  warning: WASM runtime not found, output needs JS harness");
         user_wasm
@@ -221,10 +230,8 @@ pub fn cmd_build_wasm(
     // the compiler and provide the Web-Worker-backed Thread/Channel/Mutex
     // implementation used in the browser (`rayzor_threads.js` +
     // `rayzor_worker.js`).
-    let thread_runtime_src: &str =
-        include_str!("../compiler/data/rayzor_threads.js");
-    let thread_worker_src: &str =
-        include_str!("../compiler/data/rayzor_worker.js");
+    let thread_runtime_src: &str = include_str!("../compiler/data/rayzor_threads.js");
+    let thread_worker_src: &str = include_str!("../compiler/data/rayzor_worker.js");
     let thread_runtime_path = build_dir.join("rayzor_threads.js");
     let thread_worker_path = build_dir.join("rayzor_worker.js");
     if let Err(e) = std::fs::write(&thread_runtime_path, thread_runtime_src) {
@@ -349,15 +356,16 @@ pub fn cmd_build_wasm(
 pub fn find_wasm_runtime() -> Option<PathBuf> {
     let mut candidates = vec![
         // Development: built from source (cwd-relative)
-        PathBuf::from("runtime-wasm/target/wasm32-wasip1/release/rayzor_runtime_wasm.wasm"),
+        PathBuf::from("runtime-wasm/target/wasm32-wasip1-threads/release/rayzor_runtime_wasm.wasm"),
     ];
 
     // Development: relative to the rayzor binary (works from any cwd)
     if let Ok(exe) = std::env::current_exe() {
         if let Some(bin_dir) = exe.parent() {
             // binary is in target/release/, repo root is ../../
-            let repo_root = bin_dir
-                .join("../../runtime-wasm/target/wasm32-wasip1/release/rayzor_runtime_wasm.wasm");
+            let repo_root = bin_dir.join(
+                "../../runtime-wasm/target/wasm32-wasip1-threads/release/rayzor_runtime_wasm.wasm",
+            );
             candidates.push(repo_root);
             // Installed: alongside rayzor binary
             candidates.push(bin_dir.join("rayzor_runtime_wasm.wasm"));
@@ -383,7 +391,8 @@ pub fn resolve_and_copy_host_modules(
     project: &Option<compiler::workspace::Project>,
     build_dir: &std::path::Path,
 ) -> std::collections::BTreeMap<String, String> {
-    let mut resolved: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut resolved: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
 
     if js_imports.is_empty() {
         return resolved;
@@ -402,13 +411,17 @@ pub fn resolve_and_copy_host_modules(
                 let js_filename = host_path.file_name().unwrap().to_string_lossy().to_string();
                 let dest = build_dir.join(&js_filename);
                 if let Err(e) = std::fs::copy(host_path, &dest) {
-                    eprintln!("  warning: failed to copy host {}: {}", host_path.display(), e);
+                    eprintln!(
+                        "  warning: failed to copy host {}: {}",
+                        host_path.display(),
+                        e
+                    );
                     continue;
                 }
 
                 // Also copy companion .wasm file if it exists (wasm-bindgen output)
                 let bg_wasm = host_path.with_file_name(
-                    host_path.file_stem().unwrap().to_string_lossy().to_string() + "_bg.wasm"
+                    host_path.file_stem().unwrap().to_string_lossy().to_string() + "_bg.wasm",
                 );
                 if bg_wasm.exists() {
                     let bg_dest = build_dir.join(bg_wasm.file_name().unwrap());
@@ -1680,12 +1693,46 @@ async function run() {{
     }}
   }}
 
+  // The Rayzor WASM runtime is now built with +atomics and imports its
+  // memory from `env.memory`. To let Web Workers share state we must
+  // back that import with a `WebAssembly.Memory {{ shared: true, ... }}`.
+  // This is only legal on cross-origin-isolated pages (COOP: same-origin +
+  // COEP: require-corp headers). Fall back to a non-shared memory otherwise
+  // so the single-threaded fallback path still works in plain servers and
+  // in Node.js.
+  const sharedAvailable =
+    typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated === true;
+  // Must match the linker's declared minimum (`merged_initial.max(512)` in
+  // wasm_linker.rs) — the module's imported memory entry requires at least
+  // 512 pages so the host-side bump allocator near the top of memory doesn't
+  // collide with the runtime heap.
+  let envMemory = null;
+  try {{
+    envMemory = new WebAssembly.Memory({{
+      initial: 512,       // 32 MiB — matches linker minimum
+      maximum: 16384,     // 1 GiB cap (matches runtime-wasm linker config)
+      shared: sharedAvailable,
+    }});
+  }} catch (e) {{
+    console.warn('[rayzor] shared memory alloc failed:', e);
+    try {{
+      envMemory = new WebAssembly.Memory({{ initial: 512, maximum: 16384 }});
+    }} catch (e2) {{
+      console.error('[rayzor] memory alloc failed entirely:', e2);
+    }}
+  }}
+  // Expose so rayzor.malloc / readString / writeString can read from it
+  // before WebAssembly.instantiate() has returned. The runtime copies bytes
+  // into this buffer via data.init during start, then the runtime bump
+  // allocator manages 17 MiB+.
+  memory = envMemory;
+
   const {{ instance }} = await WebAssembly.instantiate(wasmBytes, {{
+    env: {{ memory: envMemory }},
     rayzor: rayzorProxy,
     wasi_snapshot_preview1: wasiProxy,
 {host_import_objects}  }});
 
-  memory = instance.exports.memory;
   _wasmInstance = instance;
 
   // Lazily boot the Worker pool once we have a WASM module + memory.

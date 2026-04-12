@@ -487,12 +487,19 @@ pub extern "C" fn haxe_math_max(a: f64, b: f64) -> f64 {
 /// Simple LCG random number generator. Returns [0.0, 1.0).
 #[no_mangle]
 pub extern "C" fn haxe_math_random() -> f64 {
-    // Static seed — no atomics needed, WASM is single-threaded.
-    static mut SEED: u64 = 1;
-    unsafe {
-        SEED = SEED.wrapping_mul(1103515245).wrapping_add(12345);
-        ((SEED / 65536) % 32768) as f64 / 32768.0
-    }
+    // With wasm32-wasip1-threads + shared memory, multiple Rayzor threads
+    // can call this concurrently — a plain `static mut` would be a data
+    // race. A Relaxed CAS loop on an AtomicU64 gives us lock-free thread
+    // safety without meaningful single-threaded overhead.
+    use core::sync::atomic::{AtomicU64, Ordering};
+    static SEED: AtomicU64 = AtomicU64::new(1);
+    let mut next = 0u64;
+    let _ = SEED.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
+        let n = s.wrapping_mul(1103515245).wrapping_add(12345);
+        next = n;
+        Some(n)
+    });
+    ((next / 65536) % 32768) as f64 / 32768.0
 }
 
 #[no_mangle]

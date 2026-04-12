@@ -1,0 +1,20 @@
+# Enable WASM threads: atomics, bulk-memory, and mutable-globals are required
+# for rustc to emit a shared memory section. This is what makes
+# `WebAssembly.Memory` back the linear memory with a `SharedArrayBuffer`,
+# which lets Atomics.wait/notify + Web Workers run Rayzor threads in
+# parallel in the browser.
+#
+# Target: wasm32-wasip1-threads
+#   Same API as wasm32-wasip1 but ships an atomics-enabled wasi-libc
+#   sysroot, so `std::fs`, `std::process`, and friends link cleanly with
+#   `+atomics` (plain wasm32-wasip1 fails because its prebuilt errno.c
+#   wasn't compiled with the atomics feature).
+
+[target.wasm32-wasip1-threads]
+rustflags = [
+    "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals",
+    "-C", "link-arg=--shared-memory",
+    "-C", "link-arg=--import-memory",
+    "-C", "link-arg=--max-memory=1073741824",  # 1 GiB
+    "-C", "link-arg=--initial-memory=16777216", # 16 MiB
+]
