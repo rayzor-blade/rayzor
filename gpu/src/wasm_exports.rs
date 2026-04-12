@@ -532,9 +532,13 @@ pub fn gfx_pipeline_set_shader(pipe_h: i32, shader_h: i32) {
     let mut ht = HANDLES.lock().unwrap();
     if let Some(GpuObject::PipelineBuilder(b)) = ht.get_mut(pipe_h) {
         #[cfg(not(feature = "native"))]
-        { b.shader = Some(shader_h); }
+        {
+            b.shader = Some(shader_h);
+        }
         #[cfg(feature = "native")]
-        { let _ = (b, shader_h); }
+        {
+            let _ = (b, shader_h);
+        }
     }
 }
 
@@ -590,7 +594,10 @@ pub fn gfx_pipeline_build(pipe_h: i32, dev_h: i32) -> i32 {
     };
 
     #[cfg(feature = "native")]
-    { let _ = (builder, device); 0 }
+    {
+        let _ = (builder, device);
+        0
+    }
 
     #[cfg(not(feature = "native"))]
     {
@@ -952,9 +959,14 @@ pub fn gfx_surface_create(
     // On WASM, ignore raw handles — find the existing canvas on the page.
     // Window.createCentered already created a canvas element.
     #[cfg(target_arch = "wasm32")]
-    { return gfx_surface_create_canvas(dev_h, "", width, height); }
+    {
+        return gfx_surface_create_canvas(dev_h, "", width, height);
+    }
     #[cfg(not(target_arch = "wasm32"))]
-    { let _ = (dev_h, width, height); 0 }
+    {
+        let _ = (dev_h, width, height);
+        0
+    }
 }
 
 // ============================================================================

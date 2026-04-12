@@ -4152,8 +4152,7 @@ impl<'a> TastToHirContext<'a> {
             .collect();
         let mut param_map: BTreeMap<SymbolId, HirExpr> = BTreeMap::new();
         if method.parameters.len() == arguments.len() {
-            for (param, lowered_arg) in method.parameters.iter().zip(lowered_arguments)
-            {
+            for (param, lowered_arg) in method.parameters.iter().zip(lowered_arguments) {
                 param_map.insert(param.symbol_id, lowered_arg);
             }
         }
@@ -4270,8 +4269,7 @@ impl<'a> TastToHirContext<'a> {
 
         // Map parameters to arguments
         if method.parameters.len() == arguments.len() {
-            for (param, lowered_arg) in method.parameters.iter().zip(lowered_arguments)
-            {
+            for (param, lowered_arg) in method.parameters.iter().zip(lowered_arguments) {
                 param_map.insert(param.symbol_id, lowered_arg);
             }
         } else {
