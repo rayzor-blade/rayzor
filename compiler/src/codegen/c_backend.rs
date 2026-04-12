@@ -562,7 +562,8 @@ impl CBackend {
         &self,
         function: &crate::ir::IrFunction,
     ) -> BTreeMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId, String)>> {
-        let mut copies: BTreeMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId, String)>> = BTreeMap::new();
+        let mut copies: BTreeMap<(IrBlockId, IrBlockId), Vec<(IrId, IrId, String)>> =
+            BTreeMap::new();
 
         for (block_id, block) in &function.cfg.blocks {
             for phi in &block.phi_nodes {

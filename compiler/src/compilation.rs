@@ -3747,12 +3747,15 @@ impl CompilationUnit {
 
         let mut paths: Vec<PathBuf> = fs::read_dir(dir_path)
             .map_err(|e| format!("Failed to read directory {:?}: {}", dir_path, e))?
-            .map(|entry| entry.map(|e| e.path()).map_err(|e| format!("Failed to read directory entry: {}", e)))
+            .map(|entry| {
+                entry
+                    .map(|e| e.path())
+                    .map_err(|e| format!("Failed to read directory entry: {}", e))
+            })
             .collect::<Result<_, _>>()?;
         paths.sort();
 
         for path in paths {
-
             if path.is_file() {
                 if let Some(ext) = path.extension() {
                     if ext == "hx" {
@@ -5650,10 +5653,8 @@ impl CompilationUnit {
                 if let Some((mod_is, _)) = class_sym.js_import {
                     if let Some(js_module) = self.string_interner.get(mod_is) {
                         for entry in &entries {
-                            self.extern_js_module_map.insert(
-                                entry.symbol_name.clone(),
-                                js_module.to_string(),
-                            );
+                            self.extern_js_module_map
+                                .insert(entry.symbol_name.clone(), js_module.to_string());
                         }
                     }
                 }
@@ -5691,12 +5692,12 @@ impl CompilationUnit {
         use crate::tast::TypeKind;
         let tt = self.type_table.borrow();
         match tt.get(type_id).map(|t| &t.kind) {
-            Some(TypeKind::Int) => 3,       // I32
-            Some(TypeKind::Float) => 7,     // F64
-            Some(TypeKind::Bool) => 1,      // Bool
-            Some(TypeKind::String) => 8,    // String
-            Some(TypeKind::Void) => 0,      // Void
-            _ => 9,                         // PtrVoid for class types, etc.
+            Some(TypeKind::Int) => 3,    // I32
+            Some(TypeKind::Float) => 7,  // F64
+            Some(TypeKind::Bool) => 1,   // Bool
+            Some(TypeKind::String) => 8, // String
+            Some(TypeKind::Void) => 0,   // Void
+            _ => 9,                      // PtrVoid for class types, etc.
         }
     }
 

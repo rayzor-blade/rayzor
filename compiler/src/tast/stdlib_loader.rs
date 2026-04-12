@@ -191,7 +191,6 @@ impl StdLibLoader {
             dir_paths.sort(); // Deterministic ordering
 
             for file_path in dir_paths {
-
                 // Only load .hx files, skip directories
                 if file_path.is_file()
                     && file_path.extension().and_then(|s| s.to_str()) == Some("hx")
@@ -303,7 +302,6 @@ impl StdLibLoader {
         dir_paths.sort();
 
         for path in dir_paths {
-
             if path.is_dir() {
                 // Recursively scan subdirectories
                 self.scan_directory_recursive(&path, files);

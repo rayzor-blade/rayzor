@@ -342,7 +342,6 @@ fn discover_files_recursive(
     dir_paths.sort(); // Deterministic ordering
 
     for path in dir_paths {
-
         if path.is_dir() {
             let dir_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
 

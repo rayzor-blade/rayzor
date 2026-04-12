@@ -47,7 +47,9 @@ impl PipelineBuilder {
         self.vertex_attributes.clear();
         let mut offset = 0u64;
         for i in 0..attr_count as usize {
-            if i >= attr_data.len() { break; }
+            if i >= attr_data.len() {
+                break;
+            }
             let components = attr_data[i];
             let format = match components {
                 1 => wgpu::VertexFormat::Float32,

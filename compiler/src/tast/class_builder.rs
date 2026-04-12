@@ -33,12 +33,12 @@ impl ClassHierarchyBuilder {
             superclass,
             interfaces,
             all_supertypes: BTreeSet::new(), // Will be computed later
-            depth: 0,                       // Will be computed later
-            is_final: false,                // TODO: Extract from class metadata
-            is_abstract: false,             // TODO: Extract from class metadata
-            is_extern: false,               // TODO: Extract from class metadata
-            is_interface: false,            // This is a class, not interface
-            sealed_to: None,                // TODO: Extract from metadata
+            depth: 0,                        // Will be computed later
+            is_final: false,                 // TODO: Extract from class metadata
+            is_abstract: false,              // TODO: Extract from class metadata
+            is_extern: false,                // TODO: Extract from class metadata
+            is_interface: false,             // This is a class, not interface
+            sealed_to: None,                 // TODO: Extract from metadata
         };
 
         self.hierarchies.insert(class_id, info);
@@ -47,8 +47,7 @@ impl ClassHierarchyBuilder {
     /// Compute transitive closure of supertypes for all classes
     pub fn compute_transitive_closure(&mut self, type_table: &RefCell<TypeTable>) {
         // First pass: collect all direct relationships
-        let mut direct_supers: BTreeMap<SymbolId, Vec<TypeId>> =
-            BTreeMap::new();
+        let mut direct_supers: BTreeMap<SymbolId, Vec<TypeId>> = BTreeMap::new();
 
         for (&class_id, info) in &self.hierarchies {
             let mut supers = Vec::with_capacity(1 + info.interfaces.len()); // Superclass + interfaces

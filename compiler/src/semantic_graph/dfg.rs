@@ -271,9 +271,7 @@ impl Ord for ConstantValue {
             (ConstantValue::Null, ConstantValue::Null) => Ordering::Equal,
             (ConstantValue::Bool(a), ConstantValue::Bool(b)) => a.cmp(b),
             (ConstantValue::Int(a), ConstantValue::Int(b)) => a.cmp(b),
-            (ConstantValue::Float(a), ConstantValue::Float(b)) => {
-                a.total_cmp(b)
-            }
+            (ConstantValue::Float(a), ConstantValue::Float(b)) => a.total_cmp(b),
             (ConstantValue::String(a), ConstantValue::String(b)) => a.cmp(b),
             _ => Ordering::Equal,
         }

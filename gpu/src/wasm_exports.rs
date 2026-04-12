@@ -711,7 +711,15 @@ pub fn gfx_cmd_begin_pass(
         std::ptr::null()
     };
     if let Some(GpuObject::CommandRecorder(cmd)) = ht.get_mut(cmd_h) {
-        cmd.begin_pass(color_view_ptr, load_op, clear_r, clear_g, clear_b, clear_a, depth_view_ptr);
+        cmd.begin_pass(
+            color_view_ptr,
+            load_op,
+            clear_r,
+            clear_g,
+            clear_b,
+            clear_a,
+            depth_view_ptr,
+        );
     }
 }
 
@@ -764,7 +772,13 @@ pub fn gfx_cmd_set_bind_group(cmd_h: i32, group_index: u32, bind_group_h: i32) {
 }
 
 #[wasm_bindgen(js_name = "rayzor_gpu_gfx_cmd_draw")]
-pub fn gfx_cmd_draw(cmd_h: i32, vertex_count: u32, instance_count: u32, first_vertex: u32, first_instance: u32) {
+pub fn gfx_cmd_draw(
+    cmd_h: i32,
+    vertex_count: u32,
+    instance_count: u32,
+    first_vertex: u32,
+    first_instance: u32,
+) {
     let mut ht = HANDLES.lock().unwrap();
     if let Some(GpuObject::CommandRecorder(cmd)) = ht.get_mut(cmd_h) {
         cmd.push_draw(vertex_count, instance_count, first_vertex, first_instance);
@@ -772,15 +786,36 @@ pub fn gfx_cmd_draw(cmd_h: i32, vertex_count: u32, instance_count: u32, first_ve
 }
 
 #[wasm_bindgen(js_name = "rayzor_gpu_gfx_cmd_draw_indexed")]
-pub fn gfx_cmd_draw_indexed(cmd_h: i32, index_count: u32, instance_count: u32, first_index: u32, base_vertex: i32, first_instance: u32) {
+pub fn gfx_cmd_draw_indexed(
+    cmd_h: i32,
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    base_vertex: i32,
+    first_instance: u32,
+) {
     let mut ht = HANDLES.lock().unwrap();
     if let Some(GpuObject::CommandRecorder(cmd)) = ht.get_mut(cmd_h) {
-        cmd.push_draw_indexed(index_count, instance_count, first_index, base_vertex, first_instance);
+        cmd.push_draw_indexed(
+            index_count,
+            instance_count,
+            first_index,
+            base_vertex,
+            first_instance,
+        );
     }
 }
 
 #[wasm_bindgen(js_name = "rayzor_gpu_gfx_cmd_set_viewport")]
-pub fn gfx_cmd_set_viewport(cmd_h: i32, x: f32, y: f32, w: f32, h: f32, min_depth: f32, max_depth: f32) {
+pub fn gfx_cmd_set_viewport(
+    cmd_h: i32,
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    min_depth: f32,
+    max_depth: f32,
+) {
     let mut ht = HANDLES.lock().unwrap();
     if let Some(GpuObject::CommandRecorder(cmd)) = ht.get_mut(cmd_h) {
         cmd.push_set_viewport(x, y, w, h, min_depth, max_depth);
@@ -796,7 +831,14 @@ pub fn gfx_cmd_set_scissor(cmd_h: i32, x: u32, y: u32, w: u32, h: u32) {
 }
 
 #[wasm_bindgen(js_name = "rayzor_gpu_gfx_cmd_begin_pass_mrt")]
-pub fn gfx_cmd_begin_pass_mrt(cmd_h: i32, _count: i32, _color_views: &[i32], _load_ops: &[i32], _clear_colors: &[f64], _depth_h: i32) {
+pub fn gfx_cmd_begin_pass_mrt(
+    cmd_h: i32,
+    _count: i32,
+    _color_views: &[i32],
+    _load_ops: &[i32],
+    _clear_colors: &[f64],
+    _depth_h: i32,
+) {
     let mut ht = HANDLES.lock().unwrap();
     if let Some(GpuObject::CommandRecorder(_cmd)) = ht.get_mut(cmd_h) {
         // MRT stub — single pass fallback for now
@@ -816,7 +858,12 @@ pub fn gfx_cmd_end_pass(cmd_h: i32) {
 // ============================================================================
 
 #[wasm_bindgen(js_name = "rayzor_gpu_gfx_pipeline_set_vertex_layout_simple")]
-pub fn gfx_pipeline_set_vertex_layout_simple(builder_h: i32, stride: i32, attr_count: i32, attr_data: &[i32]) {
+pub fn gfx_pipeline_set_vertex_layout_simple(
+    builder_h: i32,
+    stride: i32,
+    attr_count: i32,
+    attr_data: &[i32],
+) {
     let mut ht = HANDLES.lock().unwrap();
     if let Some(GpuObject::PipelineBuilder(pb)) = ht.get_mut(builder_h) {
         pb.set_vertex_layout_simple(stride, attr_count, attr_data);
@@ -878,8 +925,7 @@ pub fn gfx_buffer_write_bytes(buf_h: i32, dev_h: i32, offset: i32, data: &[u8]) 
         _ => return,
     };
     if let Some(GpuObject::Buffer(b)) = ht.get(buf_h) {
-        ctx.queue
-            .write_buffer(&b.buffer, offset as u64, data);
+        ctx.queue.write_buffer(&b.buffer, offset as u64, data);
     }
 }
 
