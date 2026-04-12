@@ -650,7 +650,9 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 type_hint,
                 expr,
             }
-        } else if self.stream.at(TokenKind::KwFinal) || (has_final_modifier && self.stream.at(TokenKind::Ident)) {
+        } else if self.stream.at(TokenKind::KwFinal)
+            || (has_final_modifier && self.stream.at(TokenKind::Ident))
+        {
             // `final x: Int = 42;` — the `final` keyword was already consumed
             // as a modifier, or it's still pending as a token.
             if self.stream.at(TokenKind::KwFinal) {
