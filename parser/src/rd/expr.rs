@@ -379,6 +379,27 @@ impl<'a, 'b> RdParser<'a, 'b> {
             }
             TokenKind::Ident => {
                 let name = token.text(self.source).to_string();
+                // Compiler-specific code block: __js__("code"), __cpp__("code", arg0, ...)
+                if name.starts_with("__") && name.ends_with("__") && name.len() > 4 {
+                    self.stream.advance();
+                    self.stream.expect(TokenKind::LParen)?;
+                    let code = self.parse_expression()?;
+                    let mut args = Vec::new();
+                    while self.stream.at(TokenKind::Comma) {
+                        self.stream.advance();
+                        args.push(self.parse_expression()?);
+                    }
+                    let end = self.stream.current_offset();
+                    self.stream.expect(TokenKind::RParen)?;
+                    return Ok(Expr {
+                        kind: ExprKind::CompilerSpecific {
+                            target: name,
+                            code: Box::new(code),
+                            args,
+                        },
+                        span: Span::new(start, end),
+                    });
+                }
                 self.stream.advance();
                 Ok(Expr {
                     kind: ExprKind::Ident(name),
