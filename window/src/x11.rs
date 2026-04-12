@@ -118,6 +118,11 @@ const EVENT_MASK: i64 = KEY_PRESS_MASK
 // X11 function pointer table — loaded once via dlopen/dlsym
 // ============================================================================
 
+// Safety: X11Lib holds a dlopen handle and function pointers that are valid
+// for the lifetime of the process. The library is loaded once and never
+// unloaded, so the pointers are effectively 'static. All X11 calls happen
+// on the main thread (X11 is not thread-safe), but Sync+Send is required
+// for OnceLock<T> in a static.
 #[allow(non_snake_case)]
 struct X11Lib {
     _lib: *mut c_void,
@@ -149,6 +154,9 @@ struct X11Lib {
     XGetWindowAttributes: unsafe extern "C" fn(Display, Window, *mut XWindowAttributes) -> i32,
     _XDefaultColormap: unsafe extern "C" fn(Display, i32) -> Colormap,
 }
+
+unsafe impl Send for X11Lib {}
+unsafe impl Sync for X11Lib {}
 
 /// XWindowAttributes — used to query map_state for visibility and window geometry.
 #[repr(C)]
@@ -527,15 +535,17 @@ impl X11Window {
     }
 
     /// Resize the window to (w, h).
-    pub unsafe fn set_size(&mut self, w: u32, h: u32) {
+    pub unsafe fn set_size(&mut self, w: i32, h: i32) {
         let x11 = match x11() {
             Some(x) => x,
             None => return,
         };
-        (x11.XResizeWindow)(self.display, self.window, w, h);
+        let uw = w as u32;
+        let uh = h as u32;
+        (x11.XResizeWindow)(self.display, self.window, uw, uh);
         (x11.XFlush)(self.display);
-        self.width = w;
-        self.height = h;
+        self.width = uw;
+        self.height = uh;
     }
 
     /// Show or hide the window.
