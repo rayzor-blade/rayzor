@@ -390,7 +390,11 @@ impl E2ETestSuite {
 
         println!("\n📊 Overall:");
         println!("   Total:  {}", total);
-        println!("   Passed: {} ({}%)", passed, (passed * 100).checked_div(total).unwrap_or(0));
+        println!(
+            "   Passed: {} ({}%)",
+            passed,
+            (passed * 100).checked_div(total).unwrap_or(0)
+        );
         println!("   Failed: {}", failed);
 
         println!("\n📈 By Level:");
