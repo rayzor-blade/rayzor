@@ -3,6 +3,7 @@
 use super::error::ParseError;
 use super::RdParser;
 use crate::haxe_ast::*;
+use crate::haxe_parser_expr::unescape_string;
 use crate::token::TokenKind;
 
 impl<'a, 'b> RdParser<'a, 'b> {
@@ -306,6 +307,9 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 self.stream.advance();
                 let val = if text.starts_with("0x") || text.starts_with("0X") {
                     i64::from_str_radix(&text[2..], 16).unwrap_or(0)
+                } else if text.starts_with('0') && text.len() > 1 && text.as_bytes()[1].is_ascii_digit() {
+                    // Octal: 0755 → 493
+                    i64::from_str_radix(&text[1..], 8).unwrap_or(0)
                 } else {
                     text.parse::<i64>().unwrap_or(0)
                 };
@@ -337,7 +341,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     })
                 } else {
                     Ok(Expr {
-                        kind: ExprKind::String(inner.to_string()),
+                        kind: ExprKind::String(unescape_string(inner)),
                         span: token.span,
                     })
                 }

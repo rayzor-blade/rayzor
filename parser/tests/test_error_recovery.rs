@@ -9,10 +9,10 @@ fn test_syntax_errors() {
     // "class Test { var field }" parse successfully via fallback paths.
     // Only test inputs that both parsers reject.
     let invalid_inputs = vec![
-        "class",                              // Incomplete class declaration
-        "class Test {",                       // Unclosed brace
-        "function",                           // Standalone function keyword
-        "var x = ;",                          // Missing expression
+        "class",        // Incomplete class declaration
+        "class Test {", // Unclosed brace
+        "function",     // Standalone function keyword
+        "var x = ;",    // Missing expression
         // "}" is accepted by RD parser fallback (empty file with stray brace)
         "class Test { function method( {} }", // Invalid parameter syntax
     ];
