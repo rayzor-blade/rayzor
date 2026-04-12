@@ -195,7 +195,7 @@ mod native_ffi {
     #[no_mangle]
     pub unsafe extern "C" fn rayzor_window_set_size(win: *mut NativeWindow, w: i32, h: i32) {
         if !win.is_null() {
-            (*win).inner.set_size(w, h);
+            (*win).inner.set_size(w as u32, h as u32);
         }
     }
     #[no_mangle]
