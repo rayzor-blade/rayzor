@@ -38,11 +38,6 @@ impl XEvent {
         i32::from_ne_bytes([self.data[0], self.data[1], self.data[2], self.data[3]])
     }
 
-    // KeyPress / KeyRelease: keycode at offset 84 (u32)
-    fn keycode(&self) -> u32 {
-        u32::from_ne_bytes([self.data[84], self.data[85], self.data[86], self.data[87]])
-    }
-
     // ButtonPress / ButtonRelease: button at offset 84 (u32)
     fn button(&self) -> u32 {
         u32::from_ne_bytes([self.data[84], self.data[85], self.data[86], self.data[87]])
@@ -73,21 +68,6 @@ impl XEvent {
 
     fn configure_height(&self) -> i32 {
         i32::from_ne_bytes([self.data[44], self.data[45], self.data[46], self.data[47]])
-    }
-
-    // ClientMessage: message_type (Atom) at offset 40 (u64 on 64-bit),
-    //                data.l[0] (long) at offset 56
-    fn client_message_type(&self) -> Atom {
-        u64::from_ne_bytes([
-            self.data[40],
-            self.data[41],
-            self.data[42],
-            self.data[43],
-            self.data[44],
-            self.data[45],
-            self.data[46],
-            self.data[47],
-        ])
     }
 
     fn client_data_l0(&self) -> u64 {
@@ -149,7 +129,7 @@ struct X11Lib {
     XUnmapWindow: unsafe extern "C" fn(Display, Window) -> i32,
     XDestroyWindow: unsafe extern "C" fn(Display, Window) -> i32,
     XStoreName: unsafe extern "C" fn(Display, Window, *const c_char) -> i32,
-    XMoveResizeWindow: unsafe extern "C" fn(Display, Window, i32, i32, u32, u32) -> i32,
+    _XMoveResizeWindow: unsafe extern "C" fn(Display, Window, i32, i32, u32, u32) -> i32,
     XMoveWindow: unsafe extern "C" fn(Display, Window, i32, i32) -> i32,
     XResizeWindow: unsafe extern "C" fn(Display, Window, u32, u32) -> i32,
     XNextEvent: unsafe extern "C" fn(Display, *mut XEvent) -> i32,
@@ -157,7 +137,7 @@ struct X11Lib {
     XSelectInput: unsafe extern "C" fn(Display, Window, i64) -> i32,
     XDefaultScreen: unsafe extern "C" fn(Display) -> i32,
     XRootWindow: unsafe extern "C" fn(Display, i32) -> Window,
-    XDefaultGC: unsafe extern "C" fn(Display, i32) -> *mut c_void,
+    _XDefaultGC: unsafe extern "C" fn(Display, i32) -> *mut c_void,
     XBlackPixel: unsafe extern "C" fn(Display, i32) -> u64,
     XWhitePixel: unsafe extern "C" fn(Display, i32) -> u64,
     XDisplayWidth: unsafe extern "C" fn(Display, i32) -> i32,
@@ -167,7 +147,7 @@ struct X11Lib {
     XFlush: unsafe extern "C" fn(Display) -> i32,
     XLookupKeysym: unsafe extern "C" fn(*mut XEvent, i32) -> KeySym,
     XGetWindowAttributes: unsafe extern "C" fn(Display, Window, *mut XWindowAttributes) -> i32,
-    XDefaultColormap: unsafe extern "C" fn(Display, i32) -> Colormap,
+    _XDefaultColormap: unsafe extern "C" fn(Display, i32) -> Colormap,
 }
 
 /// XWindowAttributes — used to query map_state for visibility and window geometry.
@@ -204,19 +184,17 @@ impl XWindowAttributes {
     }
 }
 
-static mut X11: Option<X11Lib> = None;
+static X11: std::sync::OnceLock<X11Lib> = std::sync::OnceLock::new();
 
 /// Load (or return cached) X11 function table. Returns None if libX11.so.6 is unavailable.
 fn x11() -> Option<&'static X11Lib> {
+    if let Some(lib) = X11.get() {
+        return Some(lib);
+    }
     unsafe {
-        if X11.is_some() {
-            return X11.as_ref();
-        }
-
-        let lib = libc::dlopen(b"libX11.so.6\0".as_ptr() as *const c_char, libc::RTLD_LAZY);
+        let lib = libc::dlopen(c"libX11.so.6".as_ptr(), libc::RTLD_LAZY);
         if lib.is_null() {
-            // Fallback: try without version suffix
-            let lib2 = libc::dlopen(b"libX11.so\0".as_ptr() as *const c_char, libc::RTLD_LAZY);
+            let lib2 = libc::dlopen(c"libX11.so".as_ptr(), libc::RTLD_LAZY);
             if lib2.is_null() {
                 return None;
             }
@@ -259,7 +237,7 @@ unsafe fn load_x11_symbols(lib: *mut c_void) -> Option<&'static X11Lib> {
             XStoreName,
             unsafe extern "C" fn(Display, Window, *const c_char) -> i32
         ),
-        XMoveResizeWindow: load_sym!(
+        _XMoveResizeWindow: load_sym!(
             XMoveResizeWindow,
             unsafe extern "C" fn(Display, Window, i32, i32, u32, u32) -> i32
         ),
@@ -282,7 +260,7 @@ unsafe fn load_x11_symbols(lib: *mut c_void) -> Option<&'static X11Lib> {
         ),
         XDefaultScreen: load_sym!(XDefaultScreen, unsafe extern "C" fn(Display) -> i32),
         XRootWindow: load_sym!(XRootWindow, unsafe extern "C" fn(Display, i32) -> Window),
-        XDefaultGC: load_sym!(
+        _XDefaultGC: load_sym!(
             XDefaultGC,
             unsafe extern "C" fn(Display, i32) -> *mut c_void
         ),
@@ -307,14 +285,14 @@ unsafe fn load_x11_symbols(lib: *mut c_void) -> Option<&'static X11Lib> {
             XGetWindowAttributes,
             unsafe extern "C" fn(Display, Window, *mut XWindowAttributes) -> i32
         ),
-        XDefaultColormap: load_sym!(
+        _XDefaultColormap: load_sym!(
             XDefaultColormap,
             unsafe extern "C" fn(Display, i32) -> Colormap
         ),
     };
 
-    X11 = Some(x11lib);
-    X11.as_ref()
+    let _ = X11.set(x11lib);
+    X11.get()
 }
 
 // ============================================================================
@@ -324,7 +302,7 @@ unsafe fn load_x11_symbols(lib: *mut c_void) -> Option<&'static X11Lib> {
 pub struct X11Window {
     pub(crate) display: *mut c_void, // X11 Display*
     pub(crate) window: u64,          // X11 Window (XID)
-    screen: i32,
+    _screen: i32,
     pub(crate) width: u32,
     pub(crate) height: u32,
     pub resized: bool,
@@ -334,7 +312,7 @@ pub struct X11Window {
     mouse_y: f64,
     mouse_buttons: [bool; 5],
     wm_delete_window: Atom,
-    wm_protocols: Atom,
+    _wm_protocols: Atom,
     visible: bool,
     pos_x: i32,
     pos_y: i32,
@@ -379,11 +357,11 @@ impl X11Window {
         // Register WM_DELETE_WINDOW so the window manager sends ClientMessage on close
         let wm_protocols = (x11.XInternAtom)(
             display,
-            b"WM_PROTOCOLS\0".as_ptr() as *const c_char,
+            c"WM_PROTOCOLS".as_ptr(),
             0, // False — create if needed
         );
         let mut wm_delete_window =
-            (x11.XInternAtom)(display, b"WM_DELETE_WINDOW\0".as_ptr() as *const c_char, 0);
+            (x11.XInternAtom)(display, c"WM_DELETE_WINDOW".as_ptr(), 0);
         (x11.XSetWMProtocols)(display, window, &mut wm_delete_window, 1);
 
         // Map (show) the window
@@ -393,7 +371,7 @@ impl X11Window {
         Some(X11Window {
             display,
             window,
-            screen,
+            _screen: screen,
             width: w as u32,
             height: h as u32,
             resized: false,
@@ -403,7 +381,7 @@ impl X11Window {
             mouse_y: 0.0,
             mouse_buttons: [false; 5],
             wm_delete_window,
-            wm_protocols,
+            _wm_protocols: wm_protocols,
             visible: true,
             pos_x: x,
             pos_y: y,
@@ -522,7 +500,7 @@ impl X11Window {
     /// Check if a key is currently pressed. `key` uses cross-platform virtual key codes
     /// (matching the same scheme as CocoaWindow: ASCII values for letters, arrow keys, etc.).
     pub fn is_key_down(&self, key: i32) -> bool {
-        (key >= 0 && key < 256) && self.key_states[key as usize]
+        (0..256).contains(&key) && self.key_states[key as usize]
     }
 
     /// Set the window title.
