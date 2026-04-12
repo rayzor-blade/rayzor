@@ -1238,7 +1238,9 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Export class_fields for accumulation across file compilations.
-    pub fn export_class_fields(&self) -> &BTreeMap<SymbolId, Vec<(InternedString, SymbolId, bool)>> {
+    pub fn export_class_fields(
+        &self,
+    ) -> &BTreeMap<SymbolId, Vec<(InternedString, SymbolId, bool)>> {
         &self.class_fields
     }
 
@@ -2883,8 +2885,7 @@ impl<'a> AstLowering<'a> {
 
         // Process type parameters
         let type_params = self.lower_type_parameters(&class_decl.type_params)?;
-        let mut type_param_map: BTreeMap<InternedString, TypeId> =
-            BTreeMap::new();
+        let mut type_param_map: BTreeMap<InternedString, TypeId> = BTreeMap::new();
         for tp in &type_params {
             let interned_name = tp.name;
             // Convert constraints to ConstraintKind for symbol table
@@ -3470,8 +3471,7 @@ impl<'a> AstLowering<'a> {
 
         // Process type parameters
         let type_params = self.lower_type_parameters(&interface_decl.type_params)?;
-        let mut type_param_map: BTreeMap<InternedString, TypeId> =
-            BTreeMap::new();
+        let mut type_param_map: BTreeMap<InternedString, TypeId> = BTreeMap::new();
         for tp in &type_params {
             let interned_name = tp.name;
             // Convert constraints to ConstraintKind for symbol table
@@ -3580,8 +3580,7 @@ impl<'a> AstLowering<'a> {
 
         // Process type parameters
         let type_params = self.lower_type_parameters(&enum_decl.type_params)?;
-        let mut type_param_map: BTreeMap<InternedString, TypeId> =
-            BTreeMap::new();
+        let mut type_param_map: BTreeMap<InternedString, TypeId> = BTreeMap::new();
         let mut type_param_ids = Vec::new();
         for tp in &type_params {
             let interned_name = tp.name;
@@ -3837,8 +3836,7 @@ impl<'a> AstLowering<'a> {
 
         // Process type parameters
         let type_params = self.lower_type_parameters(&abstract_decl.type_params)?;
-        let mut type_param_map: BTreeMap<InternedString, TypeId> =
-            BTreeMap::new();
+        let mut type_param_map: BTreeMap<InternedString, TypeId> = BTreeMap::new();
         for tp in &type_params {
             let interned_name = tp.name;
             // Convert constraints to ConstraintKind for symbol table
@@ -4716,8 +4714,7 @@ impl<'a> AstLowering<'a> {
 
         // Process type parameters
         let type_params = self.lower_type_parameters(&func.type_params)?;
-        let mut type_param_map: BTreeMap<InternedString, TypeId> =
-            BTreeMap::new();
+        let mut type_param_map: BTreeMap<InternedString, TypeId> = BTreeMap::new();
         for tp in &type_params {
             let interned_name = tp.name;
             // Convert constraints to ConstraintKind for symbol table
@@ -4877,8 +4874,7 @@ impl<'a> AstLowering<'a> {
 
         // Process type parameters
         let type_params = self.lower_type_parameters(&func.type_params)?;
-        let mut type_param_map: BTreeMap<InternedString, TypeId> =
-            BTreeMap::new();
+        let mut type_param_map: BTreeMap<InternedString, TypeId> = BTreeMap::new();
         for tp in &type_params {
             let interned_name = tp.name;
             // Convert constraints to ConstraintKind for symbol table

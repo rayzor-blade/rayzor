@@ -530,8 +530,13 @@ impl<'a> TastToHirContext<'a> {
             // Look up class hierarchy info from SymbolTable
             is_final: self.is_class_final(class.symbol_id),
             is_abstract: self.is_class_abstract(class.symbol_id),
-            is_extern: self.symbol_table.get_symbol(class.symbol_id)
-                .map(|s| s.flags.contains(crate::tast::symbols::SymbolFlags::EXTERN) || s.flags.is_native())
+            is_extern: self
+                .symbol_table
+                .get_symbol(class.symbol_id)
+                .map(|s| {
+                    s.flags.contains(crate::tast::symbols::SymbolFlags::EXTERN)
+                        || s.flags.is_native()
+                })
                 .unwrap_or(false),
             derived_traits: class.derived_traits.clone(),
             debug_format: class.debug_format.clone(),

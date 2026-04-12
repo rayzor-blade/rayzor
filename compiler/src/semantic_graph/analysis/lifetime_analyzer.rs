@@ -1668,7 +1668,8 @@ impl LifetimeAnalyzer {
 
         // If we found uses, potentially extend lifetime to cover them
         if let Some(last_block) = latest_use_block {
-            let last_block_lifetime = self.get_block_lifetime(last_block, regions, &BTreeMap::new());
+            let last_block_lifetime =
+                self.get_block_lifetime(last_block, regions, &BTreeMap::new());
 
             // In a real implementation, we would compare lifetimes and potentially extend
             // For now, keep the more conservative (longer) lifetime

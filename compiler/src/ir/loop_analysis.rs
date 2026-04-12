@@ -403,7 +403,11 @@ impl LoopNestInfo {
             .copied()
             .collect();
 
-        fn set_depth(loops: &mut BTreeMap<IrBlockId, NaturalLoop>, header: IrBlockId, depth: usize) {
+        fn set_depth(
+            loops: &mut BTreeMap<IrBlockId, NaturalLoop>,
+            header: IrBlockId,
+            depth: usize,
+        ) {
             loops.get_mut(&header).unwrap().nesting_depth = depth;
             let children: Vec<IrBlockId> = loops[&header].children.clone();
             for child in children {

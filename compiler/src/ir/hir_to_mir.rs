@@ -8271,17 +8271,21 @@ impl<'a> HirToMirContext<'a> {
                     if let HirExprKind::Literal(HirLiteral::Int(lane_val)) = &index.kind {
                         if *lane_val >= 0 && (*lane_val as usize) < lane_count as usize {
                             let lane = *lane_val as u8;
-                            let extracted = self
-                                .builder
-                                .build_vector_extract(obj_reg, lane, elem_ty.clone())?;
+                            let extracted = self.builder.build_vector_extract(
+                                obj_reg,
+                                lane,
+                                elem_ty.clone(),
+                            )?;
                             // Haxe `Float` is f64. F32 lanes always widen to F64 so downstream
                             // consumers (string concat, float_to_string, arithmetic) see the
                             // expected Float type. The HIR expr.ty is often Dynamic (@:coreType
                             // abstracts erase to Dynamic), so we cannot rely on it.
                             if matches!(elem_ty, IrType::F32) {
-                                return self
-                                    .builder
-                                    .build_cast(extracted, IrType::F32, IrType::F64);
+                                return self.builder.build_cast(
+                                    extracted,
+                                    IrType::F32,
+                                    IrType::F64,
+                                );
                             }
                             return Some(extracted);
                         }
@@ -17780,10 +17784,8 @@ impl<'a> HirToMirContext<'a> {
                         }
                         false
                     }
-                    let lhs_is_string =
-                        lhs_is_string || is_string_concat_chain(lhs);
-                    let rhs_is_string =
-                        rhs_is_string || is_string_concat_chain(rhs);
+                    let lhs_is_string = lhs_is_string || is_string_concat_chain(lhs);
+                    let rhs_is_string = rhs_is_string || is_string_concat_chain(rhs);
 
                     if lhs_is_string || rhs_is_string {
                         // Lower both operands
@@ -18029,10 +18031,8 @@ impl<'a> HirToMirContext<'a> {
                             {
                                 let lhs_rty = self.builder.get_register_type(lhs_reg);
                                 let rhs_rty = self.builder.get_register_type(rhs_reg);
-                                let lhs_is_vec =
-                                    matches!(&lhs_rty, Some(IrType::Vector { .. }));
-                                let rhs_is_vec =
-                                    matches!(&rhs_rty, Some(IrType::Vector { .. }));
+                                let lhs_is_vec = matches!(&lhs_rty, Some(IrType::Vector { .. }));
+                                let rhs_is_vec = matches!(&rhs_rty, Some(IrType::Vector { .. }));
                                 if lhs_is_vec || rhs_is_vec {
                                     let vec_ty = if lhs_is_vec {
                                         lhs_rty.unwrap()
@@ -18057,9 +18057,9 @@ impl<'a> HirToMirContext<'a> {
                                             );
                                         }
                                     };
-                                    return self.builder.build_vector_binop(
-                                        bin_op, lhs_reg, rhs_reg, vec_ty,
-                                    );
+                                    return self
+                                        .builder
+                                        .build_vector_binop(bin_op, lhs_reg, rhs_reg, vec_ty);
                                 }
                             }
 
@@ -30634,10 +30634,7 @@ impl<'a> HirToMirContext<'a> {
             // Register haxe_array_push_f64: fn(arr: *HaxeArray, val: f64) -> void
             let push_f64_func_id = self.get_or_register_extern_function(
                 "haxe_array_push_f64",
-                vec![
-                    IrType::Ptr(Box::new(IrType::I64)),
-                    IrType::F64,
-                ],
+                vec![IrType::Ptr(Box::new(IrType::I64)), IrType::F64],
                 IrType::Void,
             );
 

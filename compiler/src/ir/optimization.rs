@@ -1593,7 +1593,8 @@ impl OptimizationPass for GVNPass {
             // Each child gets a CLONE of its parent's map so siblings
             // don't share values — only dominated blocks inherit.
             let entry = function.entry_block();
-            let mut stack: Vec<(IrBlockId, BTreeMap<String, IrId>)> = vec![(entry, BTreeMap::new())];
+            let mut stack: Vec<(IrBlockId, BTreeMap<String, IrId>)> =
+                vec![(entry, BTreeMap::new())];
 
             while let Some((block_id, mut local_values)) = stack.pop() {
                 if let Some(block) = function.cfg.get_block(block_id) {

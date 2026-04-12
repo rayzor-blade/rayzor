@@ -126,9 +126,9 @@ struct GenericOperationCache {
 impl GenericOperationCache {
     fn new() -> Self {
         Self {
-            bounds_cache: BTreeMap::new(), // Typical bounds checks
-            subtype_cache: BTreeMap::new(), // Common subtype queries
-            method_cache: BTreeMap::new(),  // Method lookups
+            bounds_cache: BTreeMap::new(),     // Typical bounds checks
+            subtype_cache: BTreeMap::new(),    // Common subtype queries
+            method_cache: BTreeMap::new(),     // Method lookups
             resolution_cache: BTreeMap::new(), // Type resolutions
             hits: 0,
             misses: 0,

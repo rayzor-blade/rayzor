@@ -9,7 +9,6 @@ use crate::compile_helpers::compile_haxe_to_mir;
 use crate::tui;
 use crate::wasm_cmd::find_wasm_runtime;
 
-
 pub fn cmd_rpkg_pack(
     dylibs: Vec<PathBuf>,
     os_tags: Vec<String>,
@@ -128,11 +127,17 @@ pub fn cmd_rpkg_pack(
                     );
                     // Check for companion _bg.wasm (wasm-bindgen output)
                     let bg_wasm_path = path.with_file_name(
-                        path.file_stem().unwrap().to_string_lossy().to_string() + "_bg.wasm"
+                        path.file_stem().unwrap().to_string_lossy().to_string() + "_bg.wasm",
                     );
                     if bg_wasm_path.exists() {
-                        let bg_size = std::fs::metadata(&bg_wasm_path).map(|m| m.len()).unwrap_or(0);
-                        println!("  js-host-wasm: {} ({:.1} KB)", bg_wasm_path.display(), bg_size as f64 / 1024.0);
+                        let bg_size = std::fs::metadata(&bg_wasm_path)
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                        println!(
+                            "  js-host-wasm: {} ({:.1} KB)",
+                            bg_wasm_path.display(),
+                            bg_size as f64 / 1024.0
+                        );
                     }
                     js_hosts.push((module_name.to_string(), source));
                 }
@@ -198,9 +203,11 @@ pub fn cmd_rpkg_pack(
                     if name == module_name {
                         let js_path = PathBuf::from(file);
                         let bg = js_path.with_file_name(
-                            js_path.file_stem().unwrap().to_string_lossy().to_string() + "_bg.wasm"
+                            js_path.file_stem().unwrap().to_string_lossy().to_string() + "_bg.wasm",
                         );
-                        if bg.exists() { return Some(bg); }
+                        if bg.exists() {
+                            return Some(bg);
+                        }
                     }
                 }
                 None
