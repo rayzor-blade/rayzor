@@ -35,9 +35,10 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use wasm_encoder::{
-    CodeSection, ConstExpr, DataSection, EntityType, ExportKind, ExportSection, Function,
-    FunctionSection, GlobalSection, GlobalType as EncGlobalType, ImportSection, Instruction,
-    MemArg as EncMemArg, MemorySection, MemoryType as EncMemoryType, Module, TypeSection, ValType,
+    CodeSection, ConstExpr, DataCountSection, DataSection, EntityType, ExportKind, ExportSection,
+    Function, FunctionSection, GlobalSection, GlobalType as EncGlobalType, ImportSection,
+    Instruction, MemArg as EncMemArg, MemorySection, MemoryType as EncMemoryType, Module,
+    TypeSection, ValType,
 };
 
 // ---------------------------------------------------------------------------
@@ -157,13 +158,33 @@ enum GlobalInit {
 
 /// An active data segment.
 #[derive(Clone, Debug)]
-struct ParsedData {
-    /// Memory index (usually 0).
-    memory_idx: u32,
-    /// Offset in linear memory.
-    offset: u32,
-    /// Raw bytes.
-    data: Vec<u8>,
+enum ParsedData {
+    Active {
+        memory_idx: u32,
+        offset: u32,
+        data: Vec<u8>,
+    },
+    Passive {
+        data: Vec<u8>,
+    },
+}
+
+/// Parsed memory descriptor.
+#[derive(Clone, Debug)]
+struct ParsedMemory {
+    initial: u64,
+    maximum: Option<u64>,
+    /// `shared` was set in the module's memory type — the module was built
+    /// with `+atomics` and expects a SharedArrayBuffer-backed memory.
+    shared: bool,
+    /// Memory came in via the import section (e.g. `(import "env" "memory"
+    /// (memory 256 16384 shared))`). When true, the merged module must also
+    /// import its memory instead of declaring one locally.
+    imported: bool,
+    /// Import module name (e.g. "env"). Only meaningful when `imported`.
+    import_module: Option<String>,
+    /// Import field name (e.g. "memory"). Only meaningful when `imported`.
+    import_name: Option<String>,
 }
 
 /// A fully parsed WASM module.
@@ -178,7 +199,11 @@ struct ParsedModule {
     exports: Vec<ParsedExport>,
     /// Export name -> original function index (in this module's index space).
     export_func_map: BTreeMap<String, u32>,
-    memory: Option<(u64, Option<u64>)>,
+    /// Memory descriptor: (initial, maximum, shared, imported).
+    /// `shared=true` means the module was built with +atomics and expects
+    /// a SharedArrayBuffer-backed memory. `imported=true` means the memory
+    /// comes in via the import section instead of being declared locally.
+    memory: Option<ParsedMemory>,
     globals: Vec<ParsedGlobal>,
     data_segments: Vec<ParsedData>,
     /// Total number of function imports (= first internal func index).
@@ -187,6 +212,10 @@ struct ParsedModule {
     tables: Vec<(u32, Option<u32>)>,
     /// Element segments: (table_idx, offset, func_indices)
     elements: Vec<(u32, u32, Vec<u32>)>,
+    /// Start function index (if the module has a start section).
+    /// For wasm32-wasip1-threads modules this is `__wasm_init_memory`,
+    /// which copies passive data segments into linear memory.
+    start_func: Option<u32>,
 }
 
 impl ParsedModule {
@@ -205,6 +234,7 @@ impl ParsedModule {
         let mut elements = Vec::new();
         let mut data_segments = Vec::new();
         let mut num_func_imports = 0u32;
+        let mut start_func: Option<u32> = None;
 
         let parser = Parser::new(0);
         for payload in parser.parse_all(wasm) {
@@ -258,7 +288,14 @@ impl ParsedModule {
                                     num_func_imports += 1;
                                 }
                                 wasmparser::TypeRef::Memory(mem) => {
-                                    memory = Some((mem.initial, mem.maximum));
+                                    memory = Some(ParsedMemory {
+                                        initial: mem.initial,
+                                        maximum: mem.maximum,
+                                        shared: mem.shared,
+                                        imported: true,
+                                        import_module: Some(import.module.to_string()),
+                                        import_name: Some(import.name.to_string()),
+                                    });
                                 }
                                 _ => {}
                             }
@@ -277,7 +314,14 @@ impl ParsedModule {
                 Payload::MemorySection(reader) => {
                     for mem in reader {
                         let mem = mem.map_err(|e| format!("{label}: memory error: {e}"))?;
-                        memory = Some((mem.initial, mem.maximum));
+                        memory = Some(ParsedMemory {
+                            initial: mem.initial,
+                            maximum: mem.maximum,
+                            shared: mem.shared,
+                            imported: false,
+                            import_module: None,
+                            import_name: None,
+                        });
                     }
                 }
 
@@ -353,21 +397,27 @@ impl ParsedModule {
                 Payload::DataSection(reader) => {
                     for data in reader {
                         let data = data.map_err(|e| format!("{label}: data error: {e}"))?;
-                        if let wasmparser::DataKind::Active {
-                            memory_index,
-                            offset_expr,
-                        } = data.kind
-                        {
-                            let offset = match parse_const_expr(&offset_expr) {
-                                GlobalInit::I32(v) => v as u32,
-                                GlobalInit::I64(v) => v as u32,
-                                _ => 0,
-                            };
-                            data_segments.push(ParsedData {
-                                memory_idx: memory_index,
-                                offset,
-                                data: data.data.to_vec(),
-                            });
+                        match data.kind {
+                            wasmparser::DataKind::Active {
+                                memory_index,
+                                offset_expr,
+                            } => {
+                                let offset = match parse_const_expr(&offset_expr) {
+                                    GlobalInit::I32(v) => v as u32,
+                                    GlobalInit::I64(v) => v as u32,
+                                    _ => 0,
+                                };
+                                data_segments.push(ParsedData::Active {
+                                    memory_idx: memory_index,
+                                    offset,
+                                    data: data.data.to_vec(),
+                                });
+                            }
+                            wasmparser::DataKind::Passive => {
+                                data_segments.push(ParsedData::Passive {
+                                    data: data.data.to_vec(),
+                                });
+                            }
                         }
                     }
                 }
@@ -375,6 +425,10 @@ impl ParsedModule {
                 Payload::CodeSectionEntry(body) => {
                     // Store the raw bytes of the function body for later re-encoding.
                     code_bodies.push(body.as_bytes().to_vec());
+                }
+
+                Payload::StartSection { func, .. } => {
+                    start_func = Some(func);
                 }
 
                 _ => {}
@@ -394,6 +448,7 @@ impl ParsedModule {
             num_func_imports,
             tables,
             elements,
+            start_func,
         })
     }
 }
@@ -756,7 +811,59 @@ impl LinkerCtx {
         }
         module.section(&type_section);
 
-        // --- Import section (WASI imports from runtime only) ---
+        // --- Merged memory parameters ---
+        // If either the runtime or user module declared a shared memory, the
+        // merged module must also be shared and imported — the browser
+        // harness or wasmtime runner provides a SharedArrayBuffer-backed
+        // `WebAssembly.Memory { shared: true, ... }` via the `env.memory`
+        // import, which is how Atomics.wait/notify + the Web Worker pool
+        // cooperate to run Rayzor threads in parallel.
+        let default_mem = || ParsedMemory {
+            initial: 256,
+            maximum: None,
+            shared: false,
+            imported: false,
+            import_module: None,
+            import_name: None,
+        };
+        let rt_mem = rt.memory.clone().unwrap_or_else(default_mem);
+        let user_mem = user.memory.clone().unwrap_or_else(default_mem);
+        let merged_shared = rt_mem.shared || user_mem.shared;
+        let merged_imported = rt_mem.imported || user_mem.imported || merged_shared;
+        // Shared memory MUST have a maximum — use the larger of the two, or
+        // fall back to 1 GiB (16384 pages) which matches runtime-wasm config.
+        // Ensure at least 512 pages (32 MiB) so the host-side bump allocator
+        // near the top of memory doesn't collide with the runtime's heap.
+        let merged_initial = rt_mem.initial.max(user_mem.initial).max(512);
+        let merged_maximum = match (rt_mem.maximum, user_mem.maximum) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) | (None, Some(a)) => Some(a),
+            (None, None) => {
+                if merged_shared {
+                    Some(16384)
+                } else {
+                    Some(1024)
+                }
+            }
+        };
+        // Shared memories require a maximum even if one wasn't declared.
+        let merged_maximum = if merged_shared {
+            Some(merged_maximum.unwrap_or(16384))
+        } else {
+            merged_maximum
+        };
+        let merged_mem_import_module = rt_mem
+            .import_module
+            .clone()
+            .or(user_mem.import_module.clone())
+            .unwrap_or_else(|| "env".to_string());
+        let merged_mem_import_name = rt_mem
+            .import_name
+            .clone()
+            .or(user_mem.import_name.clone())
+            .unwrap_or_else(|| "memory".to_string());
+
+        // --- Import section (WASI imports from runtime + optional shared memory) ---
         // Build import section: WASI imports first, then preserved @:jsImport imports.
         let mut import_section = ImportSection::new();
 
@@ -774,6 +881,23 @@ impl LinkerCtx {
         for imp in &self.preserved_imports {
             import_section.import(&imp.module, &imp.name, EntityType::Function(imp.type_idx));
         }
+
+        // Imported shared memory. The `shared` flag is what makes the host
+        // back this memory with a SharedArrayBuffer.
+        if merged_imported {
+            import_section.import(
+                &merged_mem_import_module,
+                &merged_mem_import_name,
+                EntityType::Memory(EncMemoryType {
+                    minimum: merged_initial,
+                    maximum: merged_maximum,
+                    memory64: false,
+                    shared: merged_shared,
+                    page_size_log2: None,
+                }),
+            );
+        }
+
         let n_preserved = self.preserved_imports.len();
         module.section(&import_section);
 
@@ -808,7 +932,10 @@ impl LinkerCtx {
         // via call_indirect and from JS.
         let rt_table_size = rt.tables.first().map(|(init, _)| *init).unwrap_or(0);
         let table_size = rt_table_size.max(self.total_func_count);
-        eprintln!("[wasm-linker] table: rt={}, total_funcs={}, merged={}", rt_table_size, self.total_func_count, table_size);
+        eprintln!(
+            "[wasm-linker] table: rt={}, total_funcs={}, merged={}",
+            rt_table_size, self.total_func_count, table_size
+        );
         if !rt.tables.is_empty() || table_size > 0 {
             let mut table_section = wasm_encoder::TableSection::new();
             table_section.table(wasm_encoder::TableType {
@@ -822,26 +949,20 @@ impl LinkerCtx {
         }
 
         // --- Memory section ---
-        let rt_mem = rt.memory.unwrap_or((256, None));
-        let user_mem = user.memory.unwrap_or((256, None));
-        // Ensure minimum 512 pages (32 MB) for heap room above data/stack sections.
-        // The runtime's __heap_base can be ~16 MB, so 256 pages (16 MB) leaves no heap.
-        let merged_initial = rt_mem.0.max(user_mem.0).max(512);
-        let merged_maximum = match (rt_mem.1, user_mem.1) {
-            (Some(a), Some(b)) => Some(a.max(b)),
-            (Some(a), None) | (None, Some(a)) => Some(a),
-            // Allow growth up to 1024 pages (64 MB) by default
-            (None, None) => Some(1024),
-        };
-        let mut mem_section = MemorySection::new();
-        mem_section.memory(EncMemoryType {
-            minimum: merged_initial,
-            maximum: merged_maximum,
-            memory64: false,
-            shared: false,
-            page_size_log2: None,
-        });
-        module.section(&mem_section);
+        // Only emit a local memory section when the memory isn't imported.
+        // If either module is shared or imported, the memory is declared in
+        // the import section above and we skip emitting a local memory.
+        if !merged_imported {
+            let mut mem_section = MemorySection::new();
+            mem_section.memory(EncMemoryType {
+                minimum: merged_initial,
+                maximum: merged_maximum,
+                memory64: false,
+                shared: merged_shared,
+                page_size_log2: None,
+            });
+            module.section(&mem_section);
+        }
 
         // --- Global section ---
         let mut global_section = GlobalSection::new();
@@ -873,6 +994,26 @@ impl LinkerCtx {
         let mut export_section = ExportSection::new();
         export_section.export("memory", ExportKind::Memory, 0);
         export_section.export("__indirect_function_table", ExportKind::Table, 0);
+        // Forward a small whitelist of runtime exports so the JS harness
+        // and thread runtime can call into the WASM module directly. In
+        // particular, `rayzor_malloc` backs the shared-memory sync/result
+        // slot allocator — without it rayzor_threads.js falls back to
+        // fixed addresses that collide with dlmalloc's heap and corrupt
+        // state. Extend this list as more runtime entry points are needed
+        // from JS.
+        const RUNTIME_EXPORT_WHITELIST: &[&str] =
+            &["rayzor_malloc", "rayzor_free", "rayzor_realloc"];
+        for export in &rt.exports {
+            if export.kind != ExportItemKind::Func {
+                continue;
+            }
+            if !RUNTIME_EXPORT_WHITELIST.contains(&export.name.as_str()) {
+                continue;
+            }
+            if let Some(&merged_idx) = self.rt_func_remap.get(&export.index) {
+                export_section.export(&export.name, ExportKind::Func, merged_idx);
+            }
+        }
         // Preserve ALL user exports (not just _start)
         for export in &user.exports {
             if export.kind == ExportItemKind::Func {
@@ -882,6 +1023,20 @@ impl LinkerCtx {
             }
         }
         module.section(&export_section);
+
+        // --- Start section ---
+        // The runtime-wasm module (wasm32-wasip1-threads) has a start
+        // function (`__wasm_init_memory`) that copies passive data segments
+        // into linear memory via `memory.init` + `data.drop`. Without
+        // running it, all .rodata (string literals like "false", format
+        // strings, etc.) stays zeroed.
+        if let Some(rt_start) = rt.start_func {
+            if let Some(&merged_idx) = self.rt_func_remap.get(&rt_start) {
+                module.section(&wasm_encoder::StartSection {
+                    function_index: merged_idx,
+                });
+            }
+        }
 
         // --- Element section (from runtime, populates function table) ---
         {
@@ -901,19 +1056,89 @@ impl LinkerCtx {
             // Add ALL user internal functions to table (for closures / call_indirect).
             // User functions start after imports in the merged index space.
             // Map each user-module function to its merged index.
-            let user_func_start = self.n_wasi_imports + n_preserved as u32 + rt.functions.len() as u32 + self.stub_type_indices.len() as u32;
+            let user_func_start = self.n_wasi_imports
+                + n_preserved as u32
+                + rt.functions.len() as u32
+                + self.stub_type_indices.len() as u32;
             let user_func_count = user.functions.len() as u32;
             if user_func_count > 0 {
-                let user_funcs: Vec<u32> = (0..user_func_count)
-                    .map(|i| user_func_start + i)
-                    .collect();
+                let user_funcs: Vec<u32> =
+                    (0..user_func_count).map(|i| user_func_start + i).collect();
                 elem_section.active(
                     Some(0),
                     &ConstExpr::i32_const(user_func_start as i32),
                     wasm_encoder::Elements::Functions(std::borrow::Cow::Owned(user_funcs)),
                 );
             }
+            // Closure-indirect-call support in multi-threaded builds.
+            //
+            // `MakeClosure` in wasm_backend.rs emits
+            //     I32Const(fn_idx_pre_link)         ;; table slot
+            //     RefFunc(fn_idx_pre_link)          ;; merged via user_func_remap
+            //     TableSet(0)
+            //     … and writes fn_idx_pre_link into closure+0.
+            // That works on the main thread because the `TableSet` runs at
+            // closure-creation time and the linker rewrote `RefFunc` to the
+            // merged index. But the raw `I32Const` slot is NOT remapped, so
+            // each closure lives at `table[fn_idx_pre_link]` — NOT at
+            // `table[merged_idx]`. On a second wasm instance (a Web Worker
+            // re-instantiating the same module), `MakeClosure` was never
+            // run, so those slots are empty and `call_indirect` through a
+            // closure returns `null` → 0.
+            //
+            // Fix: statically mirror every user function at its backend
+            // (pre-link) index slot via a second element segment. Then the
+            // worker's freshly-instantiated table already has valid funcrefs
+            // where the closure `fn_idx` points, and dispatched closures
+            // run correctly on every thread.
+            if !self.user_func_remap.is_empty() {
+                let mut remap_pairs: Vec<(u32, u32)> =
+                    self.user_func_remap.iter().map(|(&b, &m)| (b, m)).collect();
+                remap_pairs.sort_by_key(|(b, _)| *b);
+                // Collapse contiguous backend-index runs into one element
+                // segment each — wasmparser/encoder handles many tiny
+                // segments fine but contiguous runs keep the wire format
+                // compact.
+                let mut i = 0;
+                while i < remap_pairs.len() {
+                    let start_slot = remap_pairs[i].0;
+                    let mut run_funcs: Vec<u32> = Vec::new();
+                    let mut expected = start_slot;
+                    while i < remap_pairs.len() && remap_pairs[i].0 == expected {
+                        run_funcs.push(remap_pairs[i].1);
+                        expected += 1;
+                        i += 1;
+                    }
+                    // Skip slots that are already covered by the rt element
+                    // entries above (they win for their declared ranges).
+                    elem_section.active(
+                        Some(0),
+                        &ConstExpr::i32_const(start_slot as i32),
+                        wasm_encoder::Elements::Functions(std::borrow::Cow::Owned(run_funcs)),
+                    );
+                }
+            }
             module.section(&elem_section);
+        }
+
+        // --- Data count section ---
+        // Required whenever the code section uses `memory.init` / `data.drop`
+        // against passive data segments. The runtime-wasm module (built with
+        // wasm32-wasip1-threads / +atomics) always has passive segments; its
+        // `__wasm_init_memory` start function uses `memory.init` + `data.drop`
+        // to copy them into linear memory at startup. Emit the count whenever
+        // there are any data segments — active-only builds tolerate the
+        // section harmlessly, while passive builds require it.
+        let has_passive = rt
+            .data_segments
+            .iter()
+            .chain(user.data_segments.iter())
+            .any(|s| matches!(s, ParsedData::Passive { .. }));
+        let total_data_segments = rt.data_segments.len() as u32 + user.data_segments.len() as u32;
+        if total_data_segments > 0 && (merged_shared || has_passive) {
+            module.section(&DataCountSection {
+                count: total_data_segments,
+            });
         }
 
         // --- Code section ---
@@ -972,20 +1197,48 @@ impl LinkerCtx {
         module.section(&code_section);
 
         // --- Data section ---
+        // Runtime-wasm (built with wasm32-wasip1-threads / +atomics) emits
+        // PASSIVE data segments; the module's `__wasm_init_memory` start
+        // function copies them into linear memory via `memory.init`. These
+        // must be preserved verbatim so the segment indices referenced by
+        // `memory.init` / `data.drop` in the runtime code bodies remain
+        // valid.
         let mut data_section = DataSection::new();
         for seg in &rt.data_segments {
-            data_section.active(
-                seg.memory_idx,
-                &ConstExpr::i32_const(seg.offset as i32),
-                seg.data.iter().copied(),
-            );
+            match seg {
+                ParsedData::Active {
+                    memory_idx,
+                    offset,
+                    data,
+                } => {
+                    data_section.active(
+                        *memory_idx,
+                        &ConstExpr::i32_const(*offset as i32),
+                        data.iter().copied(),
+                    );
+                }
+                ParsedData::Passive { data } => {
+                    data_section.passive(data.iter().copied());
+                }
+            }
         }
         for seg in &user.data_segments {
-            data_section.active(
-                seg.memory_idx,
-                &ConstExpr::i32_const(seg.offset as i32),
-                seg.data.iter().copied(),
-            );
+            match seg {
+                ParsedData::Active {
+                    memory_idx,
+                    offset,
+                    data,
+                } => {
+                    data_section.active(
+                        *memory_idx,
+                        &ConstExpr::i32_const(*offset as i32),
+                        data.iter().copied(),
+                    );
+                }
+                ParsedData::Passive { data } => {
+                    data_section.passive(data.iter().copied());
+                }
+            }
         }
         module.section(&data_section);
 

@@ -20,9 +20,34 @@ export class RayzorThreadRuntime {
     this.memory = null;
     this.table = null;
 
-    // Sync primitive allocator (in shared memory)
+    // Sync primitive + result slot regions. Addresses are assigned in
+    // init() via `rayzor_malloc` so dlmalloc on the runtime side treats
+    // these bytes as allocated and won't hand them out to the user
+    // program. Fixed-address regions (e.g. 2 MiB / 3 MiB) collide with
+    // dlmalloc's heap and corrupt it on the first allocation.
+    this.SYNC_BASE = 0;           // set in init()
+    this.SYNC_POOL_BYTES = 64 * 1024;  // 64 KiB for mutexes/semaphores/etc.
     this.nextSyncSlot = 0;
-    this.SYNC_BASE = 1024 * 1024 * 2; // 2MB offset for sync primitives
+
+    this.RESULT_BASE = 0;         // set in init()
+    this.RESULT_POOL_BYTES = 64 * 1024; // 64 KiB → 4096 16-byte slots
+    this.RESULT_SLOT_BYTES = 16;
+    this.nextResultSlot = 0;
+    this.freeResultSlots = [];
+  }
+
+  _allocResultSlot() {
+    if (this.freeResultSlots.length > 0) return this.freeResultSlots.pop();
+    const addr = this.RESULT_BASE + this.nextResultSlot * this.RESULT_SLOT_BYTES;
+    this.nextResultSlot++;
+    return addr;
+  }
+
+  _releaseResultSlot(addr) {
+    // Reset the ready flag and recycle. The main thread holds the only
+    // reference at this point (after join() observed done), so no atomic
+    // fence is needed — the next allocator will re-initialize it.
+    this.freeResultSlots.push(addr);
   }
 
   // Initialize the worker pool. Call after WASM instantiation.
@@ -30,6 +55,35 @@ export class RayzorThreadRuntime {
     this.wasmModule = wasmModule;
     this.memory = memory;
     this.table = instance.exports.__indirect_function_table;
+
+    // Reserve sync + result slot regions through the runtime's own
+    // dlmalloc. If we just picked fixed addresses (e.g. 2 MiB / 3 MiB)
+    // they'd land inside dlmalloc's heap and the first user allocation
+    // would trample the mutex state and result slots.
+    const runtimeMalloc = instance.exports.rayzor_malloc;
+    if (typeof runtimeMalloc === 'function') {
+      this.SYNC_BASE = runtimeMalloc(this.SYNC_POOL_BYTES);
+      this.RESULT_BASE = runtimeMalloc(this.RESULT_POOL_BYTES);
+      // Zero the result region so freshly-allocated slots start with
+      // ready=0. dlmalloc doesn't guarantee zero-initialized memory.
+      const i32 = new Int32Array(
+        memory.buffer,
+        this.RESULT_BASE,
+        this.RESULT_POOL_BYTES >> 2,
+      );
+      for (let i = 0; i < i32.length; i++) Atomics.store(i32, i, 0);
+      console.log(
+        `[rayzor:threads] sync region @ 0x${this.SYNC_BASE.toString(16)}, ` +
+        `result region @ 0x${this.RESULT_BASE.toString(16)}`,
+      );
+    } else {
+      console.warn(
+        '[rayzor:threads] rayzor_malloc export missing; falling back to fixed ' +
+        'addresses (may race with dlmalloc)',
+      );
+      this.SYNC_BASE = 2 * 1024 * 1024;
+      this.RESULT_BASE = 3 * 1024 * 1024;
+    }
 
     // Check SharedArrayBuffer support
     if (!(memory.buffer instanceof SharedArrayBuffer)) {
@@ -50,12 +104,16 @@ export class RayzorThreadRuntime {
 
       worker.onmessage = (e) => this._handleWorkerMessage(e.data, worker);
 
+      // NOTE: we intentionally do NOT forward `this.table` —
+      // `WebAssembly.Table` is not a structured-cloneable type, so
+      // postMessage would raise DataCloneError. The worker will grab its
+      // own `__indirect_function_table` off the instance exports after it
+      // re-instantiates the module on its side.
       worker.postMessage({
         type: 'init',
         threadId: tid,
         module: wasmModule,
         memory: memory,
-        table: this.table,
       });
 
       // Wait for ready
@@ -101,49 +159,81 @@ export class RayzorThreadRuntime {
 
   spawn(fnIdx, envPtr) {
     const threadId = this.nextThreadId++;
-    const taskId = this.nextTaskId++;
 
-    this.threads.set(threadId, { done: false, result: 0, worker: null });
-
-    if (this.idleWorkers.length > 0) {
+    // Real Worker pool path (requires SharedArrayBuffer). The worker writes
+    // the closure result into a shared-memory slot and the main thread
+    // busy-polls the `ready` flag in `join()` — we cannot use
+    // `Atomics.wait` on the main thread per the HTML spec, but we *can*
+    // observe atomic writes from other threads via `Atomics.load` inside
+    // a synchronous loop.
+    if (this._isShared() && this.idleWorkers.length > 0) {
       const worker = this.idleWorkers.pop();
-      this.threads.get(threadId).worker = worker;
-
-      const promise = new Promise((resolve, reject) => {
-        this.tasks.set(taskId, { resolve, reject, threadId });
+      const slot = this._allocResultSlot();
+      // Reset ready flag before dispatch.
+      const view = new Int32Array(this.memory.buffer);
+      Atomics.store(view, slot >> 2, 0);
+      this.threads.set(threadId, {
+        done: false,
+        result: 0,
+        worker,
+        slot,
       });
-
-      worker.postMessage({ type: 'run', taskId, fnIdx, envPtr });
-      this.threads.get(threadId).promise = promise;
-    } else {
-      // No idle workers — run synchronously on main thread (fallback).
-      // Resolves the closure body via __indirect_function_table.get(fnIdx)
-      // and invokes it with env_ptr, caching the result for join().
-      try {
-        const table = this.table;
-        const fn = table ? table.get(fnIdx) : null;
-        const result = fn ? fn(envPtr) : 0;
-        this.threads.get(threadId).done = true;
-        this.threads.get(threadId).result = result;
-      } catch (e) {
-        console.warn('[rayzor:threads] spawn fallback failed:', e);
-        this.threads.get(threadId).done = true;
-        this.threads.get(threadId).result = 0;
-      }
+      worker.postMessage({ type: 'run', threadId, fnIdx, envPtr, slot });
+      return threadId;
     }
 
+    // Fallback: no Worker pool / no SharedArrayBuffer. Run synchronously
+    // on the main thread so join() returns the cached result.
+    this.threads.set(threadId, { done: false, result: 0, worker: null });
+    try {
+      const table = this.table;
+      const fn = table ? table.get(fnIdx) : null;
+      const result = fn ? fn(envPtr) : 0;
+      this.threads.get(threadId).done = true;
+      this.threads.get(threadId).result = result;
+    } catch (e) {
+      console.warn('[rayzor:threads] spawn fallback failed:', e);
+      this.threads.get(threadId).done = true;
+      this.threads.get(threadId).result = 0;
+    }
     return threadId;
   }
 
   join(threadId) {
     const thread = this.threads.get(threadId);
     if (!thread) return this._boxJoinResult(0);
-    // Main thread fallback: the closure already ran synchronously during
-    // spawn(), so `thread.done` is true and we return the cached result.
+
     if (thread.done) return this._boxJoinResult(thread.result);
-    // True blocking on main thread requires Atomics.wait on shared memory.
-    // With a Worker pool we'd spin here; without it we log and return 0.
-    console.warn('[rayzor:threads] join() on main thread with pending Worker task');
+
+    // Worker-dispatched task: spin on the ready flag. Reads are atomic
+    // against the worker's `Atomics.store(ready, 1)` — this is the whole
+    // point of shared memory + atomics.
+    if (thread.slot !== undefined) {
+      const view = new Int32Array(this.memory.buffer);
+      const readyIdx = thread.slot >> 2;
+      // Small idle twiddle so we don't peg the core. Atomics.wait is
+      // forbidden on the main thread, so the busy-wait is the only option
+      // for a fully synchronous join().
+      while (Atomics.load(view, readyIdx) === 0) {
+        // Tight loop. A future optimization could bounce the wait into a
+        // dedicated "coordinator" worker via Atomics.waitAsync, but that
+        // requires an async WASM ABI.
+      }
+      const dv = new DataView(this.memory.buffer);
+      const result = Number(dv.getBigInt64(thread.slot + 8, true));
+      thread.done = true;
+      thread.result = result;
+      // Reclaim the slot and return the worker to the idle pool.
+      this._releaseResultSlot(thread.slot);
+      thread.slot = undefined;
+      if (thread.worker) {
+        this.idleWorkers.push(thread.worker);
+        thread.worker = null;
+      }
+      return this._boxJoinResult(result);
+    }
+
+    console.warn('[rayzor:threads] join() on main thread with no slot');
     return this._boxJoinResult(0);
   }
 
@@ -163,7 +253,15 @@ export class RayzorThreadRuntime {
   }
 
   isFinished(threadId) {
-    return this.threads.get(threadId)?.done ? 1 : 0;
+    const thread = this.threads.get(threadId);
+    if (!thread) return 0;
+    if (thread.done) return 1;
+    // Peek at the shared-memory ready flag for worker-dispatched tasks.
+    if (thread.slot !== undefined && this._isShared()) {
+      const view = new Int32Array(this.memory.buffer);
+      return Atomics.load(view, thread.slot >> 2) === 1 ? 1 : 0;
+    }
+    return 0;
   }
 
   yieldNow() {
