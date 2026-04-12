@@ -81,7 +81,7 @@ mod native_surface {
             // X11: window_handle is the Window ID (u32), display_handle is Display*
             let x11_window = window_handle as u32;
             let x11_display = std::ptr::NonNull::new(display_handle)?;
-            let mut wh = XlibWindowHandle::new(x11_window as u64);
+            let wh = XlibWindowHandle::new(x11_window as u64);
             let window = RawWindowHandle::Xlib(wh);
             let display = RawDisplayHandle::Xlib(XlibDisplayHandle::new(Some(x11_display), 0));
             Some(RawSurfaceTarget { window, display })
