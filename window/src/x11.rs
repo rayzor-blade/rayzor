@@ -360,8 +360,7 @@ impl X11Window {
             c"WM_PROTOCOLS".as_ptr(),
             0, // False — create if needed
         );
-        let mut wm_delete_window =
-            (x11.XInternAtom)(display, c"WM_DELETE_WINDOW".as_ptr(), 0);
+        let mut wm_delete_window = (x11.XInternAtom)(display, c"WM_DELETE_WINDOW".as_ptr(), 0);
         (x11.XSetWMProtocols)(display, window, &mut wm_delete_window, 1);
 
         // Map (show) the window
