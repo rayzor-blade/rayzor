@@ -136,11 +136,7 @@ impl TestResults {
 
         println!("\n=== CATEGORY BREAKDOWN ===");
         for category in &self.test_categories {
-            let pass_rate = if category.tests_run > 0 {
-                (category.tests_passed * 100) / category.tests_run
-            } else {
-                0
-            };
+            let pass_rate = (category.tests_passed * 100).checked_div(category.tests_run).unwrap_or(0);
 
             println!(
                 "📁 {}: {}/{} tests passed ({}%)",

@@ -36,6 +36,7 @@ pub struct RecordedRenderPass {
 }
 
 /// Command encoder that records multiple render passes.
+#[derive(Default)]
 pub struct CommandRecorder {
     passes: Vec<RecordedRenderPass>,
     current_pass: Option<RecordedRenderPass>,
@@ -43,10 +44,7 @@ pub struct CommandRecorder {
 
 impl CommandRecorder {
     pub fn new() -> Self {
-        Self {
-            passes: Vec::new(),
-            current_pass: None,
-        }
+        Self::default()
     }
 
     /// Submit all recorded passes to the GPU.
@@ -128,7 +126,7 @@ impl CommandRecorder {
         self.passes.clear();
     }
 
-    /// Begin a new render pass with a color attachment and optional depth.
+    #[allow(clippy::too_many_arguments)]
     pub fn begin_pass(
         &mut self,
         color_view: *const wgpu::TextureView,

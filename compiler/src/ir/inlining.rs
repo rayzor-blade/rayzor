@@ -744,7 +744,7 @@ impl OptimizationPass for InliningPass {
                     .push(candidate);
             }
             for sites in sites_by_caller.values_mut() {
-                sites.sort_by(|a, b| b.instruction_index.cmp(&a.instruction_index));
+                sites.sort_by_key(|x| std::cmp::Reverse(x.instruction_index));
             }
 
             let mut any_inlined = false;

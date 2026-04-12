@@ -126,20 +126,14 @@ class Main {
 
                 // Validation
                 match *class_name {
-                    "Container" => {
-                        if !is_generic {
-                            return Err(format!("Container should have @:generic flag"));
-                        }
+                    "Container" if !is_generic => {
+                        return Err(format!("Container should have @:generic flag"));
                     }
-                    "SimpleClass" => {
-                        if is_generic {
-                            return Err(format!("SimpleClass should NOT have @:generic flag"));
-                        }
+                    "SimpleClass" if is_generic => {
+                        return Err(format!("SimpleClass should NOT have @:generic flag"));
                     }
-                    "FinalContainer" => {
-                        if !is_final {
-                            return Err(format!("FinalContainer should have @:final flag"));
-                        }
+                    "FinalContainer" if !is_final => {
+                        return Err(format!("FinalContainer should have @:final flag"));
                     }
                     _ => {}
                 }

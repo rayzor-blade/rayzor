@@ -12,7 +12,7 @@ fn test_render_triangle_to_texture() {
     use rayzor_gpu::graphics::*;
 
     // 1. Create device
-    let ctx = unsafe { rayzor_gpu_gfx_device_create() };
+    let ctx = rayzor_gpu_gfx_device_create();
     assert!(!ctx.is_null(), "Failed to create GPU device");
 
     // 2. Compile WGSL shader — triangle with vertex colors
@@ -88,7 +88,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4f {
     assert!(!vb.is_null(), "Failed to create vertex buffer");
 
     // 4. Build render pipeline
-    let builder = unsafe { rayzor_gpu_gfx_pipeline_begin() };
+    let builder = rayzor_gpu_gfx_pipeline_begin();
     assert!(!builder.is_null());
     unsafe {
         rayzor_gpu_gfx_pipeline_set_shader(builder, shader);

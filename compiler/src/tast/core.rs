@@ -1138,7 +1138,7 @@ impl TypeTable {
             .map(|(id, stats)| (*id, stats.reference_count + stats.instantiation_count))
             .collect();
 
-        usage_pairs.sort_by(|a, b| b.1.cmp(&a.1));
+        usage_pairs.sort_by_key(|x| std::cmp::Reverse(x.1));
         usage_pairs.truncate(limit);
         usage_pairs
     }

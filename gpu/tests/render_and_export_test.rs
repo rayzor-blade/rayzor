@@ -114,7 +114,7 @@ fn fs(in: VOut) -> @location(0) vec4f {
 
     // 8. Save as PPM
     let path = "triangle_output.ppm";
-    let mut ppm = format!("P6\n{} {}\n255\n", w, h);
+    let ppm = format!("P6\n{} {}\n255\n", w, h);
     let mut rgb_data = Vec::with_capacity((w * h * 3) as usize);
     for y in 0..h {
         for x in 0..w {

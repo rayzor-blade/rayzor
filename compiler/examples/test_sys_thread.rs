@@ -398,7 +398,7 @@ impl E2ETestSuite {
         println!(
             "   Passed: {} ({}%)",
             passed,
-            if total > 0 { passed * 100 / total } else { 0 }
+            (passed * 100).checked_div(total).unwrap_or(0)
         );
         println!("   Failed: {}", failed);
 

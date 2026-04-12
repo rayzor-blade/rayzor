@@ -283,11 +283,8 @@ impl ProgressTui {
                             KeyCode::End | KeyCode::Char('G') => {
                                 app.scroll_offset = app.state.output_lines.len().saturating_sub(1);
                             }
-                            KeyCode::Char('n') => {
-                                // Next search match
-                                if !app.search_query.is_empty() {
-                                    app.jump_to_next_match();
-                                }
+                            KeyCode::Char('n') if !app.search_query.is_empty() => {
+                                app.jump_to_next_match();
                             }
                             _ => {}
                         }

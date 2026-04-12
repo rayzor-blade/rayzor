@@ -27,8 +27,8 @@ pub struct PipelineBuilder {
     pub(crate) bind_group_layouts: Vec<*const GraphicsBindGroupLayout>,
 }
 
-impl PipelineBuilder {
-    pub fn new() -> Self {
+impl Default for PipelineBuilder {
+    fn default() -> Self {
         Self {
             shader: None,
             topology: wgpu::PrimitiveTopology::TriangleList,
@@ -40,6 +40,12 @@ impl PipelineBuilder {
             vertex_attributes: vec![],
             bind_group_layouts: vec![],
         }
+    }
+}
+
+impl PipelineBuilder {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn set_vertex_layout_simple(&mut self, stride: i32, attr_count: i32, attr_data: &[i32]) {

@@ -8,9 +8,6 @@
 //! - Linux: dlopen("libX11.so") + X11
 //! - Windows: CreateWindowExW (user32.dll)
 
-#[cfg(feature = "native")]
-use std::ffi::c_void;
-
 pub mod event;
 
 #[cfg(target_os = "macos")]

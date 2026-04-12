@@ -122,11 +122,9 @@ pub fn run_mir_viewer(mir_text: &str, module_name: &str, total_functions: usize)
                         KeyCode::End => {
                             app.code_scroll = app.current_line_count().saturating_sub(1);
                         }
-                        KeyCode::Enter => {
-                            if app.active_panel == Panel::FuncList {
-                                app.code_scroll = 0;
-                                app.active_panel = Panel::Code;
-                            }
+                        KeyCode::Enter if app.active_panel == Panel::FuncList => {
+                            app.code_scroll = 0;
+                            app.active_panel = Panel::Code;
                         }
                         KeyCode::Char('n') => app.jump_to_next_match(),
                         _ => {}

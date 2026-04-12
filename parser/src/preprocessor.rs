@@ -371,17 +371,13 @@ fn tokenize_condition(condition: &str) -> Vec<CondToken> {
             '(' => tokens.push(CondToken::LParen),
             ')' => tokens.push(CondToken::RParen),
             '!' => tokens.push(CondToken::Not),
-            '|' => {
-                if chars.peek() == Some(&'|') {
-                    chars.next();
-                    tokens.push(CondToken::Or);
-                }
+            '|' if chars.peek() == Some(&'|') => {
+                chars.next();
+                tokens.push(CondToken::Or);
             }
-            '&' => {
-                if chars.peek() == Some(&'&') {
-                    chars.next();
-                    tokens.push(CondToken::And);
-                }
+            '&' if chars.peek() == Some(&'&') => {
+                chars.next();
+                tokens.push(CondToken::And);
             }
             _ if ch.is_alphabetic() || ch == '_' => {
                 let mut ident = String::new();
