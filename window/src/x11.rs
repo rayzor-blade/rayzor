@@ -322,11 +322,11 @@ unsafe fn load_x11_symbols(lib: *mut c_void) -> Option<&'static X11Lib> {
 // ============================================================================
 
 pub struct X11Window {
-    display: *mut c_void, // X11 Display*
-    window: u64,          // X11 Window (XID)
+    pub(crate) display: *mut c_void, // X11 Display*
+    pub(crate) window: u64,          // X11 Window (XID)
     screen: i32,
-    width: u32,
-    height: u32,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
     pub resized: bool,
     should_close: bool,
     key_states: [bool; 256],
