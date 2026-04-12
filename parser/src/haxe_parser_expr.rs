@@ -690,7 +690,7 @@ fn simple_string<'a>(full: &'a str, input: &'a str, quote: char) -> PResult<'a, 
 }
 
 /// Convert escape sequences in a parsed string literal to their actual characters.
-fn unescape_string(s: &str) -> String {
+pub(crate) fn unescape_string(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut chars = s.chars();
     while let Some(c) = chars.next() {

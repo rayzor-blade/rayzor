@@ -18,7 +18,7 @@ use error::ParseError;
 pub fn rd_parse(
     source: &str,
     file_name: &str,
-    _is_import_file: bool,
+    is_import_file: bool,
     debug: bool,
 ) -> Result<HaxeFile, Vec<ParseError>> {
     let tokens = Lexer::new(source).tokenize().map_err(|e| {
@@ -30,7 +30,7 @@ pub fn rd_parse(
 
     let mut stream = TokenStream::new(&tokens, source);
     let mut parser = RdParser::new(&mut stream, source, file_name);
-    let file = parser.parse_file(debug)?;
+    let file = parser.parse_file(debug, is_import_file)?;
     Ok(file)
 }
 
@@ -53,11 +53,21 @@ impl<'a, 'b> RdParser<'a, 'b> {
     }
 
     /// Parse a complete Haxe file.
-    pub fn parse_file(&mut self, debug: bool) -> Result<HaxeFile, Vec<ParseError>> {
+    pub fn parse_file(
+        &mut self,
+        debug: bool,
+        is_import_file: bool,
+    ) -> Result<HaxeFile, Vec<ParseError>> {
         let start = self.stream.current_offset();
 
-        // Package declaration
+        // Package declaration — forbidden in import.hx
         let package = if self.stream.at(TokenKind::KwPackage) {
+            if is_import_file {
+                return Err(vec![ParseError::new(
+                    "import.hx files must not contain package declarations",
+                    Span::new(start, start + 7),
+                )]);
+            }
             Some(self.parse_package()?)
         } else {
             None
@@ -84,6 +94,13 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
             // Try type declaration or module field
             if self.is_at_type_declaration() {
+                if is_import_file {
+                    let offset = self.stream.current_offset();
+                    return Err(vec![ParseError::new(
+                        "import.hx files must only contain import/using statements",
+                        Span::new(offset, offset + 1),
+                    )]);
+                }
                 match self.parse_type_declaration() {
                     Ok(decl) => declarations.push(decl),
                     Err(e) => {
@@ -96,6 +113,13 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
             // Module-level field (var, final, function with modifiers/metadata)
             if self.is_at_module_field() {
+                if is_import_file {
+                    let offset = self.stream.current_offset();
+                    return Err(vec![ParseError::new(
+                        "import.hx files must only contain import/using statements",
+                        Span::new(offset, offset + 1),
+                    )]);
+                }
                 match self.parse_module_field() {
                     Ok(field) => module_fields.push(field),
                     Err(e) => {
@@ -224,8 +248,16 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 | TokenKind::KwStatic
                 | TokenKind::KwInline
                 | TokenKind::KwExtern
-                | TokenKind::KwFinal
                 | TokenKind::KwOverride => {
+                    i += 1;
+                }
+                TokenKind::KwFinal => {
+                    // `final` can be a modifier (before var/function) or a
+                    // standalone declaration (`final x: Int = 42`). If the
+                    // next token is an identifier, it's a field declaration.
+                    if self.stream.peek_at(i + 1).kind == TokenKind::Ident {
+                        return true;
+                    }
                     i += 1;
                 }
                 TokenKind::KwVar | TokenKind::KwFunction => return true,

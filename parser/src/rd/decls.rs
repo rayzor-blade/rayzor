@@ -24,19 +24,34 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.expect(TokenKind::KwImport)?;
         let path = self.parse_dotted_path()?;
 
-        let (path, mode) = if self.stream.at(TokenKind::KwIn) || self.stream.current_text() == "as" {
+        let (path, mode) = if self.stream.at(TokenKind::KwIn) || self.stream.current_text() == "as"
+        {
             // import X as Alias or import X in Alias
             self.stream.advance();
             let alias = self.stream.current_text().to_string();
             self.stream.advance();
             (path, ImportMode::Alias(alias))
         } else if path.last().is_some_and(|s| s == "*") {
-            // import com.example.Module.* → path without *, mode = Wildcard
+            // import com.example.Module.* [except A, B, C] → wildcard with optional exclusions
             let mut p = path;
             p.pop();
-            (p, ImportMode::Wildcard)
+            if self.stream.current_text() == "except" {
+                self.stream.advance();
+                let mut exclusions = Vec::new();
+                exclusions.push(self.stream.current_text().to_string());
+                self.stream.advance();
+                while self.stream.eat(TokenKind::Comma).is_some() {
+                    exclusions.push(self.stream.current_text().to_string());
+                    self.stream.advance();
+                }
+                (p, ImportMode::WildcardWithExclusions(exclusions))
+            } else {
+                (p, ImportMode::Wildcard)
+            }
         } else if path.len() >= 2
-            && path.last().is_some_and(|s| s.starts_with(|c: char| c.is_ascii_lowercase()))
+            && path
+                .last()
+                .is_some_and(|s| s.starts_with(|c: char| c.is_ascii_lowercase()))
         {
             // import com.example.Type.staticField → field import
             let mut p = path;
@@ -611,6 +626,10 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let meta = self.parse_metadata_list();
         let (access, modifiers) = self.parse_access_and_modifiers();
 
+        // `final` is consumed by `parse_access_and_modifiers` as a modifier.
+        // Detect `final <ident>` patterns by checking modifiers.
+        let has_final_modifier = modifiers.iter().any(|m| matches!(m, Modifier::Final));
+
         let kind = if self.stream.at(TokenKind::KwVar) {
             self.stream.advance();
             let name = self.stream.current_text().to_string();
@@ -631,8 +650,12 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 type_hint,
                 expr,
             }
-        } else if self.stream.at(TokenKind::KwFinal) {
-            self.stream.advance();
+        } else if self.stream.at(TokenKind::KwFinal) || (has_final_modifier && self.stream.at(TokenKind::Ident)) {
+            // `final x: Int = 42;` — the `final` keyword was already consumed
+            // as a modifier, or it's still pending as a token.
+            if self.stream.at(TokenKind::KwFinal) {
+                self.stream.advance();
+            }
             let name = self.stream.current_text().to_string();
             self.stream.advance();
             let type_hint = if self.stream.eat(TokenKind::Colon).is_some() {
