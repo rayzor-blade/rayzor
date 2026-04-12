@@ -531,7 +531,10 @@ pub fn gfx_pipeline_begin() -> i32 {
 pub fn gfx_pipeline_set_shader(pipe_h: i32, shader_h: i32) {
     let mut ht = HANDLES.lock().unwrap();
     if let Some(GpuObject::PipelineBuilder(b)) = ht.get_mut(pipe_h) {
-        b.shader = Some(shader_h);
+        #[cfg(not(feature = "native"))]
+        { b.shader = Some(shader_h); }
+        #[cfg(feature = "native")]
+        { let _ = (b, shader_h); }
     }
 }
 
@@ -586,68 +589,72 @@ pub fn gfx_pipeline_build(pipe_h: i32, dev_h: i32) -> i32 {
         _ => return 0,
     };
 
-    let shader_h = match builder.shader {
-        Some(h) => h,
-        None => return 0,
-    };
-    let (module, vs_entry, fs_entry) = match ht.get(shader_h) {
-        Some(GpuObject::Shader {
-            module,
-            vs_entry,
-            fs_entry,
-        }) => (module, vs_entry.clone(), fs_entry.clone()),
-        _ => return 0,
-    };
+    #[cfg(feature = "native")]
+    { let _ = (builder, device); 0 }
 
-    let targets: Vec<Option<wgpu::ColorTargetState>> = if builder.color_targets.is_empty() {
-        vec![Some(wgpu::ColorTargetState {
-            format: wgpu::TextureFormat::Bgra8Unorm,
-            blend: None,
-            write_mask: wgpu::ColorWrites::ALL,
-        })]
-    } else {
-        builder
-            .color_targets
-            .iter()
-            .map(|f| {
-                Some(wgpu::ColorTargetState {
-                    format: *f,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
+    #[cfg(not(feature = "native"))]
+    {
+        let shader_h = match builder.shader {
+            Some(h) => h,
+            None => return 0,
+        };
+        let (module, vs_entry, fs_entry) = match ht.get(shader_h) {
+            Some(GpuObject::Shader {
+                module,
+                vs_entry,
+                fs_entry,
+            }) => (module, vs_entry.clone(), fs_entry.clone()),
+            _ => return 0,
+        };
+
+        let targets: Vec<Option<wgpu::ColorTargetState>> = if builder.color_targets.is_empty() {
+            vec![Some(wgpu::ColorTargetState {
+                format: wgpu::TextureFormat::Bgra8Unorm,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            })]
+        } else {
+            builder
+                .color_targets
+                .iter()
+                .map(|f| {
+                    Some(wgpu::ColorTargetState {
+                        format: *f,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })
                 })
-            })
-            .collect()
-    };
+                .collect()
+        };
 
-    let pipeline = match device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-        label: None,
-        layout: None,
-        vertex: wgpu::VertexState {
-            module,
-            entry_point: Some(&vs_entry),
-            buffers: &[],
-            compilation_options: Default::default(),
-        },
-        fragment: Some(wgpu::FragmentState {
-            module,
-            entry_point: Some(&fs_entry),
-            targets: &targets,
-            compilation_options: Default::default(),
-        }),
-        primitive: wgpu::PrimitiveState {
-            topology: builder.topology,
-            cull_mode: builder.cull_mode,
-            ..Default::default()
-        },
-        depth_stencil: None,
-        multisample: wgpu::MultisampleState::default(),
-        multiview: None,
-        cache: None,
-    }) {
-        p => p,
-    };
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: None,
+            layout: None,
+            vertex: wgpu::VertexState {
+                module,
+                entry_point: Some(&vs_entry),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module,
+                entry_point: Some(&fs_entry),
+                targets: &targets,
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: builder.topology,
+                cull_mode: builder.cull_mode,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview: None,
+            cache: None,
+        });
 
-    ht.alloc(GpuObject::Pipeline(Box::new(GraphicsPipeline { pipeline })))
+        ht.alloc(GpuObject::Pipeline(Box::new(GraphicsPipeline { pipeline })))
+    }
 }
 
 #[wasm_bindgen(js_name = "rayzor_gpu_gfx_pipeline_destroy")]
@@ -685,6 +692,7 @@ pub fn gfx_cmd_destroy(h: i32) {
     HANDLES.lock().unwrap().free(h);
 }
 
+#[allow(clippy::too_many_arguments)]
 #[wasm_bindgen(js_name = "rayzor_gpu_gfx_cmd_begin_pass")]
 pub fn gfx_cmd_begin_pass(
     cmd_h: i32,
@@ -943,7 +951,10 @@ pub fn gfx_surface_create(
 ) -> i32 {
     // On WASM, ignore raw handles — find the existing canvas on the page.
     // Window.createCentered already created a canvas element.
-    gfx_surface_create_canvas(dev_h, "", width, height)
+    #[cfg(target_arch = "wasm32")]
+    { return gfx_surface_create_canvas(dev_h, "", width, height); }
+    #[cfg(not(target_arch = "wasm32"))]
+    { let _ = (dev_h, width, height); 0 }
 }
 
 // ============================================================================
@@ -1162,7 +1173,7 @@ fn compute_binary_op(dev_h: i32, a_h: i32, b_h: i32, op: &str) -> i32 {
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, Some(&bg), &[]);
-        pass.dispatch_workgroups(((a_numel + 255) / 256) as u32, 1, 1);
+        pass.dispatch_workgroups(a_numel.div_ceil(256), 1, 1);
     }
     ctx.queue.submit(std::iter::once(encoder.finish()));
 
@@ -1246,7 +1257,7 @@ fn compute_unary_op(dev_h: i32, a_h: i32, expr: &str) -> i32 {
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, Some(&bg), &[]);
-        pass.dispatch_workgroups(((a_numel + 255) / 256) as u32, 1, 1);
+        pass.dispatch_workgroups(a_numel.div_ceil(256), 1, 1);
     }
     ctx.queue.submit(std::iter::once(encoder.finish()));
 
@@ -1458,7 +1469,7 @@ pub fn compute_dot(dev_h: i32, a_h: i32, b_h: i32) -> f64 {
         Some(GpuObject::GfxContext(c)) => c,
         _ => return 0.0,
     };
-    let (a_buf, a_numel) = match ht.get(a_h) {
+    let (a_buf, _a_numel) = match ht.get(a_h) {
         Some(GpuObject::ComputeBuffer(b)) => (&b.buffer.buffer, b.numel),
         _ => return 0.0,
     };
@@ -1559,22 +1570,21 @@ pub fn compute_matmul(dev_h: i32, a_h: i32, b_h: i32, m: i32, k: i32, n: i32) ->
         _ => return 0,
     };
 
-    let wgsl = format!(
-        "struct Params {{ m: u32, k: u32, n: u32 }}\n\
+    let wgsl = "\
+        struct Params { m: u32, k: u32, n: u32 }\n\
          @group(0) @binding(0) var<uniform> params: Params;\n\
          @group(0) @binding(1) var<storage,read> a: array<f32>;\n\
          @group(0) @binding(2) var<storage,read> b: array<f32>;\n\
          @group(0) @binding(3) var<storage,read_write> out: array<f32>;\n\
-         @compute @workgroup_size(16,16) fn main(@builtin(global_invocation_id) id: vec3u) {{\n\
+         @compute @workgroup_size(16,16) fn main(@builtin(global_invocation_id) id: vec3u) {\n\
            let row = id.x; let col = id.y;\n\
-           if (row >= params.m || col >= params.n) {{ return; }}\n\
+           if (row >= params.m || col >= params.n) { return; }\n\
            var sum: f32 = 0.0;\n\
-           for (var i = 0u; i < params.k; i++) {{\n\
+           for (var i = 0u; i < params.k; i++) {\n\
              sum += a[row * params.k + i] * b[i * params.n + col];\n\
-           }}\n\
+           }\n\
            out[row * params.n + col] = sum;\n\
-         }}"
-    );
+         }";
 
     let module = ctx
         .device
@@ -1640,7 +1650,7 @@ pub fn compute_matmul(dev_h: i32, a_h: i32, b_h: i32, m: i32, k: i32, n: i32) ->
         let mut pass = encoder.begin_compute_pass(&Default::default());
         pass.set_pipeline(&pipeline);
         pass.set_bind_group(0, Some(&bg), &[]);
-        pass.dispatch_workgroups((m as u32 + 15) / 16, (n as u32 + 15) / 16, 1);
+        pass.dispatch_workgroups((m as u32).div_ceil(16), (n as u32).div_ceil(16), 1);
     }
     ctx.queue.submit(std::iter::once(encoder.finish()));
 

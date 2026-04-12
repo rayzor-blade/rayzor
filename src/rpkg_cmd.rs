@@ -9,6 +9,7 @@ use crate::compile_helpers::compile_haxe_to_mir;
 use crate::tui;
 use crate::wasm_cmd::find_wasm_runtime;
 
+#[allow(clippy::too_many_arguments)]
 pub fn cmd_rpkg_pack(
     dylibs: Vec<PathBuf>,
     os_tags: Vec<String>,

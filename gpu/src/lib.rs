@@ -52,8 +52,6 @@ pub mod wasm_exports;
 
 #[cfg(feature = "native")]
 use rayzor_plugin::{declare_native_methods, NativeMethodDesc};
-#[cfg(feature = "native")]
-use std::ffi::c_void;
 
 // ============================================================================
 // Method descriptor table (read by compiler at plugin load time)

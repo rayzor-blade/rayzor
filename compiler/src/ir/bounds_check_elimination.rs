@@ -182,7 +182,7 @@ fn eliminate_bounds_checks(
 
     // Process each loop (innermost first via nesting depth)
     let mut loops: Vec<&NaturalLoop> = loop_info.loops.values().collect();
-    loops.sort_by(|a, b| b.nesting_depth.cmp(&a.nesting_depth));
+    loops.sort_by_key(|x| std::cmp::Reverse(x.nesting_depth));
 
     for natural_loop in loops {
         // Step 1: Analyze the loop header for the for-in pattern

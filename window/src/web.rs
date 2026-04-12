@@ -263,11 +263,13 @@ impl WebWindow {
                     .push(WindowEvent::mouse_wheel(e.delta_x(), e.delta_y()));
                 e.prevent_default();
             }) as Box<dyn FnMut(JsValue)>);
+            let opts = web_sys::AddEventListenerOptions::new();
+            opts.set_passive(false);
             self.canvas
                 .add_event_listener_with_callback_and_add_event_listener_options(
                     "wheel",
                     closure.as_ref().unchecked_ref(),
-                    web_sys::AddEventListenerOptions::new().passive(false),
+                    &opts,
                 )
                 .unwrap();
             closure.forget();

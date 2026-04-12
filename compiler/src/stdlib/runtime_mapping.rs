@@ -446,7 +446,7 @@ impl StdlibMapping {
             .collect();
 
         // Sort using dynamic priority based on class characteristics
-        results.sort_by(|a, b| self.class_priority(a.0).cmp(&self.class_priority(b.0)));
+        results.sort_by_key(|x| self.class_priority(x.0));
 
         results
     }

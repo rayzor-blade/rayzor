@@ -101,13 +101,7 @@ pub fn window_poll_events(h: i32) -> i32 {
 pub fn window_is_key_down(h: i32, key: i32) -> i32 {
     let wt = WINDOWS.lock().unwrap();
     match wt.get(h) {
-        Some(w) => {
-            if w.is_key_down(key) {
-                1
-            } else {
-                0
-            }
-        }
+        Some(w) => i32::from(w.is_key_down(key)),
         None => 0,
     }
 }
@@ -453,9 +447,10 @@ pub fn window_event_scroll_y(h: i32, idx: i32) -> f64 {
 pub fn window_run_loop(win_h: i32, callback: js_sys::Function) {
     use std::cell::RefCell;
     use std::rc::Rc;
-    use wasm_bindgen::JsCast;
 
-    let f: Rc<RefCell<Option<Closure<dyn FnMut()>>>> = Rc::new(RefCell::new(None));
+    type AnimationClosure = Rc<RefCell<Option<Closure<dyn FnMut()>>>>;
+
+    let f: AnimationClosure = Rc::new(RefCell::new(None));
     let g = f.clone();
 
     *g.borrow_mut() = Some(Closure::wrap(Box::new(move || {

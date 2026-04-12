@@ -341,7 +341,7 @@ fn unroll_loops_in_function(function: &mut IrFunction) -> OptimizationResult {
         .iter()
         .map(|(&header, l)| (header, l.nesting_depth))
         .collect();
-    loops_by_depth.sort_by(|a, b| b.1.cmp(&a.1)); // Deepest first
+    loops_by_depth.sort_by_key(|x| std::cmp::Reverse(x.1));
 
     for (header, _depth) in loops_by_depth {
         let natural_loop = match loop_info.loops.get(&header) {

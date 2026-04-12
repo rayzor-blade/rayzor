@@ -159,7 +159,7 @@ impl ProfileData {
             .filter(|(_, count)| *count >= self.config.hot_threshold)
             .collect();
 
-        hot_funcs.sort_by(|a, b| b.1.cmp(&a.1)); // Sort descending by count
+        hot_funcs.sort_by_key(|x| std::cmp::Reverse(x.1));
         hot_funcs
     }
 
@@ -174,7 +174,7 @@ impl ProfileData {
             })
             .collect();
 
-        warm_funcs.sort_by(|a, b| b.1.cmp(&a.1));
+        warm_funcs.sort_by_key(|x| std::cmp::Reverse(x.1));
         warm_funcs
     }
 

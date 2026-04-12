@@ -584,7 +584,7 @@ impl CompileCtx {
                                 s
                             });
                     let suffix = format!("_{}", snake);
-                    if let Some((&ref _qname, &idx)) = name_to_idx
+                    if let Some((_qname, &idx)) = name_to_idx
                         .iter()
                         .filter(|(k, _)| {
                             (k.starts_with("haxe_") || k.starts_with("rayzor_"))
