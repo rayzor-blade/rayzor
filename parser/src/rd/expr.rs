@@ -537,12 +537,22 @@ impl<'a, 'b> RdParser<'a, 'b> {
             TokenKind::DollarIdent => {
                 let text = token.text(self.source).to_string();
                 self.stream.advance();
+                // $v{expr} — dollar identifier with braced argument
+                let arg = if self.stream.at(TokenKind::LBrace) {
+                    self.stream.advance();
+                    let arg_expr = self.parse_expression()?;
+                    self.stream.expect(TokenKind::RBrace)?;
+                    Some(Box::new(arg_expr))
+                } else {
+                    None
+                };
+                let end = self.stream.current_offset();
                 Ok(Expr {
                     kind: ExprKind::DollarIdent {
                         name: text[1..].to_string(),
-                        arg: None,
+                        arg,
                     },
-                    span: token.span,
+                    span: Span::new(start, end),
                 })
             }
             TokenKind::RegexLit => {

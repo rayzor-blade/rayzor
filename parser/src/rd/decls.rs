@@ -24,16 +24,26 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.expect(TokenKind::KwImport)?;
         let path = self.parse_dotted_path()?;
 
-        let mode = if self.stream.at(TokenKind::KwIn) || self.stream.current_text() == "as" {
+        let (path, mode) = if self.stream.at(TokenKind::KwIn) || self.stream.current_text() == "as" {
             // import X as Alias or import X in Alias
             self.stream.advance();
             let alias = self.stream.current_text().to_string();
             self.stream.advance();
-            ImportMode::Alias(alias)
+            (path, ImportMode::Alias(alias))
         } else if path.last().is_some_and(|s| s == "*") {
-            ImportMode::Wildcard
+            // import com.example.Module.* → path without *, mode = Wildcard
+            let mut p = path;
+            p.pop();
+            (p, ImportMode::Wildcard)
+        } else if path.len() >= 2
+            && path.last().is_some_and(|s| s.starts_with(|c: char| c.is_ascii_lowercase()))
+        {
+            // import com.example.Type.staticField → field import
+            let mut p = path;
+            let field = p.pop().unwrap();
+            (p, ImportMode::Field(field))
         } else {
-            ImportMode::Normal
+            (path, ImportMode::Normal)
         };
 
         self.stream.eat(TokenKind::Semicolon);
