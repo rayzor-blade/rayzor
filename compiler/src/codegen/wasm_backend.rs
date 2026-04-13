@@ -3657,7 +3657,6 @@ impl<'a> FunctionLowerer<'a> {
 /// This eliminates the pointer width mismatch entirely.
 fn ir_type_to_wasm(ty: &IrType) -> ValType {
     match ty {
-        IrType::I64 | IrType::U64 => ValType::I64,
         IrType::F32 => ValType::F32,
         IrType::F64 => ValType::F64,
         // SIMD vectors map to WASM v128. Currently only f32x4 (16 bytes) is
@@ -3864,7 +3863,8 @@ mod tests {
     #[test]
     fn test_ir_type_to_wasm() {
         assert_eq!(ir_type_to_wasm(&IrType::I32), ValType::I32);
-        assert_eq!(ir_type_to_wasm(&IrType::I64), ValType::I64);
+        // In WASM32, I64 maps to I32 (all pointers and type-erased values are 32-bit)
+        assert_eq!(ir_type_to_wasm(&IrType::I64), ValType::I32);
         assert_eq!(ir_type_to_wasm(&IrType::F32), ValType::F32);
         assert_eq!(ir_type_to_wasm(&IrType::F64), ValType::F64);
         assert_eq!(ir_type_to_wasm(&IrType::Bool), ValType::I32);
