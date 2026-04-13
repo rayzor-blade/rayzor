@@ -1,0 +1,12 @@
+[project]
+name = "tink-json"
+version = "0.1.0"
+entry = "src/Main.hx"
+
+[build]
+class-paths = ["src", "../../compiler/haxe-std"]
+opt-level = 2
+preset = "application"
+
+[cache]
+enabled = true
