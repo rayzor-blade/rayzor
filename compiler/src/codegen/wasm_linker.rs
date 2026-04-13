@@ -2300,11 +2300,14 @@ mod tests {
         let merged = result.unwrap();
         let parsed = ParsedModule::parse(&merged, "merged").unwrap();
 
-        // No imports should remain (runtime had none, user's rayzor import was stubbed).
-        assert_eq!(parsed.func_imports.len(), 0);
+        // Unresolved "rayzor" imports are preserved (forwarded to JS proxy),
+        // so the merged module has 1 func import.
+        assert_eq!(parsed.func_imports.len(), 1);
+        assert_eq!(parsed.func_imports[0].module, "rayzor");
+        assert_eq!(parsed.func_imports[0].name, "nonexistent_func");
 
-        // Should have 3 internal functions: 1 runtime + 1 stub + 1 user.
-        assert_eq!(parsed.functions.len(), 3);
+        // Should have 2 internal functions: 1 runtime + 1 user (no stub needed).
+        assert_eq!(parsed.functions.len(), 2);
     }
 
     #[test]
