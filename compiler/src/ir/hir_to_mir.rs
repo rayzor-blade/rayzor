@@ -4465,7 +4465,10 @@ impl<'a> HirToMirContext<'a> {
                                 // `new Box(d)`. These transfer ownership of the argument to the
                                 // wrapper. Remove the argument variable from drop tracking so
                                 // it isn't freed when the scope exits (the wrapper now owns it).
-                                if let HirExprKind::New { args, class_name, .. } = &init_expr.kind {
+                                if let HirExprKind::New {
+                                    args, class_name, ..
+                                } = &init_expr.kind
+                                {
                                     let is_ownership_wrapper = class_name
                                         .and_then(|n| self.string_interner.get(n))
                                         .map_or(false, |name| {
@@ -4473,8 +4476,12 @@ impl<'a> HirToMirContext<'a> {
                                         });
                                     if is_ownership_wrapper {
                                         for arg in args {
-                                            if let HirExprKind::Variable { symbol: arg_sym, .. } = &arg.kind {
-                                                if self.owned_heap_values.remove(arg_sym).is_some() {
+                                            if let HirExprKind::Variable {
+                                                symbol: arg_sym, ..
+                                            } = &arg.kind
+                                            {
+                                                if self.owned_heap_values.remove(arg_sym).is_some()
+                                                {
                                                     self.reassigned_in_scope.insert(*arg_sym);
                                                 }
                                             }
