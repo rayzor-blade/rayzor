@@ -2472,8 +2472,22 @@ impl<'a> AstLowering<'a> {
                             existing_symbol,
                         );
                         existing_symbol
-                    } else if let Some(existing_symbol) =
-                        self.resolve_symbol_in_scope_hierarchy(symbol_name)
+                    } else if let Some(existing_symbol) = self
+                        .resolve_symbol_in_scope_hierarchy(symbol_name)
+                        .filter(|sid| {
+                            // Only reuse if the existing symbol has no qualified_name OR its
+                            // qualified_name matches the imported path. Otherwise it's a DIFFERENT
+                            // class with the same simple name (e.g. stdlib `Json` vs user `tink.Json`)
+                            // and reusing it would silently route user imports to stdlib.
+                            self.context
+                                .symbol_table
+                                .get_symbol(*sid)
+                                .map(|sym| {
+                                    sym.qualified_name.is_none()
+                                        || sym.qualified_name == Some(qn_interned)
+                                })
+                                .unwrap_or(false)
+                        })
                     {
                         // Bare-name fallback — set qualified_name to match the import path
                         // so downstream code (e.g., Send/Sync validation) can identify the type
