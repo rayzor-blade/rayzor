@@ -77,6 +77,12 @@ pub struct MacroInterpreter {
     /// and `Context.getLocalClass()` return the class being built. Without
     /// this, those APIs return empty/null.
     pub macro_context: Option<super::context_api::MacroContext>,
+    /// Stack of classes whose macros are currently executing.
+    /// Bare identifier calls inside a macro body (e.g. `parseValue(...)`
+    /// inside `tink.Json.parse`) fall back to this class's static methods
+    /// when not found as builtins, env vars, or registered macros.
+    /// Stack so nested macro calls restore the outer class on return.
+    macro_class_stack: Vec<String>,
 }
 
 impl MacroInterpreter {
@@ -114,6 +120,7 @@ impl MacroInterpreter {
             vm,
             scheduler,
             macro_context: None,
+            macro_class_stack: Vec::new(),
         }
     }
 
@@ -132,6 +139,7 @@ impl MacroInterpreter {
             vm,
             scheduler,
             macro_context: None,
+            macro_class_stack: Vec::new(),
         }
     }
 
@@ -156,7 +164,19 @@ impl MacroInterpreter {
             vm,
             scheduler,
             macro_context: None,
+            macro_class_stack: Vec::new(),
         }
+    }
+
+    /// Push the name of the class whose macro is about to execute.
+    /// See `macro_class_stack` on the struct for why this exists.
+    pub fn push_macro_class(&mut self, class_name: String) {
+        self.macro_class_stack.push(class_name);
+    }
+
+    /// Pop the most recently pushed macro class context.
+    pub fn pop_macro_class(&mut self) -> Option<String> {
+        self.macro_class_stack.pop()
     }
 
     /// Get a reference to the environment
@@ -907,6 +927,17 @@ impl MacroInterpreter {
                 if let Some(macro_def) = self.registry.find_macro_by_name(name).cloned() {
                     return self.call_macro_def(&macro_def, arg_vals, location);
                 }
+                // Look up as a sibling static method of the class whose macro
+                // is currently executing. This lets a macro body call helper
+                // functions defined in the same class (e.g. `tink.Json.parse`
+                // internally calls `parseValue`).
+                if let Some(class_name) = self.macro_class_stack.last().cloned() {
+                    if let Some(result) =
+                        self.try_static_call(&class_name, name, &arg_vals, location)?
+                    {
+                        return Ok(result);
+                    }
+                }
                 Err(MacroError::UndefinedVariable {
                     name: name.clone(),
                     location,
@@ -1067,7 +1098,21 @@ impl MacroInterpreter {
             body: def.body.clone(),
             captures: std::collections::BTreeMap::new(),
         };
-        let result = self.call_function(&func, args, location)?;
+        // Track the class that contains this macro so bare-identifier calls
+        // in the body (e.g. `parseValue(...)` inside `tink.Json.parse`)
+        // can resolve to sibling static helpers via the class registry.
+        let class_name = def
+            .qualified_name
+            .rsplit_once('.')
+            .map(|(cls, _)| cls.to_string());
+        if let Some(cls) = &class_name {
+            self.macro_class_stack.push(cls.clone());
+        }
+        let result = self.call_function(&func, args, location);
+        if class_name.is_some() {
+            self.macro_class_stack.pop();
+        }
+        let result = result?;
 
         // Profile: check if this macro should be promoted to bytecode.
         // Morsel scheduling: when a macro crosses the threshold, batch-compile
@@ -1312,24 +1357,41 @@ impl MacroInterpreter {
             },
             _ => {
                 // Fallback: check ClassRegistry for user/stdlib class
-                if let Some(ref cr) = self.class_registry {
-                    if let Some(method_info) = cr.find_static_method(resolved, method) {
-                        let body = method_info.body.clone();
-                        let params = method_info.params.clone();
-                        self.env.push_scope();
-                        for (i, param) in params.iter().enumerate() {
-                            let val = args.get(i).cloned().unwrap_or(MacroValue::Null);
-                            self.env.define(&param.name, val);
-                        }
-                        let result = self.eval_expr(&body);
-                        self.env.pop_scope();
-                        return match result {
-                            Ok(val) => Ok(Some(val)),
-                            Err(MacroError::Return { value: Some(v) }) => Ok(Some(*v)),
-                            Err(MacroError::Return { value: None }) => Ok(Some(MacroValue::Null)),
-                            Err(e) => Err(e),
-                        };
+                let resolved_owned = resolved.to_string();
+                let maybe_method = self
+                    .class_registry
+                    .as_ref()
+                    .and_then(|cr| cr.find_static_method(&resolved_owned, method))
+                    .map(|m| (m.body.clone(), m.params.clone()));
+                if let Some((body, params)) = maybe_method {
+                    // Depth tracking — prevents runaway recursion from
+                    // crashing the compiler when a macro body has a bug
+                    // (stack overflow aborts the process; we'd rather
+                    // surface a diagnostic and move on).
+                    self.call_depth += 1;
+                    if self.call_depth > self.max_call_depth {
+                        self.call_depth -= 1;
+                        return Err(MacroError::RecursionLimitExceeded {
+                            macro_name: format!("{}.{}", resolved_owned, method),
+                            depth: self.call_depth,
+                            max_depth: self.max_call_depth,
+                            location,
+                        });
                     }
+                    self.env.push_scope();
+                    for (i, param) in params.iter().enumerate() {
+                        let val = args.get(i).cloned().unwrap_or(MacroValue::Null);
+                        self.env.define(&param.name, val);
+                    }
+                    let result = self.eval_expr(&body);
+                    self.env.pop_scope();
+                    self.call_depth -= 1;
+                    return match result {
+                        Ok(val) => Ok(Some(val)),
+                        Err(MacroError::Return { value: Some(v) }) => Ok(Some(*v)),
+                        Err(MacroError::Return { value: None }) => Ok(Some(MacroValue::Null)),
+                        Err(e) => Err(e),
+                    };
                 }
                 Ok(None)
             }

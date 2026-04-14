@@ -258,5 +258,4 @@ class Json {
         // Return values as an array (keys available via .keys field)
         return {expr: macro [$a{valueExprs}], endPos: pos, keys: keyNames};
     }
-    #end
 }

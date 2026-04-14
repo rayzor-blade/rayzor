@@ -972,8 +972,23 @@ impl MacroExpander {
             interp.define_variable(&param.name, value);
         }
 
+        // Push the macro's class context so bare-identifier calls in the
+        // body (e.g. `parseValue(...)` inside `tink.Json.parse`) can resolve
+        // to sibling static helpers via the class registry.
+        let class_context = macro_def
+            .qualified_name
+            .rsplit_once('.')
+            .map(|(cls, _)| cls.to_string());
+        if let Some(cls) = &class_context {
+            interp.push_macro_class(cls.clone());
+        }
+
         // Execute the macro body
         let result = interp.eval_expr(&macro_def.body);
+
+        if class_context.is_some() {
+            interp.pop_macro_class();
+        }
 
         // Collect trace output
         for line in interp.take_trace_output() {
@@ -1102,12 +1117,12 @@ fn extract_macro_call_name(expr: &Expr) -> Option<String> {
         ExprKind::Field {
             expr: obj, field, ..
         } => {
-            // Build qualified name: Foo.bar → "Foo.bar"
-            if let ExprKind::Ident(class_name) = &obj.kind {
-                Some(format!("{}.{}", class_name, field))
-            } else {
-                None
-            }
+            // Build qualified name for simple and FQN paths:
+            //   Foo.bar         → "Foo.bar"
+            //   tink.Json.parse → "tink.Json.parse"
+            // Recurse so arbitrary-depth `pkg.sub.Class.method` works.
+            let prefix = extract_macro_call_name(obj)?;
+            Some(format!("{}.{}", prefix, field))
         }
         _ => None,
     }
@@ -1190,6 +1205,37 @@ pub fn expand_macros(file: HaxeFile) -> ExpansionResult {
 /// The registry may contain macro definitions from previously compiled files.
 pub fn expand_macros_with_registry(file: HaxeFile, registry: MacroRegistry) -> ExpansionResult {
     let mut expander = MacroExpander::with_state(registry, MacroContext::new());
+    expander.expand_file(file)
+}
+
+/// Expand macros and also scan sibling/dependency files for macro definitions.
+///
+/// This is critical for cross-file macro discovery: when `Main.hx` calls
+/// `tink.Json.parse(...)` and `tink.Json.parse` is a macro defined in
+/// `tink/Json.hx`, we must scan `tink/Json.hx` first so the registry
+/// knows about the macro before expansion walks the call site.
+///
+/// Without this, the macro call silently falls through to regular method
+/// resolution and (for classes with matching simple names to stdlib) gets
+/// routed to the stdlib method. Phase 2 of the macro correctness plan.
+pub fn expand_macros_with_dependencies(
+    file: HaxeFile,
+    class_registry: ClassRegistry,
+    dependency_files: &[HaxeFile],
+) -> ExpansionResult {
+    let mut expander = MacroExpander::with_class_registry(class_registry);
+
+    // Pre-scan dependency files so their macro definitions are in the
+    // registry before we expand the main file. Errors from scanning
+    // dependencies are ignored — they'll surface when the dep file is
+    // compiled on its own.
+    for dep in dependency_files {
+        if dep.filename == file.filename {
+            continue; // skip the file we're about to expand
+        }
+        let _ = expander.registry.scan_and_register(dep, &dep.filename);
+    }
+
     expander.expand_file(file)
 }
 
