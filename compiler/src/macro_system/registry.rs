@@ -9,6 +9,47 @@ use std::sync::Arc;
 /// Default maximum macro expansion depth
 const DEFAULT_MAX_DEPTH: usize = 256;
 
+/// Convert an expression to a qualified name string (for macro references).
+///
+/// Recursively walks nested `Field` chains and unwraps `Call` callees so
+/// `@:build(tink.Json.build)` resolves to `"tink.Json.build"` and
+/// `@:build(MacroTools.buildFields())` resolves to `"MacroTools.buildFields"`.
+///
+/// Returns an empty string for unsupported shapes so callers can detect
+/// malformed metadata via `is_empty()`.
+pub fn expr_to_qualified_name(expr: &Expr) -> String {
+    use parser::ExprKind;
+    match &expr.kind {
+        ExprKind::Ident(name) => name.clone(),
+        ExprKind::Field {
+            expr: base, field, ..
+        } => {
+            let base_name = expr_to_qualified_name(base);
+            if base_name.is_empty() {
+                field.clone()
+            } else {
+                format!("{}.{}", base_name, field)
+            }
+        }
+        ExprKind::Call { expr: callee, .. } => {
+            // @:build(MacroTools.buildFields()) — extract the function path
+            expr_to_qualified_name(callee)
+        }
+        _ => String::new(),
+    }
+}
+
+/// Extract the macro name from the first metadata param.
+/// Returns empty string if the metadata has no params or an unsupported shape.
+pub fn extract_macro_name_from_args(args: &[Expr]) -> String {
+    args.first().map(expr_to_qualified_name).unwrap_or_default()
+}
+
+/// Extract the macro name from a `Metadata` value.
+pub fn extract_macro_name_from_meta(meta: &parser::Metadata) -> String {
+    extract_macro_name_from_args(&meta.params)
+}
+
 /// A registered macro function definition
 #[derive(Debug, Clone)]
 pub struct MacroDefinition {
@@ -204,31 +245,7 @@ impl MacroRegistry {
 
     /// Extract the macro name from @:build metadata arguments
     fn extract_build_macro_name(&self, args: &[Expr]) -> String {
-        if let Some(first) = args.first() {
-            // Try to extract a qualified name from the expression
-            self.expr_to_qualified_name(first)
-        } else {
-            String::new()
-        }
-    }
-
-    /// Convert an expression to a qualified name string (for macro references)
-    fn expr_to_qualified_name(&self, expr: &Expr) -> String {
-        use parser::ExprKind;
-        match &expr.kind {
-            ExprKind::Ident(name) => name.clone(),
-            ExprKind::Field {
-                expr: base, field, ..
-            } => {
-                let base_name = self.expr_to_qualified_name(base);
-                format!("{}.{}", base_name, field)
-            }
-            ExprKind::Call { expr: callee, .. } => {
-                // @:build(MacroTools.buildFields()) — extract the function path
-                self.expr_to_qualified_name(callee)
-            }
-            _ => format!("{:?}", expr.kind),
-        }
+        extract_macro_name_from_args(args)
     }
 
     /// Look up a macro by its qualified name
