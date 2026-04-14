@@ -403,12 +403,21 @@ impl MacroExpander {
     /// Returns (expanded_expr, did_change).
     fn walk_expr(&mut self, expr: Expr) -> Result<(Expr, bool), MacroError> {
         match &expr.kind {
-            // --- Primary macro nodes ---
-            ExprKind::Macro(inner) => {
-                // `macro expr` — evaluate the inner expression at compile time
-                let expanded = self.eval_macro_expr(inner)?;
-                self.expansions_count += 1;
-                Ok((expanded, true))
+            // --- Reification fragments ---
+            //
+            // `macro expr`, `macro { ... }` (Reify), and `$v{...}` / `$e{...}`
+            // (DollarIdent) are reification syntax: they build an `Expr` value
+            // at the moment the enclosing function is executed, using that
+            // function's live local scope. They are NOT compile-time constants
+            // we can eagerly evaluate during the structural walk.
+            //
+            // Evaluating them here with a fresh empty-scope interpreter causes
+            // spurious `undefined variable` errors for every local the
+            // reification references (see tink/Json.hx parseString/etc.).
+            // Leave them in the AST untouched; the macro interpreter handles
+            // them correctly when it actually runs the containing function.
+            ExprKind::Macro(_) | ExprKind::Reify(_) | ExprKind::DollarIdent { .. } => {
+                Ok((expr, false))
             }
 
             // --- Function calls that might be macro calls ---
@@ -1358,6 +1367,50 @@ mod tests {
             expander.registry().get_macro("Macros.makeConst").is_some(),
             "macro should be registered"
         );
+    }
+
+    /// Phase 4 regression guard: helper functions containing reification
+    /// expressions (`macro $v{x}`, `macro true`) must not fail with
+    /// "undefined variable" during the structural walk. Reification only
+    /// makes sense when the macro interpreter is actually running the
+    /// function body with live scope — during the pre-expansion walk,
+    /// reification fragments should be left untouched.
+    ///
+    /// Before Phase 4, `tink/Json.hx`'s parseString/parseNumber/parseArray/
+    /// parseObject each produced "undefined variable in macro: 'X'" errors
+    /// during file-level expansion.
+    #[test]
+    fn test_reification_in_helper_function_not_evaluated() {
+        let source = r#"
+            class Helper {
+                static function wrapInt(n:Int) {
+                    return macro $v{n};
+                }
+                static function wrapBool(b:Bool) {
+                    return macro $v{b};
+                }
+            }
+        "#;
+        let file = parse(source);
+        let result = expand_macros(file);
+
+        // No errors — reification fragments left alone.
+        let errors: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d.severity, super::super::errors::MacroSeverity::Error))
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "unexpected diagnostics: {:?}",
+            errors
+                .iter()
+                .map(|d| d.message.clone())
+                .collect::<Vec<_>>()
+        );
+        // The class should still have both functions with their reification
+        // bodies intact (no expansion count bumped).
+        assert_eq!(result.expansions_count, 0);
     }
 
     #[test]
