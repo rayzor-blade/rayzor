@@ -94,6 +94,12 @@ pub struct CompilationUnit {
     /// Stdlib typed files loaded on-demand (typedefs, etc. that need to be in HIR)
     loaded_stdlib_typed_files: Vec<TypedFile>,
 
+    /// Raw ASTs of files loaded via import resolution (stdlib and user-package imports).
+    /// Used for cross-file macro discovery — when a file is expanded, macros defined
+    /// in its imports (e.g., `import tink.Json`) must be registered first. The compiled
+    /// `TypedFile` form isn't usable here; macro expansion runs before TAST lowering.
+    loaded_import_haxe_files: Vec<HaxeFile>,
+
     /// Diagnostics collected during compilation (warnings, non-exhaustive switches, etc.)
     /// These are printed during compilation AND stored here for cache replay.
     pub collected_diagnostics: Vec<diagnostics::Diagnostic>,
@@ -459,6 +465,7 @@ impl CompilationUnit {
             import_mir_modules: Vec::new(),
             import_own_func_ids: std::collections::BTreeSet::new(),
             loaded_stdlib_typed_files: Vec::new(),
+            loaded_import_haxe_files: Vec::new(),
             collected_diagnostics: Vec::new(),
             global_class_fields: BTreeMap::new(),
             stdlib_function_map: BTreeMap::new(),
@@ -2630,6 +2637,18 @@ impl CompilationUnit {
         self.namespace_resolver
             .mark_file_loaded(file_path.to_path_buf());
 
+        // Phase 2: capture raw AST of imports containing macros so that
+        // cross-file macro discovery (e.g. `import tink.Json; tink.Json.parse(...)`)
+        // works even when the import is served from BLADE cache. This is gated
+        // by a cheap substring check to avoid parsing every stdlib file; only
+        // files containing macro definitions need to be kept around for the
+        // expander's dependency scan.
+        if source.contains("macro ") || source.contains("@:build") {
+            if let Ok(raw_ast) = self.parse_file(&filename, source) {
+                self.loaded_import_haxe_files.push(raw_ast);
+            }
+        }
+
         // Try BLADE cache first
         // Skip BLADE cache for typedef files — they produce no MIR functions and
         // need fresh compilation to properly resolve their target types (e.g.,
@@ -3917,12 +3936,75 @@ impl CompilationUnit {
             let mut class_registry = crate::macro_system::ClassRegistry::new();
             class_registry.register_files(&self.stdlib_files);
             class_registry.register_files(&self.import_hx_files);
+            class_registry.register_files(&self.loaded_import_haxe_files);
             class_registry.register_file(ast_file);
-            let expansion = crate::macro_system::expand_macros_with_class_registry(
+            // Phase 2 fix: pass user files AND macro-bearing import files as
+            // "dependency" files so cross-file macros (e.g.
+            // `import tink.Json` + `tink.Json.parse(...)`) are discovered.
+            // Without this, only the current file's macros are in the registry
+            // and cross-file calls silently fall through.
+            let mut dep_files: Vec<HaxeFile> = Vec::new();
+            dep_files.extend(self.user_files.iter().cloned());
+            dep_files.extend(self.loaded_import_haxe_files.iter().cloned());
+            let expansion = crate::macro_system::expand_macros_with_dependencies(
                 ast_file.clone(),
                 class_registry,
+                &dep_files,
             );
+            // Surface macro expansion diagnostics to the user, not just to
+            // debug logs. A silent fallthrough is much worse than a loud
+            // error — a failed macro call otherwise routes to a regular
+            // method (often the stdlib namesake) with no indication the
+            // macro didn't run.
             for diag in &expansion.diagnostics {
+                // Skip Info-level diagnostics — they're used for per-macro
+                // registration traces and would spam the output.
+                if matches!(diag.severity, crate::macro_system::MacroSeverity::Info) {
+                    if matches!(diag.severity, crate::macro_system::MacroSeverity::Error) {
+                        debug!("Macro expansion error in {}: {}", filename, diag.message);
+                    }
+                    continue;
+                }
+                let severity = match diag.severity {
+                    crate::macro_system::MacroSeverity::Error => {
+                        diagnostics::DiagnosticSeverity::Error
+                    }
+                    crate::macro_system::MacroSeverity::Warning => {
+                        diagnostics::DiagnosticSeverity::Warning
+                    }
+                    crate::macro_system::MacroSeverity::Info => {
+                        diagnostics::DiagnosticSeverity::Info
+                    }
+                };
+                let loc = &diag.location;
+                let pos = diagnostics::SourcePosition::new(
+                    loc.line.max(1) as usize,
+                    loc.column.max(1) as usize,
+                    loc.byte_offset as usize,
+                );
+                let end_pos = diagnostics::SourcePosition::new(
+                    loc.line.max(1) as usize,
+                    (loc.column.max(1) + 1) as usize,
+                    (loc.byte_offset + 1) as usize,
+                );
+                let span = diagnostics::SourceSpan::new(
+                    pos,
+                    end_pos,
+                    diagnostics::FileId::new(0),
+                );
+                self.collected_diagnostics.push(diagnostics::Diagnostic {
+                    severity,
+                    code: Some("MACRO".to_string()),
+                    message: format!(
+                        "macro expansion in {}: {}",
+                        filename, diag.message
+                    ),
+                    span,
+                    labels: Vec::new(),
+                    suggestions: Vec::new(),
+                    notes: Vec::new(),
+                    help: Vec::new(),
+                });
                 if matches!(diag.severity, crate::macro_system::MacroSeverity::Error) {
                     debug!("Macro expansion error in {}: {}", filename, diag.message);
                 }
