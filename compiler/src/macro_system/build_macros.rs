@@ -166,6 +166,8 @@ fn apply_build_macro(
     let result = if let Some(def) = macro_def {
         // Macro is in the registry — execute it
         let mut interp = MacroInterpreter::new(registry.clone());
+        // Pass the build context so Context.getBuildFields() returns class fields
+        interp.macro_context = Some(context);
         let eval_result = interp.eval_expr(&def.body);
 
         match eval_result {
