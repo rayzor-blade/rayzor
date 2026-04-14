@@ -7,6 +7,7 @@
 //   3. Runtime: tink.JsonWriter string escaping
 //   4. Runtime: tink.JsonParser JSON parsing
 
+import tink.Json;
 import tink.JsonWriter;
 import tink.JsonParser;
 
