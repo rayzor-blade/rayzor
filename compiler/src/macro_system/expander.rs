@@ -1159,29 +1159,16 @@ fn collect_build_macros(file: &HaxeFile) -> Vec<BuildMacroInfo> {
     result
 }
 
-/// Extract the macro name from @:build metadata parameters
+/// Extract the macro name from @:build metadata parameters.
+/// Delegates to the shared helper so nested FQN forms like
+/// `@:build(tink.Json.build)` resolve to `"tink.Json.build"` rather than
+/// the leaf `"build"`.
 fn extract_build_macro_name(meta: &Metadata) -> String {
-    if let Some(first) = meta.params.first() {
-        match &first.kind {
-            ExprKind::Ident(name) => name.clone(),
-            ExprKind::Call { expr, .. } => {
-                if let ExprKind::Ident(name) = &expr.kind {
-                    name.clone()
-                } else {
-                    format!("{:?}", expr.kind)
-                }
-            }
-            ExprKind::Field { expr, field, .. } => {
-                if let ExprKind::Ident(class_name) = &expr.kind {
-                    format!("{}.{}", class_name, field)
-                } else {
-                    field.clone()
-                }
-            }
-            _ => "unknown".to_string(),
-        }
-    } else {
+    let name = super::registry::extract_macro_name_from_meta(meta);
+    if name.is_empty() {
         "unknown".to_string()
+    } else {
+        name
     }
 }
 
@@ -1327,6 +1314,24 @@ mod tests {
         assert_eq!(macros.len(), 1);
         assert_eq!(macros[0].class_name, "Test");
         assert_eq!(macros[0].macro_name, "MyMacro.build");
+    }
+
+    /// Phase 3 regression guard: nested FQN `@:build(tink.Json.build)` must
+    /// produce the full qualified name. Previously `extract_build_macro_name`
+    /// in this file walked only one `Field` level and returned `"build"`.
+    #[test]
+    fn test_collect_build_macros_nested_fqn() {
+        let source = r#"
+            @:build(tink.Json.build)
+            class User {
+                var name:String;
+            }
+        "#;
+        let file = parse(source);
+        let macros = collect_build_macros(&file);
+        assert_eq!(macros.len(), 1);
+        assert_eq!(macros[0].class_name, "User");
+        assert_eq!(macros[0].macro_name, "tink.Json.build");
     }
 
     #[test]

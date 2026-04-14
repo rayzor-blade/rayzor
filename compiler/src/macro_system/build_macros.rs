@@ -160,8 +160,13 @@ fn apply_build_macro(
     });
     context.current_class = Some(class.name.clone());
 
-    // Step 4: Call the build macro function
-    let macro_def = registry.get_macro(&macro_name);
+    // Step 4: Call the build macro function.
+    // Try exact FQN first; fall back to simple-name lookup so partial names
+    // still resolve (e.g. `@:build(Json.build)` after `import tink.Json` — the
+    // registry key is the FQN `tink.Json.build`).
+    let macro_def = registry
+        .get_macro(&macro_name)
+        .or_else(|| registry.find_macro_by_name(&macro_name));
 
     let result = if let Some(def) = macro_def {
         // Macro is in the registry — execute it
@@ -463,36 +468,12 @@ fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
     })
 }
 
-/// Extract the macro function name from @:build metadata parameters
+/// Extract the macro function name from @:build metadata parameters.
+/// Delegates to the shared helper so nested FQN forms like
+/// `@:build(tink.Json.build)` resolve to `"tink.Json.build"` rather than
+/// the leaf `"build"`.
 fn extract_build_macro_name(meta: &Metadata) -> String {
-    if let Some(first) = meta.params.first() {
-        match &first.kind {
-            ExprKind::Ident(name) => name.clone(),
-            ExprKind::Call { expr, .. } => {
-                if let ExprKind::Ident(name) = &expr.kind {
-                    name.clone()
-                } else if let ExprKind::Field { expr, field, .. } = &expr.kind {
-                    if let ExprKind::Ident(class_name) = &expr.kind {
-                        format!("{}.{}", class_name, field)
-                    } else {
-                        field.clone()
-                    }
-                } else {
-                    String::new()
-                }
-            }
-            ExprKind::Field { expr, field, .. } => {
-                if let ExprKind::Ident(class_name) = &expr.kind {
-                    format!("{}.{}", class_name, field)
-                } else {
-                    field.clone()
-                }
-            }
-            _ => String::new(),
-        }
-    } else {
-        String::new()
-    }
+    super::registry::extract_macro_name_from_meta(meta)
 }
 
 #[cfg(test)]
@@ -578,6 +559,72 @@ mod tests {
             span: Span::new(0, 0),
         };
         assert_eq!(extract_build_macro_name(&meta), "MacroUtils.build");
+    }
+
+    /// Nested FQN — `@:build(tink.Json.build)` — must not collapse to `"build"`.
+    /// This was the Phase 3 bug: the chained `Field(Field(...))` shape caused
+    /// `@:build` lookup to fail with "undefined macro: 'build'" even when the
+    /// macro was correctly registered under `tink.Json.build`.
+    #[test]
+    fn test_extract_build_macro_name_nested_fqn() {
+        let meta = Metadata {
+            name: "build".to_string(),
+            params: vec![Expr {
+                kind: ExprKind::Field {
+                    expr: Box::new(Expr {
+                        kind: ExprKind::Field {
+                            expr: Box::new(Expr {
+                                kind: ExprKind::Ident("tink".to_string()),
+                                span: Span::new(0, 0),
+                            }),
+                            field: "Json".to_string(),
+                            is_optional: false,
+                        },
+                        span: Span::new(0, 0),
+                    }),
+                    field: "build".to_string(),
+                    is_optional: false,
+                },
+                span: Span::new(0, 0),
+            }],
+            span: Span::new(0, 0),
+        };
+        assert_eq!(extract_build_macro_name(&meta), "tink.Json.build");
+    }
+
+    /// Parameterised form `@:build(M.make(arg))` — callee is a nested Field;
+    /// extractor should unwrap Call and still produce the qualified path.
+    #[test]
+    fn test_extract_build_macro_name_nested_call() {
+        let meta = Metadata {
+            name: "build".to_string(),
+            params: vec![Expr {
+                kind: ExprKind::Call {
+                    expr: Box::new(Expr {
+                        kind: ExprKind::Field {
+                            expr: Box::new(Expr {
+                                kind: ExprKind::Field {
+                                    expr: Box::new(Expr {
+                                        kind: ExprKind::Ident("pkg".to_string()),
+                                        span: Span::new(0, 0),
+                                    }),
+                                    field: "M".to_string(),
+                                    is_optional: false,
+                                },
+                                span: Span::new(0, 0),
+                            }),
+                            field: "make".to_string(),
+                            is_optional: false,
+                        },
+                        span: Span::new(0, 0),
+                    }),
+                    args: vec![],
+                },
+                span: Span::new(0, 0),
+            }],
+            span: Span::new(0, 0),
+        };
+        assert_eq!(extract_build_macro_name(&meta), "pkg.M.make");
     }
 
     #[test]
