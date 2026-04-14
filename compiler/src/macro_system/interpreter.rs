@@ -73,6 +73,10 @@ pub struct MacroInterpreter {
     vm: Option<MacroVm>,
     /// Morsel scheduler for tiered compilation (only active when VM is present).
     scheduler: Option<MorselScheduler>,
+    /// Macro context for @:build macros. When set, `Context.getBuildFields()`
+    /// and `Context.getLocalClass()` return the class being built. Without
+    /// this, those APIs return empty/null.
+    pub macro_context: Option<super::context_api::MacroContext>,
 }
 
 impl MacroInterpreter {
@@ -109,6 +113,7 @@ impl MacroInterpreter {
             class_data_cache: BTreeMap::new(),
             vm,
             scheduler,
+            macro_context: None,
         }
     }
 
@@ -126,6 +131,7 @@ impl MacroInterpreter {
             class_data_cache: BTreeMap::new(),
             vm,
             scheduler,
+            macro_context: None,
         }
     }
 
@@ -149,6 +155,7 @@ impl MacroInterpreter {
             class_data_cache: BTreeMap::new(),
             vm,
             scheduler,
+            macro_context: None,
         }
     }
 
@@ -1155,8 +1162,15 @@ impl MacroInterpreter {
         let resolved = self.resolve_class_name(class_name);
         match resolved {
             "haxe.macro.Context" => {
-                let mut ctx = super::context_api::MacroContext::new();
-                let result = ctx.dispatch(method, args, location)?;
+                // Use the stored macro_context if available (set by @:build
+                // pipeline so Context.getBuildFields() returns class fields).
+                // Fall back to a fresh empty context for expression macros.
+                let result = if let Some(ref mut ctx) = self.macro_context {
+                    ctx.dispatch(method, args, location)?
+                } else {
+                    let mut ctx = super::context_api::MacroContext::new();
+                    ctx.dispatch(method, args, location)?
+                };
                 Ok(Some(result))
             }
             "Std" => match method {
