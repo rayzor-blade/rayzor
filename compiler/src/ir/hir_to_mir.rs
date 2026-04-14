@@ -5443,9 +5443,15 @@ impl<'a> HirToMirContext<'a> {
                                         || qn.starts_with("rayzor.")
                                 })
                                 .unwrap_or(false);
-                            // Check if the stdlib mapping has ANY method for this class
-                            let has_stdlib_methods = self.stdlib_mapping.class_has_any_method(name);
-                            is_extern || is_wrapper || in_stdlib_ns || has_stdlib_methods
+                            // Check if the stdlib mapping has ANY method for this class.
+                            // IMPORTANT: this must be combined with in_stdlib_ns because
+                            // class_has_any_method matches by simple name (e.g., "Json"),
+                            // and user classes like `tink.Json` have the same simple name
+                            // as stdlib `haxe.Json`. Without the namespace check, user
+                            // macros would be hijacked by stdlib method mappings.
+                            let has_stdlib_methods_in_ns =
+                                self.stdlib_mapping.class_has_any_method(name) && in_stdlib_ns;
+                            is_extern || is_wrapper || in_stdlib_ns || has_stdlib_methods_in_ns
                         })
                         .unwrap_or(false);
                     if !is_known_stdlib {
@@ -6165,7 +6171,23 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // FALLBACK: Then try simple class name (e.g., "Thread")
+        // FALLBACK: Try simple class name (e.g., "Thread", "Json") ONLY when the
+        // qualified name is in a stdlib namespace. Without this guard, user
+        // classes like `tink.Json` would hijack stdlib method dispatch via
+        // simple-name matching, causing `tink.Json.parse` to silently route
+        // to `haxe.Json.parse` (haxe_json_parse).
+        let in_stdlib_ns = parts.len() == 1
+            || qualified_name.starts_with("haxe.")
+            || qualified_name.starts_with("sys.")
+            || qualified_name.starts_with("rayzor.")
+            || qualified_name.starts_with("StringTools")
+            || qualified_name.starts_with("Std.")
+            || qualified_name.starts_with("Math.")
+            || qualified_name.starts_with("Type.")
+            || qualified_name.starts_with("Reflect.");
+        if !in_stdlib_ns {
+            return None;
+        }
         if let Some(count) = param_count {
             if let Some((_sig, mapping)) =
                 self.stdlib_mapping
