@@ -299,10 +299,21 @@ impl MacroInterpreter {
             }
 
             // --- Unary operations ---
-            ExprKind::Unary { op, expr: inner } => {
-                let val = self.eval_expr(inner)?;
-                self.apply_unary_op(op, &val, location)
-            }
+            ExprKind::Unary { op, expr: inner } => match op {
+                // Pre/post inc/dec need lvalue access: compute the new value,
+                // then write it back through the same target machinery
+                // `eval_assignment` uses. Evaluating `inner` once and handing
+                // it to `apply_unary_op` silently drops the store, so `x++`
+                // becomes a no-op and loops like `while (i<n) i++` never
+                // terminate.
+                UnaryOp::PreIncr | UnaryOp::PostIncr | UnaryOp::PreDecr | UnaryOp::PostDecr => {
+                    self.eval_inc_dec(op, inner, location)
+                }
+                _ => {
+                    let val = self.eval_expr(inner)?;
+                    self.apply_unary_op(op, &val, location)
+                }
+            },
 
             // --- Ternary ---
             ExprKind::Ternary {
@@ -1947,22 +1958,153 @@ impl MacroInterpreter {
                     location,
                 }),
             },
-            UnaryOp::PreIncr | UnaryOp::PostIncr => match val {
-                MacroValue::Int(i) => Ok(MacroValue::Int(i + 1)),
-                MacroValue::Float(f) => Ok(MacroValue::Float(f + 1.0)),
+            UnaryOp::PreIncr
+            | UnaryOp::PostIncr
+            | UnaryOp::PreDecr
+            | UnaryOp::PostDecr => {
+                // Inc/dec are handled by `eval_inc_dec` in the caller because
+                // they need lvalue write-back; they should never flow through
+                // this helper. If we see one here it indicates a routing bug.
+                Err(MacroError::TypeError {
+                    message: format!(
+                        "internal: apply_unary_op called with inc/dec {:?}; \
+                         should be routed through eval_inc_dec",
+                        op
+                    ),
+                    location,
+                })
+            }
+        }
+    }
+
+    /// Evaluate a pre/post inc/dec expression with lvalue write-back.
+    ///
+    /// Haxe semantics: PostIncr returns the original value, PreIncr returns
+    /// the new value (same for Decr). `Int` stays `Int`, `Float` stays `Float`
+    /// — no promotion.
+    ///
+    /// The three target shapes mirror `eval_assignment`:
+    /// - `Ident` — read, update, `env.set`.
+    /// - `Field` — fast path via `mutate_object_field`, fallback via
+    ///   `assign_base` on the evaluated base `MacroValue::Object`.
+    /// - `Index` — COW through `assign_base`, mirroring the `Assign` path.
+    fn eval_inc_dec(
+        &mut self,
+        op: &UnaryOp,
+        target: &Expr,
+        location: SourceLocation,
+    ) -> Result<MacroValue, MacroError> {
+        let is_incr = matches!(op, UnaryOp::PreIncr | UnaryOp::PostIncr);
+        let is_pre = matches!(op, UnaryOp::PreIncr | UnaryOp::PreDecr);
+
+        let add_one = |val: &MacroValue| -> Result<MacroValue, MacroError> {
+            match val {
+                MacroValue::Int(i) => Ok(MacroValue::Int(if is_incr { i + 1 } else { i - 1 })),
+                MacroValue::Float(f) => Ok(MacroValue::Float(if is_incr {
+                    f + 1.0
+                } else {
+                    f - 1.0
+                })),
                 _ => Err(MacroError::TypeError {
-                    message: format!("cannot increment {}", val.type_name()),
+                    message: format!(
+                        "cannot {} {}",
+                        if is_incr { "increment" } else { "decrement" },
+                        val.type_name()
+                    ),
                     location,
                 }),
-            },
-            UnaryOp::PreDecr | UnaryOp::PostDecr => match val {
-                MacroValue::Int(i) => Ok(MacroValue::Int(i - 1)),
-                MacroValue::Float(f) => Ok(MacroValue::Float(f - 1.0)),
-                _ => Err(MacroError::TypeError {
-                    message: format!("cannot decrement {}", val.type_name()),
-                    location,
-                }),
-            },
+            }
+        };
+
+        match &target.kind {
+            ExprKind::Ident(name) => {
+                let old = self
+                    .env
+                    .get(name)
+                    .cloned()
+                    .ok_or_else(|| MacroError::UndefinedVariable {
+                        name: name.clone(),
+                        location,
+                    })?;
+                let new = add_one(&old)?;
+                if !self.env.set(name, new.clone()) {
+                    self.env.define(name, new.clone());
+                }
+                Ok(if is_pre { new } else { old })
+            }
+            ExprKind::Field {
+                expr: base, field, ..
+            } => {
+                // Read the current field value through a normal field access.
+                let base_val = self.eval_expr(base)?;
+                let old = self.field_access(&base_val, field, location)?;
+                let new = add_one(&old)?;
+                // Write back — reuse eval_assignment's field path by going
+                // through the fast/fallback machinery.
+                let base_var_name = match &base.kind {
+                    ExprKind::This => Some("this"),
+                    ExprKind::Ident(n) => Some(n.as_str()),
+                    _ => None,
+                };
+                if let Some(var_name) = base_var_name {
+                    if self.env.mutate_object_field(var_name, field, new.clone()) {
+                        return Ok(if is_pre { new } else { old });
+                    }
+                }
+                // Fallback: COW the base object and reassign.
+                let mut base_val = self.eval_expr(base)?;
+                if let MacroValue::Object(ref mut arc_map) = base_val {
+                    Arc::make_mut(arc_map).insert(field.clone(), new.clone());
+                    self.assign_base(base, base_val)?;
+                    Ok(if is_pre { new } else { old })
+                } else {
+                    Err(MacroError::TypeError {
+                        message: format!(
+                            "cannot {} field '{}' on {}",
+                            if is_incr { "increment" } else { "decrement" },
+                            field,
+                            base_val.type_name()
+                        ),
+                        location,
+                    })
+                }
+            }
+            ExprKind::Index { expr: base, index } => {
+                let mut base_val = self.eval_expr(base)?;
+                let idx = self.eval_expr(index)?;
+                let old = self.index_access(&base_val, &idx, location)?;
+                let new = add_one(&old)?;
+                match (&mut base_val, &idx) {
+                    (MacroValue::Array(arc_arr), MacroValue::Int(i)) => {
+                        let i = *i as usize;
+                        let arr = Arc::make_mut(arc_arr);
+                        if i < arr.len() {
+                            arr[i] = new.clone();
+                        }
+                        self.assign_base(base, base_val)?;
+                        Ok(if is_pre { new } else { old })
+                    }
+                    (MacroValue::Object(arc_map), _) => {
+                        Arc::make_mut(arc_map)
+                            .insert(idx.to_display_string(), new.clone());
+                        self.assign_base(base, base_val)?;
+                        Ok(if is_pre { new } else { old })
+                    }
+                    _ => Err(MacroError::TypeError {
+                        message: format!(
+                            "cannot {} indexed element on {}",
+                            if is_incr { "increment" } else { "decrement" },
+                            base_val.type_name()
+                        ),
+                        location,
+                    }),
+                }
+            }
+            _ => Err(MacroError::TypeError {
+                message: "inc/dec target must be a variable, field access, or indexed element"
+                    .to_string(),
+                location,
+            }),
         }
     }
 
@@ -2372,6 +2514,103 @@ mod tests {
         assert_eq!(
             eval("var x = 0; while (x < 5) { x = x + 1; } return x;").unwrap(),
             MacroValue::Int(5)
+        );
+    }
+
+    // Phase 5 regression guards.
+    //
+    // Before Phase 5, `apply_unary_op` computed `i+1` for `PostIncr` but
+    // dropped the result (never writing it back through the lvalue), so
+    // `x++` was a no-op. This silently broke any macro using `while (i<n) i++`
+    // — including tink.Json.parseValue, which recursed to the stack-limit
+    // trying to advance past `[`.
+    //
+    // Bytecode VM does this correctly; tree-walker runs first until the
+    // tiering threshold, so the bug only hits slow-path macros.
+    #[test]
+    fn test_post_increment_ident() {
+        assert_eq!(
+            eval("var x = 5; var old = x++; return old + x * 10;").unwrap(),
+            MacroValue::Int(5 + 6 * 10)
+        );
+    }
+
+    #[test]
+    fn test_pre_increment_ident() {
+        assert_eq!(
+            eval("var x = 5; var new_ = ++x; return new_ + x * 10;").unwrap(),
+            MacroValue::Int(6 + 6 * 10)
+        );
+    }
+
+    #[test]
+    fn test_post_decrement_ident() {
+        assert_eq!(
+            eval("var x = 5; var old = x--; return old + x * 10;").unwrap(),
+            MacroValue::Int(5 + 4 * 10)
+        );
+    }
+
+    #[test]
+    fn test_pre_decrement_ident() {
+        assert_eq!(
+            eval("var x = 5; var new_ = --x; return new_ + x * 10;").unwrap(),
+            MacroValue::Int(4 + 4 * 10)
+        );
+    }
+
+    /// The canonical failing loop from tink.Json.parseValue — this would
+    /// recurse infinitely before Phase 5 because `i++` was a no-op.
+    #[test]
+    fn test_while_loop_with_increment_terminates() {
+        assert_eq!(
+            eval("var i = 0; while (i < 10) i++; return i;").unwrap(),
+            MacroValue::Int(10)
+        );
+    }
+
+    #[test]
+    fn test_increment_keeps_type() {
+        // Int stays Int, Float stays Float — no promotion.
+        assert!(matches!(
+            eval("var x = 0; x++; return x;").unwrap(),
+            MacroValue::Int(1)
+        ));
+        assert!(matches!(
+            eval("var x = 0.5; x++; return x;").unwrap(),
+            MacroValue::Float(f) if (f - 1.5).abs() < 1e-9
+        ));
+    }
+
+    #[test]
+    fn test_increment_object_field() {
+        assert_eq!(
+            eval("var obj = { count: 10 }; obj.count++; return obj.count;").unwrap(),
+            MacroValue::Int(11)
+        );
+    }
+
+    #[test]
+    fn test_pre_increment_object_field_returns_new() {
+        assert_eq!(
+            eval("var obj = { count: 10 }; var n = ++obj.count; return n;").unwrap(),
+            MacroValue::Int(11)
+        );
+    }
+
+    #[test]
+    fn test_post_increment_array_element() {
+        assert_eq!(
+            eval("var arr = [10, 20, 30]; arr[1]++; return arr[1];").unwrap(),
+            MacroValue::Int(21)
+        );
+    }
+
+    #[test]
+    fn test_post_increment_array_element_returns_old() {
+        assert_eq!(
+            eval("var arr = [10, 20, 30]; var old = arr[1]++; return old;").unwrap(),
+            MacroValue::Int(20)
         );
     }
 
