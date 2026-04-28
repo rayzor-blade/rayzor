@@ -79,7 +79,16 @@ class Main {
         trace("--- 3. @:build introspection ---");
         var user = new User("Alice", 30, true);
         trace("User field count: " + Std.string(user.fieldCount()));
+        trace("User field names: " + Std.string(user.fieldNames()));
         trace("User schema: " + user.describe());
+
+        // Config exercises @:json("max_connections") (rename) and
+        // @:jsonIgnore (skip). Field count should be 3 (host, port,
+        // maxConnections — debugMode is ignored).
+        var cfg = new Config("localhost", 8080, 100, false);
+        trace("Config field count: " + Std.string(cfg.fieldCount()));
+        trace("Config field names: " + Std.string(cfg.fieldNames()));
+        trace("Config schema: " + cfg.describe());
 
         // --------------------------------------------------------
         // 5. Runtime JSON string escaping
