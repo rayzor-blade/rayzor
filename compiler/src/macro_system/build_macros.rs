@@ -502,9 +502,9 @@ fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
                         let wrapped = match &raw.kind {
                             parser::ExprKind::Block(_) => raw,
                             _ => parser::Expr {
-                                kind: parser::ExprKind::Block(vec![
-                                    parser::BlockElement::Expr(raw.clone()),
-                                ]),
+                                kind: parser::ExprKind::Block(vec![parser::BlockElement::Expr(
+                                    raw.clone(),
+                                )]),
                                 span: raw.span,
                             },
                         };
@@ -538,26 +538,17 @@ fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
                 }
                 fn sniff(expr: &parser::Expr) -> Option<parser::Type> {
                     match &expr.kind {
-                        parser::ExprKind::Block(elems) => elems
-                            .iter()
-                            .rev()
-                            .find_map(|e| match e {
+                        parser::ExprKind::Block(elems) => {
+                            elems.iter().rev().find_map(|e| match e {
                                 parser::BlockElement::Expr(ex) => sniff(ex),
                                 _ => None,
-                            }),
+                            })
+                        }
                         parser::ExprKind::Return(Some(inner)) => sniff(inner),
-                        parser::ExprKind::Int(_) => {
-                            Some(primitive_type_path("Int"))
-                        }
-                        parser::ExprKind::Float(_) => {
-                            Some(primitive_type_path("Float"))
-                        }
-                        parser::ExprKind::Bool(_) => {
-                            Some(primitive_type_path("Bool"))
-                        }
-                        parser::ExprKind::String(_) => {
-                            Some(primitive_type_path("String"))
-                        }
+                        parser::ExprKind::Int(_) => Some(primitive_type_path("Int")),
+                        parser::ExprKind::Float(_) => Some(primitive_type_path("Float")),
+                        parser::ExprKind::Bool(_) => Some(primitive_type_path("Bool")),
+                        parser::ExprKind::String(_) => Some(primitive_type_path("String")),
                         parser::ExprKind::Array(_) => {
                             // Don't try to be clever about element types
                             // here — leaving as None lets TAST infer.
@@ -930,11 +921,7 @@ mod tests {
             .filter(|d| matches!(d.severity, super::super::errors::MacroSeverity::Error))
             .map(|d| d.message.clone())
             .collect();
-        assert!(
-            errs.is_empty(),
-            "unexpected build macro errors: {:?}",
-            errs
-        );
+        assert!(errs.is_empty(), "unexpected build macro errors: {:?}", errs);
         assert_eq!(result.applied_count, 1);
     }
 

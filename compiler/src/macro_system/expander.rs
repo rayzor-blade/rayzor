@@ -1410,10 +1410,7 @@ mod tests {
         assert!(
             errors.is_empty(),
             "unexpected diagnostics: {:?}",
-            errors
-                .iter()
-                .map(|d| d.message.clone())
-                .collect::<Vec<_>>()
+            errors.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
         );
         // The class should still have both functions with their reification
         // bodies intact (no expansion count bumped).

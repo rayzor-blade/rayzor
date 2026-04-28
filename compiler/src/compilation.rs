@@ -3987,18 +3987,11 @@ impl CompilationUnit {
                     (loc.column.max(1) + 1) as usize,
                     (loc.byte_offset + 1) as usize,
                 );
-                let span = diagnostics::SourceSpan::new(
-                    pos,
-                    end_pos,
-                    diagnostics::FileId::new(0),
-                );
+                let span = diagnostics::SourceSpan::new(pos, end_pos, diagnostics::FileId::new(0));
                 self.collected_diagnostics.push(diagnostics::Diagnostic {
                     severity,
                     code: Some("MACRO".to_string()),
-                    message: format!(
-                        "macro expansion in {}: {}",
-                        filename, diag.message
-                    ),
+                    message: format!("macro expansion in {}: {}", filename, diag.message),
                     span,
                     labels: Vec::new(),
                     suggestions: Vec::new(),

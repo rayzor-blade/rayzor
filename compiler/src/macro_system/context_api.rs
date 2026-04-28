@@ -301,10 +301,7 @@ impl MacroContext {
                 );
                 // Mirror tink-style class metadata where reasonable.
                 if let Some(build) = &self.build_class {
-                    obj.insert(
-                        "pack".to_string(),
-                        MacroValue::Array(Arc::new(Vec::new())),
-                    );
+                    obj.insert("pack".to_string(), MacroValue::Array(Arc::new(Vec::new())));
                     obj.insert(
                         "module".to_string(),
                         MacroValue::String(Arc::from(build.qualified_name.as_str())),

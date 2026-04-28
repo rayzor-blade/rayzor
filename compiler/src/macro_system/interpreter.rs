@@ -2091,10 +2091,7 @@ impl MacroInterpreter {
                     location,
                 }),
             },
-            UnaryOp::PreIncr
-            | UnaryOp::PostIncr
-            | UnaryOp::PreDecr
-            | UnaryOp::PostDecr => {
+            UnaryOp::PreIncr | UnaryOp::PostIncr | UnaryOp::PreDecr | UnaryOp::PostDecr => {
                 // Inc/dec are handled by `eval_inc_dec` in the caller because
                 // they need lvalue write-back; they should never flow through
                 // this helper. If we see one here it indicates a routing bug.
@@ -2133,11 +2130,9 @@ impl MacroInterpreter {
         let add_one = |val: &MacroValue| -> Result<MacroValue, MacroError> {
             match val {
                 MacroValue::Int(i) => Ok(MacroValue::Int(if is_incr { i + 1 } else { i - 1 })),
-                MacroValue::Float(f) => Ok(MacroValue::Float(if is_incr {
-                    f + 1.0
-                } else {
-                    f - 1.0
-                })),
+                MacroValue::Float(f) => {
+                    Ok(MacroValue::Float(if is_incr { f + 1.0 } else { f - 1.0 }))
+                }
                 _ => Err(MacroError::TypeError {
                     message: format!(
                         "cannot {} {}",
@@ -2151,14 +2146,14 @@ impl MacroInterpreter {
 
         match &target.kind {
             ExprKind::Ident(name) => {
-                let old = self
-                    .env
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| MacroError::UndefinedVariable {
-                        name: name.clone(),
-                        location,
-                    })?;
+                let old =
+                    self.env
+                        .get(name)
+                        .cloned()
+                        .ok_or_else(|| MacroError::UndefinedVariable {
+                            name: name.clone(),
+                            location,
+                        })?;
                 let new = add_one(&old)?;
                 if !self.env.set(name, new.clone()) {
                     self.env.define(name, new.clone());
@@ -2218,8 +2213,7 @@ impl MacroInterpreter {
                         Ok(if is_pre { new } else { old })
                     }
                     (MacroValue::Object(arc_map), _) => {
-                        Arc::make_mut(arc_map)
-                            .insert(idx.to_display_string(), new.clone());
+                        Arc::make_mut(arc_map).insert(idx.to_display_string(), new.clone());
                         self.assign_base(base, base_val)?;
                         Ok(if is_pre { new } else { old })
                     }
@@ -2388,10 +2382,7 @@ fn enum_ctor_tag(name: &str) -> Option<&'static str> {
 /// `{kind: tag, args: [...]}`.
 fn build_enum_ctor_value(tag: &'static str, args: &[MacroValue]) -> MacroValue {
     let mut map = std::collections::BTreeMap::new();
-    map.insert(
-        "kind".to_string(),
-        MacroValue::String(Arc::from(tag)),
-    );
+    map.insert("kind".to_string(), MacroValue::String(Arc::from(tag)));
     if args.len() == 1 {
         if let MacroValue::Object(payload) = &args[0] {
             for (k, v) in payload.iter() {
