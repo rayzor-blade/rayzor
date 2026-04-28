@@ -102,12 +102,39 @@ class Main {
 
         // --------------------------------------------------------
         // 6. Runtime JSON parsing
-        // NOTE: JsonParser uses enums which need further compiler work.
-        //       Uncomment when enum dispatch is fully supported.
         // --------------------------------------------------------
-        // trace("--- 6. Runtime JsonParser ---");
-        // var parsed = tink.JsonParser.parse('{"name":"Bob","age":25}');
-        // trace(parsed);
+        // --------------------------------------------------------
+        // 6. Runtime JSON parsing
+        //
+        //    Enum declarations and pattern-matching work — the demo
+        //    runs to "=== Done ===" using `switch (parsed) { case ...: }`.
+        //    But `tink.JsonParser.parse(...)` currently returns `JNull`
+        //    on real input: the parser is a class with instance state
+        //    (`src`, `pos`) and recursive method calls, and somewhere
+        //    in that chain the runtime ends up at the early
+        //    `pos >= src.length` exit instead of dispatching to
+        //    parseObject/parseArray. The macro-side compile-time
+        //    parser in tink.Json works fine — the gap is the
+        //    runtime-class-instance side (Sections 1-3 are unaffected).
+        //
+        //    `trace(parsed)` on the top-level enum is sidestepped here
+        //    because the trace formatter would chase the enum's Array
+        //    payload through `format_array_slot`, which needs a
+        //    recursive formatter for nested enum-payload slots.
+        //    Pattern-matching at the call site exercises the parts
+        //    that work today.
+        // --------------------------------------------------------
+        trace("--- 6. Runtime JsonParser ---");
+        var parsed = tink.JsonParser.parse('{"name":"Bob","age":25}');
+        switch (parsed) {
+            case JNull: trace("parsed: JNull");
+            case JBool(b): trace("parsed: JBool(" + b + ")");
+            case JInt(i): trace("parsed: JInt(" + i + ")");
+            case JFloat(f): trace("parsed: JFloat(" + f + ")");
+            case JString(s): trace("parsed: JString(" + s + ")");
+            case JArray(_): trace("parsed: JArray");
+            case JObject(_): trace("parsed: JObject");
+        }
 
         trace("=== Done ===");
     }
