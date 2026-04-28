@@ -1400,8 +1400,14 @@ pub extern "C" fn haxe_array_resize(arr: *mut HaxeArray, new_len: i64) {
 }
 
 /// toString: create string representation "[elem0, elem1, ...]"
-/// Elements are printed as integers (i64). For proper type-aware printing,
-/// the compiler should use trace() which has type info.
+///
+/// Each `i64` slot is rendered with the same heuristic as
+/// `haxe_trace_array` in `haxe_sys`: small integers stay raw,
+/// pointer-shaped values that resolve to a known `DynamicValue` are
+/// formatted via `haxe_std_string_ptr`. This mirrors the boxing the
+/// compiler does for heterogeneous-element array literals so
+/// `Std.string([true, "hi", 3.14])` reads back as
+/// `"[true, hi, 3.14]"` rather than raw bytes.
 #[no_mangle]
 pub extern "C" fn haxe_array_to_string(arr: *const HaxeArray) -> *mut HaxeString {
     unsafe {
@@ -1428,7 +1434,7 @@ pub extern "C" fn haxe_array_to_string(arr: *const HaxeArray) -> *mut HaxeString
                 s.push_str(", ");
             }
             let val = *data.add(i);
-            s.push_str(&val.to_string());
+            s.push_str(&crate::haxe_sys::format_array_slot_for_string(val));
         }
 
         s.push(']');

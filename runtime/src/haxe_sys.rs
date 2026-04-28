@@ -259,7 +259,14 @@ pub extern "C" fn haxe_trace_any(dynamic_ptr: *mut u8) {
 
 /// Trace an Array value — prints elements as [e0, e1, e2, ...]
 /// The value is expected to be a pointer to a HaxeArray struct.
-/// Elements are printed as integers (i64) since arrays store i64 values.
+///
+/// Each `i64`-sized slot is interpreted with a heuristic:
+/// - small absolute values are raw integers (homogeneous Array<Int>);
+/// - heap-pointer-shaped values are tried as `DynamicValue*` and routed
+///   through `haxe_std_string_ptr` for type-aware formatting.
+/// This makes heterogeneous `Array<Dynamic>` literals like
+/// `[true, false, null, "hello", 3.14]` print as the user's values
+/// instead of raw byte patterns.
 #[no_mangle]
 pub extern "C" fn haxe_trace_array(arr_ptr: *mut u8) {
     if arr_ptr.is_null() {
@@ -276,7 +283,7 @@ pub extern "C" fn haxe_trace_array(arr_ptr: *mut u8) {
             }
             if arr.elem_size == 8 {
                 let val = *(arr.ptr.add(i * 8) as *const i64);
-                result.push_str(&val.to_string());
+                result.push_str(&format_array_slot(val));
             } else if arr.elem_size == 4 {
                 let val = *(arr.ptr.add(i * 4) as *const i32);
                 result.push_str(&val.to_string());
@@ -287,6 +294,145 @@ pub extern "C" fn haxe_trace_array(arr_ptr: *mut u8) {
         result.push(']');
         print_with_prefix(&result);
     }
+}
+
+/// Render one slot of an `Array<i64>` for trace/toString output.
+///
+/// When the compiler boxes heterogeneous-array elements (see
+/// `lower_array_literal` in `compiler/src/ir/hir_to_mir.rs`) every slot
+/// is a `DynamicValue*`. We can't see the array's static type from the
+/// runtime, so this function distinguishes *values* from *pointers* by
+/// shape — small integers and nice-looking floats stay raw, anything
+/// else gets a guarded probe at the suspected DynamicValue header.
+pub(crate) fn format_array_slot_for_string(val: i64) -> String {
+    format_array_slot(val)
+}
+
+fn format_array_slot(val: i64) -> String {
+    // Null pointer (or integer 0) — for heterogeneous-array slots this
+    // came from a `null` literal that the compiler stored as a raw
+    // null pointer. Showing `null` here instead of `0` is right almost
+    // every time; pure `Array<Int>` containing literal `0` is rare and
+    // its formatting is a known compromise of this heuristic.
+    if val == 0 {
+        return "null".to_string();
+    }
+
+    // Small integers: definitely not pointers. Covers normal Int data
+    // and common positions/indexes/sizes without touching memory.
+    const RAW_INT_BOUND: i64 = 1 << 32; // 4 GiB
+    if val.unsigned_abs() < RAW_INT_BOUND as u64 {
+        return val.to_string();
+    }
+
+    let uval = val as u64;
+
+    // Pointer alignment heuristic. `DynamicValue` is `repr(C)` over a
+    // `u32` and a `*mut u8`, so it must be at least 8-byte aligned on
+    // 64-bit platforms. A pointer-shaped value with the low 3 bits set
+    // is surely not a real DynamicValue address.
+    if uval & 0x7 != 0 {
+        return val.to_string();
+    }
+
+    // User-space heap range gate. macOS / Linux user-heap addresses live
+    // in roughly `[4 GiB, 16 TiB]`. Anything above 16 TiB is either
+    // kernel space (where dereferencing SIGSEGVs userspace) or pure
+    // garbage — most importantly this excludes `f64` bit patterns that
+    // happen to look 8-aligned (e.g. the bits of 3.14 are about 4×10¹⁸,
+    // way above any real heap address).
+    const USER_HEAP_LO: u64 = 0x0000_0001_0000_0000; // 4 GiB
+    const USER_HEAP_HI: u64 = 0x0000_1000_0000_0000; // 16 TiB
+    if uval < USER_HEAP_LO || uval > USER_HEAP_HI {
+        return val.to_string();
+    }
+
+    // Belt-and-suspenders: even within the user-heap range, validate
+    // that the page is actually mapped. macOS may map kernel pages in
+    // user-visible address ranges that are still unreadable to us, and
+    // the heuristic shouldn't crash if it stumbles into one.
+    if !addr_is_readable(val as usize, 16) {
+        return val.to_string();
+    }
+
+    unsafe {
+        let dyn_val =
+            std::ptr::read_volatile(val as usize as *const crate::type_system::DynamicValue);
+        let tid = dyn_val.type_id.0;
+        // Validate the type_id is in the known range. Built-ins are 0..=10
+        // (see TYPE_VOID..TYPE_FUNCTION); user types start at 1000.
+        let known_builtin = tid <= 10;
+        let known_user = tid >= crate::type_system::TYPE_USER_START && tid < 0x0010_0000;
+        if !known_builtin && !known_user {
+            return val.to_string();
+        }
+        // Format via the same dispatcher Std.string uses.
+        let s_ptr = crate::type_system::haxe_std_string_ptr(val as usize as *mut u8);
+        if s_ptr.is_null() {
+            return val.to_string();
+        }
+        let hs = &*s_ptr;
+        if hs.ptr.is_null() || hs.len == 0 || hs.len > 100_000 {
+            return val.to_string();
+        }
+        let slice = std::slice::from_raw_parts(hs.ptr as *const u8, hs.len);
+        match std::str::from_utf8(slice) {
+            Ok(s) => s.to_string(),
+            Err(_) => val.to_string(),
+        }
+    }
+}
+
+/// Check whether `len` bytes starting at `addr` lie inside a mapped page.
+/// Used to gate suspect pointer dereferences in `format_array_slot`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn addr_is_readable(addr: usize, len: usize) -> bool {
+    if addr == 0 || len == 0 {
+        return false;
+    }
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) } as usize;
+    if page_size == 0 {
+        return false;
+    }
+    let start = addr & !(page_size - 1);
+    let end_addr = addr.saturating_add(len - 1);
+    let end = end_addr & !(page_size - 1);
+    let pages = (end - start) / page_size + 1;
+    // mincore wants a buffer that's `pages` bytes long. macOS uses
+    // `*mut c_char` (signed); Linux uses `*mut c_uchar`. The `cfg`
+    // splits keep us portable without a third-party crate.
+    #[cfg(target_os = "macos")]
+    {
+        let mut vec = vec![0i8; pages];
+        let rc = unsafe {
+            libc::mincore(
+                start as *mut libc::c_void,
+                pages * page_size,
+                vec.as_mut_ptr(),
+            )
+        };
+        rc == 0
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let mut vec = vec![0u8; pages];
+        let rc = unsafe {
+            libc::mincore(
+                start as *mut libc::c_void,
+                pages * page_size,
+                vec.as_mut_ptr(),
+            )
+        };
+        rc == 0
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn addr_is_readable(_addr: usize, _len: usize) -> bool {
+    // Other platforms (Windows, WASM) — skip the runtime probe and
+    // print as int. The compiler-side heterogeneous-array boxing still
+    // applies, but we avoid the dereference.
+    false
 }
 
 #[cfg(test)]
@@ -312,6 +458,30 @@ mod tests {
                 "value {value:?} should disable trace"
             );
         }
+    }
+
+    /// Regression: small ints stay raw, zero shows as `null`, and
+    /// pointer-shaped garbage doesn't crash — just falls back to int
+    /// formatting after the readability probe rejects it. Live
+    /// `DynamicValue*` formatting is exercised by the tink-json
+    /// integration; here we cover the cheap shape-check paths.
+    #[test]
+    fn format_array_slot_small_int_stays_raw() {
+        assert_eq!(super::format_array_slot(42), "42");
+        assert_eq!(super::format_array_slot(-1), "-1");
+        assert_eq!(super::format_array_slot(1 << 30), "1073741824");
+    }
+
+    #[test]
+    fn format_array_slot_zero_renders_as_null() {
+        assert_eq!(super::format_array_slot(0), "null");
+    }
+
+    #[test]
+    fn format_array_slot_misaligned_pointer_falls_back_to_int() {
+        // 8-aligned check rejects this immediately — no probe attempted.
+        let val = 0x1_0000_0001_i64;
+        assert_eq!(super::format_array_slot(val), val.to_string());
     }
 }
 

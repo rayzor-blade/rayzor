@@ -30688,9 +30688,149 @@ impl<'a> HirToMirContext<'a> {
                 IrType::Void,
             );
 
-            for elem in elements.iter() {
-                let elem_val = self.lower_expression(elem)?;
-                let elem_type = self.builder.get_register_type(elem_val);
+            // Pre-pass: lower every element so we know each one's MIR type.
+            // If the elements have heterogeneous register types (e.g. mixing
+            // Bool, F64, Ptr, I32) we MUST box each one as a `DynamicValue*`
+            // before storing — otherwise different-typed bytes share a single
+            // `i64` slot and `trace([true, 3.14, "s"])` reads them back as
+            // `[1, <f64-bits>, <ptr>]` raw nonsense. Homogeneous arrays
+            // (`[1, 2, 3]`) stay on the fast path.
+            //
+            // We also remember the element's HIR `TypeKind` so the boxing
+            // step can pick the right `haxe_box_*` flavour for `String`
+            // (which has its own `HaxeString` representation distinct from
+            // `DynamicValue`).
+            let lowered: Vec<Option<(IrId, Option<IrType>, Option<crate::tast::TypeKind>)>> =
+                elements
+                    .iter()
+                    .map(|elem| {
+                        let v = self.lower_expression(elem)?;
+                        let t = self.builder.get_register_type(v);
+                        let hir_kind = {
+                            let type_table = self.type_table;
+                            type_table.get(elem.ty).map(|tr| tr.kind.clone())
+                        };
+                        Some((v, t, hir_kind))
+                    })
+                    .collect();
+            let heterogeneous = {
+                let normalize = |t: &Option<IrType>| match t {
+                    Some(IrType::I32) | Some(IrType::I64) => 1u8,
+                    Some(IrType::F32) | Some(IrType::F64) => 2u8,
+                    Some(IrType::Bool) => 3u8,
+                    Some(IrType::Ptr(_)) => 4u8,
+                    _ => 5u8,
+                };
+                let first = lowered
+                    .iter()
+                    .find_map(|p| p.as_ref())
+                    .map(|(_, t, _)| normalize(t));
+                first.map_or(false, |first_kind| {
+                    lowered
+                        .iter()
+                        .filter_map(|p| p.as_ref())
+                        .any(|(_, t, _)| normalize(t) != first_kind)
+                })
+            };
+
+            for entry in lowered {
+                let (elem_val, elem_type, hir_kind) = match entry {
+                    Some(triple) => triple,
+                    None => continue,
+                };
+                // Heterogeneous-array path: box every primitive element so the
+                // runtime walking the array sees a uniform sequence of
+                // `DynamicValue*`s and can dispatch type-aware formatting.
+                if heterogeneous {
+                    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                    let boxed = match &elem_type {
+                        Some(IrType::Bool) => {
+                            let f = self.get_or_register_extern_function(
+                                "haxe_box_bool_ptr",
+                                vec![IrType::Bool],
+                                ptr_u8.clone(),
+                            );
+                            self.builder
+                                .build_call_direct(f, vec![elem_val], ptr_u8.clone())
+                        }
+                        Some(IrType::I32) => {
+                            let ext = self
+                                .builder
+                                .build_cast(elem_val, IrType::I32, IrType::I64)?;
+                            let f = self.get_or_register_extern_function(
+                                "haxe_box_int_ptr",
+                                vec![IrType::I64],
+                                ptr_u8.clone(),
+                            );
+                            self.builder
+                                .build_call_direct(f, vec![ext], ptr_u8.clone())
+                        }
+                        Some(IrType::I64) => {
+                            let f = self.get_or_register_extern_function(
+                                "haxe_box_int_ptr",
+                                vec![IrType::I64],
+                                ptr_u8.clone(),
+                            );
+                            self.builder
+                                .build_call_direct(f, vec![elem_val], ptr_u8.clone())
+                        }
+                        Some(IrType::F32) => {
+                            let promoted = self
+                                .builder
+                                .build_cast(elem_val, IrType::F32, IrType::F64)?;
+                            let f = self.get_or_register_extern_function(
+                                "haxe_box_float_ptr",
+                                vec![IrType::F64],
+                                ptr_u8.clone(),
+                            );
+                            self.builder
+                                .build_call_direct(f, vec![promoted], ptr_u8.clone())
+                        }
+                        Some(IrType::F64) => {
+                            let f = self.get_or_register_extern_function(
+                                "haxe_box_float_ptr",
+                                vec![IrType::F64],
+                                ptr_u8.clone(),
+                            );
+                            self.builder
+                                .build_call_direct(f, vec![elem_val], ptr_u8.clone())
+                        }
+                        Some(IrType::String) => {
+                            // String literals come through as `IrType::String`,
+                            // a `HaxeString*` runtime struct — distinct from
+                            // a generic `Ptr`. Wrap in `DynamicValue` so the
+                            // trace formatter sees a `type_id == TYPE_STRING`
+                            // header at offset 0.
+                            let f = self.get_or_register_extern_function(
+                                "haxe_box_haxestring_ptr",
+                                vec![ptr_u8.clone()],
+                                ptr_u8.clone(),
+                            );
+                            let cast = self
+                                .builder
+                                .build_bitcast(elem_val, ptr_u8.clone())
+                                .unwrap_or(elem_val);
+                            self.builder
+                                .build_call_direct(f, vec![cast], ptr_u8.clone())
+                        }
+                        Some(IrType::Ptr(_)) => {
+                            // `null`, class instances and pre-boxed
+                            // `DynamicValue*`s carry the right shape
+                            // already (or are null) — pass through.
+                            Some(elem_val)
+                        }
+                        _ => Some(elem_val),
+                    };
+                    let push_val = boxed
+                        .and_then(|b| self.builder.build_bitcast(b, IrType::I64))
+                        .unwrap_or(elem_val);
+                    self.builder.build_call_direct(
+                        push_i64_func_id,
+                        vec![array_ptr, push_val],
+                        IrType::Void,
+                    );
+                    continue;
+                }
 
                 // For F64 elements, use the dedicated f64 push function to
                 // preserve the full 64 bits on WASM32.
