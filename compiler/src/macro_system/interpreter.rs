@@ -236,13 +236,22 @@ impl MacroInterpreter {
 
             // --- Identifiers ---
             ExprKind::Ident(name) => {
-                self.env
-                    .get(name)
-                    .cloned()
-                    .ok_or(MacroError::UndefinedVariable {
-                        name: name.clone(),
-                        location,
-                    })
+                if let Some(v) = self.env.get(name).cloned() {
+                    return Ok(v);
+                }
+                // Bare enum-constructor identifiers from haxe.macro.Expr —
+                // `APublic`, `AInline`, etc. — appear unbound in build macros
+                // because the interpreter doesn't load enum declarations.
+                // Map them to plain strings so `value_to_class_field` (which
+                // matches on `"Public" | "Static" | ...`) accepts either
+                // constructor form.
+                if let Some(stripped) = enum_ident_as_string(name) {
+                    return Ok(MacroValue::String(Arc::from(stripped)));
+                }
+                Err(MacroError::UndefinedVariable {
+                    name: name.clone(),
+                    location,
+                })
             }
 
             // --- Variable declarations ---
@@ -628,7 +637,7 @@ impl MacroInterpreter {
                 let resolved_name = self.resolve_class_name(&name);
 
                 // Special handling for known types
-                match resolved_name {
+                match resolved_name.as_str() {
                     "Map" | "haxe.ds.Map" => Ok(MacroValue::Object(Arc::new(
                         std::collections::BTreeMap::new(),
                     ))),
@@ -637,13 +646,14 @@ impl MacroInterpreter {
                     "sys.io.File" => self.construct_file(arg_vals, location),
                     _ => {
                         // Check cache first, then ClassRegistry for user-defined constructor
-                        let cached = if let Some(cached) = self.class_data_cache.get(resolved_name)
+                        let cached = if let Some(cached) =
+                            self.class_data_cache.get(resolved_name.as_str())
                         {
                             Some(Arc::clone(cached))
                         } else {
                             // Cache miss: extract from registry and cache
                             let data = self.class_registry.as_ref().and_then(|cr| {
-                                cr.find_class(resolved_name).map(|ci| {
+                                cr.find_class(&resolved_name).map(|ci| {
                                     Arc::new(CachedClassData {
                                         qualified_name: ci.qualified_name.clone(),
                                         instance_vars: ci
@@ -949,6 +959,14 @@ impl MacroInterpreter {
                         return Ok(result);
                     }
                 }
+                // Enum-constructor style call from haxe.macro.Expr:
+                // `FFun({args:[], ret:..., expr:...})` should produce
+                // `{kind: "FFun", args:[], ret:..., expr:...}` so the
+                // build-macro consumer (`value_to_class_field`) can read
+                // the variant tag through the nested `kind` field.
+                if let Some(tag) = enum_ctor_tag(name) {
+                    return Ok(build_enum_ctor_value(tag, &arg_vals));
+                }
                 Err(MacroError::UndefinedVariable {
                     name: name.clone(),
                     location,
@@ -1198,12 +1216,24 @@ impl MacroInterpreter {
     /// Resolve a class name through imports.
     /// Returns the fully qualified name if the bare name was imported,
     /// otherwise returns the original name.
-    fn resolve_class_name<'a>(&'a self, class_name: &'a str) -> &'a str {
+    ///
+    /// Cross-file macro invocation note: the `import_map` is always the
+    /// CALLER file's imports, not the macro-defining file's. A macro body
+    /// in `tink/Json.hx` that references `Context` will fail to resolve
+    /// via `import_map` when called from `Main.hx` (which doesn't
+    /// `import haxe.macro.Context`). Fall back to the ClassRegistry's
+    /// short-name index so registered classes resolve by their bare name
+    /// regardless of the call site's imports.
+    fn resolve_class_name(&self, class_name: &str) -> String {
         if let Some(qualified) = self.import_map.get(class_name) {
-            qualified.as_str()
-        } else {
-            class_name
+            return qualified.clone();
         }
+        if let Some(cr) = &self.class_registry {
+            if let Some(info) = cr.find_class(class_name) {
+                return info.qualified_name.clone();
+            }
+        }
+        class_name.to_string()
     }
 
     /// Try to dispatch a static class method call (e.g., Context.parse, Std.string)
@@ -1216,7 +1246,7 @@ impl MacroInterpreter {
     ) -> Result<Option<MacroValue>, MacroError> {
         // Resolve bare class names through imports
         let resolved = self.resolve_class_name(class_name);
-        match resolved {
+        match resolved.as_str() {
             "haxe.macro.Context" => {
                 // Use the stored macro_context if available (set by @:build
                 // pipeline so Context.getBuildFields() returns class fields).
@@ -1368,7 +1398,7 @@ impl MacroInterpreter {
             },
             _ => {
                 // Fallback: check ClassRegistry for user/stdlib class
-                let resolved_owned = resolved.to_string();
+                let resolved_owned = resolved.clone();
                 let maybe_method = self
                     .class_registry
                     .as_ref()
@@ -1611,6 +1641,14 @@ impl MacroInterpreter {
         _args: Vec<MacroValue>,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
+        // `.get()` on plain objects acts as a Ref/Null<T> dereference — it
+        // returns the object itself. This lets Haxe macro idioms like
+        // `Context.getLocalClass().get().name` work when the underlying
+        // class is modeled as an Object.
+        if method == "get" && _args.is_empty() && !obj.contains_key("__type__") {
+            return Ok(MacroValue::Object(Arc::new(obj.clone())));
+        }
+
         // Check __type__ for type-specific method dispatch
         let type_name = obj
             .get("__type__")
@@ -2161,6 +2199,82 @@ impl MacroInterpreter {
 /// excluding names that are bound by local `var` declarations or function parameters.
 /// This is used for selective closure capture — only variables actually referenced
 /// in the closure body need to be captured from the enclosing scope.
+/// Recognise enum-constructor calls from `haxe.macro.Expr.FieldType` —
+/// e.g. `FFun({args, ret, expr})` — and report the variant tag we want
+/// to surface as the `kind` field of the resulting object. None means
+/// the identifier isn't an enum constructor and should fall through to
+/// the normal undefined-variable error.
+fn enum_ctor_tag(name: &str) -> Option<&'static str> {
+    match name {
+        // haxe.macro.Expr.FieldType
+        "FVar" => Some("FVar"),
+        "FFun" => Some("FFun"),
+        "FProp" => Some("FProp"),
+        // haxe.macro.Expr.ComplexType
+        "TPath" => Some("TPath"),
+        "TFunction" => Some("TFunction"),
+        "TAnonymous" => Some("TAnonymous"),
+        "TParent" => Some("TParent"),
+        "TExtend" => Some("TExtend"),
+        "TOptional" => Some("TOptional"),
+        _ => None,
+    }
+}
+
+/// Construct the object form of an enum-constructor call.
+///
+/// For tagged variants like `FFun(payload)` where the single argument is
+/// already an Object, we merge the payload's fields into the result and
+/// store the variant tag under `kind` — that's the shape
+/// `value_to_class_field` reads.
+///
+/// For other shapes (multiple args, non-object args), we fall back to
+/// `{kind: tag, args: [...]}`.
+fn build_enum_ctor_value(tag: &'static str, args: &[MacroValue]) -> MacroValue {
+    let mut map = std::collections::BTreeMap::new();
+    map.insert(
+        "kind".to_string(),
+        MacroValue::String(Arc::from(tag)),
+    );
+    if args.len() == 1 {
+        if let MacroValue::Object(payload) = &args[0] {
+            for (k, v) in payload.iter() {
+                if k != "kind" {
+                    map.insert(k.clone(), v.clone());
+                }
+            }
+            return MacroValue::Object(Arc::new(map));
+        }
+    }
+    map.insert(
+        "args".to_string(),
+        MacroValue::Array(Arc::new(args.to_vec())),
+    );
+    MacroValue::Object(Arc::new(map))
+}
+
+/// Recognise the bare-identifier form of `haxe.macro.Expr.Access` enum
+/// constructors so build-macro bodies that use `APublic`, `AInline`, etc.
+/// can be interpreted without an actual enum table.
+///
+/// Returns the matching string token (`"Public"`, `"Inline"`, …) — the
+/// representation `value_to_class_field` already understands.
+fn enum_ident_as_string(name: &str) -> Option<&'static str> {
+    match name {
+        // haxe.macro.Expr.Access — used in @:build-generated `Field.access`.
+        "APublic" => Some("Public"),
+        "APrivate" => Some("Private"),
+        "AStatic" => Some("Static"),
+        "AOverride" => Some("Override"),
+        "ADynamic" => Some("Dynamic"),
+        "AInline" => Some("Inline"),
+        "AMacro" => Some("Macro"),
+        "AFinal" => Some("Final"),
+        "AExtern" => Some("Extern"),
+        _ => None,
+    }
+}
+
 fn collect_free_vars(
     expr: &Expr,
     bound: &mut std::collections::BTreeSet<String>,

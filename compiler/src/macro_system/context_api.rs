@@ -285,10 +285,33 @@ impl MacroContext {
         MacroValue::Position(self.call_position)
     }
 
-    /// `Context.getLocalClass()` — Get the current class name (or Null)
+    /// `Context.getLocalClass()` — Get a `Ref<ClassType>`-like value for
+    /// the current class. In Haxe's macro API the result is a `Null<Ref<T>>`
+    /// that you call `.get()` on to dereference. We model that with an
+    /// Object that carries the class info directly; `.get()` on objects is
+    /// a passthrough (see `method_call` / `field_access`) so both
+    /// `cls.get().name` and `cls.name` resolve to the class name.
     pub fn get_local_class(&self) -> MacroValue {
         match &self.current_class {
-            Some(name) => MacroValue::String(Arc::from(name.as_str())),
+            Some(name) => {
+                let mut obj = std::collections::BTreeMap::new();
+                obj.insert(
+                    "name".to_string(),
+                    MacroValue::String(Arc::from(name.as_str())),
+                );
+                // Mirror tink-style class metadata where reasonable.
+                if let Some(build) = &self.build_class {
+                    obj.insert(
+                        "pack".to_string(),
+                        MacroValue::Array(Arc::new(Vec::new())),
+                    );
+                    obj.insert(
+                        "module".to_string(),
+                        MacroValue::String(Arc::from(build.qualified_name.as_str())),
+                    );
+                }
+                MacroValue::Object(Arc::new(obj))
+            }
             None => MacroValue::Null,
         }
     }
@@ -958,10 +981,19 @@ mod tests {
         assert_eq!(ctx.get_local_class(), MacroValue::Null);
 
         ctx.current_class = Some("MyClass".to_string());
-        assert_eq!(
-            ctx.get_local_class(),
-            MacroValue::String(Arc::from("MyClass"))
-        );
+        // Phase 5.5: getLocalClass now returns a Ref<ClassType>-style
+        // Object with a `name` field, instead of a bare String, so build
+        // macros can do `Context.getLocalClass().get().name`.
+        let cls = ctx.get_local_class();
+        match cls {
+            MacroValue::Object(obj) => {
+                assert_eq!(
+                    obj.get("name"),
+                    Some(&MacroValue::String(Arc::from("MyClass")))
+                );
+            }
+            other => panic!("expected Object, got {:?}", other),
+        }
     }
 
     #[test]

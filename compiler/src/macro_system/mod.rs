@@ -70,7 +70,9 @@ pub mod reification;
 pub mod value;
 
 pub use ast_bridge::{apply_binary_op, expr_to_value, value_to_expr};
-pub use build_macros::{process_build_macros, BuildMacroResult};
+pub use build_macros::{
+    process_build_macros, process_build_macros_with_class_registry, BuildMacroResult,
+};
 pub use class_registry::ClassRegistry;
 pub use context_api::{
     BuildClassContext, BuildField, BuildFieldKind, DefinedType, DefinedTypeKind, FieldAccess,
