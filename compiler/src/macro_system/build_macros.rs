@@ -393,10 +393,67 @@ fn class_field_to_build_field(field: &ClassField) -> BuildField {
 
 /// Convert MacroValue field objects back to parser ClassField list.
 ///
-/// This is a best-effort conversion — complex expressions in the macro
-/// output are preserved as-is when they're Expr values.
-fn values_to_class_fields(values: &[MacroValue], _class: &ClassDecl) -> Vec<ClassField> {
-    values.iter().filter_map(value_to_class_field).collect()
+/// `BuildField`'s on-the-wire representation drops parameter type info
+/// and return type info (params come over as bare name strings, types
+/// come over as debug-formatted strings). For fields the build macro
+/// passed through unchanged, that loss would silently break the original
+/// declaration — e.g. a constructor `new(host, port, maxConn)` would lose
+/// its parameters and the body would fail with `Cannot find name 'maxConn'`.
+///
+/// To preserve fidelity we resolve each rebuilt field by name against the
+/// original class. If the original has the same field name and matching
+/// kind, swap in the original's full `ClassFieldKind` — this keeps params,
+/// return types, type hints, and bodies intact for unchanged fields.
+/// Newly synthesised fields (no name match) keep the round-trip-rebuilt
+/// form.
+fn values_to_class_fields(values: &[MacroValue], class: &ClassDecl) -> Vec<ClassField> {
+    let originals: std::collections::BTreeMap<String, &ClassField> = class
+        .fields
+        .iter()
+        .map(|f| (field_name(f).to_string(), f))
+        .collect();
+
+    values
+        .iter()
+        .filter_map(value_to_class_field)
+        .map(|mut rebuilt| {
+            if let Some(original) = originals.get(field_name(&rebuilt)) {
+                // Same kind in both → replace with original to recover
+                // params / return types / type hints / bodies that the
+                // BuildField wire format dropped.
+                let same_kind = matches!(
+                    (&rebuilt.kind, &original.kind),
+                    (ClassFieldKind::Function(_), ClassFieldKind::Function(_))
+                        | (ClassFieldKind::Var { .. }, ClassFieldKind::Var { .. })
+                        | (ClassFieldKind::Final { .. }, ClassFieldKind::Final { .. })
+                        | (
+                            ClassFieldKind::Property { .. },
+                            ClassFieldKind::Property { .. }
+                        )
+                );
+                if same_kind {
+                    rebuilt.kind = original.kind.clone();
+                    rebuilt.span = original.span;
+                    // Merge original metadata that the macro may have
+                    // dropped, but keep any access/modifiers explicitly
+                    // set by the rebuilt form.
+                    if rebuilt.meta.is_empty() {
+                        rebuilt.meta = original.meta.clone();
+                    }
+                }
+            }
+            rebuilt
+        })
+        .collect()
+}
+
+fn field_name(field: &ClassField) -> &str {
+    match &field.kind {
+        ClassFieldKind::Var { name, .. }
+        | ClassFieldKind::Final { name, .. }
+        | ClassFieldKind::Property { name, .. } => name,
+        ClassFieldKind::Function(func) => &func.name,
+    }
 }
 
 /// Convert a single MacroValue (Object) back to a ClassField
@@ -673,6 +730,82 @@ mod tests {
         let result = process_build_macros(file, &registry);
         assert_eq!(result.applied_count, 0);
         assert_eq!(result.file.declarations.len(), 1);
+    }
+
+    /// Phase 6 regression guard: when a build macro returns the original
+    /// `Context.getBuildFields()` array unchanged (or with new fields
+    /// appended), the round-trip through `BuildField` MUST preserve each
+    /// original field's full kind — params, return type, type hints,
+    /// body — not collapse a `function new(host, port, maxConn, debug)`
+    /// into a parameterless function whose body references undefined
+    /// names.
+    #[test]
+    fn test_build_macro_preserves_original_function_params() {
+        let source = r#"
+            class Builder {
+                macro public static function build():Array<Field> {
+                    return Context.getBuildFields();
+                }
+            }
+            @:build(Builder.build)
+            class Target {
+                public var x:Int;
+                public function new(a:Int, b:String, c:Bool) {
+                    this.x = a;
+                }
+            }
+        "#;
+        let file = parse(source);
+        let mut registry = MacroRegistry::new();
+        registry.scan_and_register(&file, "test.hx").unwrap();
+
+        let mut class_registry = super::super::class_registry::ClassRegistry::new();
+        class_registry.register_file(&file);
+
+        let result = process_build_macros_with_class_registry(
+            file,
+            &registry,
+            Some(Arc::new(class_registry)),
+        );
+
+        let target = result
+            .file
+            .declarations
+            .iter()
+            .find_map(|d| match d {
+                TypeDeclaration::Class(c) if c.name == "Target" => Some(c),
+                _ => None,
+            })
+            .expect("Target class");
+
+        let new_fn = target
+            .fields
+            .iter()
+            .find(|f| match &f.kind {
+                ClassFieldKind::Function(func) => func.name == "new",
+                _ => false,
+            })
+            .expect("new function");
+
+        match &new_fn.kind {
+            ClassFieldKind::Function(func) => {
+                assert_eq!(
+                    func.params.len(),
+                    3,
+                    "constructor lost its params on round-trip; \
+                     got {:?}",
+                    func.params
+                );
+                assert_eq!(func.params[0].name, "a");
+                assert_eq!(func.params[1].name, "b");
+                assert_eq!(func.params[2].name, "c");
+                assert!(
+                    func.body.is_some(),
+                    "constructor lost its body on round-trip"
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 
     /// Phase 5.5 regression guard: build macros that reference bare class
