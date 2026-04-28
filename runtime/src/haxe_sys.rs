@@ -352,7 +352,7 @@ fn format_array_slot(val: i64) -> String {
     // that the page is actually mapped. macOS may map kernel pages in
     // user-visible address ranges that are still unreadable to us, and
     // the heuristic shouldn't crash if it stumbles into one.
-    if !addr_is_readable(val as usize, 16) {
+    if !addr_is_readable(val as usize, 24) {
         return val.to_string();
     }
 
@@ -364,23 +364,46 @@ fn format_array_slot(val: i64) -> String {
         // (see TYPE_VOID..TYPE_FUNCTION); user types start at 1000.
         let known_builtin = tid <= 10;
         let known_user = (crate::type_system::TYPE_USER_START..0x0010_0000).contains(&tid);
-        if !known_builtin && !known_user {
-            return val.to_string();
+        if known_builtin || known_user {
+            // Format via the same dispatcher Std.string uses.
+            let s_ptr = crate::type_system::haxe_std_string_ptr(val as usize as *mut u8);
+            if !s_ptr.is_null() {
+                let hs = &*s_ptr;
+                if !hs.ptr.is_null() && hs.len > 0 && hs.len <= 100_000 {
+                    let slice = std::slice::from_raw_parts(hs.ptr as *const u8, hs.len);
+                    if let Ok(s) = std::str::from_utf8(slice) {
+                        return s.to_string();
+                    }
+                }
+            }
         }
-        // Format via the same dispatcher Std.string uses.
-        let s_ptr = crate::type_system::haxe_std_string_ptr(val as usize as *mut u8);
-        if s_ptr.is_null() {
-            return val.to_string();
+
+        // Second-chance probe: if the type_id rejection or the
+        // `Std.string` dispatch didn't produce a string, try the
+        // `HaxeString` layout. `Array<String>` stores raw `HaxeString*`
+        // values (no Dynamic boxing) when the array is monotyped, so
+        // `[name, age, active].fieldNames()` lands here. Validate a
+        // plausible shape (non-null `ptr`, sane `len`) before reading
+        // the bytes — anything else falls back to int. `cap == 0` is
+        // legal: compile-time string literals point into static data
+        // and have no allocation capacity.
+        let hs_probe =
+            std::ptr::read_volatile(val as usize as *const crate::haxe_string::HaxeString);
+        let cap_ok = hs_probe.cap == 0
+            || (hs_probe.cap >= hs_probe.len && hs_probe.cap <= 1_000_000);
+        if !hs_probe.ptr.is_null()
+            && hs_probe.len > 0
+            && hs_probe.len <= 100_000
+            && cap_ok
+            && addr_is_readable(hs_probe.ptr as usize, hs_probe.len)
+        {
+            let slice = std::slice::from_raw_parts(hs_probe.ptr as *const u8, hs_probe.len);
+            if let Ok(s) = std::str::from_utf8(slice) {
+                return s.to_string();
+            }
         }
-        let hs = &*s_ptr;
-        if hs.ptr.is_null() || hs.len == 0 || hs.len > 100_000 {
-            return val.to_string();
-        }
-        let slice = std::slice::from_raw_parts(hs.ptr as *const u8, hs.len);
-        match std::str::from_utf8(slice) {
-            Ok(s) => s.to_string(),
-            Err(_) => val.to_string(),
-        }
+
+        val.to_string()
     }
 }
 
