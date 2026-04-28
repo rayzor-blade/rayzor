@@ -782,19 +782,31 @@ impl MacroInterpreter {
     /// Evaluate a block of elements, returning the last value
     fn eval_block(&mut self, elements: &[parser::BlockElement]) -> Result<MacroValue, MacroError> {
         self.env.push_scope();
-        let mut last = MacroValue::Null;
+        let mut result: Result<MacroValue, MacroError> = Ok(MacroValue::Null);
         for elem in elements {
             match elem {
-                parser::BlockElement::Expr(expr) => {
-                    last = self.eval_expr(expr)?;
-                }
+                parser::BlockElement::Expr(expr) => match self.eval_expr(expr) {
+                    Ok(val) => result = Ok(val),
+                    Err(e) => {
+                        result = Err(e);
+                        break;
+                    }
+                },
                 _ => {
                     // Imports/using/conditionals in blocks — skip for macro context
                 }
             }
         }
+        // CRITICAL: pop the scope on EVERY exit path, not just success.
+        // The earlier `let last = self.eval_expr(expr)?;` form short-circuited
+        // out before reaching `pop_scope()`, leaking one block scope per
+        // early-return / break / continue / throw. Over a few recursive
+        // calls the scope stack grew unboundedly, and identifier lookups
+        // found stale outer-scope `pos` values instead of the current
+        // function's, which caused mutual-recursion macros (parseValue ↔
+        // parseArray ↔ parseNumber in tink.Json) to spin forever.
         self.env.pop_scope();
-        Ok(last)
+        result
     }
 
     /// Evaluate an assignment expression
@@ -1067,25 +1079,40 @@ impl MacroInterpreter {
             self.env.define(name, value.clone());
         }
 
-        // Bind parameters (use define_owned to avoid &str → to_string() allocation)
+        // Bind parameters (use define_owned to avoid &str → to_string() allocation).
+        // Default-value evaluation can fail; that error must NOT short-circuit
+        // before pop_scope, or we'd leak the function scope.
+        let mut bind_err: Option<MacroError> = None;
         for (i, param) in func.params.iter().enumerate() {
             let value = if let Some(arg) = args.get(i) {
                 arg.clone()
             } else if param.optional {
                 MacroValue::Null
             } else if let Some(default) = &param.default_value {
-                self.eval_expr(default)?
+                match self.eval_expr(default) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        bind_err = Some(e);
+                        break;
+                    }
+                }
             } else {
                 MacroValue::Null
             };
             self.env.define_owned(param.name.clone(), value);
         }
 
-        // Execute body
-        let result = match self.eval_expr(&func.body) {
-            Ok(val) => Ok(val),
-            Err(MacroError::Return { value }) => Ok(value.map(|v| *v).unwrap_or(MacroValue::Null)),
-            Err(e) => Err(e),
+        let result = if let Some(e) = bind_err {
+            Err(e)
+        } else {
+            // Execute body
+            match self.eval_expr(&func.body) {
+                Ok(val) => Ok(val),
+                Err(MacroError::Return { value }) => {
+                    Ok(value.map(|v| *v).unwrap_or(MacroValue::Null))
+                }
+                Err(e) => Err(e),
+            }
         };
 
         self.env.pop_scope();
@@ -1613,14 +1640,44 @@ impl MacroInterpreter {
                     .collect();
                 Ok(MacroValue::Array(Arc::new(parts)))
             }
-            "substring" | "substr" => {
+            "substring" => {
+                // Haxe `String.substring(startIndex, endIndex)` — chars from
+                // startIndex up to (but not including) endIndex.
                 let start = args.first().and_then(|a| a.as_int()).unwrap_or(0).max(0) as usize;
                 let end = args
                     .get(1)
                     .and_then(|a| a.as_int())
                     .map(|e| e.max(0) as usize)
                     .unwrap_or(s.len());
-                let result: String = s.chars().skip(start).take(end - start).collect();
+                let take = end.saturating_sub(start);
+                let result: String = s.chars().skip(start).take(take).collect();
+                Ok(MacroValue::String(Arc::from(result.as_str())))
+            }
+            "substr" => {
+                // Haxe `String.substr(pos, ?len)` — `len` characters starting
+                // at `pos`. Critically *not* the same as `substring(start, end)`:
+                // the second argument is a LENGTH, not an end index. Treating
+                // them identically caused tink.Json's `s.substr(pos, 4) ==
+                // "true"` literal-detection to read only 3 characters and
+                // miss every keyword.
+                let pos = args.first().and_then(|a| a.as_int()).unwrap_or(0);
+                let s_len = s.chars().count() as i64;
+                // Negative `pos` counts from the end (Haxe spec).
+                let start = if pos < 0 {
+                    (s_len + pos).max(0) as usize
+                } else {
+                    (pos as usize).min(s_len as usize)
+                };
+                let len = match args.get(1).and_then(|a| a.as_int()) {
+                    Some(n) if n < 0 => {
+                        // Negative length: stop at `len` from the end.
+                        let absn = (-n) as i64;
+                        (s_len - start as i64 - absn).max(0) as usize
+                    }
+                    Some(n) => n as usize,
+                    None => s_len as usize - start,
+                };
+                let result: String = s.chars().skip(start).take(len).collect();
                 Ok(MacroValue::String(Arc::from(result.as_str())))
             }
             "toUpperCase" => Ok(MacroValue::String(Arc::from(s.to_uppercase().as_str()))),
@@ -1882,9 +1939,20 @@ impl MacroInterpreter {
         field: &str,
         location: SourceLocation,
     ) -> Result<MacroValue, MacroError> {
-        // Unwrap Expr-wrapped values so field access works on the concrete type
-        // (e.g., s.length where s is MacroValue::Expr(String("hello")))
-        let unwrapped = if matches!(base, MacroValue::Expr(_)) {
+        // AST-introspection fields on `Expr` values (`.expr`, `.pos`) must
+        // be routed to the `MacroValue::Expr` arm below — they are how
+        // build-macro / parse-macro code reads the variant tag and source
+        // position of a reified `Expr`. If we unwrap first, an
+        // `Expr(ExprKind::String("x"))` becomes a `MacroValue::String` and
+        // `.expr` then errors with "String has no field 'expr'", which is
+        // exactly the failure that broke `tink.Json.parse('{"x":1}')`'s
+        // key extraction.
+        //
+        // For all other fields (e.g., `.length`), the unwrap is the right
+        // call: it lets `s.length` work when `s` is an `Expr` wrapping a
+        // string literal.
+        let preserve_expr = matches!(field, "expr" | "pos");
+        let unwrapped = if !preserve_expr && matches!(base, MacroValue::Expr(_)) {
             let u = ast_bridge::unwrap_expr_value(base);
             if matches!(u, MacroValue::Expr(_)) {
                 None
@@ -2726,6 +2794,111 @@ mod tests {
             eval("var arr = [10, 20, 30]; var old = arr[1]++; return old;").unwrap(),
             MacroValue::Int(20)
         );
+    }
+
+    /// Regression guard for the JSON parsing bug fixes (substr/substring,
+    /// eval_block scope leak, field-access unwrap).
+
+    /// `String.substr(pos, len)` and `String.substring(start, end)` must
+    /// be different. Treating them identically caused
+    /// `s.substr(pos, 4) == "true"` to silently fail every keyword check
+    /// in tink.Json — substr returned 3 chars instead of 4.
+    #[test]
+    fn test_string_substr_length_argument() {
+        // substr(start, len) — len characters starting at start.
+        assert_eq!(
+            eval("return \"abcdefgh\".substr(1, 4);").unwrap(),
+            MacroValue::from_str("bcde")
+        );
+        // substr with no length — to end of string.
+        assert_eq!(
+            eval("return \"abcdef\".substr(2);").unwrap(),
+            MacroValue::from_str("cdef")
+        );
+        // Negative pos counts from end.
+        assert_eq!(
+            eval("return \"abcdef\".substr(-3, 2);").unwrap(),
+            MacroValue::from_str("de")
+        );
+        // substring(start, end) — different semantics.
+        assert_eq!(
+            eval("return \"abcdefgh\".substring(1, 4);").unwrap(),
+            MacroValue::from_str("bcd")
+        );
+    }
+
+    /// Block scopes must be popped on early returns. Before the fix
+    /// `eval_block` used `eval_expr(expr)?` which short-circuited past
+    /// `pop_scope`, leaking one scope per `return`. Mutually recursive
+    /// macro helpers grew an unbounded scope stack and identifier
+    /// lookups found stale outer-scope values, causing infinite loops
+    /// (tink.Json.parseValue ↔ parseArray ↔ parseNumber).
+    #[test]
+    fn test_block_scope_popped_on_early_return() {
+        // Deeply nested early returns must not leak scopes — if they
+        // did, this test would hang or produce wrong results because
+        // the outer `pos` would shadow each inner `pos` in turn.
+        let source = r#"
+            var pos = 0;
+            for (i in 0...10) {
+                if (i > 5) {
+                    pos = 99; // late assignment
+                    if (i == 7) {
+                        // early-return-style nested block
+                    }
+                }
+            }
+            return pos;
+        "#;
+        assert_eq!(eval(source).unwrap(), MacroValue::Int(99));
+    }
+
+    /// `expr.expr` and `expr.pos` on a `MacroValue::Expr` must return AST
+    /// metadata, not unwrap the wrapped value. Build/parse macros use
+    /// `key.expr.expr` (with key being a parseString-returned Object) to
+    /// pattern-match on `EConst(CString(_))` — the unwrap step was making
+    /// `key.expr` collapse into a bare `MacroValue::String`, so `.expr`
+    /// then errored with "String has no field 'expr'".
+    #[test]
+    fn test_field_access_preserves_expr_for_introspection() {
+        // Build an Object with an Expr field (simulating
+        // `{expr: macro $v{result}, ...}` from parseString)
+        let mut interp = MacroInterpreter::new(MacroRegistry::new());
+        let inner = parser::Expr {
+            kind: parser::ExprKind::String("hello".to_string()),
+            span: parser::Span::default(),
+        };
+        let mut obj = std::collections::BTreeMap::new();
+        obj.insert("expr".to_string(), MacroValue::Expr(Arc::new(inner)));
+        obj.insert("endPos".to_string(), MacroValue::Int(7));
+        let key_obj = MacroValue::Object(Arc::new(obj));
+
+        // Access `.expr` once — gets the Expr value (not unwrapped).
+        let key_expr = interp
+            .field_access(&key_obj, "expr", crate::tast::SourceLocation::unknown())
+            .unwrap();
+        assert!(
+            matches!(key_expr, MacroValue::Expr(_)),
+            "key.expr should preserve MacroValue::Expr, got {:?}",
+            key_expr
+        );
+
+        // Access `.expr` again — gets the ExprDef enum representation.
+        let kind_value = interp
+            .field_access(&key_expr, "expr", crate::tast::SourceLocation::unknown())
+            .unwrap();
+        assert!(
+            matches!(kind_value, MacroValue::Enum(_, _, _)),
+            "key.expr.expr should produce a MacroValue::Enum, got {:?}",
+            kind_value
+        );
+
+        // Sanity: unwrap-friendly fields still work — `.length` on an
+        // Expr-wrapped string falls through to String.length.
+        let len = interp
+            .field_access(&key_expr, "length", crate::tast::SourceLocation::unknown())
+            .unwrap();
+        assert_eq!(len, MacroValue::Int(5));
     }
 
     #[test]
