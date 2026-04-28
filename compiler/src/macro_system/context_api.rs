@@ -722,18 +722,24 @@ fn build_field_to_value(field: &BuildField) -> MacroValue {
         BuildFieldKind::Var { type_hint, expr } => {
             let mut kind_obj = BTreeMap::new();
             kind_obj.insert("kind".to_string(), MacroValue::String(Arc::from("FVar")));
-            if let Some(t) = type_hint {
-                kind_obj.insert(
-                    "type".to_string(),
-                    MacroValue::String(Arc::from(t.as_str())),
-                );
-            }
-            if let Some(e) = expr {
-                kind_obj.insert(
-                    "expr".to_string(),
-                    MacroValue::Expr(Arc::from(e.as_ref().clone())),
-                );
-            }
+            let type_val = match type_hint {
+                Some(t) => MacroValue::String(Arc::from(t.as_str())),
+                None => MacroValue::Null,
+            };
+            let expr_val = match expr {
+                Some(e) => MacroValue::Expr(Arc::from(e.as_ref().clone())),
+                None => MacroValue::Null,
+            };
+            kind_obj.insert("type".to_string(), type_val.clone());
+            kind_obj.insert("expr".to_string(), expr_val.clone());
+            // Positional `__args__` array so enum-pattern matchers
+            // (`switch f.kind { case FVar(t, _): ... }`) can bind the
+            // constructor's positional args by index. Mirrors
+            // `haxe.macro.Expr.FieldType.FVar(t:ComplexType, e:Expr)`.
+            kind_obj.insert(
+                "__args__".to_string(),
+                MacroValue::Array(Arc::new(vec![type_val, expr_val])),
+            );
             MacroValue::Object(Arc::new(kind_obj))
         }
         BuildFieldKind::Function {
