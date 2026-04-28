@@ -43,7 +43,18 @@ pub struct BuildMacroResult {
 ///
 /// This should be called before regular macro expansion so that
 /// generated fields are available for expression-level expansion.
-pub fn process_build_macros(mut file: HaxeFile, registry: &MacroRegistry) -> BuildMacroResult {
+pub fn process_build_macros(file: HaxeFile, registry: &MacroRegistry) -> BuildMacroResult {
+    process_build_macros_with_class_registry(file, registry, None)
+}
+
+/// Like [`process_build_macros`] but threads a `ClassRegistry` to the
+/// interpreter so build-macro bodies can resolve sibling helpers and
+/// imported classes by short name (e.g. `Context` → `haxe.macro.Context`).
+pub fn process_build_macros_with_class_registry(
+    mut file: HaxeFile,
+    registry: &MacroRegistry,
+    class_registry: Option<Arc<super::class_registry::ClassRegistry>>,
+) -> BuildMacroResult {
     let mut diagnostics = Vec::new();
     let mut applied_count = 0;
 
@@ -64,7 +75,7 @@ pub fn process_build_macros(mut file: HaxeFile, registry: &MacroRegistry) -> Bui
                     .collect();
 
                 for meta in &build_metas {
-                    match apply_build_macro(&mut class, meta, registry) {
+                    match apply_build_macro(&mut class, meta, registry, class_registry.clone()) {
                         Ok(()) => {
                             applied_count += 1;
                             diagnostics.push(MacroDiagnostic::info(
@@ -84,7 +95,12 @@ pub fn process_build_macros(mut file: HaxeFile, registry: &MacroRegistry) -> Bui
                 // Check for @:autoBuild from implemented interfaces
                 for auto_build in &auto_build_interfaces {
                     if class_implements(&class, &auto_build.interface_name) {
-                        match apply_build_macro(&mut class, &auto_build.build_meta, registry) {
+                        match apply_build_macro(
+                            &mut class,
+                            &auto_build.build_meta,
+                            registry,
+                            class_registry.clone(),
+                        ) {
                             Ok(()) => {
                                 applied_count += 1;
                                 diagnostics.push(MacroDiagnostic::info(
@@ -134,6 +150,7 @@ fn apply_build_macro(
     class: &mut ClassDecl,
     meta: &Metadata,
     registry: &MacroRegistry,
+    class_registry: Option<Arc<super::class_registry::ClassRegistry>>,
 ) -> Result<(), MacroError> {
     let location = super::errors::span_to_location(meta.span);
 
@@ -169,8 +186,29 @@ fn apply_build_macro(
         .or_else(|| registry.find_macro_by_name(&macro_name));
 
     let result = if let Some(def) = macro_def {
-        // Macro is in the registry — execute it
-        let mut interp = MacroInterpreter::new(registry.clone());
+        // Macro is in the registry — execute it. Thread the ClassRegistry
+        // when available so bare-name references inside the build-macro
+        // body (e.g. `Context`, `FFun`, sibling static helpers) resolve
+        // via the short-name index. Without this, every `Context.*` call
+        // in a build macro fails with `undefined variable: 'Context'`
+        // because @:build is dispatched before the caller's import_map
+        // could ever matter.
+        let mut interp = if let Some(cr) = class_registry {
+            MacroInterpreter::with_class_registry(
+                registry.clone(),
+                std::collections::BTreeMap::new(),
+                cr,
+            )
+        } else {
+            MacroInterpreter::new(registry.clone())
+        };
+        // Seed the macro_class_stack with the macro's defining class so
+        // the interpreter's bare-identifier fallback (see interpreter.rs
+        // eval_call's Ident arm) finds sibling static helpers when the
+        // build macro delegates to them.
+        if let Some((defining_class, _)) = def.qualified_name.rsplit_once('.') {
+            interp.push_macro_class(defining_class.to_string());
+        }
         // Pass the build context so Context.getBuildFields() returns class fields
         interp.macro_context = Some(context);
         let eval_result = interp.eval_expr(&def.body);
@@ -635,6 +673,63 @@ mod tests {
         let result = process_build_macros(file, &registry);
         assert_eq!(result.applied_count, 0);
         assert_eq!(result.file.declarations.len(), 1);
+    }
+
+    /// Phase 5.5 regression guard: build macros that reference bare class
+    /// names (e.g. `Context` imported in the defining file) must resolve
+    /// via the ClassRegistry when passed, not fail with
+    /// `undefined variable: 'Context'`.
+    #[test]
+    fn test_build_macro_resolves_context_via_class_registry() {
+        let source = r#"
+            class Builder {
+                macro public static function build():Array<Int> {
+                    Context.currentPos();
+                    return [];
+                }
+            }
+            @:build(Builder.build)
+            class Target {
+                var x:Int;
+            }
+        "#;
+        let file = parse(source);
+
+        // Register the macro and Context class in the class registry
+        let mut registry = MacroRegistry::new();
+        registry.scan_and_register(&file, "test.hx").unwrap();
+
+        // Simulate haxe.macro.Context being available
+        let mut class_registry = super::super::class_registry::ClassRegistry::new();
+        class_registry.register_file(&file);
+        let ctx_source = r#"
+            package haxe.macro;
+            class Context {
+                public static function currentPos():Int { return 0; }
+            }
+        "#;
+        let ctx_file = parse(ctx_source);
+        class_registry.register_file(&ctx_file);
+
+        let result = process_build_macros_with_class_registry(
+            file,
+            &registry,
+            Some(Arc::new(class_registry)),
+        );
+
+        // The build macro should NOT error out with undefined Context.
+        let errs: Vec<_> = result
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d.severity, super::super::errors::MacroSeverity::Error))
+            .map(|d| d.message.clone())
+            .collect();
+        assert!(
+            errs.is_empty(),
+            "unexpected build macro errors: {:?}",
+            errs
+        );
+        assert_eq!(result.applied_count, 1);
     }
 
     #[test]

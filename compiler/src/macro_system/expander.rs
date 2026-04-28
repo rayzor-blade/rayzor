@@ -182,8 +182,15 @@ impl MacroExpander {
                 ));
             }
 
-            // Phase 2b: Execute @:build macros — modify class fields before expression expansion
-            let build_result = super::build_macros::process_build_macros(file, &self.registry);
+            // Phase 2b: Execute @:build macros — modify class fields before
+            // expression expansion. Pass the ClassRegistry so bare-name
+            // references inside the build-macro body (e.g. `Context`,
+            // sibling static helpers) resolve via the short-name index.
+            let build_result = super::build_macros::process_build_macros_with_class_registry(
+                file,
+                &self.registry,
+                Some(self.class_registry.clone()),
+            );
             file = build_result.file;
             self.expansions_count += build_result.applied_count;
             for diag in build_result.diagnostics {
