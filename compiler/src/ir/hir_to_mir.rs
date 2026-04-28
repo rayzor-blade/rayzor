@@ -30754,16 +30754,15 @@ impl<'a> HirToMirContext<'a> {
                                 .build_call_direct(f, vec![elem_val], ptr_u8.clone())
                         }
                         Some(IrType::I32) => {
-                            let ext = self
-                                .builder
-                                .build_cast(elem_val, IrType::I32, IrType::I64)?;
+                            let ext =
+                                self.builder
+                                    .build_cast(elem_val, IrType::I32, IrType::I64)?;
                             let f = self.get_or_register_extern_function(
                                 "haxe_box_int_ptr",
                                 vec![IrType::I64],
                                 ptr_u8.clone(),
                             );
-                            self.builder
-                                .build_call_direct(f, vec![ext], ptr_u8.clone())
+                            self.builder.build_call_direct(f, vec![ext], ptr_u8.clone())
                         }
                         Some(IrType::I64) => {
                             let f = self.get_or_register_extern_function(
@@ -30775,9 +30774,9 @@ impl<'a> HirToMirContext<'a> {
                                 .build_call_direct(f, vec![elem_val], ptr_u8.clone())
                         }
                         Some(IrType::F32) => {
-                            let promoted = self
-                                .builder
-                                .build_cast(elem_val, IrType::F32, IrType::F64)?;
+                            let promoted =
+                                self.builder
+                                    .build_cast(elem_val, IrType::F32, IrType::F64)?;
                             let f = self.get_or_register_extern_function(
                                 "haxe_box_float_ptr",
                                 vec![IrType::F64],
