@@ -1423,6 +1423,33 @@ impl MacroInterpreter {
                 }
                 _ => Ok(None),
             },
+            "haxe.macro.ComplexTypeTools" | "ComplexTypeTools" => match method {
+                // `ComplexTypeTools.toString(c)` — convert a ComplexType
+                // back to its source-level Haxe representation. The full
+                // Haxe stdlib delegates to `Printer.printComplexType`,
+                // which we don't run; instead we extract the leaf type
+                // name from the parser's `Type::Path { path: TypePath {
+                // name, ... }, ... }` debug format that the macro
+                // pipeline uses for the kind object's `type` field. This
+                // handles the common cases (`Int`, `String`, `Bool`,
+                // user classes) used by `@:build` introspection helpers
+                // like tink.Json's `describe()`.
+                "toString" => {
+                    let raw = args.first().and_then(|v| v.as_string()).unwrap_or("");
+                    let s = if let Some(idx) = raw.find("name: \"") {
+                        let rest = &raw[idx + 7..];
+                        rest.find('"').map(|end| &rest[..end]).unwrap_or("Dynamic")
+                    } else if raw.is_empty() {
+                        "Dynamic"
+                    } else {
+                        // Couldn't find the leaf — surface the raw form
+                        // so the user can spot the inability to print.
+                        raw
+                    };
+                    Ok(Some(MacroValue::String(Arc::from(s))))
+                }
+                _ => Ok(None),
+            },
             _ => {
                 // Fallback: check ClassRegistry for user/stdlib class
                 let resolved_owned = resolved.clone();
@@ -2253,8 +2280,69 @@ impl MacroInterpreter {
                 Ok(true)
             }
             parser::Pattern::Underscore => Ok(true),
+            parser::Pattern::Constructor { path, params } => {
+                // `case FVar(t, _):` over a value like
+                //   { kind: "FVar", type: <T>, expr: <E>, __args__: [<T>, <E>] }
+                // We match the path's leaf name against the object's `kind`
+                // tag and bind each pattern param against the same-index
+                // entry of `__args__`.
+                let ctor_name = &path.name;
+                let obj = match value {
+                    MacroValue::Object(map) => map,
+                    MacroValue::Enum(_, variant, payload) => {
+                        // Enum-shaped values (e.g. `EConst(CString(s))`
+                        // produced by `expr_kind_to_value`) match by
+                        // variant name + positional payload.
+                        if &**variant != ctor_name.as_str() {
+                            return Ok(false);
+                        }
+                        if params.len() > payload.len() {
+                            return Ok(false);
+                        }
+                        for (sub_pat, sub_val) in params.iter().zip(payload.iter()) {
+                            if !self.match_pattern(sub_val, sub_pat)? {
+                                return Ok(false);
+                            }
+                        }
+                        return Ok(true);
+                    }
+                    _ => return Ok(false),
+                };
+                // Verify the variant tag.
+                match obj.get("kind") {
+                    Some(MacroValue::String(s)) if &**s == ctor_name.as_str() => {}
+                    _ => return Ok(false),
+                }
+                // Pull positional args. If `__args__` is missing the kind
+                // object was constructed without positional info — match
+                // only if no params were expected.
+                let args: Vec<MacroValue> = match obj.get("__args__") {
+                    Some(MacroValue::Array(arr)) => arr.iter().cloned().collect(),
+                    _ => Vec::new(),
+                };
+                if params.len() > args.len() {
+                    return Ok(false);
+                }
+                for (sub_pat, sub_val) in params.iter().zip(args.iter()) {
+                    if !self.match_pattern(sub_val, sub_pat)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
+            parser::Pattern::Or(alts) => {
+                for alt in alts {
+                    if self.match_pattern(value, alt)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            parser::Pattern::Null => Ok(matches!(value, MacroValue::Null)),
             _ => {
-                // Constructor patterns, or patterns etc. — simplified matching
+                // Array, Object, Type, Extractor patterns — not supported
+                // yet by the macro tree-walker. Return false so the case
+                // doesn't silently appear to match.
                 Ok(false)
             }
         }

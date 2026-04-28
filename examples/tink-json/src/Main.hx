@@ -75,14 +75,11 @@ class Main {
 
         // --------------------------------------------------------
         // 3. @:build macro introspection
-        // NOTE: @:build generates correct AST but generated method bodies
-        //       produce `unreachable` in MIR. This is a known compiler gap
-        //       being tracked for fix. Uncomment when resolved.
         // --------------------------------------------------------
-        // trace("--- 3. @:build introspection ---");
-        // var user = new User("Alice", 30, true);
-        // trace("User field count: " + Std.string(user.fieldCount()));
-        // trace("User schema: " + user.describe());
+        trace("--- 3. @:build introspection ---");
+        var user = new User("Alice", 30, true);
+        trace("User field count: " + Std.string(user.fieldCount()));
+        trace("User schema: " + user.describe());
 
         // --------------------------------------------------------
         // 5. Runtime JSON string escaping

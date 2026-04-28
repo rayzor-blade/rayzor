@@ -490,17 +490,90 @@ fn value_to_class_field(value: &MacroValue) -> Option<ClassField> {
                 })
                 .and_then(|v| {
                     if let MacroValue::Expr(e) = v {
-                        Some(Box::new((**e).clone()))
+                        // Function bodies in Haxe AST are conventionally
+                        // `Block`s. A reified single-expression body like
+                        // `macro return $v{n}` lands here as a bare
+                        // `Return(...)`, and the downstream HIR/MIR pipeline
+                        // needs the surrounding Block to allocate a function
+                        // scope and emit a proper terminator. Without the
+                        // wrap, the generated method's MIR ends up as
+                        // `unreachable`, which then SIGILLs at runtime.
+                        let raw = (**e).clone();
+                        let wrapped = match &raw.kind {
+                            parser::ExprKind::Block(_) => raw,
+                            _ => parser::Expr {
+                                kind: parser::ExprKind::Block(vec![
+                                    parser::BlockElement::Expr(raw.clone()),
+                                ]),
+                                span: raw.span,
+                            },
+                        };
+                        Some(Box::new(wrapped))
                     } else {
                         None
                     }
                 });
 
+            // Best-effort return-type inference. The macro source declares
+            // the return type via `ret: macro :Int`, but reification turns
+            // that into an opaque placeholder we can't recover statically.
+            // Without ANY return type the downstream type checker tends to
+            // fall back to `Dynamic`, which then breaks generic uses like
+            // `trace(t.fieldCount())` (the value gets routed through a
+            // `DynamicValue*`-expecting formatter even though it's actually
+            // an `Int`). Sniff the body for a terminal `Return` of a
+            // primitive literal and synthesise a matching `Type::Path` so
+            // the call sites see the right concrete type.
+            let return_type = body.as_deref().and_then(|b| {
+                fn primitive_type_path(name: &str) -> parser::Type {
+                    parser::Type::Path {
+                        path: parser::TypePath {
+                            package: Vec::new(),
+                            name: name.to_string(),
+                            sub: None,
+                        },
+                        params: Vec::new(),
+                        span: parser::Span::new(0, 0),
+                    }
+                }
+                fn sniff(expr: &parser::Expr) -> Option<parser::Type> {
+                    match &expr.kind {
+                        parser::ExprKind::Block(elems) => elems
+                            .iter()
+                            .rev()
+                            .find_map(|e| match e {
+                                parser::BlockElement::Expr(ex) => sniff(ex),
+                                _ => None,
+                            }),
+                        parser::ExprKind::Return(Some(inner)) => sniff(inner),
+                        parser::ExprKind::Int(_) => {
+                            Some(primitive_type_path("Int"))
+                        }
+                        parser::ExprKind::Float(_) => {
+                            Some(primitive_type_path("Float"))
+                        }
+                        parser::ExprKind::Bool(_) => {
+                            Some(primitive_type_path("Bool"))
+                        }
+                        parser::ExprKind::String(_) => {
+                            Some(primitive_type_path("String"))
+                        }
+                        parser::ExprKind::Array(_) => {
+                            // Don't try to be clever about element types
+                            // here — leaving as None lets TAST infer.
+                            None
+                        }
+                        _ => None,
+                    }
+                }
+                sniff(b)
+            });
+
             ClassFieldKind::Function(parser::Function {
                 name: name.clone(),
                 type_params: Vec::new(),
                 params,
-                return_type: None,
+                return_type,
                 body,
                 span: parser::Span::new(0, 0),
             })
