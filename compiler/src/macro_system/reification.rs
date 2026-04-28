@@ -169,12 +169,47 @@ impl ReificationEngine {
             }
 
             ExprKind::Array(elements) => {
-                let new_elems: Result<Vec<Expr>, MacroError> = elements
-                    .iter()
-                    .map(|e| Self::process_expr(e, env))
-                    .collect();
+                // `$a{exprs}` inside an array literal is a SPLICE, not a
+                // nested array. `macro [$a{elements}]` must produce
+                // `[e1, e2, e3]`, not `[[e1, e2, e3]]`. Recognise the
+                // splice form and flatten its result into the parent
+                // array instead of recursing through it as a normal
+                // expression.
+                let mut new_elems: Vec<Expr> = Vec::with_capacity(elements.len());
+                for e in elements {
+                    if let ExprKind::DollarIdent {
+                        name,
+                        arg: Some(arg),
+                    } = &e.kind
+                    {
+                        if name == "a" {
+                            let val = Self::eval_simple_expr(arg, env, e.span)?;
+                            match val {
+                                MacroValue::Array(items) => {
+                                    for item in items.iter() {
+                                        new_elems.push(match item {
+                                            MacroValue::Expr(inner) => (**inner).clone(),
+                                            other => ast_bridge::value_to_expr(other),
+                                        });
+                                    }
+                                    continue;
+                                }
+                                other => {
+                                    return Err(MacroError::ReificationError {
+                                        message: format!(
+                                            "$a{{}} inside array literal expects Array, got {}",
+                                            other.type_name()
+                                        ),
+                                        location: span_to_location(e.span),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    new_elems.push(Self::process_expr(e, env)?);
+                }
                 Ok(Expr {
-                    kind: ExprKind::Array(new_elems?),
+                    kind: ExprKind::Array(new_elems),
                     span: expr.span,
                 })
             }
@@ -611,6 +646,71 @@ mod tests {
                 }
             }
             _ => panic!("expected Field expression"),
+        }
+    }
+
+    /// Regression guard: `macro [$a{exprs}]` must FLATTEN the splice into
+    /// the surrounding array literal, not nest it. Before the fix,
+    /// `process_expr` recursed into Array elements, so the DollarIdent
+    /// returned a single Array Expr and the parent ended up with one
+    /// nested element instead of N inline elements.
+    ///
+    /// This exact pattern is how tink.Json.parse (and any macro that
+    /// builds an array from a Vec of Expr) returns its result; without
+    /// the flattening, `tink.Json.parse("[1,2,3]")` produced
+    /// `[[1,2,3]]` at the AST level, which then traced as
+    /// `[<address>]` at runtime.
+    #[test]
+    fn test_array_literal_splice_flattens_dollar_a() {
+        let mut env = Environment::new();
+        let items = vec![
+            MacroValue::Expr(Arc::new(Expr {
+                kind: ExprKind::Int(10),
+                span: Span::default(),
+            })),
+            MacroValue::Expr(Arc::new(Expr {
+                kind: ExprKind::Int(20),
+                span: Span::default(),
+            })),
+            MacroValue::Expr(Arc::new(Expr {
+                kind: ExprKind::Int(30),
+                span: Span::default(),
+            })),
+        ];
+        env.define("xs", MacroValue::Array(Arc::new(items)));
+
+        // `macro [$a{xs}]` — Array containing one DollarIdent("a", xs).
+        let outer = Expr {
+            kind: ExprKind::Array(vec![Expr {
+                kind: ExprKind::DollarIdent {
+                    name: "a".to_string(),
+                    arg: Some(Box::new(Expr {
+                        kind: ExprKind::Ident("xs".to_string()),
+                        span: Span::default(),
+                    })),
+                },
+                span: Span::default(),
+            }]),
+            span: Span::default(),
+        };
+
+        let reified = ReificationEngine::reify_expr(&outer, &env).unwrap();
+        match reified {
+            MacroValue::Expr(arc_expr) => match &arc_expr.kind {
+                ExprKind::Array(elems) => {
+                    assert_eq!(
+                        elems.len(),
+                        3,
+                        "splice must flatten — got {} elements",
+                        elems.len()
+                    );
+                    assert_eq!(elems[0].kind, ExprKind::Int(10));
+                    assert_eq!(elems[1].kind, ExprKind::Int(20));
+                    assert_eq!(elems[2].kind, ExprKind::Int(30));
+                }
+                other => panic!("expected outer Array, got {:?}", other),
+            },
+            other => panic!("expected MacroValue::Expr, got {:?}", other),
         }
     }
 
