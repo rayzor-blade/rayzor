@@ -264,6 +264,7 @@ pub extern "C" fn haxe_trace_any(dynamic_ptr: *mut u8) {
 /// - small absolute values are raw integers (homogeneous Array<Int>);
 /// - heap-pointer-shaped values are tried as `DynamicValue*` and routed
 ///   through `haxe_std_string_ptr` for type-aware formatting.
+///
 /// This makes heterogeneous `Array<Dynamic>` literals like
 /// `[true, false, null, "hello", 3.14]` print as the user's values
 /// instead of raw byte patterns.
@@ -343,7 +344,7 @@ fn format_array_slot(val: i64) -> String {
     // way above any real heap address).
     const USER_HEAP_LO: u64 = 0x0000_0001_0000_0000; // 4 GiB
     const USER_HEAP_HI: u64 = 0x0000_1000_0000_0000; // 16 TiB
-    if uval < USER_HEAP_LO || uval > USER_HEAP_HI {
+    if !(USER_HEAP_LO..=USER_HEAP_HI).contains(&uval) {
         return val.to_string();
     }
 
@@ -362,7 +363,7 @@ fn format_array_slot(val: i64) -> String {
         // Validate the type_id is in the known range. Built-ins are 0..=10
         // (see TYPE_VOID..TYPE_FUNCTION); user types start at 1000.
         let known_builtin = tid <= 10;
-        let known_user = tid >= crate::type_system::TYPE_USER_START && tid < 0x0010_0000;
+        let known_user = (crate::type_system::TYPE_USER_START..0x0010_0000).contains(&tid);
         if !known_builtin && !known_user {
             return val.to_string();
         }
