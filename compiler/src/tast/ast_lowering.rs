@@ -12545,17 +12545,27 @@ impl<'a> AstLowering<'a> {
         &mut self,
         pattern: &parser::Pattern,
     ) -> Result<Vec<(InternedString, SymbolId)>, LoweringError> {
+        self.bind_pattern_variables_typed(pattern, None)
+    }
+
+    /// Bind pattern variables, propagating an expected type when known
+    /// (e.g. for `case JString(s):` where `s` should be typed as String
+    /// from the JString variant's parameter type).
+    fn bind_pattern_variables_typed(
+        &mut self,
+        pattern: &parser::Pattern,
+        expected_type: Option<TypeId>,
+    ) -> Result<Vec<(InternedString, SymbolId)>, LoweringError> {
         use parser::Pattern;
         match pattern {
             Pattern::Var(var_name) => {
-                // Create a variable symbol for the pattern variable
                 let interned_name = self.context.intern_string(var_name);
+                let type_id = expected_type.unwrap_or(TypeId::invalid());
                 let var_symbol = self
                     .context
                     .symbol_table
-                    .create_variable_in_scope(interned_name, self.context.current_scope);
+                    .create_variable_with_type(interned_name, self.context.current_scope, type_id);
 
-                // Add to current scope
                 self.context
                     .scope_tree
                     .get_scope_mut(self.context.current_scope)
@@ -12564,11 +12574,42 @@ impl<'a> AstLowering<'a> {
 
                 Ok(vec![(interned_name, var_symbol)])
             }
-            Pattern::Constructor { params, .. } => {
-                // Recursively bind variables in constructor parameters
+            Pattern::Constructor { path, params } => {
+                // Resolve the constructor's parameter types so sub-pattern
+                // variable bindings get proper type info (e.g. JString(s)
+                // where s is String). Without this, `s.length` later fails
+                // because the destructured variable has TypeId::invalid().
+                let ctor_name = self.context.intern_string(&path.name);
+                let ctor_sym = self
+                    .resolve_enum_constructor_from_discriminant(ctor_name)
+                    .or_else(|| self.resolve_symbol_in_scope_hierarchy(ctor_name));
+
+                let mut param_types: Vec<Option<TypeId>> = vec![None; params.len()];
+                if let Some(sym_id) = ctor_sym {
+                    if let Some(sym) = self.context.symbol_table.get_symbol(sym_id) {
+                        let ctor_type_id = sym.type_id;
+                        if ctor_type_id != TypeId::invalid() {
+                            let type_table = self.context.type_table.borrow();
+                            if let Some(ty) = type_table.get(ctor_type_id) {
+                                if let crate::tast::core::TypeKind::Function {
+                                    params: tparams, ..
+                                } = &ty.kind
+                                {
+                                    for (i, &tid) in tparams.iter().enumerate() {
+                                        if i < param_types.len() {
+                                            param_types[i] = Some(tid);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 let mut bindings = Vec::new();
-                for param in params {
-                    bindings.extend(self.bind_pattern_variables(param)?);
+                for (i, param) in params.iter().enumerate() {
+                    let param_ty = param_types.get(i).copied().unwrap_or(None);
+                    bindings.extend(self.bind_pattern_variables_typed(param, param_ty)?);
                 }
                 Ok(bindings)
             }

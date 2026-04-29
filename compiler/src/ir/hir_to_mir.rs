@@ -29204,30 +29204,10 @@ impl<'a> HirToMirContext<'a> {
         // Check exhaustiveness (analysis only, no codegen effect)
         self.check_switch_exhaustiveness(scrutinee, cases);
 
-        // Switch/match statement lowering:
-        // switch (scrutinee) {
-        //   case pattern1 if guard1: body1
-        //   case pattern2: body2
-        //   default: default_body
-        // }
-        //
-        // Becomes a series of conditional branches:
-        //   %scrut = evaluate scrutinee
-        //   br pattern1_test
-        // pattern1_test:
-        //   %match1 = test pattern1 against %scrut
-        //   br %match1, guard1_test, pattern2_test
-        // guard1_test:
-        //   %guard1 = evaluate guard1
-        //   br %guard1, body1_block, pattern2_test
-        // body1_block:
-        //   <body1>
-        //   br continuation
-        // pattern2_test:
-        //   %match2 = test pattern2 against %scrut
-        //   br %match2, body2_block, default_block
-        // ...
-        // continuation:
+        // Switch/match statement lowering — see lower_if_statement for the
+        // analogous if/else pattern. Variables modified inside any case body
+        // get phi nodes at the continuation block so cross-case writes are
+        // visible (and SSA-valid) to code following the switch.
 
         // Evaluate scrutinee once
         let scrut_val = match self.lower_expression(scrutinee) {
@@ -29260,14 +29240,40 @@ impl<'a> HirToMirContext<'a> {
             None => return,
         };
 
+        // Find variables modified in any case body. Capture their pre-switch
+        // register so we can phi-merge per-case writes at the continuation.
+        let mut modified_vars: BTreeSet<SymbolId> = BTreeSet::new();
+        for case in cases {
+            for stmt in &case.body.statements {
+                self.find_modified_variables_in_statement(stmt, &mut modified_vars);
+            }
+        }
+        let mut var_initial_values: BTreeMap<SymbolId, (IrId, IrType)> = BTreeMap::new();
+        for symbol_id in &modified_vars {
+            if let Some(&reg) = self.symbol_map.get(symbol_id) {
+                if let Some(func) = self.builder.current_function() {
+                    if let Some(local) = func.locals.get(&reg) {
+                        var_initial_values.insert(*symbol_id, (reg, local.ty.clone()));
+                    }
+                }
+            }
+        }
+
+        let entry_block = self.builder.current_block();
+
         // Branch to first case test
         if let Some(&first_test) = case_test_blocks.first() {
             self.builder.build_branch(first_test);
         } else {
             // No cases, go to default
             self.builder.build_branch(default_block);
+            self.builder.switch_to_block(continuation);
             return;
         }
+
+        // Per-case end block + post-body symbol_map snapshots, used to wire
+        // phi node incoming edges at the continuation.
+        let mut case_incoming: Vec<(IrBlockId, BTreeMap<SymbolId, IrId>)> = Vec::new();
 
         // Lower each case
         for (i, case) in cases.iter().enumerate() {
@@ -29338,6 +29344,15 @@ impl<'a> HirToMirContext<'a> {
                     .build_cond_branch(pattern_matches, body_block, next_test);
             }
 
+            // Snapshot the symbol_map entries for tracked vars BEFORE the body,
+            // so each case starts from the pre-switch state instead of the
+            // previous case's writes.
+            for symbol_id in var_initial_values.keys() {
+                if let Some(&(reg, _)) = var_initial_values.get(symbol_id) {
+                    self.symbol_map.insert(*symbol_id, reg);
+                }
+            }
+
             // Generate case body block
             self.builder.switch_to_block(body_block);
             // Bind pattern variables (extract enum fields into variable symbols)
@@ -29349,15 +29364,76 @@ impl<'a> HirToMirContext<'a> {
                 );
             }
             self.lower_block(&case.body);
-            self.builder.build_branch(continuation);
+            if !self.is_terminated() {
+                let end = self.builder.current_block();
+                let mut snapshot: BTreeMap<SymbolId, IrId> = BTreeMap::new();
+                for symbol_id in var_initial_values.keys() {
+                    if let Some(&reg) = self.symbol_map.get(symbol_id) {
+                        snapshot.insert(*symbol_id, reg);
+                    }
+                }
+                self.builder.build_branch(continuation);
+                if let Some(end_block) = end {
+                    case_incoming.push((end_block, snapshot));
+                }
+            }
         }
 
         // Default block - just continue (could also panic for exhaustive matches)
+        // Restore tracked vars to their initial values for the default path.
+        for symbol_id in var_initial_values.keys() {
+            if let Some(&(reg, _)) = var_initial_values.get(symbol_id) {
+                self.symbol_map.insert(*symbol_id, reg);
+            }
+        }
         self.builder.switch_to_block(default_block);
+        let default_end = self.builder.current_block();
+        let mut default_snapshot: BTreeMap<SymbolId, IrId> = BTreeMap::new();
+        for (symbol_id, (initial_reg, _)) in &var_initial_values {
+            default_snapshot.insert(*symbol_id, *initial_reg);
+        }
         self.builder.build_branch(continuation);
+        if let Some(end_block) = default_end {
+            case_incoming.push((end_block, default_snapshot));
+        }
 
         // Continue after switch
         self.builder.switch_to_block(continuation);
+
+        // Build phi nodes for variables modified in any case so the
+        // post-switch code sees the matched case's value (and SSA stays valid).
+        for (symbol_id, (initial_reg, var_type)) in &var_initial_values {
+            // Skip if no case actually changed the variable.
+            let any_changed = case_incoming
+                .iter()
+                .any(|(_, snap)| snap.get(symbol_id).copied().unwrap_or(*initial_reg) != *initial_reg);
+            if !any_changed {
+                continue;
+            }
+            if let Some(phi_reg) = self.builder.build_phi(continuation, var_type.clone()) {
+                for (end_block, snapshot) in &case_incoming {
+                    let val = snapshot.get(symbol_id).copied().unwrap_or(*initial_reg);
+                    self.builder
+                        .add_phi_incoming(continuation, phi_reg, *end_block, val);
+                }
+                if let Some(func) = self.builder.current_function_mut() {
+                    if let Some(local) = func.locals.get(initial_reg).cloned() {
+                        func.locals.insert(
+                            phi_reg,
+                            super::IrLocal {
+                                name: format!("{}_phi", local.name),
+                                ty: var_type.clone(),
+                                mutable: true,
+                                source_location: local.source_location,
+                                allocation: super::AllocationHint::Register,
+                            },
+                        );
+                    }
+                }
+                self.symbol_map.insert(*symbol_id, phi_reg);
+            }
+        }
+        let _ = entry_block;
     }
 
     fn lower_pattern_test(&mut self, scrutinee: IrId, pattern: &HirPattern) -> Option<IrId> {

@@ -3826,10 +3826,15 @@ impl StdlibMapping {
             map_method!(static "Json", "stringify" => "haxe_json_stringify", params: 1, returns: primitive,
                 types: &[PtrU8] => PtrU8),
             // haxe.format.JsonParser.parse(str:String):Dynamic
-            map_method!(static "JsonParser", "parse" => "haxe_json_parse", params: 1, returns: primitive,
+            // Keyed by FQN — bare-name `JsonParser` would shadow user
+            // classes named `JsonParser` (e.g. `tink.JsonParser`) and
+            // hijack their static `.parse(...)` calls into the runtime
+            // `haxe_json_parse` shim. Same shape as Phase 1's `Json`
+            // shadowing fix, on the runtime-mapping side.
+            map_method!(static "haxe.format.JsonParser", "parse" => "haxe_json_parse", params: 1, returns: primitive,
                 types: &[PtrU8] => PtrU8),
             // haxe.format.JsonPrinter.print(o:Dynamic, ?replacer, ?space):String
-            map_method!(static "JsonPrinter", "print" => "haxe_json_stringify", params: 1, returns: primitive,
+            map_method!(static "haxe.format.JsonPrinter", "print" => "haxe_json_stringify", params: 1, returns: primitive,
                 types: &[PtrU8] => PtrU8),
         ];
 

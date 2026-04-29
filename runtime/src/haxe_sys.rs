@@ -389,8 +389,8 @@ fn format_array_slot(val: i64) -> String {
         // and have no allocation capacity.
         let hs_probe =
             std::ptr::read_volatile(val as usize as *const crate::haxe_string::HaxeString);
-        let cap_ok = hs_probe.cap == 0
-            || (hs_probe.cap >= hs_probe.len && hs_probe.cap <= 1_000_000);
+        let cap_ok =
+            hs_probe.cap == 0 || (hs_probe.cap >= hs_probe.len && hs_probe.cap <= 1_000_000);
         if !hs_probe.ptr.is_null()
             && hs_probe.len > 0
             && hs_probe.len <= 100_000
