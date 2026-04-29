@@ -2259,18 +2259,46 @@ impl<'a> TastToHirContext<'a> {
                 });
 
                 if has_constructor_patterns {
-                    // Lower as a proper switch statement with pattern matching
+                    // Switch-as-expression: capture each case's result via a temp
+                    // variable so the surrounding block evaluates to the matched
+                    // case's body. The MIR switch lowerer inserts phi nodes for
+                    // variables modified across cases (mirrors the if/else path).
                     let scrutinee_expr = self.lower_expression(discriminant);
+                    let result_type = expr.expr_type;
+                    let (result_name, result_symbol) = self.gen_temp_var();
+
+                    let mut statements: Vec<HirStatement> = Vec::new();
+
+                    let init_null = HirExpr::new(
+                        HirExprKind::Null,
+                        result_type,
+                        self.current_lifetime,
+                        SourceLocation::unknown(),
+                    );
+                    statements.push(HirStatement::Let {
+                        pattern: HirPattern::Variable {
+                            name: result_name.clone(),
+                            symbol: result_symbol,
+                        },
+                        type_hint: Some(result_type),
+                        init: Some(init_null),
+                        is_mutable: true,
+                    });
+
                     let mut hir_cases = Vec::new();
 
                     for case in cases {
                         let patterns = vec![self.lower_case_value_pattern(&case.case_value)];
                         let body = match &case.body {
                             TypedStatement::Expression { expression, .. } => {
-                                let body_stmt =
-                                    HirStatement::Expr(self.lower_expression(expression));
+                                let case_expr = self.lower_expression(expression);
+                                let assign = HirStatement::Assign {
+                                    lhs: HirLValue::Variable(result_symbol),
+                                    rhs: case_expr,
+                                    op: None,
+                                };
                                 HirBlock {
-                                    statements: vec![body_stmt],
+                                    statements: vec![assign],
                                     expr: None,
                                     scope: self.current_scope,
                                 }
@@ -2289,30 +2317,42 @@ impl<'a> TastToHirContext<'a> {
                         });
                     }
 
-                    // Add default case if present
                     if let Some(default) = default_case {
+                        let default_expr = self.lower_expression(default);
+                        let assign = HirStatement::Assign {
+                            lhs: HirLValue::Variable(result_symbol),
+                            rhs: default_expr,
+                            op: None,
+                        };
                         hir_cases.push(HirMatchCase {
                             patterns: vec![HirPattern::Wildcard],
                             guard: None,
                             body: HirBlock {
-                                statements: vec![HirStatement::Expr(
-                                    self.lower_expression(default),
-                                )],
+                                statements: vec![assign],
                                 expr: None,
                                 scope: self.current_scope,
                             },
                         });
                     }
 
-                    let switch_stmt = HirStatement::Switch {
+                    statements.push(HirStatement::Switch {
                         scrutinee: scrutinee_expr,
                         cases: hir_cases,
+                    });
+
+                    let result_read = HirExpr {
+                        kind: HirExprKind::Variable {
+                            symbol: result_symbol,
+                            capture_mode: None,
+                        },
+                        ty: result_type,
+                        lifetime: self.current_lifetime,
+                        source_location: expr.source_location,
                     };
 
-                    // Wrap the switch statement in a block expression
                     let block = HirBlock {
-                        statements: vec![switch_stmt],
-                        expr: None,
+                        statements,
+                        expr: Some(Box::new(result_read)),
                         scope: self.current_scope,
                     };
 
