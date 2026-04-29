@@ -491,11 +491,8 @@ impl X11Window {
                     // Redraw needed — for now just flush
                     (x11.XFlush)(self.display);
                 }
-                CLIENT_MESSAGE => {
-                    // Check if this is WM_DELETE_WINDOW
-                    if event.client_data_l0() == self.wm_delete_window {
-                        self.should_close = true;
-                    }
+                CLIENT_MESSAGE if event.client_data_l0() == self.wm_delete_window => {
+                    self.should_close = true;
                 }
                 _ => {}
             }
