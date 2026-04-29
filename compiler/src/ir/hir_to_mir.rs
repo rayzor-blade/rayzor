@@ -24826,15 +24826,34 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // No verified match — refuse to fall back blindly. Returning the first
-        // arbitrary match here lets stdlib types (e.g. `Array.length`) resolve
-        // to an unrelated user/stdlib field with the same name (e.g.
-        // `List.length`), which then routes through GEP-based field access
-        // and produces nonsensical MIR (`gep <field_ir_ty> obj, [stale_idx]`).
-        // Returning None lets the caller fall through to the stdlib runtime
-        // dispatch (e.g. `haxe_array_length`), which is the correct path for
-        // Array/String property access.
-        None
+        // No verified match. We can't blindly return all_matches[0] — that
+        // path lets stdlib types (e.g. `Array.length`) resolve to an
+        // unrelated entry like `List.length` (registered when @:build pulls
+        // List into the compilation), routing through GEP-based field
+        // access and producing nonsensical MIR. But we also can't always
+        // return None — generic returns (e.g. `Arc<T>::get()` returning T)
+        // give a receiver_ty that doesn't match any concrete class, and
+        // the legitimate user field would then be unreachable.
+        //
+        // Compromise: return None when the receiver is a known stdlib
+        // type (Array/String/Map/etc.) where the caller will reach the
+        // proper stdlib runtime dispatch. Otherwise fall back to the
+        // first match — this preserves the old behaviour for user-class
+        // field access via generic returns.
+        let receiver_is_stdlib_property_target = self
+            .type_table
+            .get(receiver_ty)
+            .map(|ti| {
+                matches!(
+                    ti.kind,
+                    TypeKind::Array { .. } | TypeKind::String | TypeKind::Map { .. }
+                )
+            })
+            .unwrap_or(false);
+        if receiver_is_stdlib_property_target {
+            return None;
+        }
+        Some(all_matches[0])
     }
 
     /// Check if any class in field_index_map has a field with the same name.
