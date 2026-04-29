@@ -29411,9 +29411,9 @@ impl<'a> HirToMirContext<'a> {
         // post-switch code sees the matched case's value (and SSA stays valid).
         for (symbol_id, (initial_reg, var_type)) in &var_initial_values {
             // Skip if no case actually changed the variable.
-            let any_changed = case_incoming
-                .iter()
-                .any(|(_, snap)| snap.get(symbol_id).copied().unwrap_or(*initial_reg) != *initial_reg);
+            let any_changed = case_incoming.iter().any(|(_, snap)| {
+                snap.get(symbol_id).copied().unwrap_or(*initial_reg) != *initial_reg
+            });
             if !any_changed {
                 continue;
             }
