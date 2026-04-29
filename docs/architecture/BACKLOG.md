@@ -873,12 +873,11 @@ Thread.spawn(() -> {
 - sys.ssl.* - SSL/TLS support
 
 **System Threading (alternative to rayzor.concurrent)**
-- sys.thread.Lock
-- sys.thread.Mutex (different from rayzor.concurrent.Mutex)
-- sys.thread.Tls<T>
-- sys.thread.Semaphore
-- sys.thread.Condition
-- sys.thread.Deque
+- sys.thread.Tls<T> — extern class shipped in `compiler/haxe-std/sys/thread/Tls.hx`, but no runtime backing yet (no `sys_tls_*` functions, no stdlib mapping)
+
+> The remaining `sys.thread.*` primitives — **Lock, Mutex, Semaphore,
+> Condition, Deque** — are already implemented (see §3.2 / §3.3) and
+> were misclassified here. Only `Tls<T>` still needs runtime work.
 
 **Compile-Time Features (N/A for JIT)**
 - MacroType - Macro metaprogramming
@@ -2348,7 +2347,83 @@ trace("The point is: " + p);    // ✅ (calls toString())
 - **Async state machines** build on generics and memory safety
 - Implementation should follow dependency order to avoid rework
 
-**Last Updated:** 2026-03-12 (Copy/Drop/ManualDrop traits, 115/115 tests)
+**Last Updated:** 2026-04-29 (switch-as-expression phi merge + field disambiguation hardening)
+
+## Recent Progress (Session 2026-04-29 - Switch-as-Expression Phi & Field Disambiguation)
+
+**Switch-as-expression with constructor patterns:** ✅ Complete
+
+- ✅ **TAST→HIR rewrite** — `var x = switch (e) { case A(v): v; case B: 0; }` now allocates a mutable temp, replaces each case body's trailing expression with `Assign(_tmp, expr)`, and the surrounding Block evaluates to `Variable(_tmp)`. Previously the Block had `expr: None` and the outer Let bound `x` to garbage.
+- ✅ **MIR phi merge** — `lower_switch_statement` mirrors `lower_if_statement`'s phi machinery: collects vars modified across cases, snapshots per-case end-block + symbol_map, creates phi nodes at continuation. Without phis, Cranelift's egraph elaborator panicked with `index 4294967295 out of bounds`.
+- ✅ **TAST pattern type binding** — `bind_pattern_variables_typed` propagates the variant's parameter types to sub-pattern variables (`s` in `case JString(s)` now registers with String type), fixing "class not registered" type errors.
+
+**Field disambiguation in `resolve_field_index_by_name`:** ✅ Complete
+
+- ✅ **No blind fallback for stdlib properties** — when name-only lookup can't be verified against the receiver and the receiver is a known stdlib property target (Array/String/Map), return `None` so the caller routes through `haxe_array_length` / `haxe_string_length` instead of a stale `List.length` GEP. Previously, `@:build` pulling Haxe's `List` into the compilation hijacked all `Array.length` accesses and SIGSEGV'd.
+- ✅ **Preserve user-class fallback** — for non-stdlib receivers (e.g. `Arc<T>::get()` returning a generic `T` whose receiver_ty doesn't match any concrete class), keep the legacy first-match behaviour so legitimate field access still works (`arc_basic` test).
+
+**`@:build` introspection — Phase 1–6 fix chain:** ✅ Complete
+
+- ✅ **Phase 1** — imports don't reuse existing symbols with conflicting `qualified_name`.
+- ✅ **Phase 3** — `@:build` FQN extraction + registry fallback for cross-file build macros.
+- ✅ **Phase 4** — don't eagerly evaluate reification in field-body walk.
+- ✅ **Phase 5** — pre/post inc/dec write back through lvalue.
+- ✅ **Phase 5.5** — cross-file scope, `Ref<T>.get()`, enum constructors.
+- ✅ **Phase 6** — preserve original field kinds across `@:build` round-trip.
+- ✅ **Bodies, return types, enum patterns** — `value_to_class_field` extracts function params + return type; `Pattern::Constructor` matching for build-field shapes; enum-payload extraction surfaced through TAST.
+
+**Cross-context class allocation size mismatch:** ✅ Complete
+
+- ✅ **Name-based `class_alloc_sizes_by_name`** — TypeIds are unstable across compilation contexts, so heap allocation size lookup now keys by class qualified name. Fixed intermittent SIGABRT in `haxe_string_concat_impl` when Exception was allocated 16 bytes instead of 32.
+
+**BLADE cache stale cross-module function references:** ✅ Complete
+
+- ✅ **`external_function_names` map** — cached MIR modules embed cross-module function IDs from the original session; on reload, those references are stale because modules get different base offsets. Resolution via name lookup + post-pass fixup once all imports are loaded.
+
+**Heterogeneous `Array<Dynamic>` trace formatting:** ✅ Complete
+
+- ✅ **Compiler-side boxing** — mixed-type array literals now box primitives as `DynamicValue*`; Strings boxed via `haxe_box_haxestring_ptr`.
+- ✅ **Runtime-side probing** — `format_array_slot` recognises both boxed `DynamicValue` and `HaxeString` pointers (with `mincore`-validated memory probe and `cap == 0` allowed for static literals).
+
+**`tink-json` example:** ✅ Added
+
+- ✅ Macro-powered JSON utilities exercising expression macros (`tink.Json.parse/stringify`), `@:build` introspection (`fieldCount`, `fieldNames`, `describe`), runtime `tink.JsonWriter` string escaping, and runtime `tink.JsonParser` parsing into `JsonValue` enum + pattern matching. Demo runs end-to-end: `parsed: JObject with 2 fields`.
+
+**Other fixes:**
+
+- ✅ **`@:forward` abstract method calls** — added `TypeKind::Abstract` to `is_type_erased_ptr` so MIR-wrapper arg processing casts (instead of boxing) the underlying array pointer (`safe.pop()` no longer SIGABRTs).
+- ✅ **Static method spurious `this`** — `tast_to_hir` wraps `StaticMethodCall` as `Field { object: Variable(class_symbol), method }`. MIR Field-callee path now detects class/abstract/typedef receivers via `SymbolKind` and skips passing the class type_id as `this`.
+- ✅ **Stdlib namespace guard** — `get_stdlib_runtime_info` now refuses to match by simple name unless the receiver class lives in `haxe.` / `sys.` / `rayzor.` (or is an explicit MIR-wrapper class), so user classes named `Json` / `JsonParser` aren't hijacked into the stdlib runtime.
+- ✅ **Macro-context wiring** — `MacroContext` threaded through the interpreter for `@:build` macros to access `Context.getBuildFields()`, `Context.currentPos()`, etc.
+- ✅ **Ownership transfer for `Arc`/`Mutex`/`Box` constructors** — wrapper takes ownership of its argument; the argument variable is removed from drop tracking.
+
+**Test Suite:**
+
+- ✅ **All 700 unit tests pass**
+- ✅ **11/11 stdlib e2e tests pass** (including `arc_basic`)
+- ✅ **11/11 macro e2e tests pass**
+
+---
+
+## Recent Progress (Session 2026-04-15 - WASM Threads & Tensor wgpu)
+
+**SharedArrayBuffer threads in WASM:** ✅ Complete
+
+- ✅ Passive data segments in WASM linker
+- ✅ Wasmtime thread runtime + browser worker wiring
+- ✅ Browser `RayzorThreadRuntime` falls back to single-threaded mode when SAB unavailable
+
+**Tensor wgpu compute backend:** ✅ Complete
+
+- ✅ `rayzor-gpu` `compute_buffer_write_f32` / `read_f32` / `full_f32`
+- ✅ Browser-side wiring (mandatory when `rayzor-gpu` host loaded)
+- ✅ Wasmtime runner exposes Metal/Vulkan/DX12 matmul through wgpu
+
+**SIMD4f WASM backend:** ✅ Complete
+
+- ✅ Native `f32x4` lowering in `wasm_backend`
+
+---
 
 ## Recent Progress (Session 2026-03-12 - Copy, Drop, ManualDrop Traits)
 
