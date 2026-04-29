@@ -879,8 +879,12 @@ Thread.spawn(() -> {
 > Condition, Deque** — are already implemented (see §3.2 / §3.3) and
 > were misclassified here. Only `Tls<T>` still needs runtime work.
 
-**Compile-Time Features (N/A for JIT)**
-- MacroType - Macro metaprogramming
+**Compile-Time Type Generation**
+- `haxe.macro.MacroType<[expr]>` — extern class shipped in
+  `compiler/haxe-std/haxe/macro/MacroType.hx` as an empty marker, but
+  no compiler/parser support for the `MacroType<[expr]>` substitution
+  syntax. Rayzor's macro system runs during type checking, so this is
+  implementable (it's compile-time, not JIT-vs-AOT) — just unbuilt.
 
 ### 6.7 Implementation Plan
 
