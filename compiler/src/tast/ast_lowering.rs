@@ -12561,10 +12561,11 @@ impl<'a> AstLowering<'a> {
             Pattern::Var(var_name) => {
                 let interned_name = self.context.intern_string(var_name);
                 let type_id = expected_type.unwrap_or(TypeId::invalid());
-                let var_symbol = self
-                    .context
-                    .symbol_table
-                    .create_variable_with_type(interned_name, self.context.current_scope, type_id);
+                let var_symbol = self.context.symbol_table.create_variable_with_type(
+                    interned_name,
+                    self.context.current_scope,
+                    type_id,
+                );
 
                 self.context
                     .scope_tree
@@ -12592,7 +12593,8 @@ impl<'a> AstLowering<'a> {
                             let type_table = self.context.type_table.borrow();
                             if let Some(ty) = type_table.get(ctor_type_id) {
                                 if let crate::tast::core::TypeKind::Function {
-                                    params: tparams, ..
+                                    params: tparams,
+                                    ..
                                 } = &ty.kind
                                 {
                                     for (i, &tid) in tparams.iter().enumerate() {
