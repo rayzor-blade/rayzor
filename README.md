@@ -239,7 +239,7 @@ Rayzor uses **ownership-based memory management** with compile-time analysis, no
 - **Ownership Tracking**: Move semantics, borrow checking, use-after-move detection
 - **Lifetime Analysis**: Constraint-based solver, region inference, inter-procedural analysis
 
-See [MEMORY_MANAGEMENT.md](MEMORY_MANAGEMENT.md) for the complete strategy.
+See [MEMORY_MANAGEMENT.md](docs/architecture/MEMORY_MANAGEMENT.md) for the complete strategy.
 
 #### 11. Diagnostics System
 
@@ -542,7 +542,7 @@ Single-file executable format for deployment:
 - **Symbol Manifest**: Pre-resolved symbols eliminate re-parsing
 - **Reproducible**: Build info captures compiler version and platform
 
-See [BLADE_FORMAT_SPEC.md](BLADE_FORMAT_SPEC.md) and [RZB_FORMAT_SPEC.md](RZB_FORMAT_SPEC.md) for format details.
+See [BLADE_FORMAT_SPEC.md](docs/architecture/BLADE_FORMAT_SPEC.md) and [RZB_FORMAT_SPEC.md](docs/architecture/RZB_FORMAT_SPEC.md) for format details.
 
 ---
 
@@ -570,20 +570,20 @@ Rayzor uses **ownership-based memory management** instead of garbage collection.
 
 GC is reserved only for `Dynamic` typed values or types whose size cannot be determined at compile time.
 
-See [MEMORY_MANAGEMENT.md](MEMORY_MANAGEMENT.md) for the complete strategy.
+See [MEMORY_MANAGEMENT.md](docs/architecture/MEMORY_MANAGEMENT.md) for the complete strategy.
 
 ---
 
 ## Documentation
 
-- **[MEMORY_MANAGEMENT.md](MEMORY_MANAGEMENT.md)** - Memory management strategy (ownership, lifetimes, drops)
-- **[ARCHITECTURE.md](compiler/ARCHITECTURE.md)** - Complete system architecture
-- **[SSA_ARCHITECTURE.md](compiler/SSA_ARCHITECTURE.md)** - SSA integration details
-- **[RAYZOR_ARCHITECTURE.md](compiler/RAYZOR_ARCHITECTURE.md)** - Vision, roadmap, tiered JIT
-- **[BLADE_FORMAT_SPEC.md](BLADE_FORMAT_SPEC.md)** - BLADE module cache format
-- **[RZB_FORMAT_SPEC.md](RZB_FORMAT_SPEC.md)** - RayzorBundle executable format
-- **[RUNTIME_ARCHITECTURE.md](RUNTIME_ARCHITECTURE.md)** - Runtime library and extern functions
-- **[BACKLOG.md](BACKLOG.md)** - Feature backlog and progress tracking
+- **[MEMORY_MANAGEMENT.md](docs/architecture/MEMORY_MANAGEMENT.md)** - Memory management strategy (ownership, lifetimes, drops)
+- **[ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md)** - Complete system architecture
+- **[SSA_ARCHITECTURE.md](docs/architecture/SSA_ARCHITECTURE.md)** - SSA integration details
+- **[RAYZOR_ARCHITECTURE.md](docs/architecture/RAYZOR_ARCHITECTURE.md)** - Vision, roadmap, tiered JIT
+- **[BLADE_FORMAT_SPEC.md](docs/architecture/BLADE_FORMAT_SPEC.md)** - BLADE module cache format
+- **[RZB_FORMAT_SPEC.md](docs/architecture/RZB_FORMAT_SPEC.md)** - RayzorBundle executable format
+- **[RUNTIME_ARCHITECTURE.md](docs/architecture/RUNTIME_ARCHITECTURE.md)** - Runtime library and extern functions
+- **[BACKLOG.md](docs/architecture/BACKLOG.md)** - Feature backlog and progress tracking
 
 ---
 
@@ -665,13 +665,13 @@ Rayzor is under active development. Contributions are welcome!
    ```
 
 3. **Read the architecture docs**:
-   - Start with [ARCHITECTURE.md](compiler/ARCHITECTURE.md)
-   - Understand SSA integration in [SSA_ARCHITECTURE.md](compiler/SSA_ARCHITECTURE.md)
-   - Review memory management in [MEMORY_MANAGEMENT.md](MEMORY_MANAGEMENT.md)
+   - Start with [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md)
+   - Understand SSA integration in [SSA_ARCHITECTURE.md](docs/architecture/SSA_ARCHITECTURE.md)
+   - Review memory management in [MEMORY_MANAGEMENT.md](docs/architecture/MEMORY_MANAGEMENT.md)
 
 ### Development Workflow
 
-See [ARCHITECTURE.md](compiler/ARCHITECTURE.md#contributing) for:
+See [ARCHITECTURE.md](docs/architecture/ARCHITECTURE.md#contributing) for:
 - Code organization principles
 - Adding new features
 - Testing strategy
