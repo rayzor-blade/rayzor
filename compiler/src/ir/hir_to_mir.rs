@@ -24826,8 +24826,15 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Fall back to first match
-        Some(all_matches[0])
+        // No verified match — refuse to fall back blindly. Returning the first
+        // arbitrary match here lets stdlib types (e.g. `Array.length`) resolve
+        // to an unrelated user/stdlib field with the same name (e.g.
+        // `List.length`), which then routes through GEP-based field access
+        // and produces nonsensical MIR (`gep <field_ir_ty> obj, [stale_idx]`).
+        // Returning None lets the caller fall through to the stdlib runtime
+        // dispatch (e.g. `haxe_array_length`), which is the correct path for
+        // Array/String property access.
+        None
     }
 
     /// Check if any class in field_index_map has a field with the same name.

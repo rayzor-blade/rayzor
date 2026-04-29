@@ -103,26 +103,17 @@ class Main {
 
         // --------------------------------------------------------
         // 6. Runtime JSON parsing
-        //
-        //    Switch-as-expression with constructor patterns now binds the
-        //    matched case's value via a temp variable + phi (see fix in
-        //    tast_to_hir.rs / hir_to_mir.rs). The parser itself works in
-        //    isolated runs; in this demo, however, JObject(fields).length
-        //    SIGSEGVs because the JsonValue's payload pointer is stale by
-        //    the time the switch reads it. The interaction between the
-        //    @:build macros (User/Config) and cross-file enum payload
-        //    extraction is a separate bug — pinpointed but not yet fixed.
         // --------------------------------------------------------
         trace("--- 6. Runtime JsonParser ---");
         var parsed = tink.JsonParser.parse('{"name":"Bob","age":25}');
         switch (parsed) {
             case JNull: trace("parsed: JNull");
-            case JBool(b): trace("parsed: JBool");
-            case JInt(i): trace("parsed: JInt");
-            case JFloat(f): trace("parsed: JFloat");
-            case JString(s): trace("parsed: JString");
-            case JArray(arr): trace("parsed: JArray");
-            case JObject(fields): trace("parsed: JObject");
+            case JBool(b): trace("parsed: JBool(" + b + ")");
+            case JInt(i): trace("parsed: JInt(" + i + ")");
+            case JFloat(f): trace("parsed: JFloat(" + f + ")");
+            case JString(s): trace("parsed: JString(" + s + ")");
+            case JArray(arr): trace("parsed: JArray with " + arr.length + " elements");
+            case JObject(fields): trace("parsed: JObject with " + fields.length + " fields");
         }
 
         trace("=== Done ===");
