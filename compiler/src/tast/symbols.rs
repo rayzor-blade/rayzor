@@ -568,6 +568,16 @@ pub struct SymbolTable {
     supertype_cache: BTreeMap<SymbolId, BTreeSet<TypeId>>,
     /// Map from enum symbol to its variants
     enum_variants: BTreeMap<SymbolId, Vec<SymbolId>>,
+    /// Class symbol → ordered TypeParameter TypeIds (e.g. `Arc<T>` → `[T_id]`).
+    /// Lifted from per-AST-lowering state so generic-class info populated
+    /// when one file (e.g. stdlib `Arc.hx`) is lowered remains visible
+    /// when the user file later does `new Arc(value)`. Required by
+    /// `infer_type_args_from_constructor` to substitute T → concrete arg.
+    class_type_params: BTreeMap<SymbolId, Vec<TypeId>>,
+    /// Class symbol → constructor `SymbolId`. Same lifecycle reasoning as
+    /// `class_type_params`: needed cross-file by `new Arc(value)` to
+    /// recover the constructor signature for arg-type inference.
+    class_constructor_symbols: BTreeMap<SymbolId, SymbolId>,
     /// Enhanced symbol resolution cache
     symbol_cache: Rc<SymbolResolutionCache>,
 }
@@ -588,6 +598,8 @@ impl SymbolTable {
             symbol_to_type: BTreeMap::new(),
             supertype_cache: BTreeMap::new(),
             enum_variants: BTreeMap::new(),
+            class_type_params: BTreeMap::new(),
+            class_constructor_symbols: BTreeMap::new(),
             symbol_cache: Rc::new(SymbolResolutionCache::new(1000)),
         }
     }
@@ -607,6 +619,8 @@ impl SymbolTable {
             symbol_to_type: BTreeMap::new(),
             supertype_cache: BTreeMap::new(),
             enum_variants: BTreeMap::new(), // Estimate fewer enums
+            class_type_params: BTreeMap::new(),
+            class_constructor_symbols: BTreeMap::new(),
             symbol_cache: Rc::new(SymbolResolutionCache::with_sizes(capacity, capacity / 2)),
         }
     }
@@ -1300,6 +1314,28 @@ impl SymbolTable {
             }
         }
         None
+    }
+
+    /// Record the ordered TypeParameter TypeIds for a generic class.
+    /// Called from AST-lowering for user/stdlib classes and from BLADE
+    /// load for cached generic classes.
+    pub fn set_class_type_params(&mut self, class_symbol: SymbolId, type_params: Vec<TypeId>) {
+        self.class_type_params.insert(class_symbol, type_params);
+    }
+
+    /// Look up a class's ordered TypeParameter TypeIds (e.g. `[T_id]` for `Arc<T>`).
+    pub fn get_class_type_params(&self, class_symbol: SymbolId) -> Option<&Vec<TypeId>> {
+        self.class_type_params.get(&class_symbol)
+    }
+
+    /// Record the constructor SymbolId for a class.
+    pub fn set_class_constructor(&mut self, class_symbol: SymbolId, ctor_symbol: SymbolId) {
+        self.class_constructor_symbols.insert(class_symbol, ctor_symbol);
+    }
+
+    /// Look up a class's constructor SymbolId.
+    pub fn get_class_constructor(&self, class_symbol: SymbolId) -> Option<SymbolId> {
+        self.class_constructor_symbols.get(&class_symbol).copied()
     }
 
     /// Get the variants of an enum
