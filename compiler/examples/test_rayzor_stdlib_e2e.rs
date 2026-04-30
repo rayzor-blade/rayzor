@@ -743,6 +743,64 @@ class Main {
     );
 
     // ============================================================================
+    // TEST 6b: Arc deref coercion — `arc.field` / `arc.method()`
+    // ============================================================================
+    // Mirrors arc_basic but exercises auto-deref instead of explicit `.get()`.
+    // If the deref hooks in lower_field_expression / lower_call_expression
+    // regress, this test will fail while arc_basic still passes.
+    suite.add_test(
+        E2ETestCase::new(
+            "arc_basic_deref",
+            "Arc auto-deref: arc.value and arc.method() without explicit .get()",
+            r#"
+package test;
+
+import rayzor.concurrent.Thread;
+import rayzor.concurrent.Arc;
+
+@:derive([Send, Sync])
+class Counter {
+    public var value: Int;
+
+    public function new(v: Int) {
+        this.value = v;
+    }
+
+    public function bumped(): Int {
+        return this.value + 1;
+    }
+}
+
+class Main {
+    static function main() {
+        var arc = new Arc(new Counter(41));
+
+        // Field deref: arc.value -> arc.get().value
+        var v = arc.value;
+
+        // Method deref: arc.bumped() -> arc.get().bumped()
+        var b = arc.bumped();
+
+        // Used by Thread.spawn closure to keep the Send/Sync path live.
+        var arc_clone = arc.clone();
+        var handle = Thread.spawn(() -> {
+            return arc_clone.value + arc_clone.bumped();
+        });
+        var _ = handle.join();
+    }
+}
+"#,
+        )
+        .expect_mir_calls(vec![
+            "rayzor_arc_init",
+            "rayzor_arc_clone",
+            "rayzor_arc_get",
+            "rayzor_thread_spawn",
+        ])
+        .expect_level(TestLevel::Execution),
+    );
+
+    // ============================================================================
     // TEST 7: For-In Loop over Array
     // ============================================================================
     // For-in loop over arrays - simplified test just to see if for-in compiles
@@ -827,6 +885,59 @@ class Main {
         var mutex_ref4 = counter.get();
         var final_guard = mutex_ref4.lock();
         trace(final_guard.get().value);  // Should be 3
+        final_guard.unlock();
+    }
+}
+"#,
+        )
+        .expect_mir_calls(vec![
+            "rayzor_arc_init",
+            "rayzor_mutex_init",
+            "rayzor_mutex_lock",
+        ]),
+    );
+
+    // ============================================================================
+    // TEST 8b: Arc<Mutex<T>> deref coercion — full nested wrapper chain
+    // ============================================================================
+    // Mirrors arc_mutex_integration but uses auto-deref. Specifically
+    // exercises the nested-wrapper substitution path in
+    // compute_type_substitution: `arc.get().lock().value` requires the
+    // Class<TypeParameter> return-type substitution to recurse.
+    suite.add_test(
+        E2ETestCase::new(
+            "arc_mutex_deref",
+            "Arc<Mutex<T>> nested-wrapper deref chain without explicit get()s",
+            r#"
+package test;
+
+import rayzor.concurrent.Arc;
+import rayzor.concurrent.Mutex;
+
+@:derive([Send])
+class State {
+    public var value: Int;
+    public function new() { this.value = 0; }
+    public function bump():Void { this.value = this.value + 1; }
+}
+
+class Main {
+    static function main() {
+        var counter = new Arc(new Mutex(new State()));
+
+        // arc.get().lock() returns a MutexGuard<State> through nested
+        // type-arg substitution. guard.bump() then auto-derefs through
+        // MutexGuard.get().
+        var guard1 = counter.get().lock();
+        guard1.bump();
+        guard1.unlock();
+
+        var guard2 = counter.get().lock();
+        guard2.bump();
+        guard2.unlock();
+
+        var final_guard = counter.get().lock();
+        trace(final_guard.value);  // Should be 2
         final_guard.unlock();
     }
 }
