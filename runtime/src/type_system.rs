@@ -2325,10 +2325,19 @@ pub extern "C" fn haxe_box_bool_ptr(value: bool) -> *mut u8 {
     Box::into_raw(boxed) as *mut u8
 }
 
-/// Box a String as Dynamic (returns opaque pointer to DynamicValue)
-/// Takes a null-terminated string pointer.
+/// Box a null-terminated **C string** as Dynamic.
+///
+/// **Do NOT call this from the compiler when boxing a Rayzor `String`** —
+/// Rayzor strings are HaxeString structs (`{ptr, len, cap}`) passed by
+/// pointer, not C strings. Calling `strlen` on a HaxeString* reads the
+/// inner `ptr` field's bytes (essentially garbage from a UTF-8 standpoint)
+/// and the resulting Dynamic round-trips as `<invalid utf8>` / empty.
+/// Use [`haxe_box_haxestring_ptr`] instead for HaxeString pointers.
+///
+/// This function is preserved for FFI users that genuinely have a
+/// null-terminated C string (e.g. embedded Rayzor in C-style hosts).
 #[no_mangle]
-pub extern "C" fn haxe_box_string_ptr(str_ptr: *const u8) -> *mut u8 {
+pub extern "C" fn haxe_box_cstring_ptr(str_ptr: *const u8) -> *mut u8 {
     let len = if str_ptr.is_null() {
         0
     } else {
@@ -2339,8 +2348,18 @@ pub extern "C" fn haxe_box_string_ptr(str_ptr: *const u8) -> *mut u8 {
     Box::into_raw(boxed) as *mut u8
 }
 
+/// Deprecated misleading name — kept as a stub that forwards to
+/// `haxe_box_cstring_ptr`, since older external callers / older BLADE
+/// caches reference the symbol by name. New code MUST NOT call this:
+/// it does NOT do what its name suggests for Rayzor strings (see
+/// `haxe_box_cstring_ptr` doc).
+#[no_mangle]
+pub extern "C" fn haxe_box_string_ptr(str_ptr: *const u8) -> *mut u8 {
+    haxe_box_cstring_ptr(str_ptr)
+}
+
 /// Box a HaxeString pointer as Dynamic.
-/// Unlike haxe_box_string_ptr (which expects a null-terminated C string),
+/// Unlike haxe_box_cstring_ptr (which expects a null-terminated C string),
 /// this takes a pointer to an existing HaxeString struct and wraps it directly.
 #[no_mangle]
 pub extern "C" fn haxe_box_haxestring_ptr(hs_ptr: *mut u8) -> *mut u8 {

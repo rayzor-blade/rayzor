@@ -44,6 +44,7 @@ class Main {
         var d1:Dynamic = 42;
         var d2:Dynamic = 3.14;
         var d3:Dynamic = true;
+        var d4:Dynamic = "hello";
 
         // Test unboxing: Dynamic -> concrete values
         var i:Int = d1;
@@ -54,6 +55,14 @@ class Main {
         trace(i);   // Should print 42
         trace(f);   // Should print 3.14
         trace(b);   // Should print true
+
+        // Dynamic+String concat — regression guard for a recurring bug:
+        // `haxe_box_string_ptr` historically expected a null-terminated
+        // C string but the compiler passed it a HaxeString*, so
+        // `trace("prefix: " + d4)` printed empty / `<invalid utf8>`.
+        // The fix is to box Rayzor strings via `haxe_box_haxestring_ptr`.
+        trace("d4: " + d4);                       // Should print "d4: hello"
+        trace("d1: " + d1 + " d4: " + d4);        // Should print "d1: 42 d4: hello"
     }
 }
 "#;
@@ -104,6 +113,8 @@ class Main {
     println!("42");
     println!("3.14");
     println!("true");
+    println!("d4: hello");
+    println!("d1: 42 d4: hello");
     println!("\n=== Actual Output ===\n");
 
     for module in mir_modules.iter().rev() {
