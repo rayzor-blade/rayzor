@@ -2291,38 +2291,39 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 ## Known Issues
 
 ### Deref Coercion for Wrapper Types
-**Status:** 🟡 Single-level field + method deref shipped (2026-04-30); nested wrappers still pending
+**Status:** ✅ Field + method + nested-wrapper deref shipped (2026-04-30)
 **Affected Types:** `Arc<T>`, `MutexGuard<T>`
 
-Wrapper types like `Arc<T>` and `MutexGuard<T>` transparently forward field/method access to their inner type. `arc.field` and `arc.method()` desugar to `arc.get().field` / `arc.get().method()` during TAST lowering when the member doesn't exist on the wrapper.
+Wrapper types `Arc<T>` and `MutexGuard<T>` transparently forward field/method access to their inner type. `arc.field` and `arc.method()` desugar to `arc.get().field` / `arc.get().method()` during TAST lowering when the member doesn't exist on the wrapper.
 
-**What works:**
+**Working examples:**
 ```haxe
+// Single-level field deref:
 var arc = new Arc(new SharedData(42));
-var v = arc.value;            // ✅ field deref
-var d = arc.double();         // ✅ method deref (commit d145433, 2026-04-30)
+var v = arc.value;                       // ✅ → arc.get().value → 42
 
+// Single-level method deref:
+var arc = new Arc(new Calculator(21));
+var d = arc.double();                    // ✅ → arc.get().double() → 42
+
+// MutexGuard field deref:
 var m = new Mutex(new State(99));
 var g = m.lock();
-var x = g.x;                  // ✅ MutexGuard field deref
-```
+var x = g.x;                             // ✅ → g.get().x → 99
 
-**Still requires explicit `.get()`:**
-```haxe
+// Nested wrapper, full chain:
 var arc = new Arc(new Mutex(new State(99)));
-var v = arc.get().lock().get().x;  // ❌ implicit `.get()` chain doesn't work
-                                   //    on the MutexGuard returned by lock()
+var v = arc.get().lock().x;              // ✅ → arc.get().lock().get().x → 99
 ```
 
-**Remaining work — blocked on `compute_type_substitution` recursion:**
+**Implementation chain (three commits, 2026-04-30):**
 
-The cross-file generic-class metadata pipeline is now fixed (commit `d145433`): `class_type_params` and `class_constructor_symbols` were lifted from `AstLoweringContext` onto `SymbolTable`, making `infer_type_args_from_constructor` succeed for stdlib `Arc<T>` / `MutexGuard<T>` regardless of which file declared them. With that, `arc.get()` returns the substituted concrete type, and the method-deref hook in `lower_call_expression` works.
+1. `19acb3a` — Field hook in `lower_field_expression`: synthesise `MethodCall { receiver, get_sym, ... }` directly when the field doesn't resolve on the wrapper. Worked for the simple Arc case because MIR's field-access does runtime name-based dispatch even when TAST gives a `TypeParameter` receiver.
+2. `d145433` — Method hook in `lower_call_expression`: synthesise the parser-level `obj.get()` Call and re-run `lower_expression`. Required lifting `class_type_params` + `class_constructor_symbols` from per-`AstLoweringContext` state onto `SymbolTable` so generic-class metadata populated when `Arc.hx` / `Mutex.hx` lowered reaches the user file's compilation. Without that, `infer_type_args_from_constructor` always returned None for stdlib generics → unresolved `TypeParameter` receiver → method dispatch failed.
+3. `b25f2ae` — Nested wrappers: `compute_type_substitution` was missing two arms — Class receivers with non-empty `type_args` (e.g. `Mutex<State>`) and Class return types with `TypeParameter` args (e.g. `MutexGuard<T>`). Both stdlib generic types serialise as `Class` not `GenericInstance`. Added a `NeedClassInstance` substitution-result variant to defer the type creation to Phase 2 (avoids a RefCell already-borrowed panic since the substitution function holds an immutable type_table borrow).
 
-Nested wrappers fail because `compute_type_substitution` (in `ast_lowering.rs`) doesn't recurse into nested generic receiver types when substituting `TypeParameter`s. For `m.lock()` where `m: Mutex<State>` returning `MutexGuard<T>`, the substitution should walk `MutexGuard<T>` → find `T` → substitute with `State` from `m`'s type_args → produce `MutexGuard<State>`. Currently it returns `MutexGuard` with empty type_args, so `guard.x` deref ends up with a `Dynamic` inner type and SIGSEGV's at runtime.
-
-Follow-ups:
-1. Make `compute_type_substitution` recurse into `Class { type_args }` and `GenericInstance { type_args }` when substituting TypeParameters in the return type, so `MutexGuard<T>` substituted with `T → State` becomes `MutexGuard<State>`.
-2. Optional: `@:autoDeref` metadata so user classes can opt in (currently hardcoded to `rayzor.concurrent.Arc` / `rayzor.concurrent.MutexGuard`).
+**Remaining (low priority):**
+- Optional `@:autoDeref` metadata so user classes can opt in (currently hardcoded to `rayzor.concurrent.Arc` / `rayzor.concurrent.MutexGuard` by qualified name).
 
 ### @:native Metadata Ignored on Extern Abstract Methods
 **Status:** ✅ FIXED (2026-04-30)

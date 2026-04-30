@@ -36,12 +36,12 @@ These block legitimate Haxe code from running. Do these first.
 
 ### 2. Deref Coercion for Wrapper Types ([Known Issues](BACKLOG.md#known-issues))
 
-- [x] **Field access** on `Arc<T>` / `MutexGuard<T>` auto-inserts `.get()` (commit `19acb3a`, 2026-04-30) — `arc.value` desugars to `arc.get().value`.
-- [x] **Method calls** on inner type (commit `d145433`, 2026-04-30) — `arc.double()` auto-inserts `.get()`. The fix lifted `class_type_params` + `class_constructor_symbols` from per-`AstLoweringContext` state onto `SymbolTable` so generic-class metadata propagates across files; `infer_type_args_from_constructor` now succeeds for stdlib `Arc<T>`/`MutexGuard<T>`. Mirror hook added in `lower_call_expression`.
-- [ ] **Nested wrappers** (`Arc<Mutex<T>>`) — separate bug in `compute_type_substitution`. `arc.get().lock()` returns a `MutexGuard` with empty type_args because the substitution doesn't recurse into nested generic receiver types when computing `MutexGuard<T>` → `MutexGuard<State>`. So `guard.x` deref produces `Dynamic` instead of `State` and SIGSEGV's at runtime. Single-level wrappers work fine; nested still requires explicit `.get()` chain.
+- [x] **Field access** on `Arc<T>` / `MutexGuard<T>` auto-inserts `.get()` (commit `19acb3a`, 2026-04-30).
+- [x] **Method calls** on inner type (commit `d145433`, 2026-04-30) — `arc.double()` works. Fix lifted `class_type_params` + `class_constructor_symbols` onto `SymbolTable`.
+- [x] **Nested wrappers** (`Arc<Mutex<T>>`) (commit `b25f2ae`, 2026-04-30) — `arc.get().lock().x` deref-chains correctly. Fix extended `compute_type_substitution` to handle (1) `Class { type_args }` receivers and (2) `Class { type_args: [TypeParameter] }` return types, with a new `NeedClassInstance` substitution-result variant for the Phase 1/Phase 2 split.
 - [ ] Optional `@:autoDeref` metadata on user classes (currently the wrapper list is hardcoded to `rayzor.concurrent.Arc` and `rayzor.concurrent.MutexGuard` by qualified name).
 
-Affects ergonomics of every concurrency program — single-level cases now ergonomic.
+Concurrency-program ergonomics: ✅ all common cases now auto-deref.
 
 ### 3. ~~`@:native` Metadata Ignored on Extern Abstract Methods~~ ✅ DONE (2026-04-30)
 
