@@ -1330,7 +1330,8 @@ impl SymbolTable {
 
     /// Record the constructor SymbolId for a class.
     pub fn set_class_constructor(&mut self, class_symbol: SymbolId, ctor_symbol: SymbolId) {
-        self.class_constructor_symbols.insert(class_symbol, ctor_symbol);
+        self.class_constructor_symbols
+            .insert(class_symbol, ctor_symbol);
     }
 
     /// Look up a class's constructor SymbolId.
