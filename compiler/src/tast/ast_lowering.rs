@@ -6055,6 +6055,65 @@ impl<'a> AstLowering<'a> {
         self.resolve_type_to_class_symbol_inner(&type_table, type_id)
     }
 
+    /// Detect "auto-deref wrapper" classes — types where field access
+    /// transparently forwards to their inner value via a `get()` method.
+    /// Currently hardcoded to `rayzor.concurrent.Arc` and
+    /// `rayzor.concurrent.MutexGuard`; could be promoted to an
+    /// `@:autoDeref` metadata attribute later.
+    fn is_auto_deref_wrapper_class(&self, class_sym: SymbolId) -> bool {
+        let sym = match self.context.symbol_table.get_symbol(class_sym) {
+            Some(s) => s,
+            None => return false,
+        };
+        let qn = sym
+            .qualified_name
+            .and_then(|q| self.context.string_interner.get(q))
+            .unwrap_or("");
+        matches!(qn, "rayzor.concurrent.Arc" | "rayzor.concurrent.MutexGuard")
+    }
+
+    /// Find the `get()` method on an auto-deref wrapper class.
+    /// Checks both `class_methods` (user-class compilation unit) and the
+    /// class's symbol-table scope (extern classes loaded from BLADE).
+    fn find_wrapper_get_method(&self, class_sym: SymbolId) -> Option<SymbolId> {
+        let get_name_str = "get";
+        if let Some(methods) = self.class_methods.get(&class_sym) {
+            for (name, sym, _) in methods {
+                if self.context.string_interner.get(*name) == Some(get_name_str) {
+                    return Some(*sym);
+                }
+            }
+        }
+        // Fallback: extern classes loaded from BLADE register their methods
+        // in the class's scope, not in `class_methods`.
+        let class_sym_info = self.context.symbol_table.get_symbol(class_sym)?;
+        let get_interned = self.context.string_interner.get_id(get_name_str)?;
+        let method_sym = self
+            .context
+            .symbol_table
+            .lookup_symbol(class_sym_info.scope_id, get_interned)?;
+        if method_sym.kind == crate::tast::symbols::SymbolKind::Function {
+            Some(method_sym.id)
+        } else {
+            None
+        }
+    }
+
+    /// Extract the first type argument from a generic class type
+    /// (e.g. `T` from `Arc<T>`), used to type the synthesised `.get()`
+    /// call in deref coercion.
+    fn extract_wrapper_inner_type(&self, wrapper_type: TypeId) -> Option<TypeId> {
+        let type_table = self.context.type_table.borrow();
+        let ti = type_table.get(wrapper_type)?;
+        match &ti.kind {
+            crate::tast::core::TypeKind::Class { type_args, .. }
+            | crate::tast::core::TypeKind::GenericInstance { type_args, .. } => {
+                type_args.first().copied()
+            }
+            _ => None,
+        }
+    }
+
     /// Inner helper that takes a borrowed type table to allow recursive calls
     fn resolve_type_to_class_symbol_inner(
         &self,
@@ -9596,7 +9655,7 @@ impl<'a> AstLowering<'a> {
         }
 
         // Not a static access, proceed with instance field access
-        let obj_expr = self.lower_expression(expr)?;
+        let mut obj_expr = self.lower_expression(expr)?;
         let field_name = self.context.intern_string(field);
 
         // Helper: look up a field or method by name in a class, checking both
@@ -9616,6 +9675,47 @@ impl<'a> AstLowering<'a> {
                 }
                 None
             };
+
+        // Deref coercion: if the receiver is an auto-deref wrapper
+        // (`Arc<T>` / `MutexGuard<T>`) and the field doesn't exist on the
+        // wrapper itself, transparently rewrite `wrapper.field` as
+        // `wrapper.get().field`. Avoids forcing every concurrency
+        // program to call `.get()` explicitly.
+        if let Some(class_sym) = self.resolve_type_to_class_symbol(obj_expr.expr_type) {
+            let field_on_wrapper = resolve_in_class(self, &class_sym, field_name).is_some();
+            if !field_on_wrapper && self.is_auto_deref_wrapper_class(class_sym) {
+                if let Some(get_sym) = self.find_wrapper_get_method(class_sym) {
+                    // Pick T from the wrapper's type_args first; if the
+                    // class type was registered without args (common for
+                    // extern stdlib classes), fall back to inferring the
+                    // return type of `get()` from its function signature
+                    // and the receiver's type substitution.
+                    let inner_type = self
+                        .extract_wrapper_inner_type(obj_expr.expr_type)
+                        .or_else(|| {
+                            self.infer_method_call_return_type(get_sym, obj_expr.expr_type)
+                                .ok()
+                        })
+                        .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type());
+                    let location = obj_expr.source_location;
+                    let lifetime_id = obj_expr.lifetime_id;
+                    obj_expr = TypedExpression {
+                        kind: TypedExpressionKind::MethodCall {
+                            receiver: Box::new(obj_expr),
+                            method_symbol: get_sym,
+                            arguments: Vec::new(),
+                            type_arguments: Vec::new(),
+                            is_optional: false,
+                        },
+                        expr_type: inner_type,
+                        usage: VariableUsage::Borrow,
+                        lifetime_id,
+                        source_location: location,
+                        metadata: ExpressionMetadata::default(),
+                    };
+                }
+            }
+        }
 
         // For field access, we need to look up the field symbol from the object's type
         // Create type parameter with deferred constraint resolution
