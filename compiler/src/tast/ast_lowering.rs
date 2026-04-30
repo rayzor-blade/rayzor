@@ -2925,12 +2925,18 @@ impl<'a> AstLowering<'a> {
         }
         self.context.push_type_parameters(type_param_map.clone());
 
-        // Store ordered type parameter TypeIds for generic type inference
+        // Store ordered type parameter TypeIds for generic type inference.
+        // Mirror to the shared SymbolTable so cross-file lookups
+        // (e.g. user file calling `new Arc(value)`) can recover the
+        // type-param TypeIds populated when Arc.hx was lowered.
         if !type_param_map.is_empty() {
             let ordered_tp_ids: Vec<TypeId> = type_params
                 .iter()
                 .filter_map(|tp| type_param_map.get(&tp.name).copied())
                 .collect();
+            self.context
+                .symbol_table
+                .set_class_type_params(class_symbol, ordered_tp_ids.clone());
             self.class_type_params.insert(class_symbol, ordered_tp_ids);
         }
 
@@ -3042,7 +3048,11 @@ impl<'a> AstLowering<'a> {
                         }
                     }
                 } else {
-                    // Store constructor symbol for generic type inference
+                    // Store constructor symbol for generic type inference,
+                    // mirroring to SymbolTable for cross-file lookups.
+                    self.context
+                        .symbol_table
+                        .set_class_constructor(class_symbol, method_symbol);
                     self.class_constructor_symbols
                         .insert(class_symbol, method_symbol);
                 }
@@ -4585,15 +4595,30 @@ impl<'a> AstLowering<'a> {
             }
         };
 
-        // Check if class has type parameters
-        let type_param_ids = self.class_type_params.get(&class_symbol)?;
+        // Check if class has type parameters. Prefer the per-instance map
+        // (current file's lowering) but fall back to the shared SymbolTable
+        // for cross-file lookups (e.g. user file calling `new Arc(value)`
+        // when `Arc.hx` was lowered in a different ast_lowering instance).
+        let type_param_ids: Vec<TypeId> = if let Some(ids) = self.class_type_params.get(&class_symbol) {
+            ids.clone()
+        } else if let Some(ids) = self.context.symbol_table.get_class_type_params(class_symbol) {
+            ids.clone()
+        } else {
+            return None;
+        };
         if type_param_ids.is_empty() {
             return None;
         }
 
-        // Get constructor symbol and its function type
-        let ctor_symbol = self.class_constructor_symbols.get(&class_symbol)?;
-        let ctor_type_id = self.context.symbol_table.get_symbol(*ctor_symbol)?.type_id;
+        // Get constructor symbol and its function type — same fallback chain.
+        let ctor_symbol = if let Some(s) = self.class_constructor_symbols.get(&class_symbol).copied() {
+            s
+        } else if let Some(s) = self.context.symbol_table.get_class_constructor(class_symbol) {
+            s
+        } else {
+            return None;
+        };
+        let ctor_type_id = self.context.symbol_table.get_symbol(ctor_symbol)?.type_id;
         let param_type_ids = {
             let tt = self.context.type_table.borrow();
             let ti = tt.get(ctor_type_id)?;
@@ -6053,6 +6078,29 @@ impl<'a> AstLowering<'a> {
     fn resolve_type_to_class_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
         let type_table = self.context.type_table.borrow();
         self.resolve_type_to_class_symbol_inner(&type_table, type_id)
+    }
+
+    /// Build the parser-level AST `expr.get()` for deref coercion.
+    /// Re-running `lower_expression` on the result re-uses the normal
+    /// method-call lowering path so the inner type is recovered through
+    /// signature substitution rather than direct `MethodCall` synthesis.
+    fn synth_get_call_expr(&self, expr: &Expr) -> Expr {
+        let span = expr.span;
+        let getter = Expr {
+            kind: parser::ExprKind::Field {
+                expr: Box::new(expr.clone()),
+                field: "get".to_string(),
+                is_optional: false,
+            },
+            span,
+        };
+        Expr {
+            kind: parser::ExprKind::Call {
+                expr: Box::new(getter),
+                args: Vec::new(),
+            },
+            span,
+        }
     }
 
     /// Detect "auto-deref wrapper" classes — types where field access
@@ -8720,8 +8768,49 @@ impl<'a> AstLowering<'a> {
                 }
 
                 // Not a static call, proceed with instance method call
-                let receiver_expr = self.lower_expression(obj_expr)?;
+                let mut receiver_expr = self.lower_expression(obj_expr)?;
                 let method_name = self.context.intern_string(field);
+
+                // Deref coercion (method call): if the receiver is an
+                // auto-deref wrapper (`Arc<T>` / `MutexGuard<T>`) and the
+                // method doesn't exist on the wrapper itself, transparently
+                // rewrite `wrapper.method(args)` as `wrapper.get().method(args)`.
+                // Mirrors lower_field_expression's hook — synthesise the
+                // parser-level `obj_expr.get()` Call and re-run
+                // lower_expression so the standard method-call type
+                // inference applies. Now works because cross-file generic
+                // class metadata is shared on SymbolTable.
+                let should_deref_method = self
+                    .resolve_type_to_class_symbol(receiver_expr.expr_type)
+                    .map(|class_sym| {
+                        if !self.is_auto_deref_wrapper_class(class_sym) {
+                            return false;
+                        }
+                        let on_wrapper = self
+                            .class_methods
+                            .get(&class_sym)
+                            .map(|methods| methods.iter().any(|(n, _, _)| *n == method_name))
+                            .unwrap_or(false)
+                            || self
+                                .context
+                                .symbol_table
+                                .get_symbol(class_sym)
+                                .and_then(|cs| {
+                                    self.context
+                                        .symbol_table
+                                        .lookup_symbol(cs.scope_id, method_name)
+                                })
+                                .map(|s| s.kind == crate::tast::symbols::SymbolKind::Function)
+                                .unwrap_or(false);
+                        !on_wrapper
+                    })
+                    .unwrap_or(false);
+                if should_deref_method {
+                    let synth = self.synth_get_call_expr(obj_expr);
+                    if let Ok(rewritten) = self.lower_expression(&synth) {
+                        receiver_expr = rewritten;
+                    }
+                }
 
                 // First, try to resolve as a regular method on the receiver
                 let method_symbol = self.resolve_method_symbol(&receiver_expr, method_name);
@@ -9681,21 +9770,18 @@ impl<'a> AstLowering<'a> {
         // wrapper itself, transparently rewrite `wrapper.field` as
         // `wrapper.get().field`. Avoids forcing every concurrency
         // program to call `.get()` explicitly.
+        // Deref coercion: rewrite `wrapper.field` as `wrapper.get().field`
+        // when the field doesn't exist on the wrapper. Synthesises the
+        // MethodCall directly with `infer_method_call_return_type` to get
+        // the substituted concrete inner type.
         if let Some(class_sym) = self.resolve_type_to_class_symbol(obj_expr.expr_type) {
             let field_on_wrapper = resolve_in_class(self, &class_sym, field_name).is_some();
             if !field_on_wrapper && self.is_auto_deref_wrapper_class(class_sym) {
                 if let Some(get_sym) = self.find_wrapper_get_method(class_sym) {
-                    // Pick T from the wrapper's type_args first; if the
-                    // class type was registered without args (common for
-                    // extern stdlib classes), fall back to inferring the
-                    // return type of `get()` from its function signature
-                    // and the receiver's type substitution.
                     let inner_type = self
-                        .extract_wrapper_inner_type(obj_expr.expr_type)
-                        .or_else(|| {
-                            self.infer_method_call_return_type(get_sym, obj_expr.expr_type)
-                                .ok()
-                        })
+                        .infer_method_call_return_type(get_sym, obj_expr.expr_type)
+                        .ok()
+                        .or_else(|| self.extract_wrapper_inner_type(obj_expr.expr_type))
                         .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type());
                     let location = obj_expr.source_location;
                     let lifetime_id = obj_expr.lifetime_id;
