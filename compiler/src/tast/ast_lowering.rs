@@ -4607,25 +4607,35 @@ impl<'a> AstLowering<'a> {
         // (current file's lowering) but fall back to the shared SymbolTable
         // for cross-file lookups (e.g. user file calling `new Arc(value)`
         // when `Arc.hx` was lowered in a different ast_lowering instance).
-        let type_param_ids: Vec<TypeId> = if let Some(ids) = self.class_type_params.get(&class_symbol) {
-            ids.clone()
-        } else if let Some(ids) = self.context.symbol_table.get_class_type_params(class_symbol) {
-            ids.clone()
-        } else {
-            return None;
-        };
+        let type_param_ids: Vec<TypeId> =
+            if let Some(ids) = self.class_type_params.get(&class_symbol) {
+                ids.clone()
+            } else if let Some(ids) = self
+                .context
+                .symbol_table
+                .get_class_type_params(class_symbol)
+            {
+                ids.clone()
+            } else {
+                return None;
+            };
         if type_param_ids.is_empty() {
             return None;
         }
 
         // Get constructor symbol and its function type — same fallback chain.
-        let ctor_symbol = if let Some(s) = self.class_constructor_symbols.get(&class_symbol).copied() {
-            s
-        } else if let Some(s) = self.context.symbol_table.get_class_constructor(class_symbol) {
-            s
-        } else {
-            return None;
-        };
+        let ctor_symbol =
+            if let Some(s) = self.class_constructor_symbols.get(&class_symbol).copied() {
+                s
+            } else if let Some(s) = self
+                .context
+                .symbol_table
+                .get_class_constructor(class_symbol)
+            {
+                s
+            } else {
+                return None;
+            };
         let ctor_type_id = self.context.symbol_table.get_symbol(ctor_symbol)?.type_id;
         let param_type_ids = {
             let tt = self.context.type_table.borrow();
