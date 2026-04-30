@@ -428,6 +428,12 @@ pub struct BladeMethodInfo {
     pub is_inline: bool,
     /// Type parameters for generic methods
     pub type_params: Vec<String>,
+    /// Native name from `@:native` metadata (e.g. `to_haxe_string`).
+    /// Used by stdlib runtime mapping when the Haxe method name differs
+    /// from the FFI symbol. `#[serde(default)]` so older cache files
+    /// without this field deserialise as `None`.
+    #[serde(default)]
+    pub native_name: Option<String>,
 }
 
 /// Complete symbol information for a class
