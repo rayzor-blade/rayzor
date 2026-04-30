@@ -624,6 +624,14 @@ enum TypeSubstitutionResult {
         base_type: TypeId,
         type_args: Vec<TypeId>,
     },
+    /// Need to create a concrete generic Class with these type arguments
+    /// (e.g. `MutexGuard<State>` substituted from `MutexGuard<T>`).
+    /// Used when the return type is a `TypeKind::Class` with non-empty
+    /// `type_args`, distinguishing from `GenericInstance`.
+    NeedClassInstance {
+        symbol_id: SymbolId,
+        type_args: Vec<TypeId>,
+    },
 }
 
 impl<'a> AstLowering<'a> {
@@ -11746,6 +11754,14 @@ impl<'a> AstLowering<'a> {
                 .type_table
                 .borrow_mut()
                 .create_generic_instance(base_type, type_args)),
+            TypeSubstitutionResult::NeedClassInstance {
+                symbol_id,
+                type_args,
+            } => Ok(self
+                .context
+                .type_table
+                .borrow_mut()
+                .create_class_type(symbol_id, type_args)),
         }
     }
 
@@ -11783,6 +11799,27 @@ impl<'a> AstLowering<'a> {
                 } else {
                     return TypeSubstitutionResult::NoChange(return_type);
                 }
+            }
+            crate::tast::core::TypeKind::Class {
+                symbol_id,
+                type_args,
+            } if !type_args.is_empty() => {
+                // Concrete generic class instance like `Mutex<State>` —
+                // type_args holds the concrete substitution. Derive the
+                // base parameter list from the class symbol's TypeParameter
+                // record (lifted onto SymbolTable so cross-file lookups
+                // see it).
+                let params = self
+                    .context
+                    .symbol_table
+                    .get_class_type_params(*symbol_id)
+                    .cloned()
+                    .or_else(|| self.class_type_params.get(symbol_id).cloned())
+                    .unwrap_or_default();
+                if params.is_empty() {
+                    return TypeSubstitutionResult::NoChange(return_type);
+                }
+                (params, type_args.clone())
             }
             _ => return TypeSubstitutionResult::NoChange(return_type),
         };
@@ -11861,10 +11898,8 @@ impl<'a> AstLowering<'a> {
                             new_type_args.push(new_arg);
                             changed = true;
                         }
-                        TypeSubstitutionResult::NeedGenericInstance {
-                            base_type,
-                            type_args,
-                        } => {
+                        TypeSubstitutionResult::NeedGenericInstance { .. }
+                        | TypeSubstitutionResult::NeedClassInstance { .. } => {
                             // Would need to create nested type - for now just use the original
                             // This is a limitation, but handles most common cases
                             new_type_args.push(*arg);
@@ -11881,6 +11916,39 @@ impl<'a> AstLowering<'a> {
                     }
                     return TypeSubstitutionResult::NeedGenericInstance {
                         base_type: *base_type,
+                        type_args: new_type_args,
+                    };
+                }
+                TypeSubstitutionResult::NoChange(return_type)
+            }
+            crate::tast::core::TypeKind::Class {
+                symbol_id,
+                type_args: ret_type_args,
+            } if !ret_type_args.is_empty() => {
+                // Generic class return type (e.g. `MutexGuard<T>` from
+                // `Mutex.lock()`). Same recursive substitution as the
+                // `GenericInstance` arm — needed for nested wrappers like
+                // `Arc<Mutex<T>>` where `lock()`'s return type is
+                // serialised as a Class with TypeParameter args rather
+                // than a GenericInstance.
+                let mut new_type_args = Vec::with_capacity(ret_type_args.len());
+                let mut changed = false;
+                for arg in ret_type_args {
+                    match self.compute_type_substitution(*arg, receiver_type, type_table) {
+                        TypeSubstitutionResult::NoChange(_) => new_type_args.push(*arg),
+                        TypeSubstitutionResult::DirectSubstitution(new_arg) => {
+                            new_type_args.push(new_arg);
+                            changed = true;
+                        }
+                        TypeSubstitutionResult::NeedGenericInstance { .. }
+                        | TypeSubstitutionResult::NeedClassInstance { .. } => {
+                            new_type_args.push(*arg);
+                        }
+                    }
+                }
+                if changed {
+                    return TypeSubstitutionResult::NeedClassInstance {
+                        symbol_id: *symbol_id,
                         type_args: new_type_args,
                     };
                 }
