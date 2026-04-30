@@ -21533,15 +21533,27 @@ impl<'a> HirToMirContext<'a> {
             }
 
             Some(TypeKind::String) => {
-                debug!("[BOXING] Auto-boxing String to Dynamic using haxe_box_string_ptr");
+                // Use `haxe_box_haxestring_ptr`, NOT `haxe_box_string_ptr`.
+                // The former wraps an existing HaxeString struct pointer
+                // directly. The latter expects a null-terminated C string
+                // and runs `strlen` — feeding it a HaxeString* (whose
+                // first 8 bytes are the inner data pointer, not bytes
+                // of UTF-8) corrupts the boxed content and produces
+                // empty/garbage when `haxe_std_string_ptr` later reads
+                // it back during e.g. `trace("prefix: " + d)`.
+                debug!("[BOXING] Auto-boxing String to Dynamic via haxe_box_haxestring_ptr");
                 let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let value_as_ptr = self
+                    .builder
+                    .build_bitcast(value, ptr_u8.clone())
+                    .unwrap_or(value);
                 let box_func_id = self.get_or_register_extern_function(
-                    "haxe_box_string_ptr",
-                    vec![IrType::String],
+                    "haxe_box_haxestring_ptr",
+                    vec![ptr_u8.clone()],
                     ptr_u8.clone(),
                 );
                 self.builder
-                    .build_call_direct(box_func_id, vec![value], ptr_u8)
+                    .build_call_direct(box_func_id, vec![value_as_ptr], ptr_u8)
             }
 
             // Abstract, TypeParam, etc. — skip boxing for unsupported types
