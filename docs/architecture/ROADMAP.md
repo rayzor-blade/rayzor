@@ -36,9 +36,10 @@ These block legitimate Haxe code from running. Do these first.
 
 ### 2. Deref Coercion for Wrapper Types ([Known Issues](BACKLOG.md#known-issues))
 
-- [ ] Detect method/field access on `Arc<T>`, `MutexGuard<T>` and similar
-- [ ] Auto-insert `.get()` during MIR lowering
-- [ ] Handle nested wrappers (e.g. `Arc<Mutex<T>>`)
+- [x] **Field access** on `Arc<T>` / `MutexGuard<T>` auto-inserts `.get()` (commit `19acb3a`, 2026-04-30) — `arc.value` desugars to `arc.get().value` during TAST lowering when the field doesn't exist on the wrapper.
+- [ ] **Method calls** on inner type — `arc.someMethod()` still requires explicit `.get()`. Same hook needs to land in `lower_call_expression`'s Field branch; the chained-`MethodCall` resolution path in `resolve_method_symbol` needs hardening before this works without SIGSEGV-ing.
+- [ ] **Nested wrappers** (e.g. `Arc<Mutex<T>>`) — single-level works, but a chain like `arc.get().lock().field` doesn't yet auto-deref both layers. Inner-type extraction loses generic info when the class type is registered with empty `type_args` (common for stdlib extern classes).
+- [ ] Optional `@:autoDeref` metadata on user classes (currently the wrapper list is hardcoded to `rayzor.concurrent.Arc` and `rayzor.concurrent.MutexGuard` by qualified name).
 
 Affects ergonomics of every concurrency program — user shouldn't need to call `.get()` to reach the inner value.
 
