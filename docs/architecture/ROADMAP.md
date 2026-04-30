@@ -16,7 +16,7 @@ unchecked items + 🟡/🔴/⏸️ status markers.
 |---|---|---|
 | Tensor (CPU) | 🔴 Not started | [§14.2](BACKLOG.md#142-rayzordstensor-cpu) |
 | GPU Compute Phase 4–7 | 🟡 Phases 1–3 done; reductions/matmul/fusion/cross-platform pending | [§14.3](BACKLOG.md#143-rayzor-gpu-plugin) |
-| Networking | 🔴 Host/Socket/SSL not started | [§6.6](BACKLOG.md#66-not-implemented---low-priority) |
+| Networking | ✅ Host/Socket/UdpSocket/SSL all shipped (was misclassified — no work pending) | [§6.6](BACKLOG.md#66-not-implemented---low-priority) |
 | Documentation | 🟡 Core docs exist; user guides missing | [§10](BACKLOG.md#10-documentation) |
 | Testing infrastructure | 🟡 Unit + e2e green; fuzzing/perf-suite missing | [§9](BACKLOG.md#9-testing-infrastructure) |
 | Diagnostics — LSP / warnings | 🟡 Errors solid; IDE integration absent | [§7](BACKLOG.md#7-error-recovery--diagnostics) |
@@ -30,13 +30,9 @@ unchecked items + 🟡/🔴/⏸️ status markers.
 
 These block legitimate Haxe code from running. Do these first.
 
-### 1. Networking ([§6.6](BACKLOG.md#66-not-implemented---low-priority))
+### 1. ~~Networking~~ ✅ DONE (was misclassified in backlog)
 
-- [ ] `sys.net.Host` — DNS resolution
-- [ ] `sys.net.Socket` — TCP/UDP sockets
-- [ ] `sys.ssl.*` — SSL/TLS support
-
-Async runtime is in place (Future<T> + @:async, [§2](BACKLOG.md#2-asyncawait-system) ✅), so the prerequisite is satisfied. Networking is the largest remaining stdlib gap.
+`sys.net.Host`, `sys.net.Socket`, `sys.net.UdpSocket`, `sys.net.Address`, `sys.ssl.Socket` (rustls-backed) and friends are all shipped with runtime backing and stdlib mappings. Verified by `socket_host_basic` and `host_localhost` e2e tests.
 
 ### 2. Deref Coercion for Wrapper Types ([Known Issues](BACKLOG.md#known-issues))
 
@@ -46,13 +42,9 @@ Async runtime is in place (Future<T> + @:async, [§2](BACKLOG.md#2-asyncawait-sy
 
 Affects ergonomics of every concurrency program — user shouldn't need to call `.get()` to reach the inner value.
 
-### 3. `@:native` Metadata Ignored on Extern Abstract Methods ([Known Issues](BACKLOG.md#known-issues))
+### 3. ~~`@:native` Metadata Ignored on Extern Abstract Methods~~ ✅ DONE (2026-04-30)
 
-- [ ] Process `@:native` during BLADE cache deserialization, **or**
-- [ ] Process `@:native` on extern abstract methods post-cache, **or**
-- [ ] Store `native_name` in the BLADE cache format itself
-
-Currently runtime mappings have to use the Haxe method name to compensate; defeats the purpose of `@:native`.
+`BladeMethodInfo.native_name` now persists across cache, `register_method_from_blade` restores it on load, and codegen paths that consult `symbol.native_name` work for cached methods. See commit `e8d2b1d`.
 
 ---
 

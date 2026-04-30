@@ -867,10 +867,17 @@ Thread.spawn(() -> {
 
 ### 6.6 Not Implemented - LOW PRIORITY 🔴
 
-**Networking (requires async)**
-- Host - DNS resolution
-- Socket - TCP/UDP sockets
-- sys.ssl.* - SSL/TLS support
+**Networking (✅ already implemented — was misclassified)**
+- ✅ `sys.net.Host` — DNS resolution via `rayzor_host_*` runtime
+  functions, extern class at `compiler/haxe-std/sys/net/Host.hx`
+- ✅ `sys.net.Socket` — TCP sockets via `rayzor_socket_*`
+- ✅ `sys.net.UdpSocket` — UDP sockets
+- ✅ `sys.net.Address`, `SocketInput`, `SocketOutput` — extern classes shipped
+- ✅ `sys.ssl.*` — SSL/TLS via `rayzor_ssl_socket_*` (rustls-backed),
+  with `sys.ssl.Socket`, `Certificate`, `Key`, `Digest`,
+  `DigestAlgorithm`. End-to-end stdlib mappings in
+  `runtime_mapping.rs`. Verified by `socket_host_basic` and
+  `host_localhost` e2e tests.
 
 **System Threading (alternative to rayzor.concurrent)**
 - sys.thread.Tls<T> — extern class shipped in `compiler/haxe-std/sys/thread/Tls.hx`, but no runtime backing yet (no `sys_tls_*` functions, no stdlib mapping)
@@ -2302,21 +2309,14 @@ var value = arc.get();  // Must explicitly call .get()
 - Handle nested wrappers (e.g., `Arc<Mutex<T>>`)
 
 ### @:native Metadata Ignored on Extern Abstract Methods
-**Status:** Bug (workaround in place)
-**Affected Types:** `rayzor.CString`, `rayzor.Usize`, `rayzor.Ptr`, and any stdlib extern abstract
+**Status:** ✅ FIXED (2026-04-30)
+**Affected Types:** ~~`rayzor.CString`, `rayzor.Usize`, `rayzor.Ptr`, and any stdlib extern abstract~~
 
-`@:native` metadata on extern abstract method declarations (e.g., `@:native("to_haxe_string") public function toHaxeString():String`) is not processed during stdlib BLADE cache loading. The `symbol.native_name` field remains `None` for all stdlib extern abstract methods.
+Previously, `@:native` metadata on extern abstract method declarations was not processed during stdlib BLADE cache loading — `symbol.native_name` remained `None` for all stdlib extern abstract methods loaded from cache.
 
-This means `get_stdlib_runtime_info` cannot use the declared native name to look up the correct runtime mapping — it must use the Haxe method name (`symbol.name`) instead.
+**Fix:** `BladeMethodInfo` now carries `native_name: Option<String>` (with `#[serde(default)]` for cache-format back-compat). `preblade::extract_method_from_ast` extracts `@:native(...)` from each method's field-level metadata. `compilation::register_method_from_blade` restores `sym.native_name` and sets `SymbolFlags::NATIVE` when the cached method has it. Codegen paths that consult `symbol.native_name` (e.g. `is_stdlib_class_by_symbol`, the class-level `@:native` lookup in `get_stdlib_runtime_info`'s FALLBACK 1.5) now work for cached methods identically to AST-lowered ones.
 
-**Workaround:** Runtime mapping keys in `runtime_mapping.rs` use Haxe method names (e.g., `"toHaxeString"`) instead of the `@:native` names (e.g., `"to_haxe_string"`). This works but defeats the purpose of `@:native`.
-
-**Root Cause:** Stdlib types are loaded via the BLADE cache path, which deserializes pre-built symbols. The `@:native` metadata processing added in `lower_function_from_field` (ast_lowering.rs) only runs for user-defined types, not for stdlib types loaded from cache.
-
-**Fix Required:**
-- Process `@:native` metadata during BLADE cache deserialization, or
-- Process `@:native` on extern abstract methods during stdlib loading (post-cache), or
-- Store `native_name` in the BLADE cache format itself
+**Note:** `runtime_mapping.rs` keys are still by Haxe method name; switching to native-name keys is independent of this fix.
 
 ### String Concatenation with Trace
 **Status:** ✅ FIXED (2026-01-30)
