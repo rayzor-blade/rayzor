@@ -1310,6 +1310,14 @@ impl CompilationUnit {
                 effects: crate::tast::core::FunctionEffects::default(),
             });
 
+        // Resolve native_name from the cached `@:native` metadata before we
+        // open the borrow, so we can intern the string without aliasing
+        // `self.symbol_table`.
+        let native_name_interned = method
+            .native_name
+            .as_ref()
+            .map(|n| self.string_interner.intern(n));
+
         // Update symbol with type and flags
         if let Some(sym) = self.symbol_table.get_symbol_mut(method_symbol) {
             sym.type_id = func_type;
@@ -1327,6 +1335,14 @@ impl CompilationUnit {
                     .string_interner
                     .intern(&format!("{}.{}", class_name, method.name));
                 sym.qualified_name = Some(method_qualified_name);
+            }
+            // Restore `@:native("foo")` from the BLADE cache. Without this,
+            // stdlib runtime mappings have to be keyed by Haxe method name
+            // (defeating the purpose of `@:native`), and FFI symbol lookup
+            // through `sym.native_name` always finds None for cached types.
+            if let Some(native_interned) = native_name_interned {
+                sym.native_name = Some(native_interned);
+                sym.flags = sym.flags.union(SymbolFlags::NATIVE);
             }
         }
 
