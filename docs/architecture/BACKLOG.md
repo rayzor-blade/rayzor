@@ -2291,31 +2291,38 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 ## Known Issues
 
 ### Deref Coercion for Wrapper Types
-**Status:** 🟡 Field access shipped (2026-04-30, commit `19acb3a`); method calls + nested wrappers pending
+**Status:** 🟡 Single-level field + method deref shipped (2026-04-30); nested wrappers still pending
 **Affected Types:** `Arc<T>`, `MutexGuard<T>`
 
-Wrapper types like `Arc<T>` and `MutexGuard<T>` transparently forward field access to their inner type. `arc.field` desugars to `arc.get().field` during TAST lowering when the field doesn't exist on the wrapper.
+Wrapper types like `Arc<T>` and `MutexGuard<T>` transparently forward field/method access to their inner type. `arc.field` and `arc.method()` desugar to `arc.get().field` / `arc.get().method()` during TAST lowering when the member doesn't exist on the wrapper.
 
-**What works (single-level field access):**
+**What works:**
 ```haxe
 var arc = new Arc(new SharedData(42));
-var v = arc.value;          // ✅ desugars to arc.get().value
+var v = arc.value;            // ✅ field deref
+var d = arc.double();         // ✅ method deref (commit d145433, 2026-04-30)
+
+var m = new Mutex(new State(99));
+var g = m.lock();
+var x = g.x;                  // ✅ MutexGuard field deref
 ```
 
 **Still requires explicit `.get()`:**
 ```haxe
-var arc = new Arc(new Calculator(21));
-var d = arc.double();       // ❌ — method calls don't auto-deref yet
-var d = arc.get().double(); // workaround
-
-var arc2 = new Arc(new Mutex(new State(99)));
-var v = arc2.get().lock().field; // ❌ — nested wrappers need explicit chain
+var arc = new Arc(new Mutex(new State(99)));
+var v = arc.get().lock().get().x;  // ❌ implicit `.get()` chain doesn't work
+                                   //    on the MutexGuard returned by lock()
 ```
 
-**Remaining work:**
-- Method calls — same hook in `lower_call_expression`'s Field branch; needs `resolve_method_symbol` hardening for chained-`MethodCall` receivers (current attempt SIGSEGV's at runtime).
-- Nested wrappers (`Arc<Mutex<T>>`) — extracting T from the inner generic instance when class.type_args is empty (common for stdlib extern classes loaded from BLADE).
-- Optional `@:autoDeref` metadata so user classes can opt in (currently hardcoded to `rayzor.concurrent.Arc` / `rayzor.concurrent.MutexGuard`).
+**Remaining work — blocked on `compute_type_substitution` recursion:**
+
+The cross-file generic-class metadata pipeline is now fixed (commit `d145433`): `class_type_params` and `class_constructor_symbols` were lifted from `AstLoweringContext` onto `SymbolTable`, making `infer_type_args_from_constructor` succeed for stdlib `Arc<T>` / `MutexGuard<T>` regardless of which file declared them. With that, `arc.get()` returns the substituted concrete type, and the method-deref hook in `lower_call_expression` works.
+
+Nested wrappers fail because `compute_type_substitution` (in `ast_lowering.rs`) doesn't recurse into nested generic receiver types when substituting `TypeParameter`s. For `m.lock()` where `m: Mutex<State>` returning `MutexGuard<T>`, the substitution should walk `MutexGuard<T>` → find `T` → substitute with `State` from `m`'s type_args → produce `MutexGuard<State>`. Currently it returns `MutexGuard` with empty type_args, so `guard.x` deref ends up with a `Dynamic` inner type and SIGSEGV's at runtime.
+
+Follow-ups:
+1. Make `compute_type_substitution` recurse into `Class { type_args }` and `GenericInstance { type_args }` when substituting TypeParameters in the return type, so `MutexGuard<T>` substituted with `T → State` becomes `MutexGuard<State>`.
+2. Optional: `@:autoDeref` metadata so user classes can opt in (currently hardcoded to `rayzor.concurrent.Arc` / `rayzor.concurrent.MutexGuard`).
 
 ### @:native Metadata Ignored on Extern Abstract Methods
 **Status:** ✅ FIXED (2026-04-30)

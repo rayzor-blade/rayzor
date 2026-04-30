@@ -36,12 +36,12 @@ These block legitimate Haxe code from running. Do these first.
 
 ### 2. Deref Coercion for Wrapper Types ([Known Issues](BACKLOG.md#known-issues))
 
-- [x] **Field access** on `Arc<T>` / `MutexGuard<T>` auto-inserts `.get()` (commit `19acb3a`, 2026-04-30) — `arc.value` desugars to `arc.get().value` during TAST lowering when the field doesn't exist on the wrapper.
-- [ ] **Method calls** on inner type — `arc.someMethod()` still requires explicit `.get()`. Same hook needs to land in `lower_call_expression`'s Field branch; the chained-`MethodCall` resolution path in `resolve_method_symbol` needs hardening before this works without SIGSEGV-ing.
-- [ ] **Nested wrappers** (e.g. `Arc<Mutex<T>>`) — single-level works, but a chain like `arc.get().lock().field` doesn't yet auto-deref both layers. Inner-type extraction loses generic info when the class type is registered with empty `type_args` (common for stdlib extern classes).
+- [x] **Field access** on `Arc<T>` / `MutexGuard<T>` auto-inserts `.get()` (commit `19acb3a`, 2026-04-30) — `arc.value` desugars to `arc.get().value`.
+- [x] **Method calls** on inner type (commit `d145433`, 2026-04-30) — `arc.double()` auto-inserts `.get()`. The fix lifted `class_type_params` + `class_constructor_symbols` from per-`AstLoweringContext` state onto `SymbolTable` so generic-class metadata propagates across files; `infer_type_args_from_constructor` now succeeds for stdlib `Arc<T>`/`MutexGuard<T>`. Mirror hook added in `lower_call_expression`.
+- [ ] **Nested wrappers** (`Arc<Mutex<T>>`) — separate bug in `compute_type_substitution`. `arc.get().lock()` returns a `MutexGuard` with empty type_args because the substitution doesn't recurse into nested generic receiver types when computing `MutexGuard<T>` → `MutexGuard<State>`. So `guard.x` deref produces `Dynamic` instead of `State` and SIGSEGV's at runtime. Single-level wrappers work fine; nested still requires explicit `.get()` chain.
 - [ ] Optional `@:autoDeref` metadata on user classes (currently the wrapper list is hardcoded to `rayzor.concurrent.Arc` and `rayzor.concurrent.MutexGuard` by qualified name).
 
-Affects ergonomics of every concurrency program — user shouldn't need to call `.get()` to reach the inner value.
+Affects ergonomics of every concurrency program — single-level cases now ergonomic.
 
 ### 3. ~~`@:native` Metadata Ignored on Extern Abstract Methods~~ ✅ DONE (2026-04-30)
 
