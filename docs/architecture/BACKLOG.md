@@ -2291,22 +2291,31 @@ Features are ranked by **impact** (how much real Haxe code they block) and **com
 ## Known Issues
 
 ### Deref Coercion for Wrapper Types
-**Status:** Not Implemented
-**Affected Types:** Arc<T>, MutexGuard<T>, and similar wrapper types
+**Status:** 🟡 Field access shipped (2026-04-30, commit `19acb3a`); method calls + nested wrappers pending
+**Affected Types:** `Arc<T>`, `MutexGuard<T>`
 
-Wrapper types like `Arc<T>` and `MutexGuard<T>` were designed to transparently forward method/field access to their inner type (similar to Rust's `Deref` trait). Currently, users must explicitly call `.get()` to access the inner value.
+Wrapper types like `Arc<T>` and `MutexGuard<T>` transparently forward field access to their inner type. `arc.field` desugars to `arc.get().field` during TAST lowering when the field doesn't exist on the wrapper.
 
-**Workaround:** Use explicit `.get()` calls:
+**What works (single-level field access):**
 ```haxe
-var arc = Arc.init(42);
-var value = arc.get();  // Must explicitly call .get()
-// Instead of: var value = arc;  // Would implicitly deref
+var arc = new Arc(new SharedData(42));
+var v = arc.value;          // ✅ desugars to arc.get().value
 ```
 
-**Future Implementation:**
-- Detect method/field access on wrapper types
-- Automatically insert `.get()` calls during MIR lowering
-- Handle nested wrappers (e.g., `Arc<Mutex<T>>`)
+**Still requires explicit `.get()`:**
+```haxe
+var arc = new Arc(new Calculator(21));
+var d = arc.double();       // ❌ — method calls don't auto-deref yet
+var d = arc.get().double(); // workaround
+
+var arc2 = new Arc(new Mutex(new State(99)));
+var v = arc2.get().lock().field; // ❌ — nested wrappers need explicit chain
+```
+
+**Remaining work:**
+- Method calls — same hook in `lower_call_expression`'s Field branch; needs `resolve_method_symbol` hardening for chained-`MethodCall` receivers (current attempt SIGSEGV's at runtime).
+- Nested wrappers (`Arc<Mutex<T>>`) — extracting T from the inner generic instance when class.type_args is empty (common for stdlib extern classes loaded from BLADE).
+- Optional `@:autoDeref` metadata so user classes can opt in (currently hardcoded to `rayzor.concurrent.Arc` / `rayzor.concurrent.MutexGuard`).
 
 ### @:native Metadata Ignored on Extern Abstract Methods
 **Status:** ✅ FIXED (2026-04-30)
