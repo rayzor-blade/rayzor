@@ -18,4 +18,28 @@ extern class GpuBuffer {
     /** Get the dtype tag of this buffer. */
     @:native("gpu_buffer_dtype")
     public function dtype():rayzor.ds.DType;
+
+    /**
+     * Element-wise GPU addition (`a + b`).
+     * Returns a new lazy GpuBuffer; the underlying kernel runs when the
+     * result is read back via `GPUCompute.toTensor` / `.sum` / etc.
+     */
+    @:native("gpu_buffer_add")
+    @:op(A + B)
+    public function add(other:GpuBuffer):GpuBuffer;
+
+    /** Element-wise GPU subtraction (`a - b`). */
+    @:native("gpu_buffer_sub")
+    @:op(A - B)
+    public function sub(other:GpuBuffer):GpuBuffer;
+
+    /** Element-wise GPU multiplication (`a * b`). */
+    @:native("gpu_buffer_mul")
+    @:op(A * B)
+    public function mul(other:GpuBuffer):GpuBuffer;
+
+    /** Element-wise GPU division (`a / b`). */
+    @:native("gpu_buffer_div")
+    @:op(A / B)
+    public function div(other:GpuBuffer):GpuBuffer;
 }

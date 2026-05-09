@@ -105,6 +105,12 @@ declare_native_methods! {
     // GpuBuffer instance methods
     "rayzor_gpu_GpuBuffer",  "numel",        instance, "rayzor_gpu_compute_buffer_numel",  [Ptr]           => I64;
     "rayzor_gpu_GpuBuffer",  "dtype",        instance, "rayzor_gpu_compute_buffer_dtype",  [Ptr]           => I64;
+    // GpuBuffer @:op overloads — `a + b` desugars to `a.add(b)` etc.
+    // Reuses binary_lazy under the hood (no ctx needed; lazy DAG only).
+    "rayzor_gpu_GpuBuffer",  "add",          instance, "rayzor_gpu_buffer_add",            [Ptr, Ptr]      => Ptr;
+    "rayzor_gpu_GpuBuffer",  "sub",          instance, "rayzor_gpu_buffer_sub",            [Ptr, Ptr]      => Ptr;
+    "rayzor_gpu_GpuBuffer",  "mul",          instance, "rayzor_gpu_buffer_mul",            [Ptr, Ptr]      => Ptr;
+    "rayzor_gpu_GpuBuffer",  "div",          instance, "rayzor_gpu_buffer_div",            [Ptr, Ptr]      => Ptr;
 
     // ======================================================================
     // GPU Graphics (render pipeline)
@@ -289,6 +295,23 @@ mod native_plugin {
             (
                 "rayzor_gpu_compute_div",
                 ops::rayzor_gpu_compute_div as *const u8,
+            ),
+            // GpuBuffer @:op binary ops — same dispatch, no ctx parameter
+            (
+                "rayzor_gpu_buffer_add",
+                ops::rayzor_gpu_buffer_add as *const u8,
+            ),
+            (
+                "rayzor_gpu_buffer_sub",
+                ops::rayzor_gpu_buffer_sub as *const u8,
+            ),
+            (
+                "rayzor_gpu_buffer_mul",
+                ops::rayzor_gpu_buffer_mul as *const u8,
+            ),
+            (
+                "rayzor_gpu_buffer_div",
+                ops::rayzor_gpu_buffer_div as *const u8,
             ),
             // Unary elementwise ops
             (
