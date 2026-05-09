@@ -123,9 +123,9 @@ runtime functions via a stdlib-mapping fallback in MIR property dispatch.
 
 The other `sys.thread.*` primitives (Lock, Mutex, Semaphore, Condition, Deque) are already implemented — see [§3.2](BACKLOG.md#32-channel-system-message-passing) / [§3.3](BACKLOG.md#33-synchronization-primitives).
 
-### 9. Channel `select` Macro ([§3.2](BACKLOG.md#32-channel-system-message-passing))
+### 9. ~~Channel `select`~~ ✅ DONE ([§3.2](BACKLOG.md#32-channel-system-message-passing))
 
-- [ ] Multi-channel `Select` class / macro for non-deterministic receive across multiple channels (Go-style `select { case <-ch1: ...; case <-ch2: ... }`).
+- [x] `rayzor.concurrent.Select` class with `recv` (blocking) and `tryRecv` (non-blocking) static methods, returning `SelectResult<T>` (commit `5c9ea21`, 2026-05-09). Polling-based; future revision can switch to shared-notify condvar without API change.
 
 ### 10. Inline C / TinyCC Polish ([§13.7](BACKLOG.md#137-remaining--future-enhancements))
 
