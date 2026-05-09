@@ -117,9 +117,9 @@ Phase 7 has Metal, WebGPU, and CUDA shipped — only Vulkan and OpenCL remain.
 - [x] E2E test `tls_basic` in `test_rayzor_stdlib_e2e.rs`
 
 Implementation note: the `value(get, set)` *property syntax* on extern
-classes still doesn't auto-dispatch through `lower_field_access` — callers
-write `t.get_value()` / `t.set_value(v)` explicitly. Filed as a polish
-follow-up; the runtime + stdlib mapping themselves are correct.
+classes was wired in commit `957fbde` (2026-05-09) — `tls.value` and
+`tls.value = v` both compile and dispatch through the @:native-bound
+runtime functions via a stdlib-mapping fallback in MIR property dispatch.
 
 The other `sys.thread.*` primitives (Lock, Mutex, Semaphore, Condition, Deque) are already implemented — see [§3.2](BACKLOG.md#32-channel-system-message-passing) / [§3.3](BACKLOG.md#33-synchronization-primitives).
 
