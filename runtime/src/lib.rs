@@ -68,6 +68,7 @@ pub mod cstring_runtime;
 
 // Tensor runtime — N-dimensional array (rayzor.ds.Tensor)
 pub mod tensor;
+pub mod tensor_simd;
 
 // TinyCC runtime API (rayzor.runtime.CC)
 #[cfg(feature = "tcc-runtime")]
