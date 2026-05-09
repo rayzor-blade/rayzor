@@ -68,25 +68,29 @@ ML / numerical workloads need a Tensor type even before GPU.
 
 ### 5. GPU Compute — Phases 4 to 7 ([§14.3](BACKLOG.md#143-rayzor-gpu-plugin))
 
-Phases 1–3 (Metal device + buffers + MSL elementwise kernels, 15 tests) are ✅ shipped. Remaining:
+Phases 1–6 are ✅ shipped (Metal device + buffers + elementwise kernels +
+tree-reduction kernels + tiled matmul + `@:gpuStruct` + lazy fusion DAG).
+Phase 7 has Metal, WebGPU, and CUDA shipped — only Vulkan and OpenCL remain.
 
-#### Phase 4 — Reductions + Matmul
-- [ ] Tree-reduction kernels (sum, mean, max, min) with threadgroup shared memory
-- [ ] Tiled 16×16 shared-memory matmul
-- [ ] Dot product
+#### Phase 4 ✅ Reductions + Matmul
+- [x] Tree-reduction kernels (sum, mean, max, min) with threadgroup shared memory (MSL + CUDA + WGSL)
+- [x] Tiled 16×16 shared-memory matmul with FMA (MSL + CUDA + WGSL)
+- [x] Dot product (elementwise mul + reduce-sum)
+- [x] Batch matmul
 
-#### Phase 5 — Compute Data Structures (`@:gpuStruct`)
-- [ ] `@:gpuStruct` annotation (GPU-aligned flat structs, 4-byte floats)
-- [ ] Structured buffer create / alloc / read
-- [ ] MSL/CUDA typedef generation via `gpuDef()`
+#### Phase 5 ✅ Compute Data Structures (`@:gpuStruct`)
+- [x] `@:gpuStruct` annotation + symbol flag
+- [x] GPU-compatible layout precomputation
+- [x] Auto-injected `gpuDef()` / `gpuSize()` / `gpuAlignment()`
 
-#### Phase 6 — Kernel Fusion
-- [ ] Lazy evaluation DAG for elementwise op chains
-- [ ] Fused kernel codegen (`a.add(b).mul(c).relu()` → single kernel)
+#### Phase 6 ✅ Kernel Fusion
+- [x] Lazy evaluation DAG for elementwise op chains
+- [x] Fused kernel codegen (`a.add(b).mul(c).relu()` → single kernel)
+- [x] Fused-kernel cache keyed by DAG hash
 
-#### Phase 7 — Additional Backends
-- [ ] CUDA backend (NVRTC) — NVIDIA GPUs
-- [ ] WebGPU backend (wgpu) — cross-platform
+#### Phase 7 🟡 Additional Backends — 3 of 4 shipped
+- [x] CUDA backend (NVRTC) — NVIDIA GPUs
+- [x] WebGPU backend (wgpu) — cross-platform
 - [ ] Vulkan backend (SPIR-V) — Windows / Linux / Android
 - [ ] OpenCL backend — cross-platform legacy
 

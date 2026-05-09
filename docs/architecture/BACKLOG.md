@@ -1582,23 +1582,28 @@ Strategy: Tinygrad-style source code emission (Kernel IR → text per backend �
 - [x] Unary ops: gpu.neg/abs/sqrt/exp/log/relu(buf) → bufResult
 - [x] 15 GPU tests passing (codegen + Metal integration + ops)
 
-**Phase 4 — Reductions + Matmul**
-- [ ] Tree-reduction kernels (sum, mean, max, min) with threadgroup shared memory
-- [ ] Tiled 16x16 shared-memory matmul
-- [ ] Dot product
+**Phase 4 ✅ Reductions + Matmul**
+- [x] Tree-reduction kernels (sum, mean, max, min) with threadgroup shared memory (`codegen/{msl,cuda,wgsl}_reduction.rs`)
+- [x] Tiled 16x16 shared-memory matmul with FMA (`codegen/{msl,cuda,wgsl}_matmul.rs`)
+- [x] Dot product (`gpu_compute_dot` = elementwise mul + sum)
+- [x] Batch matmul (`gpu_compute_batch_matmul`)
+- [x] E2E tests: `compiler/tests/gpu/test_gpu_matmul.hx`
 
-**Phase 5 — Compute Data Structures (@:gpuStruct)**
-- [ ] `@:gpuStruct` annotation (GPU-aligned flat structs, 4-byte floats)
-- [ ] Structured buffer create/alloc/read
-- [ ] MSL/CUDA typedef generation via `gpuDef()`
+**Phase 5 ✅ Compute Data Structures (@:gpuStruct)**
+- [x] `@:gpuStruct` annotation + symbol flag bit (`tast/symbols.rs`, `tast/ast_lowering.rs`)
+- [x] GPU-compatible layout precomputation (`hir_to_mir.rs::GpuStructLayout`)
+- [x] Auto-injected synthetic `gpuDef()`, `gpuSize()`, `gpuAlignment()` methods
+- [x] E2E test: `compiler/tests/gpu/test_gpu_struct.hx`
 
-**Phase 6 — Kernel Fusion**
-- [ ] Lazy evaluation DAG for elementwise op chains
-- [ ] Fused kernel codegen (e.g., `a.add(b).mul(c).relu()` → single kernel)
+**Phase 6 ✅ Kernel Fusion**
+- [x] Lazy evaluation DAG for elementwise op chains (`gpu/src/lazy.rs`)
+- [x] Fused kernel codegen — `a.add(b).mul(c).relu()` → single kernel (`codegen/{msl,cuda,wgsl}_fused.rs`)
+- [x] Fused-kernel cache keyed by DAG hash
+- [x] E2E test: `compiler/tests/gpu/test_gpu_fusion.hx`
 
-**Phase 7 — Additional Backends**
-- [ ] CUDA backend (NVRTC) — NVIDIA GPUs
-- [ ] WebGPU backend (wgpu) — cross-platform
+**Phase 7 🟡 Additional Backends (3 of 4 shipped)**
+- [x] CUDA backend (NVRTC) — `gpu/src/cuda/`
+- [x] WebGPU backend (wgpu) — `gpu/src/wgpu_backend/`, cross-platform
 - [ ] Vulkan backend (SPIR-V) — Windows/Linux/Android
 - [ ] OpenCL backend — cross-platform legacy
 
