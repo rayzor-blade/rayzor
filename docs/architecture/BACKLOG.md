@@ -1546,17 +1546,17 @@ All metadata works on both classes and functions. When `__c__()` is used, metada
 - [x] Cranelift + LLVM backend support
 - [x] 16 E2E tests passing
 
-### 14.2 rayzor.ds.Tensor (CPU) 🔴
+### 14.2 rayzor.ds.Tensor (CPU) 🟢 (almost done — SIMD4f vectorisation pending)
 
-- [ ] Tensor type with shape/strides/dtype (extern class, runtime in Rust)
-- [ ] DType enum (F32, F16, BF16, I32, I8, U8)
-- [ ] Construction: zeros, ones, full, fromArray, rand
-- [ ] View ops: reshape, transpose, permute, slice (no-copy via strides)
-- [ ] Elementwise ops: add, sub, mul, div, exp, log, sqrt
-- [ ] Reductions: sum, mean, max, min
-- [ ] Linear algebra: matmul, dot
-- [ ] Activations: relu, gelu, silu, softmax
-- [ ] Normalization: layerNorm, rmsNorm
+- [x] Tensor type with shape/strides/dtype (extern class, runtime in Rust)
+- [x] DType enum (F32, F16, BF16, I32, I8, U8)
+- [x] Construction: zeros, ones, full, fromArray, rand
+- [x] View ops: reshape, transpose, permute, slice (no-copy via strides)
+- [x] Elementwise ops: add, sub, mul, div, exp, log, sqrt
+- [x] Reductions: sum, mean, max, min
+- [x] Linear algebra: matmul, dot
+- [x] Activations: relu, gelu, silu, softmax
+- [x] Normalization: layerNorm, rmsNorm
 - [ ] SIMD4f vectorized CPU paths for f32 ops
 
 ### 14.3 rayzor-gpu Plugin 🟡
