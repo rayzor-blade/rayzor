@@ -4270,6 +4270,23 @@ impl CompilationUnit {
             }
         }
 
+        // Seed cross-file property accessors from loaded stdlib typed files.
+        // Extern-only files like sys/thread/Tls.hx skip MIR generation (handled
+        // by `is_extern_only` above) so their property fields never reach
+        // MirContext::register_class_metadata. Without this seed, user code
+        // like `tls.value` falls through to a "field not found" error.
+        // Equivalent to the BLADE-cache restoration path at line ~3020 but
+        // also covers fresh (uncached) stdlib loads.
+        let stdlib_files: Vec<_> = self
+            .loaded_stdlib_typed_files
+            .iter()
+            .map(|f| f as *const _)
+            .collect();
+        for tf_ptr in stdlib_files {
+            let tf = unsafe { &*tf_ptr };
+            self.seed_property_accessors_from_typed_file(tf);
+        }
+
         // Save external constructor keys to filter them out of the result
         let external_constructor_keys: std::collections::BTreeSet<String> =
             self.import_constructor_name_map.keys().cloned().collect();
@@ -5596,6 +5613,25 @@ impl CompilationUnit {
     /// this extracts the method signatures and registers them as NativePlugin entries.
     /// This makes them visible to the MIR lowerer's StdlibMapping, which otherwise only
     /// knows about methods from rpkg NativePlugins.
+    /// Seed `import_property_access_map` from any property fields declared in
+    /// the given typed file. Without this, extern-only stdlib files (whose MIR
+    /// generation is skipped via the `is_extern_only` shortcut in
+    /// `compile_file`) never populate the property accessor map, so user code
+    /// like `tls.value` falls through to a "field not found" error in MIR
+    /// `lower_field_access`. Each property field's `PropertyAccessInfo` is
+    /// keyed by the field's SymbolId.
+    fn seed_property_accessors_from_typed_file(&mut self, typed_file: &TypedFile) {
+        for class in &typed_file.classes {
+            for field in &class.fields {
+                if let Some(prop_info) = field.property_access.as_ref() {
+                    self.import_property_access_map
+                        .entry(field.symbol_id)
+                        .or_insert_with(|| prop_info.clone());
+                }
+            }
+        }
+    }
+
     fn register_extern_methods_from_typed_file(&mut self, typed_file: &TypedFile) {
         use crate::compiler_plugin::NativePlugin;
         use crate::rpkg::MethodDescEntry;

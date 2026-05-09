@@ -1121,6 +1121,49 @@ class Main {
         .expect_mir_calls(vec!["rayzor_semaphore_acquire", "rayzor_semaphore_release"]),
     );
 
+    // ============================================================================
+    // TLS TESTS — sys.thread.Tls<T> (thread-local storage)
+    // ============================================================================
+    suite.add_test(
+        E2ETestCase::new(
+            "tls_basic",
+            "sys.thread.Tls — value property — set/read on the same thread, distinct slots are isolated",
+            r#"
+package test;
+
+import sys.thread.Tls;
+
+class Box {
+    public var v:Int;
+    public function new(v:Int) { this.v = v; }
+}
+
+class Main {
+    static function main() {
+        var t = new Tls<Box>();
+
+        // Pre-set: null on the current thread.
+        var pre = t.value;
+        if (pre == null) trace("pre_null=true");
+
+        // Set + read on the same thread.
+        t.value = new Box(7);
+        trace(t.value.v);
+
+        // Re-set; the per-thread slot is overwritten.
+        t.value = new Box(99);
+        trace(t.value.v);
+
+        // A second Tls slot is independent of the first.
+        var u = new Tls<Box>();
+        if (u.value == null) trace("u_null=true");
+    }
+}
+"#,
+        )
+        .expect_mir_calls(vec!["sys_tls_new", "sys_tls_set_value", "sys_tls_get_value"]),
+    );
+
     // Run all tests
     let results = suite.run_all();
     suite.print_summary(&results);
