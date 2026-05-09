@@ -1704,7 +1704,7 @@ register_symbol!(
 register_symbol!("rayzor_tensor_get", crate::tensor::rayzor_tensor_get);
 register_symbol!("rayzor_tensor_set", crate::tensor::rayzor_tensor_set);
 
-// Reshape / Transpose
+// Reshape / Transpose / Permute / Slice
 register_symbol!(
     "rayzor_tensor_reshape",
     crate::tensor::rayzor_tensor_reshape
@@ -1713,6 +1713,11 @@ register_symbol!(
     "rayzor_tensor_transpose",
     crate::tensor::rayzor_tensor_transpose
 );
+register_symbol!(
+    "rayzor_tensor_permute",
+    crate::tensor::rayzor_tensor_permute
+);
+register_symbol!("rayzor_tensor_slice", crate::tensor::rayzor_tensor_slice);
 
 // Arithmetic
 register_symbol!("rayzor_tensor_add", crate::tensor::rayzor_tensor_add);
@@ -1720,15 +1725,31 @@ register_symbol!("rayzor_tensor_sub", crate::tensor::rayzor_tensor_sub);
 register_symbol!("rayzor_tensor_mul", crate::tensor::rayzor_tensor_mul);
 register_symbol!("rayzor_tensor_div", crate::tensor::rayzor_tensor_div);
 
-// Math
+// Math / activations / normalization
 register_symbol!("rayzor_tensor_sqrt", crate::tensor::rayzor_tensor_sqrt);
 register_symbol!("rayzor_tensor_exp", crate::tensor::rayzor_tensor_exp);
 register_symbol!("rayzor_tensor_log", crate::tensor::rayzor_tensor_log);
 register_symbol!("rayzor_tensor_relu", crate::tensor::rayzor_tensor_relu);
+register_symbol!("rayzor_tensor_gelu", crate::tensor::rayzor_tensor_gelu);
+register_symbol!("rayzor_tensor_silu", crate::tensor::rayzor_tensor_silu);
+register_symbol!(
+    "rayzor_tensor_softmax",
+    crate::tensor::rayzor_tensor_softmax
+);
+register_symbol!(
+    "rayzor_tensor_layer_norm",
+    crate::tensor::rayzor_tensor_layer_norm
+);
+register_symbol!(
+    "rayzor_tensor_rms_norm",
+    crate::tensor::rayzor_tensor_rms_norm
+);
 
 // Reductions
 register_symbol!("rayzor_tensor_sum", crate::tensor::rayzor_tensor_sum);
 register_symbol!("rayzor_tensor_mean", crate::tensor::rayzor_tensor_mean);
+register_symbol!("rayzor_tensor_max", crate::tensor::rayzor_tensor_max);
+register_symbol!("rayzor_tensor_min", crate::tensor::rayzor_tensor_min);
 register_symbol!("rayzor_tensor_dot", crate::tensor::rayzor_tensor_dot);
 
 // Linear algebra

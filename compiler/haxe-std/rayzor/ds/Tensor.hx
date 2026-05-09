@@ -80,6 +80,14 @@ extern class Tensor {
     @:native("tensor_transpose")
     public function transpose():Tensor;
 
+    /** N-D permutation (no copy, view) */
+    @:native("tensor_permute")
+    public function permute(axes:Array<Int>):Tensor;
+
+    /** Slice along a single dim, [start, end) (no copy, view) */
+    @:native("tensor_slice")
+    public function slice(dim:Int, start:Int, end:Int):Tensor;
+
     // --- Arithmetic (elementwise, return new tensor) ---
 
     /** Element-wise addition */
@@ -122,6 +130,14 @@ extern class Tensor {
     @:native("tensor_mean")
     public function mean():Float;
 
+    /** Maximum element */
+    @:native("tensor_max")
+    public function max():Float;
+
+    /** Minimum element */
+    @:native("tensor_min")
+    public function min():Float;
+
     // --- Math ---
 
     /** Element-wise square root */
@@ -139,6 +155,26 @@ extern class Tensor {
     /** Element-wise ReLU activation */
     @:native("tensor_relu")
     public function relu():Tensor;
+
+    /** Element-wise GELU activation (tanh approximation) */
+    @:native("tensor_gelu")
+    public function gelu():Tensor;
+
+    /** Element-wise SiLU / swish activation */
+    @:native("tensor_silu")
+    public function silu():Tensor;
+
+    /** Softmax over the last dimension */
+    @:native("tensor_softmax")
+    public function softmax():Tensor;
+
+    /** Layer normalization over the last dimension */
+    @:native("tensor_layer_norm")
+    public function layerNorm(eps:Float):Tensor;
+
+    /** RMS normalization over the last dimension */
+    @:native("tensor_rms_norm")
+    public function rmsNorm(eps:Float):Tensor;
 
     // --- Interop ---
 

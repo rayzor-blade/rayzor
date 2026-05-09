@@ -407,6 +407,161 @@ class Main {
 "#,
     ));
 
+    // ============================================================================
+    // TEST 13: Tensor.max / Tensor.min reductions
+    // ============================================================================
+    tests.push(E2ETestCase::new(
+        "tensor_max_min",
+        r#"
+package test;
+
+import rayzor.ds.Tensor;
+import rayzor.ds.DType;
+
+class Main {
+    static function main() {
+        var t = Tensor.fromArray([3.0, 1.0, 4.0, 1.0, 5.0, 9.0, 2.0, 6.0], DType.F32);
+        trace(t.max());  // 9.0
+        trace(t.min());  // 1.0
+    }
+}
+"#,
+    ));
+
+    // ============================================================================
+    // TEST 14: Tensor.gelu / Tensor.silu — activations sanity
+    // ============================================================================
+    tests.push(E2ETestCase::new(
+        "tensor_gelu_silu",
+        r#"
+package test;
+
+import rayzor.ds.Tensor;
+import rayzor.ds.DType;
+
+class Main {
+    static function main() {
+        // GELU(0) ~= 0, SiLU(0) = 0
+        var z = Tensor.zeros([4], DType.F32);
+        trace(z.gelu().sum());  // ~ 0
+        trace(z.silu().sum());  // 0
+    }
+}
+"#,
+    ));
+
+    // ============================================================================
+    // TEST 15: Tensor.softmax — sums to 1.0 along last dim
+    // ============================================================================
+    tests.push(E2ETestCase::new(
+        "tensor_softmax",
+        r#"
+package test;
+
+import rayzor.ds.Tensor;
+import rayzor.ds.DType;
+
+class Main {
+    static function main() {
+        var t = Tensor.fromArray([1.0, 2.0, 3.0, 4.0], DType.F32);
+        var s = t.softmax();
+        trace(s.sum());  // ~ 1.0
+    }
+}
+"#,
+    ));
+
+    // ============================================================================
+    // TEST 16: Tensor.layerNorm — normalized vector has mean ~0
+    // ============================================================================
+    tests.push(E2ETestCase::new(
+        "tensor_layer_norm",
+        r#"
+package test;
+
+import rayzor.ds.Tensor;
+import rayzor.ds.DType;
+
+class Main {
+    static function main() {
+        var t = Tensor.fromArray([1.0, 2.0, 3.0, 4.0], DType.F32);
+        var n = t.layerNorm(0.00001);
+        // After layer norm over last dim, sum of normalized values ~= 0
+        trace(n.sum());
+    }
+}
+"#,
+    ));
+
+    // ============================================================================
+    // TEST 17: Tensor.rmsNorm — magnitude property
+    // ============================================================================
+    tests.push(E2ETestCase::new(
+        "tensor_rms_norm",
+        r#"
+package test;
+
+import rayzor.ds.Tensor;
+import rayzor.ds.DType;
+
+class Main {
+    static function main() {
+        var t = Tensor.fromArray([1.0, 2.0, 3.0, 4.0], DType.F32);
+        var r = t.rmsNorm(0.00001);
+        // RMS-norm preserves direction; finite sum
+        trace(r.sum());
+    }
+}
+"#,
+    ));
+
+    // ============================================================================
+    // TEST 18: Tensor.permute — reorder axes (no-copy view)
+    // ============================================================================
+    tests.push(E2ETestCase::new(
+        "tensor_permute",
+        r#"
+package test;
+
+import rayzor.ds.Tensor;
+import rayzor.ds.DType;
+
+class Main {
+    static function main() {
+        var t = Tensor.ones([2, 3, 4], DType.F32);
+        var p = t.permute([2, 0, 1]);
+        var s = p.shape();
+        trace(s[0]);  // 4
+        trace(s[1]);  // 2
+        trace(s[2]);  // 3
+        trace(p.numel());  // 24
+    }
+}
+"#,
+    ));
+
+    // ============================================================================
+    // TEST 19: Tensor.slice — slice along an axis
+    // ============================================================================
+    tests.push(E2ETestCase::new(
+        "tensor_slice",
+        r#"
+package test;
+
+import rayzor.ds.Tensor;
+import rayzor.ds.DType;
+
+class Main {
+    static function main() {
+        var t = Tensor.ones([6], DType.F32);
+        var s = t.slice(0, 1, 4);  // 3 elements
+        trace(s.numel());  // 3
+        trace(s.sum());    // 3.0
+    }
+}
+"#,
+    ));
+
     // Run all tests
     println!("+---------------------------------------------------------------------------+");
     println!("|            Tensor -- E2E Test Suite                                        |");
