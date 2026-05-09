@@ -1266,6 +1266,19 @@ const rayzor = {{
     }}
     rayzor._tensorHandles.delete(h);
   }},
+  // GpuBuffer @:op overloading — `gpuA + gpuB` syntax. The native side
+  // (rayzor_gpu_buffer_*) ignores the device handle because lazy DAG nodes
+  // don't need it. The browser GPU module evaluates eagerly via wgpu and
+  // does need the device, so we re-thread `_gpuDeviceH` here.
+  rayzor_gpu_buffer_add: (a, b) =>
+    rayzor._gpuMod ? rayzor._gpuMod.rayzor_gpu_compute_add(rayzor._gpuDeviceH, a, b) : 0,
+  rayzor_gpu_buffer_sub: (a, b) =>
+    rayzor._gpuMod ? rayzor._gpuMod.rayzor_gpu_compute_sub(rayzor._gpuDeviceH, a, b) : 0,
+  rayzor_gpu_buffer_mul: (a, b) =>
+    rayzor._gpuMod ? rayzor._gpuMod.rayzor_gpu_compute_mul(rayzor._gpuDeviceH, a, b) : 0,
+  rayzor_gpu_buffer_div: (a, b) =>
+    rayzor._gpuMod ? rayzor._gpuMod.rayzor_gpu_compute_div(rayzor._gpuDeviceH, a, b) : 0,
+
   // Bare-name aliases for forwarder stubs
   Tensor_zeros: (...a) => rayzor.rayzor_tensor_zeros(...a),
   Tensor_ones: (...a) => rayzor.rayzor_tensor_ones(...a),
