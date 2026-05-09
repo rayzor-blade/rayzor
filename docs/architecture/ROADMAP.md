@@ -109,12 +109,17 @@ Phase 7 has Metal, WebGPU, and CUDA shipped — only Vulkan and OpenCL remain.
 
 ## P2 — Standard Library / Runtime Polish
 
-### 8. `sys.thread.Tls<T>` ([§6.6](BACKLOG.md#66-not-implemented---low-priority))
+### 8. ~~`sys.thread.Tls<T>`~~ ✅ DONE ([§6.6](BACKLOG.md#66-not-implemented---low-priority))
 
 - [x] Extern class shipped in `compiler/haxe-std/sys/thread/Tls.hx`
-- [ ] Runtime backing (`sys_tls_*` functions)
-- [ ] Stdlib mapping
-- [ ] Basic test
+- [x] Runtime backing (`sys_tls_new` / `sys_tls_get_value` / `sys_tls_set_value`) — commit `a645d19`, 2026-05-09
+- [x] Stdlib mapping (constructor + get_value + set_value)
+- [x] E2E test `tls_basic` in `test_rayzor_stdlib_e2e.rs`
+
+Implementation note: the `value(get, set)` *property syntax* on extern
+classes still doesn't auto-dispatch through `lower_field_access` — callers
+write `t.get_value()` / `t.set_value(v)` explicitly. Filed as a polish
+follow-up; the runtime + stdlib mapping themselves are correct.
 
 The other `sys.thread.*` primitives (Lock, Mutex, Semaphore, Condition, Deque) are already implemented — see [§3.2](BACKLOG.md#32-channel-system-message-passing) / [§3.3](BACKLOG.md#33-synchronization-primitives).
 
