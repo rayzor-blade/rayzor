@@ -1607,11 +1607,11 @@ Strategy: Tinygrad-style source code emission (Kernel IR → text per backend �
 - [ ] Vulkan backend (SPIR-V) — Windows/Linux/Android
 - [ ] OpenCL backend — cross-platform legacy
 
-### 14.5 Operator Overloading for GPU/Tensor Types 🟡
+### 14.5 Operator Overloading for GPU/Tensor Types ✅
 
 - [x] Exercise existing `@:op` annotations on Tensor — E2E test `tensor_operator_overload` (commit `0fae6da`, 2026-05-09).
-- [ ] Add `@:op` overloading to GpuBuffer (requires ctx back-pointer in buffer struct).
-- [x] Extern-class `@:op` works end-to-end (Tensor a+b/a-b/a*b/a/b dispatches through @:native runtime mapping).
+- [x] Add `@:op` overloading to GpuBuffer (commit `b3b9afb`, 2026-05-09). `rayzor_gpu_buffer_{add,sub,mul,div}` no-ctx wrappers; ctx back-pointer not actually needed since `binary_lazy` only touches the two buffers and ctx is consulted at materialization.
+- [x] Extern-class `@:op` works end-to-end (Tensor a+b/a-b/a*b/a/b dispatches through @:native runtime mapping; GpuBuffer same).
 - [x] Extern-abstract `@:op` works end-to-end (SIMD4f, pre-existing).
 
 ### 14.4 Interpreter SIMD Correctness 🔴
