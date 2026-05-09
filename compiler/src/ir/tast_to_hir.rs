@@ -60,6 +60,15 @@ pub struct TastToHirContext<'a> {
     /// Inline variable values (for static inline vars that need constant evaluation)
     /// Maps symbol ID to the evaluated literal value (preserving type)
     inline_var_values: BTreeMap<SymbolId, HirLiteral>,
+
+    /// Cross-file index of `@:op`-tagged methods on classes/abstracts.
+    /// Key: `(class_or_abstract_symbol, operator_name)` where operator_name is
+    /// "Add", "Sub", "Mul", "Div", etc. (BinaryOperator) or "Neg", "Not"
+    /// (UnaryOperator) — see `op_key_for_binary` / `op_key_for_unary`.
+    /// Value: the method's `SymbolId`.
+    /// Seeded from imported/loaded files so `a + b` on a stdlib type like
+    /// `Tensor` works from user code.
+    class_operator_methods: BTreeMap<(SymbolId, String), SymbolId>,
 }
 
 #[derive(Debug)]
@@ -146,6 +155,7 @@ impl<'a> TastToHirContext<'a> {
             current_file: None,
             stdlib_mapping: StdlibMapping::new(),
             inline_var_values: BTreeMap::new(),
+            class_operator_methods: BTreeMap::new(),
         }
     }
 
@@ -161,6 +171,68 @@ impl<'a> TastToHirContext<'a> {
         for file in imported_files {
             self.evaluate_inline_static_vars(file);
         }
+    }
+
+    /// Seed the `class_operator_methods` index from imported files plus the
+    /// current file. Lets `a + b` on a class declared in stdlib (like Tensor)
+    /// resolve when used from user code.
+    pub fn seed_class_operator_methods(
+        &mut self,
+        imported_files: &[&TypedFile],
+        current: Option<&TypedFile>,
+    ) {
+        let mut all: Vec<&TypedFile> = imported_files.to_vec();
+        if let Some(c) = current {
+            all.push(c);
+        }
+        for file in all {
+            for class_def in &file.classes {
+                for method in &class_def.methods {
+                    for (op_str, _params) in &method.metadata.operator_metadata {
+                        if let Some(op) = Self::parse_operator_from_metadata(op_str) {
+                            let key = Self::op_key_for_binary(&op);
+                            self.class_operator_methods
+                                .entry((class_def.symbol_id, key))
+                                .or_insert(method.symbol_id);
+                        }
+                    }
+                }
+            }
+            // Abstracts can also be cross-file (e.g. SIMD4f); index them too
+            // so that abstract @:op resolves regardless of which file declared it.
+            for abstract_def in &file.abstracts {
+                for method in &abstract_def.methods {
+                    for (op_str, _params) in &method.metadata.operator_metadata {
+                        if let Some(op) = Self::parse_operator_from_metadata(op_str) {
+                            let key = Self::op_key_for_binary(&op);
+                            self.class_operator_methods
+                                .entry((abstract_def.symbol_id, key))
+                                .or_insert(method.symbol_id);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Stable string key for a `BinaryOperator` variant, used to index
+    /// `class_operator_methods`. Mirrors `parse_operator_from_metadata`.
+    fn op_key_for_binary(op: &BinaryOperator) -> String {
+        match op {
+            BinaryOperator::Add => "Add",
+            BinaryOperator::Sub => "Sub",
+            BinaryOperator::Mul => "Mul",
+            BinaryOperator::Div => "Div",
+            BinaryOperator::Mod => "Mod",
+            BinaryOperator::Eq => "Eq",
+            BinaryOperator::Ne => "Ne",
+            BinaryOperator::Lt => "Lt",
+            BinaryOperator::Le => "Le",
+            BinaryOperator::Gt => "Gt",
+            BinaryOperator::Ge => "Ge",
+            _ => "Other",
+        }
+        .to_string()
     }
 
     /// Seed inline var values from the global name-keyed map (populated from BLADE cache).
@@ -1916,29 +1988,65 @@ impl<'a> TastToHirContext<'a> {
                     }
                 }
 
-                // OPERATOR OVERLOADING: Check if left operand has abstract type with @:op metadata
-                if let Some((method_symbol, _abstract_symbol)) =
+                // OPERATOR OVERLOADING: rewrite `a OP b` to a method call when the
+                // LHS type (abstract or class) declares an @:op-tagged method matching OP.
+                if let Some((method_symbol, _owner_symbol, is_class)) =
                     self.find_binary_operator_method(left.expr_type, operator)
                 {
-                    // debug!(": Found operator method for {:?} on type {:?}: method symbol {:?}",
-                    //           operator, left.expr_type, method_symbol);
-
-                    // Rewrite binary operation to method call:  `a + b` → `a.add(b)`
-                    // Then try to inline it using existing infrastructure
-                    if let Some(inlined) = self.try_inline_abstract_method(
-                        left,
-                        method_symbol,
-                        &[(**right).clone()],
-                        expr.expr_type,
-                        expr.source_location,
-                    ) {
-                        // debug!(": Successfully inlined operator method!");
-                        return inlined;
-                    } else {
-                        // debug!(": Operator method found but not inlined, generating method call");
-                        // Fall through to generate a regular method call
-                        // TODO: Generate MethodCall instead of Binary
+                    if !is_class {
+                        // Abstract: try inline first (existing path); fall through if not inlinable.
+                        if let Some(inlined) = self.try_inline_abstract_method(
+                            left,
+                            method_symbol,
+                            &[(**right).clone()],
+                            expr.expr_type,
+                            expr.source_location,
+                        ) {
+                            return inlined;
+                        }
                     }
+
+                    // Class (or abstract that didn't inline): synthesize a TypedExpression
+                    // of kind `MethodCall` and recurse — that way we go through the *same*
+                    // lowering path as a real `a.method(b)` call (stdlib mapping, drop
+                    // tracking, monomorphization all work without divergence).
+                    //
+                    // For result type we use `left.expr_type` — for the symmetric ops we
+                    // care about (Add/Sub/Mul/Div on Tensor / SIMD4f / etc.) the return
+                    // type matches the LHS. The TAST type-checker may have left
+                    // `expr.expr_type` as a primitive default since it doesn't know
+                    // class @:op return types yet.
+                    let result_type = {
+                        let type_table = self.type_table.borrow();
+                        let lhs_is_user = type_table
+                            .get(left.expr_type)
+                            .map(|t| {
+                                matches!(t.kind, TypeKind::Class { .. } | TypeKind::Abstract { .. })
+                            })
+                            .unwrap_or(false);
+                        drop(type_table);
+                        if lhs_is_user {
+                            left.expr_type
+                        } else {
+                            expr.expr_type
+                        }
+                    };
+
+                    let synthesized = TypedExpression {
+                        expr_type: result_type,
+                        kind: TypedExpressionKind::MethodCall {
+                            receiver: left.clone(),
+                            method_symbol,
+                            arguments: vec![(**right).clone()],
+                            type_arguments: vec![],
+                            is_optional: false,
+                        },
+                        usage: expr.usage,
+                        lifetime_id: expr.lifetime_id,
+                        source_location: expr.source_location,
+                        metadata: expr.metadata.clone(),
+                    };
+                    return self.lower_expression(&synthesized);
                 }
 
                 // Check if this is an assignment operator
@@ -3919,40 +4027,66 @@ impl<'a> TastToHirContext<'a> {
         self.get_dynamic_type() // Fallback to dynamic
     }
 
-    /// Find a method with matching @:op metadata for a binary operator
-    /// Returns (method_symbol, abstract_symbol) if found
+    /// Find a method with matching @:op metadata for a binary operator.
+    /// Returns (method_symbol, owner_symbol, is_class) if found.
+    /// Owner is the abstract symbol or class symbol that declares the method.
     fn find_binary_operator_method(
         &self,
         operand_type: TypeId,
         operator: &BinaryOperator,
-    ) -> Option<(SymbolId, SymbolId)> {
-        // Check if this type is an abstract type
+    ) -> Option<(SymbolId, SymbolId, bool)> {
         let type_table = self.type_table.borrow();
         let type_info = type_table.get(operand_type)?;
-        let abstract_symbol = match &type_info.kind {
-            TypeKind::Abstract { symbol_id, .. } => *symbol_id,
-            _ => return None, // Not an abstract type
+        let (owner_symbol, is_class) = match &type_info.kind {
+            TypeKind::Abstract { symbol_id, .. } => (*symbol_id, false),
+            TypeKind::Class { symbol_id, .. } => (*symbol_id, true),
+            _ => return None,
         };
         drop(type_table);
 
-        // Get the abstract definition from the current file
+        // Cross-file index: covers stdlib classes/abstracts (Tensor, SIMD4f, etc.)
+        // that are declared in a different file from the one being lowered.
+        let key = Self::op_key_for_binary(operator);
+        if let Some(method_symbol) = self
+            .class_operator_methods
+            .get(&(owner_symbol, key.clone()))
+        {
+            return Some((*method_symbol, owner_symbol, is_class));
+        }
+
+        // Same-file fallback (kept for safety; the index above already covers
+        // current_file when seeded with `current` parameter).
         let current_file = self.current_file?;
 
-        // Search all abstracts for the one matching our symbol
+        if is_class {
+            for class_def in &current_file.classes {
+                if class_def.symbol_id != owner_symbol {
+                    continue;
+                }
+                for method in &class_def.methods {
+                    for (op_str, _params) in &method.metadata.operator_metadata {
+                        if let Some(parsed_op) = Self::parse_operator_from_metadata(op_str) {
+                            if std::mem::discriminant(&parsed_op)
+                                == std::mem::discriminant(operator)
+                            {
+                                return Some((method.symbol_id, owner_symbol, true));
+                            }
+                        }
+                    }
+                }
+            }
+            return None;
+        }
+
         for abstract_def in &current_file.abstracts {
-            if abstract_def.symbol_id != abstract_symbol {
+            if abstract_def.symbol_id != owner_symbol {
                 continue;
             }
-
-            // Found the abstract, now search for a method with matching @:op metadata
             for method in &abstract_def.methods {
                 for (op_str, _params) in &method.metadata.operator_metadata {
                     if let Some(parsed_op) = Self::parse_operator_from_metadata(op_str) {
-                        // Compare using discriminant to match operator variants
                         if std::mem::discriminant(&parsed_op) == std::mem::discriminant(operator) {
-                            // debug!(": Matched operator {:?} to method {} with metadata '{}'",
-                            //           operator, self.string_interner.get(method.name).unwrap_or("<unknown>"), op_str);
-                            return Some((method.symbol_id, abstract_symbol));
+                            return Some((method.symbol_id, owner_symbol, false));
                         }
                     }
                 }
@@ -5200,6 +5334,11 @@ pub fn lower_tast_to_hir_with_imports(
     if !imported_files.is_empty() {
         context.seed_inline_vars_from_imports(imported_files);
     }
+
+    // Seed cross-file `@:op` operator method index so `a + b` works on
+    // stdlib classes/abstracts (Tensor, SIMD4f, …) when the user's file
+    // imports them.
+    context.seed_class_operator_methods(imported_files, Some(file));
 
     // Seed from global inline vars (includes BLADE cache-restored constants)
     context.seed_inline_vars_from_global(global_inline_vars);
