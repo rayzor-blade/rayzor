@@ -134,11 +134,13 @@ The other `sys.thread.*` primitives (Lock, Mutex, Semaphore, Condition, Deque) a
 - [ ] `CC.addClib()` explicit API method (currently `@:clib` metadata only)
 - [ ] Windows: test MSYS2/MinGW pkg-config integration end-to-end
 
-### 11. Interpreter SIMD Correctness ([§14.4](BACKLOG.md#144-interpreter-simd-correctness))
+### 11. ~~Interpreter SIMD Correctness~~ ✅ MOSTLY DONE ([§14.4](BACKLOG.md#144-interpreter-simd-correctness))
 
-- [ ] Integrate the `wide` crate for real SIMD in the interpreter (currently returns void), **or**
-- [ ] Force-promote SIMD functions to skip Tier 0
-- [ ] Close TCC Linker SIMD gap on Linux (final tier lacks SIMD)
+Vector* MIR instructions in the interpreter now `Err(JitBailout)` instead of silently returning void; the tiered backend's existing bailout handler recompiles to Baseline and re-executes. Plus a fix to `execute_function` so pre-promoted SIMD functions (via `function_uses_simd`) actually trigger lazy JIT compile in start_interpreted=true mode. Commit `a4dc263`, 2026-05-09. New unit + e2e tests.
+
+- [x] ~~Integrate the `wide` crate for real SIMD in the interpreter~~ — went with the simpler bailout-to-JIT approach instead. No silent miscompile; correctness preserved.
+- [x] Force-promote SIMD functions to skip Tier 0 (via `function_uses_simd` at compile_module time, plus runtime bailout safety net).
+- [ ] Close TCC Linker SIMD gap on Linux (final tier lacks SIMD) — still open, separate from the interpreter path.
 
 ### 12. AOT — Static Linking + Cross-Compilation Gaps
 
