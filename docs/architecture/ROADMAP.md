@@ -64,7 +64,7 @@ ML / numerical workloads need a Tensor type even before GPU.
 - [x] Linear algebra: `matmul`, `dot`
 - [x] Activations: `relu`, `gelu`, `silu`, `softmax`
 - [x] Normalization: `layerNorm`, `rmsNorm`
-- [ ] SIMD4f vectorised CPU paths for f32 ops
+- [x] SIMD4f vectorised CPU paths for f32 ops (NEON + SSE2 + scalar fallback)
 
 ### 5. GPU Compute — Phases 4 to 7 ([§14.3](BACKLOG.md#143-rayzor-gpu-plugin))
 
