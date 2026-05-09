@@ -546,6 +546,62 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
 
     /// Read a HaxeArray of i32 values from WASM memory.
     /// HaxeArray layout: { data_ptr: u32, len: u32, cap: u32, elem_size: u32 }.
+    /// Read a raw contiguous block of `len` integer values from WASM memory.
+    /// Used for the decomposed `(data_ptr, len)` ABI emitted by the tensor MIR
+    /// wrappers, which extract data and length from a HaxeArray *before* the
+    /// extern call. Each element is i64-strided to match the native runtime
+    /// (`runtime/src/tensor.rs::read_shape`); on 32-bit WASM the high 4 bytes
+    /// are zero, so we read the low 4 bytes per slot.
+    fn read_raw_int_array_i64stride(
+        caller: &mut Caller<'_, WasmState>,
+        data_ptr: i32,
+        len: i32,
+    ) -> Vec<i32> {
+        if data_ptr <= 0 || len <= 0 {
+            return vec![];
+        }
+        let stride = 8usize;
+        let total = len as usize * stride;
+        if let Some(data) = read_wasm_mem(caller, data_ptr as usize, total) {
+            return (0..len as usize)
+                .map(|i| {
+                    i32::from_le_bytes(
+                        data[i * stride..i * stride + 4]
+                            .try_into()
+                            .unwrap_or([0; 4]),
+                    )
+                })
+                .collect();
+        }
+        vec![]
+    }
+
+    /// Read a raw contiguous block of `len` f64 values from WASM memory
+    /// (i64-strided slots, low 8 bytes of each slot is the f64 payload).
+    fn read_raw_f64_array_i64stride(
+        caller: &mut Caller<'_, WasmState>,
+        data_ptr: i32,
+        len: i32,
+    ) -> Vec<f64> {
+        if data_ptr <= 0 || len <= 0 {
+            return vec![];
+        }
+        let stride = 8usize;
+        let total = len as usize * stride;
+        if let Some(data) = read_wasm_mem(caller, data_ptr as usize, total) {
+            return (0..len as usize)
+                .map(|i| {
+                    f64::from_le_bytes(
+                        data[i * stride..i * stride + 8]
+                            .try_into()
+                            .unwrap_or([0; 8]),
+                    )
+                })
+                .collect();
+        }
+        vec![]
+    }
+
     fn read_haxe_array_i32(caller: &mut Caller<'_, WasmState>, arr_ptr: i32) -> Vec<i32> {
         let ptr = unbox_int_from_memory(caller, arr_ptr) as usize;
         if ptr == 0 {
@@ -2046,6 +2102,8 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
             "rayzor_tensor_set" => Some("rayzor_tensor_set"),
             "rayzor_tensor_reshape" => Some("rayzor_tensor_reshape"),
             "rayzor_tensor_transpose" => Some("rayzor_tensor_transpose"),
+            "rayzor_tensor_permute" => Some("rayzor_tensor_permute"),
+            "rayzor_tensor_slice" => Some("rayzor_tensor_slice"),
             "rayzor_tensor_add" | "Tensor_add" => Some("rayzor_tensor_add"),
             "rayzor_tensor_sub" | "Tensor_sub" => Some("rayzor_tensor_sub"),
             "rayzor_tensor_mul" | "Tensor_mul" => Some("rayzor_tensor_mul"),
@@ -2054,10 +2112,17 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
             "rayzor_tensor_dot" => Some("rayzor_tensor_dot"),
             "rayzor_tensor_sum" => Some("rayzor_tensor_sum"),
             "rayzor_tensor_mean" => Some("rayzor_tensor_mean"),
+            "rayzor_tensor_max" => Some("rayzor_tensor_max"),
+            "rayzor_tensor_min" => Some("rayzor_tensor_min"),
             "rayzor_tensor_sqrt" => Some("rayzor_tensor_sqrt"),
             "rayzor_tensor_exp" => Some("rayzor_tensor_exp"),
             "rayzor_tensor_log" => Some("rayzor_tensor_log"),
             "rayzor_tensor_relu" => Some("rayzor_tensor_relu"),
+            "rayzor_tensor_gelu" => Some("rayzor_tensor_gelu"),
+            "rayzor_tensor_silu" => Some("rayzor_tensor_silu"),
+            "rayzor_tensor_softmax" => Some("rayzor_tensor_softmax"),
+            "rayzor_tensor_layer_norm" => Some("rayzor_tensor_layer_norm"),
+            "rayzor_tensor_rms_norm" => Some("rayzor_tensor_rms_norm"),
             "rayzor_tensor_free" => Some("rayzor_tensor_free"),
             "rayzor_tensor_data"
             | "rayzor_tensor_shape"
@@ -2078,7 +2143,10 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         let ret_ty: ValType = func_ty.results().next().unwrap_or(ValType::I32);
 
         match canon {
-            // -- rayzor_tensor_zeros(shapePtr, dtype) -> handle --
+            // -- rayzor_tensor_zeros(dataPtr, ndim, dtype) -> handle --
+            // ABI: MIR Tensor_zeros wrapper extracts (data_ptr, ndim) from
+            // the shape Array<Int> via extract_array_ptr_len before the
+            // extern call, so we read the shape data directly from data_ptr.
             "rayzor_tensor_zeros" => {
                 linker
                     .func_new(
@@ -2086,8 +2154,9 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                         name,
                         func_ty.clone(),
                         move |mut caller, params, results| {
-                            let shape_ptr = val_i32(&params[0]);
-                            let shape = read_haxe_array_i32(&mut caller, shape_ptr);
+                            let data_ptr = val_i32(&params[0]);
+                            let ndim = val_i32(&params[1]);
+                            let shape = read_raw_int_array_i64stride(&mut caller, data_ptr, ndim);
                             let numel: usize = shape.iter().map(|&s| s.max(0) as usize).product();
                             let s = caller.data_mut();
                             let id = s.next_tensor_id;
@@ -2106,7 +2175,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
             }
 
-            // -- rayzor_tensor_ones(shapePtr, dtype) -> handle --
+            // -- rayzor_tensor_ones(dataPtr, ndim, dtype) -> handle --
             "rayzor_tensor_ones" => {
                 linker
                     .func_new(
@@ -2114,8 +2183,9 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                         name,
                         func_ty.clone(),
                         move |mut caller, params, results| {
-                            let shape_ptr = val_i32(&params[0]);
-                            let shape = read_haxe_array_i32(&mut caller, shape_ptr);
+                            let data_ptr = val_i32(&params[0]);
+                            let ndim = val_i32(&params[1]);
+                            let shape = read_raw_int_array_i64stride(&mut caller, data_ptr, ndim);
                             let numel: usize = shape.iter().map(|&s| s.max(0) as usize).product();
                             let s = caller.data_mut();
                             let id = s.next_tensor_id;
@@ -2134,7 +2204,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
             }
 
-            // -- rayzor_tensor_full(shapePtr, value, dtype) -> handle --
+            // -- rayzor_tensor_full(dataPtr, ndim, value, dtype) -> handle --
             "rayzor_tensor_full" => {
                 linker
                     .func_new(
@@ -2142,9 +2212,10 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                         name,
                         func_ty.clone(),
                         move |mut caller, params, results| {
-                            let shape_ptr = val_i32(&params[0]);
-                            let value = val_f64(&params[1]);
-                            let shape = read_haxe_array_i32(&mut caller, shape_ptr);
+                            let data_ptr = val_i32(&params[0]);
+                            let ndim = val_i32(&params[1]);
+                            let value = val_f64(&params[2]);
+                            let shape = read_raw_int_array_i64stride(&mut caller, data_ptr, ndim);
                             let numel: usize = shape.iter().map(|&s| s.max(0) as usize).product();
                             let s = caller.data_mut();
                             let id = s.next_tensor_id;
@@ -2163,7 +2234,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
             }
 
-            // -- rayzor_tensor_from_array(dataPtr, dtype) -> handle --
+            // -- rayzor_tensor_from_array(dataPtr, len, dtype) -> handle --
             "rayzor_tensor_from_array" => {
                 linker
                     .func_new(
@@ -2172,8 +2243,8 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                         func_ty.clone(),
                         move |mut caller, params, results| {
                             let data_ptr = val_i32(&params[0]);
-                            let data = read_haxe_array_f64(&mut caller, data_ptr);
-                            let len = data.len() as i32;
+                            let len = val_i32(&params[1]);
+                            let data = read_raw_f64_array_i64stride(&mut caller, data_ptr, len);
                             let s = caller.data_mut();
                             let id = s.next_tensor_id;
                             s.next_tensor_id += 1;
@@ -2191,7 +2262,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
             }
 
-            // -- rayzor_tensor_rand(shapePtr, dtype) -> handle --
+            // -- rayzor_tensor_rand(dataPtr, ndim, dtype) -> handle --
             "rayzor_tensor_rand" => {
                 linker
                     .func_new(
@@ -2199,8 +2270,9 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                         name,
                         func_ty.clone(),
                         move |mut caller, params, results| {
-                            let shape_ptr = val_i32(&params[0]);
-                            let shape = read_haxe_array_i32(&mut caller, shape_ptr);
+                            let data_ptr = val_i32(&params[0]);
+                            let ndim = val_i32(&params[1]);
+                            let shape = read_raw_int_array_i64stride(&mut caller, data_ptr, ndim);
                             let numel: usize = shape.iter().map(|&s| s.max(0) as usize).product();
                             // Simple LCG pseudo-random for determinism in WASM
                             let mut seed: u64 = 12345;
@@ -2282,7 +2354,10 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
             }
 
-            // -- rayzor_tensor_get(handle, idx) -> f64 --
+            // -- rayzor_tensor_get(handle, indicesPtr, ndim) -> f64 --
+            // ABI: indices arrive as a decomposed (data_ptr, ndim) pair from
+            // the MIR Tensor_get wrapper. Multi-dim indices are flattened via
+            // row-major strides over the tensor's shape.
             "rayzor_tensor_get" => {
                 let rt = ret_ty.clone();
                 linker
@@ -2292,13 +2367,28 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                         func_ty.clone(),
                         move |mut caller, params, results| {
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
-                            let idx =
-                                unbox_int_from_memory(&mut caller, val_i32(&params[1])) as usize;
+                            let idx_ptr = val_i32(&params[1]);
+                            let ndim = val_i32(&params[2]);
+                            let indices = read_raw_int_array_i64stride(&mut caller, idx_ptr, ndim);
                             let val = caller
                                 .data()
                                 .tensor_handles
                                 .get(&h)
-                                .and_then(|t| t.data.get(idx).copied())
+                                .and_then(|t| {
+                                    let n = t.shape.len();
+                                    if n == 0 {
+                                        return t.data.first().copied();
+                                    }
+                                    let mut strides = vec![1_usize; n];
+                                    for i in (0..n.saturating_sub(1)).rev() {
+                                        strides[i] = strides[i + 1] * t.shape[i + 1] as usize;
+                                    }
+                                    let mut off = 0_usize;
+                                    for (i, idx) in indices.iter().enumerate().take(n) {
+                                        off += (*idx).max(0) as usize * strides[i];
+                                    }
+                                    t.data.get(off).copied()
+                                })
                                 .unwrap_or(0.0);
                             results[0] = ret_f64(val, &rt);
                             Ok(())
@@ -2307,7 +2397,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
             }
 
-            // -- rayzor_tensor_set(handle, idx, value) -> void --
+            // -- rayzor_tensor_set(handle, indicesPtr, ndim, value) -> void --
             "rayzor_tensor_set" => {
                 linker
                     .func_new(
@@ -2316,12 +2406,27 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                         func_ty.clone(),
                         move |mut caller, params, results| {
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
-                            let idx =
-                                unbox_int_from_memory(&mut caller, val_i32(&params[1])) as usize;
-                            let value = val_f64(&params[2]);
+                            let idx_ptr = val_i32(&params[1]);
+                            let ndim = val_i32(&params[2]);
+                            let value = val_f64(&params[3]);
+                            let indices = read_raw_int_array_i64stride(&mut caller, idx_ptr, ndim);
                             if let Some(t) = caller.data_mut().tensor_handles.get_mut(&h) {
-                                if idx < t.data.len() {
-                                    t.data[idx] = value;
+                                let n = t.shape.len();
+                                let off = if n == 0 {
+                                    0
+                                } else {
+                                    let mut strides = vec![1_usize; n];
+                                    for i in (0..n.saturating_sub(1)).rev() {
+                                        strides[i] = strides[i + 1] * t.shape[i + 1] as usize;
+                                    }
+                                    let mut o = 0_usize;
+                                    for (i, idx) in indices.iter().enumerate().take(n) {
+                                        o += (*idx).max(0) as usize * strides[i];
+                                    }
+                                    o
+                                };
+                                if off < t.data.len() {
+                                    t.data[off] = value;
                                 }
                             }
                             if !results.is_empty() {
@@ -2333,7 +2438,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
             }
 
-            // -- rayzor_tensor_reshape(handle, shapePtr) -> handle --
+            // -- rayzor_tensor_reshape(handle, shapePtr, ndim) -> handle --
             "rayzor_tensor_reshape" => {
                 linker
                     .func_new(
@@ -2343,7 +2448,9 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                         move |mut caller, params, results| {
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                             let shape_ptr = val_i32(&params[1]);
-                            let new_shape = read_haxe_array_i32(&mut caller, shape_ptr);
+                            let ndim = val_i32(&params[2]);
+                            let new_shape =
+                                read_raw_int_array_i64stride(&mut caller, shape_ptr, ndim);
                             let data = caller
                                 .data()
                                 .tensor_handles
@@ -2823,6 +2930,458 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                             let id = s.next_tensor_id;
                             s.next_tensor_id += 1;
                             s.tensor_handles.insert(id, TensorState { data, shape });
+                            results[0] = Val::I32(id);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_max(handle) -> f64 --
+            "rayzor_tensor_max" => {
+                let rt = ret_ty.clone();
+                linker
+                    .func_new(
+                        "rayzor",
+                        name,
+                        func_ty.clone(),
+                        move |mut caller, params, results| {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let v = caller
+                                .data()
+                                .tensor_handles
+                                .get(&h)
+                                .map(|t| {
+                                    if t.data.is_empty() {
+                                        f64::NEG_INFINITY
+                                    } else {
+                                        t.data.iter().copied().fold(f64::NEG_INFINITY, f64::max)
+                                    }
+                                })
+                                .unwrap_or(f64::NEG_INFINITY);
+                            results[0] = ret_f64(v, &rt);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_min(handle) -> f64 --
+            "rayzor_tensor_min" => {
+                let rt = ret_ty.clone();
+                linker
+                    .func_new(
+                        "rayzor",
+                        name,
+                        func_ty.clone(),
+                        move |mut caller, params, results| {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let v = caller
+                                .data()
+                                .tensor_handles
+                                .get(&h)
+                                .map(|t| {
+                                    if t.data.is_empty() {
+                                        f64::INFINITY
+                                    } else {
+                                        t.data.iter().copied().fold(f64::INFINITY, f64::min)
+                                    }
+                                })
+                                .unwrap_or(f64::INFINITY);
+                            results[0] = ret_f64(v, &rt);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_gelu(handle) -> handle --
+            // Tanh approximation matching PyTorch `gelu(approximate='tanh')`.
+            "rayzor_tensor_gelu" => {
+                linker
+                    .func_new(
+                        "rayzor",
+                        name,
+                        func_ty.clone(),
+                        move |mut caller, params, results| {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let (data, shape) = caller
+                                .data()
+                                .tensor_handles
+                                .get(&h)
+                                .map(|t| {
+                                    let c = (2.0_f64 / std::f64::consts::PI).sqrt();
+                                    let out: Vec<f64> = t
+                                        .data
+                                        .iter()
+                                        .map(|&x| {
+                                            let inner = c * (x + 0.044715 * x * x * x);
+                                            0.5 * x * (1.0 + inner.tanh())
+                                        })
+                                        .collect();
+                                    (out, t.shape.clone())
+                                })
+                                .unwrap_or((vec![], vec![]));
+                            let s = caller.data_mut();
+                            let id = s.next_tensor_id;
+                            s.next_tensor_id += 1;
+                            s.tensor_handles.insert(id, TensorState { data, shape });
+                            results[0] = Val::I32(id);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_silu(handle) -> handle --
+            // x * sigmoid(x), implemented as x / (1 + exp(-x)).
+            "rayzor_tensor_silu" => {
+                linker
+                    .func_new(
+                        "rayzor",
+                        name,
+                        func_ty.clone(),
+                        move |mut caller, params, results| {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let (data, shape) = caller
+                                .data()
+                                .tensor_handles
+                                .get(&h)
+                                .map(|t| {
+                                    let out: Vec<f64> =
+                                        t.data.iter().map(|&x| x / (1.0 + (-x).exp())).collect();
+                                    (out, t.shape.clone())
+                                })
+                                .unwrap_or((vec![], vec![]));
+                            let s = caller.data_mut();
+                            let id = s.next_tensor_id;
+                            s.next_tensor_id += 1;
+                            s.tensor_handles.insert(id, TensorState { data, shape });
+                            results[0] = Val::I32(id);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_softmax(handle) -> handle --
+            // Softmax over the last dimension (max-subtract for numeric stability).
+            "rayzor_tensor_softmax" => {
+                linker
+                    .func_new(
+                        "rayzor",
+                        name,
+                        func_ty.clone(),
+                        move |mut caller, params, results| {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let (data, shape) = caller
+                                .data()
+                                .tensor_handles
+                                .get(&h)
+                                .map(|t| {
+                                    let last = *t.shape.last().unwrap_or(&0).max(&0) as usize;
+                                    let total = t.data.len();
+                                    if last == 0 || total == 0 {
+                                        return (Vec::new(), t.shape.clone());
+                                    }
+                                    let groups = total / last;
+                                    let mut out = vec![0.0_f64; total];
+                                    for g in 0..groups {
+                                        let base = g * last;
+                                        let mut maxv = f64::NEG_INFINITY;
+                                        for i in 0..last {
+                                            let v = t.data[base + i];
+                                            if v > maxv {
+                                                maxv = v;
+                                            }
+                                        }
+                                        let mut sum = 0.0;
+                                        for i in 0..last {
+                                            let e = (t.data[base + i] - maxv).exp();
+                                            out[base + i] = e;
+                                            sum += e;
+                                        }
+                                        if sum > 0.0 {
+                                            let inv = 1.0 / sum;
+                                            for i in 0..last {
+                                                out[base + i] *= inv;
+                                            }
+                                        }
+                                    }
+                                    (out, t.shape.clone())
+                                })
+                                .unwrap_or((vec![], vec![]));
+                            let s = caller.data_mut();
+                            let id = s.next_tensor_id;
+                            s.next_tensor_id += 1;
+                            s.tensor_handles.insert(id, TensorState { data, shape });
+                            results[0] = Val::I32(id);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_layer_norm(handle, eps) -> handle --
+            // (x - mean(x)) / sqrt(var(x) + eps) over the last dimension.
+            "rayzor_tensor_layer_norm" => {
+                linker
+                    .func_new(
+                        "rayzor",
+                        name,
+                        func_ty.clone(),
+                        move |mut caller, params, results| {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let eps = val_f64(&params[1]);
+                            let (data, shape) = caller
+                                .data()
+                                .tensor_handles
+                                .get(&h)
+                                .map(|t| {
+                                    let last = *t.shape.last().unwrap_or(&0).max(&0) as usize;
+                                    let total = t.data.len();
+                                    if last == 0 || total == 0 {
+                                        return (Vec::new(), t.shape.clone());
+                                    }
+                                    let groups = total / last;
+                                    let n = last as f64;
+                                    let mut out = vec![0.0_f64; total];
+                                    for g in 0..groups {
+                                        let base = g * last;
+                                        let mean: f64 =
+                                            (0..last).map(|i| t.data[base + i]).sum::<f64>() / n;
+                                        let var: f64 = (0..last)
+                                            .map(|i| {
+                                                let d = t.data[base + i] - mean;
+                                                d * d
+                                            })
+                                            .sum::<f64>()
+                                            / n;
+                                        let inv = 1.0 / (var + eps).sqrt();
+                                        for i in 0..last {
+                                            out[base + i] = (t.data[base + i] - mean) * inv;
+                                        }
+                                    }
+                                    (out, t.shape.clone())
+                                })
+                                .unwrap_or((vec![], vec![]));
+                            let s = caller.data_mut();
+                            let id = s.next_tensor_id;
+                            s.next_tensor_id += 1;
+                            s.tensor_handles.insert(id, TensorState { data, shape });
+                            results[0] = Val::I32(id);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_rms_norm(handle, eps) -> handle --
+            // x / sqrt(mean(x^2) + eps) over the last dimension.
+            "rayzor_tensor_rms_norm" => {
+                linker
+                    .func_new(
+                        "rayzor",
+                        name,
+                        func_ty.clone(),
+                        move |mut caller, params, results| {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let eps = val_f64(&params[1]);
+                            let (data, shape) = caller
+                                .data()
+                                .tensor_handles
+                                .get(&h)
+                                .map(|t| {
+                                    let last = *t.shape.last().unwrap_or(&0).max(&0) as usize;
+                                    let total = t.data.len();
+                                    if last == 0 || total == 0 {
+                                        return (Vec::new(), t.shape.clone());
+                                    }
+                                    let groups = total / last;
+                                    let n = last as f64;
+                                    let mut out = vec![0.0_f64; total];
+                                    for g in 0..groups {
+                                        let base = g * last;
+                                        let ms: f64 = (0..last)
+                                            .map(|i| {
+                                                let v = t.data[base + i];
+                                                v * v
+                                            })
+                                            .sum::<f64>()
+                                            / n;
+                                        let inv = 1.0 / (ms + eps).sqrt();
+                                        for i in 0..last {
+                                            out[base + i] = t.data[base + i] * inv;
+                                        }
+                                    }
+                                    (out, t.shape.clone())
+                                })
+                                .unwrap_or((vec![], vec![]));
+                            let s = caller.data_mut();
+                            let id = s.next_tensor_id;
+                            s.next_tensor_id += 1;
+                            s.tensor_handles.insert(id, TensorState { data, shape });
+                            results[0] = Val::I32(id);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_permute(handle, axesPtr, axesLen) -> handle --
+            // Reorders dimensions; the host runtime materializes a new buffer
+            // (no stride-based views). axes_ptr points to a contiguous i32
+            // array provided by the caller's HaxeArray decomposition.
+            "rayzor_tensor_permute" => {
+                linker
+                    .func_new(
+                        "rayzor",
+                        name,
+                        func_ty.clone(),
+                        move |mut caller, params, results| {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let axes_ptr = val_i32(&params[1]);
+                            let axes_len = val_i32(&params[2]);
+                            let axes =
+                                read_raw_int_array_i64stride(&mut caller, axes_ptr, axes_len);
+                            let axes_len = axes_len as usize;
+
+                            let (data, new_shape) = caller
+                                .data()
+                                .tensor_handles
+                                .get(&h)
+                                .map(|t| {
+                                    let n = t.shape.len();
+                                    if axes.len() != n
+                                        || axes.iter().any(|&a| a < 0 || (a as usize) >= n)
+                                    {
+                                        return (Vec::new(), Vec::new());
+                                    }
+                                    // Compute row-major strides for original shape
+                                    let mut strides = vec![1_usize; n];
+                                    for i in (0..n.saturating_sub(1)).rev() {
+                                        strides[i] = strides[i + 1] * t.shape[i + 1] as usize;
+                                    }
+                                    let new_shape: Vec<i32> =
+                                        axes.iter().map(|&a| t.shape[a as usize]).collect();
+                                    let total: usize =
+                                        new_shape.iter().map(|&s| s.max(0) as usize).product();
+                                    let new_n = new_shape.len();
+                                    let mut new_strides = vec![1_usize; new_n];
+                                    for i in (0..new_n.saturating_sub(1)).rev() {
+                                        new_strides[i] =
+                                            new_strides[i + 1] * new_shape[i + 1] as usize;
+                                    }
+                                    let mut out = vec![0.0_f64; total];
+                                    let mut idx = vec![0_usize; new_n];
+                                    for flat in 0..total {
+                                        // Decompose flat into multi-index using new_strides
+                                        let mut rem = flat;
+                                        for (i, s) in new_strides.iter().enumerate() {
+                                            idx[i] = rem / s;
+                                            rem %= s;
+                                        }
+                                        // Map back via axes to source offset
+                                        let mut src_off = 0_usize;
+                                        for (new_dim, &src_dim) in axes.iter().enumerate() {
+                                            src_off += idx[new_dim] * strides[src_dim as usize];
+                                        }
+                                        if src_off < t.data.len() {
+                                            out[flat] = t.data[src_off];
+                                        }
+                                    }
+                                    (out, new_shape)
+                                })
+                                .unwrap_or((vec![], vec![]));
+                            let s = caller.data_mut();
+                            let id = s.next_tensor_id;
+                            s.next_tensor_id += 1;
+                            s.tensor_handles.insert(
+                                id,
+                                TensorState {
+                                    data,
+                                    shape: new_shape,
+                                },
+                            );
+                            results[0] = Val::I32(id);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- rayzor_tensor_slice(handle, dim, start, end) -> handle --
+            "rayzor_tensor_slice" => {
+                linker
+                    .func_new(
+                        "rayzor",
+                        name,
+                        func_ty.clone(),
+                        move |mut caller, params, results| {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let dim = val_i32(&params[1]) as usize;
+                            let start = val_i32(&params[2]).max(0) as usize;
+                            let end = val_i32(&params[3]).max(0) as usize;
+                            let (data, new_shape) = caller
+                                .data()
+                                .tensor_handles
+                                .get(&h)
+                                .map(|t| {
+                                    let n = t.shape.len();
+                                    if dim >= n {
+                                        return (Vec::new(), Vec::new());
+                                    }
+                                    let dim_size = t.shape[dim].max(0) as usize;
+                                    let e = end.min(dim_size);
+                                    if start >= e {
+                                        return (Vec::new(), Vec::new());
+                                    }
+                                    let new_dim = e - start;
+                                    let mut new_shape: Vec<i32> = t.shape.clone();
+                                    new_shape[dim] = new_dim as i32;
+
+                                    // Row-major strides for original shape
+                                    let mut strides = vec![1_usize; n];
+                                    for i in (0..n.saturating_sub(1)).rev() {
+                                        strides[i] = strides[i + 1] * t.shape[i + 1] as usize;
+                                    }
+                                    let total: usize =
+                                        new_shape.iter().map(|&s| s.max(0) as usize).product();
+                                    let mut new_strides = vec![1_usize; n];
+                                    for i in (0..n.saturating_sub(1)).rev() {
+                                        new_strides[i] =
+                                            new_strides[i + 1] * new_shape[i + 1] as usize;
+                                    }
+                                    let mut out = vec![0.0_f64; total];
+                                    let mut idx = vec![0_usize; n];
+                                    for flat in 0..total {
+                                        let mut rem = flat;
+                                        for (i, s) in new_strides.iter().enumerate() {
+                                            idx[i] = rem / s;
+                                            rem %= s;
+                                        }
+                                        idx[dim] += start;
+                                        let mut src_off = 0_usize;
+                                        for (i, st) in strides.iter().enumerate() {
+                                            src_off += idx[i] * st;
+                                        }
+                                        if src_off < t.data.len() {
+                                            out[flat] = t.data[src_off];
+                                        }
+                                    }
+                                    (out, new_shape)
+                                })
+                                .unwrap_or((vec![], vec![]));
+                            let s = caller.data_mut();
+                            let id = s.next_tensor_id;
+                            s.next_tensor_id += 1;
+                            s.tensor_handles.insert(
+                                id,
+                                TensorState {
+                                    data,
+                                    shape: new_shape,
+                                },
+                            );
                             results[0] = Val::I32(id);
                             Ok(())
                         },
