@@ -101,9 +101,9 @@ Phase 7 has Metal, WebGPU, and CUDA shipped — only Vulkan and OpenCL remain.
 - [x] Verify extern-class `@:op` works end-to-end (Tensor a+b/a-b/a*b/a/b)
 - [x] Verify extern-abstract `@:op` works end-to-end (SIMD4f, pre-existing)
 
-### 7. Generic Metadata Pipeline Integration ([Phase 1](BACKLOG.md#phase-1-foundation-mostly-complete))
+### 7. ~~Generic Metadata Pipeline Integration~~ ✅ DONE (was stale)
 
-- [ ] Last 🔴 item under "Phase 1: Foundation" — generic metadata still needs end-to-end pipeline integration. Specifics in §1 of the backlog.
+`@:generic` flag flows from TAST through `SymbolFlags::GENERIC` into the monomorphization pass at [compiler/src/ir/monomorphize.rs](compiler/src/ir/monomorphize.rs) (821 lines). Cross-file generic-class metadata (`class_type_params` + `class_constructor_symbols`) lives on `SymbolTable` since commit `d145433`. Verified end-to-end by the `test_generic_metadata`, `test_generics_e2e`, `test_monomorphization`, `test_recursive_generics` examples (all passing).
 
 ---
 

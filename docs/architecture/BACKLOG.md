@@ -1052,11 +1052,11 @@ inventory::submit! { RayzorSymbol::new("haxe_std_parse_int", haxe_std_parse_int 
 
 ## Implementation Priority Order
 
-### Phase 1: Foundation (Mostly Complete)
+### Phase 1: Foundation ✅ COMPLETE
 1. ✅ Memory safety infrastructure
 2. ✅ Property access support (getter/setter) — full method dispatch working
 3. ✅ Derived traits (PartialEq/Ord/Hash codegen, Send/Sync validation, Clone/Copy field checks)
-4. 🔴 Generic metadata pipeline integration
+4. ✅ Generic metadata pipeline integration — `@:generic` flag flows TAST → `SymbolFlags::GENERIC` → monomorphization (`compiler/src/ir/monomorphize.rs`, 821 lines). Cross-file `class_type_params` + `class_constructor_symbols` on `SymbolTable` (commit `d145433`). Verified end-to-end by `test_generic_metadata`, `test_generics_e2e`, `test_monomorphization`, `test_recursive_generics`.
 
 ### Phase 2: JIT Execution ✅ COMPLETE (2026-01-28)
 
