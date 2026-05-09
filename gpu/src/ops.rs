@@ -99,6 +99,34 @@ pub unsafe extern "C" fn rayzor_gpu_compute_div(_ctx: i64, a: i64, b: i64) -> i6
 }
 
 // ---------------------------------------------------------------------------
+// GpuBuffer-method API for `@:op` overloading: `a + b` syntax.
+//
+// These take (self, other) — no ctx parameter, since binary_lazy doesn't
+// touch the context (the result is a lazy DAG node; materialization later
+// uses the GpuContext owned by GPUCompute).
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_buffer_add(a: i64, b: i64) -> i64 {
+    binary_lazy(a, b, KernelOp::Add)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_buffer_sub(a: i64, b: i64) -> i64 {
+    binary_lazy(a, b, KernelOp::Sub)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_buffer_mul(a: i64, b: i64) -> i64 {
+    binary_lazy(a, b, KernelOp::Mul)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_buffer_div(a: i64, b: i64) -> i64 {
+    binary_lazy(a, b, KernelOp::Div)
+}
+
+// ---------------------------------------------------------------------------
 // Extern C API — Unary ops: (ctx, a) -> result (lazy)
 // ---------------------------------------------------------------------------
 
@@ -993,6 +1021,96 @@ mod tests {
             let _ = Box::from_raw(a_buf as *mut GpuBuffer);
             let _ = Box::from_raw(b_buf as *mut GpuBuffer);
             let _ = Box::from_raw(c_buf as *mut GpuBuffer);
+            let _ = Box::from_raw(ctx as *mut GpuContext);
+        }
+    }
+
+    #[test]
+    fn test_gpu_buffer_op_overload() {
+        // Verifies the rayzor_gpu_buffer_* (no-ctx) entry points used by
+        // GpuBuffer @:op overloading produce the same result as the existing
+        // rayzor_gpu_compute_* (with-ctx) ops.
+        let ctx = make_ctx();
+        if ctx == 0 {
+            return;
+        }
+
+        let n = 256;
+        let a_data: Vec<f32> = (0..n).map(|i| i as f32).collect();
+        let b_data: Vec<f32> = (0..n).map(|i| (i * 2) as f32).collect();
+
+        let a_buf = unsafe { create_test_buffer(ctx, &a_data) };
+        let b_buf = unsafe { create_test_buffer(ctx, &b_data) };
+
+        // a + b → a*3 elementwise
+        let add_result = unsafe { rayzor_gpu_buffer_add(a_buf, b_buf) };
+        // a * b → i * 2*i = 2i²
+        let mul_result = unsafe { rayzor_gpu_buffer_mul(a_buf, b_buf) };
+        // b - a → i
+        let sub_result = unsafe { rayzor_gpu_buffer_sub(b_buf, a_buf) };
+
+        for &result in &[add_result, mul_result, sub_result] {
+            assert_ne!(result, 0, "buffer op returned null");
+            let result_buf = unsafe { &*(result as *const GpuBuffer) };
+            assert!(
+                matches!(result_buf.kind, GpuBufferKind::Lazy(_)),
+                "buffer op result should be lazy"
+            );
+        }
+
+        let gpu_ctx = unsafe { &mut *(ctx as *mut GpuContext) };
+        let add_buf = unsafe { &mut *(add_result as *mut GpuBuffer) };
+        add_buf.ensure_materialized(gpu_ctx).unwrap();
+        let byte_size = n * 4;
+        let data = add_buf.native_buffer().read_bytes(byte_size).unwrap();
+        let add_slice = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const f32, n) };
+        for (i, &val) in add_slice.iter().enumerate() {
+            let expected = (i + i * 2) as f32;
+            assert!(
+                (val - expected).abs() < 1e-6,
+                "buffer add mismatch at {}: expected {}, got {}",
+                i,
+                expected,
+                val
+            );
+        }
+
+        let mul_buf = unsafe { &mut *(mul_result as *mut GpuBuffer) };
+        mul_buf.ensure_materialized(gpu_ctx).unwrap();
+        let data = mul_buf.native_buffer().read_bytes(byte_size).unwrap();
+        let mul_slice = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const f32, n) };
+        for (i, &val) in mul_slice.iter().enumerate() {
+            let expected = (i * i * 2) as f32;
+            assert!(
+                (val - expected).abs() < 1e-3,
+                "buffer mul mismatch at {}: expected {}, got {}",
+                i,
+                expected,
+                val
+            );
+        }
+
+        let sub_buf = unsafe { &mut *(sub_result as *mut GpuBuffer) };
+        sub_buf.ensure_materialized(gpu_ctx).unwrap();
+        let data = sub_buf.native_buffer().read_bytes(byte_size).unwrap();
+        let sub_slice = unsafe { std::slice::from_raw_parts(data.as_ptr() as *const f32, n) };
+        for (i, &val) in sub_slice.iter().enumerate() {
+            let expected = i as f32;
+            assert!(
+                (val - expected).abs() < 1e-6,
+                "buffer sub mismatch at {}: expected {}, got {}",
+                i,
+                expected,
+                val
+            );
+        }
+
+        unsafe {
+            let _ = Box::from_raw(add_result as *mut GpuBuffer);
+            let _ = Box::from_raw(mul_result as *mut GpuBuffer);
+            let _ = Box::from_raw(sub_result as *mut GpuBuffer);
+            let _ = Box::from_raw(a_buf as *mut GpuBuffer);
+            let _ = Box::from_raw(b_buf as *mut GpuBuffer);
             let _ = Box::from_raw(ctx as *mut GpuContext);
         }
     }

@@ -44,6 +44,12 @@ class Main {
         check("mul", gpu.sum(gpu.mul(a, b)), 10752.0);    // (3*7)*512 = 10752
         check("div", gpu.sum(gpu.div(b, a)), 1194.666748046875);  // (7/3)*512 ≈ 1194.67
 
+        // --- @:op overloading: gpuA + gpuB syntax ---
+        check("op_add", gpu.sum(a + b), 5120.0);
+        check("op_sub", gpu.sum(b - a), 2048.0);
+        check("op_mul", gpu.sum(a * b), 10752.0);
+        check("op_div", gpu.sum(b / a), 1194.666748046875);
+
         // --- Unary elementwise ---
         check("neg", gpu.sum(gpu.neg(a)), -1536.0);       // -3*512
         check("abs_neg", gpu.sum(gpu.abs(gpu.neg(a))), 1536.0);
