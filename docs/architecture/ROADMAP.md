@@ -96,9 +96,10 @@ Phase 7 has Metal, WebGPU, and CUDA shipped — only Vulkan and OpenCL remain.
 
 ### 6. Operator Overloading for GPU / Tensor ([§14.5](BACKLOG.md#145-operator-overloading-for-gputensor-types))
 
-- [ ] Exercise existing `@:op` annotations on Tensor (E2E tests using `a + b` syntax)
+- [x] Exercise existing `@:op` annotations on Tensor (E2E test `tensor_operator_overload`, commit `0fae6da`, 2026-05-09)
 - [ ] Add `@:op` overloading to GpuBuffer (requires ctx back-pointer in buffer struct)
-- [ ] Verify abstract-type `@:op` support works end-to-end (currently only extern class is tested)
+- [x] Verify extern-class `@:op` works end-to-end (Tensor a+b/a-b/a*b/a/b)
+- [x] Verify extern-abstract `@:op` works end-to-end (SIMD4f, pre-existing)
 
 ### 7. Generic Metadata Pipeline Integration ([Phase 1](BACKLOG.md#phase-1-foundation-mostly-complete))
 
