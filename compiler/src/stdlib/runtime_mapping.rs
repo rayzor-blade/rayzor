@@ -2776,6 +2776,16 @@ impl StdlibMapping {
         use IrTypeDescriptor::*;
 
         let mappings = vec![
+            // -- sys.thread.Tls<T> -- Thread-Local Storage --
+            // Tls<T>() -> Tls<T>: allocate a fresh thread-local slot id
+            map_method!(constructor "sys_thread_Tls", "new" => "sys_tls_new", params: 0, returns: primitive,
+                types: &[] => PtrU8),
+            // tls.get_value() -> T: read this thread's value (null if unset)
+            map_method!(instance "sys_thread_Tls", "get_value" => "sys_tls_get_value", params: 0, returns: primitive,
+                types: &[PtrU8] => PtrU8),
+            // tls.set_value(v): write this thread's value
+            map_method!(instance "sys_thread_Tls", "set_value" => "sys_tls_set_value", params: 1, returns: void,
+                types: &[PtrU8, PtrU8]),
             // Constructor: new Mutex() -> Mutex
             map_method!(constructor "sys_thread_Mutex", "new" => "sys_mutex_alloc", params: 0, returns: primitive,
                 types: &[] => PtrU8),

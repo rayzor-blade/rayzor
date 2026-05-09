@@ -1291,6 +1291,11 @@ register_symbol!("sys_thread_yield", crate::concurrency::sys_thread_yield);
 register_symbol!("sys_thread_sleep", crate::concurrency::sys_thread_sleep);
 register_symbol!("sys_thread_current", crate::concurrency::sys_thread_current);
 
+// sys.thread.Tls<T> — Thread-Local Storage
+register_symbol!("sys_tls_new", crate::concurrency::sys_tls_new);
+register_symbol!("sys_tls_get_value", crate::concurrency::sys_tls_get_value);
+register_symbol!("sys_tls_set_value", crate::concurrency::sys_tls_set_value);
+
 // sys.thread.Mutex wrapper functions
 register_symbol!("sys_mutex_alloc", crate::concurrency::sys_mutex_alloc);
 register_symbol!("sys_mutex_acquire", crate::concurrency::sys_mutex_acquire);

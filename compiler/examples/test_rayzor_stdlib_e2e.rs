@@ -1002,6 +1002,54 @@ class Main {
     );
 
     // ============================================================================
+    // TEST 11b: sys.thread.Tls — Thread-Local Storage
+    // ============================================================================
+    suite.add_test(
+        E2ETestCase::new(
+            "tls_basic",
+            "sys.thread.Tls — set/read on the same thread, distinct slots are isolated",
+            r#"
+package test;
+
+import sys.thread.Tls;
+
+class Box {
+    public var v:Int;
+    public function new(v:Int) { this.v = v; }
+}
+
+class Main {
+    static function main() {
+        var t = new Tls<Box>();
+
+        // Pre-set: null on the current thread.
+        var pre = t.get_value();
+        if (pre == null) trace("pre_null=true");
+
+        // Set + read on the same thread.
+        t.set_value(new Box(7));
+        trace(t.get_value().v);
+
+        // Re-set; the per-thread slot is overwritten.
+        t.set_value(new Box(99));
+        trace(t.get_value().v);
+
+        // A second Tls slot is independent of the first.
+        var u = new Tls<Box>();
+        if (u.get_value() == null) trace("u_null=true");
+    }
+}
+"#,
+        )
+        .expect_mir_calls(vec![
+            "sys_tls_new",
+            "sys_tls_set_value",
+            "sys_tls_get_value",
+        ])
+        .expect_level(TestLevel::Execution),
+    );
+
+    // ============================================================================
     // TEST 11: Host.localhost() static method
     // ============================================================================
     suite.add_test(
