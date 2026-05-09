@@ -1291,6 +1291,25 @@ register_symbol!("sys_thread_yield", crate::concurrency::sys_thread_yield);
 register_symbol!("sys_thread_sleep", crate::concurrency::sys_thread_sleep);
 register_symbol!("sys_thread_current", crate::concurrency::sys_thread_current);
 
+// rayzor.concurrent.Select — Multi-channel non-deterministic receive
+register_symbol!("rayzor_select_recv", crate::concurrency::rayzor_select_recv);
+register_symbol!(
+    "rayzor_select_try_recv",
+    crate::concurrency::rayzor_select_try_recv
+);
+register_symbol!(
+    "rayzor_select_result_free",
+    crate::concurrency::rayzor_select_result_free
+);
+register_symbol!(
+    "rayzor_select_result_index",
+    crate::concurrency::rayzor_select_result_index
+);
+register_symbol!(
+    "rayzor_select_result_value",
+    crate::concurrency::rayzor_select_result_value
+);
+
 // sys.thread.Tls<T> — Thread-Local Storage
 register_symbol!("sys_tls_new", crate::concurrency::sys_tls_new);
 register_symbol!("sys_tls_get_value", crate::concurrency::sys_tls_get_value);

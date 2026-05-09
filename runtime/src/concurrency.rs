@@ -1233,6 +1233,158 @@ pub unsafe extern "C" fn sys_condition_broadcast(condition: *mut u8) {
 }
 
 // ============================================================================
+// rayzor.concurrent.Select — Multi-channel non-deterministic receive
+// ============================================================================
+//
+// Go-style `select { case x := <-ch1; case y := <-ch2; ... }` over `Channel<T>`.
+// The runtime exposes two entry points:
+//
+//   - `rayzor_select_try_recv(channels, count)` polls each channel once and
+//     returns immediately. If any channel has a buffered value, it is removed
+//     and returned along with that channel's index. Otherwise returns -1.
+//   - `rayzor_select_recv(channels, count)` repeatedly polls until any channel
+//     yields a value, sleeping briefly between rounds. Adequate for typical
+//     workloads; a future revision can switch to a shared notify-condvar to
+//     replace the sleep loop without changing the API.
+//
+// Both return a heap-boxed `SelectResult { index: i64, value: *mut u8 }`. The
+// index is -1 when no channel was ready (try variant only). The Haxe surface
+// `rayzor.concurrent.Select.recv` / `.tryRecv` reads these two fields.
+
+/// Pure-data return shape consumed by the Haxe `SelectResult` class.
+/// Layout matches Haxe class field order: `index` at offset 0, `value` at 8.
+#[repr(C)]
+struct SelectResultRaw {
+    index: i64,
+    value: *mut u8,
+}
+
+/// Allocate a `SelectResult` carrying the raw channel value.
+/// The Haxe surface types `value` as `T` (the channel's element type),
+/// so callers see it directly as e.g. `Msg`, not `Dynamic` — no boxing
+/// is needed (matching `Channel.receive():T`).
+unsafe fn alloc_select_result(index: i64, value: *mut u8) -> *mut u8 {
+    let boxed = Box::new(SelectResultRaw { index, value });
+    Box::into_raw(boxed) as *mut u8
+}
+
+/// Try once across all channels — returns immediately.
+/// Returns boxed `SelectResult { -1, null }` if no channel is ready.
+///
+/// # Safety
+/// `channels_ptr` must point to `count` valid channel handles (each
+/// previously returned from `rayzor_channel_init`).
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_select_try_recv(
+    channels_ptr: *const *mut u8,
+    count: i32,
+) -> *mut u8 {
+    if channels_ptr.is_null() || count <= 0 {
+        return alloc_select_result(-1, ptr::null_mut());
+    }
+    let chans = std::slice::from_raw_parts(channels_ptr, count as usize);
+    for (i, &ch) in chans.iter().enumerate() {
+        if ch.is_null() {
+            continue;
+        }
+        let handle = &*(ch as *const ChannelHandle);
+        let mut state = match handle.state.lock() {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if let Some(value) = state.buffer.pop_front() {
+            drop(state);
+            handle.not_full.notify_one();
+            return alloc_select_result(i as i64, value);
+        }
+    }
+    alloc_select_result(-1, ptr::null_mut())
+}
+
+/// Block until any channel has a value (polling loop with short sleeps).
+///
+/// # Safety
+/// Same as `rayzor_select_try_recv`.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_select_recv(channels_ptr: *const *mut u8, count: i32) -> *mut u8 {
+    if channels_ptr.is_null() || count <= 0 {
+        return alloc_select_result(-1, ptr::null_mut());
+    }
+    let chans = std::slice::from_raw_parts(channels_ptr, count as usize);
+    let mut backoff_us = 50u64;
+    loop {
+        // Fast path: try each channel.
+        for (i, &ch) in chans.iter().enumerate() {
+            if ch.is_null() {
+                continue;
+            }
+            let handle = &*(ch as *const ChannelHandle);
+            let mut state = match handle.state.lock() {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            if let Some(value) = state.buffer.pop_front() {
+                drop(state);
+                handle.not_full.notify_one();
+                return alloc_select_result(i as i64, value);
+            }
+            // If this channel is closed AND empty, treat as ready-with-null —
+            // matches Go semantics where a closed empty channel yields the
+            // zero value forever. Index returned so user can detect closure.
+            if state.closed {
+                drop(state);
+                return alloc_select_result(i as i64, ptr::null_mut());
+            }
+        }
+        // Adaptive backoff up to 2ms; keeps latency low for short waits while
+        // not burning CPU on long waits. Replace with a shared select-condvar
+        // when we wire one through ChannelHandle.
+        thread::sleep(Duration::from_micros(backoff_us));
+        if backoff_us < 2000 {
+            backoff_us = (backoff_us * 2).min(2000);
+        }
+    }
+}
+
+/// Free a SelectResult allocated by `rayzor_select_*`. Called by the Haxe
+/// runtime once the user reads `index`/`value`.
+///
+/// # Safety
+/// `result` must be a pointer returned from `rayzor_select_recv` /
+/// `rayzor_select_try_recv` and not previously freed.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_select_result_free(result: *mut u8) {
+    if !result.is_null() {
+        drop(Box::from_raw(result as *mut SelectResultRaw));
+    }
+}
+
+/// `SelectResult.index` getter. Returns -1 for the null sentinel.
+///
+/// # Safety
+/// `result` must be a pointer returned from `rayzor_select_recv` /
+/// `rayzor_select_try_recv`.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_select_result_index(result: *const u8) -> i64 {
+    if result.is_null() {
+        return -1;
+    }
+    (*(result as *const SelectResultRaw)).index
+}
+
+/// `SelectResult.value` getter. Returns null for the null sentinel.
+///
+/// # Safety
+/// Same as `rayzor_select_result_index`.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_select_result_value(result: *const u8) -> *mut u8 {
+    if result.is_null() {
+        return ptr::null_mut();
+    }
+    (*(result as *const SelectResultRaw)).value
+}
+
+// ============================================================================
 // sys.thread.Tls — Thread-Local Storage
 // ============================================================================
 //
@@ -1399,6 +1551,58 @@ mod tests {
             sys_tls_set_value(b, two);
             assert_eq!(sys_tls_get_value(a) as usize, 1);
             assert_eq!(sys_tls_get_value(b) as usize, 2);
+        }
+    }
+
+    #[test]
+    fn test_select_picks_ready_channel() {
+        unsafe {
+            let a = rayzor_channel_init(0);
+            let b = rayzor_channel_init(0);
+            let c = rayzor_channel_init(0);
+
+            // Only `b` has a value buffered; select must return index=1.
+            rayzor_channel_send(b, 99usize as *mut u8);
+
+            let chans = [a, b, c];
+            let result_ptr = rayzor_select_try_recv(chans.as_ptr(), 3);
+            assert!(!result_ptr.is_null());
+            let result = &*(result_ptr as *const SelectResultRaw);
+            assert_eq!(result.index, 1);
+            assert_eq!(result.value as usize, 99);
+            rayzor_select_result_free(result_ptr);
+
+            // Subsequent try sees nothing → index = -1.
+            let empty_ptr = rayzor_select_try_recv(chans.as_ptr(), 3);
+            let empty = &*(empty_ptr as *const SelectResultRaw);
+            assert_eq!(empty.index, -1);
+            rayzor_select_result_free(empty_ptr);
+        }
+    }
+
+    #[test]
+    fn test_select_blocks_until_send() {
+        unsafe {
+            let a = rayzor_channel_init(0);
+            let b = rayzor_channel_init(0);
+            let chans = [a, b];
+            let chans_addr = chans.as_ptr() as usize;
+
+            // Spawn a sender that pushes onto channel `b` after a short delay,
+            // simulating a real producer.
+            let b_addr = b as usize;
+            let sender = thread::spawn(move || {
+                thread::sleep(Duration::from_millis(20));
+                rayzor_channel_send(b_addr as *mut u8, 7usize as *mut u8);
+            });
+
+            let result_ptr = rayzor_select_recv(chans_addr as *const *mut u8, 2);
+            let result = &*(result_ptr as *const SelectResultRaw);
+            assert_eq!(result.index, 1);
+            assert_eq!(result.value as usize, 7);
+            rayzor_select_result_free(result_ptr);
+
+            sender.join().unwrap();
         }
     }
 

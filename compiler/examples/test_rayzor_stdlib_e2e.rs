@@ -664,6 +664,70 @@ class Main {
     );
 
     // ============================================================================
+    // TEST 4c: Select — non-deterministic multi-channel receive
+    // ============================================================================
+    // Exercises both Select.tryRecv (non-blocking probe) and Select.recv
+    // (blocking until any channel has data). Two channels, one pre-populated
+    // and one filled by a spawned sender — verifies the index + value carry
+    // back through SelectResult<T>'s property accessors.
+    suite.add_test(
+        E2ETestCase::new(
+            "select_basic",
+            "Select.tryRecv + Select.recv across multiple Channel<T>",
+            r#"
+package test;
+
+import rayzor.concurrent.Channel;
+import rayzor.concurrent.Select;
+import rayzor.concurrent.Thread;
+
+@:derive([Send])
+class Msg {
+    public var v:Int;
+    public function new(v:Int) { this.v = v; }
+}
+
+class Main {
+    static function main() {
+        var ch1 = new Channel<Msg>(0);
+        var ch2 = new Channel<Msg>(0);
+
+        // Probe before any send — index should be -1.
+        var probe = Select.tryRecv([ch1, ch2]);
+        trace("probe_idx=" + probe.index);
+        probe.free();
+
+        // Send on ch2; tryRecv should pick it up at index 1.
+        ch2.send(new Msg(7));
+        var r = Select.tryRecv([ch1, ch2]);
+        trace("try_idx=" + r.index);
+        trace("try_val=" + r.value.v);
+        r.free();
+
+        // Spawn a sender that pushes to ch1 a moment later;
+        // blocking recv must pick it up at index 0. Keep the handle and
+        // join it so the runtime's ACTIVE_THREAD_COUNT decrements before
+        // the test harness's wait-all-threads cleanup fires.
+        var sender = Thread.spawn(() -> {
+            ch1.send(new Msg(42));
+            return 0;
+        });
+
+        var b = Select.recv([ch1, ch2]);
+        trace("blk_idx=" + b.index);
+        trace("blk_val=" + b.value.v);
+        b.free();
+
+        sender.join();
+    }
+}
+"#,
+        )
+        .expect_mir_calls(vec!["rayzor_select_recv", "rayzor_select_try_recv"])
+        .expect_level(TestLevel::Execution),
+    );
+
+    // ============================================================================
     // TEST 5: Mutex Basic Lock/Unlock
     // ============================================================================
     suite.add_test(
