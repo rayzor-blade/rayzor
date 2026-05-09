@@ -11231,6 +11231,37 @@ impl<'a> AstLowering<'a> {
                 right,
             } => {
                 let type_table = self.context.type_table.borrow();
+
+                // OPERATOR OVERLOADING: when the LHS is a user-defined class or abstract
+                // type and the operator is one of the arithmetic/comparison ones, the
+                // result type is the LHS type (per @:op semantics on Tensor, SIMD4f, …).
+                // Without this we'd default to Float below and silently miscompile —
+                // `var t = a + b` would type `t` as Float, then `t.sum()` dispatches on
+                // the wrong type. This handles the symmetric-typed ops; asymmetric ops
+                // are a future extension if needed.
+                if matches!(
+                    operator,
+                    BinaryOperator::Add
+                        | BinaryOperator::Sub
+                        | BinaryOperator::Mul
+                        | BinaryOperator::Div
+                        | BinaryOperator::Mod
+                ) {
+                    let lhs_is_user_type = type_table
+                        .get(left.expr_type)
+                        .map(|t| {
+                            matches!(
+                                t.kind,
+                                crate::tast::core::TypeKind::Class { .. }
+                                    | crate::tast::core::TypeKind::Abstract { .. }
+                            )
+                        })
+                        .unwrap_or(false);
+                    if lhs_is_user_type {
+                        return Ok(left.expr_type);
+                    }
+                }
+
                 match operator {
                     BinaryOperator::Add => {
                         // Add can be either string concatenation or numeric addition

@@ -541,6 +541,38 @@ class Main {
     ));
 
     // ============================================================================
+    // TEST 19a: Tensor operator overloading (@:op)
+    //
+    // Exercises @:op(A + B), (A - B), (A * B), (A / B) declared on Tensor.hx.
+    // ============================================================================
+    tests.push(E2ETestCase::new(
+        "tensor_operator_overload",
+        r#"
+package test;
+
+import rayzor.ds.Tensor;
+import rayzor.ds.DType;
+
+class Main {
+    static function main() {
+        var a = Tensor.full([4], 2.0, DType.F32);
+        var b = Tensor.full([4], 3.0, DType.F32);
+
+        var added = a + b;   // @:op(A + B) -> [5,5,5,5]
+        var subbed = a - b;  // @:op(A - B) -> [-1,-1,-1,-1]
+        var muled = a * b;   // @:op(A * B) -> [6,6,6,6]
+        var divved = a / b;  // @:op(A / B) -> [2/3,...]
+
+        trace(added.sum());   // 20
+        trace(subbed.sum());  // -4
+        trace(muled.sum());   // 24
+        trace(divved.sum());  // 2.6666...
+    }
+}
+"#,
+    ));
+
+    // ============================================================================
     // TEST 19: Tensor.slice — slice along an axis
     // ============================================================================
     tests.push(E2ETestCase::new(
