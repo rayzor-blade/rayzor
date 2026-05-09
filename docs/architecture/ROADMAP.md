@@ -55,15 +55,15 @@ Concurrency-program ergonomics: ✅ all common cases now auto-deref.
 
 ML / numerical workloads need a Tensor type even before GPU.
 
-- [ ] Tensor type with shape / strides / dtype (extern class, Rust runtime)
-- [ ] DType enum (F32, F16, BF16, I32, I8, U8)
-- [ ] Construction: `zeros`, `ones`, `full`, `fromArray`, `rand`
-- [ ] View ops: `reshape`, `transpose`, `permute`, `slice` (no-copy via strides)
-- [ ] Elementwise: `add`, `sub`, `mul`, `div`, `exp`, `log`, `sqrt`
-- [ ] Reductions: `sum`, `mean`, `max`, `min`
-- [ ] Linear algebra: `matmul`, `dot`
-- [ ] Activations: `relu`, `gelu`, `silu`, `softmax`
-- [ ] Normalization: `layerNorm`, `rmsNorm`
+- [x] Tensor type with shape / strides / dtype (extern class, Rust runtime)
+- [x] DType enum (F32, F16, BF16, I32, I8, U8)
+- [x] Construction: `zeros`, `ones`, `full`, `fromArray`, `rand`
+- [x] View ops: `reshape`, `transpose`, `permute`, `slice` (no-copy via strides)
+- [x] Elementwise: `add`, `sub`, `mul`, `div`, `exp`, `log`, `sqrt`
+- [x] Reductions: `sum`, `mean`, `max`, `min`
+- [x] Linear algebra: `matmul`, `dot`
+- [x] Activations: `relu`, `gelu`, `silu`, `softmax`
+- [x] Normalization: `layerNorm`, `rmsNorm`
 - [ ] SIMD4f vectorised CPU paths for f32 ops
 
 ### 5. GPU Compute — Phases 4 to 7 ([§14.3](BACKLOG.md#143-rayzor-gpu-plugin))
