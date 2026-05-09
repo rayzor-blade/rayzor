@@ -94,11 +94,11 @@ Phase 7 has Metal, WebGPU, and CUDA shipped — only Vulkan and OpenCL remain.
 - [ ] Vulkan backend (SPIR-V) — Windows / Linux / Android
 - [ ] OpenCL backend — cross-platform legacy
 
-### 6. Operator Overloading for GPU / Tensor ([§14.5](BACKLOG.md#145-operator-overloading-for-gputensor-types))
+### 6. ~~Operator Overloading for GPU / Tensor~~ ✅ DONE ([§14.5](BACKLOG.md#145-operator-overloading-for-gputensor-types))
 
 - [x] Exercise existing `@:op` annotations on Tensor (E2E test `tensor_operator_overload`, commit `0fae6da`, 2026-05-09)
-- [ ] Add `@:op` overloading to GpuBuffer (requires ctx back-pointer in buffer struct)
-- [x] Verify extern-class `@:op` works end-to-end (Tensor a+b/a-b/a*b/a/b)
+- [x] Add `@:op` overloading to GpuBuffer (commit `b3b9afb`, 2026-05-09 — turns out no ctx back-pointer was needed; `binary_lazy` already operates on buffers alone, ctx only consulted at materialization)
+- [x] Verify extern-class `@:op` works end-to-end (Tensor a+b/a-b/a*b/a/b, GpuBuffer same)
 - [x] Verify extern-abstract `@:op` works end-to-end (SIMD4f, pre-existing)
 
 ### 7. ~~Generic Metadata Pipeline Integration~~ ✅ DONE (was stale)
