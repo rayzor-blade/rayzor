@@ -617,55 +617,80 @@ pub unsafe extern "C" fn rayzor_tensor_transpose(tensor_ptr: i64) -> i64 {
 // Elementwise arithmetic
 // ============================================================================
 
-/// Binary elementwise op on two f32 tensors
-unsafe fn tensor_binop(a_ptr: i64, b_ptr: i64, op: fn(f32, f32) -> f32) -> i64 {
+/// Set up output tensor and return (a_slice, b_slice, r_slice) for an
+/// elementwise binary f32 op. Returns 0 result and `None` if the op is
+/// invalid (shape mismatch, non-f32 dtype). Assumes contiguous f32 data.
+#[allow(clippy::type_complexity)]
+unsafe fn prepare_binop<'a>(
+    a_ptr: i64,
+    b_ptr: i64,
+) -> Option<(&'a [f32], &'a [f32], &'a mut [f32], i64)> {
     if a_ptr == 0 || b_ptr == 0 {
-        return 0;
+        return None;
     }
     let a = &*(a_ptr as *const RayzorTensor);
     let b = &*(b_ptr as *const RayzorTensor);
 
-    // Shapes must match (no broadcasting yet)
     if a.numel != b.numel || a.dtype != DTYPE_F32 || b.dtype != DTYPE_F32 {
-        return 0;
+        return None;
     }
 
     let shape = std::slice::from_raw_parts(a.shape, a.ndim);
     let result = alloc_tensor(shape, DTYPE_F32, None);
     if result == 0 {
-        return 0;
+        return None;
     }
 
     let r = &*(result as *const RayzorTensor);
-    let a_data = a.data as *const f32;
-    let b_data = b.data as *const f32;
-    let r_data = r.data as *mut f32;
-
-    for i in 0..a.numel {
-        *r_data.add(i) = op(*a_data.add(i), *b_data.add(i));
-    }
-
-    result
+    let n = a.numel;
+    let a_slice = std::slice::from_raw_parts(a.data as *const f32, n);
+    let b_slice = std::slice::from_raw_parts(b.data as *const f32, n);
+    let r_slice = std::slice::from_raw_parts_mut(r.data as *mut f32, n);
+    Some((a_slice, b_slice, r_slice, result))
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_add(a: i64, b: i64) -> i64 {
-    tensor_binop(a, b, |x, y| x + y)
+    match prepare_binop(a, b) {
+        Some((a_s, b_s, r_s, result)) => {
+            crate::tensor_simd::add_slice(r_s, a_s, b_s);
+            result
+        }
+        None => 0,
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_sub(a: i64, b: i64) -> i64 {
-    tensor_binop(a, b, |x, y| x - y)
+    match prepare_binop(a, b) {
+        Some((a_s, b_s, r_s, result)) => {
+            crate::tensor_simd::sub_slice(r_s, a_s, b_s);
+            result
+        }
+        None => 0,
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_mul(a: i64, b: i64) -> i64 {
-    tensor_binop(a, b, |x, y| x * y)
+    match prepare_binop(a, b) {
+        Some((a_s, b_s, r_s, result)) => {
+            crate::tensor_simd::mul_slice(r_s, a_s, b_s);
+            result
+        }
+        None => 0,
+    }
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_div(a: i64, b: i64) -> i64 {
-    tensor_binop(a, b, |x, y| if y != 0.0 { x / y } else { 0.0 })
+    match prepare_binop(a, b) {
+        Some((a_s, b_s, r_s, result)) => {
+            crate::tensor_simd::div_slice(r_s, a_s, b_s);
+            result
+        }
+        None => 0,
+    }
 }
 
 // ============================================================================
@@ -714,8 +739,26 @@ pub unsafe extern "C" fn rayzor_tensor_log(a: i64) -> i64 {
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn rayzor_tensor_relu(a: i64) -> i64 {
-    tensor_unary(a, |x| if x > 0.0 { x } else { 0.0 })
+pub unsafe extern "C" fn rayzor_tensor_relu(a_ptr: i64) -> i64 {
+    if a_ptr == 0 {
+        return 0;
+    }
+    let a = &*(a_ptr as *const RayzorTensor);
+    if a.dtype != DTYPE_F32 {
+        return 0;
+    }
+
+    let shape = std::slice::from_raw_parts(a.shape, a.ndim);
+    let result = alloc_tensor(shape, DTYPE_F32, None);
+    if result == 0 {
+        return 0;
+    }
+    let r = &*(result as *const RayzorTensor);
+    let n = a.numel;
+    let a_s = std::slice::from_raw_parts(a.data as *const f32, n);
+    let r_s = std::slice::from_raw_parts_mut(r.data as *mut f32, n);
+    crate::tensor_simd::relu_slice(r_s, a_s);
+    result
 }
 
 /// GELU (approximate, tanh-based) — matches PyTorch `gelu(approximate='tanh')`.
@@ -759,24 +802,25 @@ pub unsafe extern "C" fn rayzor_tensor_softmax(a_ptr: i64) -> i64 {
 
     for g in 0..groups {
         let base = g * last;
-        // max for numeric stability
-        let mut maxv = f32::NEG_INFINITY;
+        let a_row = std::slice::from_raw_parts(a_data.add(base), last);
+        let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
+
+        // SIMD: max for numeric stability.
+        let maxv = crate::tensor_simd::max_slice(a_row);
+
+        // exp(x - max) — transcendental, scalar.
         for i in 0..last {
-            let v = *a_data.add(base + i);
-            if v > maxv {
-                maxv = v;
-            }
+            r_row[i] = (a_row[i] - maxv).exp();
         }
-        let mut sum = 0.0f32;
-        for i in 0..last {
-            let e = (*a_data.add(base + i) - maxv).exp();
-            *r_data.add(base + i) = e;
-            sum += e;
-        }
+
+        // SIMD: sum of exponentiated values.
+        let sum = crate::tensor_simd::sum_slice(r_row);
         if sum > 0.0 {
             let inv = 1.0 / sum;
-            for i in 0..last {
-                *r_data.add(base + i) *= inv;
+            // SIMD: scale by reciprocal via in-place axpy with zero accumulator.
+            // Using scale_slice keeps the loop tight.
+            for v in r_row.iter_mut() {
+                *v *= inv;
             }
         }
     }
@@ -811,20 +855,19 @@ pub unsafe extern "C" fn rayzor_tensor_layer_norm(a_ptr: i64, eps: f64) -> i64 {
 
     for g in 0..groups {
         let base = g * last;
-        let mut mean = 0.0f32;
-        for i in 0..last {
-            mean += *a_data.add(base + i);
-        }
-        mean /= n;
-        let mut var = 0.0f32;
-        for i in 0..last {
-            let d = *a_data.add(base + i) - mean;
-            var += d * d;
-        }
-        var /= n;
+        let a_row = std::slice::from_raw_parts(a_data.add(base), last);
+        let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
+
+        // SIMD: mean.
+        let mean = crate::tensor_simd::sum_slice(a_row) / n;
+
+        // Variance: (a - mean)^2 sum. Done in place via r_row to reuse SIMD
+        // sub + mul.
+        crate::tensor_simd::sub_const_slice(r_row, a_row, mean);
+        let var = crate::tensor_simd::sum_of_squares(r_row) / n;
         let inv = 1.0 / (var + eps).sqrt();
-        for i in 0..last {
-            *r_data.add(base + i) = (*a_data.add(base + i) - mean) * inv;
+        for v in r_row.iter_mut() {
+            *v *= inv;
         }
     }
     result
@@ -857,16 +900,12 @@ pub unsafe extern "C" fn rayzor_tensor_rms_norm(a_ptr: i64, eps: f64) -> i64 {
 
     for g in 0..groups {
         let base = g * last;
-        let mut ms = 0.0f32;
-        for i in 0..last {
-            let v = *a_data.add(base + i);
-            ms += v * v;
-        }
-        ms /= n;
+        let a_row = std::slice::from_raw_parts(a_data.add(base), last);
+        let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
+
+        let ms = crate::tensor_simd::sum_of_squares(a_row) / n;
         let inv = 1.0 / (ms + eps).sqrt();
-        for i in 0..last {
-            *r_data.add(base + i) = *a_data.add(base + i) * inv;
-        }
+        crate::tensor_simd::mul_const_slice(r_row, a_row, inv);
     }
     result
 }
@@ -885,13 +924,8 @@ pub unsafe extern "C" fn rayzor_tensor_sum(tensor_ptr: i64) -> f64 {
     if t.dtype != DTYPE_F32 {
         return 0.0;
     }
-
-    let data = t.data as *const f32;
-    let mut acc = 0.0f64;
-    for i in 0..t.numel {
-        acc += *data.add(i) as f64;
-    }
-    acc
+    let data = std::slice::from_raw_parts(t.data as *const f32, t.numel);
+    crate::tensor_simd::sum_slice(data) as f64
 }
 
 /// tensor.max() -> f64 (returns -inf for empty tensors)
@@ -904,15 +938,8 @@ pub unsafe extern "C" fn rayzor_tensor_max(tensor_ptr: i64) -> f64 {
     if t.dtype != DTYPE_F32 || t.numel == 0 {
         return f64::NEG_INFINITY;
     }
-    let data = t.data as *const f32;
-    let mut m = *data;
-    for i in 1..t.numel {
-        let v = *data.add(i);
-        if v > m {
-            m = v;
-        }
-    }
-    m as f64
+    let data = std::slice::from_raw_parts(t.data as *const f32, t.numel);
+    crate::tensor_simd::max_slice(data) as f64
 }
 
 /// tensor.min() -> f64 (returns +inf for empty tensors)
@@ -925,15 +952,8 @@ pub unsafe extern "C" fn rayzor_tensor_min(tensor_ptr: i64) -> f64 {
     if t.dtype != DTYPE_F32 || t.numel == 0 {
         return f64::INFINITY;
     }
-    let data = t.data as *const f32;
-    let mut m = *data;
-    for i in 1..t.numel {
-        let v = *data.add(i);
-        if v < m {
-            m = v;
-        }
-    }
-    m as f64
+    let data = std::slice::from_raw_parts(t.data as *const f32, t.numel);
+    crate::tensor_simd::min_slice(data) as f64
 }
 
 /// tensor.mean() -> f64
@@ -961,13 +981,9 @@ pub unsafe extern "C" fn rayzor_tensor_dot(a_ptr: i64, b_ptr: i64) -> f64 {
         return 0.0;
     }
 
-    let a_data = a.data as *const f32;
-    let b_data = b.data as *const f32;
-    let mut acc = 0.0f64;
-    for i in 0..a.numel {
-        acc += (*a_data.add(i) as f64) * (*b_data.add(i) as f64);
-    }
-    acc
+    let a_s = std::slice::from_raw_parts(a.data as *const f32, a.numel);
+    let b_s = std::slice::from_raw_parts(b.data as *const f32, b.numel);
+    crate::tensor_simd::dot_slice(a_s, b_s)
 }
 
 // ============================================================================
@@ -1009,10 +1025,29 @@ pub unsafe extern "C" fn rayzor_tensor_matmul(a_ptr: i64, b_ptr: i64) -> i64 {
     let b_data = b.data as *const f32;
     let r_data = r.data as *mut f32;
 
-    // Naive matmul with stride awareness
     let a_strides = std::slice::from_raw_parts(a.strides, 2);
     let b_strides = std::slice::from_raw_parts(b.strides, 2);
 
+    // Fast path: both A and B row-major (innermost stride == 1). Loop order
+    // is (i, k, j) so the inner `j` loop accumulates into a contiguous row of
+    // R with broadcast a_ik — the textbook SIMD-friendly matmul.
+    if a_strides[1] == 1 && b_strides[1] == 1 {
+        let r_row_size = n;
+        for i in 0..m {
+            let a_row = a_data.add(i * a_strides[0]);
+            let r_row = r_data.add(i * r_row_size);
+            for p in 0..k {
+                let a_ik = *a_row.add(p);
+                let b_row = b_data.add(p * b_strides[0]);
+                let r_slice = std::slice::from_raw_parts_mut(r_row, n);
+                let b_slice = std::slice::from_raw_parts(b_row, n);
+                crate::tensor_simd::axpy_slice(r_slice, a_ik, b_slice);
+            }
+        }
+        return result;
+    }
+
+    // Strided fallback (e.g. transposed views).
     for i in 0..m {
         for j in 0..n {
             let mut sum = 0.0f32;
