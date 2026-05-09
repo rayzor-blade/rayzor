@@ -380,6 +380,51 @@ class Main {
 }
 "#,
         ),
+        // sys.net.Host — DNS / hostname.
+        (
+            "host_localhost",
+            r#"
+import sys.net.Host;
+
+class Main {
+    static function main() {
+        var name = Host.localhost();
+    }
+}
+"#,
+        ),
+        // sys.net.Socket + Host — TCP echo over localhost.
+        (
+            "socket_host_basic",
+            r#"
+import sys.net.Socket;
+import sys.net.Host;
+
+class Main {
+    static function main() {
+        // Server: bind to localhost and listen.
+        var server = new Socket();
+        var host = new Host("127.0.0.1");
+        server.bind(host, 19876);
+        server.listen(1);
+
+        // Client: connect to the server.
+        var client = new Socket();
+        client.connect(new Host("127.0.0.1"), 19876);
+
+        // Server accepts; client writes; server reads.
+        var conn = server.accept();
+        client.write("hello");
+        var data = conn.read();
+
+        // Cleanup.
+        conn.close();
+        client.close();
+        server.close();
+    }
+}
+"#,
+        ),
     ];
 
     let mut func_pass = 0;

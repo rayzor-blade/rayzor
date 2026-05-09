@@ -1145,6 +1145,73 @@ impl<'a> HirToMirContext<'a> {
 
     /// Resolve a class symbol from a receiver type, handling aliases/generic instances.
     /// Falls back to the persisted class_type_to_symbol map when TypeIds drift.
+    /// Last-ditch dispatch for `tls.value` / `tls.value = v` on extern classes
+    /// where the property accessor method (`get_value` / `set_value`) is
+    /// declared with `@:native(...)` and lives in the stdlib mapping rather
+    /// than the user's `function_map` / `external_function_map`.
+    ///
+    /// Looks up `(receiver_class_name, accessor_method_name)` in
+    /// `stdlib_mapping`, registers an extern call to the runtime function,
+    /// and emits a direct call. Returns `None` if no mapping is found,
+    /// letting the caller fall through to other paths (or emit a real error).
+    fn try_property_call_via_stdlib(
+        &mut self,
+        receiver_ty: TypeId,
+        accessor_name: InternedString,
+        args: Vec<IrId>,
+        return_type: IrType,
+    ) -> Option<IrId> {
+        let class_symbol = self.resolve_receiver_class_symbol(receiver_ty)?;
+        let class_name = self.symbol_table.get_symbol(class_symbol).and_then(|s| {
+            s.qualified_name
+                .and_then(|n| self.string_interner.get(n))
+                .or_else(|| self.string_interner.get(s.name))
+        })?;
+        let method_name = self.string_interner.get(accessor_name)?;
+
+        // The stdlib mapping uses `_`-separated qualified names like
+        // `sys_thread_Tls`; the symbol stores `sys.thread.Tls`. Try the
+        // dot form first (matches MIR_lookup convention), then convert.
+        let dot_form = class_name.to_string();
+        let underscore_form = dot_form.replace('.', "_");
+
+        // expected_param_count = args.len() - 1 because args includes `this`
+        let expected_extra = args.len().saturating_sub(1);
+
+        let candidate_classes = [dot_form.as_str(), underscore_form.as_str()];
+        let mut found: Option<(String, IrType, Vec<IrType>)> = None;
+        for cn in &candidate_classes {
+            if let Some((_sig, mapping)) = self
+                .stdlib_mapping
+                .find_by_name_and_params(cn, method_name, expected_extra)
+                .or_else(|| self.stdlib_mapping.find_by_name(cn, method_name))
+            {
+                let runtime_name = mapping.runtime_name.to_string();
+                let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                let param_types = vec![ptr_u8.clone(); args.len()];
+                found = Some((runtime_name, return_type.clone(), param_types));
+                break;
+            }
+        }
+        let (runtime_name, ret_ty, param_types) = found?;
+        let func_id =
+            self.get_or_register_extern_function(&runtime_name, param_types, ret_ty.clone());
+        let r = self
+            .builder
+            .build_call_direct(func_id, args, ret_ty.clone());
+        // build_call_direct returns None for void calls (no result register).
+        // For our caller a successful void call should still count as "did it",
+        // so synthesize a sentinel IrId(0) — the setter caller doesn't use
+        // the return value, only the `is_some()` check.
+        if r.is_some() {
+            r
+        } else if matches!(ret_ty, IrType::Void) {
+            Some(crate::ir::IrId(0))
+        } else {
+            None
+        }
+    }
+
     fn resolve_receiver_class_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
         let mut current = type_id;
         {
@@ -23303,8 +23370,11 @@ impl<'a> HirToMirContext<'a> {
             HirLValue::Field { object, field } => {
                 // Write object.field = value
                 if let Some(obj_reg) = self.lower_expression(object) {
-                    // Check if this is a property with a custom setter
-                    if let Some(property_info) = self.property_access_map.get(field) {
+                    // Check if this is a property with a custom setter.
+                    // Clone the info so the immutable borrow of `self` is released
+                    // before any of the per-arm fallbacks that need `&mut self`.
+                    let property_info_owned = self.property_access_map.get(field).cloned();
+                    if let Some(property_info) = property_info_owned.as_ref() {
                         match &property_info.setter {
                             crate::tast::PropertyAccessor::Method(setter_method_name) => {
                                 // Look up the setter method by name in function_map
@@ -23341,21 +23411,37 @@ impl<'a> HirToMirContext<'a> {
                                         return_type,
                                     );
                                     return; // Setter called successfully
-                                } else {
-                                    // Setter method not found - this is an error
-                                    let method_name_str = self
-                                        .string_interner
-                                        .get(*setter_method_name)
-                                        .unwrap_or("<unknown>");
-                                    self.add_error(
-                                        &format!(
-                                            "Property setter method '{}' not found",
-                                            method_name_str
-                                        ),
-                                        SourceLocation::unknown(),
-                                    );
+                                }
+
+                                // Fallback: extern-class accessor — try the stdlib mapping
+                                // (e.g. sys.thread.Tls.set_value → sys_tls_set_value).
+                                let setter_name = *setter_method_name;
+                                let receiver_ty = object.ty;
+                                if self
+                                    .try_property_call_via_stdlib(
+                                        receiver_ty,
+                                        setter_name,
+                                        vec![obj_reg, value],
+                                        IrType::Void,
+                                    )
+                                    .is_some()
+                                {
                                     return;
                                 }
+
+                                // Setter method not found - this is an error
+                                let method_name_str = self
+                                    .string_interner
+                                    .get(*setter_method_name)
+                                    .unwrap_or("<unknown>");
+                                self.add_error(
+                                    &format!(
+                                        "Property setter method '{}' not found",
+                                        method_name_str
+                                    ),
+                                    SourceLocation::unknown(),
+                                );
+                                return;
                             }
                             crate::tast::PropertyAccessor::Null => {
                                 // `null` setter = writable from inside the class only.
@@ -24286,6 +24372,19 @@ impl<'a> HirToMirContext<'a> {
                         return self
                             .builder
                             .build_call_direct(func_id, vec![obj], result_type);
+                    }
+
+                    // Fallback: extern-class accessor — try the stdlib mapping
+                    // (e.g. sys.thread.Tls.get_value → sys_tls_get_value).
+                    let getter_name = *getter_method_name;
+                    let result_type = self.convert_type(field_ty);
+                    if let Some(result) = self.try_property_call_via_stdlib(
+                        receiver_ty,
+                        getter_name,
+                        vec![obj],
+                        result_type,
+                    ) {
+                        return Some(result);
                     }
                     // Getter not found — fall through to other paths (stdlib dispatch, GEP, etc.)
                 }
