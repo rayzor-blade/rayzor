@@ -32,9 +32,11 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
     build_tensor_get(builder);
     build_tensor_set(builder);
 
-    // Reshape / transpose
+    // Reshape / transpose / permute / slice
     build_tensor_reshape(builder);
     build_tensor_transpose(builder);
+    build_tensor_permute(builder);
+    build_tensor_slice(builder);
 
     // Arithmetic (binary)
     build_tensor_add(builder);
@@ -42,15 +44,24 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
     build_tensor_mul(builder);
     build_tensor_div(builder);
 
-    // Math (unary)
+    // Math (unary) / activations
     build_tensor_sqrt(builder);
     build_tensor_exp(builder);
     build_tensor_log(builder);
     build_tensor_relu(builder);
+    build_tensor_gelu(builder);
+    build_tensor_silu(builder);
+    build_tensor_softmax(builder);
+
+    // Normalization
+    build_tensor_layer_norm(builder);
+    build_tensor_rms_norm(builder);
 
     // Reductions
     build_tensor_sum(builder);
     build_tensor_mean(builder);
+    build_tensor_max(builder);
+    build_tensor_min(builder);
     build_tensor_dot(builder);
 
     // Linear algebra
@@ -179,6 +190,29 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
         .build();
     builder.mark_as_extern(func_id);
 
+    // permute: (tensor, axes_ptr, axes_len) -> i64
+    let func_id = builder
+        .begin_function("rayzor_tensor_permute")
+        .param("tensor", i64_ty.clone())
+        .param("axes_ptr", i64_ty.clone())
+        .param("axes_len", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // slice: (tensor, dim, start, end) -> i64
+    let func_id = builder
+        .begin_function("rayzor_tensor_slice")
+        .param("tensor", i64_ty.clone())
+        .param("dim", i64_ty.clone())
+        .param("start", i64_ty.clone())
+        .param("end", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
     // Binary ops: (a, b) -> i64
     for name in &[
         "rayzor_tensor_add",
@@ -203,6 +237,9 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
         "rayzor_tensor_exp",
         "rayzor_tensor_log",
         "rayzor_tensor_relu",
+        "rayzor_tensor_gelu",
+        "rayzor_tensor_silu",
+        "rayzor_tensor_softmax",
     ] {
         let func_id = builder
             .begin_function(*name)
@@ -213,8 +250,25 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
         builder.mark_as_extern(func_id);
     }
 
+    // Normalization ops: (tensor, eps: f64) -> i64
+    for name in &["rayzor_tensor_layer_norm", "rayzor_tensor_rms_norm"] {
+        let func_id = builder
+            .begin_function(*name)
+            .param("tensor", i64_ty.clone())
+            .param("eps", f64_ty.clone())
+            .returns(i64_ty.clone())
+            .calling_convention(CallingConvention::C)
+            .build();
+        builder.mark_as_extern(func_id);
+    }
+
     // Reductions: (tensor) -> f64
-    for name in &["rayzor_tensor_sum", "rayzor_tensor_mean"] {
+    for name in &[
+        "rayzor_tensor_sum",
+        "rayzor_tensor_mean",
+        "rayzor_tensor_max",
+        "rayzor_tensor_min",
+    ] {
         let func_id = builder
             .begin_function(*name)
             .param("tensor", i64_ty.clone())
@@ -550,15 +604,24 @@ build_simple_i64_to_i64!(
     "rayzor_tensor_transpose"
 );
 
-// Unary math ops
+// Unary math ops / activations
 build_simple_i64_to_i64!(build_tensor_sqrt, "Tensor_sqrt", "rayzor_tensor_sqrt");
 build_simple_i64_to_i64!(build_tensor_exp, "Tensor_exp", "rayzor_tensor_exp");
 build_simple_i64_to_i64!(build_tensor_log, "Tensor_log", "rayzor_tensor_log");
 build_simple_i64_to_i64!(build_tensor_relu, "Tensor_relu", "rayzor_tensor_relu");
+build_simple_i64_to_i64!(build_tensor_gelu, "Tensor_gelu", "rayzor_tensor_gelu");
+build_simple_i64_to_i64!(build_tensor_silu, "Tensor_silu", "rayzor_tensor_silu");
+build_simple_i64_to_i64!(
+    build_tensor_softmax,
+    "Tensor_softmax",
+    "rayzor_tensor_softmax"
+);
 
 // Reductions
 build_simple_i64_to_f64!(build_tensor_sum, "Tensor_sum", "rayzor_tensor_sum");
 build_simple_i64_to_f64!(build_tensor_mean, "Tensor_mean", "rayzor_tensor_mean");
+build_simple_i64_to_f64!(build_tensor_max, "Tensor_max", "rayzor_tensor_max");
+build_simple_i64_to_f64!(build_tensor_min, "Tensor_min", "rayzor_tensor_min");
 
 // Interop
 build_simple_i64_to_i64!(build_tensor_data, "Tensor_data", "rayzor_tensor_data");
@@ -663,6 +726,121 @@ fn build_tensor_set(builder: &mut MirBuilder) {
         .expect("rayzor_tensor_set not found");
     builder.call(extern_id, vec![self_val, indices_ptr, ndim, value]);
     builder.ret(None);
+}
+
+/// Tensor_permute(self: i64, axes_arr: i64) -> i64
+fn build_tensor_permute(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+
+    let func_id = builder
+        .begin_function("Tensor_permute")
+        .param("self", i64_ty.clone())
+        .param("axes_arr", i64_ty.clone())
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_val = builder.get_param(0);
+    let axes_arr = builder.get_param(1);
+    let (axes_ptr, axes_len) = extract_array_ptr_len(builder, axes_arr);
+
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_permute")
+        .expect("rayzor_tensor_permute not found");
+    let result = builder
+        .call(extern_id, vec![self_val, axes_ptr, axes_len])
+        .unwrap();
+    builder.ret(Some(result));
+}
+
+/// Tensor_slice(self: i64, dim: i64, start: i64, end: i64) -> i64
+fn build_tensor_slice(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+
+    let func_id = builder
+        .begin_function("Tensor_slice")
+        .param("self", i64_ty.clone())
+        .param("dim", i64_ty.clone())
+        .param("start", i64_ty.clone())
+        .param("end", i64_ty.clone())
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_val = builder.get_param(0);
+    let dim = builder.get_param(1);
+    let start = builder.get_param(2);
+    let end = builder.get_param(3);
+
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_slice")
+        .expect("rayzor_tensor_slice not found");
+    let result = builder
+        .call(extern_id, vec![self_val, dim, start, end])
+        .unwrap();
+    builder.ret(Some(result));
+}
+
+/// Tensor_layer_norm(self: i64, eps: f64) -> i64
+fn build_tensor_layer_norm(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let f64_ty = IrType::F64;
+
+    let func_id = builder
+        .begin_function("Tensor_layer_norm")
+        .param("self", i64_ty.clone())
+        .param("eps", f64_ty)
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_val = builder.get_param(0);
+    let eps = builder.get_param(1);
+
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_layer_norm")
+        .expect("rayzor_tensor_layer_norm not found");
+    let result = builder.call(extern_id, vec![self_val, eps]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// Tensor_rms_norm(self: i64, eps: f64) -> i64
+fn build_tensor_rms_norm(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let f64_ty = IrType::F64;
+
+    let func_id = builder
+        .begin_function("Tensor_rms_norm")
+        .param("self", i64_ty.clone())
+        .param("eps", f64_ty)
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_val = builder.get_param(0);
+    let eps = builder.get_param(1);
+
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_rms_norm")
+        .expect("rayzor_tensor_rms_norm not found");
+    let result = builder.call(extern_id, vec![self_val, eps]).unwrap();
+    builder.ret(Some(result));
 }
 
 /// Tensor_reshape(tensor: i64, shape_arr: i64) -> i64

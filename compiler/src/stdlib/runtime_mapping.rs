@@ -3286,6 +3286,12 @@ impl StdlibMapping {
             // tensor.transpose(): Tensor
             map_method!(instance "rayzor_ds_Tensor", "transpose" => "Tensor_transpose", params: 0, mir_wrapper,
                 types: &[PtrVoid] => PtrVoid),
+            // tensor.permute(axes: Array<Int>): Tensor
+            map_method!(instance "rayzor_ds_Tensor", "permute" => "Tensor_permute", params: 1, mir_wrapper,
+                types: &[PtrVoid, PtrVoid] => PtrVoid),
+            // tensor.slice(dim, start, end): Tensor
+            map_method!(instance "rayzor_ds_Tensor", "slice" => "Tensor_slice", params: 3, mir_wrapper,
+                types: &[PtrVoid, I64, I64, I64] => PtrVoid),
             // --- Arithmetic (binary, instance) ---
             // tensor.add(other: Tensor): Tensor
             map_method!(instance "rayzor_ds_Tensor", "add" => "Tensor_add", params: 1, mir_wrapper,
@@ -3313,6 +3319,12 @@ impl StdlibMapping {
             // tensor.mean(): Float
             map_method!(instance "rayzor_ds_Tensor", "mean" => "Tensor_mean", params: 0, mir_wrapper,
                 types: &[PtrVoid] => F64),
+            // tensor.max(): Float
+            map_method!(instance "rayzor_ds_Tensor", "max" => "Tensor_max", params: 0, mir_wrapper,
+                types: &[PtrVoid] => F64),
+            // tensor.min(): Float
+            map_method!(instance "rayzor_ds_Tensor", "min" => "Tensor_min", params: 0, mir_wrapper,
+                types: &[PtrVoid] => F64),
             // --- Math (unary) ---
             // tensor.sqrt(): Tensor
             map_method!(instance "rayzor_ds_Tensor", "sqrt" => "Tensor_sqrt", params: 0, mir_wrapper,
@@ -3326,6 +3338,21 @@ impl StdlibMapping {
             // tensor.relu(): Tensor
             map_method!(instance "rayzor_ds_Tensor", "relu" => "Tensor_relu", params: 0, mir_wrapper,
                 types: &[PtrVoid] => PtrVoid),
+            // tensor.gelu(): Tensor
+            map_method!(instance "rayzor_ds_Tensor", "gelu" => "Tensor_gelu", params: 0, mir_wrapper,
+                types: &[PtrVoid] => PtrVoid),
+            // tensor.silu(): Tensor
+            map_method!(instance "rayzor_ds_Tensor", "silu" => "Tensor_silu", params: 0, mir_wrapper,
+                types: &[PtrVoid] => PtrVoid),
+            // tensor.softmax(): Tensor
+            map_method!(instance "rayzor_ds_Tensor", "softmax" => "Tensor_softmax", params: 0, mir_wrapper,
+                types: &[PtrVoid] => PtrVoid),
+            // tensor.layerNorm(eps: Float): Tensor
+            map_method!(instance "rayzor_ds_Tensor", "layerNorm" => "Tensor_layer_norm", params: 1, mir_wrapper,
+                types: &[PtrVoid, F64] => PtrVoid),
+            // tensor.rmsNorm(eps: Float): Tensor
+            map_method!(instance "rayzor_ds_Tensor", "rmsNorm" => "Tensor_rms_norm", params: 1, mir_wrapper,
+                types: &[PtrVoid, F64] => PtrVoid),
             // --- Interop ---
             // tensor.data(): Ptr<Float>
             map_method!(instance "rayzor_ds_Tensor", "data" => "Tensor_data", params: 0, mir_wrapper,

@@ -446,6 +446,129 @@ pub unsafe extern "C" fn rayzor_tensor_reshape(tensor_ptr: i64, shape_ptr: i64, 
     new_t as i64
 }
 
+/// tensor.permute(axes_ptr, ndim) -> i64 (n-D permutation — reorders shape/strides, view)
+#[no_mangle]
+#[allow(clippy::manual_slice_size_calculation, clippy::needless_range_loop)]
+pub unsafe extern "C" fn rayzor_tensor_permute(
+    tensor_ptr: i64,
+    axes_ptr: i64,
+    axes_len: i64,
+) -> i64 {
+    if tensor_ptr == 0 {
+        return 0;
+    }
+    let t = &*(tensor_ptr as *const RayzorTensor);
+    let n = axes_len as usize;
+    if n != t.ndim {
+        return 0;
+    }
+
+    let axes_data = axes_ptr as *const i64;
+    let mut seen = vec![false; n];
+    let mut axes = vec![0usize; n];
+    for i in 0..n {
+        let ax = *axes_data.add(i) as usize;
+        if ax >= n || seen[ax] {
+            return 0;
+        }
+        seen[ax] = true;
+        axes[i] = ax;
+    }
+
+    let old_shape = std::slice::from_raw_parts(t.shape, n);
+    let old_strides = std::slice::from_raw_parts(t.strides, n);
+
+    let new_shape_ptr = malloc(n * std::mem::size_of::<usize>()) as *mut usize;
+    let new_strides_ptr = malloc(n * std::mem::size_of::<usize>()) as *mut usize;
+    if new_shape_ptr.is_null() || new_strides_ptr.is_null() {
+        return 0;
+    }
+    for i in 0..n {
+        *new_shape_ptr.add(i) = old_shape[axes[i]];
+        *new_strides_ptr.add(i) = old_strides[axes[i]];
+    }
+
+    let new_t = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
+    if new_t.is_null() {
+        return 0;
+    }
+    *new_t = RayzorTensor {
+        data: t.data,
+        shape: new_shape_ptr,
+        strides: new_strides_ptr,
+        ndim: n,
+        numel: t.numel,
+        dtype: t.dtype,
+        owns_data: false,
+    };
+    new_t as i64
+}
+
+/// tensor.slice(dim, start, end) -> i64 (view over [start..end) along `dim`, view)
+#[no_mangle]
+#[allow(clippy::manual_slice_size_calculation, clippy::needless_range_loop)]
+pub unsafe extern "C" fn rayzor_tensor_slice(
+    tensor_ptr: i64,
+    dim: i64,
+    start: i64,
+    end: i64,
+) -> i64 {
+    if tensor_ptr == 0 {
+        return 0;
+    }
+    let t = &*(tensor_ptr as *const RayzorTensor);
+    let d = dim as usize;
+    if d >= t.ndim {
+        return 0;
+    }
+
+    let old_shape = std::slice::from_raw_parts(t.shape, t.ndim);
+    let old_strides = std::slice::from_raw_parts(t.strides, t.ndim);
+    let dim_size = old_shape[d];
+
+    let s = start.max(0) as usize;
+    let e = (end as usize).min(dim_size);
+    if s >= e {
+        return 0;
+    }
+    let new_dim_size = e - s;
+
+    let new_shape_ptr = malloc(t.ndim * std::mem::size_of::<usize>()) as *mut usize;
+    let new_strides_ptr = malloc(t.ndim * std::mem::size_of::<usize>()) as *mut usize;
+    if new_shape_ptr.is_null() || new_strides_ptr.is_null() {
+        return 0;
+    }
+    for i in 0..t.ndim {
+        *new_shape_ptr.add(i) = if i == d { new_dim_size } else { old_shape[i] };
+        *new_strides_ptr.add(i) = old_strides[i];
+    }
+
+    let mut new_numel = 1usize;
+    for i in 0..t.ndim {
+        new_numel *= *new_shape_ptr.add(i);
+    }
+
+    // Offset data pointer by s * stride[d] elements
+    let elem_size = dtype_size(t.dtype);
+    let byte_offset = s * old_strides[d] * elem_size;
+    let new_data = t.data.add(byte_offset);
+
+    let new_t = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
+    if new_t.is_null() {
+        return 0;
+    }
+    *new_t = RayzorTensor {
+        data: new_data,
+        shape: new_shape_ptr,
+        strides: new_strides_ptr,
+        ndim: t.ndim,
+        numel: new_numel,
+        dtype: t.dtype,
+        owns_data: false,
+    };
+    new_t as i64
+}
+
 /// tensor.transpose() -> i64 (2D transpose — swaps shape/strides)
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_transpose(tensor_ptr: i64) -> i64 {
@@ -595,6 +718,159 @@ pub unsafe extern "C" fn rayzor_tensor_relu(a: i64) -> i64 {
     tensor_unary(a, |x| if x > 0.0 { x } else { 0.0 })
 }
 
+/// GELU (approximate, tanh-based) — matches PyTorch `gelu(approximate='tanh')`.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_gelu(a: i64) -> i64 {
+    tensor_unary(a, |x| {
+        let c = (2.0f32 / std::f32::consts::PI).sqrt();
+        let inner = c * (x + 0.044715 * x * x * x);
+        0.5 * x * (1.0 + inner.tanh())
+    })
+}
+
+/// SiLU / swish: x * sigmoid(x).
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_silu(a: i64) -> i64 {
+    tensor_unary(a, |x| x / (1.0 + (-x).exp()))
+}
+
+/// Softmax over the last dimension.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_softmax(a_ptr: i64) -> i64 {
+    if a_ptr == 0 {
+        return 0;
+    }
+    let a = &*(a_ptr as *const RayzorTensor);
+    if a.dtype != DTYPE_F32 || a.ndim == 0 {
+        return 0;
+    }
+
+    let shape = std::slice::from_raw_parts(a.shape, a.ndim);
+    let result = alloc_tensor(shape, DTYPE_F32, None);
+    if result == 0 {
+        return 0;
+    }
+
+    let r = &*(result as *const RayzorTensor);
+    let a_data = a.data as *const f32;
+    let r_data = r.data as *mut f32;
+    let last = shape[a.ndim - 1];
+    let groups = a.numel.checked_div(last).unwrap_or(0);
+
+    for g in 0..groups {
+        let base = g * last;
+        // max for numeric stability
+        let mut maxv = f32::NEG_INFINITY;
+        for i in 0..last {
+            let v = *a_data.add(base + i);
+            if v > maxv {
+                maxv = v;
+            }
+        }
+        let mut sum = 0.0f32;
+        for i in 0..last {
+            let e = (*a_data.add(base + i) - maxv).exp();
+            *r_data.add(base + i) = e;
+            sum += e;
+        }
+        if sum > 0.0 {
+            let inv = 1.0 / sum;
+            for i in 0..last {
+                *r_data.add(base + i) *= inv;
+            }
+        }
+    }
+    result
+}
+
+/// Layer normalization over the last dimension. (x - mean) / sqrt(var + eps).
+/// `eps` is passed as f64 from Haxe.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_layer_norm(a_ptr: i64, eps: f64) -> i64 {
+    if a_ptr == 0 {
+        return 0;
+    }
+    let a = &*(a_ptr as *const RayzorTensor);
+    if a.dtype != DTYPE_F32 || a.ndim == 0 {
+        return 0;
+    }
+
+    let shape = std::slice::from_raw_parts(a.shape, a.ndim);
+    let result = alloc_tensor(shape, DTYPE_F32, None);
+    if result == 0 {
+        return 0;
+    }
+
+    let r = &*(result as *const RayzorTensor);
+    let a_data = a.data as *const f32;
+    let r_data = r.data as *mut f32;
+    let last = shape[a.ndim - 1];
+    let groups = a.numel.checked_div(last).unwrap_or(0);
+    let eps = eps as f32;
+    let n = last as f32;
+
+    for g in 0..groups {
+        let base = g * last;
+        let mut mean = 0.0f32;
+        for i in 0..last {
+            mean += *a_data.add(base + i);
+        }
+        mean /= n;
+        let mut var = 0.0f32;
+        for i in 0..last {
+            let d = *a_data.add(base + i) - mean;
+            var += d * d;
+        }
+        var /= n;
+        let inv = 1.0 / (var + eps).sqrt();
+        for i in 0..last {
+            *r_data.add(base + i) = (*a_data.add(base + i) - mean) * inv;
+        }
+    }
+    result
+}
+
+/// RMS normalization over the last dimension. x / sqrt(mean(x^2) + eps).
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_rms_norm(a_ptr: i64, eps: f64) -> i64 {
+    if a_ptr == 0 {
+        return 0;
+    }
+    let a = &*(a_ptr as *const RayzorTensor);
+    if a.dtype != DTYPE_F32 || a.ndim == 0 {
+        return 0;
+    }
+
+    let shape = std::slice::from_raw_parts(a.shape, a.ndim);
+    let result = alloc_tensor(shape, DTYPE_F32, None);
+    if result == 0 {
+        return 0;
+    }
+
+    let r = &*(result as *const RayzorTensor);
+    let a_data = a.data as *const f32;
+    let r_data = r.data as *mut f32;
+    let last = shape[a.ndim - 1];
+    let groups = a.numel.checked_div(last).unwrap_or(0);
+    let eps = eps as f32;
+    let n = last as f32;
+
+    for g in 0..groups {
+        let base = g * last;
+        let mut ms = 0.0f32;
+        for i in 0..last {
+            let v = *a_data.add(base + i);
+            ms += v * v;
+        }
+        ms /= n;
+        let inv = 1.0 / (ms + eps).sqrt();
+        for i in 0..last {
+            *r_data.add(base + i) = *a_data.add(base + i) * inv;
+        }
+    }
+    result
+}
+
 // ============================================================================
 // Reductions
 // ============================================================================
@@ -616,6 +892,48 @@ pub unsafe extern "C" fn rayzor_tensor_sum(tensor_ptr: i64) -> f64 {
         acc += *data.add(i) as f64;
     }
     acc
+}
+
+/// tensor.max() -> f64 (returns -inf for empty tensors)
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_max(tensor_ptr: i64) -> f64 {
+    if tensor_ptr == 0 {
+        return f64::NEG_INFINITY;
+    }
+    let t = &*(tensor_ptr as *const RayzorTensor);
+    if t.dtype != DTYPE_F32 || t.numel == 0 {
+        return f64::NEG_INFINITY;
+    }
+    let data = t.data as *const f32;
+    let mut m = *data;
+    for i in 1..t.numel {
+        let v = *data.add(i);
+        if v > m {
+            m = v;
+        }
+    }
+    m as f64
+}
+
+/// tensor.min() -> f64 (returns +inf for empty tensors)
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_min(tensor_ptr: i64) -> f64 {
+    if tensor_ptr == 0 {
+        return f64::INFINITY;
+    }
+    let t = &*(tensor_ptr as *const RayzorTensor);
+    if t.dtype != DTYPE_F32 || t.numel == 0 {
+        return f64::INFINITY;
+    }
+    let data = t.data as *const f32;
+    let mut m = *data;
+    for i in 1..t.numel {
+        let v = *data.add(i);
+        if v < m {
+            m = v;
+        }
+    }
+    m as f64
 }
 
 /// tensor.mean() -> f64
