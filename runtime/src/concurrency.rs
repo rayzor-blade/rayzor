@@ -1233,10 +1233,68 @@ pub unsafe extern "C" fn sys_condition_broadcast(condition: *mut u8) {
 }
 
 // ============================================================================
+// sys.thread.Tls — Thread-Local Storage
+// ============================================================================
+//
+// `Tls<T>` is a typed thread-local slot. Each `new Tls()` allocates a fresh
+// slot id; reads and writes go through a per-thread `HashMap<slot_id, ptr>`,
+// so each thread sees its own value independent of other threads.
+//
+// The Haxe surface is:
+//   var tls:Tls<MyType> = new Tls();
+//   tls.value = something;     // → set_value
+//   var v = tls.value;          // → get_value
+//
+// At runtime, `sys_tls_new` returns the slot id boxed as a `*mut u8` (the
+// pointer value *is* the id, encoded as `id as *mut u8`). Get/set unbox by
+// casting back. Storing values as `*mut u8` lets us hold any boxed Haxe
+// value without per-T monomorphization.
+
+thread_local! {
+    static TLS_SLOTS: std::cell::RefCell<HashMap<u64, *mut u8>> =
+        std::cell::RefCell::new(HashMap::new());
+}
+
+static TLS_NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+/// `new Tls()` — allocate a fresh thread-local slot id and return it as
+/// an opaque handle. The handle is stable across threads (same id on
+/// every thread); only the per-thread *value* differs.
+#[no_mangle]
+pub extern "C" fn sys_tls_new() -> *mut u8 {
+    let id = TLS_NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    id as *mut u8
+}
+
+/// `tls.value` getter. Returns the current thread's value for this slot,
+/// or null if `set_value` was never called on the current thread.
+///
+/// # Safety
+/// `handle` must be a valid Tls slot id returned by `sys_tls_new`.
+#[no_mangle]
+pub unsafe extern "C" fn sys_tls_get_value(handle: *const u8) -> *mut u8 {
+    let id = handle as u64;
+    TLS_SLOTS.with(|cell| cell.borrow().get(&id).copied().unwrap_or(ptr::null_mut()))
+}
+
+/// `tls.value = v` setter. Stores `value` in the current thread's slot.
+/// Setting to null effectively clears the slot for this thread.
+///
+/// # Safety
+/// `handle` must be a valid Tls slot id returned by `sys_tls_new`.
+#[no_mangle]
+pub unsafe extern "C" fn sys_tls_set_value(handle: *const u8, value: *mut u8) {
+    let id = handle as u64;
+    TLS_SLOTS.with(|cell| {
+        cell.borrow_mut().insert(id, value);
+    });
+}
+
+// ============================================================================
 // JIT Lifecycle Management
 // ============================================================================
 
-/// Clean up JIT-related global state
+/// Clean up JIT-related global state.
 ///
 /// This should be called after rayzor_wait_all_threads() and before the next
 /// JIT compilation to reset thread tracking state.
@@ -1287,6 +1345,60 @@ mod tests {
 
             let count = rayzor_arc_strong_count(arc1);
             assert_eq!(count, 2);
+        }
+    }
+
+    #[allow(clippy::manual_dangling_ptr)]
+    #[test]
+    fn test_tls_per_thread_isolation() {
+        unsafe {
+            let slot = sys_tls_new();
+            assert!(!slot.is_null());
+
+            // Main thread: nothing set yet → null.
+            assert!(sys_tls_get_value(slot).is_null());
+
+            // Set a value on the main thread (small integer "tag", not a
+            // real pointer — the runtime treats it opaquely).
+            let v42 = 42usize as *const () as *mut u8;
+            sys_tls_set_value(slot, v42);
+            assert_eq!(sys_tls_get_value(slot) as usize, 42);
+
+            // A different thread starts empty (different per-thread map),
+            // can set its own value, and doesn't see the main thread's.
+            let slot_addr = slot as usize;
+            let h = thread::spawn(move || {
+                let s = slot_addr as *const u8;
+                assert!(sys_tls_get_value(s).is_null());
+                let v99 = 99usize as *const () as *mut u8;
+                sys_tls_set_value(s, v99);
+                assert_eq!(sys_tls_get_value(s) as usize, 99);
+            });
+            h.join().unwrap();
+
+            // Main thread is unaffected by the spawned thread's writes.
+            assert_eq!(sys_tls_get_value(slot) as usize, 42);
+        }
+    }
+
+    #[allow(clippy::manual_dangling_ptr)]
+    #[test]
+    fn test_tls_distinct_slots() {
+        unsafe {
+            let a = sys_tls_new();
+            let b = sys_tls_new();
+            assert_ne!(a, b);
+
+            // The test stores small integer "tags" via the *mut u8 channel
+            // — the runtime never derefs them, only stashes/returns the bits.
+            // Cast through usize → ptr to keep clippy's manual_dangling_ptr
+            // lint happy (it triggers on bare integer-as-pointer casts).
+            let one = 1usize as *const () as *mut u8;
+            let two = 2usize as *const () as *mut u8;
+            sys_tls_set_value(a, one);
+            sys_tls_set_value(b, two);
+            assert_eq!(sys_tls_get_value(a) as usize, 1);
+            assert_eq!(sys_tls_get_value(b) as usize, 2);
         }
     }
 

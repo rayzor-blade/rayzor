@@ -32,6 +32,7 @@ package sys.thread;
 	(hl) Warning: At the moment `Tls` does not protect the value from being
 	garbage collected. Keep the value reachable to avoid crashes.
 **/
+@:native("sys::thread::Tls")
 extern class Tls<T> {
 	var value(get, set):T;
 
@@ -42,4 +43,12 @@ extern class Tls<T> {
 		or the memory will never be collected.
 	**/
 	function new():Void;
+
+	/** Property accessor — read this thread's value (null if unset). */
+	@:native("sys_tls_get_value")
+	private function get_value():T;
+
+	/** Property accessor — write this thread's value. */
+	@:native("sys_tls_set_value")
+	private function set_value(v:T):T;
 }
