@@ -1178,8 +1178,20 @@ impl TieredBackend {
             .copied()
             .unwrap_or(OptimizationTier::Interpreted);
 
-        // JIT mode: lazily compile all modules on first execution if not yet compiled
-        if !self.start_interpreted && tier == OptimizationTier::Baseline {
+        // Lazy JIT compilation. Trigger when:
+        //   1. JIT mode (`!start_interpreted`) — original behaviour: every
+        //      function compiles up front on first execute.
+        //   2. Interpreter mode AND the requested function was *pre-promoted*
+        //      to Baseline at compile_module time — currently this happens
+        //      for SIMD-using functions (see `function_uses_simd`). Without
+        //      this branch, the JIT-path lookup fails because no module has
+        //      been compiled yet (interp mode normally defers compilation
+        //      until a JitBailout fires).
+        let pre_promoted_in_interp_mode =
+            self.start_interpreted && tier == OptimizationTier::Baseline;
+        if (!self.start_interpreted && tier == OptimizationTier::Baseline)
+            || pre_promoted_in_interp_mode
+        {
             // Check if we need to compile (no function pointers yet)
             let needs_compile = self.function_pointers.read().unwrap().is_empty();
             if needs_compile {

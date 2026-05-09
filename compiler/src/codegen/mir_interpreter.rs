@@ -1999,50 +1999,28 @@ impl MirInterpreter {
                 }
             }
 
-            // === SIMD Vector Operations (not yet supported in interpreter) ===
-            // These are lowered by the JIT compiler; interpreter falls back to void
-            IrInstruction::VectorLoad { dest, .. } => {
-                self.current_frame_mut()
-                    .registers
-                    .set(*dest, NanBoxedValue::void());
-            }
-            IrInstruction::VectorStore { .. } => {
-                // Vector store has no dest, nothing to do
-            }
-            IrInstruction::VectorBinOp { dest, .. } => {
-                self.current_frame_mut()
-                    .registers
-                    .set(*dest, NanBoxedValue::void());
-            }
-            IrInstruction::VectorSplat { dest, .. } => {
-                self.current_frame_mut()
-                    .registers
-                    .set(*dest, NanBoxedValue::void());
-            }
-            IrInstruction::VectorExtract { dest, .. } => {
-                self.current_frame_mut()
-                    .registers
-                    .set(*dest, NanBoxedValue::void());
-            }
-            IrInstruction::VectorInsert { dest, .. } => {
-                self.current_frame_mut()
-                    .registers
-                    .set(*dest, NanBoxedValue::void());
-            }
-            IrInstruction::VectorReduce { dest, .. } => {
-                self.current_frame_mut()
-                    .registers
-                    .set(*dest, NanBoxedValue::void());
-            }
-            IrInstruction::VectorUnaryOp { dest, .. } => {
-                self.current_frame_mut()
-                    .registers
-                    .set(*dest, NanBoxedValue::void());
-            }
-            IrInstruction::VectorMinMax { dest, .. } => {
-                self.current_frame_mut()
-                    .registers
-                    .set(*dest, NanBoxedValue::void());
+            // === SIMD Vector Operations ===
+            // The interpreter has no native vector support, so any Vector*
+            // instruction triggers a JIT bailout: the tiered backend
+            // recompiles this function at Baseline (Cranelift) and
+            // re-executes from the call site. This was previously silently
+            // returning void, which silently miscompiled SIMD-using code in
+            // start_interpreted=true mode (e.g. `var c = a + b` on SIMD4f
+            // produced zeros). The tier-0-skip in TieredBackend's
+            // `function_uses_simd` short-circuits this for direct SIMD users
+            // at compile_module time; the bailout below is the safety net
+            // for any case the upfront scan misses (e.g. SIMD reaching
+            // through extern returns or future instruction additions).
+            IrInstruction::VectorLoad { .. }
+            | IrInstruction::VectorStore { .. }
+            | IrInstruction::VectorBinOp { .. }
+            | IrInstruction::VectorSplat { .. }
+            | IrInstruction::VectorExtract { .. }
+            | IrInstruction::VectorInsert { .. }
+            | IrInstruction::VectorReduce { .. }
+            | IrInstruction::VectorUnaryOp { .. }
+            | IrInstruction::VectorMinMax { .. } => {
+                return Err(InterpError::JitBailout(function.id));
             }
 
             // === Global Variable Access ===
@@ -3821,6 +3799,59 @@ mod tests {
         match negative {
             InterpValue::I64(n) => assert_eq!(n, -5),
             other => panic!("Expected I64 result, got {:?}", other),
+        }
+    }
+
+    /// SIMD instructions in interpreted code must bail out to JIT instead
+    /// of silently producing void. Without this guard, code like
+    /// `var c:SIMD4f = a + b` ran in tier-0 (start_interpreted=true) would
+    /// return zeros and the user would see a silent miscompile.
+    #[test]
+    fn test_vector_op_triggers_jit_bailout() {
+        use crate::ir::mir_builder::MirBuilder;
+        use crate::ir::{BinaryOp, IrType};
+
+        // Build a minimal function that contains a single VectorBinOp.
+        // The interpreter has no native vector support, so encountering this
+        // instruction must surface as Err(InterpError::JitBailout).
+        let mut builder = MirBuilder::new("simd_test");
+        let vec_ty = IrType::vector(IrType::F32, 4);
+        let func_id = builder
+            .begin_function("simd_add")
+            .param("a", vec_ty.clone())
+            .param("b", vec_ty.clone())
+            .returns(vec_ty.clone())
+            .build();
+        builder.set_current_function(func_id);
+        let entry = builder.create_block("entry");
+        builder.set_insert_point(entry);
+        let a = builder.get_param(0);
+        let b = builder.get_param(1);
+        let r = builder.vector_bin_op(BinaryOp::Add, a, b, vec_ty.clone());
+        builder.ret(Some(r));
+
+        let module = builder.finish();
+
+        let mut interp = MirInterpreter::new();
+        // Inputs: arbitrary i64s that fill the vector parameter slots —
+        // the interpreter shouldn't get far enough to actually use them.
+        let result = interp.execute(
+            &module,
+            func_id,
+            vec![InterpValue::I64(0), InterpValue::I64(0)],
+        );
+
+        match result {
+            Err(InterpError::JitBailout(bailed_id)) => {
+                assert_eq!(
+                    bailed_id, func_id,
+                    "JitBailout should reference the SIMD-using function"
+                );
+            }
+            other => panic!(
+                "expected Err(InterpError::JitBailout({:?})), got {:?}",
+                func_id, other
+            ),
         }
     }
 
