@@ -229,6 +229,7 @@ impl StdlibMapping {
         mapping.register_filesystem_methods();
         mapping.register_thread_methods();
         mapping.register_channel_methods();
+        mapping.register_select_methods();
         mapping.register_arc_methods();
         mapping.register_mutex_methods();
         mapping.register_future_methods();
@@ -1962,6 +1963,38 @@ impl StdlibMapping {
             // MIR wrapper: takes channel handle, returns bool
             map_method!(instance "rayzor_concurrent_Channel", "isFull" => "Channel_isFull", params: 0, mir_wrapper,
                 types: &[PtrU8] => Bool),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // Select Methods (rayzor.concurrent.Select)
+    // ============================================================================
+    //
+    // Multi-channel non-deterministic receive (Go-style `select`).
+    // Both methods take a HaxeArray<Dynamic> of channel handles. The MIR
+    // wrapper extracts (data_ptr, length) and forwards to the runtime.
+
+    fn register_select_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            // Select.recv(channels:Array<Dynamic>):SelectResult — blocks
+            map_method!(static "rayzor_concurrent_Select", "recv" => "Select_recv", params: 1, mir_wrapper,
+                types: &[PtrU8] => PtrU8),
+            // Select.tryRecv(channels:Array<Dynamic>):SelectResult — non-blocking
+            map_method!(static "rayzor_concurrent_Select", "tryRecv" => "Select_tryRecv", params: 1, mir_wrapper,
+                types: &[PtrU8] => PtrU8),
+            // SelectResult.free():Void — releases the heap allocation
+            map_method!(instance "rayzor_concurrent_SelectResult", "free" => "rayzor_select_result_free", params: 0, returns: void,
+                types: &[PtrU8]),
+            // SelectResult.get_index():Int — property accessor for `index`
+            map_method!(instance "rayzor_concurrent_SelectResult", "get_index" => "rayzor_select_result_index", params: 0, returns: primitive,
+                types: &[PtrU8] => I64),
+            // SelectResult.get_value():Dynamic — property accessor for `value`
+            map_method!(instance "rayzor_concurrent_SelectResult", "get_value" => "rayzor_select_result_value", params: 0, returns: primitive,
+                types: &[PtrU8] => PtrU8),
         ];
 
         self.register_from_tuples(mappings);

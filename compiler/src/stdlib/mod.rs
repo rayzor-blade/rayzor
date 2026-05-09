@@ -39,6 +39,7 @@ pub mod vec_u8;
 // Rayzor concurrent primitives
 pub mod channel;
 pub mod future;
+pub mod select_op;
 pub mod sync;
 pub mod thread;
 
@@ -107,6 +108,7 @@ pub fn build_stdlib() -> IrModule {
     // Build concurrent primitives
     thread::build_thread_type(&mut builder);
     channel::build_channel_type(&mut builder);
+    select_op::build_select_type(&mut builder);
     sync::build_sync_types(&mut builder);
     future::build_future_type(&mut builder);
 
@@ -150,6 +152,7 @@ pub fn build_stdlib_with_plugins(registry: &CompilerPluginRegistry) -> IrModule 
     stdtypes::build_std_types(&mut builder);
     thread::build_thread_type(&mut builder);
     channel::build_channel_type(&mut builder);
+    select_op::build_select_type(&mut builder);
     sync::build_sync_types(&mut builder);
     future::build_future_type(&mut builder);
     socket::build_socket_type(&mut builder);
