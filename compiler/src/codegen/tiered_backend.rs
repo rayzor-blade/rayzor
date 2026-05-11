@@ -383,6 +383,18 @@ pub struct TieredBackend {
     /// `beadie_adapter` is `None`.
     beadie_beads:
         Arc<Mutex<BTreeMap<IrFunctionId, beadie::BoundBead<super::beadie_jit::BeadieJit>>>>,
+
+    /// Phase B: counter — number of times `record_call` attempted to
+    /// route a Standard-tier promotion through beadie. Includes
+    /// failures (e.g. `func_id` not found in any module). Zero when
+    /// `beadie_adapter` is `None`.
+    beadie_routes_attempted: Arc<AtomicU64>,
+
+    /// Phase B: counter — number of times `install_beadie_pointer`
+    /// actually wrote a new pointer into `function_pointers` at the
+    /// Standard tier. Skips idempotent re-installs of an already-known
+    /// pointer.
+    beadie_installs: Arc<AtomicU64>,
 }
 
 /// Optimization tier level (5-tier system with interpreter)
@@ -901,6 +913,29 @@ impl TieredConfig {
     }
 }
 
+/// Snapshot of beadie-integration counters for observability /
+/// benchmarking. See [`TieredBackend::beadie_stats`].
+#[derive(Debug, Clone, Copy)]
+pub struct BeadieStats {
+    /// Whether the beadie adapter was constructed at all (true iff
+    /// `TieredConfig::enable_beadie_adapter` was set).
+    pub adapter_enabled: bool,
+    /// Number of times `record_call` tried to route a Standard-tier
+    /// promotion through beadie. Includes retries (the install may
+    /// require multiple `record_call`s to land — the install observer
+    /// runs inline with `record_call` rather than on a separate
+    /// thread).
+    pub routes_attempted: u64,
+    /// Number of times a beadie-produced pointer was actually written
+    /// into `function_pointers`. This counts real state transitions
+    /// only (idempotent re-installs of the same pointer are skipped).
+    pub installs: u64,
+    /// Number of distinct functions registered as beads (one bead per
+    /// promoted `IrFunctionId`). Reaches `installs` once every routed
+    /// function has had its pointer installed.
+    pub registered_beads: usize,
+}
+
 /// Build the beadie infrastructure when [`TieredConfig::enable_beadie_adapter`]
 /// is set, otherwise return `None`.
 ///
@@ -922,10 +957,21 @@ fn build_beadie_if_enabled(
     if !config.enable_beadie_adapter {
         return Ok(None);
     }
-    // `ThresholdPolicy::new` takes `u32`; rayzor's profile thresholds
-    // are `u64`. Cap to `u32::MAX` to avoid silent truncation when
-    // someone passes an absurdly large value.
-    let threshold = config.profile_config.warm_threshold.min(u32::MAX as u64) as u32;
+    // Beadie threshold = 1, not `warm_threshold`. The double-threshold
+    // semantics bit us in the first benchmark run: rayzor's
+    // `record_call` routes to beadie only AFTER its `warm_threshold`
+    // (e.g. 3 calls) is crossed; if beadie then has its own
+    // threshold of 3, beadie's counter must reach 3 *additional*
+    // routes before firing the compile. With the Benchmark preset's
+    // `hot_threshold = 5`, rayzor moves on to the legacy Optimized
+    // path after just 2 beadie routes, so beadie's compile never
+    // fires.
+    //
+    // The right division of labour under Option A: rayzor's
+    // ProfileData owns "is this function hot enough to promote to
+    // Standard". When that decision fires, beadie's job is to
+    // compile *immediately* — not to re-evaluate.
+    let beadie_threshold: u32 = 1;
     let symbols_snapshot: super::beadie_jit::RuntimeSymbolTable = Arc::new(
         symbols
             .iter()
@@ -934,9 +980,19 @@ fn build_beadie_if_enabled(
     );
     let adapter = super::beadie_jit::build_batched_adapter(
         symbols_snapshot,
-        threshold,
+        beadie_threshold,
         /*capacity=*/ 64,
         /*batch_limit=*/ 16,
+    );
+    // Always announce on stderr — silently-active integration during a
+    // benchmark run is worse than a one-line preamble. Quiet enough not
+    // to noise up non-benchmark output.
+    eprintln!(
+        "[beadie] adapter ENABLED (threshold={} — immediate-on-route; \
+         rayzor's warm_threshold={} gates entry). RAYZOR_USE_BEADIE={:?}",
+        beadie_threshold,
+        config.profile_config.warm_threshold,
+        std::env::var("RAYZOR_USE_BEADIE").unwrap_or_default()
     );
     Ok(Some(adapter))
 }
@@ -1020,6 +1076,8 @@ impl TieredBackend {
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
+            beadie_routes_attempted: Arc::new(AtomicU64::new(0)),
+            beadie_installs: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -1083,6 +1141,8 @@ impl TieredBackend {
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
+            beadie_routes_attempted: Arc::new(AtomicU64::new(0)),
+            beadie_installs: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -1114,6 +1174,24 @@ impl TieredBackend {
     /// allocating a new bead when the function has been seen before.
     pub fn has_beadie_bead(&self, func_id: IrFunctionId) -> bool {
         self.beadie_beads.lock().unwrap().contains_key(&func_id)
+    }
+
+    /// Phase B counters: how often `record_call` tried to route a
+    /// Standard-tier promotion through beadie, and how many of those
+    /// resulted in an actual pointer install. The first counter
+    /// double-counts retry calls (each `record_call` past the
+    /// threshold attempts again until the install happens); the
+    /// second counter only fires on real state transitions.
+    ///
+    /// Used by benchmark harnesses to confirm the integration is
+    /// active and to attribute compile counts.
+    pub fn beadie_stats(&self) -> BeadieStats {
+        BeadieStats {
+            adapter_enabled: self.beadie_adapter.is_some(),
+            routes_attempted: self.beadie_routes_attempted.load(Ordering::Relaxed),
+            installs: self.beadie_installs.load(Ordering::Relaxed),
+            registered_beads: self.beadie_beads.lock().unwrap().len(),
+        }
     }
 
     /// Read the installed JIT pointer for `func_id`, or `None` if no
@@ -1246,6 +1324,20 @@ impl TieredBackend {
                 return;
             }
         }
+        // Don't downgrade: if the legacy Optimized/Maximum path
+        // already installed a higher-tier pointer (e.g. because the
+        // hotness counter ran past Standard while beadie was still
+        // compiling), drop the beadie pointer on the floor. This is
+        // benign — the beadie code stays alive (Box::leak'd), it's
+        // just never called.
+        {
+            let ft = self.function_tiers.read().unwrap();
+            if let Some(current) = ft.get(&func_id).copied() {
+                if current as u8 > OptimizationTier::Standard as u8 {
+                    return;
+                }
+            }
+        }
         if !self.promotion_barrier.request_promotion() {
             // Another promotion is already in flight — let it finish;
             // we'll retry on the next `record_call`.
@@ -1265,10 +1357,15 @@ impl TieredBackend {
             ft.insert(func_id, OptimizationTier::Standard);
         }
         self.promotion_barrier.complete_promotion();
+        self.beadie_installs.fetch_add(1, Ordering::Relaxed);
         if self.config.verbosity >= 1 {
-            debug!(
-                "[TieredBackend] beadie installed pointer for {:?} at Standard tier",
-                func_id
+            // eprintln! rather than debug! so the signal shows up
+            // without configuring a tracing subscriber — important
+            // for benchmark observability.
+            eprintln!(
+                "[beadie] installed pointer for {:?} at Standard tier (total installs: {})",
+                func_id,
+                self.beadie_installs.load(Ordering::Relaxed)
             );
         }
     }
@@ -1816,9 +1913,12 @@ impl TieredBackend {
             // logic that reads `get_function_count` continues to see
             // accurate counts. Without this, higher-tier promotion
             // criteria would silently divide by two.
-            let routed_to_beadie = target_tier == OptimizationTier::Standard
-                && self.beadie_adapter.is_some()
-                && self.route_standard_to_beadie(func_id);
+            let beadie_eligible =
+                target_tier == OptimizationTier::Standard && self.beadie_adapter.is_some();
+            if beadie_eligible {
+                self.beadie_routes_attempted.fetch_add(1, Ordering::Relaxed);
+            }
+            let routed_to_beadie = beadie_eligible && self.route_standard_to_beadie(func_id);
             if !routed_to_beadie {
                 self.enqueue_for_optimization(func_id, target_tier);
             }

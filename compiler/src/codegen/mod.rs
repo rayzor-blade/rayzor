@@ -35,7 +35,8 @@ pub use mir_interpreter::{
 };
 pub use profiling::{HotnessLevel, ProfileConfig, ProfileData, ProfileStatistics};
 pub use tiered_backend::{
-    BailoutStrategy, OptimizationTier, TierPreset, TieredBackend, TieredConfig, TieredStatistics,
+    BailoutStrategy, BeadieStats, OptimizationTier, TierPreset, TieredBackend, TieredConfig,
+    TieredStatistics,
 };
 
 #[cfg(feature = "llvm-backend")]
