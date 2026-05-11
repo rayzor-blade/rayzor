@@ -906,6 +906,20 @@ impl DfgBuilder {
                 arguments,
                 expression,
             ),
+            // Bound method reference — for DFG purposes treat as a
+            // method call with no arguments (the receiver is the only
+            // data dependency that flows in; the call happens later
+            // through the closure).
+            TypedExpressionKind::MethodReference {
+                receiver,
+                method_symbol,
+            } => self.build_method_call_expression(
+                node_id,
+                receiver,
+                *method_symbol,
+                &[],
+                expression,
+            ),
             TypedExpressionKind::StaticMethodCall {
                 class_symbol,
                 method_symbol,

@@ -354,6 +354,15 @@ pub enum HirExprKind {
         captures: Vec<HirCapture>,
     },
 
+    /// Bound method reference: `obj.method` without invocation.
+    /// MIR lowering builds a closure `{ thunk_fn, receiver }` so that
+    /// calling the resulting value invokes `method(receiver, ...args)`.
+    /// Mirrors `TypedExpressionKind::MethodReference` from TAST.
+    MethodReference {
+        receiver: Box<HirExpr>,
+        method_symbol: SymbolId,
+    },
+
     // === Arrays ===
     Array {
         elements: Vec<HirExpr>,

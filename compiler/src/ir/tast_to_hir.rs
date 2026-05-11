@@ -1908,6 +1908,13 @@ impl<'a> TastToHirContext<'a> {
                     is_method: true,
                 }
             }
+            TypedExpressionKind::MethodReference {
+                receiver,
+                method_symbol,
+            } => HirExprKind::MethodReference {
+                receiver: Box::new(self.lower_expression(receiver)),
+                method_symbol: *method_symbol,
+            },
             TypedExpressionKind::New {
                 class_type,
                 type_arguments,

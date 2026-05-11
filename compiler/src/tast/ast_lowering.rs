@@ -9876,6 +9876,48 @@ impl<'a> AstLowering<'a> {
             }
         };
 
+        // Method-as-value (bound method reference): if the resolved
+        // symbol is a function (instance method on the receiver's
+        // class), emit `MethodReference` rather than a `FieldAccess`.
+        // This site is reached only for *standalone* `obj.method`
+        // expressions — `lower_call_expression` routes
+        // `obj.method(args)` through its own field-callee branch
+        // before reaching here, so converting unconditionally here
+        // can't accidentally break the invocation path.
+        let is_method = self
+            .context
+            .symbol_table
+            .get_symbol(field_symbol)
+            .map(|s| s.kind == crate::tast::symbols::SymbolKind::Function)
+            .unwrap_or(false);
+        if is_method {
+            // The expression's type is the method's function type,
+            // which the symbol already carries (or Dynamic as a
+            // safe fallback for unresolved generic methods).
+            let method_fn_type = self
+                .context
+                .symbol_table
+                .get_symbol(field_symbol)
+                .map(|s| s.type_id)
+                .filter(|tid| tid.is_valid())
+                .unwrap_or_else(|| self.context.type_table.borrow().dynamic_type());
+            let kind = TypedExpressionKind::MethodReference {
+                receiver: Box::new(obj_expr),
+                method_symbol: field_symbol,
+            };
+            let usage = VariableUsage::Borrow;
+            let lifetime_id = self.assign_lifetime(&kind, &method_fn_type);
+            let metadata = self.analyze_expression_metadata(&kind);
+            return Ok(TypedExpression {
+                expr_type: method_fn_type,
+                kind,
+                usage,
+                lifetime_id,
+                source_location: self.context.span_to_location(&expression.span),
+                metadata,
+            });
+        }
+
         let kind = TypedExpressionKind::FieldAccess {
             object: Box::new(obj_expr),
             field_symbol,
