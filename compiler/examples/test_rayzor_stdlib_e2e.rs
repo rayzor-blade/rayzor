@@ -997,6 +997,20 @@ class Main {
         } else {
             trace("resolveClass: " + Type.getClassName(byName));
         }
+
+        // Type.typeof on a class instance must return TClass(<actual>),
+        // not TClass(String) (was the symptom when the Dynamic-arg
+        // boxing path mis-routed class instances through
+        // `haxe_box_haxestring_ptr`). The trace formatter renders
+        // the boxed enum as `TClass(Dog)`.
+        trace("typeof(d): " + Type.typeof(d));
+
+        // Reflect.isObject must recognise class instances. Was
+        // returning false because the heuristic relied on a
+        // type_id >= 1000 cutoff that small user-class ids don't
+        // satisfy. Now consults the class registry.
+        trace("isObject(d): " + Reflect.isObject(d));
+        trace("isObject(42): " + Reflect.isObject(42));
     }
 }
 "#,

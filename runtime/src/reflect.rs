@@ -281,8 +281,14 @@ pub extern "C" fn haxe_reflect_is_object(v: *mut u8) -> bool {
         if dv.type_id == TYPE_FUNCTION {
             return false;
         }
-        // Anonymous objects and user-defined types (classes) are "objects"
-        dv.type_id == anon_object::TYPE_ANON_OBJECT || dv.type_id.0 >= 1000
+        // Anon objects, registered class instances, or other
+        // user-defined heap types all qualify. The `>= 1000`
+        // fallback covers extern abstract / interface types that
+        // aren't always in the runtime class registry but still
+        // have non-primitive type ids.
+        dv.type_id == anon_object::TYPE_ANON_OBJECT
+            || is_class_type(dv.type_id.0)
+            || dv.type_id.0 >= 1000
     }
 }
 

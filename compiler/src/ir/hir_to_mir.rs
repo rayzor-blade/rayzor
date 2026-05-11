@@ -31895,7 +31895,7 @@ impl<'a> HirToMirContext<'a> {
         };
 
         let ir_type = self.convert_type(concrete_type_id);
-        let (is_string, is_enum, is_function) = {
+        let (is_string, is_enum, is_function, is_class_like) = {
             let type_table = self.type_table;
             let ti = type_table.get(concrete_type_id);
             (
@@ -31905,6 +31905,22 @@ impl<'a> HirToMirContext<'a> {
                     .unwrap_or(false),
                 ti.map(|t| matches!(t.kind, crate::tast::TypeKind::Function { .. }))
                     .unwrap_or(false),
+                // Class / Interface / Anonymous / Array all share the
+                // "pointer-with-type_id-header" runtime representation.
+                // Without this branch, the catch-all below boxes them
+                // via `haxe_box_haxestring_ptr` which mis-tags them as
+                // `TYPE_STRING` — breaking `Type.typeof` /
+                // `Type.getClass` on the resulting `Dynamic`.
+                ti.map(|t| {
+                    matches!(
+                        t.kind,
+                        crate::tast::TypeKind::Class { .. }
+                            | crate::tast::TypeKind::Interface { .. }
+                            | crate::tast::TypeKind::Anonymous { .. }
+                            | crate::tast::TypeKind::Array { .. }
+                    )
+                })
+                .unwrap_or(false),
             )
         };
 
@@ -31967,8 +31983,42 @@ impl<'a> HirToMirContext<'a> {
                 .build_call_direct(box_func, vec![as_ptr], ptr_u8);
         }
 
-        if is_string || matches!(&ir_type, IrType::Ptr(_)) {
-            // String or pointer type — box as HaxeString
+        if is_class_like {
+            // Class / Interface / Anonymous / Array: dispatch to
+            // `haxe_box_class_instance` which reads the actual
+            // runtime type_id from the instance's `__type_id`
+            // header at offset 0. We can't pass
+            // `concrete_type_id.as_raw()` to `haxe_box_reference_ptr`
+            // directly — the TAST TypeId at this site doesn't
+            // always match the IR TypeId stored in the header
+            // (different id namespaces). Header-driven tagging
+            // sidesteps that mismatch and is what makes
+            // `Type.typeof(class_instance)` / `Type.getClass`
+            // recover the correct class identity from the
+            // resulting Dynamic.
+            let actual_reg_type = self
+                .builder
+                .get_register_type(value)
+                .unwrap_or(ir_type.clone());
+            let as_ptr = if matches!(&actual_reg_type, IrType::Ptr(_)) {
+                value
+            } else {
+                self.builder
+                    .build_cast(value, actual_reg_type, ptr_u8.clone())
+                    .unwrap_or(value)
+            };
+            let box_func = self.get_or_register_extern_function(
+                "haxe_box_class_instance",
+                vec![ptr_u8.clone()],
+                ptr_u8.clone(),
+            );
+            self.builder
+                .build_call_direct(box_func, vec![as_ptr], ptr_u8)
+        } else if is_string || matches!(&ir_type, IrType::Ptr(_)) {
+            // String or generic-pointer type — box as HaxeString.
+            // (Catches String + any remaining `Ptr` fallback that isn't
+            // a class/interface/anon/array — e.g. type-erased opaque
+            // pointers from extern declarations.)
             // haxe_box_haxestring_ptr wraps a HaxeString* pointer in a DynamicValue.
             // The actual register may be I64 (type-erased) even though the resolved type is Ptr.
             let actual_reg_type = self
