@@ -197,23 +197,35 @@ impl JitBackend for BeadieJit {
 }
 
 /// Build a batched [`BackendAdapter<BeadieJit>`] with the given runtime
-/// symbol snapshot.
-///
-/// `threshold` is the call count at which beadie promotes a registered
-/// function. Production wiring passes
-/// [`crate::codegen::profiling::ProfileConfig::warm_threshold`]. The
-/// adapter compiles at the cranelift opt-level corresponding to
-/// rayzor's Standard tier ("speed").
+/// symbol snapshot, at the cranelift opt-level corresponding to
+/// rayzor's Standard tier.
 pub fn build_batched_adapter(
     runtime_symbols: RuntimeSymbolTable,
     threshold: u32,
     capacity: usize,
     batch_limit: usize,
 ) -> Arc<BackendAdapter<BeadieJit>> {
-    let jit = BeadieJit::new(
+    build_batched_adapter_at(
         runtime_symbols,
         super::tiered_backend::OptimizationTier::Standard.cranelift_opt_level(),
-    );
+        threshold,
+        capacity,
+        batch_limit,
+    )
+}
+
+/// Build a batched [`BackendAdapter<BeadieJit>`] with explicit
+/// cranelift opt-level. Used by `TieredBackend` to construct one
+/// adapter per tier (Standard at `"speed"`, Optimized at
+/// `"speed_and_size"`).
+pub fn build_batched_adapter_at(
+    runtime_symbols: RuntimeSymbolTable,
+    opt_level: &'static str,
+    threshold: u32,
+    capacity: usize,
+    batch_limit: usize,
+) -> Arc<BackendAdapter<BeadieJit>> {
+    let jit = BeadieJit::new(runtime_symbols, opt_level);
     Arc::new(BackendAdapter::from_arc_with_policy_batched(
         Arc::new(jit),
         ThresholdPolicy::new(threshold),
@@ -406,6 +418,79 @@ mod tests {
 
         let f: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(beadie_ptr) };
         assert_eq!(f(19, 23), 42);
+    }
+
+    /// Phase B step 5: hot_threshold crossing routes Optimized
+    /// promotion through beadie too. With `warm_threshold = 1` and
+    /// `hot_threshold = 2`, the second `record_call` crosses
+    /// `hot_threshold` and should route via the Optimized adapter.
+    /// Asserts the function lands at `Optimized` tier with a pointer
+    /// produced by beadie's `"speed_and_size"` opt-level compile.
+    #[test]
+    fn record_call_routes_optimized_via_beadie_end_to_end() {
+        use super::super::tiered_backend::{OptimizationTier, TieredBackend, TieredConfig};
+        use std::time::{Duration, Instant};
+
+        let plugin = rayzor_runtime::plugin_impl::get_plugin();
+        let symbols = plugin.runtime_symbols();
+        let symbols_ref: Vec<(&str, *const u8)> = symbols.iter().map(|(n, p)| (*n, *p)).collect();
+
+        let mut cfg = TieredConfig::default();
+        cfg.enable_beadie_adapter = true;
+        cfg.profile_config.interpreter_threshold = 100; // skip Baseline
+        cfg.profile_config.warm_threshold = 1;
+        cfg.profile_config.hot_threshold = 2;
+        cfg.profile_config.blazing_threshold = u64::MAX;
+        cfg.enable_background_optimization = false;
+
+        let mut backend =
+            TieredBackend::with_symbols(cfg, &symbols_ref).expect("tiered backend with beadie");
+        let (module, func_id) = build_add_module();
+        backend.compile_module(module).expect("module loaded");
+
+        // First call: count 0→1, target = Standard, routes via beadie
+        // Standard adapter.
+        backend.record_call(func_id);
+        // Second call: count 1→2, target = Optimized, routes via
+        // beadie Optimized adapter.
+        backend.record_call(func_id);
+
+        // Wait for both compiles + at least one install.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            // Poll execute_function-style: see if any pointer landed.
+            backend.record_call(func_id);
+            if let Some(tier) = backend.function_tier(func_id) {
+                if tier == OptimizationTier::Optimized {
+                    break;
+                }
+            }
+            if Instant::now() > deadline {
+                panic!(
+                    "Optimized tier not reached within 10s (last tier: {:?}, stats: {:?})",
+                    backend.function_tier(func_id),
+                    backend.beadie_stats()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        assert_eq!(
+            backend.function_tier(func_id),
+            Some(OptimizationTier::Optimized)
+        );
+        let installed = backend
+            .jit_pointer(func_id)
+            .expect("function_pointers missing entry");
+        let f: extern "C" fn(i64, i64) -> i64 =
+            unsafe { std::mem::transmute(installed as *mut ()) };
+        assert_eq!(f(40, 2), 42);
+
+        // Stats sanity: at least 2 routes happened (Standard + Optimized),
+        // at least 1 install landed.
+        let stats = backend.beadie_stats();
+        assert!(stats.routes_attempted >= 2, "stats: {:?}", stats);
+        assert!(stats.installs >= 1, "stats: {:?}", stats);
     }
 
     /// Multi-function cross-call: `caller` invokes `callee` (both in
