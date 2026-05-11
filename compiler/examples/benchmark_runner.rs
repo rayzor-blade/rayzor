@@ -1067,13 +1067,14 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
                 let _ = run_tiered_iteration(&mut state);
             }
 
-            // Process optimization queue synchronously
-            let optimized = state.backend.process_queue_sync();
-            if optimized > 0 {
-                for _ in 0..3 {
-                    let _ = run_tiered_iteration(&mut state);
-                }
-                let _ = state.backend.process_queue_sync();
+            // Step 6: legacy `process_queue_sync` is gone. Beadie owns
+            // Standard + Optimized promotion via its own broker
+            // thread; the install lands inline with `execute_function`
+            // via `maybe_install_compiled_beadie_pointer`. The extra
+            // iterations below give beadie's broker time to compile +
+            // the main thread time to observe + install.
+            for _ in 0..3 {
+                let _ = run_tiered_iteration(&mut state);
             }
 
             // Upgrade to LLVM tier for maximum performance
@@ -1161,13 +1162,12 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
                 let _ = run_precompiled_tiered_iteration(&mut state);
             }
 
-            // Process optimization queue synchronously
-            let optimized = state.backend.process_queue_sync();
-            if optimized > 0 {
-                for _ in 0..3 {
-                    let _ = run_precompiled_tiered_iteration(&mut state);
-                }
-                let _ = state.backend.process_queue_sync();
+            // Step 6: legacy `process_queue_sync` is gone. Beadie owns
+            // Standard + Optimized promotion; install lands inline
+            // with `execute_function`. Extra iterations give beadie's
+            // broker time to compile + observe + install.
+            for _ in 0..3 {
+                let _ = run_precompiled_tiered_iteration(&mut state);
             }
 
             // Upgrade to LLVM tier for maximum performance

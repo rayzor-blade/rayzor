@@ -309,24 +309,12 @@ pub struct TieredBackend {
     /// Function pointers (usize for thread safety, cast to function type when needed)
     function_pointers: Arc<RwLock<BTreeMap<IrFunctionId, usize>>>,
 
-    /// Queue of functions waiting for recompilation at higher tier
-    optimization_queue: Arc<Mutex<VecDeque<(IrFunctionId, OptimizationTier)>>>,
-
-    /// Functions currently being optimized (prevents duplicate work)
-    optimizing: Arc<Mutex<BTreeSet<IrFunctionId>>>,
-
     /// The MIR modules (needed for recompilation and interpretation)
     /// Multiple modules may be loaded (e.g., user code + stdlib)
     modules: Arc<RwLock<Vec<IrModule>>>,
 
     /// Configuration
     config: TieredConfig,
-
-    /// Background optimization worker handle
-    worker_handle: Option<thread::JoinHandle<()>>,
-
-    /// Shutdown signal for background worker
-    shutdown: Arc<Mutex<bool>>,
 
     /// Whether to start in interpreted mode (Phase 0)
     start_interpreted: bool,
@@ -349,14 +337,6 @@ pub struct TieredBackend {
     /// Ensures no JIT code is executing when function pointers are replaced
     promotion_barrier: Arc<PromotionBarrier>,
 
-    /// Number of Cranelift tier promotions performed (each leaks a backend)
-    promotion_count: Arc<AtomicU64>,
-
-    /// The highest Cranelift tier currently compiled for all functions
-    /// Used to skip redundant recompilations when multiple functions
-    /// cross thresholds at the same tier level
-    current_compiled_tier: Arc<AtomicU8>,
-
     /// Number of loaded MIR modules that have already run startup hooks.
     initialized_module_count: Arc<Mutex<usize>>,
 
@@ -376,7 +356,7 @@ pub struct TieredBackend {
     /// When set, `record_call` routes Standard-tier promotion through
     /// this adapter. `beadie_adapter_optimized` does the same for
     /// Optimized-tier promotion.
-    beadie_adapter: Option<Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>>,
+    beadie_adapter: Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>,
 
     /// Phase B: lazy registry of one `BoundBead` per `IrFunctionId`
     /// that beadie's Standard-tier adapter is tracking. Populated on
@@ -393,7 +373,7 @@ pub struct TieredBackend {
     /// function's Standard bead reaches `Compiled`, it doesn't
     /// recompile when the same function later crosses the Optimized
     /// threshold.
-    beadie_adapter_optimized: Option<Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>>,
+    beadie_adapter_optimized: Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>,
 
     /// Phase B step 5: bead registry for the Optimized adapter.
     /// Parallel to `beadie_beads` but tracks Optimized-tier promotion
@@ -614,16 +594,11 @@ impl TierPreset {
                     blazing_threshold: u64::MAX, // No LLVM for short scripts
                     sample_rate: 1,
                 },
-                enable_background_optimization: false, // Sync optimization for predictability
-                optimization_check_interval_ms: 50,
-                max_parallel_optimizations: 2,
                 verbosity: 0,
                 start_interpreted: true,
                 bailout_strategy: BailoutStrategy::Quick,
-                max_tier_promotions: 4,
+                enable_tier_promotion: true,
                 enable_stack_traces: true,
-
-                enable_beadie_adapter: false,
             },
 
             TierPreset::Application => TieredConfig {
@@ -634,15 +609,11 @@ impl TierPreset {
                     blazing_threshold: 2000, // LLVM for sustained hot code
                     sample_rate: 1,
                 },
-                enable_background_optimization: true,
-                optimization_check_interval_ms: 100,
-                max_parallel_optimizations: 4,
                 verbosity: 0,
                 start_interpreted: true,
                 bailout_strategy: BailoutStrategy::Quick,
-                max_tier_promotions: 10,
+                enable_tier_promotion: true,
                 enable_stack_traces: false, // TEMP: disabled to test global store bug
-                enable_beadie_adapter: false,
             },
 
             TierPreset::Server => TieredConfig {
@@ -653,16 +624,11 @@ impl TierPreset {
                     blazing_threshold: 500, // Lower LLVM threshold for servers
                     sample_rate: 1,
                 },
-                enable_background_optimization: true,
-                optimization_check_interval_ms: 50,
-                max_parallel_optimizations: 8, // More parallel compilation
                 verbosity: 0,
                 start_interpreted: true,
                 bailout_strategy: BailoutStrategy::Immediate,
-                max_tier_promotions: 15,
+                enable_tier_promotion: true,
                 enable_stack_traces: true,
-
-                enable_beadie_adapter: false,
             },
 
             TierPreset::Benchmark => TieredConfig {
@@ -673,29 +639,20 @@ impl TierPreset {
                     blazing_threshold: u64::MAX, // Manual LLVM upgrade after warmup
                     sample_rate: 1,
                 },
-                enable_background_optimization: false, // Sync for deterministic results
-                optimization_check_interval_ms: 1,
-                max_parallel_optimizations: 4,
                 verbosity: 1,            // Show tier transitions
                 start_interpreted: true, // Start with interpreter for instant startup
                 bailout_strategy: BailoutStrategy::Immediate,
-                max_tier_promotions: 8,
+                enable_tier_promotion: true,
                 enable_stack_traces: false, // No instrumentation overhead in benchmarks
-                enable_beadie_adapter: false,
             },
 
             TierPreset::Development => TieredConfig {
                 profile_config: ProfileConfig::development(),
-                enable_background_optimization: true,
-                optimization_check_interval_ms: 50,
-                max_parallel_optimizations: 2,
                 verbosity: 2, // Detailed logging
                 start_interpreted: true,
                 bailout_strategy: BailoutStrategy::Immediate,
-                max_tier_promotions: 6,
+                enable_tier_promotion: true,
                 enable_stack_traces: true,
-
-                enable_beadie_adapter: false,
             },
 
             TierPreset::Embedded => TieredConfig {
@@ -706,15 +663,11 @@ impl TierPreset {
                     blazing_threshold: u64::MAX,
                     sample_rate: u64::MAX, // Disable profiling
                 },
-                enable_background_optimization: false,
-                optimization_check_interval_ms: u64::MAX,
-                max_parallel_optimizations: 0,
                 verbosity: 0,
                 start_interpreted: true,
                 bailout_strategy: BailoutStrategy::Slow, // High threshold before bailout
-                max_tier_promotions: 0,                  // Interpreter only
-                enable_stack_traces: false,              // No stack traces for embedded
-                enable_beadie_adapter: false,
+                enable_tier_promotion: false,
+                enable_stack_traces: false, // No stack traces for embedded
             },
         }
     }
@@ -780,15 +733,6 @@ pub struct TieredConfig {
     /// Profiling configuration
     pub profile_config: ProfileConfig,
 
-    /// Enable background optimization (async optimization in separate thread)
-    pub enable_background_optimization: bool,
-
-    /// How often to check for hot functions (in milliseconds)
-    pub optimization_check_interval_ms: u64,
-
-    /// Maximum number of functions to optimize in parallel
-    pub max_parallel_optimizations: usize,
-
     /// Verbosity level (0 = silent, 1 = basic, 2 = detailed)
     pub verbosity: u8,
 
@@ -796,45 +740,37 @@ pub struct TieredConfig {
     /// If false, functions are compiled to Baseline (Phase 1) immediately
     pub start_interpreted: bool,
 
-    /// Interpreter bailout strategy - determines how quickly to switch to JIT
-    /// Use BailoutStrategy::Immediate for benchmarks, Quick for most apps
+    /// Interpreter bailout strategy — determines how quickly to switch
+    /// from interpreter to JIT (Baseline tier). Use
+    /// `BailoutStrategy::Immediate` for benchmarks, `Quick` for most apps.
     pub bailout_strategy: BailoutStrategy,
 
-    /// Maximum number of Cranelift tier promotions (each leaks a backend).
-    /// Once exhausted, further Cranelift promotions are skipped (functions stay at current tier).
-    /// LLVM promotion is not counted since it has its own singleton guard.
-    /// Set to 0 to disable tier promotion entirely.
-    pub max_tier_promotions: u64,
+    /// Enable tier promotion (Standard / Optimized / Maximum). When
+    /// `false`, functions stay at their initial tier (Interpreter or
+    /// Baseline) forever — useful for embedded/script modes that don't
+    /// want JIT spin-up cost.
+    ///
+    /// Step 6 renamed this from `max_tier_promotions: u64` (which was
+    /// a Cranelift-leak budget) since beadie owns the per-promotion
+    /// compile-and-leak now; the budget no longer applies.
+    pub enable_tier_promotion: bool,
 
     /// Enable source-mapped stack traces for exceptions.
     /// When true, registers JIT function addresses with source metadata after compilation
     /// and captures Haxe-level stack traces on throw. Disabled in --release mode for
     /// zero overhead in production.
     pub enable_stack_traces: bool,
-
-    /// Phase B (beadie integration, infrastructure stage): when true, the
-    /// backend constructs a [`beadie::BackendAdapter`] alongside the
-    /// existing tier machinery. The adapter is dormant — no call site
-    /// routes through it yet — but its presence on a real run proves the
-    /// wiring builds and that the shared `CraneliftBackend` can be
-    /// adopted by beadie without disrupting the legacy queue + worker.
-    /// Default: false.
-    pub enable_beadie_adapter: bool,
 }
 
 impl Default for TieredConfig {
     fn default() -> Self {
         Self {
             profile_config: ProfileConfig::default(),
-            enable_background_optimization: true,
-            optimization_check_interval_ms: 100,
-            max_parallel_optimizations: 4,
             verbosity: 0,
             start_interpreted: true, // Enable interpreter by default for instant startup
             bailout_strategy: BailoutStrategy::Quick, // Good balance for most apps
-            max_tier_promotions: 10,
+            enable_tier_promotion: true,
             enable_stack_traces: true, // Debug by default
-            enable_beadie_adapter: false,
         }
     }
 }
@@ -856,24 +792,16 @@ impl TieredConfig {
         preset.to_config()
     }
 
-    /// Apply env-var overrides to the config. Currently:
+    /// Apply env-var overrides to the config.
     ///
-    /// - `RAYZOR_USE_BEADIE` — when set to `1` / `true` / `yes`,
-    ///   forces [`Self::enable_beadie_adapter`] on; when unset or set
-    ///   to `0` / `false` / `no`, leaves the field untouched.
-    ///
-    /// Called automatically by [`TierPreset::to_config`]. Benchmarks
-    /// and CLI tools that construct [`TieredConfig`] by hand should
-    /// call this method explicitly to honour the env flag.
-    pub fn apply_env_overrides(mut self) -> Self {
-        if let Ok(v) = std::env::var("RAYZOR_USE_BEADIE") {
-            if matches!(
-                v.as_str(),
-                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
-            ) {
-                self.enable_beadie_adapter = true;
-            }
-        }
+    /// Step 6 removed the `RAYZOR_USE_BEADIE` override: beadie is now
+    /// unconditional (it owns Standard + Optimized tier promotion as
+    /// the single tier scheduler), so there's nothing to toggle. The
+    /// method stays as a no-op extension point — kept on the public
+    /// API so callers (`TierPreset::to_config`, benchmark harnesses)
+    /// don't need to be touched if we later add new env-controlled
+    /// options.
+    pub fn apply_env_overrides(self) -> Self {
         self
     }
 
@@ -881,16 +809,11 @@ impl TieredConfig {
     pub fn development() -> Self {
         Self {
             profile_config: ProfileConfig::development(),
-            enable_background_optimization: true,
-            optimization_check_interval_ms: 50,
-            max_parallel_optimizations: 2,
             verbosity: 2,
             start_interpreted: true, // Instant startup for quick iteration
             bailout_strategy: BailoutStrategy::Immediate, // Quick bailout for testing
-            max_tier_promotions: 6,
+            enable_tier_promotion: true,
             enable_stack_traces: true,
-
-            enable_beadie_adapter: false,
         }
     }
 
@@ -898,15 +821,11 @@ impl TieredConfig {
     pub fn production() -> Self {
         Self {
             profile_config: ProfileConfig::production(),
-            enable_background_optimization: true,
-            optimization_check_interval_ms: 1000,
-            max_parallel_optimizations: 8,
             verbosity: 0,
             start_interpreted: true, // Instant startup, then promote hot functions
             bailout_strategy: BailoutStrategy::Quick, // Quick bailout
-            max_tier_promotions: 10,
+            enable_tier_promotion: true,
             enable_stack_traces: false, // Production: no trace overhead
-            enable_beadie_adapter: false,
         }
     }
 
@@ -915,16 +834,11 @@ impl TieredConfig {
     pub fn jit_only() -> Self {
         Self {
             profile_config: ProfileConfig::default(),
-            enable_background_optimization: true,
-            optimization_check_interval_ms: 100,
-            max_parallel_optimizations: 4,
             verbosity: 0,
             start_interpreted: false, // Skip interpreter, start at Phase 1
             bailout_strategy: BailoutStrategy::Quick, // Not used when start_interpreted=false
-            max_tier_promotions: 10,
+            enable_tier_promotion: true,
             enable_stack_traces: true,
-
-            enable_beadie_adapter: false,
         }
     }
 }
@@ -952,48 +866,32 @@ pub struct BeadieStats {
     pub registered_beads: usize,
 }
 
-/// Build the beadie infrastructure when [`TieredConfig::enable_beadie_adapter`]
-/// is set, otherwise return `None`.
-///
-/// Returns just the [`beadie::BackendAdapter`] — beadie no longer
-/// holds a persistent cranelift backend (step 4 pivot to
-/// fresh-backend-per-compile; see [`super::beadie_jit`] for the
-/// rationale). The runtime symbol snapshot is owned inside the
-/// adapter's `BeadieJit` and reused on every dispatch.
-///
-/// Threshold derives from
-/// [`crate::codegen::profiling::ProfileConfig::warm_threshold`] so
-/// beadie's policy matches the hand-rolled enqueue criterion in
-/// `record_call`. Capacity + batch limit are conservative starting
-/// points; revisit with benchmark data.
-/// Bundle returned from [`build_beadie_if_enabled`]: the per-tier
-/// adapters. `None` for both when the integration is disabled.
+/// Per-tier beadie adapters: (Standard, Optimized).
 type BeadieAdapters = (
-    Option<Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>>, // standard
-    Option<Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>>, // optimized
+    Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>, // standard
+    Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>, // optimized
 );
 
-fn build_beadie_if_enabled(
-    config: &TieredConfig,
-    symbols: &[(&str, *const u8)],
-) -> Result<BeadieAdapters, String> {
-    if !config.enable_beadie_adapter {
-        return Ok((None, None));
-    }
-    // Beadie threshold = 1 — see comment block below. Both tiers use
-    // the same threshold because rayzor's ProfileData owns the
-    // "is this hot enough" decision; beadie's job once routed is to
-    // compile *immediately*, not re-evaluate.
-    //
-    // The double-threshold semantics bit us in the first benchmark
-    // run: rayzor's `record_call` routes to beadie only AFTER its
-    // tier-specific threshold (`warm_threshold` for Standard,
-    // `hot_threshold` for Optimized) is crossed; if beadie then had
-    // its own non-1 threshold, beadie's counter would need to reach
-    // that count *more* routes before firing the compile. Under
-    // narrow promotion windows (Benchmark preset: `warm_threshold=3`,
-    // `hot_threshold=5` — only 2 calls between them), beadie's
-    // compile would never fire.
+/// Build the per-tier beadie adapters. Step 6 removed the
+/// `enable_beadie_adapter` toggle and the `Option`-of-tuple return:
+/// beadie is now unconditional, the broker thread is always live, and
+/// `record_call` always routes Standard/Optimized through it.
+///
+/// Each `BackendAdapter<BeadieJit>` is one broker thread + one bead
+/// registry. `BeadieJit` itself is stateless aside from the runtime
+/// symbol snapshot — it builds a fresh `CraneliftBackend` per compile
+/// and `Box::leak`s it.
+///
+/// Beadie's policy threshold is hardcoded to 1 (immediate-on-route).
+/// Rayzor's `ProfileData` already owns the "is this hot enough"
+/// decision via tier-specific thresholds (`warm_threshold`,
+/// `hot_threshold`); beadie's job once routed is to compile
+/// immediately, not re-evaluate. The double-threshold issue this
+/// avoids: under narrow promotion windows (Benchmark preset:
+/// `warm_threshold=3`, `hot_threshold=5` — only 2 calls between
+/// them), a non-1 beadie threshold would never let beadie's counter
+/// cross before rayzor moves on to the next tier.
+fn build_beadie_adapters(symbols: &[(&str, *const u8)]) -> Result<BeadieAdapters, String> {
     let beadie_threshold: u32 = 1;
     let symbols_snapshot: super::beadie_jit::RuntimeSymbolTable = Arc::new(
         symbols
@@ -1015,20 +913,16 @@ fn build_beadie_if_enabled(
         /*capacity=*/ 64,
         /*batch_limit=*/ 16,
     );
-    // Always announce on stderr — silently-active integration during a
-    // benchmark run is worse than a one-line preamble.
+    // One-line construction announcement on stderr. Step 6 simplifies:
+    // beadie is unconditional, no env-var to report.
     eprintln!(
-        "[beadie] adapters ENABLED — Standard ({:?}) + Optimized ({:?}); \
-         threshold={} (immediate-on-route). rayzor warm_threshold={} / \
-         hot_threshold={} gate entry. RAYZOR_USE_BEADIE={:?}",
+        "[beadie] adapters built — Standard ({:?}) + Optimized ({:?}); \
+         threshold={} (immediate-on-route)",
         OptimizationTier::Standard.cranelift_opt_level(),
         OptimizationTier::Optimized.cranelift_opt_level(),
         beadie_threshold,
-        config.profile_config.warm_threshold,
-        config.profile_config.hot_threshold,
-        std::env::var("RAYZOR_USE_BEADIE").unwrap_or_default()
     );
-    Ok((Some(standard), Some(optimized)))
+    Ok((standard, optimized))
 }
 
 impl TieredBackend {
@@ -1072,7 +966,7 @@ impl TieredBackend {
 
         // Create interpreter with configured bailout threshold
         let mut interp = MirInterpreter::new();
-        let max_iterations = if config.max_tier_promotions == 0 {
+        let max_iterations = if !config.enable_tier_promotion {
             u64::MAX
         } else {
             config.bailout_strategy.threshold()
@@ -1085,7 +979,7 @@ impl TieredBackend {
         // can't call any `haxe_*` runtime helper, which is fine for
         // tests of pure-arithmetic kernels but useless for real code.
         // Production callers go through `with_symbols`.
-        let (beadie_adapter, beadie_adapter_optimized) = build_beadie_if_enabled(&config, &[])?;
+        let (beadie_adapter, beadie_adapter_optimized) = build_beadie_adapters(&[])?;
 
         Ok(Self {
             interpreter: Arc::new(Mutex::new(interp)),
@@ -1093,20 +987,14 @@ impl TieredBackend {
             profile_data,
             function_tiers: Arc::new(RwLock::new(BTreeMap::new())),
             function_pointers: Arc::new(RwLock::new(BTreeMap::new())),
-            optimization_queue: Arc::new(Mutex::new(VecDeque::new())),
-            optimizing: Arc::new(Mutex::new(BTreeSet::new())),
             modules: Arc::new(RwLock::new(Vec::new())),
             config,
-            worker_handle: None,
-            shutdown: Arc::new(Mutex::new(false)),
             start_interpreted,
             runtime_symbols: Arc::new(Vec::new()),
             llvm_queue: Arc::new(Mutex::new(VecDeque::new())),
             #[cfg(feature = "llvm-backend")]
             llvm_compiled: Arc::new(Mutex::new(false)),
             promotion_barrier: Arc::new(PromotionBarrier::new()),
-            promotion_count: Arc::new(AtomicU64::new(0)),
-            current_compiled_tier: Arc::new(AtomicU8::new(0)),
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1141,7 +1029,7 @@ impl TieredBackend {
 
         // Create interpreter with configured bailout threshold and register symbols
         let mut interp = MirInterpreter::new();
-        let max_iterations = if config.max_tier_promotions == 0 {
+        let max_iterations = if !config.enable_tier_promotion {
             u64::MAX
         } else {
             config.bailout_strategy.threshold()
@@ -1152,7 +1040,7 @@ impl TieredBackend {
         }
 
         let baseline_backend = Arc::new(Mutex::new(baseline_backend));
-        let (beadie_adapter, beadie_adapter_optimized) = build_beadie_if_enabled(&config, symbols)?;
+        let (beadie_adapter, beadie_adapter_optimized) = build_beadie_adapters(symbols)?;
 
         Ok(Self {
             interpreter: Arc::new(Mutex::new(interp)),
@@ -1160,20 +1048,14 @@ impl TieredBackend {
             profile_data,
             function_tiers: Arc::new(RwLock::new(BTreeMap::new())),
             function_pointers: Arc::new(RwLock::new(BTreeMap::new())),
-            optimization_queue: Arc::new(Mutex::new(VecDeque::new())),
-            optimizing: Arc::new(Mutex::new(BTreeSet::new())),
             modules: Arc::new(RwLock::new(Vec::new())),
             config,
-            worker_handle: None,
-            shutdown: Arc::new(Mutex::new(false)),
             start_interpreted,
             runtime_symbols: Arc::new(runtime_symbols),
             llvm_queue: Arc::new(Mutex::new(VecDeque::new())),
             #[cfg(feature = "llvm-backend")]
             llvm_compiled: Arc::new(Mutex::new(false)),
             promotion_barrier: Arc::new(PromotionBarrier::new()),
-            promotion_count: Arc::new(AtomicU64::new(0)),
-            current_compiled_tier: Arc::new(AtomicU8::new(0)),
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
@@ -1184,13 +1066,10 @@ impl TieredBackend {
         })
     }
 
-    /// Borrow the beadie adapter, if Phase B is enabled in config.
-    /// Returns `None` when `enable_beadie_adapter` was false at
-    /// construction time.
-    pub fn beadie_adapter(
-        &self,
-    ) -> Option<&Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>> {
-        self.beadie_adapter.as_ref()
+    /// Borrow the Standard-tier beadie adapter. Always present (step
+    /// 6: beadie is unconditional).
+    pub fn beadie_adapter(&self) -> &Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>> {
+        &self.beadie_adapter
     }
 
     /// Borrow the beadie bead registry — one `BoundBead` per
@@ -1225,7 +1104,7 @@ impl TieredBackend {
     /// active and to attribute compile counts.
     pub fn beadie_stats(&self) -> BeadieStats {
         BeadieStats {
-            adapter_enabled: self.beadie_adapter.is_some(),
+            adapter_enabled: true,
             routes_attempted: self.beadie_routes_attempted.load(Ordering::Relaxed),
             installs: self.beadie_installs.load(Ordering::Relaxed),
             registered_beads: self.beadie_beads.lock().unwrap().len(),
@@ -1303,8 +1182,8 @@ impl TieredBackend {
         tier: OptimizationTier,
     ) -> Option<&Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>> {
         match tier {
-            OptimizationTier::Standard => self.beadie_adapter.as_ref(),
-            OptimizationTier::Optimized => self.beadie_adapter_optimized.as_ref(),
+            OptimizationTier::Standard => Some(&self.beadie_adapter),
+            OptimizationTier::Optimized => Some(&self.beadie_adapter_optimized),
             _ => None,
         }
     }
@@ -1495,7 +1374,7 @@ impl TieredBackend {
     }
 
     fn run_startup_hooks_interpreter(&self, modules: &[IrModule]) -> Result<(), String> {
-        let normal_max_iterations = if self.config.max_tier_promotions == 0 {
+        let normal_max_iterations = if !self.config.enable_tier_promotion {
             u64::MAX
         } else {
             self.config.bailout_strategy.threshold()
@@ -1659,14 +1538,6 @@ impl TieredBackend {
         // Store module for later recompilation/interpretation
         self.modules.write().unwrap().push(module);
 
-        // Start background optimization if enabled
-        // NOTE: In JIT mode (start_interpreted=false), defer starting until after
-        // compile_all_modules_jit() completes in execute_function(), otherwise the
-        // background worker will try to recompile functions that haven't been compiled yet.
-        if self.config.enable_background_optimization && self.start_interpreted {
-            self.start_background_optimization();
-        }
-
         Ok(())
     }
 
@@ -1692,7 +1563,7 @@ impl TieredBackend {
         // is available, install it under the PromotionBarrier so the
         // tier read below sees the upgraded state. No-op when beadie
         // is disabled or the function has no registered bead.
-        if self.beadie_adapter.is_some() {
+        if true {
             self.maybe_install_compiled_beadie_pointer(func_id);
         }
 
@@ -1865,26 +1736,16 @@ impl TieredBackend {
     ///
     /// This bypasses the normal tier promotion and compiles everything with LLVM.
     /// Useful for benchmarks where you want maximum performance from the start.
+    ///
+    /// Step 6 cleanup: no longer needs to stop the legacy background
+    /// worker (it's gone). Beadie's broker threads run independently
+    /// of LLVM compile; they may install Standard/Optimized pointers
+    /// while LLVM is compiling, but `install_beadie_pointer`'s
+    /// no-downgrade guard skips installs once Maximum lands.
     #[cfg(feature = "llvm-backend")]
     pub fn upgrade_to_llvm(&mut self) -> Result<(), String> {
         if self.config.verbosity >= 1 {
             debug!("[TieredBackend] Upgrading all functions to LLVM...");
-        }
-
-        // Stop background optimization to prevent race conditions during LLVM compilation
-        // The background worker might be in the middle of Cranelift compilation
-        *self.shutdown.lock().unwrap() = true;
-        if let Some(handle) = self.worker_handle.take() {
-            let _ = handle.join();
-        }
-
-        // Wait for any ongoing optimizations to complete
-        loop {
-            let optimizing_count = self.optimizing.lock().unwrap().len();
-            if optimizing_count == 0 {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
         match self.compile_all_with_llvm() {
@@ -1968,186 +1829,33 @@ impl TieredBackend {
         };
 
         if let Some(target_tier) = should_promote {
-            // Phase B step 5 (Option A): when the beadie adapter is
-            // enabled AND `target_tier` has a beadie adapter
-            // (Standard or Optimized), route the promotion through
-            // beadie's broker instead of the legacy
-            // `enqueue_for_optimization` path. Baseline keeps the
-            // legacy big-bang `compile_all_modules_jit` path (no
-            // per-function model), Maximum keeps LLVM (main-thread
-            // constraint).
+            // Phase B step 5/6: route Standard + Optimized through
+            // beadie. The legacy queue + worker infrastructure is
+            // gone (step 6 deletion), so there's no fallback for
+            // those tiers — beadie owns them.
             //
-            // ProfileData increment above stays in place on every
-            // path so the legacy/beadie boundary doesn't silently
-            // divide counts.
-            let beadie_eligible = matches!(
+            // Baseline isn't reached here: count >=
+            // interpreter_threshold sets target_tier to Baseline, but
+            // Baseline is established by `compile_all_modules_jit`
+            // (the JIT-bailout big-bang) rather than by per-function
+            // routing.
+            //
+            // Maximum (LLVM) doesn't go through beadie either — it's
+            // user-triggered via `upgrade_to_llvm` and runs on the
+            // main thread because of LLVM's `add_global_mapping`
+            // constraint.
+            //
+            // ProfileData increment above stays in place so the tier
+            // statistics report accurate hotness regardless of who
+            // owns the compile.
+            if matches!(
                 target_tier,
                 OptimizationTier::Standard | OptimizationTier::Optimized
-            ) && self.beadie_adapter_for(target_tier).is_some();
-            if beadie_eligible {
+            ) {
                 self.beadie_routes_attempted.fetch_add(1, Ordering::Relaxed);
-            }
-            let routed_to_beadie =
-                beadie_eligible && self.route_through_beadie(func_id, target_tier);
-            if !routed_to_beadie {
-                self.enqueue_for_optimization(func_id, target_tier);
+                self.route_through_beadie(func_id, target_tier);
             }
         }
-    }
-
-    /// Process the optimization queue synchronously (for when background optimization is disabled)
-    /// Returns the number of functions optimized
-    pub fn process_queue_sync(&mut self) -> usize {
-        let mut optimized = 0;
-
-        loop {
-            // Take one item from the queue
-            let item = {
-                let mut queue = self.optimization_queue.lock().unwrap();
-                queue.pop_front()
-            };
-
-            match item {
-                Some((func_id, target_tier)) => {
-                    // Skip LLVM tiers in sync mode (too slow)
-                    if target_tier.uses_llvm() {
-                        continue;
-                    }
-
-                    // Optimize the function
-                    if let Err(e) = self.optimize_function_internal(func_id, target_tier) {
-                        if self.config.verbosity >= 1 {
-                            debug!(
-                                "[TieredBackend] Sync optimization failed for {:?}: {}",
-                                func_id, e
-                            );
-                        }
-                    } else {
-                        optimized += 1;
-                    }
-                }
-                None => break, // Queue is empty
-            }
-        }
-
-        optimized
-    }
-
-    /// Enqueue a function for optimization at a specific tier
-    fn enqueue_for_optimization(&self, func_id: IrFunctionId, target_tier: OptimizationTier) {
-        let mut queue = self.optimization_queue.lock().unwrap();
-        let optimizing = self.optimizing.lock().unwrap();
-
-        // Don't enqueue if already optimizing or already in queue at this tier
-        if !optimizing.contains(&func_id)
-            && !queue
-                .iter()
-                .any(|(id, tier)| *id == func_id && *tier == target_tier)
-        {
-            let count = self.profile_data.get_function_count(func_id);
-            if self.config.verbosity >= 2 {
-                debug!(
-                    "[TieredBackend] Enqueuing {:?} for {} (count: {})",
-                    func_id,
-                    target_tier.description(),
-                    count
-                );
-            }
-            queue.push_back((func_id, target_tier));
-        }
-    }
-
-    /// Manually trigger recompilation of a function at a specific tier
-    pub fn optimize_function(
-        &mut self,
-        func_id: IrFunctionId,
-        target_tier: OptimizationTier,
-    ) -> Result<(), String> {
-        self.optimize_function_internal(func_id, target_tier)
-    }
-
-    /// Internal: Recompile a single function at a specific tier
-    fn optimize_function_internal(
-        &mut self,
-        func_id: IrFunctionId,
-        target_tier: OptimizationTier,
-    ) -> Result<(), String> {
-        if self.config.verbosity >= 1 {
-            let count = self.profile_data.get_function_count(func_id);
-            debug!(
-                "[TieredBackend] Recompiling {:?} at {} (count: {})",
-                func_id,
-                target_tier.description(),
-                count
-            );
-        }
-
-        // Verify the function exists
-        let modules_lock = self.modules.read().unwrap();
-        if !modules_lock
-            .iter()
-            .any(|m| m.functions.contains_key(&func_id))
-        {
-            return Err(format!("Function {:?} not found in any module", func_id));
-        }
-
-        // Choose backend based on tier
-        // For tier promotion, we recompile ALL modules at the new tier because
-        // functions may call each other across modules
-        let all_pointers = if target_tier.uses_llvm() {
-            // Tier 4 (Maximum): Use LLVM backend - compiles all modules
-            drop(modules_lock); // Release lock before heavy work
-            let ptr = self.compile_with_llvm(func_id)?;
-            // LLVM compile_with_llvm returns a single pointer, but we need all
-            // For now, just return the requested function
-            let mut map = BTreeMap::new();
-            map.insert(func_id, ptr);
-            map
-        } else {
-            // Tier 1-3: Use Cranelift backend
-            // Skip if already at this tier (dedup)
-            let current_tier = self.current_compiled_tier.load(Ordering::Relaxed);
-            if target_tier as u8 <= current_tier {
-                drop(modules_lock);
-                return Ok(());
-            }
-
-            // Check promotion budget
-            let count = self.promotion_count.fetch_add(1, Ordering::Relaxed);
-            if count >= self.config.max_tier_promotions {
-                self.promotion_count.fetch_sub(1, Ordering::Relaxed);
-                drop(modules_lock);
-                return Ok(());
-            }
-
-            // Compile ALL modules at the new tier and get ALL function pointers
-            let pointers = self.compile_all_at_tier(&modules_lock, target_tier)?;
-            self.current_compiled_tier
-                .store(target_tier as u8, Ordering::Relaxed);
-            drop(modules_lock);
-            pointers
-        };
-
-        // Atomically swap ALL function pointers from the new compilation
-        {
-            let mut fp_lock = self.function_pointers.write().unwrap();
-            let mut ft_lock = self.function_tiers.write().unwrap();
-
-            for (fid, ptr) in all_pointers {
-                fp_lock.insert(fid, ptr);
-                ft_lock.insert(fid, target_tier);
-            }
-        }
-
-        if self.config.verbosity >= 1 {
-            debug!(
-                "[TieredBackend] Successfully recompiled {:?} at {}",
-                func_id,
-                target_tier.description()
-            );
-        }
-
-        Ok(())
     }
 
     /// Compile all modules to Cranelift in JIT mode (lazy compilation on first execution)
@@ -2260,11 +1968,6 @@ impl TieredBackend {
 
         if self.config.verbosity >= 1 {
             debug!("[TieredBackend] JIT compilation complete");
-        }
-
-        // Now start background optimization (was deferred in JIT mode)
-        if self.config.enable_background_optimization {
-            self.start_background_optimization();
         }
 
         Ok(())
@@ -2541,130 +2244,6 @@ impl TieredBackend {
                 );
             }
         }
-    }
-
-    /// Compile ALL modules with Cranelift backend at the specified tier
-    ///
-    /// This method recompiles ALL modules at the target optimization tier and returns
-    /// ALL function pointers. This is the correct approach for tier promotion because
-    /// functions may call each other across modules.
-    ///
-    /// Returns: BTreeMap of (func_id -> function pointer) for all compiled functions
-    fn compile_all_at_tier(
-        &self,
-        all_modules: &[IrModule],
-        target_tier: OptimizationTier,
-    ) -> Result<BTreeMap<IrFunctionId, usize>, String> {
-        use crate::ir::optimization::PassManager;
-
-        // Convert runtime symbols to the format Cranelift expects
-        let symbols: Vec<(&str, *const u8)> = self
-            .runtime_symbols
-            .iter()
-            .map(|(name, ptr)| (name.as_str(), *ptr as *const u8))
-            .collect();
-
-        // Create a new Cranelift backend with the target optimization level and runtime symbols
-        let mut backend =
-            CraneliftBackend::with_symbols_and_opt(target_tier.cranelift_opt_level(), &symbols)?;
-
-        // Apply MIR-level optimizations for higher tiers
-        let mir_opt_level = target_tier.mir_opt_level();
-        let optimized_modules: Vec<IrModule>;
-        let modules_to_compile: &[IrModule] =
-            if mir_opt_level != crate::ir::optimization::OptimizationLevel::O0 {
-                // Clone all modules and apply MIR optimizations
-                optimized_modules = all_modules
-                    .iter()
-                    .map(|m| {
-                        let mut module = m.clone();
-                        let mut pass_manager = PassManager::for_level(mir_opt_level);
-                        let _ = pass_manager.run(&mut module);
-                        module
-                    })
-                    .collect();
-                &optimized_modules
-            } else {
-                all_modules
-            };
-
-        // Compile all modules to the same backend WITHOUT finalizing between modules
-        for module in modules_to_compile {
-            backend.compile_module_without_finalize(module)?;
-        }
-
-        // Finalize all modules at once
-        backend.finalize()?;
-
-        // Collect function pointers for all functions with bodies
-        // Also re-register source info for stack traces (debug mode only)
-        let register_fn: Option<
-            extern "C" fn(u32, usize, *const u8, usize, *const u8, usize, u32, u32),
-        > = if self.config.enable_stack_traces {
-            self.runtime_symbols
-                .iter()
-                .find(|(name, _)| name == "rayzor_register_function_source")
-                .map(|(_, ptr)| unsafe { std::mem::transmute(*ptr) })
-        } else {
-            None
-        };
-
-        let mut pointers = BTreeMap::new();
-        for module in modules_to_compile {
-            for (func_id, function) in &module.functions {
-                // Skip extern functions (no body to compile)
-                if function.cfg.blocks.is_empty() {
-                    continue;
-                }
-                if let Ok(ptr) = backend.get_function_ptr(*func_id) {
-                    pointers.insert(*func_id, ptr as usize);
-
-                    // Re-register source info at new address (tier promotion)
-                    if let Some(register) = register_fn {
-                        let name = function.qualified_name.as_deref().unwrap_or(&function.name);
-                        let source_file = &module.source_file;
-                        register(
-                            func_id.0,
-                            ptr as usize,
-                            name.as_ptr(),
-                            name.len(),
-                            source_file.as_ptr(),
-                            source_file.len(),
-                            function.source_location.line,
-                            function.source_location.column,
-                        );
-                    }
-                }
-            }
-        }
-
-        // Leak the backend to keep the compiled code alive
-        // This is necessary because the JIT code must remain valid for the program's lifetime
-        Box::leak(Box::new(backend));
-
-        Ok(pointers)
-    }
-
-    /// Apply MIR-level optimizations to a function
-    fn apply_mir_optimizations(
-        function: IrFunction,
-        level: crate::ir::optimization::OptimizationLevel,
-    ) -> IrFunction {
-        use crate::ir::optimization::PassManager;
-
-        // Create a temporary module containing just this function
-        let mut temp_module = IrModule::new("temp_opt".to_string(), "temp".to_string());
-
-        // Use a temporary function ID
-        let temp_id = IrFunctionId(0);
-        temp_module.functions.insert(temp_id, function);
-
-        // Run optimization passes
-        let mut pass_manager = PassManager::for_level(level);
-        let _ = pass_manager.run(&mut temp_module);
-
-        // Extract the optimized function
-        temp_module.functions.remove(&temp_id).unwrap()
     }
 
     /// Process pending LLVM compilations on the main thread
@@ -3303,499 +2882,15 @@ impl TieredBackend {
         }
         Err("LLVM backend not enabled. Compile with --features llvm-backend".to_string())
     }
-
-    /// Start background optimization worker thread
-    fn start_background_optimization(&mut self) {
-        if self.worker_handle.is_some() {
-            return; // Already started
-        }
-
-        let queue = Arc::clone(&self.optimization_queue);
-        let optimizing = Arc::clone(&self.optimizing);
-        let modules = Arc::clone(&self.modules);
-        let function_pointers = Arc::clone(&self.function_pointers);
-        let function_tiers = Arc::clone(&self.function_tiers);
-        let shutdown = Arc::clone(&self.shutdown);
-        let profile_data = self.profile_data.clone();
-        let config = self.config.clone();
-        let runtime_symbols = Arc::clone(&self.runtime_symbols);
-        let llvm_queue = Arc::clone(&self.llvm_queue);
-        let promotion_barrier = Arc::clone(&self.promotion_barrier);
-        let promotion_count = Arc::clone(&self.promotion_count);
-        let current_compiled_tier = Arc::clone(&self.current_compiled_tier);
-
-        let handle = thread::spawn(move || {
-            if config.verbosity >= 1 {
-                debug!("[TieredBackend] Background optimization worker started");
-            }
-
-            loop {
-                // Check for shutdown
-                if *shutdown.lock().unwrap() {
-                    if config.verbosity >= 1 {
-                        debug!("[TieredBackend] Background worker shutting down");
-                    }
-                    break;
-                }
-
-                // Process optimization queue
-                Self::background_worker_iteration(
-                    &queue,
-                    &optimizing,
-                    &modules,
-                    &function_pointers,
-                    &function_tiers,
-                    &profile_data,
-                    &config,
-                    &runtime_symbols,
-                    &llvm_queue,
-                    &promotion_barrier,
-                    &promotion_count,
-                    &current_compiled_tier,
-                );
-
-                // Sleep before next iteration
-                thread::sleep(Duration::from_millis(config.optimization_check_interval_ms));
-            }
-        });
-
-        self.worker_handle = Some(handle);
-    }
-
-    /// Background worker iteration - processes multiple functions in parallel using rayon
-    ///
-    /// This drains up to `max_parallel_optimizations` functions from the queue and
-    /// compiles them concurrently using rayon's parallel iterators.
-    ///
-    /// ## Safe Promotion Protocol (Barrier-Based)
-    /// 1. Compile new code in background (no barrier needed)
-    /// 2. Request promotion via barrier (blocks new JIT executions)
-    /// 3. Wait for all in-flight JIT executions to complete
-    /// 4. Atomically swap ALL function pointers
-    /// 5. Release barrier (allows JIT executions to resume)
-    fn background_worker_iteration(
-        queue: &Arc<Mutex<VecDeque<(IrFunctionId, OptimizationTier)>>>,
-        optimizing: &Arc<Mutex<BTreeSet<IrFunctionId>>>,
-        modules: &Arc<RwLock<Vec<IrModule>>>,
-        function_pointers: &Arc<RwLock<BTreeMap<IrFunctionId, usize>>>,
-        function_tiers: &Arc<RwLock<BTreeMap<IrFunctionId, OptimizationTier>>>,
-        profile_data: &ProfileData,
-        config: &TieredConfig,
-        runtime_symbols: &Arc<Vec<(String, usize)>>,
-        llvm_queue: &Arc<Mutex<VecDeque<IrFunctionId>>>,
-        promotion_barrier: &Arc<PromotionBarrier>,
-        promotion_count: &Arc<AtomicU64>,
-        current_compiled_tier: &Arc<AtomicU8>,
-    ) {
-        // Drain batch of functions to compile in parallel
-        let batch: Vec<(IrFunctionId, OptimizationTier)> = {
-            let mut queue_lock = queue.lock().unwrap();
-            let mut optimizing_lock = optimizing.lock().unwrap();
-
-            // Calculate how many functions we can compile in parallel
-            let available_slots = config
-                .max_parallel_optimizations
-                .saturating_sub(optimizing_lock.len());
-            if available_slots == 0 {
-                return;
-            }
-
-            // Drain up to available_slots functions from the queue
-            let mut batch = Vec::with_capacity(available_slots);
-            while batch.len() < available_slots {
-                if let Some((func_id, target_tier)) = queue_lock.pop_front() {
-                    optimizing_lock.insert(func_id);
-                    batch.push((func_id, target_tier));
-                } else {
-                    break;
-                }
-            }
-            batch
-        };
-
-        if batch.is_empty() {
-            return;
-        }
-
-        // Get modules reference (read lock held during parallel compilation)
-        let modules_lock = modules.read().unwrap();
-        if modules_lock.is_empty() {
-            // No modules, mark all as done and return
-            let mut optimizing_lock = optimizing.lock().unwrap();
-            for (func_id, _) in &batch {
-                optimizing_lock.remove(func_id);
-            }
-            return;
-        }
-
-        // Separate LLVM and Cranelift compilations
-        // LLVM requires main thread for symbol mapping, so queue those for main thread
-        let (llvm_batch, cranelift_batch): (Vec<_>, Vec<_>) = batch
-            .iter()
-            .cloned() // Clone to get owned values
-            .partition(|(_, tier)| tier.uses_llvm());
-
-        // Queue LLVM requests for main thread compilation (instead of downgrading)
-        // The main thread will process these during execute_function calls
-        if !llvm_batch.is_empty() {
-            let mut llvm_queue_lock = llvm_queue.lock().unwrap();
-            let mut optimizing_lock = optimizing.lock().unwrap();
-            for (func_id, _) in llvm_batch {
-                // Remove from "optimizing" set since we're re-queuing for main thread
-                optimizing_lock.remove(&func_id);
-                // Add to LLVM queue for main thread
-                if !llvm_queue_lock.iter().any(|id| *id == func_id) {
-                    llvm_queue_lock.push_back(func_id);
-                    if config.verbosity >= 1 {
-                        debug!(
-                            "[TieredBackend] Queued {:?} for LLVM compilation on main thread",
-                            func_id
-                        );
-                    }
-                }
-            }
-        }
-
-        // For Cranelift tier promotion, we need to compile ALL modules at the target tier
-        // Group by target tier to minimize recompilation
-        if !cranelift_batch.is_empty() {
-            // Find the highest tier requested in this batch
-            let max_tier = cranelift_batch
-                .iter()
-                .map(|(_, tier)| *tier)
-                .max()
-                .unwrap_or(OptimizationTier::Baseline);
-
-            if config.verbosity >= 1 {
-                debug!(
-                    "[TieredBackend] Background: compiling {} functions at {} tier",
-                    cranelift_batch.len(),
-                    max_tier.description()
-                );
-            }
-
-            // Skip if we've already compiled at this tier or higher (dedup)
-            let current_tier = current_compiled_tier.load(Ordering::Relaxed);
-            if max_tier as u8 <= current_tier {
-                if config.verbosity >= 2 {
-                    debug!(
-                        "[TieredBackend] Skipping recompilation: already at tier {} (requested {})",
-                        current_tier, max_tier as u8
-                    );
-                }
-                // Mark batch items as no longer optimizing
-                let mut optimizing_lock = optimizing.lock().unwrap();
-                for (func_id, _) in &cranelift_batch {
-                    optimizing_lock.remove(func_id);
-                }
-                return;
-            }
-
-            // Check promotion budget
-            let count = promotion_count.fetch_add(1, Ordering::Relaxed);
-            if count >= config.max_tier_promotions {
-                promotion_count.fetch_sub(1, Ordering::Relaxed);
-                if config.verbosity >= 1 {
-                    debug!(
-                        "[TieredBackend] Tier promotion budget exhausted ({}/{}), skipping",
-                        count, config.max_tier_promotions
-                    );
-                }
-                let mut optimizing_lock = optimizing.lock().unwrap();
-                for (func_id, _) in &cranelift_batch {
-                    optimizing_lock.remove(func_id);
-                }
-                return;
-            }
-
-            // Compile ALL modules at the highest tier
-            let compile_result =
-                Self::compile_all_at_tier_static(&modules_lock[..], max_tier, runtime_symbols);
-
-            // Drop modules lock before installing results
-            drop(modules_lock);
-
-            // Install results using the barrier-based safe promotion protocol
-            match compile_result {
-                Ok(all_pointers) => {
-                    // Step 1: Request promotion - blocks new JIT executions
-                    promotion_barrier.request_promotion();
-
-                    if config.verbosity >= 2 {
-                        debug!(
-                            "[TieredBackend] Promotion requested, waiting for in-flight executions to drain"
-                        );
-                    }
-
-                    // Step 2: Wait for all in-flight executions to complete (with timeout)
-                    let drain_timeout = Duration::from_secs(5);
-                    if !promotion_barrier.wait_for_drain(drain_timeout) {
-                        // Timeout - cancel promotion and skip this batch
-                        if config.verbosity >= 1 {
-                            debug!(
-                                "[TieredBackend] Promotion timed out waiting for drain, cancelling"
-                            );
-                        }
-                        promotion_barrier.cancel_promotion();
-
-                        // Mark batch items as no longer optimizing so they can be retried
-                        let mut optimizing_lock = optimizing.lock().unwrap();
-                        for (func_id, _) in &cranelift_batch {
-                            optimizing_lock.remove(func_id);
-                        }
-                        return;
-                    }
-
-                    // Re-register source info at new addresses (tier promotion)
-                    if config.enable_stack_traces {
-                        Self::register_source_info_static(&modules, &all_pointers, runtime_symbols);
-                    }
-
-                    // Step 3: All executions drained - safe to install pointers atomically
-                    {
-                        let mut fp_lock = function_pointers.write().unwrap();
-                        let mut ft_lock = function_tiers.write().unwrap();
-                        let mut optimizing_lock = optimizing.lock().unwrap();
-
-                        // Install ALL function pointers from the new compilation
-                        let installed_count = all_pointers.len();
-                        for (func_id, ptr) in all_pointers {
-                            fp_lock.insert(func_id, ptr);
-                            ft_lock.insert(func_id, max_tier);
-                        }
-
-                        // Mark all batch items as no longer optimizing
-                        for (func_id, _) in &cranelift_batch {
-                            optimizing_lock.remove(func_id);
-                        }
-
-                        if config.verbosity >= 1 {
-                            debug!(
-                                "[TieredBackend] Installed {} functions at {}",
-                                installed_count,
-                                max_tier.description()
-                            );
-                        }
-                    }
-
-                    // Step 4: Complete promotion - allow JIT executions to resume
-                    promotion_barrier.complete_promotion();
-
-                    // Track the tier we just compiled to (for dedup)
-                    current_compiled_tier.store(max_tier as u8, Ordering::Relaxed);
-
-                    if config.verbosity >= 2 {
-                        debug!("[TieredBackend] Promotion complete, executions resumed");
-                    }
-                }
-                Err(e) => {
-                    if config.verbosity >= 1 {
-                        debug!("[TieredBackend] Background compilation failed: {}", e);
-                    }
-
-                    // Mark all batch items as no longer optimizing
-                    let mut optimizing_lock = optimizing.lock().unwrap();
-                    for (func_id, _) in &cranelift_batch {
-                        optimizing_lock.remove(func_id);
-                    }
-                }
-            }
-        } else {
-            // No Cranelift batch, just drop the lock
-            drop(modules_lock);
-        }
-    }
-
-    /// Static version of compile_all_at_tier for use in worker thread
-    ///
-    /// Compiles ALL modules at the specified tier and returns ALL function pointers.
-    /// This is necessary because functions may call each other across modules.
-    fn compile_all_at_tier_static(
-        all_modules: &[IrModule],
-        target_tier: OptimizationTier,
-        runtime_symbols: &Arc<Vec<(String, usize)>>,
-    ) -> Result<BTreeMap<IrFunctionId, usize>, String> {
-        use crate::ir::optimization::PassManager;
-
-        // Convert runtime symbols to format expected by Cranelift
-        let symbols: Vec<(&str, *const u8)> = runtime_symbols
-            .iter()
-            .map(|(name, ptr)| (name.as_str(), *ptr as *const u8))
-            .collect();
-
-        let mut backend =
-            CraneliftBackend::with_symbols_and_opt(target_tier.cranelift_opt_level(), &symbols)?;
-
-        // Apply MIR-level optimizations for higher tiers
-        let mir_opt_level = target_tier.mir_opt_level();
-        let optimized_modules: Vec<IrModule>;
-        let modules_to_compile: &[IrModule] =
-            if mir_opt_level != crate::ir::optimization::OptimizationLevel::O0 {
-                // Clone all modules and apply MIR optimizations
-                optimized_modules = all_modules
-                    .iter()
-                    .map(|m| {
-                        let mut module = m.clone();
-                        let mut pass_manager = PassManager::for_level(mir_opt_level);
-                        let _ = pass_manager.run(&mut module);
-                        module
-                    })
-                    .collect();
-                &optimized_modules
-            } else {
-                all_modules
-            };
-
-        // Compile all modules to the same backend WITHOUT finalizing between modules
-        for module in modules_to_compile {
-            backend.compile_module_without_finalize(module)?;
-        }
-
-        // Finalize all modules at once
-        backend.finalize()?;
-
-        // Collect function pointers for all functions with bodies
-        let mut pointers = BTreeMap::new();
-        for module in modules_to_compile {
-            for (func_id, function) in &module.functions {
-                // Skip extern functions (no body to compile)
-                if function.cfg.blocks.is_empty() {
-                    continue;
-                }
-                if let Ok(ptr) = backend.get_function_ptr(*func_id) {
-                    pointers.insert(*func_id, ptr as usize);
-                }
-            }
-        }
-
-        // Leak the backend to keep the compiled code alive
-        Box::leak(Box::new(backend));
-
-        Ok(pointers)
-    }
-
-    /// Static version of compile_with_llvm for use in worker thread
-    ///
-    /// Note: This intentionally leaks the LLVM context and backend to ensure
-    /// JIT-compiled code remains valid for the program's lifetime.
-    ///
-    /// This compiles ALL modules because functions may call other functions
-    /// across modules. The function pointer for the requested function is returned.
-    #[cfg(feature = "llvm-backend")]
-    #[allow(unused)] // Reserved for future main-thread LLVM compilation
-    fn compile_with_llvm_static(
-        func_id: IrFunctionId,
-        modules: &[IrModule],
-        runtime_symbols: &Arc<Vec<(String, usize)>>,
-    ) -> Result<usize, String> {
-        // Acquire global LLVM lock - LLVM is not thread-safe
-        let _llvm_guard = super::llvm_jit_backend::llvm_lock();
-
-        // Create context and backend, then leak them to ensure lifetime
-        // This is intentional: JIT code must remain valid indefinitely
-        let context = Box::leak(Box::new(Context::create()));
-
-        // Convert symbols back to the format LLVMJitBackend expects
-        let symbols: Vec<(&str, *const u8)> = runtime_symbols
-            .iter()
-            .map(|(name, ptr)| (name.as_str(), *ptr as *const u8))
-            .collect();
-
-        let mut backend = LLVMJitBackend::with_symbols(context, &symbols)?;
-
-        // Compile ALL modules - functions may call across modules
-        for module in modules {
-            backend.compile_module(module)?;
-        }
-
-        // Finalize the module to create the execution engine
-        backend.finalize()?;
-
-        // Get the function pointer for the requested function
-        let ptr = backend.get_function_ptr(func_id)?;
-
-        // Leak the backend to keep the execution engine alive
-        Box::leak(Box::new(backend));
-
-        Ok(ptr as usize)
-    }
-
-    /// Static version of compile_with_llvm - stub when LLVM not enabled
-    #[cfg(not(feature = "llvm-backend"))]
-    fn compile_with_llvm_static(
-        func_id: IrFunctionId,
-        _modules: &[IrModule],
-        _runtime_symbols: &Arc<Vec<(String, usize)>>,
-    ) -> Result<usize, String> {
-        Err(format!(
-            "LLVM backend not enabled, cannot compile {:?} at Tier 3. Compile with --features llvm-backend",
-            func_id
-        ))
-    }
-
-    /// Get profiling and tiering statistics
-    pub fn get_statistics(&self) -> TieredStatistics {
-        let profile_stats = self.profile_data.get_statistics();
-        let tiers = self.function_tiers.read().unwrap();
-
-        // Debug: Print what tiers we actually have
-        if self.config.verbosity >= 2 {
-            debug!("[TieredBackend] Current function tiers:");
-            for (func_id, tier) in tiers.iter() {
-                debug!("  {:?} -> {:?}", func_id, tier);
-            }
-        }
-
-        let interpreted_count = tiers
-            .values()
-            .filter(|&&t| t == OptimizationTier::Interpreted)
-            .count();
-        let baseline_count = tiers
-            .values()
-            .filter(|&&t| t == OptimizationTier::Baseline)
-            .count();
-        let standard_count = tiers
-            .values()
-            .filter(|&&t| t == OptimizationTier::Standard)
-            .count();
-        let optimized_count = tiers
-            .values()
-            .filter(|&&t| t == OptimizationTier::Optimized)
-            .count();
-        let maximum_count = tiers
-            .values()
-            .filter(|&&t| t == OptimizationTier::Maximum)
-            .count();
-
-        TieredStatistics {
-            profile_stats,
-            interpreted_functions: interpreted_count,
-            baseline_functions: baseline_count,
-            standard_functions: standard_count,
-            optimized_functions: optimized_count,
-            llvm_functions: maximum_count,
-            queued_for_optimization: self.optimization_queue.lock().unwrap().len(),
-            currently_optimizing: self.optimizing.lock().unwrap().len(),
-        }
-    }
-
-    /// Shutdown the tiered backend (stops background worker)
-    pub fn shutdown(&mut self) {
-        *self.shutdown.lock().unwrap() = true;
-
-        if let Some(handle) = self.worker_handle.take() {
-            let _ = handle.join();
-        }
-    }
 }
 
-impl Drop for TieredBackend {
-    fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
-/// Statistics about the tiered backend
+/// Statistics about the tiered backend.
+///
+/// Step 6 dropped the `queued_for_optimization` /
+/// `currently_optimizing` fields — beadie owns the
+/// Standard/Optimized scheduling; there's no rayzor-side queue to
+/// report on. Use [`TieredBackend::beadie_stats`] for beadie's
+/// per-tier counters.
 #[derive(Debug, Clone)]
 pub struct TieredStatistics {
     pub profile_stats: ProfileStatistics,
@@ -3804,8 +2899,6 @@ pub struct TieredStatistics {
     pub standard_functions: usize,
     pub optimized_functions: usize,
     pub llvm_functions: usize,
-    pub queued_for_optimization: usize,
-    pub currently_optimizing: usize,
 }
 
 impl TieredStatistics {
@@ -3813,15 +2906,12 @@ impl TieredStatistics {
     pub fn format(&self) -> String {
         format!(
             "Tiered Compilation: {} Interpreted (P0), {} Baseline (P1), {} Standard (P2), {} Optimized (P3), {} LLVM (P4)\n\
-             Queue: {} waiting, {} optimizing\n\
              {}",
             self.interpreted_functions,
             self.baseline_functions,
             self.standard_functions,
             self.optimized_functions,
             self.llvm_functions,
-            self.queued_for_optimization,
-            self.currently_optimizing,
             self.profile_stats.format()
         )
     }

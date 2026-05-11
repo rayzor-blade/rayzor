@@ -278,19 +278,17 @@ mod tests {
         let _adapter = build_batched_adapter(Arc::clone(&symbols), 1, 16, 4);
     }
 
-    /// `TieredBackend::beadie_adapter()` returns `Some` iff the config
-    /// flag is set.
+    /// Step 6: beadie is unconditional. Constructing any
+    /// `TieredBackend` always builds the Standard + Optimized
+    /// adapters; there's no toggle to verify.
     #[test]
     fn tiered_backend_constructs_with_beadie_adapter() {
         use super::super::tiered_backend::{TieredBackend, TieredConfig};
 
-        let off = TieredBackend::new(TieredConfig::default()).expect("tiered backend off");
-        assert!(off.beadie_adapter().is_none());
-
-        let mut cfg = TieredConfig::default();
-        cfg.enable_beadie_adapter = true;
-        let on = TieredBackend::new(cfg).expect("tiered backend on");
-        assert!(on.beadie_adapter().is_some());
+        let backend = TieredBackend::new(TieredConfig::default()).expect("tiered backend");
+        // Both calls return a real handle (Arc, no Option) — compile
+        // would have failed if the adapter wasn't there.
+        let _std_adapter = backend.beadie_adapter();
     }
 
     /// End-to-end: drive a real compile through beadie inside a live
@@ -309,12 +307,12 @@ mod tests {
         let symbols_ref: Vec<(&str, *const u8)> = symbols.iter().map(|(n, p)| (*n, *p)).collect();
 
         let mut cfg = TieredConfig::default();
-        cfg.enable_beadie_adapter = true;
+
         cfg.profile_config.warm_threshold = 1;
 
         let backend =
             TieredBackend::with_symbols(cfg, &symbols_ref).expect("tiered backend with beadie");
-        let adapter = backend.beadie_adapter().expect("adapter present").clone();
+        let adapter = Arc::clone(backend.beadie_adapter());
         let (module, func_id) = build_add_module();
         let bound = adapter.register(std::ptr::null_mut(), None);
 
@@ -340,26 +338,21 @@ mod tests {
         assert_eq!(f(20, 22), 42);
     }
 
-    /// `ensure_beadie_bead` is idempotent and errors when the adapter
-    /// is disabled.
+    /// `ensure_beadie_bead` is idempotent. (Step 6: the disabled-mode
+    /// error case is gone — beadie is unconditional.)
     #[test]
-    fn ensure_beadie_bead_idempotence_and_disabled_error() {
+    fn ensure_beadie_bead_idempotence() {
         use super::super::tiered_backend::{TieredBackend, TieredConfig};
         use crate::tast::SymbolId;
 
-        let off = TieredBackend::new(TieredConfig::default()).expect("tiered backend off");
+        let backend = TieredBackend::new(TieredConfig::default()).expect("tiered backend");
         let dummy = IrFunctionId(SymbolId(7).into());
-        assert!(off.ensure_beadie_bead(dummy).is_err());
-        assert!(!off.has_beadie_bead(dummy));
 
-        let mut cfg = TieredConfig::default();
-        cfg.enable_beadie_adapter = true;
-        let on = TieredBackend::new(cfg).expect("tiered backend on");
-        assert!(!on.has_beadie_bead(dummy));
-        on.ensure_beadie_bead(dummy).unwrap();
-        assert!(on.has_beadie_bead(dummy));
-        on.ensure_beadie_bead(dummy).unwrap();
-        assert_eq!(on.beadie_beads().lock().unwrap().len(), 1);
+        assert!(!backend.has_beadie_bead(dummy));
+        backend.ensure_beadie_bead(dummy).unwrap();
+        assert!(backend.has_beadie_bead(dummy));
+        backend.ensure_beadie_bead(dummy).unwrap(); // idempotent
+        assert_eq!(backend.beadie_beads().lock().unwrap().len(), 1);
     }
 
     /// E2E for `record_call`: past warm threshold, Standard promotion
@@ -375,10 +368,9 @@ mod tests {
         let symbols_ref: Vec<(&str, *const u8)> = symbols.iter().map(|(n, p)| (*n, *p)).collect();
 
         let mut cfg = TieredConfig::default();
-        cfg.enable_beadie_adapter = true;
+
         cfg.profile_config.warm_threshold = 1;
         cfg.profile_config.interpreter_threshold = 100;
-        cfg.enable_background_optimization = false;
 
         let mut backend =
             TieredBackend::with_symbols(cfg, &symbols_ref).expect("tiered backend with beadie");
@@ -436,12 +428,11 @@ mod tests {
         let symbols_ref: Vec<(&str, *const u8)> = symbols.iter().map(|(n, p)| (*n, *p)).collect();
 
         let mut cfg = TieredConfig::default();
-        cfg.enable_beadie_adapter = true;
+
         cfg.profile_config.interpreter_threshold = 100; // skip Baseline
         cfg.profile_config.warm_threshold = 1;
         cfg.profile_config.hot_threshold = 2;
         cfg.profile_config.blazing_threshold = u64::MAX;
-        cfg.enable_background_optimization = false;
 
         let mut backend =
             TieredBackend::with_symbols(cfg, &symbols_ref).expect("tiered backend with beadie");
@@ -545,12 +536,12 @@ mod tests {
         let module = builder.finish();
 
         let mut cfg = TieredConfig::default();
-        cfg.enable_beadie_adapter = true;
+
         cfg.profile_config.warm_threshold = 1;
 
         let backend =
             TieredBackend::with_symbols(cfg, &symbols_ref).expect("tiered backend with beadie");
-        let adapter = backend.beadie_adapter().expect("adapter present").clone();
+        let adapter = Arc::clone(backend.beadie_adapter());
         let bound = adapter.register(std::ptr::null_mut(), None);
 
         let (_def, modules_handle) = BeadieFunctionDef::from_single_module(module, caller_id);
