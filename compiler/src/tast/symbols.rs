@@ -335,9 +335,20 @@ impl SymbolFlags {
     pub const SHADER: Self = Self(1 << 20);
     /// @:export - export class/function for WASM JS interop
     pub const WASM_EXPORT: Self = Self(1 << 21);
+    /// @:autoDeref - field access / method calls on this wrapper class
+    /// transparently forward to its inner value via a `get()` method
+    /// (e.g. `Arc<T>`, `MutexGuard<T>`). User-extensible alternative
+    /// to the previously-hardcoded list at
+    /// `ast_lowering::is_auto_deref_wrapper_class`.
+    pub const AUTO_DEREF: Self = Self(1 << 22);
 
     pub const fn is_wasm_export(self) -> bool {
         self.contains(Self::WASM_EXPORT)
+    }
+
+    /// Check if this symbol has @:autoDeref metadata.
+    pub const fn is_auto_deref(self) -> bool {
+        self.contains(Self::AUTO_DEREF)
     }
 
     pub const fn empty() -> Self {

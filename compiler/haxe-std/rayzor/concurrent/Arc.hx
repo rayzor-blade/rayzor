@@ -23,6 +23,7 @@ package rayzor.concurrent;
  * ```
  */
 @:native("rayzor::concurrent::Arc")
+@:autoDeref
 extern class Arc<T> {
     /**
      * Create a new Arc wrapping the given value (static factory method).
