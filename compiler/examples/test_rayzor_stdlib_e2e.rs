@@ -1011,6 +1011,19 @@ class Main {
         // satisfy. Now consults the class registry.
         trace("isObject(d): " + Reflect.isObject(d));
         trace("isObject(42): " + Reflect.isObject(42));
+
+        // Type.getSuperClass + getClassName chain. Was returning
+        // empty because `class.extends` carried a TAST TypeId from
+        // a different namespace than the symbol-derived ids the
+        // runtime registry uses for class lookups. tast_to_hir now
+        // canonicalises the super_class id through the parent's
+        // symbol_id.
+        var sup = Type.getSuperClass(cls);
+        if (sup == null) {
+            trace("super: null");
+        } else {
+            trace("super: " + Type.getClassName(sup));
+        }
     }
 }
 "#,

@@ -589,11 +589,29 @@ impl<'a> TastToHirContext<'a> {
         // Create type ID from symbol ID (simplified)
         let type_id = TypeId::from_raw(class.symbol_id.as_raw());
 
+        // Canonicalise the super-class type id to the same
+        // symbol-derived namespace we use for `type_id` above. TAST
+        // gives `class.super_class` whatever `TypeId` happened to be
+        // assigned during type-checking — often a different
+        // namespace from `TypeId::from_raw(symbol_id)`, which
+        // breaks `Type.getSuperClass` -> `Type.getClassName` (the
+        // runtime registry is keyed on the symbol-derived id, so
+        // the un-canonicalised super id is a lookup miss).
+        let extends_canonical = class.super_class.and_then(|super_ty| {
+            let type_table = self.type_table.borrow();
+            type_table.get(super_ty).and_then(|ti| match &ti.kind {
+                crate::tast::core::TypeKind::Class { symbol_id, .. } => {
+                    Some(TypeId::from_raw(symbol_id.as_raw()))
+                }
+                _ => None,
+            })
+        });
+
         let hir_class = HirClass {
             symbol_id: class.symbol_id,
             name: class.name.clone(),
             type_params: self.lower_type_params(&class.type_parameters),
-            extends: class.super_class,
+            extends: extends_canonical.or(class.super_class),
             implements: class.interfaces.clone(),
             fields: hir_fields,
             methods: hir_methods,
