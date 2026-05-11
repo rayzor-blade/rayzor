@@ -195,7 +195,7 @@ fn create_interp_config() -> TieredConfig {
         start_interpreted: true,
         bailout_strategy: compiler::codegen::BailoutStrategy::Quick,
         enable_stack_traces: false,
-        enable_tier_promotion: true
+        enable_tier_promotion: true,
     }
 }
 

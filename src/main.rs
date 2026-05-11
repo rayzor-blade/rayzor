@@ -821,7 +821,7 @@ fn run_bundle(file: &Path, verbose: bool, stats: bool, preset: Preset) -> Result
         .execute_function(entry_func_id, vec![])
         .map_err(|e| format!("Execution failed: {}", e))?;
 
-    backend.shutdown();
+
 
     // Execution complete — no banner needed, output speaks for itself
     Ok(())
@@ -1261,7 +1261,7 @@ fn run_file(
     // Remove trace callback
     rayzor_runtime::haxe_sys::set_trace_callback(None);
 
-    backend.shutdown();
+
 
     // Render TUI
     if let Some(ref tui) = progress_tui_ref {
@@ -1823,7 +1823,7 @@ fn compile_file(
     use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
 
     let mut config = TieredConfig::from_preset(compiler::codegen::TierPreset::Script);
-    config.enable_background_optimization = false;
+
     config.start_interpreted = false;
 
     let mut backend = TieredBackend::new(config)?;
@@ -1838,7 +1838,7 @@ fn compile_file(
         );
     }
 
-    backend.shutdown();
+
     println!("✓ Compilation complete");
     Ok(())
 }
