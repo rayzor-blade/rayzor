@@ -7110,6 +7110,7 @@ impl<'a> HirToMirContext<'a> {
             runtime_func,
             "haxe_type_enum_constructor"
                 | "haxe_type_enum_parameters"
+                | "haxe_type_enum_index"
                 | "haxe_type_get_enum"
                 | "haxe_type_enum_eq"
         )

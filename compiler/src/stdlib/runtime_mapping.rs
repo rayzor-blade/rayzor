@@ -3567,9 +3567,13 @@ impl StdlibMapping {
             // Type.createEnumIndex(e, index, ?params):T
             map_method!(static "Type", "createEnumIndex" => "haxe_type_create_enum_index", params: 3, returns: primitive,
                 types: &[I64, I64, PtrVoid] => I64),
-            // Type.enumIndex(e:EnumValue):Int — raw i64 discriminant = index
+            // Type.enumIndex(e:EnumValue):Int — takes (value, type_id),
+            // compiler injects the enum type_id so the runtime can
+            // tell whether `value` is a raw discriminant (unboxed
+            // enums) or a heap pointer to `[tag:i32, ...]` (boxed
+            // enums with parameterised variants).
             map_method!(static "Type", "enumIndex" => "haxe_type_enum_index", params: 1, returns: primitive,
-                types: &[I64] => I64),
+                types: &[I64, I32] => I64),
             // Type.enumEq(a, b):Bool — compiler injects enum type_id
             map_method!(static "Type", "enumEq" => "haxe_type_enum_eq", params: 2, returns: primitive,
                 types: &[I64, I64, I32] => Bool),

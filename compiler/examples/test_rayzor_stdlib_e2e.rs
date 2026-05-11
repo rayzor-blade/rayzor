@@ -1032,6 +1032,63 @@ class Main {
     );
 
     // ============================================================================
+    // TEST 6e: Enum reflection (enumConstructor / enumIndex / enumParameters)
+    // ============================================================================
+    // These three Type.* functions used to return empty / garbage for any
+    // enum value because the runtime wrappers passed `is_boxed=0`
+    // unconditionally — fine for tag-only enums but wrong for mixed
+    // enums (any variant with parameters → all variants get a
+    // `[tag:i32, fields...]` heap representation). The runtime now
+    // derives `is_boxed` from the enum's RTTI (any variant
+    // param_count > 0 → boxed). Type.enumIndex also gains a compiler-
+    // injected type_id argument matching the existing
+    // enumConstructor / enumParameters convention.
+    suite.add_test(
+        E2ETestCase::new(
+            "enum_reflection_constructor_index_params",
+            "Type.enumConstructor / enumIndex / enumParameters on tag-only + mixed enums",
+            r#"
+enum Maybe {
+    None;
+    Some(v: Int);
+}
+
+enum Color {
+    Red;
+    Green;
+    Blue;
+}
+
+class Main {
+    static function main() {
+        // Mixed enum: Maybe has Some(Int) → heap-boxed representation.
+        var s = Some(42);
+        trace("Some ctor: " + Type.enumConstructor(s));   // Some
+        trace("Some idx: " + Type.enumIndex(s));            // 1
+        trace("Some params: " + Type.enumParameters(s));  // [42]
+
+        var n = None;
+        trace("None ctor: " + Type.enumConstructor(n));   // None
+        trace("None idx: " + Type.enumIndex(n));            // 0
+        trace("None params: " + Type.enumParameters(n));  // []
+
+        // Tag-only enum: Color has no parameterised variants → raw
+        // i64 discriminant representation.
+        var r = Red;
+        trace("Red ctor: " + Type.enumConstructor(r));    // Red
+        trace("Red idx: " + Type.enumIndex(r));            // 0
+
+        var b = Blue;
+        trace("Blue ctor: " + Type.enumConstructor(b));   // Blue
+        trace("Blue idx: " + Type.enumIndex(b));           // 2
+    }
+}
+"#,
+        )
+        .expect_level(TestLevel::Execution),
+    );
+
+    // ============================================================================
     // TEST 7: For-In Loop over Array
     // ============================================================================
     // For-in loop over arrays - simplified test just to see if for-in compiles
