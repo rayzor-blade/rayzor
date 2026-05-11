@@ -821,8 +821,6 @@ fn run_bundle(file: &Path, verbose: bool, stats: bool, preset: Preset) -> Result
         .execute_function(entry_func_id, vec![])
         .map_err(|e| format!("Execution failed: {}", e))?;
 
-
-
     // Execution complete — no banner needed, output speaks for itself
     Ok(())
 }
@@ -1260,8 +1258,6 @@ fn run_file(
 
     // Remove trace callback
     rayzor_runtime::haxe_sys::set_trace_callback(None);
-
-
 
     // Render TUI
     if let Some(ref tui) = progress_tui_ref {
@@ -1837,7 +1833,6 @@ fn compile_file(
             output_path.display()
         );
     }
-
 
     println!("✓ Compilation complete");
     Ok(())
