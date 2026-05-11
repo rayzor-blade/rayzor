@@ -11,9 +11,11 @@ diagnostics = { path = "../diagnostics" }
 rayzor-runtime = { path = "../runtime", features = ["tcc-runtime"] }
 rayzor-plugin = { path = "../plugin" }
 
-# Local beadie checkout — hot-function promotion broker for tier management.
-# Path dep while we co-iterate; flip to crates.io once API stabilises.
-beadie = { path = "../../beadie/crates/beadie", default-features = false }
+# Beadie — hot-function promotion broker for tier management.
+# Pinned to a git rev rather than crates.io: the batched-compile and
+# from_arc constructors we depend on landed in #1 + #2 but haven't
+# been released yet. Flip to crates.io once a tagged release goes out.
+beadie = { git = "https://github.com/darmie/beadie.git", rev = "1fa5e3bab6b494908e51c0b336e4cc2b5a9cacde", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libloading = "0.8"  # For HDLL dynamic library loading
