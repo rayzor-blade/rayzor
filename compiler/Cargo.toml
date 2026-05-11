@@ -10,6 +10,10 @@ source_map = { path = "../source_map" }
 diagnostics = { path = "../diagnostics" }
 rayzor-runtime = { path = "../runtime", features = ["tcc-runtime"] }
 rayzor-plugin = { path = "../plugin" }
+
+# Local beadie checkout — hot-function promotion broker for tier management.
+# Path dep while we co-iterate; flip to crates.io once API stabilises.
+beadie = { path = "../../beadie/crates/beadie", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 libloading = "0.8"  # For HDLL dynamic library loading
