@@ -1112,6 +1112,25 @@ impl TieredBackend {
     pub fn has_beadie_bead(&self, func_id: IrFunctionId) -> bool {
         self.beadie_beads.lock().unwrap().contains_key(&func_id)
     }
+
+    /// Read the installed JIT pointer for `func_id`, or `None` if no
+    /// pointer has been installed yet. Used by tests to observe that
+    /// the beadie path (or the legacy path) installed a callable
+    /// pointer for a function.
+    pub fn jit_pointer(&self, func_id: IrFunctionId) -> Option<usize> {
+        self.function_pointers
+            .read()
+            .unwrap()
+            .get(&func_id)
+            .copied()
+    }
+
+    /// Read the current optimization tier for `func_id`. Used by
+    /// tests to observe tier transitions across the beadie /
+    /// legacy boundary.
+    pub fn function_tier(&self, func_id: IrFunctionId) -> Option<OptimizationTier> {
+        self.function_tiers.read().unwrap().get(&func_id).copied()
+    }
 }
 
 impl TieredBackend {
@@ -1138,6 +1157,146 @@ impl TieredBackend {
         let bound = adapter.register(std::ptr::null_mut(), None);
         beads.insert(func_id, bound);
         Ok(())
+    }
+
+    /// Phase B step 3: route a Standard-tier promotion request through
+    /// beadie's broker instead of the legacy `enqueue_for_optimization`
+    /// path.
+    ///
+    /// Returns `true` if the call was forwarded to beadie (and a
+    /// pointer install may have happened on this thread as a side
+    /// effect), `false` if the beadie adapter is disabled or the
+    /// function's owning module couldn't be found. On `false`, the
+    /// caller should fall back to the legacy path.
+    ///
+    /// Behaviour:
+    /// 1. Lazy-register a bead for `func_id`.
+    /// 2. Call `on_invoke_outcome` to increment beadie's counter (and,
+    ///    once the threshold is met, trigger a background compile).
+    /// 3. If `on_invoke_outcome` returns `Some(ptr)` (cached or
+    ///    fast-path compile), install it immediately under the
+    ///    `PromotionBarrier`.
+    /// 4. Otherwise check `bound.bead().compiled()` for a pointer
+    ///    produced by a previous call's background compile; install
+    ///    that if present.
+    ///
+    /// Steps (3) and (4) are idempotent: `install_beadie_pointer`
+    /// short-circuits if the pointer is already in `function_pointers`
+    /// at the Standard tier.
+    fn route_standard_to_beadie(&self, func_id: IrFunctionId) -> bool {
+        let Some(adapter) = self.beadie_adapter.as_ref() else {
+            return false;
+        };
+        if self.ensure_beadie_bead(func_id).is_err() {
+            return false;
+        }
+
+        // Verify the function actually belongs to a loaded module
+        // before we hand its id to beadie — beadie's compile_outcome
+        // would otherwise hit the "function not in any module" error
+        // path on its own thread, where it can't surface a useful
+        // diagnostic to the user.
+        {
+            let modules = self.modules.read().unwrap();
+            if !modules.iter().any(|m| m.functions.contains_key(&func_id)) {
+                return false;
+            }
+        }
+
+        let modules_handle = Arc::clone(&self.modules);
+        // Hold the bead registry lock only for the brief
+        // `on_invoke_outcome` call (which increments beadie's counter
+        // + maybe queues a compile) and the post-call `compiled()`
+        // probe. Both are short.
+        let immediate_ptr = {
+            let beads = self.beadie_beads.lock().unwrap();
+            let Some(bound) = beads.get(&func_id) else {
+                return false;
+            };
+            let outcome =
+                adapter.on_invoke_outcome(bound, move |_| super::beadie_jit::BeadieFunctionDef {
+                    modules: modules_handle,
+                    func_id,
+                });
+            outcome.or_else(|| bound.bead().compiled())
+        };
+
+        if let Some(ptr) = immediate_ptr {
+            self.install_beadie_pointer(func_id, ptr as usize);
+        }
+        true
+    }
+
+    /// Install a beadie-produced native pointer for `func_id` under the
+    /// `PromotionBarrier`, transitioning `function_tiers[func_id]` to
+    /// [`OptimizationTier::Standard`].
+    ///
+    /// Idempotent: skips the barrier dance + writes when the pointer
+    /// is already installed at this tier. Times out the barrier drain
+    /// after 1 second; on timeout the install is silently abandoned
+    /// (the next call to `route_standard_to_beadie` will retry).
+    fn install_beadie_pointer(&self, func_id: IrFunctionId, ptr: usize) {
+        // Short-circuit if already installed.
+        {
+            let fp = self.function_pointers.read().unwrap();
+            if fp.get(&func_id).copied() == Some(ptr) {
+                return;
+            }
+        }
+        if !self.promotion_barrier.request_promotion() {
+            // Another promotion is already in flight — let it finish;
+            // we'll retry on the next `record_call`.
+            return;
+        }
+        if !self
+            .promotion_barrier
+            .wait_for_drain(Duration::from_secs(1))
+        {
+            self.promotion_barrier.cancel_promotion();
+            return;
+        }
+        {
+            let mut fp = self.function_pointers.write().unwrap();
+            let mut ft = self.function_tiers.write().unwrap();
+            fp.insert(func_id, ptr);
+            ft.insert(func_id, OptimizationTier::Standard);
+        }
+        self.promotion_barrier.complete_promotion();
+        if self.config.verbosity >= 1 {
+            debug!(
+                "[TieredBackend] beadie installed pointer for {:?} at Standard tier",
+                func_id
+            );
+        }
+    }
+
+    /// Phase B step 3: poll a registered bead for a newly-compiled
+    /// pointer and install it if one is available. Called from
+    /// `execute_function` before dispatching to JIT, so that a
+    /// background compile finished between `record_call` and the next
+    /// invocation gets observed promptly.
+    ///
+    /// Returns `true` if a pointer was just installed.
+    fn maybe_install_compiled_beadie_pointer(&self, func_id: IrFunctionId) -> bool {
+        let ptr_opt = {
+            let beads = self.beadie_beads.lock().unwrap();
+            beads
+                .get(&func_id)
+                .and_then(|bound| bound.bead().compiled())
+        };
+        let Some(ptr) = ptr_opt else {
+            return false;
+        };
+        // Skip if already installed (avoid the barrier dance on every
+        // hot call once beadie has handed us a pointer).
+        {
+            let fp = self.function_pointers.read().unwrap();
+            if fp.get(&func_id).copied() == Some(ptr as usize) {
+                return false;
+            }
+        }
+        self.install_beadie_pointer(func_id, ptr as usize);
+        true
     }
 
     fn ensure_loaded_modules_initialized(&mut self) -> Result<(), String> {
@@ -1356,6 +1515,15 @@ impl TieredBackend {
         // Process LLVM queue (main thread compilation)
         // This is safe because execute_function runs on the main thread
         self.process_llvm_queue();
+
+        // Phase B step 3: poll the beadie bead registry for a pointer
+        // produced by a background compile since the last call. If one
+        // is available, install it under the PromotionBarrier so the
+        // tier read below sees the upgraded state. No-op when beadie
+        // is disabled or the function has no registered bead.
+        if self.beadie_adapter.is_some() {
+            self.maybe_install_compiled_beadie_pointer(func_id);
+        }
 
         // Get current tier
         let tier = self
@@ -1629,7 +1797,28 @@ impl TieredBackend {
         };
 
         if let Some(target_tier) = should_promote {
-            self.enqueue_for_optimization(func_id, target_tier);
+            // Phase B step 3 (Option A — beadie owns Standard tier):
+            // when the beadie adapter is enabled AND the target tier is
+            // Standard, route the promotion through beadie's broker
+            // instead of the legacy `enqueue_for_optimization` path.
+            // Other tiers (Baseline, Optimized, Maximum) continue using
+            // the legacy queue + worker — beadie's per-function model
+            // doesn't fit the all-or-nothing Baseline big bang, and the
+            // higher tiers still need rayzor's monolithic
+            // `compile_all_at_tier` machinery until step 4 migrates
+            // them.
+            //
+            // ProfileData increment above stays in place even when
+            // beadie owns Standard, so the Optimized/Maximum decision
+            // logic that reads `get_function_count` continues to see
+            // accurate counts. Without this, higher-tier promotion
+            // criteria would silently divide by two.
+            let routed_to_beadie = target_tier == OptimizationTier::Standard
+                && self.beadie_adapter.is_some()
+                && self.route_standard_to_beadie(func_id);
+            if !routed_to_beadie {
+                self.enqueue_for_optimization(func_id, target_tier);
+            }
         }
     }
 
