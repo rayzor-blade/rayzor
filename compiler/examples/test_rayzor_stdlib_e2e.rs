@@ -330,6 +330,13 @@ impl E2ETestCase {
         // Create Cranelift backend with runtime symbols
         let mut backend = CraneliftBackend::with_symbols(&symbols_ref)?;
 
+        // Register class + enum RTTI metadata so Reflect / Type runtime
+        // calls can find class names, field names, field types, etc.
+        // Mirrors what `TieredBackend::compile_all_modules_jit` does
+        // for the production path.
+        CraneliftBackend::register_class_rtti_from_modules(modules);
+        CraneliftBackend::register_enum_rtti_from_modules(modules);
+
         // Compile all MIR modules (last module is user code)
         for module in modules {
             backend.compile_module(module)?;
@@ -917,6 +924,79 @@ class Main {
 
         trace(v);
         trace(b);
+    }
+}
+"#,
+        )
+        .expect_level(TestLevel::Execution),
+    );
+
+    // ============================================================================
+    // TEST 6d: Class-instance Reflect + Type RTTI
+    // ============================================================================
+    // Reflect.{field,setField,hasField,fields} historically only handled
+    // anonymous objects; SIGSEGV'd on class instances. The runtime now
+    // resolves field offsets + types through the class's ClassInfo
+    // (instance_fields + instance_field_types), so reflection on
+    // declared class fields works end-to-end. Inherited fields are
+    // covered via the hierarchy walk in `lookup_class_field`.
+    suite.add_test(
+        E2ETestCase::new(
+            "class_instance_reflection",
+            "Reflect / Type RTTI on class instances (declared + inherited fields)",
+            r#"
+class Animal {
+    public var name: String;
+    public var legs: Int;
+    public function new(n: String, l: Int) {
+        this.name = n;
+        this.legs = l;
+    }
+}
+
+class Dog extends Animal {
+    public var breed: String;
+    public function new(n: String, b: String) {
+        super(n, 4);
+        this.breed = b;
+    }
+}
+
+class Main {
+    static function main() {
+        var d = new Dog("Rex", "Labrador");
+
+        // Type.getClass + getClassName: class identity end-to-end.
+        var cls = Type.getClass(d);
+        trace("class: " + Type.getClassName(cls));
+
+        // Type.getInstanceFields: includes inherited fields.
+        trace("fields: " + Type.getInstanceFields(cls));
+
+        // Reflect.field on a declared field.
+        trace("breed: " + Reflect.field(d, "breed"));
+
+        // Reflect.field on an inherited field (walks the class hierarchy).
+        trace("name: " + Reflect.field(d, "name"));
+
+        // Reflect.setField + read back via direct access.
+        Reflect.setField(d, "breed", "Golden Retriever");
+        trace("after setField: " + d.breed);
+
+        // Reflect.fields(instance): same as Type.getInstanceFields(cls).
+        trace("inst fields: " + Reflect.fields(d));
+
+        // Reflect.hasField: present + missing.
+        trace("has breed: " + Reflect.hasField(d, "breed"));
+        trace("has banana: " + Reflect.hasField(d, "banana"));
+
+        // Type.resolveClass round-trip: name -> Class -> name.
+        var byName = Type.resolveClass("Dog");
+        if (byName == null) {
+            trace("resolveClass: null");
+        } else {
+            trace("resolveClass: " + Type.getClassName(byName));
+        }
     }
 }
 "#,

@@ -128,8 +128,17 @@ pub struct ClassInfo {
     pub name: &'static str,
     /// Super class type id (None if no parent)
     pub super_type_id: Option<u32>,
-    /// Instance fields (including inherited)
+    /// Instance fields (including inherited).
+    ///
+    /// **Layout invariant**: instance field at index `i` lives at
+    /// byte offset `(i + 1) * 8` in the class instance (slot 0 is
+    /// the `__type_id` header). `Reflect.field`/`setField` rely on
+    /// this for class-instance reflection.
     pub instance_fields: &'static [&'static str],
+    /// Instance field types (parallel to `instance_fields`). Used by
+    /// `Reflect.field` to box the raw 8-byte slot value into a
+    /// `DynamicValue` of the correct tag.
+    pub instance_field_types: &'static [ParamType],
     /// Static fields (own class only)
     pub static_fields: &'static [&'static str],
 }
@@ -437,12 +446,16 @@ pub fn register_enum_from_mir(
 
 /// Register class RTTI directly from MIR metadata.
 /// `instance_fields` are all instance field names (including inherited).
+/// `instance_field_types` must be parallel to `instance_fields` —
+/// used by `Reflect.field`/`setField` to box raw 8-byte slot values
+/// into `DynamicValue` of the correct tag.
 /// `static_fields` are own static field names.
 pub fn register_class_from_mir(
     type_id: u32,
     name: &str,
     super_type_id: Option<u32>,
     instance_fields: &[String],
+    instance_field_types: &[ParamType],
     static_fields: &[String],
 ) {
     let class_name_static: &'static str = Box::leak(name.to_string().into_boxed_str());
@@ -454,6 +467,17 @@ pub fn register_class_from_mir(
             .collect::<Vec<&'static str>>()
             .into_boxed_slice(),
     );
+
+    // Length-align: pad `instance_field_types` with `Dynamic` if it's
+    // shorter than `instance_fields` (callers that don't yet supply
+    // field types still produce well-formed RTTI; reflection will
+    // box those slots as i64 / pointer fallback).
+    let mut types_vec: Vec<ParamType> = instance_field_types.to_vec();
+    while types_vec.len() < instance_fields.len() {
+        types_vec.push(ParamType::Dynamic);
+    }
+    types_vec.truncate(instance_fields.len());
+    let instance_field_types_static: &'static [ParamType] = Box::leak(types_vec.into_boxed_slice());
 
     let static_fields_static: &'static [&'static str] = Box::leak(
         static_fields
@@ -469,6 +493,7 @@ pub fn register_class_from_mir(
         name: class_name_static,
         super_type_id,
         instance_fields: instance_fields_static,
+        instance_field_types: instance_field_types_static,
         static_fields: static_fields_static,
     }));
 
@@ -2574,6 +2599,92 @@ pub extern "C" fn haxe_unbox_reference_ptr(ptr: *mut u8) -> *mut u8 {
 // ============================================================================
 // Object Header Introspection
 // ============================================================================
+
+/// Walk the class hierarchy from `start_type_id` looking for an
+/// instance field named `name`. Returns `(byte_offset, ParamType)`
+/// on match — `byte_offset` already accounts for the `__type_id`
+/// header at slot 0 (so it's `(field_index + 1) * 8`).
+///
+/// `start_type_id` is the class instance's runtime type_id (read
+/// from offset 0 of the instance). The walk follows
+/// `ClassInfo::super_type_id` to find inherited fields when the
+/// class's own `instance_fields` table doesn't already include
+/// them.
+pub fn lookup_class_field(start_type_id: u32, name: &str) -> Option<(usize, ParamType)> {
+    let guard = TYPE_REGISTRY.read().unwrap();
+    let registry = guard.as_ref()?;
+    let mut current = Some(TypeId(start_type_id));
+    while let Some(tid) = current {
+        let type_info = registry.get(&tid)?;
+        let class_info = match type_info.class_info.as_ref() {
+            Some(ci) => ci,
+            None => return None,
+        };
+        if let Some(idx) = class_info.instance_fields.iter().position(|n| *n == name) {
+            let offset = (idx + 1) * 8;
+            let ty = class_info
+                .instance_field_types
+                .get(idx)
+                .copied()
+                .unwrap_or(ParamType::Dynamic);
+            return Some((offset, ty));
+        }
+        current = class_info.super_type_id.map(TypeId);
+    }
+    None
+}
+
+/// Returns `true` if `type_id` corresponds to a registered class
+/// (i.e. has a non-null `class_info`). Used by `Reflect.*` to
+/// distinguish class instances from anon objects.
+pub fn is_class_type(type_id: u32) -> bool {
+    let guard = TYPE_REGISTRY.read().unwrap();
+    guard
+        .as_ref()
+        .and_then(|r| r.get(&TypeId(type_id)))
+        .map(|ti| ti.class_info.is_some())
+        .unwrap_or(false)
+}
+
+/// Box a raw 8-byte slot value into a `DynamicValue*` using a
+/// `ParamType` tag. Mirrors `anon_object::box_value_as_dynamic` but
+/// keyed on `ParamType` rather than a runtime `TypeId` — used by
+/// class-instance `Reflect.field`.
+///
+/// `Dynamic` falls through to a `haxe_box_reference_ptr` with
+/// `TYPE_INT` tag (the slot may be a tagged pointer, an int, or a
+/// f64 bit pattern — without a static type the caller gets back an
+/// untyped i64 which they can re-interpret).
+pub unsafe fn box_class_field_as_dynamic(value: u64, ty: ParamType) -> *mut u8 {
+    match ty {
+        ParamType::Int => haxe_box_int_ptr(value as i64),
+        ParamType::Float => haxe_box_float_ptr(f64::from_bits(value)),
+        ParamType::Bool => haxe_box_bool_ptr(value != 0),
+        ParamType::String => haxe_box_reference_ptr(value as *mut u8, TYPE_STRING.0),
+        ParamType::Object => {
+            // The slot holds either a class-instance pointer (with
+            // its own `__type_id` header at offset 0) or a generic
+            // heap pointer. Read the header lazily so the box gets
+            // the *actual* runtime type rather than a generic
+            // `TYPE_OBJECT` tag.
+            let p = value as *mut u8;
+            if p.is_null() {
+                return std::ptr::null_mut();
+            }
+            let inner_type_id = haxe_object_get_type_id(p as *const u8) as u32;
+            // A non-class pointer (e.g. an Array, HaxeString) won't
+            // have a registered class; fall back to TYPE_INT tag
+            // (Dynamic untyped pointer).
+            let tag = if is_class_type(inner_type_id) {
+                inner_type_id
+            } else {
+                TYPE_INT.0
+            };
+            haxe_box_reference_ptr(p, tag)
+        }
+        ParamType::Dynamic => haxe_box_int_ptr(value as i64),
+    }
+}
 
 /// Read the runtime type_id from an object's header (first 8 bytes at offset 0).
 /// All class instances have a `__type_id: i64` field at GEP index 0.
