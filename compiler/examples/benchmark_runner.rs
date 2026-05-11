@@ -1095,6 +1095,14 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
                     Err(e) => return Err(e),
                 }
             }
+
+            // Phase B: report beadie counters so it's obvious whether
+            // the integration was active during this benchmark run.
+            let bs = state.backend.beadie_stats();
+            eprintln!(
+                "  [beadie] adapter_enabled={} routes_attempted={} installs={} registered_beads={}",
+                bs.adapter_enabled, bs.routes_attempted, bs.installs, bs.registered_beads
+            );
         }
 
         // LLVM: stateful approach - finalize() should only be called once
