@@ -361,30 +361,25 @@ pub struct TieredBackend {
     initialized_module_count: Arc<Mutex<usize>>,
 
     /// Phase B (beadie integration): optional
-    /// `BackendAdapter<BeadieJit>` over a **dedicated**
-    /// `Arc<Mutex<CraneliftBackend>>` (see
-    /// [`super::beadie_jit`] for the rationale behind a dedicated
-    /// backend rather than sharing `baseline_backend`). Constructed
-    /// only when [`TieredConfig::enable_beadie_adapter`] is true.
+    /// `BackendAdapter<BeadieJit>`, constructed only when
+    /// [`TieredConfig::enable_beadie_adapter`] is true.
     ///
-    /// Step 2 scope: the adapter is reachable and a real compile can
-    /// be driven through it (covered by
-    /// `beadie_jit::tests::tiered_backend_drives_real_compile_via_beadie`),
-    /// but `record_call` does not yet route through it. Step 3 will
-    /// wire Standard-tier promotion through this adapter.
+    /// `BeadieJit` builds a fresh `CraneliftBackend` per compile (the
+    /// same `Box::leak` pattern legacy `compile_all_at_tier` uses).
+    /// See [`super::beadie_jit`] for the rationale — short version:
+    /// fresh-per-compile gets cross-module call resolution for free
+    /// at the cost of the same per-promotion leak as the legacy path.
+    /// What beadie brings is the *broker* (threshold + batched
+    /// scheduling + broker-thread compile loop), not a different
+    /// compile mechanism.
+    ///
+    /// When set, `record_call` routes Standard-tier promotion through
+    /// this adapter; other tiers stay on the legacy queue.
     beadie_adapter: Option<Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>>,
-
-    /// Phase B: the dedicated `CraneliftBackend` that `beadie_adapter`
-    /// compiles into. Held separately so `TieredBackend` can read
-    /// function pointers / register source info / do other cross-cut
-    /// bookkeeping against it after a flush, without going through
-    /// `BeadieJit`. Shares the same `Arc<Mutex<_>>` as the adapter's
-    /// internal handle.
-    beadie_backend: Option<Arc<Mutex<CraneliftBackend>>>,
 
     /// Phase B: lazy registry of one `BoundBead` per `IrFunctionId`
     /// that beadie is tracking. Populated on demand by
-    /// [`TieredBackend::register_beadie_bead`]. Empty when
+    /// [`TieredBackend::ensure_beadie_bead`]. Empty when
     /// `beadie_adapter` is `None`.
     beadie_beads:
         Arc<Mutex<BTreeMap<IrFunctionId, beadie::BoundBead<super::beadie_jit::BeadieJit>>>>,
@@ -570,8 +565,18 @@ pub enum TierPreset {
 }
 
 impl TierPreset {
-    /// Convert preset to a TieredConfig
+    /// Convert preset to a TieredConfig. Env overrides (e.g.
+    /// `RAYZOR_USE_BEADIE=1`) are applied after the preset's defaults
+    /// so benchmark harnesses can toggle Phase B features without
+    /// recompiling.
     pub fn to_config(self) -> TieredConfig {
+        self.to_config_without_env().apply_env_overrides()
+    }
+
+    /// Same as [`Self::to_config`] but without env-var overrides.
+    /// Useful for tests that need deterministic config regardless of
+    /// the test runner's environment.
+    pub fn to_config_without_env(self) -> TieredConfig {
         match self {
             TierPreset::Script => TieredConfig {
                 profile_config: ProfileConfig {
@@ -823,6 +828,27 @@ impl TieredConfig {
         preset.to_config()
     }
 
+    /// Apply env-var overrides to the config. Currently:
+    ///
+    /// - `RAYZOR_USE_BEADIE` — when set to `1` / `true` / `yes`,
+    ///   forces [`Self::enable_beadie_adapter`] on; when unset or set
+    ///   to `0` / `false` / `no`, leaves the field untouched.
+    ///
+    /// Called automatically by [`TierPreset::to_config`]. Benchmarks
+    /// and CLI tools that construct [`TieredConfig`] by hand should
+    /// call this method explicitly to honour the env flag.
+    pub fn apply_env_overrides(mut self) -> Self {
+        if let Ok(v) = std::env::var("RAYZOR_USE_BEADIE") {
+            if matches!(
+                v.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            ) {
+                self.enable_beadie_adapter = true;
+            }
+        }
+        self
+    }
+
     /// Development configuration (aggressive optimization, verbose)
     pub fn development() -> Self {
         Self {
@@ -875,37 +901,24 @@ impl TieredConfig {
     }
 }
 
-/// Bundle returned from [`build_beadie_if_enabled`]: the adapter and
-/// the dedicated cranelift backend it compiles into. Both share the
-/// same `Arc<Mutex<CraneliftBackend>>` allocation; the backend handle
-/// is exposed separately so `TieredBackend` can do cross-cut
-/// bookkeeping (RTTI, function-pointer harvesting, source-info
-/// registration) without going through `BeadieJit`.
-struct BeadieBuild {
-    adapter: Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>,
-    backend: Arc<Mutex<CraneliftBackend>>,
-}
-
 /// Build the beadie infrastructure when [`TieredConfig::enable_beadie_adapter`]
 /// is set, otherwise return `None`.
 ///
-/// Constructs a **dedicated** [`CraneliftBackend`] for beadie — see
-/// [`super::beadie_jit`] for why this can't share `baseline_backend`.
-/// The dedicated backend is initialised with the same runtime symbols
-/// passed to `baseline_backend`, so beadie-compiled code can call
-/// `haxe_*` runtime functions identically.
+/// Returns just the [`beadie::BackendAdapter`] — beadie no longer
+/// holds a persistent cranelift backend (step 4 pivot to
+/// fresh-backend-per-compile; see [`super::beadie_jit`] for the
+/// rationale). The runtime symbol snapshot is owned inside the
+/// adapter's `BeadieJit` and reused on every dispatch.
 ///
 /// Threshold derives from
 /// [`crate::codegen::profiling::ProfileConfig::warm_threshold`] so
-/// beadie's policy matches the hand-rolled enqueue criterion when
-/// step 3 wires `record_call` through. Capacity and batch limit are
-/// chosen to drain a typical promotion wave in a single
-/// `finalize()`; both are conservative starting points and may move
-/// later based on benchmark data.
+/// beadie's policy matches the hand-rolled enqueue criterion in
+/// `record_call`. Capacity + batch limit are conservative starting
+/// points; revisit with benchmark data.
 fn build_beadie_if_enabled(
     config: &TieredConfig,
     symbols: &[(&str, *const u8)],
-) -> Result<Option<BeadieBuild>, String> {
+) -> Result<Option<Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>>, String> {
     if !config.enable_beadie_adapter {
         return Ok(None);
     }
@@ -913,10 +926,19 @@ fn build_beadie_if_enabled(
     // are `u64`. Cap to `u32::MAX` to avoid silent truncation when
     // someone passes an absurdly large value.
     let threshold = config.profile_config.warm_threshold.min(u32::MAX as u64) as u32;
-    let (adapter, backend) = super::beadie_jit::build_dedicated_adapter(
-        symbols, threshold, /*capacity=*/ 64, /*batch_limit=*/ 16,
-    )?;
-    Ok(Some(BeadieBuild { adapter, backend }))
+    let symbols_snapshot: super::beadie_jit::RuntimeSymbolTable = Arc::new(
+        symbols
+            .iter()
+            .map(|(name, ptr)| ((*name).to_string(), *ptr as usize))
+            .collect(),
+    );
+    let adapter = super::beadie_jit::build_batched_adapter(
+        symbols_snapshot,
+        threshold,
+        /*capacity=*/ 64,
+        /*batch_limit=*/ 16,
+    );
+    Ok(Some(adapter))
 }
 
 impl TieredBackend {
@@ -973,11 +995,7 @@ impl TieredBackend {
         // can't call any `haxe_*` runtime helper, which is fine for
         // tests of pure-arithmetic kernels but useless for real code.
         // Production callers go through `with_symbols`.
-        let beadie = build_beadie_if_enabled(&config, &[])?;
-        let (beadie_adapter, beadie_backend) = match beadie {
-            Some(b) => (Some(b.adapter), Some(b.backend)),
-            None => (None, None),
-        };
+        let beadie_adapter = build_beadie_if_enabled(&config, &[])?;
 
         Ok(Self {
             interpreter: Arc::new(Mutex::new(interp)),
@@ -1001,7 +1019,6 @@ impl TieredBackend {
             current_compiled_tier: Arc::new(AtomicU8::new(0)),
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
-            beadie_backend,
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
@@ -1041,11 +1058,7 @@ impl TieredBackend {
         }
 
         let baseline_backend = Arc::new(Mutex::new(baseline_backend));
-        let beadie = build_beadie_if_enabled(&config, symbols)?;
-        let (beadie_adapter, beadie_backend) = match beadie {
-            Some(b) => (Some(b.adapter), Some(b.backend)),
-            None => (None, None),
-        };
+        let beadie_adapter = build_beadie_if_enabled(&config, symbols)?;
 
         Ok(Self {
             interpreter: Arc::new(Mutex::new(interp)),
@@ -1069,7 +1082,6 @@ impl TieredBackend {
             current_compiled_tier: Arc::new(AtomicU8::new(0)),
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
-            beadie_backend,
             beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
@@ -1081,15 +1093,6 @@ impl TieredBackend {
         &self,
     ) -> Option<&Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>> {
         self.beadie_adapter.as_ref()
-    }
-
-    /// Borrow the dedicated cranelift backend that beadie compiles
-    /// into, if Phase B is enabled. Same `Some`/`None` parity as
-    /// [`Self::beadie_adapter`]. Exposed so callers (or tests) can
-    /// read function pointers / register source info directly without
-    /// going through `BeadieJit`.
-    pub fn beadie_backend(&self) -> Option<&Arc<Mutex<CraneliftBackend>>> {
-        self.beadie_backend.as_ref()
     }
 
     /// Borrow the beadie bead registry — one `BoundBead` per
