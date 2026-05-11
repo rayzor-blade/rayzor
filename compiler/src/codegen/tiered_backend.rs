@@ -360,17 +360,34 @@ pub struct TieredBackend {
     /// Number of loaded MIR modules that have already run startup hooks.
     initialized_module_count: Arc<Mutex<usize>>,
 
-    /// Phase B (beadie integration, infrastructure stage): optional
-    /// `BackendAdapter<BeadieJit>` sharing the same
-    /// `Arc<Mutex<CraneliftBackend>>` as `baseline_backend`. Constructed
+    /// Phase B (beadie integration): optional
+    /// `BackendAdapter<BeadieJit>` over a **dedicated**
+    /// `Arc<Mutex<CraneliftBackend>>` (see
+    /// [`super::beadie_jit`] for the rationale behind a dedicated
+    /// backend rather than sharing `baseline_backend`). Constructed
     /// only when [`TieredConfig::enable_beadie_adapter`] is true.
     ///
-    /// Dormant in step 1: no call site routes through it. Its presence
-    /// proves the wiring builds and that the shared cranelift backend
-    /// can be adopted by beadie without disrupting the legacy
-    /// queue + worker. Step 2 will start routing tier promotions
-    /// (initially Standard) through this adapter.
+    /// Step 2 scope: the adapter is reachable and a real compile can
+    /// be driven through it (covered by
+    /// `beadie_jit::tests::tiered_backend_drives_real_compile_via_beadie`),
+    /// but `record_call` does not yet route through it. Step 3 will
+    /// wire Standard-tier promotion through this adapter.
     beadie_adapter: Option<Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>>,
+
+    /// Phase B: the dedicated `CraneliftBackend` that `beadie_adapter`
+    /// compiles into. Held separately so `TieredBackend` can read
+    /// function pointers / register source info / do other cross-cut
+    /// bookkeeping against it after a flush, without going through
+    /// `BeadieJit`. Shares the same `Arc<Mutex<_>>` as the adapter's
+    /// internal handle.
+    beadie_backend: Option<Arc<Mutex<CraneliftBackend>>>,
+
+    /// Phase B: lazy registry of one `BoundBead` per `IrFunctionId`
+    /// that beadie is tracking. Populated on demand by
+    /// [`TieredBackend::register_beadie_bead`]. Empty when
+    /// `beadie_adapter` is `None`.
+    beadie_beads:
+        Arc<Mutex<BTreeMap<IrFunctionId, beadie::BoundBead<super::beadie_jit::BeadieJit>>>>,
 }
 
 /// Optimization tier level (5-tier system with interpreter)
@@ -858,34 +875,48 @@ impl TieredConfig {
     }
 }
 
-/// Build the beadie `BackendAdapter<BeadieJit>` that shares the same
-/// `Arc<Mutex<CraneliftBackend>>` as `TieredBackend::baseline_backend`,
-/// or return `None` when [`TieredConfig::enable_beadie_adapter`] is
-/// false.
+/// Bundle returned from [`build_beadie_if_enabled`]: the adapter and
+/// the dedicated cranelift backend it compiles into. Both share the
+/// same `Arc<Mutex<CraneliftBackend>>` allocation; the backend handle
+/// is exposed separately so `TieredBackend` can do cross-cut
+/// bookkeeping (RTTI, function-pointer harvesting, source-info
+/// registration) without going through `BeadieJit`.
+struct BeadieBuild {
+    adapter: Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>,
+    backend: Arc<Mutex<CraneliftBackend>>,
+}
+
+/// Build the beadie infrastructure when [`TieredConfig::enable_beadie_adapter`]
+/// is set, otherwise return `None`.
 ///
-/// The threshold is sourced from `ProfileConfig::warm_threshold` so
-/// that — when Phase B step 2 starts routing through the adapter —
-/// beadie's policy matches the hand-rolled enqueue criterion. Capacity
-/// and batch limit are picked to drain a typical promotion wave in a
-/// single `finalize()`; both are conservative starting points and may
-/// move later based on benchmark data.
-fn build_beadie_adapter_if_enabled(
+/// Constructs a **dedicated** [`CraneliftBackend`] for beadie — see
+/// [`super::beadie_jit`] for why this can't share `baseline_backend`.
+/// The dedicated backend is initialised with the same runtime symbols
+/// passed to `baseline_backend`, so beadie-compiled code can call
+/// `haxe_*` runtime functions identically.
+///
+/// Threshold derives from
+/// [`crate::codegen::profiling::ProfileConfig::warm_threshold`] so
+/// beadie's policy matches the hand-rolled enqueue criterion when
+/// step 3 wires `record_call` through. Capacity and batch limit are
+/// chosen to drain a typical promotion wave in a single
+/// `finalize()`; both are conservative starting points and may move
+/// later based on benchmark data.
+fn build_beadie_if_enabled(
     config: &TieredConfig,
-    backend: &Arc<Mutex<CraneliftBackend>>,
-) -> Option<Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>> {
+    symbols: &[(&str, *const u8)],
+) -> Result<Option<BeadieBuild>, String> {
     if !config.enable_beadie_adapter {
-        return None;
+        return Ok(None);
     }
     // `ThresholdPolicy::new` takes `u32`; rayzor's profile thresholds
     // are `u64`. Cap to `u32::MAX` to avoid silent truncation when
     // someone passes an absurdly large value.
     let threshold = config.profile_config.warm_threshold.min(u32::MAX as u64) as u32;
-    Some(super::beadie_jit::build_batched_adapter(
-        Arc::clone(backend),
-        threshold,
-        /*capacity=*/ 64,
-        /*batch_limit=*/ 16,
-    ))
+    let (adapter, backend) = super::beadie_jit::build_dedicated_adapter(
+        symbols, threshold, /*capacity=*/ 64, /*batch_limit=*/ 16,
+    )?;
+    Ok(Some(BeadieBuild { adapter, backend }))
 }
 
 impl TieredBackend {
@@ -937,7 +968,16 @@ impl TieredBackend {
         interp.set_max_iterations(max_iterations);
 
         let baseline_backend = Arc::new(Mutex::new(baseline_backend));
-        let beadie_adapter = build_beadie_adapter_if_enabled(&config, &baseline_backend);
+        // Constructor `new` has no runtime symbols — pass an empty
+        // slice. A beadie-compiled function with no runtime symbols
+        // can't call any `haxe_*` runtime helper, which is fine for
+        // tests of pure-arithmetic kernels but useless for real code.
+        // Production callers go through `with_symbols`.
+        let beadie = build_beadie_if_enabled(&config, &[])?;
+        let (beadie_adapter, beadie_backend) = match beadie {
+            Some(b) => (Some(b.adapter), Some(b.backend)),
+            None => (None, None),
+        };
 
         Ok(Self {
             interpreter: Arc::new(Mutex::new(interp)),
@@ -961,6 +1001,8 @@ impl TieredBackend {
             current_compiled_tier: Arc::new(AtomicU8::new(0)),
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
+            beadie_backend,
+            beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -999,7 +1041,11 @@ impl TieredBackend {
         }
 
         let baseline_backend = Arc::new(Mutex::new(baseline_backend));
-        let beadie_adapter = build_beadie_adapter_if_enabled(&config, &baseline_backend);
+        let beadie = build_beadie_if_enabled(&config, symbols)?;
+        let (beadie_adapter, beadie_backend) = match beadie {
+            Some(b) => (Some(b.adapter), Some(b.backend)),
+            None => (None, None),
+        };
 
         Ok(Self {
             interpreter: Arc::new(Mutex::new(interp)),
@@ -1023,6 +1069,8 @@ impl TieredBackend {
             current_compiled_tier: Arc::new(AtomicU8::new(0)),
             initialized_module_count: Arc::new(Mutex::new(0)),
             beadie_adapter,
+            beadie_backend,
+            beadie_beads: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -1033,6 +1081,63 @@ impl TieredBackend {
         &self,
     ) -> Option<&Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>> {
         self.beadie_adapter.as_ref()
+    }
+
+    /// Borrow the dedicated cranelift backend that beadie compiles
+    /// into, if Phase B is enabled. Same `Some`/`None` parity as
+    /// [`Self::beadie_adapter`]. Exposed so callers (or tests) can
+    /// read function pointers / register source info directly without
+    /// going through `BeadieJit`.
+    pub fn beadie_backend(&self) -> Option<&Arc<Mutex<CraneliftBackend>>> {
+        self.beadie_backend.as_ref()
+    }
+
+    /// Borrow the beadie bead registry — one `BoundBead` per
+    /// `IrFunctionId` that's been touched by the beadie path. Lazy:
+    /// entries are only created on first call to
+    /// [`Self::ensure_beadie_bead`].
+    ///
+    /// Returned as an `Arc<Mutex<_>>` so call-site code (eventually
+    /// `record_call` in step 3) can clone it cheaply for use across
+    /// the broker thread boundary.
+    pub fn beadie_beads(
+        &self,
+    ) -> &Arc<Mutex<BTreeMap<IrFunctionId, beadie::BoundBead<super::beadie_jit::BeadieJit>>>> {
+        &self.beadie_beads
+    }
+
+    /// Returns `true` if `func_id` is already registered in the bead
+    /// registry. Cheap probe — used by callers that want to avoid
+    /// allocating a new bead when the function has been seen before.
+    pub fn has_beadie_bead(&self, func_id: IrFunctionId) -> bool {
+        self.beadie_beads.lock().unwrap().contains_key(&func_id)
+    }
+}
+
+impl TieredBackend {
+    /// Register a bead for `func_id` against the beadie adapter,
+    /// returning `Err` if Phase B is disabled. Idempotent: if the bead
+    /// already exists, this is a no-op. Step 3 will call this lazily
+    /// from `record_call` to register beads on first warm-tier
+    /// promotion.
+    ///
+    /// The `core_ptr` argument is forwarded to
+    /// [`beadie::BackendAdapter::register`]; rayzor passes
+    /// `std::ptr::null_mut()` because rayzor's interpreter path is the
+    /// "core" fallback and is dispatched through
+    /// `TieredBackend::execute_function`, not through a raw pointer
+    /// the bead would call.
+    pub fn ensure_beadie_bead(&self, func_id: IrFunctionId) -> Result<(), &'static str> {
+        let Some(adapter) = self.beadie_adapter.as_ref() else {
+            return Err("beadie adapter is disabled — enable TieredConfig::enable_beadie_adapter");
+        };
+        let mut beads = self.beadie_beads.lock().unwrap();
+        if beads.contains_key(&func_id) {
+            return Ok(());
+        }
+        let bound = adapter.register(std::ptr::null_mut(), None);
+        beads.insert(func_id, bound);
+        Ok(())
     }
 
     fn ensure_loaded_modules_initialized(&mut self) -> Result<(), String> {
