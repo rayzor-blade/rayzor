@@ -23,5 +23,9 @@ class Main {
         // Bound method reference, with arg forwarding.
         var b = a.bumped;
         trace(b(99));                  // 100
+
+        // Reflect.isFunction recognises the method reference as a function.
+        var d2 = a.describe;
+        trace(Reflect.isFunction(d2)); // true
     }
 }
