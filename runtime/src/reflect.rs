@@ -11,8 +11,8 @@
 use crate::anon_object;
 use crate::haxe_string::HaxeString;
 use crate::type_system::{
-    get_type_info, DynamicValue, TYPE_BOOL, TYPE_FLOAT, TYPE_FUNCTION, TYPE_INT, TYPE_NULL,
-    TYPE_STRING,
+    box_class_field_as_dynamic, get_type_info, is_class_type, lookup_class_field, DynamicValue,
+    ParamType, TYPE_BOOL, TYPE_FLOAT, TYPE_FUNCTION, TYPE_INT, TYPE_NULL, TYPE_STRING,
 };
 
 /// Haxe ValueType constructor ordinals (matches Type.hx ValueType order)
@@ -70,10 +70,25 @@ unsafe fn unwrap_anon_dynamic(ptr: *mut u8) -> *mut u8 {
     ptr
 }
 
+/// Read the runtime type_id at offset 0 of an object pointer.
+/// Returns the lower 32 bits as `u32` (rayzor's class type_ids fit
+/// in u32; the slot is i64 with the high half zeroed).
+///
+/// # Safety
+/// `obj` must point to a class instance with the standard
+/// `[type_id: i64, fields...]` layout or to anon-shaped memory
+/// (where the first 4 bytes are the low bits of a heap pointer
+/// rather than a type_id). Callers MUST gate the interpretation
+/// via [`is_class_type`] before treating the value as a class id.
+unsafe fn read_class_type_id(obj: *mut u8) -> u32 {
+    std::ptr::read_unaligned(obj as *const u32)
+}
+
 /// Reflect.hasField(obj, field) -> Bool
 ///
-/// obj: anonymous object handle pointer (or DynamicValue wrapping one)
-/// field: HaxeString pointer
+/// Handles class instances (via `lookup_class_field`) and anon
+/// objects (via `rayzor_anon_get_field`). DynamicValue-wrapped
+/// anons get unwrapped first.
 #[no_mangle]
 pub extern "C" fn haxe_reflect_has_field(obj: *mut u8, field: *mut u8) -> bool {
     if obj.is_null() {
@@ -81,19 +96,36 @@ pub extern "C" fn haxe_reflect_has_field(obj: *mut u8, field: *mut u8) -> bool {
     }
     unsafe {
         let actual = unwrap_anon_dynamic(obj);
-        if let Some((name_ptr, name_len)) = extract_field_name(field) {
-            anon_object::rayzor_anon_has_field(actual, name_ptr, name_len)
-        } else {
-            false
+        let (name_ptr, name_len) = match extract_field_name(field) {
+            Some(p) => p,
+            None => return false,
+        };
+        // Class-instance fast path: type_id at offset 0 maps to a
+        // registered class? Walk the hierarchy via
+        // `lookup_class_field`.
+        let type_id_lo = read_class_type_id(actual);
+        if is_class_type(type_id_lo) {
+            let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                name_ptr,
+                name_len as usize,
+            ));
+            return lookup_class_field(type_id_lo, name).is_some();
         }
+        anon_object::rayzor_anon_has_field(actual, name_ptr, name_len)
     }
 }
 
 /// Reflect.field(obj, field) -> Dynamic
 ///
-/// obj: anonymous object handle pointer (or DynamicValue wrapping one)
-/// field: HaxeString pointer
-/// Returns: DynamicValue pointer (caller must manage), or null if field not found
+/// Handles both class instances (via the RTTI field-lookup table)
+/// and anonymous objects (via the shape map). Returns null when the
+/// field doesn't exist.
+///
+/// obj: class-instance pointer, anon-object handle, or
+/// DynamicValue wrapping either.
+/// field: HaxeString pointer.
+/// Returns: freshly-allocated `DynamicValue*` (caller manages), or
+/// null on miss.
 #[no_mangle]
 pub extern "C" fn haxe_reflect_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
     if obj.is_null() {
@@ -101,19 +133,40 @@ pub extern "C" fn haxe_reflect_field(obj: *mut u8, field: *mut u8) -> *mut u8 {
     }
     unsafe {
         let actual = unwrap_anon_dynamic(obj);
-        if let Some((name_ptr, name_len)) = extract_field_name(field) {
-            anon_object::rayzor_anon_get_field(actual, name_ptr, name_len)
-        } else {
-            std::ptr::null_mut()
+        let (name_ptr, name_len) = match extract_field_name(field) {
+            Some(p) => p,
+            None => return std::ptr::null_mut(),
+        };
+        let type_id_lo = read_class_type_id(actual);
+        if is_class_type(type_id_lo) {
+            let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                name_ptr,
+                name_len as usize,
+            ));
+            return match lookup_class_field(type_id_lo, name) {
+                Some((offset, ty)) => {
+                    let slot_ptr = actual.add(offset) as *const u64;
+                    let value = std::ptr::read_unaligned(slot_ptr);
+                    box_class_field_as_dynamic(value, ty)
+                }
+                None => std::ptr::null_mut(),
+            };
         }
+        anon_object::rayzor_anon_get_field(actual, name_ptr, name_len)
     }
 }
 
 /// Reflect.setField(obj, field, value) -> Void
 ///
-/// obj: anonymous object handle pointer (or DynamicValue wrapping one)
-/// field: HaxeString pointer
-/// value: DynamicValue pointer
+/// Handles both class instances and anonymous objects (see
+/// `haxe_reflect_field` for the dispatch rationale).
+///
+/// For class instances the value is extracted from the supplied
+/// `DynamicValue` according to the field's declared `ParamType`,
+/// then written into the 8-byte slot. Mismatched value types are
+/// best-effort coerced (e.g. an `Int` value into a `Float` slot
+/// stores the int bits — same behaviour as the corresponding
+/// `box_class_field_as_dynamic` direction).
 #[no_mangle]
 pub extern "C" fn haxe_reflect_set_field(obj: *mut u8, field: *mut u8, value: *mut u8) {
     if obj.is_null() {
@@ -121,9 +174,56 @@ pub extern "C" fn haxe_reflect_set_field(obj: *mut u8, field: *mut u8, value: *m
     }
     unsafe {
         let actual = unwrap_anon_dynamic(obj);
-        if let Some((name_ptr, name_len)) = extract_field_name(field) {
-            anon_object::rayzor_anon_set_field(actual, name_ptr, name_len, value);
+        let (name_ptr, name_len) = match extract_field_name(field) {
+            Some(p) => p,
+            None => return,
+        };
+        let type_id_lo = read_class_type_id(actual);
+        if is_class_type(type_id_lo) {
+            let name = std::str::from_utf8_unchecked(std::slice::from_raw_parts(
+                name_ptr,
+                name_len as usize,
+            ));
+            if let Some((offset, ty)) = lookup_class_field(type_id_lo, name) {
+                let raw = raw_value_to_slot(value, ty);
+                let slot_ptr = actual.add(offset) as *mut u64;
+                std::ptr::write_unaligned(slot_ptr, raw);
+            }
+            return;
         }
+        anon_object::rayzor_anon_set_field(actual, name_ptr, name_len, value);
+    }
+}
+
+/// Convert the raw `value: *mut u8` argument received by
+/// `haxe_reflect_set_field` into the 8-byte slot representation for
+/// a class field of `ParamType` `ty`.
+///
+/// Rayzor's MIR passes `Dynamic`-typed function arguments raw
+/// rather than wrapping them in a `DynamicValue` (verified by
+/// inspecting the MIR of `Reflect.setField(obj, name, "literal")`
+/// — the literal is passed directly as `*mut u8`). For String and
+/// object fields the value pointer is the slot bytes; for primitive
+/// fields we re-interpret the pointer bits as the value.
+///
+/// # Safety
+/// `value` must match the layout implied by `ty`: a HaxeString
+/// pointer for `String`, a class-instance / array / anon-handle
+/// pointer for `Object`, or the bitcast of the primitive value into
+/// `*mut u8` for `Int`/`Float`/`Bool`.
+unsafe fn raw_value_to_slot(value: *mut u8, ty: ParamType) -> u64 {
+    match ty {
+        // Primitive payloads are bitcast into the `*mut u8` slot by
+        // the caller (rayzor's Dynamic-arg ABI). Read the bits back
+        // out as the primitive's representation.
+        ParamType::Int | ParamType::Bool => value as i64 as u64,
+        ParamType::Float => {
+            // The float's bits live in the pointer slot. On 64-bit
+            // platforms this fits exactly; on 32-bit we'd need a
+            // different ABI but rayzor is 64-bit-only today.
+            value as u64
+        }
+        ParamType::String | ParamType::Object | ParamType::Dynamic => value as u64,
     }
 }
 
@@ -148,14 +248,23 @@ pub extern "C" fn haxe_reflect_delete_field(obj: *mut u8, field: *mut u8) -> boo
 
 /// Reflect.fields(obj) -> Array<String>
 ///
-/// obj: anonymous object handle pointer
-/// Returns: HaxeArray pointer containing HaxeString pointers
+/// Returns the field names of the given object. For class instances
+/// this delegates to `haxe_type_get_instance_fields` (so the result
+/// includes inherited fields, matching Haxe semantics). For anon
+/// objects it delegates to `rayzor_anon_fields`.
 #[no_mangle]
 pub extern "C" fn haxe_reflect_fields(obj: *mut u8) -> *mut u8 {
     if obj.is_null() {
         return std::ptr::null_mut();
     }
-    anon_object::rayzor_anon_fields(obj)
+    unsafe {
+        let actual = unwrap_anon_dynamic(obj);
+        let type_id_lo = read_class_type_id(actual);
+        if is_class_type(type_id_lo) {
+            return crate::type_system::haxe_type_get_instance_fields(type_id_lo as i64);
+        }
+        anon_object::rayzor_anon_fields(actual)
+    }
 }
 
 /// Reflect.isObject(v) -> Bool
