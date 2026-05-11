@@ -865,6 +865,66 @@ class Main {
     );
 
     // ============================================================================
+    // TEST 6c: User-defined @:autoDeref wrapper
+    // ============================================================================
+    // The auto-deref mechanism used to be hardcoded to
+    // `rayzor.concurrent.Arc` / `MutexGuard`. With the @:autoDeref
+    // metadata, any user class that exposes a `get()` method gets the
+    // same `wrapper.field` / `wrapper.method()` ergonomics. This
+    // test defines a small `Box<T>` analogue and exercises both
+    // field and method deref.
+    suite.add_test(
+        E2ETestCase::new(
+            "user_auto_deref_wrapper",
+            "@:autoDeref on a user wrapper class enables field + method deref",
+            r#"
+package test;
+
+class Counter {
+    public var value: Int;
+
+    public function new(v: Int) {
+        this.value = v;
+    }
+
+    public function bumped(): Int {
+        return this.value + 1;
+    }
+}
+
+@:autoDeref
+class CounterBox {
+    var inner: Counter;
+
+    public function new(v: Counter) {
+        this.inner = v;
+    }
+
+    public function get(): Counter {
+        return this.inner;
+    }
+}
+
+class Main {
+    static function main() {
+        var box = new CounterBox(new Counter(41));
+
+        // Field deref: box.value -> box.get().value
+        var v = box.value;
+
+        // Method deref: box.bumped() -> box.get().bumped()
+        var b = box.bumped();
+
+        trace(v);
+        trace(b);
+    }
+}
+"#,
+        )
+        .expect_level(TestLevel::Execution),
+    );
+
+    // ============================================================================
     // TEST 7: For-In Loop over Array
     // ============================================================================
     // For-in loop over arrays - simplified test just to see if for-in compiles

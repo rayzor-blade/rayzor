@@ -683,6 +683,7 @@ impl<'a> AstLowering<'a> {
                 "notNull" => flags = flags.union(SymbolFlags::NOT_NULL),
                 "async" => flags = flags.union(SymbolFlags::ASYNC),
                 "export" => flags = flags.union(SymbolFlags::WASM_EXPORT),
+                "autoDeref" => flags = flags.union(SymbolFlags::AUTO_DEREF),
                 "frameworks" | "cInclude" | "cSource" | "clib" => {
                     // @:frameworks(["Accelerate"]), @:cInclude(["vendor/stb"]), @:cSource(["lib.c"])
                     if let Some(first_param) = meta.params.first() {
@@ -6123,14 +6124,27 @@ impl<'a> AstLowering<'a> {
 
     /// Detect "auto-deref wrapper" classes — types where field access
     /// transparently forwards to their inner value via a `get()` method.
-    /// Currently hardcoded to `rayzor.concurrent.Arc` and
-    /// `rayzor.concurrent.MutexGuard`; could be promoted to an
-    /// `@:autoDeref` metadata attribute later.
+    ///
+    /// A class qualifies for auto-deref when it carries the
+    /// `@:autoDeref` metadata (parsed into [`SymbolFlags::AUTO_DEREF`]).
+    /// The built-in `rayzor.concurrent.Arc` / `MutexGuard` extern
+    /// classes are annotated with `@:autoDeref` in their `.hx`
+    /// definitions; the previously-hardcoded qualified-name list is
+    /// retained below as a fallback only for the brief window between
+    /// cache load and metadata propagation (some pre-blade-cache
+    /// extern symbols may temporarily lack the flag).
     fn is_auto_deref_wrapper_class(&self, class_sym: SymbolId) -> bool {
         let sym = match self.context.symbol_table.get_symbol(class_sym) {
             Some(s) => s,
             None => return false,
         };
+        if sym.flags.is_auto_deref() {
+            return true;
+        }
+        // Backward-compat fallback: stdlib Arc / MutexGuard cached
+        // before the @:autoDeref annotation landed. Once a clean
+        // blade cache regenerates with the new metadata flag, this
+        // branch becomes dead and can be removed.
         let qn = sym
             .qualified_name
             .and_then(|q| self.context.string_interner.get(q))

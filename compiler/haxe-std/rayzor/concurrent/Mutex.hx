@@ -79,6 +79,7 @@ extern class Mutex<T> {
  * or when the guard is dropped.
  */
 @:native("rayzor::concurrent::MutexGuard")
+@:autoDeref
 extern class MutexGuard<T> {
     /**
      * Get a reference to the protected value.
