@@ -1111,6 +1111,39 @@ impl TieredBackend {
         }
     }
 
+    /// Snapshot of per-tier function counts + profiling stats.
+    ///
+    /// Step 6 dropped the `queued_for_optimization` /
+    /// `currently_optimizing` fields from
+    /// [`TieredStatistics`] because the legacy queue is gone; this
+    /// method recomputes the per-tier counts from `function_tiers`
+    /// and forwards `ProfileData::get_statistics`.
+    pub fn get_statistics(&self) -> TieredStatistics {
+        let tiers = self.function_tiers.read().unwrap();
+        let mut interpreted = 0;
+        let mut baseline = 0;
+        let mut standard = 0;
+        let mut optimized = 0;
+        let mut maximum = 0;
+        for tier in tiers.values() {
+            match tier {
+                OptimizationTier::Interpreted => interpreted += 1,
+                OptimizationTier::Baseline => baseline += 1,
+                OptimizationTier::Standard => standard += 1,
+                OptimizationTier::Optimized => optimized += 1,
+                OptimizationTier::Maximum => maximum += 1,
+            }
+        }
+        TieredStatistics {
+            profile_stats: self.profile_data.get_statistics(),
+            interpreted_functions: interpreted,
+            baseline_functions: baseline,
+            standard_functions: standard,
+            optimized_functions: optimized,
+            llvm_functions: maximum,
+        }
+    }
+
     /// Read the installed JIT pointer for `func_id`, or `None` if no
     /// pointer has been installed yet. Used by tests to observe that
     /// the beadie path (or the legacy path) installed a callable
