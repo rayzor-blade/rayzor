@@ -2686,6 +2686,29 @@ pub unsafe fn box_class_field_as_dynamic(value: u64, ty: ParamType) -> *mut u8 {
     }
 }
 
+/// Box a class instance as `Dynamic` (`DynamicValue*`), tagging the
+/// resulting Dynamic with the instance's *actual* runtime type_id —
+/// read from its `__type_id` header at offset 0.
+///
+/// Why this exists alongside `haxe_box_reference_ptr`: the
+/// compile-time TAST TypeId at the boxing call site doesn't always
+/// match the IR TypeId that gets stored in the instance header
+/// (different id namespaces in TAST vs IR). For class / interface
+/// / anonymous / array values the header has the authoritative
+/// type_id; reading from there guarantees `Type.typeof` /
+/// `Type.getClass` recover the correct class identity from the
+/// resulting Dynamic.
+///
+/// Returns null when `obj_ptr` is null.
+#[no_mangle]
+pub extern "C" fn haxe_box_class_instance(obj_ptr: *mut u8) -> *mut u8 {
+    if obj_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    let type_id = unsafe { *(obj_ptr as *const i64) } as u32;
+    haxe_box_reference_ptr(obj_ptr, type_id)
+}
+
 /// Read the runtime type_id from an object's header (first 8 bytes at offset 0).
 /// All class instances have a `__type_id: i64` field at GEP index 0.
 #[no_mangle]

@@ -938,6 +938,10 @@ register_symbol!(
     crate::type_system::haxe_box_reference_ptr
 );
 register_symbol!(
+    "haxe_box_class_instance",
+    crate::type_system::haxe_box_class_instance
+);
+register_symbol!(
     "haxe_unbox_reference_ptr",
     crate::type_system::haxe_unbox_reference_ptr
 );
