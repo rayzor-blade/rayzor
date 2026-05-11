@@ -1497,34 +1497,61 @@ pub extern "C" fn haxe_std_downcast(value_ptr: *mut u8, expected_type_id: i64) -
 // Type API enum wrappers (accept boxed DynamicValue* from Haxe Type API)
 // ============================================================================
 
-/// Type.enumIndex(e:EnumValue):Int — get enum index from raw i64 value
-/// For simple enums: value is the discriminant (= index)
-/// For boxed enums: value is a pointer to [tag:i32][pad:i32][fields...]
-#[no_mangle]
-pub extern "C" fn haxe_type_enum_index(value: i64) -> i64 {
-    // Simple (unboxed) enums: discriminant IS the index
-    haxe_enum_get_index(value, 0)
+/// Determine whether an enum's runtime representation is **boxed**
+/// (heap-allocated `[tag:i32][pad:i32][fields...]`) or **unboxed**
+/// (raw i64 discriminant).
+///
+/// Rayzor's MIR lowers enum constructors uniformly per enum: if any
+/// variant carries parameters, ALL variants of that enum compile to
+/// heap-allocated boxed values (so a pattern match on `Maybe.None`
+/// vs `Maybe.Some(7)` has a consistent shape). Tag-only enums where
+/// every variant has zero parameters can stay unboxed.
+///
+/// This helper inspects [`EnumInfo`] to make the same decision at
+/// runtime, used by `Type.enumIndex` / `enumConstructor` /
+/// `enumParameters` to dereference `value` correctly.
+fn enum_is_boxed(type_id: u32) -> bool {
+    let guard = TYPE_REGISTRY.read().unwrap();
+    guard
+        .as_ref()
+        .and_then(|r| r.get(&TypeId(type_id)))
+        .and_then(|ti| ti.enum_info)
+        .map(|ei| ei.variants.iter().any(|v| v.param_count > 0))
+        .unwrap_or(false)
 }
 
-/// Type.enumConstructor(e:EnumValue):String — get constructor name
-/// Takes raw i64 value + type_id (injected by compiler)
+/// Type.enumIndex(e:EnumValue):Int — get enum index.
+///
+/// The compiler injects `type_id` at the call site (matching the
+/// existing convention for `enumConstructor` / `enumParameters`)
+/// so the runtime can determine whether `value` is a raw
+/// discriminant or a heap-pointer to a `[tag:i32, ...]` box.
+#[no_mangle]
+pub extern "C" fn haxe_type_enum_index(value: i64, type_id: i32) -> i64 {
+    let is_boxed = if enum_is_boxed(type_id as u32) { 1 } else { 0 };
+    haxe_enum_get_index(value, is_boxed)
+}
+
+/// Type.enumConstructor(e:EnumValue):String — get constructor name.
+/// Takes raw i64 value + type_id (injected by compiler).
 #[no_mangle]
 pub extern "C" fn haxe_type_enum_constructor(
     value: i64,
     type_id: i32,
 ) -> *mut crate::haxe_string::HaxeString {
-    haxe_enum_get_name(type_id as u32, value, 0)
+    let is_boxed = if enum_is_boxed(type_id as u32) { 1 } else { 0 };
+    haxe_enum_get_name(type_id as u32, value, is_boxed)
 }
 
-/// Type.enumParameters(e:EnumValue):Array<Dynamic> — get parameters
-/// Takes raw i64 value + type_id (injected by compiler)
-/// For simple enums, always returns empty array
+/// Type.enumParameters(e:EnumValue):Array<Dynamic> — get parameters.
+/// Takes raw i64 value + type_id (injected by compiler).
 #[no_mangle]
 pub extern "C" fn haxe_type_enum_parameters(
     value: i64,
     type_id: i32,
 ) -> *mut crate::haxe_array::HaxeArray {
-    haxe_enum_get_parameters(type_id as u32, value, 0)
+    let is_boxed = if enum_is_boxed(type_id as u32) { 1 } else { 0 };
+    haxe_enum_get_parameters(type_id as u32, value, is_boxed)
 }
 
 /// Trace an enum value by type_id and discriminant
