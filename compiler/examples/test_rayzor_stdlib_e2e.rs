@@ -1089,6 +1089,55 @@ class Main {
     );
 
     // ============================================================================
+    // TEST 6f: Bound method reference (`obj.method` without invocation)
+    // ============================================================================
+    // `obj.method` (no parens) used to fail at MIR lowering with E0100
+    // because TAST/HIR had no representation for "method as a value" —
+    // every `Field` lookup tried `class_fields` and bailed when a name
+    // resolved to a method. The new pipeline:
+    //   * TAST `lower_field_expression` detects when the resolved
+    //     symbol is `SymbolKind::Function` and emits
+    //     `TypedExpressionKind::MethodReference`.
+    //   * HIR mirrors with `HirExprKind::MethodReference`.
+    //   * MIR generates a per-method thunk that loads `this` from the
+    //     closure env and forwards to the method; builds a
+    //     `MakeClosure(thunk, [receiver])`.
+    // Calling the resulting closure invokes the method with the
+    // captured receiver.
+    suite.add_test(
+        E2ETestCase::new(
+            "method_reference_lvalue",
+            "obj.method as a value — bound method reference",
+            r#"
+class Animal {
+    public var name: String;
+    public function new(n: String) { this.name = n; }
+    public function describe(): String { return "Animal: " + this.name; }
+    public function bumped(x: Int): Int { return x + 1; }
+}
+
+class Main {
+    static function main() {
+        var a = new Animal("Rex");
+
+        // Direct invocation — already worked, regression guard.
+        trace(a.describe());
+
+        // Bound method reference, no-arg.
+        var d = a.describe;
+        trace(d());                   // Animal: Rex
+
+        // Bound method reference, with arg forwarding.
+        var b = a.bumped;
+        trace(b(99));                  // 100
+    }
+}
+"#,
+        )
+        .expect_level(TestLevel::Execution),
+    );
+
+    // ============================================================================
     // TEST 7: For-In Loop over Array
     // ============================================================================
     // For-in loop over arrays - simplified test just to see if for-in compiles

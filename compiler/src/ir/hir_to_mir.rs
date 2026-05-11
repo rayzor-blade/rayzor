@@ -179,6 +179,14 @@ pub struct HirToMirContext<'a> {
     /// real constructor after unboxing dynamic arguments.
     constructor_reflect_wrappers: BTreeMap<TypeId, IrFunctionId>,
 
+    /// Thunks for bound method references (`obj.method` lvalue).
+    /// Map: method's `IrFunctionId` → thunk `IrFunctionId`. The thunk
+    /// has closure-ABI signature `(env: *u8, ...method_params_without_this)`
+    /// and forwards to the method after loading `this` from `env[0]`.
+    /// Cached so `var f = obj.m; var g = obj.m;` reuses one thunk per
+    /// underlying method.
+    method_ref_thunks: BTreeMap<IrFunctionId, IrFunctionId>,
+
     /// Mapping from qualified class name to constructor IrFunctionId
     /// This is a fallback when TypeIds don't match (e.g., across separately compiled files)
     constructor_name_map: BTreeMap<String, IrFunctionId>,
@@ -572,6 +580,7 @@ impl<'a> HirToMirContext<'a> {
             property_access_map: BTreeMap::new(),
             constructor_map: BTreeMap::new(),
             constructor_reflect_wrappers: BTreeMap::new(),
+            method_ref_thunks: BTreeMap::new(),
             constructor_name_map: BTreeMap::new(),
             current_hir_types: hir_types,
             stdlib_mapping,
@@ -19180,6 +19189,11 @@ impl<'a> HirToMirContext<'a> {
                 self.lower_lambda(params, body, captures, expr.ty)
             }
 
+            HirExprKind::MethodReference {
+                receiver,
+                method_symbol,
+            } => self.lower_method_reference(receiver, *method_symbol),
+
             HirExprKind::Array { elements } => self.lower_array_literal(elements),
 
             HirExprKind::Map { entries } => self.lower_map_literal(entries),
@@ -34013,6 +34027,152 @@ impl<'a> HirToMirContext<'a> {
     /// Wrapper ABI: `fn(obj_ptr: *u8, args: *void) -> void`
     /// Runtime passes raw 64-bit array slots via `args`; wrappers reinterpret/cast
     /// each slot to match the concrete constructor signature.
+    /// Generate (or return cached) a thunk for `obj.method` lvalue
+    /// support. The thunk bridges the closure-call ABI
+    /// `fn_ptr(env_ptr, ...args)` to the underlying method's
+    /// `(this, ...args)` signature: it loads `this` from `env[0]`
+    /// (where `MakeClosure` puts the first captured value) and
+    /// forwards to the method.
+    ///
+    /// Returns `None` if the method's signature isn't available in
+    /// this module (e.g. cross-module method from a `.blade` cache).
+    fn ensure_method_ref_thunk(&mut self, method_func_id: IrFunctionId) -> Option<IrFunctionId> {
+        if let Some(cached) = self.method_ref_thunks.get(&method_func_id) {
+            return Some(*cached);
+        }
+
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let method_sig = self
+            .builder
+            .module
+            .functions
+            .get(&method_func_id)?
+            .signature
+            .clone();
+        if method_sig.parameters.is_empty() {
+            return None;
+        }
+
+        // Thunk signature: `(env: *u8, ...method_params_without_this) -> method_return`.
+        let mut sig_builder = FunctionSignatureBuilder::new()
+            .param("env".to_string(), ptr_u8.clone())
+            .returns(method_sig.return_type.clone())
+            .calling_convention(CallingConvention::Haxe);
+        for param in method_sig.parameters.iter().skip(1) {
+            sig_builder = sig_builder.param(param.name.clone(), param.ty.clone());
+        }
+        let thunk_sig = sig_builder.build();
+
+        let thunk_symbol = SymbolId::from_raw(u32::MAX - 2000 - self.next_wrapper_id);
+        self.next_wrapper_id += 1;
+        let thunk_name = format!("__method_ref_thunk_{}", method_func_id.0);
+
+        // Save outer function/block state — thunk generation may run
+        // *during* lowering of another function (e.g. `var f =
+        // obj.m;` inside main). Without this, `start_function`
+        // re-targets the builder at the thunk and any `build_*`
+        // calls that *should* land in the outer function leak into
+        // the thunk's body. We saw it: the thunk MIR ended up with
+        // the method's body inlined when this wasn't saved.
+        let saved_current_function = self.builder.current_function;
+        let saved_current_block = self.builder.current_block;
+        let saved_symbol_map = self.symbol_map.clone();
+        self.symbol_map.clear();
+
+        let thunk_id = self
+            .builder
+            .start_function(thunk_symbol, thunk_name, thunk_sig);
+
+        // Pull out env + the forwarded method args from the thunk's
+        // parameter registers.
+        let (env_reg, forward_regs) = {
+            let Some(func) = self.builder.current_function() else {
+                self.builder.finish_function();
+                self.builder.current_function = saved_current_function;
+                self.builder.current_block = saved_current_block;
+                self.symbol_map = saved_symbol_map;
+                return None;
+            };
+            let Some(env) = func.get_param_reg(0) else {
+                self.builder.finish_function();
+                self.builder.current_function = saved_current_function;
+                self.builder.current_block = saved_current_block;
+                self.symbol_map = saved_symbol_map;
+                return None;
+            };
+            let mut args: Vec<IrId> = Vec::new();
+            for i in 1..method_sig.parameters.len() {
+                if let Some(reg) = func.get_param_reg(i) {
+                    args.push(reg);
+                }
+            }
+            (env, args)
+        };
+
+        // Load `this` from env[0]. The closure-ABI env points at a
+        // heap struct whose first slot holds the captured receiver.
+        let this_ty = method_sig.parameters[0].ty.clone();
+        let this_loaded = self.builder.build_load(env_reg, ptr_u8.clone());
+        let this_arg = this_loaded.map(|raw_ptr| {
+            if this_ty == ptr_u8 {
+                raw_ptr
+            } else {
+                self.builder
+                    .build_cast(raw_ptr, ptr_u8.clone(), this_ty.clone())
+                    .unwrap_or(raw_ptr)
+            }
+        });
+
+        let Some(this_arg) = this_arg else {
+            self.builder.finish_function();
+            self.symbol_map = saved_symbol_map;
+            return None;
+        };
+
+        let mut call_args: Vec<IrId> = Vec::with_capacity(1 + forward_regs.len());
+        call_args.push(this_arg);
+        call_args.extend(forward_regs);
+
+        let ret_ty = method_sig.return_type.clone();
+        if matches!(ret_ty, IrType::Void) {
+            self.builder
+                .build_call_direct(method_func_id, call_args, IrType::Void);
+            self.builder.build_return(None);
+        } else {
+            let result = self
+                .builder
+                .build_call_direct(method_func_id, call_args, ret_ty.clone());
+            self.builder.build_return(result);
+        }
+
+        self.builder.finish_function();
+
+        // Restore outer function/block context.
+        self.builder.current_function = saved_current_function;
+        self.builder.current_block = saved_current_block;
+        self.symbol_map = saved_symbol_map;
+
+        self.method_ref_thunks.insert(method_func_id, thunk_id);
+        Some(thunk_id)
+    }
+
+    /// Lower `HirExprKind::MethodReference { receiver, method_symbol }`
+    /// to a closure value: `{ fn_ptr: thunk, env_ptr: env_struct }`
+    /// where the env struct holds the receiver at offset 0. Calling
+    /// the closure dispatches through the thunk, which loads the
+    /// receiver back from env and invokes the underlying method.
+    fn lower_method_reference(
+        &mut self,
+        receiver: &HirExpr,
+        method_symbol: SymbolId,
+    ) -> Option<IrId> {
+        let receiver_reg = self.lower_expression(receiver)?;
+        let method_func_id = *self.function_map.get(&method_symbol)?;
+        let thunk_id = self.ensure_method_ref_thunk(method_func_id)?;
+        self.builder
+            .build_make_closure(thunk_id, vec![receiver_reg])
+    }
+
     fn generate_constructor_reflect_wrappers(&mut self) {
         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
         let ptr_void = IrType::Ptr(Box::new(IrType::Void));

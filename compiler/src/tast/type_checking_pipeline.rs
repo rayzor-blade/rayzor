@@ -1245,6 +1245,15 @@ impl<'a> TypeCheckingPhase<'a> {
                     expr.source_location,
                 )?;
             }
+            TypedExpressionKind::MethodReference {
+                receiver,
+                method_symbol: _,
+            } => {
+                // Only the receiver participates in type-checking; the
+                // method-as-value's own Function<args -> ret> type is
+                // set on the expression at lowering time.
+                self.check_expression(receiver)?;
+            }
             TypedExpressionKind::UnaryOp { operand, operator } => {
                 let operand_type = self.check_expression(operand)?;
 

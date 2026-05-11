@@ -1085,6 +1085,20 @@ pub enum TypedExpressionKind {
         is_optional: bool,
     },
 
+    /// Bound method reference: `obj.method` (without invocation). Produces
+    /// a `Function<args -> ret>` value that, when called, invokes
+    /// `method` with `obj` as the implicit `this`.
+    ///
+    /// Distinct from `MethodCall` (which is the *invocation*) and from
+    /// `FieldAccess` (which is data-field-only). Without this variant
+    /// the field-resolver path in MIR has no way to differentiate
+    /// "data field doesn't exist on this class" from "name resolves
+    /// to a method".
+    MethodReference {
+        receiver: Box<TypedExpression>,
+        method_symbol: SymbolId,
+    },
+
     /// Static method call
     StaticMethodCall {
         class_symbol: SymbolId,

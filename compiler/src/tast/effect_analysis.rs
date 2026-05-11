@@ -292,6 +292,12 @@ impl<'a> EffectAnalyzer<'a> {
                 effects.merge(self.analyze_expression(object));
             }
 
+            // Bound method reference (`obj.method` without invocation).
+            // Effect-wise it's just an object read — same as FieldAccess.
+            TypedExpressionKind::MethodReference { receiver, .. } => {
+                effects.merge(self.analyze_expression(receiver));
+            }
+
             TypedExpressionKind::StaticFieldAccess { .. } => {
                 // Static field access might have side effects if it's a getter
                 effects.has_side_effects = true;
