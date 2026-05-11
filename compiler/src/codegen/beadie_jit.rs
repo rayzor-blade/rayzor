@@ -31,10 +31,16 @@
 //!
 //! ## Scope
 //!
-//! Phase B step 2: dedicated backend + lazy bead registry, plus an
-//! integration test that drives a real compile end-to-end through a
-//! live `TieredBackend`. Still no `record_call` routing — that change
-//! comes in step 3.
+//! Phase B step 3 (current): `record_call` routes
+//! Standard-tier promotion through beadie when
+//! [`crate::codegen::tiered_backend::TieredConfig::enable_beadie_adapter`]
+//! is set (Option A — beadie owns the Standard threshold; see
+//! commit history for the A/B rationale). Other tiers (Baseline,
+//! Optimized, Maximum) still use the legacy queue + worker.
+//! `PromotionBarrier`, `JitBailout`, and `ProfileData` accounting are
+//! all preserved — the ProfileData increment stays in `record_call`
+//! even on the beadie path, so the Optimized/Maximum decision logic
+//! (which reads `get_function_count`) doesn't divide by two.
 //!
 //! ## Why the pivot from step 1
 //!
@@ -52,7 +58,7 @@
 //! promotion) without forcing co-existence with already-compiled
 //! code.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 use beadie::{BackendAdapter, Bead, CompileError, CompileOutcome, JitBackend, ThresholdPolicy};
 
@@ -60,13 +66,48 @@ use super::cranelift_backend::CraneliftBackend;
 use crate::ir::{IrFunctionId, IrModule};
 
 /// What beadie hands the backend when it's time to compile one function:
-/// the module the function lives in plus the id to extract a pointer for.
+/// a handle to the live module set + the `IrFunctionId` to extract a
+/// pointer for.
 ///
-/// Stored by value inside the bead so beadie can re-stage the compile
-/// later (e.g. on reload after deopt) without rayzor re-supplying it.
+/// The module set is shared via the same `Arc<RwLock<Vec<IrModule>>>`
+/// that lives on [`crate::codegen::tiered_backend::TieredBackend`]. We
+/// look up the owning module at compile time (under a brief read lock)
+/// rather than snapshotting an `Arc<IrModule>` here, because:
+///
+/// - rayzor stores modules as `Vec<IrModule>` (not `Vec<Arc<IrModule>>`),
+///   so producing an `Arc<IrModule>` at dispatch time would require a
+///   deep clone of the whole `IrModule` for every promotion — wasteful
+///   on large modules.
+/// - The read lock during compilation blocks writers (rare —
+///   `compile_module` only mutates modules at load time), not readers,
+///   so live execution is unaffected.
+///
+/// Helper [`BeadieFunctionDef::from_single_module`] wraps a single
+/// `Arc<IrModule>` in the same shape — useful for tests and the
+/// `beadie_smoke` example that build standalone modules without a
+/// `TieredBackend`.
 pub struct BeadieFunctionDef {
-    pub module: Arc<IrModule>,
+    pub modules: Arc<RwLock<Vec<IrModule>>>,
     pub func_id: IrFunctionId,
+}
+
+impl BeadieFunctionDef {
+    /// Test/example helper: wrap a single owned module so it satisfies
+    /// the same `Arc<RwLock<Vec<IrModule>>>` shape used by
+    /// `TieredBackend`. Performs one move of the module value (no
+    /// clone). Returns the def **and** the shared handle so callers
+    /// can keep their own clone if needed.
+    pub fn from_single_module(
+        module: IrModule,
+        func_id: IrFunctionId,
+    ) -> (Self, Arc<RwLock<Vec<IrModule>>>) {
+        let modules = Arc::new(RwLock::new(vec![module]));
+        let def = Self {
+            modules: Arc::clone(&modules),
+            func_id,
+        };
+        (def, modules)
+    }
 }
 
 /// `JitBackend` adapter over rayzor's [`CraneliftBackend`].
@@ -105,8 +146,18 @@ impl JitBackend for BeadieJit {
     /// `with_policy_batched` to share one `finalize()` across many
     /// promotions, but the trait requires this method.
     fn compile(&self, _bead: &Arc<Bead>, def: BeadieFunctionDef) -> Result<*mut (), Self::Error> {
+        let modules = def.modules.read().unwrap();
+        let module = modules
+            .iter()
+            .find(|m| m.functions.contains_key(&def.func_id))
+            .ok_or_else(|| {
+                CompileError::new(format!(
+                    "BeadieJit::compile: function {:?} not in any module",
+                    def.func_id
+                ))
+            })?;
         let mut be = self.backend.lock().unwrap();
-        be.compile_module_without_finalize(&def.module)
+        be.compile_module_without_finalize(module)
             .map_err(CompileError::new)?;
         be.finalize().map_err(CompileError::new)?;
         let ptr = be
@@ -125,8 +176,18 @@ impl JitBackend for BeadieJit {
     ) -> Result<CompileOutcome, Self::Error> {
         let func_id = def.func_id;
         {
+            let modules = def.modules.read().unwrap();
+            let module = modules
+                .iter()
+                .find(|m| m.functions.contains_key(&func_id))
+                .ok_or_else(|| {
+                    CompileError::new(format!(
+                        "BeadieJit::compile_outcome: function {:?} not in any module",
+                        func_id
+                    ))
+                })?;
             let mut be = self.backend.lock().unwrap();
-            be.compile_module_without_finalize(&def.module)
+            be.compile_module_without_finalize(module)
                 .map_err(CompileError::new)?;
         }
         let backend_for_resolver = Arc::clone(&self.backend);
@@ -197,7 +258,7 @@ mod tests {
     use crate::ir::mir_builder::MirBuilder;
     use crate::ir::{BinaryOp, IrType};
 
-    fn build_add_module() -> (Arc<IrModule>, IrFunctionId) {
+    fn build_add_module() -> (IrModule, IrFunctionId) {
         let mut builder = MirBuilder::new("beadie_jit_test");
         let func_id = builder
             .begin_function("add")
@@ -212,7 +273,7 @@ mod tests {
         let b = builder.get_param(1);
         let sum = builder.bin_op(BinaryOp::Add, a, b);
         builder.ret(Some(sum));
-        (Arc::new(builder.finish()), func_id)
+        (builder.finish(), func_id)
     }
 
     /// The adapter constructs cleanly from a shared backend and the
@@ -282,9 +343,9 @@ mod tests {
         let (module, func_id) = build_add_module();
         let bound = adapter.register(std::ptr::null_mut(), None);
 
-        let module_for_def = Arc::clone(&module);
+        let (_def, modules_handle) = BeadieFunctionDef::from_single_module(module, func_id);
         let outcome = adapter.on_invoke_outcome(&bound, move |_| BeadieFunctionDef {
-            module: module_for_def,
+            modules: modules_handle,
             func_id,
         });
         // First call before compile finishes — None is the contract.
@@ -330,5 +391,85 @@ mod tests {
         assert!(on.has_beadie_bead(dummy));
         on.ensure_beadie_bead(dummy).unwrap(); // idempotent
         assert_eq!(on.beadie_beads().lock().unwrap().len(), 1);
+    }
+
+    /// Phase B step 3 end-to-end: `record_call` past the warm threshold
+    /// routes Standard-tier promotion through beadie, which compiles
+    /// in the background. A follow-up `record_call` (or any other
+    /// invocation that goes through `route_standard_to_beadie`) sees
+    /// `bead().compiled()` and installs the pointer under the
+    /// `PromotionBarrier`. After install, `jit_pointer` returns the
+    /// pointer beadie produced and `function_tier` is `Standard`.
+    #[test]
+    fn record_call_routes_standard_via_beadie_end_to_end() {
+        use super::super::tiered_backend::{OptimizationTier, TieredBackend, TieredConfig};
+        use std::time::{Duration, Instant};
+
+        let plugin = rayzor_runtime::plugin_impl::get_plugin();
+        let symbols = plugin.runtime_symbols();
+        let symbols_ref: Vec<(&str, *const u8)> = symbols.iter().map(|(n, p)| (*n, *p)).collect();
+
+        let mut cfg = TieredConfig::default();
+        cfg.enable_beadie_adapter = true;
+        // Force the count to land *exactly* on Standard. Bumping
+        // interpreter_threshold above warm prevents the "skip to
+        // Baseline at count >= interpreter_threshold" path from firing
+        // first; the actual lookup uses count >= warm_threshold.
+        cfg.profile_config.warm_threshold = 1;
+        cfg.profile_config.interpreter_threshold = 100;
+        // Don't start the legacy background worker — this test
+        // exercises the beadie scheduling, not the legacy queue.
+        cfg.enable_background_optimization = false;
+
+        let mut backend =
+            TieredBackend::with_symbols(cfg, &symbols_ref).expect("tiered backend with beadie");
+        let (module, func_id) = build_add_module();
+        backend.compile_module(module).expect("module loaded");
+
+        // First record_call: count starts at 0, sample passes, records
+        // → count becomes 1 → target_tier resolves to Standard → routes
+        // to beadie. The on_invoke_outcome call dispatches an
+        // asynchronous compile; the immediate outcome is None.
+        backend.record_call(func_id);
+
+        // Wait for beadie's broker to finish the background compile.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut beadie_compiled = None;
+        while Instant::now() < deadline {
+            let ptr = backend
+                .beadie_beads()
+                .lock()
+                .unwrap()
+                .get(&func_id)
+                .and_then(|b| b.bead().compiled());
+            if let Some(p) = ptr {
+                beadie_compiled = Some(p);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let beadie_ptr =
+            beadie_compiled.expect("beadie did not produce a compiled pointer within 5s");
+
+        // Now trigger install via another record_call. The route_standard
+        // path will observe bead().compiled() = Some(ptr) and install it
+        // under the barrier, switching function_tier to Standard.
+        backend.record_call(func_id);
+
+        // Final assertions: pointer installed at Standard tier, and it
+        // matches what beadie produced.
+        assert_eq!(
+            backend.function_tier(func_id),
+            Some(OptimizationTier::Standard)
+        );
+        let installed_ptr = backend
+            .jit_pointer(func_id)
+            .expect("function_pointers missing entry after install");
+        assert_eq!(installed_ptr, beadie_ptr as usize);
+
+        // Sanity: the installed pointer is callable code, not a stub
+        // or null.
+        let f: extern "C" fn(i64, i64) -> i64 = unsafe { std::mem::transmute(beadie_ptr) };
+        assert_eq!(f(19, 23), 42);
     }
 }
