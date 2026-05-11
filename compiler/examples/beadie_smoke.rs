@@ -157,17 +157,7 @@ fn wait_compiled(bead: &Arc<Bead>, timeout: Duration, label: &str) {
 /// that beadie's existing flow works against rayzor's backend.
 fn run_single_shot(jit: Arc<RayzorJit>) -> i64 {
     let policy = ThresholdPolicy::new(1); // Promote on first call.
-    let adapter: BackendAdapter<RayzorJit> = BackendAdapter::with_policy(
-        Arc::try_unwrap(jit).unwrap_or_else(|arc| {
-            // Adapter takes the backend by value; clone the inner state out
-            // by reconstructing. The Arc is only used to coexist with the
-            // batched path below — for single-shot we recreate fresh.
-            RayzorJit {
-                backend: Arc::clone(&arc.backend),
-            }
-        }),
-        policy,
-    );
+    let adapter: BackendAdapter<RayzorJit> = BackendAdapter::from_arc_with_policy(jit, policy);
 
     let (module, func_id) = build_add_module();
     let bound: BoundBead<RayzorJit> = adapter.register(std::ptr::null_mut(), None);
@@ -196,11 +186,8 @@ fn run_single_shot(jit: Arc<RayzorJit>) -> i64 {
 /// Same expected result; just exercises the staged-then-flush path.
 fn run_batched(jit: Arc<RayzorJit>) -> i64 {
     let policy = ThresholdPolicy::new(1);
-    let inner = RayzorJit {
-        backend: Arc::clone(&jit.backend),
-    };
-    let adapter: BackendAdapter<RayzorJit> = BackendAdapter::with_policy_batched(
-        inner, policy, /*capacity=*/ 16, /*batch=*/ 4,
+    let adapter: BackendAdapter<RayzorJit> = BackendAdapter::from_arc_with_policy_batched(
+        jit, policy, /*capacity=*/ 16, /*batch=*/ 4,
     );
 
     let (module, func_id) = build_add_module();
