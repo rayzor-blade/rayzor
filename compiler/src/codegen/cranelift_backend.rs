@@ -115,6 +115,25 @@ impl CraneliftBackend {
         opt_level: &str,
         symbols: &[(&str, *const u8)],
     ) -> Result<Self, String> {
+        Self::with_symbols_lookup_and_opt(opt_level, symbols, None)
+    }
+
+    /// Create backend with symbols, an optional fallback symbol lookup
+    /// callback, and optimization level.
+    ///
+    /// The `lookup_fn` is forwarded to
+    /// [`cranelift_jit::JITBuilder::symbol_lookup_fn`]. When `finalize()`
+    /// tries to resolve an `Import` symbol that isn't in the explicit
+    /// `symbols` table, cranelift consults this callback. Used by the
+    /// beadie integration ([`super::beadie_jit`]) to resolve cross-module
+    /// rayzor function references against
+    /// `TieredBackend::function_pointers` at finalize time, without
+    /// needing to pre-register every loaded function up front.
+    pub fn with_symbols_lookup_and_opt(
+        opt_level: &str,
+        symbols: &[(&str, *const u8)],
+        lookup_fn: Option<Box<dyn Fn(&str) -> Option<*const u8> + Send>>,
+    ) -> Result<Self, String> {
         // Configure Cranelift for the current platform
         let mut flag_builder = settings::builder();
 
@@ -212,6 +231,14 @@ impl CraneliftBackend {
         // Register runtime symbols from plugins
         for (name, ptr) in symbols {
             builder.symbol(*name, *ptr);
+        }
+
+        // Optional dynamic-resolution callback for any symbol not in
+        // the explicit table above. The beadie integration uses this
+        // to resolve cross-module rayzor function refs that haven't
+        // been compiled into this backend.
+        if let Some(lookup) = lookup_fn {
+            builder.symbol_lookup_fn(lookup);
         }
 
         // Create JIT module
