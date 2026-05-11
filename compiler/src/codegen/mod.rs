@@ -7,6 +7,7 @@
 /// - LLVM (maximum optimization, Phase 4)
 /// - WebAssembly (cross-platform AOT, browser + WASI)
 pub mod aot_compiler;
+pub mod beadie_jit;
 pub mod c_backend;
 pub mod cranelift_backend;
 mod instruction_lowering;

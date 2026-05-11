@@ -359,6 +359,18 @@ pub struct TieredBackend {
 
     /// Number of loaded MIR modules that have already run startup hooks.
     initialized_module_count: Arc<Mutex<usize>>,
+
+    /// Phase B (beadie integration, infrastructure stage): optional
+    /// `BackendAdapter<BeadieJit>` sharing the same
+    /// `Arc<Mutex<CraneliftBackend>>` as `baseline_backend`. Constructed
+    /// only when [`TieredConfig::enable_beadie_adapter`] is true.
+    ///
+    /// Dormant in step 1: no call site routes through it. Its presence
+    /// proves the wiring builds and that the shared cranelift backend
+    /// can be adopted by beadie without disrupting the legacy
+    /// queue + worker. Step 2 will start routing tier promotions
+    /// (initially Standard) through this adapter.
+    beadie_adapter: Option<Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>>,
 }
 
 /// Optimization tier level (5-tier system with interpreter)
@@ -560,6 +572,8 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Quick,
                 max_tier_promotions: 4,
                 enable_stack_traces: true,
+
+                enable_beadie_adapter: false,
             },
 
             TierPreset::Application => TieredConfig {
@@ -578,6 +592,7 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Quick,
                 max_tier_promotions: 10,
                 enable_stack_traces: false, // TEMP: disabled to test global store bug
+                enable_beadie_adapter: false,
             },
 
             TierPreset::Server => TieredConfig {
@@ -596,6 +611,8 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Immediate,
                 max_tier_promotions: 15,
                 enable_stack_traces: true,
+
+                enable_beadie_adapter: false,
             },
 
             TierPreset::Benchmark => TieredConfig {
@@ -614,6 +631,7 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Immediate,
                 max_tier_promotions: 8,
                 enable_stack_traces: false, // No instrumentation overhead in benchmarks
+                enable_beadie_adapter: false,
             },
 
             TierPreset::Development => TieredConfig {
@@ -626,6 +644,8 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Immediate,
                 max_tier_promotions: 6,
                 enable_stack_traces: true,
+
+                enable_beadie_adapter: false,
             },
 
             TierPreset::Embedded => TieredConfig {
@@ -644,6 +664,7 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Slow, // High threshold before bailout
                 max_tier_promotions: 0,                  // Interpreter only
                 enable_stack_traces: false,              // No stack traces for embedded
+                enable_beadie_adapter: false,
             },
         }
     }
@@ -740,6 +761,15 @@ pub struct TieredConfig {
     /// and captures Haxe-level stack traces on throw. Disabled in --release mode for
     /// zero overhead in production.
     pub enable_stack_traces: bool,
+
+    /// Phase B (beadie integration, infrastructure stage): when true, the
+    /// backend constructs a [`beadie::BackendAdapter`] alongside the
+    /// existing tier machinery. The adapter is dormant — no call site
+    /// routes through it yet — but its presence on a real run proves the
+    /// wiring builds and that the shared `CraneliftBackend` can be
+    /// adopted by beadie without disrupting the legacy queue + worker.
+    /// Default: false.
+    pub enable_beadie_adapter: bool,
 }
 
 impl Default for TieredConfig {
@@ -754,6 +784,7 @@ impl Default for TieredConfig {
             bailout_strategy: BailoutStrategy::Quick, // Good balance for most apps
             max_tier_promotions: 10,
             enable_stack_traces: true, // Debug by default
+            enable_beadie_adapter: false,
         }
     }
 }
@@ -787,6 +818,8 @@ impl TieredConfig {
             bailout_strategy: BailoutStrategy::Immediate, // Quick bailout for testing
             max_tier_promotions: 6,
             enable_stack_traces: true,
+
+            enable_beadie_adapter: false,
         }
     }
 
@@ -802,6 +835,7 @@ impl TieredConfig {
             bailout_strategy: BailoutStrategy::Quick, // Quick bailout
             max_tier_promotions: 10,
             enable_stack_traces: false, // Production: no trace overhead
+            enable_beadie_adapter: false,
         }
     }
 
@@ -818,8 +852,40 @@ impl TieredConfig {
             bailout_strategy: BailoutStrategy::Quick, // Not used when start_interpreted=false
             max_tier_promotions: 10,
             enable_stack_traces: true,
+
+            enable_beadie_adapter: false,
         }
     }
+}
+
+/// Build the beadie `BackendAdapter<BeadieJit>` that shares the same
+/// `Arc<Mutex<CraneliftBackend>>` as `TieredBackend::baseline_backend`,
+/// or return `None` when [`TieredConfig::enable_beadie_adapter`] is
+/// false.
+///
+/// The threshold is sourced from `ProfileConfig::warm_threshold` so
+/// that — when Phase B step 2 starts routing through the adapter —
+/// beadie's policy matches the hand-rolled enqueue criterion. Capacity
+/// and batch limit are picked to drain a typical promotion wave in a
+/// single `finalize()`; both are conservative starting points and may
+/// move later based on benchmark data.
+fn build_beadie_adapter_if_enabled(
+    config: &TieredConfig,
+    backend: &Arc<Mutex<CraneliftBackend>>,
+) -> Option<Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>> {
+    if !config.enable_beadie_adapter {
+        return None;
+    }
+    // `ThresholdPolicy::new` takes `u32`; rayzor's profile thresholds
+    // are `u64`. Cap to `u32::MAX` to avoid silent truncation when
+    // someone passes an absurdly large value.
+    let threshold = config.profile_config.warm_threshold.min(u32::MAX as u64) as u32;
+    Some(super::beadie_jit::build_batched_adapter(
+        Arc::clone(backend),
+        threshold,
+        /*capacity=*/ 64,
+        /*batch_limit=*/ 16,
+    ))
 }
 
 impl TieredBackend {
@@ -870,9 +936,12 @@ impl TieredBackend {
         };
         interp.set_max_iterations(max_iterations);
 
+        let baseline_backend = Arc::new(Mutex::new(baseline_backend));
+        let beadie_adapter = build_beadie_adapter_if_enabled(&config, &baseline_backend);
+
         Ok(Self {
             interpreter: Arc::new(Mutex::new(interp)),
-            baseline_backend: Arc::new(Mutex::new(baseline_backend)),
+            baseline_backend,
             profile_data,
             function_tiers: Arc::new(RwLock::new(BTreeMap::new())),
             function_pointers: Arc::new(RwLock::new(BTreeMap::new())),
@@ -891,6 +960,7 @@ impl TieredBackend {
             promotion_count: Arc::new(AtomicU64::new(0)),
             current_compiled_tier: Arc::new(AtomicU8::new(0)),
             initialized_module_count: Arc::new(Mutex::new(0)),
+            beadie_adapter,
         })
     }
 
@@ -928,9 +998,12 @@ impl TieredBackend {
             interp.register_symbol(name, *ptr);
         }
 
+        let baseline_backend = Arc::new(Mutex::new(baseline_backend));
+        let beadie_adapter = build_beadie_adapter_if_enabled(&config, &baseline_backend);
+
         Ok(Self {
             interpreter: Arc::new(Mutex::new(interp)),
-            baseline_backend: Arc::new(Mutex::new(baseline_backend)),
+            baseline_backend,
             profile_data,
             function_tiers: Arc::new(RwLock::new(BTreeMap::new())),
             function_pointers: Arc::new(RwLock::new(BTreeMap::new())),
@@ -949,7 +1022,17 @@ impl TieredBackend {
             promotion_count: Arc::new(AtomicU64::new(0)),
             current_compiled_tier: Arc::new(AtomicU8::new(0)),
             initialized_module_count: Arc::new(Mutex::new(0)),
+            beadie_adapter,
         })
+    }
+
+    /// Borrow the beadie adapter, if Phase B is enabled in config.
+    /// Returns `None` when `enable_beadie_adapter` was false at
+    /// construction time.
+    pub fn beadie_adapter(
+        &self,
+    ) -> Option<&Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>> {
+        self.beadie_adapter.as_ref()
     }
 
     fn ensure_loaded_modules_initialized(&mut self) -> Result<(), String> {
