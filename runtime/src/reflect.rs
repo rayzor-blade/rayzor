@@ -850,6 +850,7 @@ mod tests {
                     super_type_id: None,
                     instance_fields: Box::leak(vec!["__type_id"].into_boxed_slice()),
                     static_fields: Box::leak(Vec::<&'static str>::new().into_boxed_slice()),
+                    instance_field_types: &[],
                 }))),
             },
         );

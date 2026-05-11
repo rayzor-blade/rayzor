@@ -131,14 +131,11 @@ fn test_tiered_with_interpreter() {
             blazing_threshold: 500,
             sample_rate: 1,
         },
-        enable_background_optimization: false, // Disable for deterministic test
-        optimization_check_interval_ms: 50,
-        max_parallel_optimizations: 1,
         verbosity: 1,
         start_interpreted: true, // Start in interpreter mode
         bailout_strategy: compiler::codegen::BailoutStrategy::Quick,
-        max_tier_promotions: 0,
         enable_stack_traces: false,
+        enable_tier_promotion: true,
     };
 
     // Create tiered backend
@@ -183,10 +180,6 @@ fn test_tiered_with_interpreter() {
     println!("  After 10 calls:");
     println!("    Interpreted (P0): {}", stats.interpreted_functions);
     println!("    Baseline (P1): {}", stats.baseline_functions);
-    println!(
-        "    Queued for optimization: {}",
-        stats.queued_for_optimization
-    );
 
     println!("  Tiered backend interpreter test PASSED\n");
 }

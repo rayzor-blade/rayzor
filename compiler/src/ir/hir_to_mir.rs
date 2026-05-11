@@ -7732,21 +7732,21 @@ impl<'a> HirToMirContext<'a> {
             // Reflect.isFunction / Reflect.isObject need boxed DynamicValue* args
             // to inspect the type_id tag. Raw function/class pointers lack this tag,
             // so we must box via box_value_for_dynamic (same as Type.typeof).
+            //
+            // Don't shortcut on register type Ptr(U8): raw closure pointers
+            // (from MakeClosure / method references) and raw class pointers
+            // also have register type Ptr(U8) but are NOT boxed DynamicValues.
+            // `box_value_for_dynamic` already returns None when the HIR type
+            // is genuinely Dynamic, so use that as the pass-through signal.
             "haxe_reflect_is_function" | "haxe_reflect_is_object" => {
                 if args.len() != 1 {
                     return None;
                 }
                 let value_reg = self.lower_expression(&args[0])?;
                 let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
-                let value_dyn = if matches!(
-                    self.builder.get_register_type(value_reg),
-                    Some(IrType::Ptr(ref inner)) if matches!(**inner, IrType::U8)
-                ) {
-                    // Already a PtrU8 (likely already boxed Dynamic) — pass through
-                    value_reg
-                } else {
-                    self.box_value_for_dynamic(value_reg, args[0].ty)?
-                };
+                let value_dyn = self
+                    .box_value_for_dynamic(value_reg, args[0].ty)
+                    .unwrap_or(value_reg);
                 let func_id = self.get_or_register_extern_function(
                     runtime_func,
                     vec![ptr_u8.clone()],

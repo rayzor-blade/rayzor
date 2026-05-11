@@ -2643,10 +2643,7 @@ pub fn lookup_class_field(start_type_id: u32, name: &str) -> Option<(usize, Para
     let mut current = Some(TypeId(start_type_id));
     while let Some(tid) = current {
         let type_info = registry.get(&tid)?;
-        let class_info = match type_info.class_info.as_ref() {
-            Some(ci) => ci,
-            None => return None,
-        };
+        let class_info = type_info.class_info.as_ref()?;
         if let Some(idx) = class_info.instance_fields.iter().position(|n| *n == name) {
             let offset = (idx + 1) * 8;
             let ty = class_info
