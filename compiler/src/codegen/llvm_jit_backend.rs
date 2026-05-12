@@ -4396,6 +4396,28 @@ impl<'ctx> LLVMJitBackend<'ctx> {
     ) -> Result<BasicValueEnum<'ctx>, String> {
         let name = format!("binop_{}", dest.as_u32());
 
+        // Pointer→int coercion: MIR (and cranelift) treat Ptr(Void) and I64
+        // interchangeably for arithmetic, but LLVM rejects mixing a pointer
+        // with a numeric operand. Coerce pointer operands to i64 via ptrtoint
+        // so subsequent int-or-float dispatch works uniformly. Without this,
+        // a function param typed `ptr` (e.g. a class `this` reaching a binop
+        // through value-numbering) trips `into_int_value()` in inkwell.
+        let i64_type = self.context.i64_type();
+        let coerce_ptr =
+            |val: BasicValueEnum<'ctx>, tag: &str| -> Result<BasicValueEnum<'ctx>, String> {
+                if val.is_pointer_value() {
+                    let as_int = self
+                        .builder
+                        .build_ptr_to_int(val.into_pointer_value(), i64_type, tag)
+                        .map_err(|e| format!("Failed to ptrtoint: {}", e))?;
+                    Ok(as_int.into())
+                } else {
+                    Ok(val)
+                }
+            };
+        let left = coerce_ptr(left, &format!("{}_ptoi_l", name))?;
+        let right = coerce_ptr(right, &format!("{}_ptoi_r", name))?;
+
         // Coerce integer operands to the same bit width (LLVM requires matching types)
         let (left, right) = if left.is_int_value() && right.is_int_value() {
             let li = left.into_int_value();

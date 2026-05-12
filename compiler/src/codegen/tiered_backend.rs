@@ -891,7 +891,10 @@ type BeadieAdapters = (
 /// `warm_threshold=3`, `hot_threshold=5` — only 2 calls between
 /// them), a non-1 beadie threshold would never let beadie's counter
 /// cross before rayzor moves on to the next tier.
-fn build_beadie_adapters(symbols: &[(&str, *const u8)]) -> Result<BeadieAdapters, String> {
+fn build_beadie_adapters(
+    symbols: &[(&str, *const u8)],
+    verbosity: u8,
+) -> Result<BeadieAdapters, String> {
     let beadie_threshold: u32 = 1;
     let symbols_snapshot: super::beadie_jit::RuntimeSymbolTable = Arc::new(
         symbols
@@ -913,15 +916,18 @@ fn build_beadie_adapters(symbols: &[(&str, *const u8)]) -> Result<BeadieAdapters
         /*capacity=*/ 64,
         /*batch_limit=*/ 16,
     );
-    // One-line construction announcement on stderr. Step 6 simplifies:
+    // One-line construction announcement on stderr, gated by verbosity
+    // so benchmark/silent callers can suppress it. Step 6 simplifies:
     // beadie is unconditional, no env-var to report.
-    eprintln!(
-        "[beadie] adapters built — Standard ({:?}) + Optimized ({:?}); \
-         threshold={} (immediate-on-route)",
-        OptimizationTier::Standard.cranelift_opt_level(),
-        OptimizationTier::Optimized.cranelift_opt_level(),
-        beadie_threshold,
-    );
+    if verbosity >= 1 {
+        eprintln!(
+            "[beadie] adapters built — Standard ({:?}) + Optimized ({:?}); \
+             threshold={} (immediate-on-route)",
+            OptimizationTier::Standard.cranelift_opt_level(),
+            OptimizationTier::Optimized.cranelift_opt_level(),
+            beadie_threshold,
+        );
+    }
     Ok((standard, optimized))
 }
 
@@ -979,7 +985,8 @@ impl TieredBackend {
         // can't call any `haxe_*` runtime helper, which is fine for
         // tests of pure-arithmetic kernels but useless for real code.
         // Production callers go through `with_symbols`.
-        let (beadie_adapter, beadie_adapter_optimized) = build_beadie_adapters(&[])?;
+        let (beadie_adapter, beadie_adapter_optimized) =
+            build_beadie_adapters(&[], config.verbosity)?;
 
         Ok(Self {
             interpreter: Arc::new(Mutex::new(interp)),
@@ -1040,7 +1047,8 @@ impl TieredBackend {
         }
 
         let baseline_backend = Arc::new(Mutex::new(baseline_backend));
-        let (beadie_adapter, beadie_adapter_optimized) = build_beadie_adapters(symbols)?;
+        let (beadie_adapter, beadie_adapter_optimized) =
+            build_beadie_adapters(symbols, config.verbosity)?;
 
         Ok(Self {
             interpreter: Arc::new(Mutex::new(interp)),
