@@ -596,11 +596,11 @@ class Main {
     let symbols_ref: Vec<(&str, *const u8)> = symbols.iter().map(|(n, p)| (*n, *p)).collect();
 
     // Default TieredConfig has start_interpreted = true (per
-    // TieredConfig::default in tiered_backend.rs). Disable background
-    // optimisation so the test stays deterministic.
+    // TieredConfig::default in tiered_backend.rs). Disable tier
+    // promotion so the test stays deterministic.
     let mut config = TieredConfig::default();
     config.start_interpreted = true;
-    config.enable_background_optimization = false;
+    config.enable_tier_promotion = false;
     config.verbosity = 0;
     let mut backend = match TieredBackend::with_symbols(config, &symbols_ref) {
         Ok(b) => b,

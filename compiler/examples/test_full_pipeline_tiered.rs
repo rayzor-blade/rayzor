@@ -103,9 +103,6 @@ class Math {
     // Step 2: Configure tiered JIT backend
     println!("Step 2: Setting up Tiered JIT...");
     let config = TieredConfig {
-        enable_background_optimization: true,
-        optimization_check_interval_ms: 50,
-        max_parallel_optimizations: 2,
         profile_config: ProfileConfig {
             interpreter_threshold: 5,
             warm_threshold: 100,     // T0 → T1 at 100 calls
@@ -116,8 +113,8 @@ class Math {
         verbosity: 2, // Verbose output to see tier promotions
         start_interpreted: false,
         bailout_strategy: compiler::codegen::BailoutStrategy::Quick,
-        max_tier_promotions: 3,
         enable_stack_traces: false,
+        enable_tier_promotion: true,
     };
 
     let mut backend = TieredBackend::new(config)?;
@@ -228,10 +225,6 @@ class Math {
     );
     println!("  Tier 3 (Maximum):   {} functions", stats.llvm_functions);
 
-    println!("\nOptimization Queue:");
-    println!("  Queued: {}", stats.queued_for_optimization);
-    println!("  Currently optimizing: {}", stats.currently_optimizing);
-
     println!("\nProfile Statistics:");
     println!("{}", stats.profile_stats.format());
 
@@ -253,10 +246,6 @@ class Math {
 
     #[cfg(not(feature = "llvm-backend"))]
     println!("\n  (Compile with --features llvm-backend for Tier 3/LLVM support)");
-
-    // Cleanup
-    backend.shutdown();
-    println!("\nBackend shutdown complete.");
 
     Ok(())
 }

@@ -113,9 +113,6 @@ class Math {
     // Set up tiered JIT
     println!("Step 2: Setting up Tiered JIT...");
     let config = TieredConfig {
-        enable_background_optimization: true,
-        optimization_check_interval_ms: 50,
-        max_parallel_optimizations: 2,
         profile_config: ProfileConfig {
             interpreter_threshold: 5,
             warm_threshold: 10, // Fast promotion for demo
@@ -126,8 +123,8 @@ class Math {
         verbosity: 1, // Show promotions
         start_interpreted: false,
         bailout_strategy: compiler::codegen::BailoutStrategy::Quick,
-        max_tier_promotions: 3,
         enable_stack_traces: false,
+        enable_tier_promotion: true,
     };
 
     let mut backend = TieredBackend::new(config)?;
@@ -248,9 +245,6 @@ class Math {
     println!("  ✓ JIT compilation of complex control flow");
     println!("  ✓ {} correct executions", execution_count);
     println!("  ✓ Automatic tier promotion");
-
-    backend.shutdown();
-    println!("\nBackend shutdown complete.");
 
     Ok(())
 }
