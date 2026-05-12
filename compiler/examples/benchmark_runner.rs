@@ -540,7 +540,10 @@ fn setup_tiered_benchmark(
     // - Immediate bailout from interpreter hot loops
     // - Synchronous optimization for deterministic results
     // - Manual LLVM upgrade after warmup (blazing_threshold = MAX)
-    let config = TierPreset::Benchmark.to_config();
+    // Suppress beadie/tier-transition chatter — bench output should
+    // stay clean; the runner already reports compile/execute timings.
+    let mut config = TierPreset::Benchmark.to_config();
+    config.verbosity = 0;
 
     let mut backend =
         TieredBackend::with_symbols(config, symbols).map_err(|e| format!("backend: {}", e))?;
@@ -1097,13 +1100,9 @@ fn run_benchmark(bench: &Benchmark, target: Target) -> Result<BenchmarkResult, S
                 }
             }
 
-            // Phase B: report beadie counters so it's obvious whether
-            // the integration was active during this benchmark run.
-            let bs = state.backend.beadie_stats();
-            eprintln!(
-                "  [beadie] adapter_enabled={} routes_attempted={} installs={} registered_beads={}",
-                bs.adapter_enabled, bs.routes_attempted, bs.installs, bs.registered_beads
-            );
+            // Beadie counter summary suppressed in bench runs to keep
+            // output clean. Re-enable by reading state.backend.beadie_stats()
+            // if integration verification is needed.
         }
 
         // LLVM: stateful approach - finalize() should only be called once
