@@ -140,14 +140,11 @@ fn execute_bundle_interpreted(bundle: &RayzorBundle) -> Result<std::time::Durati
             blazing_threshold: 1000000,
             sample_rate: 1,
         },
-        enable_background_optimization: false,
-        optimization_check_interval_ms: 1000,
-        max_parallel_optimizations: 1,
         verbosity: 0,
         start_interpreted: true,
         bailout_strategy: compiler::codegen::BailoutStrategy::Quick,
-        max_tier_promotions: 0,
         enable_stack_traces: false,
+        enable_tier_promotion: false,
     };
 
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)
@@ -210,14 +207,11 @@ fn compile_and_run(source: &str) -> Result<(), String> {
             blazing_threshold: 1000000,
             sample_rate: 1,
         },
-        enable_background_optimization: false,
-        optimization_check_interval_ms: 1000,
-        max_parallel_optimizations: 1,
         verbosity: 0,
         start_interpreted: true,
         bailout_strategy: compiler::codegen::BailoutStrategy::Quick,
-        max_tier_promotions: 0,
         enable_stack_traces: false,
+        enable_tier_promotion: false,
     };
 
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)

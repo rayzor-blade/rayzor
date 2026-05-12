@@ -64,9 +64,6 @@ fn main() {
     let blazing_threshold = 5000; // T2 → T3 at 5,000 calls
 
     let config = TieredConfig {
-        enable_background_optimization: true,
-        optimization_check_interval_ms: 50, // Check every 50ms
-        max_parallel_optimizations: 2,      // Max 2 concurrent optimizations
         profile_config: ProfileConfig {
             interpreter_threshold: 5,
             warm_threshold,
@@ -77,8 +74,8 @@ fn main() {
         verbosity: 2, // Verbose output to see tier promotions
         start_interpreted: false,
         bailout_strategy: compiler::codegen::BailoutStrategy::Quick,
-        max_tier_promotions: 3,
         enable_stack_traces: false,
+        enable_tier_promotion: true,
     };
 
     // Create tiered backend and compile module
@@ -153,10 +150,6 @@ fn main() {
         "  Tier 2 (Optimized): {} functions",
         stats.optimized_functions
     );
-
-    println!("\nOptimization Queue:");
-    println!("  Queued: {}", stats.queued_for_optimization);
-    println!("  Currently optimizing: {}", stats.currently_optimizing);
 
     println!("\nProfile Statistics:");
     println!("{}", stats.profile_stats.format());
