@@ -150,7 +150,7 @@ pub enum TypeKind {
 }
 
 /// Function effect annotations
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionEffects {
     /// Can throw exceptions
     pub can_throw: bool,
@@ -160,6 +160,33 @@ pub struct FunctionEffects {
     pub is_pure: bool,
     /// Memory effects for optimization
     pub memory_effects: MemoryEffects,
+    /// Whether this function value is safe to transfer between threads.
+    ///
+    /// Bare named function references and lambdas whose captures are all
+    /// `Send` are `is_send = true`. Closures that capture non-Send values
+    /// (objects without `@:derive([Send])`, etc.) are `is_send = false` —
+    /// they'll fail at `Thread.spawn` / `Future.create` / any other Send sink.
+    ///
+    /// Defaults to `true` because the overwhelmingly common case is a
+    /// function type built without captures (extern functions, named class
+    /// methods, intrinsics). The `FunctionLiteral` lowering path overrides
+    /// this when a lambda captures non-Send state.
+    pub is_send: bool,
+}
+
+impl Default for FunctionEffects {
+    fn default() -> Self {
+        Self {
+            can_throw: false,
+            is_async: false,
+            is_pure: false,
+            memory_effects: MemoryEffects::default(),
+            // Default `is_send = true` so existing call sites that build
+            // function types via `FunctionEffects::default()` keep the
+            // pre-existing permissive behaviour for named function refs.
+            is_send: true,
+        }
+    }
 }
 
 /// Memory effect annotations for optimization
