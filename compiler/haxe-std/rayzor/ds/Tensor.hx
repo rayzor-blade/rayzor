@@ -60,6 +60,23 @@ extern class Tensor {
     @:native("tensor_dtype")
     public function dtype():DType;
 
+    /**
+     * Device tag this tensor lives on, as a raw int:
+     * `0=CPU, 1=Metal, 2=Cuda, 3=Vulkan, 4=WebGPU`. For a typed `Device`
+     * value, call `Tensors.deviceOf(t)` (sibling helper, future). Phase 1a:
+     * every constructor on this class returns a tensor with `deviceTag() == 0`.
+     */
+    @:native("tensor_device")
+    public function deviceTag():Int;
+
+    /**
+     * NUMA node hint (meaningful only when device tag is CPU). `-1` means
+     * "any node" (no affinity); `>= 0` is a specific node from
+     * `rayzor.concurrent.NumaTopology`.
+     */
+    @:native("tensor_numa_node")
+    public function numaNode():Int;
+
     // --- Element access ---
 
     /** Get element at indices */

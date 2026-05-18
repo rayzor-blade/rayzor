@@ -1719,6 +1719,11 @@ register_symbol!("rayzor_tensor_shape", crate::tensor::rayzor_tensor_shape);
 register_symbol!("rayzor_tensor_ndim", crate::tensor::rayzor_tensor_ndim);
 register_symbol!("rayzor_tensor_numel", crate::tensor::rayzor_tensor_numel);
 register_symbol!("rayzor_tensor_dtype", crate::tensor::rayzor_tensor_dtype);
+register_symbol!("rayzor_tensor_device", crate::tensor::rayzor_tensor_device);
+register_symbol!(
+    "rayzor_tensor_numa_node",
+    crate::tensor::rayzor_tensor_numa_node
+);
 register_symbol!(
     "rayzor_tensor_shape_ptr",
     crate::tensor::rayzor_tensor_shape_ptr

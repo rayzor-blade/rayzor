@@ -3315,6 +3315,12 @@ impl StdlibMapping {
             // tensor.dtype(): DType (returns i64 tag)
             map_method!(instance "rayzor_ds_Tensor", "dtype" => "Tensor_dtype", params: 0, mir_wrapper,
                 types: &[PtrVoid] => I64),
+            // tensor.deviceTag(): Int — 0=CPU, 1=Metal, 2=Cuda, 3=Vulkan, 4=WebGPU
+            map_method!(instance "rayzor_ds_Tensor", "deviceTag" => "Tensor_device", params: 0, mir_wrapper,
+                types: &[PtrVoid] => I64),
+            // tensor.numaNode(): Int — NUMA node hint when device==CPU; -1 = any
+            map_method!(instance "rayzor_ds_Tensor", "numaNode" => "Tensor_numa_node", params: 0, mir_wrapper,
+                types: &[PtrVoid] => I64),
             // --- Element access ---
             // tensor.get(indices: Array<Int>): Float
             map_method!(instance "rayzor_ds_Tensor", "get" => "Tensor_get", params: 1, mir_wrapper,
