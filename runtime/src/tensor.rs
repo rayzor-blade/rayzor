@@ -25,6 +25,21 @@ const DTYPE_I32: u8 = 3;
 const DTYPE_I8: u8 = 4;
 const DTYPE_U8: u8 = 5;
 
+// Device tags matching the Haxe Device enum.
+// CPU(node) collapses node into the separate numa_node field on the struct
+// — the tag itself is just "this lives on the CPU side". Vulkan and WebGPU
+// both go through the `wgpu` crate at the runtime layer; the tag merely
+// records which adapter family was selected.
+pub(crate) const DEVICE_CPU: u8 = 0;
+#[allow(dead_code)]
+pub(crate) const DEVICE_METAL: u8 = 1;
+#[allow(dead_code)]
+pub(crate) const DEVICE_CUDA: u8 = 2;
+#[allow(dead_code)]
+pub(crate) const DEVICE_VULKAN: u8 = 3;
+#[allow(dead_code)]
+pub(crate) const DEVICE_WEBGPU: u8 = 4;
+
 fn dtype_size(dtype: u8) -> usize {
     match dtype {
         DTYPE_F32 => 4,
@@ -47,6 +62,13 @@ struct RayzorTensor {
     numel: usize,
     dtype: u8,
     owns_data: bool, // false for views
+    // Device placement. `device` is the device tag (DEVICE_CPU/DEVICE_METAL/
+    // DEVICE_CUDA/DEVICE_WEBGPU). `numa_node` is meaningful only when
+    // device == DEVICE_CPU: -1 means "no affinity hint", >= 0 names a NUMA
+    // node from rayzor.concurrent.NumaTopology. Phase 1a default: every
+    // existing allocation tags itself CPU/-1.
+    device: u8,
+    numa_node: i32,
 }
 
 impl RayzorTensor {
@@ -143,6 +165,8 @@ unsafe fn alloc_tensor(shape: &[usize], dtype: u8, fill: Option<f32>) -> i64 {
         numel,
         dtype,
         owns_data: true,
+        device: DEVICE_CPU,
+        numa_node: -1,
     };
 
     tensor as i64
@@ -267,6 +291,26 @@ pub unsafe extern "C" fn rayzor_tensor_numel(tensor_ptr: i64) -> i64 {
     }
     let t = &*(tensor_ptr as *const RayzorTensor);
     t.numel as i64
+}
+
+/// tensor.device() -> i64 (returns device tag: 0=CPU, 1=Metal, 2=Cuda, 3=WebGPU)
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_device(tensor_ptr: i64) -> i64 {
+    if tensor_ptr == 0 {
+        return DEVICE_CPU as i64;
+    }
+    let t = &*(tensor_ptr as *const RayzorTensor);
+    t.device as i64
+}
+
+/// tensor.numa_node() -> i64 (NUMA node hint when device == CPU; -1 means "any")
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_numa_node(tensor_ptr: i64) -> i64 {
+    if tensor_ptr == 0 {
+        return -1;
+    }
+    let t = &*(tensor_ptr as *const RayzorTensor);
+    t.numa_node as i64
 }
 
 /// tensor.dtype() -> i64 (returns dtype tag)
@@ -441,6 +485,8 @@ pub unsafe extern "C" fn rayzor_tensor_reshape(tensor_ptr: i64, shape_ptr: i64, 
         numel: new_numel,
         dtype: t.dtype,
         owns_data: false, // view
+        device: t.device,
+        numa_node: t.numa_node,
     };
 
     new_t as i64
@@ -500,6 +546,8 @@ pub unsafe extern "C" fn rayzor_tensor_permute(
         numel: t.numel,
         dtype: t.dtype,
         owns_data: false,
+        device: t.device,
+        numa_node: t.numa_node,
     };
     new_t as i64
 }
@@ -565,6 +613,8 @@ pub unsafe extern "C" fn rayzor_tensor_slice(
         numel: new_numel,
         dtype: t.dtype,
         owns_data: false,
+        device: t.device,
+        numa_node: t.numa_node,
     };
     new_t as i64
 }
@@ -608,6 +658,8 @@ pub unsafe extern "C" fn rayzor_tensor_transpose(tensor_ptr: i64) -> i64 {
         numel: t.numel,
         dtype: t.dtype,
         owns_data: false,
+        device: t.device,
+        numa_node: t.numa_node,
     };
 
     new_t as i64

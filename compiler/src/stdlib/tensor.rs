@@ -27,6 +27,8 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
     build_tensor_ndim(builder);
     build_tensor_numel(builder);
     build_tensor_dtype(builder);
+    build_tensor_device(builder);
+    build_tensor_numa_node(builder);
 
     // Element access
     build_tensor_get(builder);
@@ -135,6 +137,8 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
         "rayzor_tensor_ndim",
         "rayzor_tensor_numel",
         "rayzor_tensor_dtype",
+        "rayzor_tensor_device",
+        "rayzor_tensor_numa_node",
         "rayzor_tensor_shape_ptr",
         "rayzor_tensor_shape_ndim",
     ] {
@@ -596,6 +600,12 @@ build_simple_i64_to_i64!(build_tensor_shape, "Tensor_shape", "rayzor_tensor_shap
 build_simple_i64_to_i64!(build_tensor_ndim, "Tensor_ndim", "rayzor_tensor_ndim");
 build_simple_i64_to_i64!(build_tensor_numel, "Tensor_numel", "rayzor_tensor_numel");
 build_simple_i64_to_i64!(build_tensor_dtype, "Tensor_dtype", "rayzor_tensor_dtype");
+build_simple_i64_to_i64!(build_tensor_device, "Tensor_device", "rayzor_tensor_device");
+build_simple_i64_to_i64!(
+    build_tensor_numa_node,
+    "Tensor_numa_node",
+    "rayzor_tensor_numa_node"
+);
 
 // Transpose (no extra params)
 build_simple_i64_to_i64!(
