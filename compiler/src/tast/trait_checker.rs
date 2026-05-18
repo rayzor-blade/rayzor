@@ -11,11 +11,10 @@ use crate::tast::{
     StringInterner, SymbolId, SymbolTable, TypeId, TypeTable,
 };
 use std::cell::RefCell;
-use std::rc::Rc;
 
 /// Trait checker for querying trait implementations
 pub struct TraitChecker<'a> {
-    type_table: &'a Rc<RefCell<TypeTable>>,
+    type_table: &'a RefCell<TypeTable>,
     symbol_table: &'a SymbolTable,
     /// Map from SymbolId to TypedClass for quick lookup
     class_map: std::collections::BTreeMap<SymbolId, &'a TypedClass>,
@@ -26,7 +25,7 @@ pub struct TraitChecker<'a> {
 impl<'a> TraitChecker<'a> {
     /// Create a new trait checker
     pub fn new(
-        type_table: &'a Rc<RefCell<TypeTable>>,
+        type_table: &'a RefCell<TypeTable>,
         symbol_table: &'a SymbolTable,
         string_interner: &'a StringInterner,
         classes: &'a [TypedClass],
@@ -107,8 +106,20 @@ impl<'a> TraitChecker<'a> {
                 self.class_implements_trait(*symbol_id, trait_)
             }
 
-            // Function types: NOT Send/Sync by default (captures unknown)
-            TypeKind::Function { .. } => false,
+            // Function types: Send-ness is tracked on `FunctionEffects.is_send`.
+            // Bare function refs / lambdas-with-Send-captures default to true;
+            // closures that capture non-Send state get `is_send = false` at
+            // FunctionLiteral TAST lowering time. Sync follows the same flag —
+            // a Send-safe function is also safe to share (it has no mutable
+            // state of its own).
+            TypeKind::Function { effects, .. } => match trait_ {
+                DerivedTrait::Send | DerivedTrait::Sync => effects.is_send,
+                // Copy / Clone for function types are pre-existing trivia:
+                // function values are bit-pattern Copy (they're code pointers
+                // + a possibly-aliased env pointer). Keep as `true` to match
+                // the prior implicit behaviour for non-Send traits.
+                _ => true,
+            },
 
             // Arrays: Send/Sync if element is Send/Sync
             TypeKind::Array { element_type } => self.implements_trait(*element_type, trait_),
@@ -213,8 +224,8 @@ impl<'a> TraitChecker<'a> {
 mod tests {
     use super::*;
 
-    fn create_test_context() -> (Rc<RefCell<TypeTable>>, SymbolTable, StringInterner) {
-        let type_table = Rc::new(RefCell::new(TypeTable::new()));
+    fn create_test_context() -> (RefCell<TypeTable>, SymbolTable, StringInterner) {
+        let type_table = RefCell::new(TypeTable::new());
         let symbol_table = SymbolTable::new();
         let string_interner = StringInterner::new();
         (type_table, symbol_table, string_interner)
@@ -256,7 +267,14 @@ mod tests {
     }
 
     #[test]
-    fn test_function_types_not_send_sync() {
+    fn test_default_function_types_are_send_sync() {
+        // Send-ness is tracked on `FunctionEffects.is_send`. The default
+        // factory builds function types with `is_send = true` — matching
+        // the common case of bare named function references (extern stdlib
+        // functions, named class methods, intrinsics) which have no
+        // captures and are bit-pattern Send. Closures that capture non-Send
+        // state get `is_send = false` set explicitly at FunctionLiteral
+        // TAST lowering time; see ast_lowering.rs.
         let (type_table, symbol_table, string_interner) = create_test_context();
         let classes: Vec<TypedClass> = vec![];
         let checker = TraitChecker::new(&type_table, &symbol_table, &string_interner, &classes);
@@ -266,9 +284,31 @@ mod tests {
             .borrow_mut()
             .create_function_type(vec![], void_type);
 
-        // Function types are NOT Send/Sync by default (captures unknown)
-        assert!(!checker.is_send(func_type));
-        assert!(!checker.is_sync(func_type));
+        assert!(checker.is_send(func_type));
+        assert!(checker.is_sync(func_type));
+    }
+
+    #[test]
+    fn test_non_send_closure_is_rejected() {
+        // Explicit `is_send = false` via `create_function_type_with_effects`
+        // is honoured — represents a closure that captures non-Send state.
+        use crate::tast::core::FunctionEffects;
+        let (type_table, symbol_table, string_interner) = create_test_context();
+        let classes: Vec<TypedClass> = vec![];
+        let checker = TraitChecker::new(&type_table, &symbol_table, &string_interner, &classes);
+
+        let void_type = type_table.borrow().void_type();
+        let effects = FunctionEffects {
+            is_send: false,
+            ..Default::default()
+        };
+        let closure_type =
+            type_table
+                .borrow_mut()
+                .create_function_type_with_effects(vec![], void_type, effects);
+
+        assert!(!checker.is_send(closure_type));
+        assert!(!checker.is_sync(closure_type));
     }
 
     // TODO: Add comprehensive tests with actual TypedClass instances

@@ -87,7 +87,7 @@ pub type ValidationResult<T> = Result<T, SendSyncError>;
 pub struct SendSyncValidator<'a> {
     trait_checker: TraitChecker<'a>,
     core_checker: CoreTypeChecker<'a>,
-    type_table: &'a Rc<RefCell<TypeTable>>,
+    type_table: &'a RefCell<TypeTable>,
     symbol_table: &'a SymbolTable,
     string_interner: &'a StringInterner,
 }
@@ -95,7 +95,7 @@ pub struct SendSyncValidator<'a> {
 impl<'a> SendSyncValidator<'a> {
     /// Create a new Send/Sync validator
     pub fn new(
-        type_table: &'a Rc<RefCell<TypeTable>>,
+        type_table: &'a RefCell<TypeTable>,
         symbol_table: &'a SymbolTable,
         string_interner: &'a StringInterner,
         classes: &'a [TypedClass],

@@ -7,7 +7,6 @@
 use crate::tast::core::TypeKind;
 use crate::tast::{StringInterner, SymbolId, SymbolTable, TypeId, TypeTable};
 use std::cell::RefCell;
-use std::rc::Rc;
 
 /// Fully qualified paths for Rayzor core types
 pub struct CoreTypePaths {
@@ -32,7 +31,7 @@ impl CoreTypePaths {
 
 /// Core type identifier for Rayzor stdlib types
 pub struct CoreTypeChecker<'a> {
-    type_table: &'a Rc<RefCell<TypeTable>>,
+    type_table: &'a RefCell<TypeTable>,
     symbol_table: &'a SymbolTable,
     string_interner: &'a StringInterner,
     paths: CoreTypePaths,
@@ -41,7 +40,7 @@ pub struct CoreTypeChecker<'a> {
 impl<'a> CoreTypeChecker<'a> {
     /// Create a new core type checker
     pub fn new(
-        type_table: &'a Rc<RefCell<TypeTable>>,
+        type_table: &'a RefCell<TypeTable>,
         symbol_table: &'a SymbolTable,
         string_interner: &'a StringInterner,
     ) -> Self {

@@ -5295,12 +5295,16 @@ impl<'a> AstLowering<'a> {
 
                 let return_type_id = self.lower_type(ret)?;
 
-                // Create function type with default effects
+                // Create function type with default effects. `is_send = true`
+                // is the right default here — this branch builds a function
+                // type from a declaration (no capture analysis available),
+                // and bare function declarations are Send-by-default.
                 let effects = crate::tast::core::FunctionEffects {
                     can_throw: false,
                     is_async: false,
                     is_pure: false,
                     memory_effects: crate::tast::core::MemoryEffects::None,
+                    is_send: true,
                 };
 
                 Ok(self.context.type_table.borrow_mut().create_type(
@@ -9281,13 +9285,65 @@ impl<'a> AstLowering<'a> {
         // Exit function scope
         self.context.exit_scope();
 
+        // Compute Send-ness from the lambda's free variables. A lambda whose
+        // captures are all `Send` produces a Function value that's itself
+        // `Send` — safe to pass to `Thread.spawn` / `Future.create` / any
+        // other Send sink. A lambda that captures non-Send state (an object
+        // without `@:derive([Send])`, etc.) yields a Function value with
+        // `is_send = false`, propagating the constraint through every
+        // subsequent API the value passes through.
+        //
+        // Without this, the trait checker's `TypeKind::Function` rule has
+        // to either reject ALL function values (over-restrictive: rejects
+        // legitimate `Thread.spawn(named_fn)` calls and breaks `NumaPool`,
+        // `Future.all`, etc.) or accept ALL function values (unsound:
+        // closures with non-Send captures escape to other threads). The
+        // per-construction Send computation lets us be precise.
+        let captures_are_send = {
+            use crate::tast::capture_analyzer::CaptureAnalyzer;
+            use crate::tast::trait_checker::TraitChecker;
+            let analyzer = CaptureAnalyzer::new(crate::tast::ScopeId::invalid());
+            let analysis = analyzer.analyze_function_literal(&lambda_params, &body);
+            // No `classes` slice available at this lowering site — we're
+            // still inside class lowering. The class-side `@:derive([Send])`
+            // metadata gets checked at TAST-pipeline validation time
+            // (`SendSyncValidator`), which has the full class list. Here we
+            // catch the primitive/extern cases; class captures fall through
+            // permissively and get re-checked later at the Thread.spawn
+            // sink. The two checks compose: this site computes is_send for
+            // primitives + closures-of-closures; the spawn site catches
+            // user-defined class captures that didn't `@:derive([Send])`.
+            let trait_checker = TraitChecker::new(
+                self.context.type_table,
+                self.context.symbol_table,
+                self.context.string_interner,
+                &[],
+            );
+            analysis
+                .captures
+                .iter()
+                .all(|c| !c.type_id.is_valid() || trait_checker.is_send(c.type_id))
+        };
+
         // Result type: function from unbound params → return type
         let lambda_param_types: Vec<TypeId> = lambda_params.iter().map(|p| p.param_type).collect();
-        let result_type = self
-            .context
-            .type_table
-            .borrow_mut()
-            .create_function_type(lambda_param_types, func_return_type);
+        let result_type = if captures_are_send {
+            // Common case — route through the cached factory.
+            self.context
+                .type_table
+                .borrow_mut()
+                .create_function_type(lambda_param_types, func_return_type)
+        } else {
+            // Non-Send capture present — bypass the shape-keyed cache so
+            // this lambda's TypeId carries the `is_send = false` bit
+            // independently from any other lambda of the same signature.
+            let mut effects = crate::tast::core::FunctionEffects::default();
+            effects.is_send = false;
+            self.context
+                .type_table
+                .borrow_mut()
+                .create_function_type_with_effects(lambda_param_types, func_return_type, effects)
+        };
 
         Ok(TypedExpression {
             kind: TypedExpressionKind::FunctionLiteral {
