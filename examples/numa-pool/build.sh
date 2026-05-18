@@ -42,7 +42,9 @@ if [ "$needs_pack" -eq 1 ]; then
     --name rayzor-numa
 fi
 
-# 3. Run the demo.
+# 3. Run the demo. Clear the project's .rayzor cache first so an old
+# cached MIR can't shadow a freshly-repacked rpkg's Haxe source.
 echo
 echo "Running numa-pool demo..."
+rm -rf .rayzor
 "$RAYZOR" run Main.hx

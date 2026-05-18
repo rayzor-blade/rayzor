@@ -9304,15 +9304,6 @@ impl<'a> AstLowering<'a> {
             use crate::tast::trait_checker::TraitChecker;
             let analyzer = CaptureAnalyzer::new(crate::tast::ScopeId::invalid());
             let analysis = analyzer.analyze_function_literal(&lambda_params, &body);
-            // No `classes` slice available at this lowering site — we're
-            // still inside class lowering. The class-side `@:derive([Send])`
-            // metadata gets checked at TAST-pipeline validation time
-            // (`SendSyncValidator`), which has the full class list. Here we
-            // catch the primitive/extern cases; class captures fall through
-            // permissively and get re-checked later at the Thread.spawn
-            // sink. The two checks compose: this site computes is_send for
-            // primitives + closures-of-closures; the spawn site catches
-            // user-defined class captures that didn't `@:derive([Send])`.
             let trait_checker = TraitChecker::new(
                 self.context.type_table,
                 self.context.symbol_table,
