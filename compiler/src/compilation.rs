@@ -5295,6 +5295,21 @@ impl CompilationUnit {
         let violations = ownership_graph.check_use_after_move();
         let mut diagnostics = Vec::new();
 
+        // Build a trait checker so we can drop violations on `Copy` types —
+        // Int / Float / Bool and any class deriving Copy are pass-by-value
+        // semantically (matches Haxe + Rust), so `i++` in a for-loop or
+        // passing an Int to a function does NOT consume the variable. The
+        // ownership graph conservatively records all variable references
+        // as moves; this filter removes the false positives at diagnostic
+        // emission time. Classes that genuinely need move semantics (no
+        // Copy derive) still surface their warnings.
+        let trait_checker = crate::tast::trait_checker::TraitChecker::new(
+            self.type_table.as_ref(),
+            &self.symbol_table,
+            &self.string_interner,
+            &typed_file.classes,
+        );
+
         for violation in violations {
             if let crate::semantic_graph::OwnershipViolation::UseAfterMove {
                 variable,
@@ -5303,6 +5318,14 @@ impl CompilationUnit {
                 ..
             } = violation
             {
+                // Skip if the variable is Copy — `i` in `i++`, primitives
+                // passed to functions, etc. shouldn't fire the warning.
+                if let Some(node) = ownership_graph.variables.get(&variable) {
+                    if node.variable_type.is_valid() && trait_checker.is_copy(node.variable_type) {
+                        continue;
+                    }
+                }
+
                 let var_name = self.get_symbol_name(variable, typed_file);
                 let file_id = diagnostics::FileId::new(use_location.file_id as usize);
                 let use_start = diagnostics::SourcePosition::new(
