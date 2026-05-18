@@ -946,6 +946,19 @@ fn run_file(
     // eprintln!("[DEBUG] extra_source_dirs={:?}", extra_source_dirs_from_manifest);
     let manifest_dirs = extra_source_dirs_from_manifest.clone();
     rpkg_source_dirs.extend(extra_source_dirs_from_manifest);
+
+    // Resolve manifest [dependencies] → .rpkg paths and merge with any
+    // explicit --rpkg flags. CLI flags take precedence by appearing later
+    // in the resulting list, which matters when a project depends on a
+    // version that the user wants to override locally.
+    let mut effective_rpkg_files = if let Some(project) = manifest_project.as_ref() {
+        compiler::workspace::resolve_dependencies(&project.manifest, &project.root)?
+    } else {
+        Vec::new()
+    };
+    effective_rpkg_files.extend(rpkg_files.iter().cloned());
+    let rpkg_files = effective_rpkg_files;
+
     for rpkg_path in &rpkg_files {
         match compiler::rpkg::install::RpkgPlugin::load(rpkg_path) {
             Ok(rpkg) => {

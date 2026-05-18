@@ -1,0 +1,14 @@
+[project]
+name = "numa-pool"
+entry = "Main.hx"
+
+[build]
+class-paths = ["."]
+
+[dependencies]
+# rayzor-numa supplies rayzor.concurrent.NumaTopology + NumaPool. The
+# bundled rpkg ships the native cdylib AND the .hx extern declarations;
+# nothing else needs to be on the class path. The CLI auto-finds the
+# .rpkg inside the directory (or with the `.rpkg` extension auto-appended)
+# — see `compiler/src/workspace/deps.rs` for the supported shapes.
+rayzor-numa = { path = "../../numa" }
