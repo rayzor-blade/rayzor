@@ -49,16 +49,17 @@ mod platform;
 
 declare_native_methods! {
     NUMA_METHODS;
-    // class,                                method,             kind,    symbol,                              params  => return
-    "rayzor_concurrent_NumaTopology", "available",         static,  "rayzor_numa_available",             []      => Bool;
-    "rayzor_concurrent_NumaTopology", "nodeCount",         static,  "rayzor_numa_node_count",            []      => I64;
-    "rayzor_concurrent_NumaTopology", "cpuCount",          static,  "rayzor_numa_cpu_count",             []      => I64;
-    "rayzor_concurrent_NumaTopology", "cpuToNode",         static,  "rayzor_numa_cpu_to_node",           [I64]   => I64;
-    // node_cpus has a writable buffer parameter (Ptr to i32 slots) — Haxe
-    // wraps it in a higher-level API on NumaTopology that hides the buffer.
-    "rayzor_concurrent_NumaTopology", "_nodeCpusRaw",      static,  "rayzor_numa_node_cpus",             [I64, Ptr, I64] => I64;
-    "rayzor_concurrent_NumaTopology", "bindCurrent",       static,  "rayzor_numa_bind_current_thread",   [I64]   => I64;
-    "rayzor_concurrent_NumaTopology", "unbindCurrent",     static,  "rayzor_numa_unbind_current_thread", []      => I64;
+    // class,                            method,         kind,   symbol,                            params  => return
+    "rayzor_concurrent_NumaTopology", "available",    static, "rayzor_numa_available",           []    => Bool;
+    "rayzor_concurrent_NumaTopology", "nodeCount",    static, "rayzor_numa_node_count",          []    => I64;
+    "rayzor_concurrent_NumaTopology", "cpuCount",     static, "rayzor_numa_cpu_count",           []    => I64;
+    "rayzor_concurrent_NumaTopology", "cpuToNode",    static, "rayzor_numa_cpu_to_node",         [I64] => I64;
+    "rayzor_concurrent_NumaTopology", "bindCurrent",  static, "rayzor_numa_bind_current_thread", [I64] => I64;
+    "rayzor_concurrent_NumaTopology", "unbindCurrent",static, "rayzor_numa_unbind_current_thread",[]   => I64;
+    // rayzor_numa_node_cpus (raw buffer fill) is exposed as a C symbol
+    // via get_runtime_symbols() but not auto-mapped to Haxe — its `Ptr`
+    // parameter has no clean Haxe representation. Haxe callers compute
+    // the per-node CPU set from cpuCount + cpuToNode instead.
 }
 
 // ---------------------------------------------------------------------------

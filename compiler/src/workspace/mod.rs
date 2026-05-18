@@ -4,11 +4,13 @@
 //! multi-project workspaces, shared BLADE caches, and backwards
 //! compatibility with `.hxml` build files.
 
+pub mod deps;
 pub mod init;
 pub mod manifest;
 
 use std::path::{Path, PathBuf};
 
+pub use deps::resolve_dependencies;
 pub use manifest::{
     BuildConfig, BundleConfig as ManifestBundleConfig, CacheConfig, ProjectManifest,
     RayzorManifest, WorkspaceCacheConfig, WorkspaceManifest,

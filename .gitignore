@@ -55,3 +55,6 @@ compiler/benchmarks/charts/*.html
 ci/thread-test/logs/
 examples/**/.rayzor/
 **/.rayzor/build/
+
+# rayzor-numa rpkg artifact (rebuilt by examples/numa-pool/build.sh)
+/numa/*.rpkg
