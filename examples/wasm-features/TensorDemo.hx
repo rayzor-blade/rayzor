@@ -1,4 +1,4 @@
-import rayzor.Tensor;
+import rayzor.ds.Tensor;
 
 /**
  * Tensor demo — construction, elementwise, matmul, reductions.
