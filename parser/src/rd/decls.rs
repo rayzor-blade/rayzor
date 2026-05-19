@@ -556,8 +556,16 @@ impl<'a, 'b> RdParser<'a, 'b> {
             self.stream.advance();
             None
         } else {
-            // Expression body (for inline functions)
-            Some(Box::new(self.parse_expression()?))
+            // Expression body, e.g. `function f():T return expr;`. The
+            // trailing `;` is the function declaration's terminator, not
+            // part of the expression — eat it here so the caller's class-
+            // body loop doesn't see a stray `;` and emit a parse error
+            // (the RD-parser failure then triggers the nom fallback, which
+            // doesn't know the parameterised arrow type form and silently
+            // returns an empty file).
+            let expr = self.parse_expression()?;
+            self.stream.eat(TokenKind::Semicolon);
+            Some(Box::new(expr))
         };
 
         Ok(Function {
