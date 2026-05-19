@@ -18,17 +18,19 @@ use crate::buffer;
 use crate::kernel_ir::KernelOp;
 
 /// Map a dtype tag to the corresponding MSL type string.
-/// MSL has native `half` (16-bit IEEE) on all Metal families; Phase 3d
-/// will route F16 there. BF16 has no native MSL type — stored as ushort,
-/// converted in kernel. FP8 likewise needs dequant-in-kernel (Phase 3e).
+///
+/// - F16 → `half` (native 16-bit IEEE on every Metal GPU family)
+/// - BF16 → no native MSL type → stored as `ushort`, converted in-kernel
+///   when read into a `float` accumulator (Phase 3e will add the helper)
+/// - FP8 → dequant-on-load → kernel-visible type is `float`
 pub fn dtype_to_msl(dtype: u8) -> &'static str {
     match dtype {
         buffer::DTYPE_F32 => "float",
         buffer::DTYPE_I32 => "int",
-        // F16/BF16/FP8 fall back to float until Phases 3d/3e wire them.
-        buffer::DTYPE_F16 | buffer::DTYPE_BF16 => "float",
+        buffer::DTYPE_F16 => "half",
+        // BF16 stored as ushort; in-kernel cast pattern: `as_type<float>(uint(x) << 16)`
+        buffer::DTYPE_BF16 => "float",
         buffer::DTYPE_FP8_E4M3 | buffer::DTYPE_FP8_E5M2 => "float",
-        // Integer storage formats.
         buffer::DTYPE_I8 => "char",
         buffer::DTYPE_U8 => "uchar",
         _ => "float",
@@ -178,6 +180,14 @@ mod tests {
         // Unary ops go through emit_unary_elementwise
         let src = emit_kernel(KernelOp::Exp, buffer::DTYPE_F32);
         assert!(src.contains("rayzor_exp_float"));
+    }
+
+    #[test]
+    fn f16_uses_metal_half_type() {
+        let src = emit_binary_elementwise(KernelOp::Add, buffer::DTYPE_F16);
+        assert!(src.contains("rayzor_add_half"));
+        assert!(src.contains("device const half* a"));
+        assert!(src.contains("device half* result"));
     }
 
     #[test]

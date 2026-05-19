@@ -11,19 +11,37 @@ use crate::kernel_ir::KernelOp;
 pub const WORKGROUP_SIZE: u32 = 256;
 
 /// Map a dtype tag to the corresponding WGSL type string.
-/// F16/BF16 require the `enable f16;` extension — wired in Phase 3d.
-/// FP8 needs dequant-in-kernel via Phase 3e.
+///
+/// - F16 emits the `f16` type (requires `enable f16;` — see `wgsl_prelude`)
+/// - BF16 has no native WGSL type → stored as `u32` and unpacked in-kernel
+/// - FP8 dequants on load (Phase 3e) → kernel-visible type is `f32`
+/// - I8/U8 stored as `u32`-packed; kernel works in i32 in-register
 pub fn dtype_to_wgsl(dtype: u8) -> &'static str {
     match dtype {
         buffer::DTYPE_F32 => "f32",
         buffer::DTYPE_I32 => "i32",
-        // F16/BF16 fall back to f32 here until Phase 3d enables the extension.
-        buffer::DTYPE_F16 | buffer::DTYPE_BF16 => "f32",
+        buffer::DTYPE_F16 => "f16",
+        // BF16: u16 bit pattern stored as packed u32; in-kernel unpack to f32.
+        buffer::DTYPE_BF16 => "f32",
         // FP8 storage formats — kernel-side dequant handled in Phase 3e.
         buffer::DTYPE_FP8_E4M3 | buffer::DTYPE_FP8_E5M2 => "f32",
-        // Integer storage formats.
         buffer::DTYPE_I8 | buffer::DTYPE_U8 => "i32",
         _ => "f32",
+    }
+}
+
+/// Optional WGSL prelude that must appear above any shader using a given
+/// dtype. Returns `""` when no prelude is needed.
+///
+/// For F16, this emits `enable f16;` — a WGSL extension that gates the
+/// `f16` type. Adapters announce support via the `shader-f16` feature; the
+/// host must request it at device-init time. As of 2026 Chrome (Tint),
+/// Safari (WebKit-WSL), and Firefox all ship this extension on hardware
+/// that supports ARMv8.2-A FP16 / Vulkan VK_KHR_shader_float16_int8.
+pub fn wgsl_prelude(dtype: u8) -> &'static str {
+    match dtype {
+        buffer::DTYPE_F16 => "enable f16;\n",
+        _ => "",
     }
 }
 
@@ -51,6 +69,7 @@ pub fn kernel_num_buffers(op: KernelOp) -> usize {
 
 /// Generate WGSL source for a binary elementwise operation.
 pub fn emit_binary_elementwise(op: KernelOp, dtype: u8) -> String {
+    let prelude = wgsl_prelude(dtype);
     let wgsl_type = dtype_to_wgsl(dtype);
     let fn_name = kernel_fn_name(op, dtype);
     let op_expr = match op {
@@ -62,7 +81,7 @@ pub fn emit_binary_elementwise(op: KernelOp, dtype: u8) -> String {
     };
 
     format!(
-        r#"@group(0) @binding(0) var<storage, read> a: array<{wgsl_type}>;
+        r#"{prelude}@group(0) @binding(0) var<storage, read> a: array<{wgsl_type}>;
 @group(0) @binding(1) var<storage, read> b: array<{wgsl_type}>;
 @group(0) @binding(2) var<storage, read_write> result: array<{wgsl_type}>;
 
@@ -80,6 +99,7 @@ fn {fn_name}(@builtin(global_invocation_id) gid: vec3<u32>) {{
 
 /// Generate WGSL source for a unary elementwise operation.
 pub fn emit_unary_elementwise(op: KernelOp, dtype: u8) -> String {
+    let prelude = wgsl_prelude(dtype);
     let wgsl_type = dtype_to_wgsl(dtype);
     let fn_name = kernel_fn_name(op, dtype);
     let op_expr = match op {
@@ -89,18 +109,22 @@ pub fn emit_unary_elementwise(op: KernelOp, dtype: u8) -> String {
         KernelOp::Exp => "exp(a[id])".to_string(),
         KernelOp::Log => "log(a[id])".to_string(),
         KernelOp::Relu => format!("max({wgsl_type}(0), a[id])"),
-        KernelOp::Sigmoid => "1.0 / (1.0 + exp(-a[id]))".to_string(),
+        KernelOp::Sigmoid => format!("{wgsl_type}(1) / ({wgsl_type}(1) + exp(-a[id]))"),
         KernelOp::Tanh => "tanh(a[id])".to_string(),
         KernelOp::Gelu => {
-            "a[id] * 0.5 * (1.0 + tanh(0.7978845608 * (a[id] + 0.044715 * a[id] * a[id] * a[id])))"
-                .to_string()
+            // Constants are written as f32 literals; WGSL implicitly converts
+            // when the surrounding expression is `f16`. We cast the leading
+            // multiplier to `wgsl_type` to anchor type inference correctly.
+            format!(
+                "a[id] * {wgsl_type}(0.5) * ({wgsl_type}(1) + tanh({wgsl_type}(0.7978845608) * (a[id] + {wgsl_type}(0.044715) * a[id] * a[id] * a[id])))"
+            )
         }
-        KernelOp::Silu => "a[id] / (1.0 + exp(-a[id]))".to_string(),
+        KernelOp::Silu => format!("a[id] / ({wgsl_type}(1) + exp(-a[id]))"),
         _ => unreachable!("not a unary op"),
     };
 
     format!(
-        r#"@group(0) @binding(0) var<storage, read> a: array<{wgsl_type}>;
+        r#"{prelude}@group(0) @binding(0) var<storage, read> a: array<{wgsl_type}>;
 @group(0) @binding(1) var<storage, read_write> result: array<{wgsl_type}>;
 
 @compute @workgroup_size({WORKGROUP_SIZE})
@@ -167,6 +191,27 @@ mod tests {
     fn test_unary_relu_f32() {
         let src = emit_unary_elementwise(KernelOp::Relu, buffer::DTYPE_F32);
         assert!(src.contains("max(f32(0), a[id])"));
+    }
+
+    #[test]
+    fn f16_emits_enable_extension_and_native_type() {
+        let src = emit_binary_elementwise(KernelOp::Add, buffer::DTYPE_F16);
+        assert!(src.starts_with("enable f16;"));
+        assert!(src.contains("array<f16>"));
+        assert!(src.contains("a[id] + b[id]"));
+    }
+
+    #[test]
+    fn f32_kernel_omits_f16_extension() {
+        let src = emit_binary_elementwise(KernelOp::Add, buffer::DTYPE_F32);
+        assert!(!src.contains("enable f16;"));
+    }
+
+    #[test]
+    fn f16_unary_relu_uses_f16_zero() {
+        let src = emit_unary_elementwise(KernelOp::Relu, buffer::DTYPE_F16);
+        assert!(src.contains("enable f16;"));
+        assert!(src.contains("max(f16(0), a[id])"));
     }
 
     #[test]

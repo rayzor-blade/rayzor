@@ -12,19 +12,30 @@ use crate::buffer;
 use crate::kernel_ir::KernelOp;
 
 /// Map a dtype tag to the corresponding CUDA C type string.
-/// CUDA `__half` (sm_53+) for F16 and `__nv_bfloat16` (sm_80+) for BF16
-/// are routed in Phase 3d. FP8 needs sm_89+ headers — Phase 3e.
+///
+/// - F16 → `__half` (sm_53+ — Maxwell+); arithmetic via cuda_fp16.h
+/// - BF16 → `__nv_bfloat16` (sm_80+ — Ampere+); arithmetic via cuda_bf16.h
+/// - FP8 → dequant-on-load → kernel-visible type is `float` (Phase 3e)
 pub fn dtype_to_cuda(dtype: u8) -> &'static str {
     match dtype {
         buffer::DTYPE_F32 => "float",
         buffer::DTYPE_I32 => "int",
-        // F16/BF16/FP8 fall back to float until Phases 3d/3e wire them.
-        buffer::DTYPE_F16 | buffer::DTYPE_BF16 => "float",
+        buffer::DTYPE_F16 => "__half",
+        buffer::DTYPE_BF16 => "__nv_bfloat16",
         buffer::DTYPE_FP8_E4M3 | buffer::DTYPE_FP8_E5M2 => "float",
-        // Integer storage formats.
         buffer::DTYPE_I8 => "signed char",
         buffer::DTYPE_U8 => "unsigned char",
         _ => "float",
+    }
+}
+
+/// Optional `#include` prelude for CUDA source. Returns an empty string for
+/// dtypes that don't need an extra header (F32/I32/U8 etc.).
+pub fn cuda_prelude(dtype: u8) -> &'static str {
+    match dtype {
+        buffer::DTYPE_F16 => "#include <cuda_fp16.h>\n",
+        buffer::DTYPE_BF16 => "#include <cuda_bf16.h>\n",
+        _ => "",
     }
 }
 
@@ -56,6 +67,7 @@ pub fn kernel_num_buffers(op: KernelOp) -> usize {
 
 /// Generate CUDA source for a binary elementwise operation.
 pub fn emit_binary_elementwise(op: KernelOp, dtype: u8) -> String {
+    let prelude = cuda_prelude(dtype);
     let cuda_type = dtype_to_cuda(dtype);
     let fn_name = kernel_fn_name(op, dtype);
     let op_expr = match op {
@@ -67,7 +79,7 @@ pub fn emit_binary_elementwise(op: KernelOp, dtype: u8) -> String {
     };
 
     format!(
-        r#"extern "C" __global__ void {fn_name}(
+        r#"{prelude}extern "C" __global__ void {fn_name}(
     const {cuda_type}* a,
     const {cuda_type}* b,
     {cuda_type}* result,
@@ -84,6 +96,7 @@ pub fn emit_binary_elementwise(op: KernelOp, dtype: u8) -> String {
 
 /// Generate CUDA source for a unary elementwise operation.
 pub fn emit_unary_elementwise(op: KernelOp, dtype: u8) -> String {
+    let prelude = cuda_prelude(dtype);
     let cuda_type = dtype_to_cuda(dtype);
     let fn_name = kernel_fn_name(op, dtype);
     let op_expr = match op {
@@ -103,7 +116,7 @@ pub fn emit_unary_elementwise(op: KernelOp, dtype: u8) -> String {
     };
 
     format!(
-        r#"extern "C" __global__ void {fn_name}(
+        r#"{prelude}extern "C" __global__ void {fn_name}(
     const {cuda_type}* a,
     {cuda_type}* result,
     unsigned int numel
@@ -220,6 +233,28 @@ mod tests {
         let src = emit_unary_elementwise(KernelOp::Relu, buffer::DTYPE_F32);
         assert!(src.contains("rayzor_relu_float"));
         assert!(src.contains("a[id] >"));
+    }
+
+    #[test]
+    fn f16_includes_cuda_fp16_header() {
+        let src = emit_binary_elementwise(KernelOp::Add, buffer::DTYPE_F16);
+        assert!(src.contains("#include <cuda_fp16.h>"));
+        assert!(src.contains("rayzor_add___half"));
+        assert!(src.contains("const __half* a"));
+    }
+
+    #[test]
+    fn bf16_includes_cuda_bf16_header() {
+        let src = emit_binary_elementwise(KernelOp::Mul, buffer::DTYPE_BF16);
+        assert!(src.contains("#include <cuda_bf16.h>"));
+        assert!(src.contains("__nv_bfloat16"));
+    }
+
+    #[test]
+    fn f32_kernel_omits_fp16_header() {
+        let src = emit_binary_elementwise(KernelOp::Add, buffer::DTYPE_F32);
+        assert!(!src.contains("cuda_fp16.h"));
+        assert!(!src.contains("cuda_bf16.h"));
     }
 
     #[test]
