@@ -129,9 +129,43 @@ extern class Tensor {
 
     // --- Linear algebra ---
 
-    /** Matrix multiplication */
+    /** Matrix multiplication (2-D × 2-D → 2-D). */
     @:native("tensor_matmul")
     public function matmul(other:Tensor):Tensor;
+
+    /**
+     * Batched 3-D matrix multiplication. `self [batch, M, K]` ×
+     * `other [batch, K, N]` → `[batch, M, N]`. Each batch slice runs an
+     * independent matmul; SIMD axpy fast path on F32, scalar fallback on
+     * other dtypes.
+     */
+    @:native("tensor_bmm")
+    public function bmm(other:Tensor):Tensor;
+
+    /**
+     * Fill the upper triangle of the last two dims with `-inf` so a
+     * subsequent softmax row reads those positions as zero probability.
+     * `positionOffset` shifts the diagonal — 0 for prefill, positive
+     * for incremental decode where the new query is at logical position
+     * `positionOffset`. Mutates in place; returns `this` for chaining.
+     */
+    @:native("tensor_causal_mask_")
+    public function causalMask_(positionOffset:Int):Tensor;
+
+    /**
+     * Multiply every element by a scalar. Returns a new tensor; uses the
+     * SIMD `mul_const_slice` fast path for F32 inputs.
+     */
+    @:native("tensor_scale")
+    public function scale(factor:Float):Tensor;
+
+    /**
+     * Swap the last two dimensions (zero-copy view). Equivalent to
+     * `permute([..., ndim-1, ndim-2])` but doesn't require an indices
+     * array literal at the call site.
+     */
+    @:native("tensor_transpose_last2")
+    public function transposeLast2():Tensor;
 
     /** Dot product (flattened) */
     @:native("tensor_dot")

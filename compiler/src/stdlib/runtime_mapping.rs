@@ -3412,6 +3412,20 @@ impl StdlibMapping {
             // Tensor.ropeSinTable(headDim: Int, maxSeqLen: Int, base: Float): Tensor
             map_method!(static "rayzor_ds_Tensor", "ropeSinTable" => "Tensor_rope_sin_table", params: 3, mir_wrapper,
                 types: &[I64, I64, F64] => PtrVoid),
+
+            // Attention building blocks — composed by nue.transformer in Haxe
+            // tensor.bmm(other: Tensor): Tensor   (batched 3-D matmul)
+            map_method!(instance "rayzor_ds_Tensor", "bmm" => "Tensor_bmm", params: 1, mir_wrapper,
+                types: &[PtrVoid, PtrVoid] => PtrVoid),
+            // tensor.causalMask_(positionOffset: Int): Tensor   (in-place; returns self)
+            map_method!(instance "rayzor_ds_Tensor", "causalMask_" => "Tensor_causal_mask_", params: 1, mir_wrapper,
+                types: &[PtrVoid, I64] => PtrVoid),
+            // tensor.scale(factor: Float): Tensor
+            map_method!(instance "rayzor_ds_Tensor", "scale" => "Tensor_scale", params: 1, mir_wrapper,
+                types: &[PtrVoid, F64] => PtrVoid),
+            // tensor.transposeLast2(): Tensor   (zero-copy view)
+            map_method!(instance "rayzor_ds_Tensor", "transposeLast2" => "Tensor_transpose_last2", params: 0, mir_wrapper,
+                types: &[PtrVoid] => PtrVoid),
             // --- Interop ---
             // tensor.data(): Ptr<Float>
             map_method!(instance "rayzor_ds_Tensor", "data" => "Tensor_data", params: 0, mir_wrapper,

@@ -1799,6 +1799,20 @@ register_symbol!(
     crate::tensor::rayzor_tensor_rope_sin_table
 );
 
+// Attention building blocks — composed by nue.transformer.GQAttention in Haxe
+// (Phase 5). The fused kernel is intentionally not on this list: the algorithm
+// lives in nue so users can fork it (alibi, sliding window, MoE routing).
+register_symbol!("rayzor_tensor_bmm", crate::tensor::rayzor_tensor_bmm);
+register_symbol!(
+    "rayzor_tensor_causal_mask_",
+    crate::tensor::rayzor_tensor_causal_mask_
+);
+register_symbol!("rayzor_tensor_scale", crate::tensor::rayzor_tensor_scale);
+register_symbol!(
+    "rayzor_tensor_transpose_last2",
+    crate::tensor::rayzor_tensor_transpose_last2
+);
+
 // Interop
 register_symbol!("rayzor_tensor_data", crate::tensor::rayzor_tensor_data);
 register_symbol!("rayzor_tensor_free", crate::tensor::rayzor_tensor_free);

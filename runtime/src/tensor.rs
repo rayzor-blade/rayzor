@@ -1510,6 +1510,205 @@ unsafe fn rope_table(head_dim: i64, max_seq_len: i64, base: f64, want_sin: bool)
     result
 }
 
+/// Batched 3-D matmul: `a [batch, M, K]` × `b [batch, K, N]` → `[batch, M, N]`.
+/// Per-batch independent matmul; reuses the existing F32 axpy fast path
+/// when the inputs are contiguous F32, scalar fallback for other dtypes.
+///
+/// This is the core kernel that lets the Haxe layer build attention as
+/// `(Q @ Kᵀ) → softmax → (· V)` without materialising a per-head loop in
+/// user code.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_bmm(a_ptr: i64, b_ptr: i64) -> i64 {
+    if a_ptr == 0 || b_ptr == 0 {
+        return 0;
+    }
+    let a = &*(a_ptr as *const RayzorTensor);
+    let b = &*(b_ptr as *const RayzorTensor);
+    if a.ndim != 3 || b.ndim != 3 || a.dtype != b.dtype {
+        return 0;
+    }
+    let a_shape = std::slice::from_raw_parts(a.shape, 3);
+    let b_shape = std::slice::from_raw_parts(b.shape, 3);
+    let batch = a_shape[0];
+    let m = a_shape[1];
+    let k = a_shape[2];
+    let n = b_shape[2];
+    if b_shape[0] != batch || b_shape[1] != k {
+        return 0;
+    }
+    let out_shape = [batch, m, n];
+    let result = alloc_tensor(&out_shape, a.dtype, Some(0.0));
+    if result == 0 {
+        return 0;
+    }
+    let r = &*(result as *const RayzorTensor);
+    let dtype = a.dtype;
+    let elem = dtype_size(dtype);
+    let a_step = m * k * elem;
+    let b_step = k * n * elem;
+    let c_step = m * n * elem;
+
+    for batch_i in 0..batch {
+        let a_data = a.data.add(batch_i * a_step);
+        let b_data = b.data.add(batch_i * b_step);
+        let c_data = r.data.add(batch_i * c_step);
+        if dtype == DTYPE_F32 {
+            let a_f = a_data as *const f32;
+            let b_f = b_data as *const f32;
+            let c_f = c_data as *mut f32;
+            for i in 0..m {
+                let a_row = a_f.add(i * k);
+                let c_row = c_f.add(i * n);
+                for p in 0..k {
+                    let a_ik = *a_row.add(p);
+                    let b_row = b_f.add(p * n);
+                    let c_slice = std::slice::from_raw_parts_mut(c_row, n);
+                    let b_slice = std::slice::from_raw_parts(b_row, n);
+                    crate::tensor_simd::axpy_slice(c_slice, a_ik, b_slice);
+                }
+            }
+            continue;
+        }
+        for i in 0..m {
+            for j in 0..n {
+                let mut acc = 0.0f32;
+                for p in 0..k {
+                    let av = load_f32_at(a_data, i * k + p, dtype);
+                    let bv = load_f32_at(b_data, p * n + j, dtype);
+                    acc += av * bv;
+                }
+                store_f32_at(c_data, i * n + j, dtype, acc);
+            }
+        }
+    }
+    result
+}
+
+/// In-place causal mask. Treats the last two dimensions of `t` as
+/// `[..., rows, cols]` and fills positions `(i, j)` with `-inf` whenever
+/// `j > i + position_offset`. Standard pattern: a softmax row reads the
+/// masked positions as zero probability.
+///
+/// `position_offset` shifts the diagonal — 0 for prefill (every query row
+/// sees keys up to its own index), positive for decode (the single new
+/// query at logical position T attends to keys 0..=T).
+///
+/// Returns the same tensor pointer (mutates in place) for convenience.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_causal_mask_(t_ptr: i64, position_offset: i64) -> i64 {
+    if t_ptr == 0 {
+        return 0;
+    }
+    let t = &*(t_ptr as *const RayzorTensor);
+    if t.ndim < 2 {
+        return 0;
+    }
+    let shape = std::slice::from_raw_parts(t.shape, t.ndim);
+    let cols = shape[t.ndim - 1];
+    let rows = shape[t.ndim - 2];
+    let outer: usize = shape[..t.ndim.saturating_sub(2)].iter().product::<usize>().max(1);
+    let pos = position_offset.max(0) as usize;
+    let neg_inf = f32::NEG_INFINITY;
+    for o in 0..outer {
+        let base = o * rows * cols;
+        for i in 0..rows {
+            // Mask everything strictly after the diagonal (+ position_offset).
+            let first_masked = (i + pos + 1).min(cols);
+            for j in first_masked..cols {
+                store_f32_at(t.data, base + i * cols + j, t.dtype, neg_inf);
+            }
+        }
+    }
+    t_ptr
+}
+
+/// Scale every element by a scalar f32. Allocates a fresh tensor; no
+/// in-place variant since composing with other ops works just as well
+/// after the new allocation.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_scale(t_ptr: i64, factor: f64) -> i64 {
+    if t_ptr == 0 {
+        return 0;
+    }
+    let t = &*(t_ptr as *const RayzorTensor);
+    let shape = std::slice::from_raw_parts(t.shape, t.ndim);
+    let result = alloc_tensor(shape, t.dtype, None);
+    if result == 0 {
+        return 0;
+    }
+    let r = &*(result as *const RayzorTensor);
+    let f = factor as f32;
+    if t.dtype == DTYPE_F32 {
+        let src = t.data as *const f32;
+        let dst = r.data as *mut f32;
+        let n = t.numel;
+        let src_slice = std::slice::from_raw_parts(src, n);
+        let dst_slice = std::slice::from_raw_parts_mut(dst, n);
+        crate::tensor_simd::mul_const_slice(dst_slice, src_slice, f);
+        return result;
+    }
+    for i in 0..t.numel {
+        let v = load_f32_at(t.data, i, t.dtype);
+        store_f32_at(r.data, i, t.dtype, v * f);
+    }
+    result
+}
+
+/// Transpose the last two dimensions (zero-copy view). Equivalent to
+/// `tensor.permute([..., ndim-1, ndim-2])` for ndim ≥ 2. The common use is
+/// turning `K [seq_k, num_kv_heads, head_dim]` into something we can
+/// matmul against, but for true 3-D batched matmul on K we'd more often
+/// pre-transpose at the per-head level — depends on layout choices.
+/// Provided for completeness so nue doesn't need to reach for permute()
+/// every time.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_transpose_last2(t_ptr: i64) -> i64 {
+    if t_ptr == 0 {
+        return 0;
+    }
+    let t = &*(t_ptr as *const RayzorTensor);
+    if t.ndim < 2 {
+        return t_ptr;
+    }
+    let n = t.ndim;
+    let old_shape = std::slice::from_raw_parts(t.shape, n);
+    let old_strides = std::slice::from_raw_parts(t.strides, n);
+
+    let new_shape_ptr = malloc(n * std::mem::size_of::<usize>()) as *mut usize;
+    let new_strides_ptr = malloc(n * std::mem::size_of::<usize>()) as *mut usize;
+    if new_shape_ptr.is_null() || new_strides_ptr.is_null() {
+        return 0;
+    }
+    for i in 0..n {
+        *new_shape_ptr.add(i) = old_shape[i];
+        *new_strides_ptr.add(i) = old_strides[i];
+    }
+    // Swap the last two.
+    *new_shape_ptr.add(n - 1) = old_shape[n - 2];
+    *new_shape_ptr.add(n - 2) = old_shape[n - 1];
+    *new_strides_ptr.add(n - 1) = old_strides[n - 2];
+    *new_strides_ptr.add(n - 2) = old_strides[n - 1];
+
+    let new_t = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
+    if new_t.is_null() {
+        free(new_shape_ptr as *mut u8);
+        free(new_strides_ptr as *mut u8);
+        return 0;
+    }
+    *new_t = RayzorTensor {
+        data: t.data,
+        shape: new_shape_ptr,
+        strides: new_strides_ptr,
+        ndim: n,
+        numel: t.numel,
+        dtype: t.dtype,
+        owns_data: false,
+        device: t.device,
+        numa_node: t.numa_node,
+    };
+    new_t as i64
+}
+
 // ============================================================================
 // Reductions
 // ============================================================================
