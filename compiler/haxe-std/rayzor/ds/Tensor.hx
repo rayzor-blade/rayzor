@@ -263,6 +263,19 @@ extern class Tensor {
     @:native("tensor_rope_sin_table")
     public static function ropeSinTable(headDim:Int, maxSeqLen:Int, base:Float):Tensor;
 
+    /**
+     * F16-stored cosine LUT for RoPE — half the memory of the F32 variant.
+     * Same `[maxSeqLen, headDim/2]` shape; precision loss bounded by f16
+     * quantisation of `cos ∈ [-1, 1]` (≈5e-4 absolute), negligible for
+     * inference. The GPU RoPE kernel reads through f32 anyway.
+     */
+    @:native("tensor_rope_cos_table_f16")
+    public static function ropeCosTableF16(headDim:Int, maxSeqLen:Int, base:Float):Tensor;
+
+    /** F16-stored sine LUT — companion to `ropeCosTableF16`. */
+    @:native("tensor_rope_sin_table_f16")
+    public static function ropeSinTableF16(headDim:Int, maxSeqLen:Int, base:Float):Tensor;
+
     // --- Interop ---
 
     /** Get raw data pointer for FFI */

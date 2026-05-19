@@ -3412,6 +3412,11 @@ impl StdlibMapping {
             // Tensor.ropeSinTable(headDim: Int, maxSeqLen: Int, base: Float): Tensor
             map_method!(static "rayzor_ds_Tensor", "ropeSinTable" => "Tensor_rope_sin_table", params: 3, mir_wrapper,
                 types: &[I64, I64, F64] => PtrVoid),
+            // Tensor.ropeCosTableF16 / ropeSinTableF16 — F16-stored LUTs
+            map_method!(static "rayzor_ds_Tensor", "ropeCosTableF16" => "Tensor_rope_cos_table_f16", params: 3, mir_wrapper,
+                types: &[I64, I64, F64] => PtrVoid),
+            map_method!(static "rayzor_ds_Tensor", "ropeSinTableF16" => "Tensor_rope_sin_table_f16", params: 3, mir_wrapper,
+                types: &[I64, I64, F64] => PtrVoid),
 
             // Attention building blocks — composed by nue.transformer in Haxe
             // tensor.bmm(other: Tensor): Tensor   (batched 3-D matmul)

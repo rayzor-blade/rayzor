@@ -37,6 +37,18 @@ pub enum KernelOp {
     Matmul,
     /// Batched matmul: C[b,m,n] = A[b,m,k] × B[b,k,n] for b in 0..B
     BatchMatmul,
+
+    // ---------- Transformer primitives ----------
+    /// RMS normalization over the last dimension with a learnable gain.
+    /// `result[..., i] = x[..., i] / sqrt(mean(x²) + eps) * weight[i]`.
+    /// Fused single-pass row reduction + scale + multiply. The eps is a
+    /// shader constant; the weight is the second input buffer.
+    RmsNorm,
+    /// Rotary position embedding. Applies adjacent-pair rotation to a
+    /// `[seq_len, num_heads, head_dim]` tensor using precomputed cos /
+    /// sin LUTs of shape `[max_seq_len, head_dim/2]`. The shader takes
+    /// three input buffers (x, cos, sin) plus a `position_offset` uniform.
+    Rope,
 }
 
 impl KernelOp {
@@ -56,6 +68,10 @@ impl KernelOp {
             | Self::Silu => 1,
             Self::ReduceSum | Self::ReduceMax | Self::ReduceMin => 1,
             Self::Matmul | Self::BatchMatmul => 2,
+            // x, weight
+            Self::RmsNorm => 2,
+            // x, cos, sin
+            Self::Rope => 3,
         }
     }
 
@@ -81,11 +97,20 @@ impl KernelOp {
             Self::ReduceMin => "reduce_min",
             Self::Matmul => "matmul",
             Self::BatchMatmul => "batch_matmul",
+            Self::RmsNorm => "rms_norm",
+            Self::Rope => "rope",
         }
     }
 
     /// Whether this op is a reduction (produces fewer outputs than inputs).
     pub fn is_reduction(self) -> bool {
         matches!(self, Self::ReduceSum | Self::ReduceMax | Self::ReduceMin)
+    }
+
+    /// Whether this op needs a row-shaped layout (last dim is reduced or
+    /// rotated per row). Distinguishes pure elementwise from primitives
+    /// that consume `head_dim` / `hidden_dim` slices per row.
+    pub fn is_row_primitive(self) -> bool {
+        matches!(self, Self::RmsNorm | Self::Rope)
     }
 }

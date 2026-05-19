@@ -120,6 +120,10 @@ pub fn kernel_num_buffers(op: KernelOp) -> usize {
         3 // input, output, numel uniform
     } else if matches!(op, KernelOp::Matmul | KernelOp::BatchMatmul) {
         4 // A, B, C, dims uniform
+    } else if op == KernelOp::RmsNorm {
+        4 // x, weight, y, params uniform
+    } else if op == KernelOp::Rope {
+        5 // x, cos, sin, y, params uniform
     } else {
         op.input_count() + 1 // inputs + result
     }
@@ -207,6 +211,9 @@ pub fn emit_kernel(op: KernelOp, dtype: u8) -> String {
     }
     if op == KernelOp::BatchMatmul {
         return super::wgsl_matmul::emit_batch_matmul(dtype);
+    }
+    if let Some(src) = super::wgsl_transformer::emit_transformer(op, dtype) {
+        return src;
     }
     match op.input_count() {
         2 => emit_binary_elementwise(op, dtype),
