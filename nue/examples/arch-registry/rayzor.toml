@@ -1,0 +1,6 @@
+[project]
+name = "arch-registry"
+entry = "Main.hx"
+
+[build]
+class-paths = [".", "../../"]

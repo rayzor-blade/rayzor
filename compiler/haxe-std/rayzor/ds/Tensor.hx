@@ -167,6 +167,14 @@ extern class Tensor {
     @:native("tensor_transpose_last2")
     public function transposeLast2():Tensor;
 
+    /**
+     * Row gather: pick the rows of this `[N, ...rest]` tensor named by
+     * `indices` and stack them as `[indices.length, ...rest]`. Used by
+     * `nue.Embedding` to turn token IDs into per-token embeddings.
+     */
+    @:native("tensor_gather_rows")
+    public function gatherRows(indices:Array<Int>):Tensor;
+
     /** Dot product (flattened) */
     @:native("tensor_dot")
     public function dot(other:Tensor):Float;
