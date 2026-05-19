@@ -193,6 +193,34 @@ extern class Tensor {
     @:native("tensor_rms_norm")
     public function rmsNorm(eps:Float):Tensor;
 
+    /**
+     * Apply rotary position embedding (RoPE) to a tensor of shape
+     * `[seq_len, num_heads, head_dim]` (or 2-D `[seq_len, head_dim]`).
+     *
+     * `cos` and `sin` are precomputed lookup tables of shape
+     * `[max_seq_len, head_dim/2]` (see `Tensor.ropeCosTable` /
+     * `ropeSinTable`). `positionOffset` adds to the per-row position —
+     * used by the KV-cache decode path to rotate the new query token at
+     * its absolute position.
+     */
+    @:native("tensor_rope")
+    public function rope(cos:Tensor, sin:Tensor, positionOffset:Int):Tensor;
+
+    /**
+     * Precomputed cosine table for RoPE. Shape `[maxSeqLen, headDim/2]`,
+     * dtype F32. Pass to `Tensor.rope`. `base` is the frequency base
+     * (10000.0 for standard Llama, 1000000.0 for long-context tunes).
+     */
+    @:native("tensor_rope_cos_table")
+    public static function ropeCosTable(headDim:Int, maxSeqLen:Int, base:Float):Tensor;
+
+    /**
+     * Precomputed sine table for RoPE — companion to `ropeCosTable`.
+     * Same shape and dtype.
+     */
+    @:native("tensor_rope_sin_table")
+    public static function ropeSinTable(headDim:Int, maxSeqLen:Int, base:Float):Tensor;
+
     // --- Interop ---
 
     /** Get raw data pointer for FFI */

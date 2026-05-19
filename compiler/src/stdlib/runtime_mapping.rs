@@ -3403,6 +3403,15 @@ impl StdlibMapping {
             // tensor.rmsNorm(eps: Float): Tensor
             map_method!(instance "rayzor_ds_Tensor", "rmsNorm" => "Tensor_rms_norm", params: 1, mir_wrapper,
                 types: &[PtrVoid, F64] => PtrVoid),
+            // tensor.rope(cos: Tensor, sin: Tensor, positionOffset: Int): Tensor
+            map_method!(instance "rayzor_ds_Tensor", "rope" => "Tensor_rope", params: 3, mir_wrapper,
+                types: &[PtrVoid, PtrVoid, PtrVoid, I64] => PtrVoid),
+            // Tensor.ropeCosTable(headDim: Int, maxSeqLen: Int, base: Float): Tensor
+            map_method!(static "rayzor_ds_Tensor", "ropeCosTable" => "Tensor_rope_cos_table", params: 3, mir_wrapper,
+                types: &[I64, I64, F64] => PtrVoid),
+            // Tensor.ropeSinTable(headDim: Int, maxSeqLen: Int, base: Float): Tensor
+            map_method!(static "rayzor_ds_Tensor", "ropeSinTable" => "Tensor_rope_sin_table", params: 3, mir_wrapper,
+                types: &[I64, I64, F64] => PtrVoid),
             // --- Interop ---
             // tensor.data(): Ptr<Float>
             map_method!(instance "rayzor_ds_Tensor", "data" => "Tensor_data", params: 0, mir_wrapper,
