@@ -1410,13 +1410,13 @@ impl<'a, 'b> RdParser<'a, 'b> {
     fn parse_type_args(&mut self) -> Result<Vec<Type>, ParseError> {
         self.stream.expect(TokenKind::Lt)?;
         let mut args = Vec::new();
-        while !self.stream.at(TokenKind::Gt) && !self.stream.is_eof() {
+        while !self.stream.at_closing_gt() && !self.stream.is_eof() {
             args.push(self.parse_type()?);
-            if !self.stream.at(TokenKind::Gt) {
+            if !self.stream.at_closing_gt() {
                 self.stream.eat(TokenKind::Comma);
             }
         }
-        self.stream.expect(TokenKind::Gt)?;
+        self.stream.expect_closing_gt()?;
         Ok(args)
     }
 }

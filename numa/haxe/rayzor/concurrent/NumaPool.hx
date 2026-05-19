@@ -54,7 +54,7 @@ class NumaPool {
      * Iterate `items` indices with the user closure `fn(idx, node)`,
      * partitioned across NUMA nodes.
      */
-    public function parallelFor(items:Int, fn:Int->Int->Void):Void {
+    public function parallelFor(items:Int, fn:(idx:Int, node:Int)->Void):Void {
         if (items <= 0) return;
 
         if (_nodeCount <= 1 || items < _nodeCount * 2) {
@@ -96,7 +96,10 @@ class NumaPool {
      * Block-partitioned variant: invoke `fn(rowStart, rowEnd, node)` once
      * per node with a contiguous half-open block range.
      */
-    public function parallelRows(rows:Int, fn:Int->Int->Int->Void):Void {
+    public function parallelRows(
+        rows:Int,
+        fn:(rowStart:Int, rowEnd:Int, node:Int)->Void
+    ):Void {
         if (rows <= 0) return;
 
         if (_nodeCount <= 1 || rows < _nodeCount) {

@@ -245,14 +245,14 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.expect(TokenKind::Lt)?;
         let mut args = Vec::new();
 
-        while !self.stream.at(TokenKind::Gt) && !self.stream.is_eof() {
+        while !self.stream.at_closing_gt() && !self.stream.is_eof() {
             args.push(self.parse_type()?);
-            if !self.stream.at(TokenKind::Gt) {
+            if !self.stream.at_closing_gt() {
                 self.stream.eat(TokenKind::Comma);
             }
         }
 
-        self.stream.expect(TokenKind::Gt)?;
+        self.stream.expect_closing_gt()?;
         Ok(args)
     }
 
@@ -264,7 +264,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.advance();
 
         let mut params = Vec::new();
-        while !self.stream.at(TokenKind::Gt) && !self.stream.is_eof() {
+        while !self.stream.at_closing_gt() && !self.stream.is_eof() {
             let param_start = self.stream.current_offset();
             let name = self.stream.current_text().to_string();
             self.stream.advance();
@@ -281,12 +281,12 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 span: self.stream.span_from(param_start),
             });
 
-            if !self.stream.at(TokenKind::Gt) {
+            if !self.stream.at_closing_gt() {
                 self.stream.eat(TokenKind::Comma);
             }
         }
 
-        self.stream.expect(TokenKind::Gt)?;
+        self.stream.expect_closing_gt()?;
         Ok(params)
     }
 }
