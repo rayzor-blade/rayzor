@@ -30,6 +30,64 @@ pub fn dtype_to_wgsl(dtype: u8) -> &'static str {
     }
 }
 
+/// WGSL helper functions for FP8 (E4M3 / E5M2) dequant-on-load. Returned as
+/// a single string ready to splice into the top of a shader that wants to
+/// read FP8 storage and compute in f32.
+///
+/// WebGPU has no native FP8 type, so storage is packed bytes inside `u32`
+/// elements. The helpers below take one `u32` and an index `[0..4)` into
+/// the four packed FP8 lanes and return the f32 value. Used by Phase 4's
+/// quantised matmul + future FP8 weight pipelines.
+pub fn wgsl_fp8_dequant_helpers() -> &'static str {
+    r#"
+fn rayzor_fp8_e4m3_dequant(byte: u32) -> f32 {
+    let sign = (byte >> 7u) & 1u;
+    let exp = (byte >> 3u) & 0xFu;
+    let mant = byte & 0x7u;
+    if (exp == 0u && mant == 0u) { return 0.0; }
+    if (exp == 0xFu && mant == 0x7u) { return bitcast<f32>(0x7FC00000u); }
+    var mant_num: f32;
+    var exp_val: i32;
+    if (exp == 0u) {
+        mant_num = f32(mant);
+        exp_val = -9;
+    } else {
+        mant_num = f32(8u + mant);
+        exp_val = i32(exp) - 10;
+    }
+    var mag = mant_num * pow(2.0, f32(exp_val));
+    if (sign != 0u) { mag = -mag; }
+    return mag;
+}
+
+fn rayzor_fp8_e5m2_dequant(byte: u32) -> f32 {
+    let sign = (byte >> 7u) & 1u;
+    let exp = (byte >> 2u) & 0x1Fu;
+    let mant = byte & 0x3u;
+    if (exp == 0u && mant == 0u) { return 0.0; }
+    if (exp == 0x1Fu) {
+        if (mant == 0u) {
+            if (sign == 0u) { return bitcast<f32>(0x7F800000u); }
+            return bitcast<f32>(0xFF800000u);
+        }
+        return bitcast<f32>(0x7FC00000u);
+    }
+    var mant_num: f32;
+    var exp_val: i32;
+    if (exp == 0u) {
+        mant_num = f32(mant);
+        exp_val = -16;
+    } else {
+        mant_num = f32(4u + mant);
+        exp_val = i32(exp) - 17;
+    }
+    var mag = mant_num * pow(2.0, f32(exp_val));
+    if (sign != 0u) { mag = -mag; }
+    return mag;
+}
+"#
+}
+
 /// Optional WGSL prelude that must appear above any shader using a given
 /// dtype. Returns `""` when no prelude is needed.
 ///
