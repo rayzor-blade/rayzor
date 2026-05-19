@@ -1046,6 +1046,50 @@ impl<'a> HirToMirContext<'a> {
         false
     }
 
+    /// Resolve a stdlib class symbol to its canonical runtime-mapping key
+    /// (e.g., `Tensor` → `rayzor_ds_Tensor`, `QTensor` → `rayzor_ds_QTensor`,
+    /// `Arc` → `rayzor_concurrent_Arc`).
+    ///
+    /// Returns `None` if the symbol isn't a registered stdlib class. The
+    /// resolution order is:
+    ///   1. `@:native("a::b::C")` annotation → `a_b_C` (the canonical form).
+    ///   2. Bare simple name (`Tensor`, `Arc`) — only when an extern class
+    ///      has no `@:native` but its registered mapping key matches by
+    ///      suffix (the `is_stdlib_class` legacy path).
+    ///
+    /// This replaces a hardcoded `if class_name == "Tensor"` mapping that
+    /// existed at `detect_stdlib_class_from_call`. The previous form only
+    /// worked for `Tensor`; every other stdlib class (Arc, Mutex, Vec, …)
+    /// happened to have its qualified name equal to its mapping key, so
+    /// the hardcoded fall-through `class_name.to_string()` did the right
+    /// thing for them — but new classes like `QTensor` (whose qualified
+    /// name is `rayzor_ds_QTensor`, not the bare `QTensor`) needed a new
+    /// hardcoded branch. This helper makes the resolution generic.
+    fn canonical_stdlib_class_name(&self, symbol: &crate::tast::symbols::Symbol) -> Option<String> {
+        if let Some(native) = symbol.native_name {
+            if let Some(native_str) = self.string_interner.get(native) {
+                let lowered = native_str.replace("::", "_");
+                if self.stdlib_mapping.is_stdlib_class(&lowered) {
+                    return Some(lowered);
+                }
+            }
+        }
+        if let Some(class_name) = self.string_interner.get(symbol.name) {
+            if self.stdlib_mapping.is_stdlib_class(class_name) {
+                // The mapping accepts both exact and suffix matches. Find
+                // the actual registered key so downstream consumers always
+                // see the canonical form.
+                for registered in self.stdlib_mapping.get_all_classes() {
+                    if registered == class_name || registered.ends_with(&format!("_{class_name}")) {
+                        return Some(registered.to_string());
+                    }
+                }
+                return Some(class_name.to_string());
+            }
+        }
+        None
+    }
+
     /// Check if a type needs drop (convenience wrapper for get_drop_behavior)
     fn type_needs_drop(&self, type_id: TypeId) -> bool {
         matches!(
@@ -5209,8 +5253,10 @@ impl<'a> HirToMirContext<'a> {
                         // Get the method name
                         if let Some(field_sym) = self.symbol_table.get_symbol(*field) {
                             if let Some(method_name) = self.string_interner.get(field_sym.name) {
-                                // Check if this is a stdlib class method that returns the same class type
-                                // Methods like init, clone, tryLock return the same class or a related type
+                                // Check if this is a stdlib class method that returns the same
+                                // class type. Methods like init/clone/tryLock return the same
+                                // class or a related type; the QTensor factories (fromFloat32,
+                                // wrapQ4KM) follow the same pattern.
                                 let returns_same_class = matches!(
                                     method_name,
                                     "init"
@@ -5221,19 +5267,23 @@ impl<'a> HirToMirContext<'a> {
                                         | "full"
                                         | "fromArray"
                                         | "rand"
+                                        | "fromFloat32"
+                                        | "wrapQ4KM"
                                 );
-                                if returns_same_class && self.is_stdlib_class_by_symbol(sym_info) {
-                                    // For Tensor class, map to runtime class name
-                                    let runtime_class_name = if class_name == "Tensor" {
-                                        "rayzor_ds_Tensor".to_string()
-                                    } else {
-                                        class_name.to_string()
-                                    };
-                                    debug!(
-                                        "[STDLIB CLASS DETECT] Static call {}.{}() returns {}",
-                                        class_name, method_name, runtime_class_name
-                                    );
-                                    return Some(runtime_class_name);
+                                if returns_same_class {
+                                    // Resolve to the canonical runtime-mapping class name. This
+                                    // honours `@:native("a::b::C")` for any stdlib class without
+                                    // a hardcoded branch per class (previously only `Tensor`
+                                    // was special-cased here).
+                                    if let Some(runtime_class_name) =
+                                        self.canonical_stdlib_class_name(sym_info)
+                                    {
+                                        debug!(
+                                            "[STDLIB CLASS DETECT] Static call {}.{}() returns {}",
+                                            class_name, method_name, runtime_class_name
+                                        );
+                                        return Some(runtime_class_name);
+                                    }
                                 }
                             }
                         }
