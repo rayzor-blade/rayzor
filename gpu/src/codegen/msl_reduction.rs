@@ -28,7 +28,6 @@ pub fn emit_reduction(op: KernelOp, dtype: u8) -> String {
         KernelOp::ReduceMax => {
             let id = match dtype {
                 buffer::DTYPE_F32 => "-INFINITY",
-                buffer::DTYPE_F64 => "-INFINITY",
                 buffer::DTYPE_I32 => "-2147483647",
                 _ => "-INFINITY",
             };
@@ -41,7 +40,6 @@ pub fn emit_reduction(op: KernelOp, dtype: u8) -> String {
         KernelOp::ReduceMin => {
             let id = match dtype {
                 buffer::DTYPE_F32 => "INFINITY",
-                buffer::DTYPE_F64 => "INFINITY",
                 buffer::DTYPE_I32 => "2147483647",
                 _ => "INFINITY",
             };

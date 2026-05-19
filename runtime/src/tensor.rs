@@ -17,13 +17,19 @@ extern "C" {
     fn free(ptr: *mut u8);
 }
 
-// DType tags matching the Haxe enum order
-const DTYPE_F32: u8 = 0;
-const DTYPE_F16: u8 = 1;
-const DTYPE_BF16: u8 = 2;
-const DTYPE_I32: u8 = 3;
-const DTYPE_I8: u8 = 4;
-const DTYPE_U8: u8 = 5;
+// DType tags matching the Haxe enum order.
+// Stays in sync with `compiler/haxe-std/rayzor/ds/DType.hx` and the GPU-side
+// constants in `gpu/src/buffer.rs`. Order is load-bearing: the Haxe enum
+// produces ordinals 0..N matching these values, and MIR call sites pass
+// the ordinal as the dtype arg.
+pub const DTYPE_F32: u8 = 0;
+pub const DTYPE_F16: u8 = 1;
+pub const DTYPE_BF16: u8 = 2;
+pub const DTYPE_I32: u8 = 3;
+pub const DTYPE_I8: u8 = 4;
+pub const DTYPE_U8: u8 = 5;
+pub const DTYPE_FP8_E4M3: u8 = 6;
+pub const DTYPE_FP8_E5M2: u8 = 7;
 
 // Device tags matching the Haxe Device enum.
 // CPU(node) collapses node into the separate numa_node field on the struct
@@ -48,6 +54,8 @@ fn dtype_size(dtype: u8) -> usize {
         DTYPE_I32 => 4,
         DTYPE_I8 => 1,
         DTYPE_U8 => 1,
+        DTYPE_FP8_E4M3 => 1,
+        DTYPE_FP8_E5M2 => 1,
         _ => 4, // default to f32
     }
 }

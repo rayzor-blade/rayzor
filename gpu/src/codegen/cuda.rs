@@ -12,12 +12,18 @@ use crate::buffer;
 use crate::kernel_ir::KernelOp;
 
 /// Map a dtype tag to the corresponding CUDA C type string.
+/// CUDA `__half` (sm_53+) for F16 and `__nv_bfloat16` (sm_80+) for BF16
+/// are routed in Phase 3d. FP8 needs sm_89+ headers — Phase 3e.
 pub fn dtype_to_cuda(dtype: u8) -> &'static str {
     match dtype {
         buffer::DTYPE_F32 => "float",
-        buffer::DTYPE_F64 => "double",
         buffer::DTYPE_I32 => "int",
-        buffer::DTYPE_I64 => "long long",
+        // F16/BF16/FP8 fall back to float until Phases 3d/3e wire them.
+        buffer::DTYPE_F16 | buffer::DTYPE_BF16 => "float",
+        buffer::DTYPE_FP8_E4M3 | buffer::DTYPE_FP8_E5M2 => "float",
+        // Integer storage formats.
+        buffer::DTYPE_I8 => "signed char",
+        buffer::DTYPE_U8 => "unsigned char",
         _ => "float",
     }
 }

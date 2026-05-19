@@ -330,9 +330,8 @@ fn reduce_dispatch(
             Ok(unsafe {
                 match dtype {
                     buffer::DTYPE_F32 => *(ptr as *const f32) as f64,
-                    buffer::DTYPE_F64 => *(ptr as *const f64),
                     buffer::DTYPE_I32 => *(ptr as *const i32) as f64,
-                    buffer::DTYPE_I64 => *(ptr as *const i64) as f64,
+                    // F16/BF16/FP8 readback added in Phase 3b once half crate lands.
                     _ => 0.0,
                 }
             })
@@ -387,9 +386,7 @@ fn reduce_dispatch(
                 .ok_or("failed to read back reduction result")?;
             Ok(match dtype {
                 buffer::DTYPE_F32 => unsafe { *(data.as_ptr() as *const f32) as f64 },
-                buffer::DTYPE_F64 => unsafe { *(data.as_ptr() as *const f64) },
                 buffer::DTYPE_I32 => unsafe { *(data.as_ptr() as *const i32) as f64 },
-                buffer::DTYPE_I64 => unsafe { *(data.as_ptr() as *const i64) as f64 },
                 _ => 0.0,
             })
         }
@@ -435,9 +432,7 @@ fn reduce_dispatch(
                 .ok_or("failed to read back reduction result")?;
             Ok(match dtype {
                 buffer::DTYPE_F32 => unsafe { *(data.as_ptr() as *const f32) as f64 },
-                buffer::DTYPE_F64 => unsafe { *(data.as_ptr() as *const f64) },
                 buffer::DTYPE_I32 => unsafe { *(data.as_ptr() as *const i32) as f64 },
-                buffer::DTYPE_I64 => unsafe { *(data.as_ptr() as *const i64) as f64 },
                 _ => 0.0,
             })
         }

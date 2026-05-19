@@ -11,12 +11,18 @@ use crate::kernel_ir::KernelOp;
 pub const WORKGROUP_SIZE: u32 = 256;
 
 /// Map a dtype tag to the corresponding WGSL type string.
+/// F16/BF16 require the `enable f16;` extension — wired in Phase 3d.
+/// FP8 needs dequant-in-kernel via Phase 3e.
 pub fn dtype_to_wgsl(dtype: u8) -> &'static str {
     match dtype {
         buffer::DTYPE_F32 => "f32",
-        buffer::DTYPE_F64 => "f32", // WGSL has no f64; fall back to f32
         buffer::DTYPE_I32 => "i32",
-        buffer::DTYPE_I64 => "i32", // WGSL has no i64; fall back to i32
+        // F16/BF16 fall back to f32 here until Phase 3d enables the extension.
+        buffer::DTYPE_F16 | buffer::DTYPE_BF16 => "f32",
+        // FP8 storage formats — kernel-side dequant handled in Phase 3e.
+        buffer::DTYPE_FP8_E4M3 | buffer::DTYPE_FP8_E5M2 => "f32",
+        // Integer storage formats.
+        buffer::DTYPE_I8 | buffer::DTYPE_U8 => "i32",
         _ => "f32",
     }
 }
