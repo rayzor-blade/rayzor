@@ -7,8 +7,8 @@ import rayzor.ds.Tensor;
  * head dimension and maximum context length, then applies them on demand.
  *
  * RoPE is parameter-free (the cos/sin tables are derived, not learned),
- * so this is NOT a `Module` — it doesn't implement `parameters()`. Use it
- * as a helper held inside a `GQAttention` or sibling block.
+ * so this is NOT a `Module` — it doesn't implement `parameters()`. Use
+ * it as a helper held inside a `GQAttention` or sibling block.
  *
  * Example:
  * ```haxe
@@ -20,6 +20,13 @@ import rayzor.ds.Tensor;
  * During incremental decode, pass the absolute position of the new token
  * as `positionOffset` so the rotation matches the previously-cached
  * positions.
+ *
+ * **GPU dispatch.** CPU-only by design. For on-device inference, call
+ * `rayzor.gpu.GPUCompute.rope(xGpu, cosGpu, sinGpu, ...)` directly with
+ * the LUTs pre-uploaded via `gpu.createBuffer(rope.cos / .sin)`. The
+ * F16-stored LUT variants from `Tensor.ropeCosTableF16` halve VRAM use.
+ * Module-level wrapper deferred pending the JIT quirks documented in
+ * `bugs_known.md`.
  */
 class RoPE {
     public var cos:Tensor;

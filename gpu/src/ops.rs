@@ -944,7 +944,57 @@ fn rms_norm_dispatch(
     eps: f32,
     elem_size: usize,
 ) -> Result<NativeBuffer, String> {
+    // RMSNorm uniform — shared across every backend. Field order matches
+    // the struct layout in the WGSL / MSL / CUDA shaders.
+    #[repr(C)]
+    struct RmsParams {
+        row_len: u32,
+        eps: f32,
+    }
+    let params = RmsParams {
+        row_len: row_len as u32,
+        eps,
+    };
+
     match (ctx, compiled) {
+        #[cfg(feature = "metal-backend")]
+        (NativeContext::Metal(metal_ctx), NativeCompiledKernel::Metal(kernel)) => {
+            use crate::metal::{buffer_ops::MetalBuffer, dispatch};
+            use objc2_metal::MTLSize;
+
+            let x_metal = match x_buf.as_ref() {
+                NativeBuffer::Metal(mb) => mb,
+                _ => return Err("x not Metal".into()),
+            };
+            let w_metal = match w_buf.as_ref() {
+                NativeBuffer::Metal(mb) => mb,
+                _ => return Err("weight not Metal".into()),
+            };
+
+            let result = MetalBuffer::allocate(metal_ctx, numel * elem_size)
+                .ok_or("failed to alloc rmsnorm result")?;
+            let params_buf = MetalBuffer::from_value(metal_ctx, &params)
+                .ok_or("failed to alloc rmsnorm params")?;
+
+            // One threadgroup per row; 256 threads per group matches
+            // TG_SIZE in the MSL shader (msl_transformer::emit_rms_norm).
+            dispatch::dispatch_threadgroups(
+                metal_ctx,
+                kernel,
+                &[x_metal, w_metal, &result, &params_buf],
+                MTLSize {
+                    width: groups,
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: 256,
+                    height: 1,
+                    depth: 1,
+                },
+            )?;
+            Ok(NativeBuffer::Metal(result))
+        }
         #[cfg(feature = "webgpu-backend")]
         (NativeContext::Wgpu(wgpu_ctx), NativeCompiledKernel::Wgpu(kernel)) => {
             use crate::wgpu_backend::{buffer_ops::WgpuBuffer, dispatch};
@@ -960,18 +1010,6 @@ fn rms_norm_dispatch(
 
             let result = WgpuBuffer::allocate(wgpu_ctx, numel * elem_size)
                 .ok_or("failed to alloc rmsnorm result")?;
-
-            // Uniform layout: { row_len: u32, eps: f32 }. The shader pads to
-            // 8 bytes naturally — explicit padding for portability.
-            #[repr(C)]
-            struct RmsParams {
-                row_len: u32,
-                eps: f32,
-            }
-            let params = RmsParams {
-                row_len: row_len as u32,
-                eps,
-            };
             let params_buf = unsafe {
                 WgpuBuffer::from_data(
                     wgpu_ctx,
@@ -989,7 +1027,36 @@ fn rms_norm_dispatch(
             )?;
             Ok(NativeBuffer::Wgpu(result))
         }
-        _ => Err("rmsnorm: backend not yet wired (only wgpu landed)".into()),
+        #[cfg(feature = "cuda-backend")]
+        (NativeContext::Cuda(cuda_ctx), NativeCompiledKernel::Cuda(kernel)) => {
+            use crate::cuda::{buffer_ops::CudaBuffer, dispatch};
+
+            let x_cuda = match x_buf.as_ref() {
+                NativeBuffer::Cuda(cb) => cb,
+                _ => return Err("x not CUDA".into()),
+            };
+            let w_cuda = match w_buf.as_ref() {
+                NativeBuffer::Cuda(cb) => cb,
+                _ => return Err("weight not CUDA".into()),
+            };
+
+            let result = CudaBuffer::allocate(cuda_ctx, numel * elem_size)
+                .ok_or("failed to alloc rmsnorm result")?;
+
+            // CUDA's dispatch_grid passes packed u32 params through the
+            // params slice; our shader reads them as RmsParams struct.
+            dispatch::dispatch_grid(
+                cuda_ctx,
+                kernel,
+                &[x_cuda, w_cuda, &result],
+                &[params.row_len, params.eps.to_bits()],
+                (groups as u32, 1, 1),
+                (256, 1, 1),
+                /* shared bytes */ 256 * 4 + 4, // partial[LANES] + shared_inv_rms
+            )?;
+            Ok(NativeBuffer::Cuda(result))
+        }
+        _ => Err("rmsnorm: no matching backend".into()),
     }
 }
 
@@ -1073,7 +1140,71 @@ fn rope_dispatch(
     cos_max_seq: usize,
     elem_size: usize,
 ) -> Result<NativeBuffer, String> {
+    // Shared uniform layout — matches the RopeParams struct in every
+    // backend's shader (wgsl_transformer / msl_transformer / cuda_transformer).
+    #[repr(C)]
+    struct RopeParams {
+        seq_len: u32,
+        num_heads: u32,
+        head_dim: u32,
+        position_offset: u32,
+        cos_max_seq: u32,
+    }
+    let params = RopeParams {
+        seq_len: seq_len as u32,
+        num_heads: num_heads as u32,
+        head_dim: head_dim as u32,
+        position_offset,
+        cos_max_seq: cos_max_seq as u32,
+    };
+    let numel = seq_len * num_heads * head_dim;
+    let half_dim = head_dim / 2;
+    let lanes = seq_len * num_heads * half_dim;
+    let wg_size = 256usize;
+
     match (ctx, compiled) {
+        #[cfg(feature = "metal-backend")]
+        (NativeContext::Metal(metal_ctx), NativeCompiledKernel::Metal(kernel)) => {
+            use crate::metal::{buffer_ops::MetalBuffer, dispatch};
+            use objc2_metal::MTLSize;
+
+            let x_metal = match x_buf.as_ref() {
+                NativeBuffer::Metal(mb) => mb,
+                _ => return Err("x not Metal".into()),
+            };
+            let cos_metal = match cos_buf.as_ref() {
+                NativeBuffer::Metal(mb) => mb,
+                _ => return Err("cos not Metal".into()),
+            };
+            let sin_metal = match sin_buf.as_ref() {
+                NativeBuffer::Metal(mb) => mb,
+                _ => return Err("sin not Metal".into()),
+            };
+
+            let result = MetalBuffer::allocate(metal_ctx, numel * elem_size)
+                .ok_or("failed to alloc rope result")?;
+            let params_buf = MetalBuffer::from_value(metal_ctx, &params)
+                .ok_or("failed to alloc rope params")?;
+
+            // Flat 1-D dispatch — `thread_position_in_grid` gives the
+            // per-lane index inside the MSL shader.
+            dispatch::dispatch_threadgroups(
+                metal_ctx,
+                kernel,
+                &[x_metal, cos_metal, sin_metal, &result, &params_buf],
+                MTLSize {
+                    width: lanes.div_ceil(wg_size),
+                    height: 1,
+                    depth: 1,
+                },
+                MTLSize {
+                    width: wg_size,
+                    height: 1,
+                    depth: 1,
+                },
+            )?;
+            Ok(NativeBuffer::Metal(result))
+        }
         #[cfg(feature = "webgpu-backend")]
         (NativeContext::Wgpu(wgpu_ctx), NativeCompiledKernel::Wgpu(kernel)) => {
             use crate::wgpu_backend::{buffer_ops::WgpuBuffer, dispatch};
@@ -1091,25 +1222,8 @@ fn rope_dispatch(
                 _ => return Err("sin not wgpu".into()),
             };
 
-            let numel = seq_len * num_heads * head_dim;
             let result = WgpuBuffer::allocate(wgpu_ctx, numel * elem_size)
                 .ok_or("failed to alloc rope result")?;
-
-            #[repr(C)]
-            struct RopeParams {
-                seq_len: u32,
-                num_heads: u32,
-                head_dim: u32,
-                position_offset: u32,
-                cos_max_seq: u32,
-            }
-            let params = RopeParams {
-                seq_len: seq_len as u32,
-                num_heads: num_heads as u32,
-                head_dim: head_dim as u32,
-                position_offset,
-                cos_max_seq: cos_max_seq as u32,
-            };
             let params_buf = unsafe {
                 WgpuBuffer::from_data(
                     wgpu_ctx,
@@ -1119,9 +1233,6 @@ fn rope_dispatch(
             }
             .ok_or("failed to alloc rope params")?;
 
-            let half_dim = head_dim / 2;
-            let lanes = seq_len * num_heads * half_dim;
-            let wg_size = 256usize;
             dispatch::dispatch_workgroups(
                 wgpu_ctx,
                 kernel,
@@ -1130,7 +1241,44 @@ fn rope_dispatch(
             )?;
             Ok(NativeBuffer::Wgpu(result))
         }
-        _ => Err("rope: backend not yet wired (only wgpu landed)".into()),
+        #[cfg(feature = "cuda-backend")]
+        (NativeContext::Cuda(cuda_ctx), NativeCompiledKernel::Cuda(kernel)) => {
+            use crate::cuda::{buffer_ops::CudaBuffer, dispatch};
+
+            let x_cuda = match x_buf.as_ref() {
+                NativeBuffer::Cuda(cb) => cb,
+                _ => return Err("x not CUDA".into()),
+            };
+            let cos_cuda = match cos_buf.as_ref() {
+                NativeBuffer::Cuda(cb) => cb,
+                _ => return Err("cos not CUDA".into()),
+            };
+            let sin_cuda = match sin_buf.as_ref() {
+                NativeBuffer::Cuda(cb) => cb,
+                _ => return Err("sin not CUDA".into()),
+            };
+
+            let result = CudaBuffer::allocate(cuda_ctx, numel * elem_size)
+                .ok_or("failed to alloc rope result")?;
+
+            dispatch::dispatch_grid(
+                cuda_ctx,
+                kernel,
+                &[x_cuda, cos_cuda, sin_cuda, &result],
+                &[
+                    params.seq_len,
+                    params.num_heads,
+                    params.head_dim,
+                    params.position_offset,
+                    params.cos_max_seq,
+                ],
+                ((lanes as u32).div_ceil(wg_size as u32), 1, 1),
+                (wg_size as u32, 1, 1),
+                /* no shared memory needed */ 0,
+            )?;
+            Ok(NativeBuffer::Cuda(result))
+        }
+        _ => Err("rope: no matching backend".into()),
     }
 }
 
