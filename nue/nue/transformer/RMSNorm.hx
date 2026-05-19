@@ -8,7 +8,7 @@ import rayzor.ds.Tensor;
  *
  * Formula:
  * ```
- *   y = x / sqrt(mean(x^2) + eps) * weight
+ *   y = x / sqrt(mean(x²) + eps) * weight
  * ```
  * applied independently to each row along the last dimension. `weight` is
  * a 1-D tensor sized to `head_dim` (or `hidden_dim` for the final norm).
@@ -17,13 +17,20 @@ import rayzor.ds.Tensor;
  * `Tensor.rmsNorm`; this module owns the gain weight + composes them.
  *
  * Standard Llama config uses `eps = 1e-5`.
+ *
+ * **GPU dispatch.** This module is CPU-only by design. For on-device
+ * inference, call `rayzor.gpu.GPUCompute.rmsNorm(xGpu, weightGpu, rowLen, eps)`
+ * directly with weights pre-uploaded via `gpu.createBuffer(weight)`. The
+ * "wire it through the module API" path tripped JIT-compiler quirks
+ * around mixed-typed fields on `nue.Module` implementers (see
+ * `bugs_known.md`); revisit when those are fixed.
  */
 class RMSNorm implements Module {
     public var weight:Tensor;
     public var eps:Float;
     public var paramName:String;
 
-    public function new(weight:Tensor, eps:Float, paramName:String = "norm.weight") {
+    public function new(weight:Tensor, eps:Float, paramName:String) {
         this.weight = weight;
         this.eps = eps;
         this.paramName = paramName;
