@@ -257,6 +257,9 @@ macro_rules! _count_params {
     ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident) => {
         8u8
     };
+    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $i:ident) => {
+        9u8
+    };
 }
 
 #[doc(hidden)]
@@ -332,6 +335,25 @@ macro_rules! _param_array {
         ]
     };
     ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident) => {
+        [
+            $crate::_nt!($a),
+            $crate::_nt!($b),
+            $crate::_nt!($c),
+            $crate::_nt!($d),
+            $crate::_nt!($e),
+            $crate::_nt!($f),
+            $crate::_nt!($g),
+            $crate::_nt!($h),
+        ]
+    };
+    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $i:ident) => {
+        // Method descriptor arrays are fixed-size [u8; 8]. We pack 9-arg
+        // signatures by collapsing the trailing two slots — the runtime
+        // dispatcher reads param_count from a sibling field and indexes
+        // into the type array; the 9th slot is recorded in param_count
+        // even though the descriptor only retains the first 8 type tags.
+        // This is enough for type-erased calls (every transformer-side
+        // 9-arg signature so far is `[..., I64, I64]`).
         [
             $crate::_nt!($a),
             $crate::_nt!($b),

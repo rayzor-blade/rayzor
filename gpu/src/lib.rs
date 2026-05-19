@@ -97,6 +97,9 @@ declare_native_methods! {
     "rayzor_gpu_GPUCompute", "matmul",       instance, "rayzor_gpu_compute_matmul",        [Ptr, Ptr, Ptr, I64, I64, I64] => Ptr;
     // Batch matmul: (self, a, b, batch, m, k, n) -> GpuBuffer
     "rayzor_gpu_GPUCompute", "batchMatmul",  instance, "rayzor_gpu_compute_batch_matmul",  [Ptr, Ptr, Ptr, I64, I64, I64, I64] => Ptr;
+    // Transformer primitives: (self, ...) -> GpuBuffer
+    "rayzor_gpu_GPUCompute", "rmsNorm", instance, "rayzor_gpu_compute_rms_norm", [Ptr, Ptr, Ptr, I64, F64] => Ptr;
+    "rayzor_gpu_GPUCompute", "rope",    instance, "rayzor_gpu_compute_rope",     [Ptr, Ptr, Ptr, Ptr, I64, I64, I64, I64, I64] => Ptr;
     // Structured buffer ops: (self, ...) -> result
     "rayzor_gpu_GPUCompute", "createStructBuffer", instance, "rayzor_gpu_compute_create_struct_buffer", [Ptr, Ptr, I64, I64] => Ptr;
     "rayzor_gpu_GPUCompute", "allocStructBuffer",  instance, "rayzor_gpu_compute_alloc_struct_buffer",  [Ptr, I64, I64]      => Ptr;
@@ -384,6 +387,15 @@ mod native_plugin {
             (
                 "rayzor_gpu_compute_batch_matmul",
                 ops::rayzor_gpu_compute_batch_matmul as *const u8,
+            ),
+            // Transformer primitives
+            (
+                "rayzor_gpu_compute_rms_norm",
+                ops::rayzor_gpu_compute_rms_norm as *const u8,
+            ),
+            (
+                "rayzor_gpu_compute_rope",
+                ops::rayzor_gpu_compute_rope as *const u8,
             ),
             // Structured buffer ops
             (

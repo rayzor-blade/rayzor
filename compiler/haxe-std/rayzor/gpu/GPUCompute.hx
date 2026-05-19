@@ -147,6 +147,30 @@ extern class GPUCompute {
     @:native("gpu_compute_batchMatmul")
     public function batchMatmul(a:GpuBuffer, b:GpuBuffer, batch:Int, m:Int, k:Int, n:Int):GpuBuffer;
 
+    // -- Transformer primitives ----------------------------------------------
+
+    /**
+     * RMS normalization with a learnable per-channel gain.
+     * `y[..., i] = x[..., i] / sqrt(mean(x²) + eps) * weight[i]`.
+     * `rowLen` is the trailing-dim length (hidden_size); the input is
+     * treated as `[groups, rowLen]` with `groups = x.numel / rowLen`.
+     */
+    @:native("gpu_compute_rmsNorm")
+    public function rmsNorm(x:GpuBuffer, weight:GpuBuffer, rowLen:Int, eps:Float):GpuBuffer;
+
+    /**
+     * Apply rotary position embedding to `x [seqLen, numHeads, headDim]`
+     * using precomputed cos/sin LUTs of shape `[cosMaxSeq, headDim/2]`.
+     * `positionOffset` shifts the per-row absolute position (0 for
+     * prefill, positive for decode).
+     */
+    @:native("gpu_compute_rope")
+    public function rope(
+        x:GpuBuffer, cos:GpuBuffer, sin:GpuBuffer,
+        seqLen:Int, numHeads:Int, headDim:Int,
+        positionOffset:Int, cosMaxSeq:Int
+    ):GpuBuffer;
+
     // -- Structured buffer ops (@:gpuStruct) -----------------------------------
 
     /** Create a GPU buffer from an array of @:gpuStruct instances. */
