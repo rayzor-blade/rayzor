@@ -43,6 +43,15 @@ class Main {
             trace("  parallelFor[" + idx + "] on node " + node);
         });
 
+        // Multi-node fanout path runs even on single-NUMA-node hardware
+        // when we force it — 4 Thread.spawn workers, each pinned via
+        // NumaTopology.bindCurrent, processing 4 chunks of the range.
+        trace("--- forced 4-node fanout ---");
+        var fanout = NumaPool.withForcedNodes(4);
+        fanout.parallelFor(16, function(idx:Int, node:Int):Void {
+            trace("  fanout[" + idx + "] on node " + node);
+        });
+
         trace("=== done ===");
     }
 }
