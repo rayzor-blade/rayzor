@@ -73,6 +73,12 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
 
     // Linear algebra
     build_tensor_matmul(builder);
+    build_tensor_bmm(builder);
+
+    // Attention building blocks (composed by nue.transformer in Haxe)
+    build_tensor_causal_mask(builder);
+    build_tensor_scale(builder);
+    build_tensor_transpose_last2(builder);
 
     // Interop
     build_tensor_data(builder);
@@ -229,6 +235,7 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
         "rayzor_tensor_mul",
         "rayzor_tensor_div",
         "rayzor_tensor_matmul",
+        "rayzor_tensor_bmm",
     ] {
         let func_id = builder
             .begin_function(*name)
@@ -239,6 +246,35 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
             .build();
         builder.mark_as_extern(func_id);
     }
+
+    // causal_mask_: (tensor, position_offset) -> i64 (returns same ptr)
+    let func_id = builder
+        .begin_function("rayzor_tensor_causal_mask_")
+        .param("tensor", i64_ty.clone())
+        .param("position_offset", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // scale: (tensor, factor: f64) -> i64
+    let func_id = builder
+        .begin_function("rayzor_tensor_scale")
+        .param("tensor", i64_ty.clone())
+        .param("factor", f64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // transpose_last2: (tensor) -> i64
+    let func_id = builder
+        .begin_function("rayzor_tensor_transpose_last2")
+        .param("tensor", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
 
     // Unary ops: (tensor) -> i64
     for name in &[
@@ -676,6 +712,72 @@ build_binop_i64!(build_tensor_sub, "Tensor_sub", "rayzor_tensor_sub");
 build_binop_i64!(build_tensor_mul, "Tensor_mul", "rayzor_tensor_mul");
 build_binop_i64!(build_tensor_div, "Tensor_div", "rayzor_tensor_div");
 build_binop_i64!(build_tensor_matmul, "Tensor_matmul", "rayzor_tensor_matmul");
+build_binop_i64!(build_tensor_bmm, "Tensor_bmm", "rayzor_tensor_bmm");
+
+/// Tensor_causal_mask_(self, position_offset) -> i64
+fn build_tensor_causal_mask(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let func_id = builder
+        .begin_function("Tensor_causal_mask_")
+        .param("self", i64_ty.clone())
+        .param("position_offset", i64_ty.clone())
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let s = builder.get_param(0);
+    let p = builder.get_param(1);
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_causal_mask_")
+        .expect("rayzor_tensor_causal_mask_ not found");
+    let result = builder.call(extern_id, vec![s, p]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// Tensor_scale(self, factor: f64) -> i64
+fn build_tensor_scale(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let f64_ty = IrType::F64;
+    let func_id = builder
+        .begin_function("Tensor_scale")
+        .param("self", i64_ty.clone())
+        .param("factor", f64_ty)
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let s = builder.get_param(0);
+    let f = builder.get_param(1);
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_scale")
+        .expect("rayzor_tensor_scale not found");
+    let result = builder.call(extern_id, vec![s, f]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// Tensor_transpose_last2(self) -> i64
+fn build_tensor_transpose_last2(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let func_id = builder
+        .begin_function("Tensor_transpose_last2")
+        .param("self", i64_ty.clone())
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let s = builder.get_param(0);
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_transpose_last2")
+        .expect("rayzor_tensor_transpose_last2 not found");
+    let result = builder.call(extern_id, vec![s]).unwrap();
+    builder.ret(Some(result));
+}
 
 // ============================================================================
 // Dot product: (tensor, tensor) -> f64
