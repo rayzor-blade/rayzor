@@ -10,6 +10,15 @@ pub struct TokenStream<'a> {
     tokens: &'a [Token],
     pos: usize,
     source: &'a str,
+    /// Counts the `>` slots already virtually consumed from a leading
+    /// `>>` (Shr) or `>>>` (Ushr) token by `expect_closing_gt`. Each
+    /// call increments this until the token is fully claimed, then
+    /// `advance()` resets it and moves past the token.
+    ///
+    /// - `0`: no virtual consumption yet; treat current token as whole.
+    /// - `1`: one `>` slot taken — still pointing at the same Shr/Ushr.
+    /// - `2`: two `>` slots taken — only meaningful for Ushr.
+    split_gt_consumed: u8,
 }
 
 impl<'a> TokenStream<'a> {
@@ -18,6 +27,7 @@ impl<'a> TokenStream<'a> {
             tokens,
             pos: 0,
             source,
+            split_gt_consumed: 0,
         }
     }
 
@@ -84,6 +94,63 @@ impl<'a> TokenStream<'a> {
                 span: token.span,
             })
         }
+    }
+
+    /// Consume the closing `>` of a type-parameter list, virtually
+    /// splitting a multi-`>` token on the fly. This handles nested
+    /// generics like `Array<Thread<Int>>` (closing `>>` = Shr) and
+    /// `Array<Array<Array<Int>>>` (closing `>>>` = Ushr).
+    ///
+    /// Each call claims one `>` slot:
+    /// - At `Gt`: advance fully.
+    /// - At `Shr` (worth 2 slots): increment counter; on slot 2, advance.
+    /// - At `Ushr` (worth 3 slots): increment counter; on slot 3, advance.
+    /// - Anything else: standard expect-Gt error.
+    pub fn expect_closing_gt(&mut self) -> Result<Span, ParseError> {
+        if self.at(TokenKind::Gt) {
+            let token = self.advance();
+            return Ok(token.span);
+        }
+        let token = self.peek();
+        let total_slots = match token.kind {
+            TokenKind::Shr => 2,
+            TokenKind::Ushr => 3,
+            _ => {
+                return Err(ParseError {
+                    message: format!(
+                        "expected '>', found {:?} ('{}')",
+                        token.kind,
+                        token.text(self.source)
+                    ),
+                    span: token.span,
+                });
+            }
+        };
+        let slot_idx = self.split_gt_consumed;
+        let span_start = token.span.start + slot_idx as usize;
+        let span_end = span_start + 1;
+        let claimed = Span {
+            start: span_start,
+            end: span_end,
+        };
+        if (slot_idx as u32) + 1 == total_slots {
+            // Last slot — consume the whole token and reset.
+            self.split_gt_consumed = 0;
+            self.advance();
+        } else {
+            // Virtual consume — token stays, counter advances.
+            self.split_gt_consumed = slot_idx + 1;
+        }
+        Ok(claimed)
+    }
+
+    /// Like `at(Gt)` but also returns true at `>>` (Shr) or `>>>` (Ushr)
+    /// — the lexer's multi-char tokens that the parser splits on the
+    /// fly for nested generic close. Use this for the loop condition
+    /// inside `parse_type_param_args` and friends.
+    pub fn at_closing_gt(&self) -> bool {
+        let kind = self.peek().kind;
+        kind == TokenKind::Gt || kind == TokenKind::Shr || kind == TokenKind::Ushr
     }
 
     /// Get the text of the current token.
