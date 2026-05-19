@@ -1429,9 +1429,50 @@ pub unsafe extern "C" fn rayzor_tensor_matmul(a_ptr: i64, b_ptr: i64) -> i64 {
         return result;
     }
 
+    // F16 / BF16 row-major fast path: axpy specialisation that stages
+    // through f32 via NEON vcvt_f32_f16 / F16C _mm_cvtph_ps in batches of 64.
+    // This is the matmul hot path for LLM inference (every row update is an
+    // f16 axpy against a half-precision weight row).
+    if a_strides[1] == 1 && b_strides[1] == 1 {
+        if a.dtype == DTYPE_F16 {
+            let a_data = a.data as *const u16;
+            let b_data = b.data as *const u16;
+            let r_data = r.data as *mut u16;
+            for i in 0..m {
+                let a_row = a_data.add(i * a_strides[0]);
+                let r_row = r_data.add(i * n);
+                for p in 0..k {
+                    let a_ik = half::f16::from_bits(*a_row.add(p)).to_f32();
+                    let b_row = b_data.add(p * b_strides[0]);
+                    let r_slice = std::slice::from_raw_parts_mut(r_row, n);
+                    let b_slice = std::slice::from_raw_parts(b_row, n);
+                    crate::tensor_simd::axpy_f16_slice(r_slice, a_ik, b_slice);
+                }
+            }
+            return result;
+        }
+        if a.dtype == DTYPE_BF16 {
+            let a_data = a.data as *const u16;
+            let b_data = b.data as *const u16;
+            let r_data = r.data as *mut u16;
+            for i in 0..m {
+                let a_row = a_data.add(i * a_strides[0]);
+                let r_row = r_data.add(i * n);
+                for p in 0..k {
+                    let a_ik = half::bf16::from_bits(*a_row.add(p)).to_f32();
+                    let b_row = b_data.add(p * b_strides[0]);
+                    let r_slice = std::slice::from_raw_parts_mut(r_row, n);
+                    let b_slice = std::slice::from_raw_parts(b_row, n);
+                    crate::tensor_simd::axpy_bf16_slice(r_slice, a_ik, b_slice);
+                }
+            }
+            return result;
+        }
+    }
+
     // Generic dtype path: convert each element to f32 in-register, accumulate
-    // in f32 (or f64 for very wide reductions), store back as the source
-    // dtype. Phase 3c specialises the F16/BF16 case to NEON / x86 F16C.
+    // in f32, store back as the source dtype. Covers strided F16/BF16 views
+    // and the integer/FP8 dtypes.
     let dtype = a.dtype;
     for i in 0..m {
         for j in 0..n {

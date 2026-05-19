@@ -653,6 +653,129 @@ pub fn dot_slice(a: &[f32], b: &[f32]) -> f64 {
     lanes_total + tail
 }
 
+// ---------------------------------------------------------------------------
+// Half-precision (F16 / BF16) SIMD primitives
+//
+// Storage is `[u16]` (the f16/bf16 bit pattern). Compute runs in f32 by
+// staging through a small `[f32; LANES]` buffer per lane group, then converts
+// back to storage on store. The conversion itself goes through the `half`
+// crate's slice helpers (`convert_to_f32_slice` / `convert_from_f32_slice`),
+// which use NEON `vcvt_f32_f16` on aarch64 (Apple Silicon + ARMv8.2-A FP16)
+// and F16C `_mm_cvtph_ps` / `_mm_cvtps_ph` on x86_64 Sandy Bridge+. The f32
+// arithmetic inside the lane reuses the f32 SIMD path established above.
+//
+// We deliberately bias toward `axpy` since that's the matmul row-update
+// primitive — the single biggest CPU win for LLM inference. Other ops
+// can layer on top later if profiling shows them as bottlenecks.
+// ---------------------------------------------------------------------------
+
+/// `r += alpha * b` for f16 storage.
+/// Both slices are u16-stored f16 bit patterns. Result stays in f16.
+#[inline]
+pub fn axpy_f16_slice(r: &mut [u16], alpha: f32, b: &[u16]) {
+    use half::f16;
+    use half::slice::HalfFloatSliceExt;
+
+    let n = r.len();
+    debug_assert!(b.len() == n);
+
+    // Staging buffers for f32 compute. Chunk size keeps L1 hot on most CPUs.
+    const CHUNK: usize = 64;
+    let mut r_f32 = [0.0f32; CHUNK];
+    let mut b_f32 = [0.0f32; CHUNK];
+
+    let mut i = 0;
+    while i + CHUNK <= n {
+        // Reinterpret the &[u16] storage as &[f16] for the half crate's
+        // SIMD-accelerated batch conversion.
+        let r_chunk: &[f16] =
+            unsafe { std::slice::from_raw_parts(r[i..i + CHUNK].as_ptr() as *const f16, CHUNK) };
+        let b_chunk: &[f16] =
+            unsafe { std::slice::from_raw_parts(b[i..i + CHUNK].as_ptr() as *const f16, CHUNK) };
+
+        r_chunk.convert_to_f32_slice(&mut r_f32);
+        b_chunk.convert_to_f32_slice(&mut b_f32);
+
+        // f32 axpy on the staged buffer — reuses the SIMD path above.
+        axpy_slice(&mut r_f32, alpha, &b_f32);
+
+        let r_chunk_mut: &mut [f16] = unsafe {
+            std::slice::from_raw_parts_mut(r[i..i + CHUNK].as_mut_ptr() as *mut f16, CHUNK)
+        };
+        r_chunk_mut.convert_from_f32_slice(&r_f32);
+        i += CHUNK;
+    }
+    // Tail: per-element scalar fallback.
+    while i < n {
+        let cur = f16::from_bits(r[i]).to_f32();
+        let bv = f16::from_bits(b[i]).to_f32();
+        r[i] = f16::from_f32(cur + alpha * bv).to_bits();
+        i += 1;
+    }
+}
+
+/// `r += alpha * b` for bf16 storage.
+#[inline]
+pub fn axpy_bf16_slice(r: &mut [u16], alpha: f32, b: &[u16]) {
+    use half::bf16;
+    use half::slice::HalfFloatSliceExt;
+
+    let n = r.len();
+    debug_assert!(b.len() == n);
+
+    const CHUNK: usize = 64;
+    let mut r_f32 = [0.0f32; CHUNK];
+    let mut b_f32 = [0.0f32; CHUNK];
+
+    let mut i = 0;
+    while i + CHUNK <= n {
+        let r_chunk: &[bf16] =
+            unsafe { std::slice::from_raw_parts(r[i..i + CHUNK].as_ptr() as *const bf16, CHUNK) };
+        let b_chunk: &[bf16] =
+            unsafe { std::slice::from_raw_parts(b[i..i + CHUNK].as_ptr() as *const bf16, CHUNK) };
+
+        r_chunk.convert_to_f32_slice(&mut r_f32);
+        b_chunk.convert_to_f32_slice(&mut b_f32);
+
+        axpy_slice(&mut r_f32, alpha, &b_f32);
+
+        let r_chunk_mut: &mut [bf16] = unsafe {
+            std::slice::from_raw_parts_mut(r[i..i + CHUNK].as_mut_ptr() as *mut bf16, CHUNK)
+        };
+        r_chunk_mut.convert_from_f32_slice(&r_f32);
+        i += CHUNK;
+    }
+    while i < n {
+        let cur = bf16::from_bits(r[i]).to_f32();
+        let bv = bf16::from_bits(b[i]).to_f32();
+        r[i] = bf16::from_f32(cur + alpha * bv).to_bits();
+        i += 1;
+    }
+}
+
+/// Convert a slice of f16-storage to f32 in bulk. Used by reductions that
+/// want SIMD f32 paths over half-precision inputs.
+#[inline]
+pub fn f16_to_f32_slice(dst: &mut [f32], src: &[u16]) {
+    use half::f16;
+    use half::slice::HalfFloatSliceExt;
+    let n = src.len();
+    debug_assert!(dst.len() == n);
+    let src_f16: &[f16] = unsafe { std::slice::from_raw_parts(src.as_ptr() as *const f16, n) };
+    src_f16.convert_to_f32_slice(dst);
+}
+
+/// Convert a slice of bf16-storage to f32 in bulk.
+#[inline]
+pub fn bf16_to_f32_slice(dst: &mut [f32], src: &[u16]) {
+    use half::bf16;
+    use half::slice::HalfFloatSliceExt;
+    let n = src.len();
+    debug_assert!(dst.len() == n);
+    let src_bf16: &[bf16] = unsafe { std::slice::from_raw_parts(src.as_ptr() as *const bf16, n) };
+    src_bf16.convert_to_f32_slice(dst);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -745,6 +868,50 @@ mod tests {
         let want: f32 = a.iter().map(|x| x * x).sum();
         let got = sum_of_squares(&a);
         assert!((got - want).abs() < 1e-3);
+    }
+
+    #[test]
+    fn axpy_f16_matches_scalar() {
+        use half::f16;
+        let b_f16: Vec<u16> = (1..=11)
+            .map(|i| f16::from_f32(i as f32).to_bits())
+            .collect();
+        let initial_f16: Vec<u16> = (0..11).map(|i| f16::from_f32(i as f32).to_bits()).collect();
+        let mut r = initial_f16.clone();
+        let alpha = 2.5f32;
+        axpy_f16_slice(&mut r, alpha, &b_f16);
+        for (i, (got_bits, init_bits)) in r.iter().zip(initial_f16.iter()).enumerate() {
+            let got = f16::from_bits(*got_bits).to_f32();
+            let init = f16::from_bits(*init_bits).to_f32();
+            let b_v = f16::from_bits(b_f16[i]).to_f32();
+            // f16 add+mul precision is ~3e-3 relative
+            let want = init + alpha * b_v;
+            let tol = (want.abs() * 1e-2).max(1e-2);
+            assert!((got - want).abs() < tol, "i={i} got={got} want={want}");
+        }
+    }
+
+    #[test]
+    fn axpy_bf16_matches_scalar() {
+        use half::bf16;
+        let b_bf16: Vec<u16> = (1..=11)
+            .map(|i| bf16::from_f32(i as f32).to_bits())
+            .collect();
+        let initial_bf16: Vec<u16> = (0..11)
+            .map(|i| bf16::from_f32(i as f32).to_bits())
+            .collect();
+        let mut r = initial_bf16.clone();
+        let alpha = 2.5f32;
+        axpy_bf16_slice(&mut r, alpha, &b_bf16);
+        for (i, (got_bits, init_bits)) in r.iter().zip(initial_bf16.iter()).enumerate() {
+            let got = bf16::from_bits(*got_bits).to_f32();
+            let init = bf16::from_bits(*init_bits).to_f32();
+            let b_v = bf16::from_bits(b_bf16[i]).to_f32();
+            // bf16 has 7-bit mantissa — relative precision ~1%
+            let want = init + alpha * b_v;
+            let tol = (want.abs() * 5e-2).max(5e-2);
+            assert!((got - want).abs() < tol, "i={i} got={got} want={want}");
+        }
     }
 
     #[test]
