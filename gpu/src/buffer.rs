@@ -12,20 +12,29 @@ use crate::backend::{NativeBuffer, NativeCompiledKernel, NativeContext};
 use crate::device::GpuContext;
 use crate::lazy::LazyNode;
 
-/// DType tags matching runtime/src/tensor.rs
+/// DType tags matching runtime/src/tensor.rs and compiler/haxe-std/rayzor/ds/DType.hx.
+/// Order is load-bearing: the Haxe enum produces these as ordinals 0..N.
 pub const DTYPE_F32: u8 = 0;
-pub const DTYPE_F64: u8 = 1;
-pub const DTYPE_I32: u8 = 2;
-pub const DTYPE_I64: u8 = 3;
+pub const DTYPE_F16: u8 = 1;
+pub const DTYPE_BF16: u8 = 2;
+pub const DTYPE_I32: u8 = 3;
+pub const DTYPE_I8: u8 = 4;
+pub const DTYPE_U8: u8 = 5;
+pub const DTYPE_FP8_E4M3: u8 = 6;
+pub const DTYPE_FP8_E5M2: u8 = 7;
 
 /// Byte size per element for each dtype.
 pub fn dtype_byte_size(dtype: u8) -> usize {
     match dtype {
         DTYPE_F32 => 4,
-        DTYPE_F64 => 8,
+        DTYPE_F16 => 2,
+        DTYPE_BF16 => 2,
         DTYPE_I32 => 4,
-        DTYPE_I64 => 8,
-        _ => 8, // default to f64
+        DTYPE_I8 => 1,
+        DTYPE_U8 => 1,
+        DTYPE_FP8_E4M3 => 1,
+        DTYPE_FP8_E5M2 => 1,
+        _ => 4, // default to f32
     }
 }
 

@@ -2734,6 +2734,7 @@ dependencies = [
  "cc",
  "chrono",
  "flate2",
+ "half",
  "inventory",
  "lazy_static",
  "libc",

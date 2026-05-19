@@ -18,12 +18,19 @@ use crate::buffer;
 use crate::kernel_ir::KernelOp;
 
 /// Map a dtype tag to the corresponding MSL type string.
+/// MSL has native `half` (16-bit IEEE) on all Metal families; Phase 3d
+/// will route F16 there. BF16 has no native MSL type — stored as ushort,
+/// converted in kernel. FP8 likewise needs dequant-in-kernel (Phase 3e).
 pub fn dtype_to_msl(dtype: u8) -> &'static str {
     match dtype {
         buffer::DTYPE_F32 => "float",
-        buffer::DTYPE_F64 => "double", // Note: requires Metal GPU Family 5+
         buffer::DTYPE_I32 => "int",
-        buffer::DTYPE_I64 => "long",
+        // F16/BF16/FP8 fall back to float until Phases 3d/3e wire them.
+        buffer::DTYPE_F16 | buffer::DTYPE_BF16 => "float",
+        buffer::DTYPE_FP8_E4M3 | buffer::DTYPE_FP8_E5M2 => "float",
+        // Integer storage formats.
+        buffer::DTYPE_I8 => "char",
+        buffer::DTYPE_U8 => "uchar",
         _ => "float",
     }
 }

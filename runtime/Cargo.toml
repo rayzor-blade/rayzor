@@ -17,6 +17,10 @@ parking_lot = "0.12"
 regex = "1"
 backtrace = "0.3"
 flate2 = "1"
+# Half-precision floats (IEEE f16 + brain float bf16). Phase 3b uses
+# this for CPU storage conversions; Phase 3c lowers selectively to NEON
+# vcvt on aarch64.
+half = "2"
 rustls = "0.23"
 webpki-roots = "0.26"
 rustls-pemfile = "2"
