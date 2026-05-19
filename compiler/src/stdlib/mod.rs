@@ -162,6 +162,7 @@ pub fn build_stdlib_with_plugins(registry: &CompilerPluginRegistry) -> IrModule 
     socket::build_socket_type(&mut builder);
     systems::build_systems_types(&mut builder);
     tensor::build_tensor_types(&mut builder);
+    qtensor::build_qtensor_types(&mut builder);
     ereg::build_ereg_type(&mut builder);
     compress::build_compress_type(&mut builder);
     ssl::build_ssl_types(&mut builder);
