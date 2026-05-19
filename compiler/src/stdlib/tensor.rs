@@ -59,6 +59,11 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
     build_tensor_layer_norm(builder);
     build_tensor_rms_norm(builder);
 
+    // Rotary position embedding (RoPE)
+    build_tensor_rope(builder);
+    build_tensor_rope_cos_table(builder);
+    build_tensor_rope_sin_table(builder);
+
     // Reductions
     build_tensor_sum(builder);
     build_tensor_mean(builder);
@@ -260,6 +265,34 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
             .begin_function(*name)
             .param("tensor", i64_ty.clone())
             .param("eps", f64_ty.clone())
+            .returns(i64_ty.clone())
+            .calling_convention(CallingConvention::C)
+            .build();
+        builder.mark_as_extern(func_id);
+    }
+
+    // rope: (x, cos, sin, position_offset) -> i64
+    let func_id = builder
+        .begin_function("rayzor_tensor_rope")
+        .param("x", i64_ty.clone())
+        .param("cos", i64_ty.clone())
+        .param("sin", i64_ty.clone())
+        .param("position_offset", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // rope cos/sin tables: (head_dim, max_seq_len, base: f64) -> i64
+    for name in &[
+        "rayzor_tensor_rope_cos_table",
+        "rayzor_tensor_rope_sin_table",
+    ] {
+        let func_id = builder
+            .begin_function(*name)
+            .param("head_dim", i64_ty.clone())
+            .param("max_seq_len", i64_ty.clone())
+            .param("base", f64_ty.clone())
             .returns(i64_ty.clone())
             .calling_convention(CallingConvention::C)
             .build();
@@ -850,6 +883,66 @@ fn build_tensor_rms_norm(builder: &mut MirBuilder) {
         .get_function_by_name("rayzor_tensor_rms_norm")
         .expect("rayzor_tensor_rms_norm not found");
     let result = builder.call(extern_id, vec![self_val, eps]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// Tensor_rope(self: i64, cos: i64, sin: i64, positionOffset: i64) -> i64
+fn build_tensor_rope(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let func_id = builder
+        .begin_function("Tensor_rope")
+        .param("self", i64_ty.clone())
+        .param("cos", i64_ty.clone())
+        .param("sin", i64_ty.clone())
+        .param("position_offset", i64_ty.clone())
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let s = builder.get_param(0);
+    let c = builder.get_param(1);
+    let sn = builder.get_param(2);
+    let p = builder.get_param(3);
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_rope")
+        .expect("rayzor_tensor_rope not found");
+    let result = builder.call(extern_id, vec![s, c, sn, p]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// Tensor_rope_cos_table(headDim: i64, maxSeqLen: i64, base: f64) -> i64
+fn build_tensor_rope_cos_table(builder: &mut MirBuilder) {
+    build_rope_table(builder, "Tensor_rope_cos_table", "rayzor_tensor_rope_cos_table");
+}
+
+/// Tensor_rope_sin_table(headDim: i64, maxSeqLen: i64, base: f64) -> i64
+fn build_tensor_rope_sin_table(builder: &mut MirBuilder) {
+    build_rope_table(builder, "Tensor_rope_sin_table", "rayzor_tensor_rope_sin_table");
+}
+
+fn build_rope_table(builder: &mut MirBuilder, wrapper: &str, extern_name: &str) {
+    let i64_ty = IrType::I64;
+    let f64_ty = IrType::F64;
+    let func_id = builder
+        .begin_function(wrapper)
+        .param("head_dim", i64_ty.clone())
+        .param("max_seq_len", i64_ty.clone())
+        .param("base", f64_ty)
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let hd = builder.get_param(0);
+    let msl = builder.get_param(1);
+    let base = builder.get_param(2);
+    let extern_id = builder
+        .get_function_by_name(extern_name)
+        .unwrap_or_else(|| panic!("{} not found", extern_name));
+    let result = builder.call(extern_id, vec![hd, msl, base]).unwrap();
     builder.ret(Some(result));
 }
 

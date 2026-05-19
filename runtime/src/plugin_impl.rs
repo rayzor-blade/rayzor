@@ -1788,6 +1788,17 @@ register_symbol!("rayzor_tensor_dot", crate::tensor::rayzor_tensor_dot);
 // Linear algebra
 register_symbol!("rayzor_tensor_matmul", crate::tensor::rayzor_tensor_matmul);
 
+// Rotary position embedding (RoPE) — transformer primitive (Phase 5)
+register_symbol!("rayzor_tensor_rope", crate::tensor::rayzor_tensor_rope);
+register_symbol!(
+    "rayzor_tensor_rope_cos_table",
+    crate::tensor::rayzor_tensor_rope_cos_table
+);
+register_symbol!(
+    "rayzor_tensor_rope_sin_table",
+    crate::tensor::rayzor_tensor_rope_sin_table
+);
+
 // Interop
 register_symbol!("rayzor_tensor_data", crate::tensor::rayzor_tensor_data);
 register_symbol!("rayzor_tensor_free", crate::tensor::rayzor_tensor_free);

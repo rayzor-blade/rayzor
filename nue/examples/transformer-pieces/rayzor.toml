@@ -1,0 +1,6 @@
+[project]
+name = "transformer-pieces"
+entry = "Main.hx"
+
+[build]
+class-paths = [".", "../../"]

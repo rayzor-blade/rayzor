@@ -1,0 +1,13 @@
+[project]
+name = "nue"
+version = "0.1.0"
+# nue is a library — no `entry` since users import it.
+type = "library"
+
+[build]
+# The Haxe sources live under ./nue/ (matching the Haxe package path).
+class-paths = ["."]
+
+[dependencies]
+# nue uses rayzor.ds.Tensor + rayzor.ds.QTensor from the bundled stdlib —
+# no explicit dependency entry needed; those are part of the compiler.
