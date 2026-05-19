@@ -874,6 +874,308 @@ fn batch_matmul_dispatch(
 }
 
 // ---------------------------------------------------------------------------
+// Transformer primitives — RmsNorm and Rope (eager dispatch).
+//
+// Unlike the elementwise lazy ops, these have row-shaped layouts +
+// uniform parameters that don't fit cleanly into the fusion graph;
+// they materialise their inputs and dispatch immediately, returning a
+// fresh materialised result. The WGSL/MSL/CUDA kernel sources live in
+// `codegen::{wgsl,msl,cuda}_transformer`.
+// ---------------------------------------------------------------------------
+
+/// `y[row, i] = x[row, i] / sqrt(mean(x²) + eps) * weight[i]`. `row_len`
+/// is the trailing-dim length (hidden_size); the input is treated as a
+/// flat `[groups, row_len]` matrix with `groups = numel / row_len`.
+unsafe fn rms_norm_impl(ctx: i64, x: i64, weight: i64, row_len: usize, eps: f32) -> i64 {
+    if ctx == 0 || x == 0 || weight == 0 || row_len == 0 {
+        return 0;
+    }
+    let gpu_ctx = &mut *(ctx as *mut GpuContext);
+    let x_buf = &mut *(x as *mut GpuBuffer);
+    let w_buf = &mut *(weight as *mut GpuBuffer);
+    if x_buf.ensure_materialized(gpu_ctx).is_err() {
+        return 0;
+    }
+    if w_buf.ensure_materialized(gpu_ctx).is_err() {
+        return 0;
+    }
+    if x_buf.numel == 0 || x_buf.numel % row_len != 0 {
+        return 0;
+    }
+    let groups = x_buf.numel / row_len;
+    let dtype = x_buf.dtype;
+    let cached = match gpu_ctx
+        .kernel_cache
+        .get_or_compile(&gpu_ctx.inner, KernelOp::RmsNorm, dtype)
+    {
+        Ok(k) => k,
+        Err(_) => return 0,
+    };
+    let elem_size = buffer::dtype_byte_size(dtype);
+
+    match rms_norm_dispatch(
+        &gpu_ctx.inner,
+        &cached.compiled,
+        x_buf.native_buffer(),
+        w_buf.native_buffer(),
+        x_buf.numel,
+        row_len,
+        groups,
+        eps,
+        elem_size,
+    ) {
+        Ok(result_native) => {
+            let result = GpuBuffer::materialized(result_native, x_buf.numel, dtype);
+            Box::into_raw(Box::new(result)) as i64
+        }
+        Err(_) => 0,
+    }
+}
+
+#[allow(unused_variables, clippy::too_many_arguments)]
+fn rms_norm_dispatch(
+    ctx: &NativeContext,
+    compiled: &NativeCompiledKernel,
+    x_buf: &Rc<NativeBuffer>,
+    w_buf: &Rc<NativeBuffer>,
+    numel: usize,
+    row_len: usize,
+    groups: usize,
+    eps: f32,
+    elem_size: usize,
+) -> Result<NativeBuffer, String> {
+    match (ctx, compiled) {
+        #[cfg(feature = "webgpu-backend")]
+        (NativeContext::Wgpu(wgpu_ctx), NativeCompiledKernel::Wgpu(kernel)) => {
+            use crate::wgpu_backend::{buffer_ops::WgpuBuffer, dispatch};
+
+            let x_wgpu = match x_buf.as_ref() {
+                NativeBuffer::Wgpu(wb) => wb,
+                _ => return Err("x not wgpu".into()),
+            };
+            let w_wgpu = match w_buf.as_ref() {
+                NativeBuffer::Wgpu(wb) => wb,
+                _ => return Err("weight not wgpu".into()),
+            };
+
+            let result = WgpuBuffer::allocate(wgpu_ctx, numel * elem_size)
+                .ok_or("failed to alloc rmsnorm result")?;
+
+            // Uniform layout: { row_len: u32, eps: f32 }. The shader pads to
+            // 8 bytes naturally — explicit padding for portability.
+            #[repr(C)]
+            struct RmsParams {
+                row_len: u32,
+                eps: f32,
+            }
+            let params = RmsParams {
+                row_len: row_len as u32,
+                eps,
+            };
+            let params_buf = unsafe {
+                WgpuBuffer::from_data(
+                    wgpu_ctx,
+                    &params as *const _ as *const u8,
+                    std::mem::size_of::<RmsParams>(),
+                )
+            }
+            .ok_or("failed to alloc rmsnorm params")?;
+
+            dispatch::dispatch_workgroups(
+                wgpu_ctx,
+                kernel,
+                &[x_wgpu, w_wgpu, &result, &params_buf],
+                (groups, 1, 1),
+            )?;
+            Ok(NativeBuffer::Wgpu(result))
+        }
+        _ => Err("rmsnorm: backend not yet wired (only wgpu landed)".into()),
+    }
+}
+
+/// Apply RoPE to `x [seq_len, num_heads, head_dim]` using precomputed
+/// cos/sin LUTs. `position_offset` shifts the logical position used
+/// for table lookup (0 for prefill, positive for decode).
+#[allow(clippy::too_many_arguments)]
+unsafe fn rope_impl(
+    ctx: i64,
+    x: i64,
+    cos: i64,
+    sin: i64,
+    seq_len: usize,
+    num_heads: usize,
+    head_dim: usize,
+    position_offset: u32,
+    cos_max_seq: usize,
+) -> i64 {
+    if ctx == 0 || x == 0 || cos == 0 || sin == 0 {
+        return 0;
+    }
+    if seq_len == 0 || num_heads == 0 || head_dim == 0 || !head_dim.is_multiple_of(2) {
+        return 0;
+    }
+    let gpu_ctx = &mut *(ctx as *mut GpuContext);
+    let x_buf = &mut *(x as *mut GpuBuffer);
+    let cos_buf = &mut *(cos as *mut GpuBuffer);
+    let sin_buf = &mut *(sin as *mut GpuBuffer);
+    if x_buf.ensure_materialized(gpu_ctx).is_err() {
+        return 0;
+    }
+    if cos_buf.ensure_materialized(gpu_ctx).is_err() {
+        return 0;
+    }
+    if sin_buf.ensure_materialized(gpu_ctx).is_err() {
+        return 0;
+    }
+    let dtype = x_buf.dtype;
+    let cached = match gpu_ctx
+        .kernel_cache
+        .get_or_compile(&gpu_ctx.inner, KernelOp::Rope, dtype)
+    {
+        Ok(k) => k,
+        Err(_) => return 0,
+    };
+    let elem_size = buffer::dtype_byte_size(dtype);
+    let numel = seq_len * num_heads * head_dim;
+
+    match rope_dispatch(
+        &gpu_ctx.inner,
+        &cached.compiled,
+        x_buf.native_buffer(),
+        cos_buf.native_buffer(),
+        sin_buf.native_buffer(),
+        seq_len,
+        num_heads,
+        head_dim,
+        position_offset,
+        cos_max_seq,
+        elem_size,
+    ) {
+        Ok(result_native) => {
+            let result = GpuBuffer::materialized(result_native, numel, dtype);
+            Box::into_raw(Box::new(result)) as i64
+        }
+        Err(_) => 0,
+    }
+}
+
+#[allow(unused_variables, clippy::too_many_arguments)]
+fn rope_dispatch(
+    ctx: &NativeContext,
+    compiled: &NativeCompiledKernel,
+    x_buf: &Rc<NativeBuffer>,
+    cos_buf: &Rc<NativeBuffer>,
+    sin_buf: &Rc<NativeBuffer>,
+    seq_len: usize,
+    num_heads: usize,
+    head_dim: usize,
+    position_offset: u32,
+    cos_max_seq: usize,
+    elem_size: usize,
+) -> Result<NativeBuffer, String> {
+    match (ctx, compiled) {
+        #[cfg(feature = "webgpu-backend")]
+        (NativeContext::Wgpu(wgpu_ctx), NativeCompiledKernel::Wgpu(kernel)) => {
+            use crate::wgpu_backend::{buffer_ops::WgpuBuffer, dispatch};
+
+            let x_wgpu = match x_buf.as_ref() {
+                NativeBuffer::Wgpu(wb) => wb,
+                _ => return Err("x not wgpu".into()),
+            };
+            let cos_wgpu = match cos_buf.as_ref() {
+                NativeBuffer::Wgpu(wb) => wb,
+                _ => return Err("cos not wgpu".into()),
+            };
+            let sin_wgpu = match sin_buf.as_ref() {
+                NativeBuffer::Wgpu(wb) => wb,
+                _ => return Err("sin not wgpu".into()),
+            };
+
+            let numel = seq_len * num_heads * head_dim;
+            let result = WgpuBuffer::allocate(wgpu_ctx, numel * elem_size)
+                .ok_or("failed to alloc rope result")?;
+
+            #[repr(C)]
+            struct RopeParams {
+                seq_len: u32,
+                num_heads: u32,
+                head_dim: u32,
+                position_offset: u32,
+                cos_max_seq: u32,
+            }
+            let params = RopeParams {
+                seq_len: seq_len as u32,
+                num_heads: num_heads as u32,
+                head_dim: head_dim as u32,
+                position_offset,
+                cos_max_seq: cos_max_seq as u32,
+            };
+            let params_buf = unsafe {
+                WgpuBuffer::from_data(
+                    wgpu_ctx,
+                    &params as *const _ as *const u8,
+                    std::mem::size_of::<RopeParams>(),
+                )
+            }
+            .ok_or("failed to alloc rope params")?;
+
+            let half_dim = head_dim / 2;
+            let lanes = seq_len * num_heads * half_dim;
+            let wg_size = 256usize;
+            dispatch::dispatch_workgroups(
+                wgpu_ctx,
+                kernel,
+                &[x_wgpu, cos_wgpu, sin_wgpu, &result, &params_buf],
+                (lanes.div_ceil(wg_size), 1, 1),
+            )?;
+            Ok(NativeBuffer::Wgpu(result))
+        }
+        _ => Err("rope: backend not yet wired (only wgpu landed)".into()),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Transformer primitives — FFI entry points
+// ---------------------------------------------------------------------------
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_gpu_compute_rms_norm(
+    ctx: i64,
+    x: i64,
+    weight: i64,
+    row_len: i64,
+    eps: f64,
+) -> i64 {
+    rms_norm_impl(ctx, x, weight, row_len as usize, eps as f32)
+}
+
+#[no_mangle]
+#[allow(clippy::too_many_arguments)]
+pub unsafe extern "C" fn rayzor_gpu_compute_rope(
+    ctx: i64,
+    x: i64,
+    cos: i64,
+    sin: i64,
+    seq_len: i64,
+    num_heads: i64,
+    head_dim: i64,
+    position_offset: i64,
+    cos_max_seq: i64,
+) -> i64 {
+    rope_impl(
+        ctx,
+        x,
+        cos,
+        sin,
+        seq_len as usize,
+        num_heads as usize,
+        head_dim as usize,
+        position_offset.max(0) as u32,
+        cos_max_seq as usize,
+    )
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
