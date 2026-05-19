@@ -1709,6 +1709,63 @@ pub unsafe extern "C" fn rayzor_tensor_transpose_last2(t_ptr: i64) -> i64 {
     new_t as i64
 }
 
+/// Row-gather: fetch the rows of `table` named by `indices` and stack
+/// them into a new tensor.
+///
+/// `table` is `[N, ...rest]`; `indices` is an i64 array of length `K`.
+/// The result has shape `[K, ...rest]` and shares the source dtype.
+/// Used by `nue.Embedding` to turn `[seq_len]` token IDs into a
+/// `[seq_len, hidden_size]` activation tensor.
+///
+/// Out-of-range indices return 0 — caller is responsible for validating
+/// the vocabulary range. The indices array is read as i64, matching the
+/// Haxe Array<Int> layout (which boxes ints to i64 in this runtime).
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_gather_rows(
+    table_ptr: i64,
+    indices_ptr: i64,
+    indices_len: i64,
+) -> i64 {
+    if table_ptr == 0 || indices_ptr == 0 || indices_len <= 0 {
+        return 0;
+    }
+    let table = &*(table_ptr as *const RayzorTensor);
+    if table.ndim == 0 {
+        return 0;
+    }
+    let table_shape = std::slice::from_raw_parts(table.shape, table.ndim);
+    let n_rows = table_shape[0];
+    let row_numel: usize = table_shape[1..].iter().product::<usize>().max(1);
+    let elem = dtype_size(table.dtype);
+    let row_bytes = row_numel * elem;
+    let k = indices_len as usize;
+
+    // Out shape: [K, ...table_shape[1..]]
+    let mut out_shape = Vec::with_capacity(table.ndim);
+    out_shape.push(k);
+    for &dim in &table_shape[1..] {
+        out_shape.push(dim);
+    }
+    let result = alloc_tensor(&out_shape, table.dtype, Some(0.0));
+    if result == 0 {
+        return 0;
+    }
+    let r = &*(result as *const RayzorTensor);
+    let indices = indices_ptr as *const i64;
+
+    for i in 0..k {
+        let idx_raw = *indices.add(i);
+        if idx_raw < 0 || (idx_raw as usize) >= n_rows {
+            // Out of range — leave the corresponding output row zeroed.
+            continue;
+        }
+        let src = table.data.add((idx_raw as usize) * row_bytes);
+        let dst = r.data.add(i * row_bytes);
+        std::ptr::copy_nonoverlapping(src, dst, row_bytes);
+    }
+    result
+}
+
 // ============================================================================
 // Reductions
 // ============================================================================

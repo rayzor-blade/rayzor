@@ -3426,6 +3426,9 @@ impl StdlibMapping {
             // tensor.transposeLast2(): Tensor   (zero-copy view)
             map_method!(instance "rayzor_ds_Tensor", "transposeLast2" => "Tensor_transpose_last2", params: 0, mir_wrapper,
                 types: &[PtrVoid] => PtrVoid),
+            // tensor.gatherRows(indices: Array<Int>): Tensor
+            map_method!(instance "rayzor_ds_Tensor", "gatherRows" => "Tensor_gather_rows", params: 1, mir_wrapper,
+                types: &[PtrVoid, PtrVoid] => PtrVoid),
             // --- Interop ---
             // tensor.data(): Ptr<Float>
             map_method!(instance "rayzor_ds_Tensor", "data" => "Tensor_data", params: 0, mir_wrapper,

@@ -1799,6 +1799,12 @@ register_symbol!(
     crate::tensor::rayzor_tensor_rope_sin_table
 );
 
+// Row gather — used by nue.Embedding for token-table lookup (Phase 6)
+register_symbol!(
+    "rayzor_tensor_gather_rows",
+    crate::tensor::rayzor_tensor_gather_rows
+);
+
 // Attention building blocks — composed by nue.transformer.GQAttention in Haxe
 // (Phase 5). The fused kernel is intentionally not on this list: the algorithm
 // lives in nue so users can fork it (alibi, sliding window, MoE routing).

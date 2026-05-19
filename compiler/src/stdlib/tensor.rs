@@ -79,6 +79,7 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
     build_tensor_causal_mask(builder);
     build_tensor_scale(builder);
     build_tensor_transpose_last2(builder);
+    build_tensor_gather_rows(builder);
 
     // Interop
     build_tensor_data(builder);
@@ -271,6 +272,17 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
     let func_id = builder
         .begin_function("rayzor_tensor_transpose_last2")
         .param("tensor", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // gather_rows: (table, indices_data_ptr, indices_len) -> i64
+    let func_id = builder
+        .begin_function("rayzor_tensor_gather_rows")
+        .param("table", i64_ty.clone())
+        .param("indices_ptr", i64_ty.clone())
+        .param("indices_len", i64_ty.clone())
         .returns(i64_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -776,6 +788,32 @@ fn build_tensor_transpose_last2(builder: &mut MirBuilder) {
         .get_function_by_name("rayzor_tensor_transpose_last2")
         .expect("rayzor_tensor_transpose_last2 not found");
     let result = builder.call(extern_id, vec![s]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// Tensor_gather_rows(self, indices_arr) -> i64
+/// Unpacks the HaxeArray<Int> into (ptr, len) and calls the runtime.
+fn build_tensor_gather_rows(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let func_id = builder
+        .begin_function("Tensor_gather_rows")
+        .param("self", i64_ty.clone())
+        .param("indices_arr", i64_ty.clone())
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let self_val = builder.get_param(0);
+    let indices_arr = builder.get_param(1);
+    let (data_ptr, len) = extract_array_ptr_len(builder, indices_arr);
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_gather_rows")
+        .expect("rayzor_tensor_gather_rows not found");
+    let result = builder
+        .call(extern_id, vec![self_val, data_ptr, len])
+        .unwrap();
     builder.ret(Some(result));
 }
 
