@@ -1472,7 +1472,7 @@ pub unsafe extern "C" fn rayzor_tensor_rope_cos_table(
     max_seq_len: i64,
     base: f64,
 ) -> i64 {
-    rope_table(head_dim, max_seq_len, base, /* sin */ false)
+    rope_table(head_dim, max_seq_len, base, DTYPE_F32, /* sin */ false)
 }
 
 #[no_mangle]
@@ -1481,10 +1481,44 @@ pub unsafe extern "C" fn rayzor_tensor_rope_sin_table(
     max_seq_len: i64,
     base: f64,
 ) -> i64 {
-    rope_table(head_dim, max_seq_len, base, /* sin */ true)
+    rope_table(head_dim, max_seq_len, base, DTYPE_F32, /* sin */ true)
 }
 
-unsafe fn rope_table(head_dim: i64, max_seq_len: i64, base: f64, want_sin: bool) -> i64 {
+/// F16-stored variants of the RoPE LUTs. Same math, half the memory.
+/// Useful when the host wants to keep both tables resident in a tight
+/// VRAM budget (Llama 3.2 1B with `max_seq_len=2048` and `head_dim=64`
+/// is 256 KB at F32, 128 KB at F16 — the savings amortise into the
+/// rest of the activation budget on WebGPU buffer caps).
+///
+/// Precision note: the rotation step inside the kernel converts each
+/// LUT element back to f32 before the multiply, so the precision loss
+/// is bounded by the F16 quantisation of `cos / sin ∈ [-1, 1]` —
+/// roughly 5e-4 absolute. Indistinguishable in practice for inference.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_rope_cos_table_f16(
+    head_dim: i64,
+    max_seq_len: i64,
+    base: f64,
+) -> i64 {
+    rope_table(head_dim, max_seq_len, base, DTYPE_F16, /* sin */ false)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_rope_sin_table_f16(
+    head_dim: i64,
+    max_seq_len: i64,
+    base: f64,
+) -> i64 {
+    rope_table(head_dim, max_seq_len, base, DTYPE_F16, /* sin */ true)
+}
+
+unsafe fn rope_table(
+    head_dim: i64,
+    max_seq_len: i64,
+    base: f64,
+    dtype: u8,
+    want_sin: bool,
+) -> i64 {
     if head_dim <= 0 || max_seq_len <= 0 || head_dim % 2 != 0 {
         return 0;
     }
@@ -1492,19 +1526,18 @@ unsafe fn rope_table(head_dim: i64, max_seq_len: i64, base: f64, want_sin: bool)
     let max_seq_len = max_seq_len as usize;
     let half = head_dim / 2;
     let shape = [max_seq_len, half];
-    let result = alloc_tensor(&shape, DTYPE_F32, None);
+    let result = alloc_tensor(&shape, dtype, None);
     if result == 0 {
         return 0;
     }
     let r = &*(result as *const RayzorTensor);
-    let data = r.data as *mut f32;
     let head_dim_f = head_dim as f64;
     for p in 0..max_seq_len {
         for i in 0..half {
             let theta = 1.0_f64 / base.powf((2 * i) as f64 / head_dim_f);
             let angle = (p as f64) * theta;
             let v = if want_sin { angle.sin() } else { angle.cos() };
-            *data.add(p * half + i) = v as f32;
+            store_f32_at(r.data, p * half + i, dtype, v as f32);
         }
     }
     result

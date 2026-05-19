@@ -1798,6 +1798,14 @@ register_symbol!(
     "rayzor_tensor_rope_sin_table",
     crate::tensor::rayzor_tensor_rope_sin_table
 );
+register_symbol!(
+    "rayzor_tensor_rope_cos_table_f16",
+    crate::tensor::rayzor_tensor_rope_cos_table_f16
+);
+register_symbol!(
+    "rayzor_tensor_rope_sin_table_f16",
+    crate::tensor::rayzor_tensor_rope_sin_table_f16
+);
 
 // Row gather — used by nue.Embedding for token-table lookup (Phase 6)
 register_symbol!(

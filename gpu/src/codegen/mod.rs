@@ -11,6 +11,8 @@ pub mod msl_fused;
 pub mod msl_matmul;
 #[cfg(feature = "metal-backend")]
 pub mod msl_reduction;
+#[cfg(feature = "metal-backend")]
+pub mod msl_transformer;
 
 #[cfg(feature = "webgpu-backend")]
 pub mod wgsl;
@@ -20,6 +22,8 @@ pub mod wgsl_fused;
 pub mod wgsl_matmul;
 #[cfg(feature = "webgpu-backend")]
 pub mod wgsl_reduction;
+#[cfg(feature = "webgpu-backend")]
+pub mod wgsl_transformer;
 
 // CUDA codegen is always compiled (no feature gate) — used for:
 // - NVRTC runtime compilation on NVIDIA GPUs (cuda-backend feature)
@@ -28,3 +32,4 @@ pub mod cuda;
 pub mod cuda_fused;
 pub mod cuda_matmul;
 pub mod cuda_reduction;
+pub mod cuda_transformer;

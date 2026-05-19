@@ -128,6 +128,9 @@ pub fn emit_kernel(op: KernelOp, dtype: u8) -> String {
     if op == KernelOp::BatchMatmul {
         return super::msl_matmul::emit_batch_matmul(dtype);
     }
+    if let Some(src) = super::msl_transformer::emit_transformer(op, dtype) {
+        return src;
+    }
     match op.input_count() {
         2 => emit_binary_elementwise(op, dtype),
         1 => emit_unary_elementwise(op, dtype),

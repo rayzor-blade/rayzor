@@ -63,6 +63,8 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
     build_tensor_rope(builder);
     build_tensor_rope_cos_table(builder);
     build_tensor_rope_sin_table(builder);
+    build_tensor_rope_cos_table_f16(builder);
+    build_tensor_rope_sin_table_f16(builder);
 
     // Reductions
     build_tensor_sum(builder);
@@ -335,6 +337,8 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
     for name in &[
         "rayzor_tensor_rope_cos_table",
         "rayzor_tensor_rope_sin_table",
+        "rayzor_tensor_rope_cos_table_f16",
+        "rayzor_tensor_rope_sin_table_f16",
     ] {
         let func_id = builder
             .begin_function(*name)
@@ -1060,6 +1064,22 @@ fn build_tensor_rope_cos_table(builder: &mut MirBuilder) {
 /// Tensor_rope_sin_table(headDim: i64, maxSeqLen: i64, base: f64) -> i64
 fn build_tensor_rope_sin_table(builder: &mut MirBuilder) {
     build_rope_table(builder, "Tensor_rope_sin_table", "rayzor_tensor_rope_sin_table");
+}
+
+fn build_tensor_rope_cos_table_f16(builder: &mut MirBuilder) {
+    build_rope_table(
+        builder,
+        "Tensor_rope_cos_table_f16",
+        "rayzor_tensor_rope_cos_table_f16",
+    );
+}
+
+fn build_tensor_rope_sin_table_f16(builder: &mut MirBuilder) {
+    build_rope_table(
+        builder,
+        "Tensor_rope_sin_table_f16",
+        "rayzor_tensor_rope_sin_table_f16",
+    );
 }
 
 fn build_rope_table(builder: &mut MirBuilder, wrapper: &str, extern_name: &str) {
