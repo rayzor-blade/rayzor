@@ -70,6 +70,10 @@ pub mod cstring_runtime;
 pub mod tensor;
 pub mod tensor_simd;
 
+// Quantised tensor runtime — INT8 / Q4_K_M storage + dequant-fused matmul
+// (rayzor.ds.QTensor)
+pub mod quant;
+
 // TinyCC runtime API (rayzor.runtime.CC)
 #[cfg(feature = "tcc-runtime")]
 pub mod tinycc_runtime;

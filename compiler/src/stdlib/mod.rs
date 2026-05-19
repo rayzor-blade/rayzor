@@ -56,6 +56,7 @@ pub mod ssl;
 pub mod systems;
 
 // Rayzor data science types (Tensor)
+pub mod qtensor;
 pub mod tensor;
 
 // Hashlink compatibility
@@ -120,6 +121,9 @@ pub fn build_stdlib() -> IrModule {
 
     // Build tensor types (rayzor.ds.Tensor)
     tensor::build_tensor_types(&mut builder);
+
+    // Build quantised tensor types (rayzor.ds.QTensor)
+    qtensor::build_qtensor_types(&mut builder);
 
     // Build EReg (regular expressions)
     ereg::build_ereg_type(&mut builder);
