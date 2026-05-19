@@ -1793,6 +1793,31 @@ register_symbol!("rayzor_tensor_data", crate::tensor::rayzor_tensor_data);
 register_symbol!("rayzor_tensor_free", crate::tensor::rayzor_tensor_free);
 
 // ============================================================================
+// Quantised Tensor (rayzor.ds.QTensor)
+// ============================================================================
+register_symbol!(
+    "rayzor_qtensor_from_f32_int8",
+    crate::quant::rayzor_qtensor_from_f32_int8
+);
+register_symbol!(
+    "rayzor_qtensor_wrap_q4_k_m",
+    crate::quant::rayzor_qtensor_wrap_q4_k_m
+);
+register_symbol!("rayzor_qtensor_rows", crate::quant::rayzor_qtensor_rows);
+register_symbol!("rayzor_qtensor_cols", crate::quant::rayzor_qtensor_cols);
+register_symbol!("rayzor_qtensor_numel", crate::quant::rayzor_qtensor_numel);
+register_symbol!("rayzor_qtensor_scheme", crate::quant::rayzor_qtensor_scheme);
+register_symbol!(
+    "rayzor_qtensor_dequant",
+    crate::quant::rayzor_qtensor_dequant
+);
+register_symbol!(
+    "rayzor_qtensor_matmul_f32",
+    crate::quant::rayzor_qtensor_matmul_f32
+);
+register_symbol!("rayzor_qtensor_free", crate::quant::rayzor_qtensor_free);
+
+// ============================================================================
 // Exception Handling (setjmp/longjmp)
 // ============================================================================
 register_symbol!(

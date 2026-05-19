@@ -262,6 +262,7 @@ impl StdlibMapping {
         mapping.register_cstring_methods();
         mapping.register_simd4f_methods();
         mapping.register_tensor_methods();
+        mapping.register_qtensor_methods();
         // Reflect + Type API
         mapping.register_reflect_methods();
         mapping.register_type_methods();
@@ -3409,6 +3410,45 @@ impl StdlibMapping {
             // tensor.free(): Void
             map_method!(instance "rayzor_ds_Tensor", "free" => "Tensor_free", params: 0, mir_wrapper,
                 types: &[PtrVoid]),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // QTensor Methods (rayzor.ds.QTensor)
+    // ============================================================================
+
+    fn register_qtensor_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            // --- Construction (static) ---
+            // QTensor.fromFloat32(src: Tensor, scheme: QScheme): QTensor
+            map_method!(static "rayzor_ds_QTensor", "fromFloat32" => "QTensor_fromFloat32",
+                params: 2, mir_wrapper, types: &[PtrVoid, I64] => PtrVoid),
+            // QTensor.wrapQ4KM(blockData: Ptr<Float>, rows: Int, cols: Int, takeOwnership: Bool): QTensor
+            map_method!(static "rayzor_ds_QTensor", "wrapQ4KM" => "QTensor_wrapQ4KM",
+                params: 4, mir_wrapper, types: &[I64, I64, I64, I64] => PtrVoid),
+            // --- Properties (instance) ---
+            map_method!(instance "rayzor_ds_QTensor", "rows" => "QTensor_rows",
+                params: 0, mir_wrapper, types: &[PtrVoid] => I64),
+            map_method!(instance "rayzor_ds_QTensor", "cols" => "QTensor_cols",
+                params: 0, mir_wrapper, types: &[PtrVoid] => I64),
+            map_method!(instance "rayzor_ds_QTensor", "numel" => "QTensor_numel",
+                params: 0, mir_wrapper, types: &[PtrVoid] => I64),
+            map_method!(instance "rayzor_ds_QTensor", "scheme" => "QTensor_scheme",
+                params: 0, mir_wrapper, types: &[PtrVoid] => I64),
+            // --- Compute ---
+            // qt.dequant(): Tensor
+            map_method!(instance "rayzor_ds_QTensor", "dequant" => "QTensor_dequant",
+                params: 0, mir_wrapper, types: &[PtrVoid] => PtrVoid),
+            // qt.matmulF32(b: Tensor): Tensor
+            map_method!(instance "rayzor_ds_QTensor", "matmulF32" => "QTensor_matmulF32",
+                params: 1, mir_wrapper, types: &[PtrVoid, PtrVoid] => PtrVoid),
+            // --- Lifetime ---
+            map_method!(instance "rayzor_ds_QTensor", "free" => "QTensor_free",
+                params: 0, mir_wrapper, types: &[PtrVoid]),
         ];
 
         self.register_from_tuples(mappings);
