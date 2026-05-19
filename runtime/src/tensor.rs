@@ -17,6 +17,8 @@ extern "C" {
     fn free(ptr: *mut u8);
 }
 
+use half::{bf16, f16};
+
 // DType tags matching the Haxe enum order.
 // Stays in sync with `compiler/haxe-std/rayzor/ds/DType.hx` and the GPU-side
 // constants in `gpu/src/buffer.rs`. Order is load-bearing: the Haxe enum
@@ -57,6 +59,211 @@ fn dtype_size(dtype: u8) -> usize {
         DTYPE_FP8_E4M3 => 1,
         DTYPE_FP8_E5M2 => 1,
         _ => 4, // default to f32
+    }
+}
+
+// ============================================================================
+// Per-element load / store helpers (storage ↔ f32)
+//
+// These convert one element at an arbitrary `*mut u8` data pointer between
+// the storage representation (specified by the dtype tag) and f32 — the
+// common compute representation. Phase 3b runs the kernels themselves in
+// f32 and converts on load/store; Phase 3c specialises hot paths to native
+// NEON f16 / x86 F16C where available.
+//
+// The fp8 paths (DTYPE_FP8_E4M3 / DTYPE_FP8_E5M2) implement a software
+// dequant since neither the host CPU nor the `half` crate has built-in
+// fp8 support. Quant-on-store is performed with naive round-to-nearest;
+// kernels operating on fp8 weights are dequant-on-load only in Phase 3e.
+// ============================================================================
+
+#[inline(always)]
+unsafe fn load_f32_at(data: *const u8, idx: usize, dtype: u8) -> f32 {
+    match dtype {
+        DTYPE_F32 => *(data as *const f32).add(idx),
+        DTYPE_F16 => f16::from_bits(*(data as *const u16).add(idx)).to_f32(),
+        DTYPE_BF16 => bf16::from_bits(*(data as *const u16).add(idx)).to_f32(),
+        DTYPE_I32 => *(data as *const i32).add(idx) as f32,
+        DTYPE_I8 => *(data as *const i8).add(idx) as f32,
+        DTYPE_U8 => *data.add(idx) as f32,
+        DTYPE_FP8_E4M3 => fp8_e4m3_to_f32(*data.add(idx)),
+        DTYPE_FP8_E5M2 => fp8_e5m2_to_f32(*data.add(idx)),
+        _ => 0.0,
+    }
+}
+
+#[inline(always)]
+unsafe fn store_f32_at(data: *mut u8, idx: usize, dtype: u8, value: f32) {
+    match dtype {
+        DTYPE_F32 => *(data as *mut f32).add(idx) = value,
+        DTYPE_F16 => *(data as *mut u16).add(idx) = f16::from_f32(value).to_bits(),
+        DTYPE_BF16 => *(data as *mut u16).add(idx) = bf16::from_f32(value).to_bits(),
+        DTYPE_I32 => *(data as *mut i32).add(idx) = value as i32,
+        DTYPE_I8 => *(data as *mut i8).add(idx) = value as i8,
+        DTYPE_U8 => *data.add(idx) = value as u8,
+        DTYPE_FP8_E4M3 => *data.add(idx) = fp8_e4m3_from_f32(value),
+        DTYPE_FP8_E5M2 => *data.add(idx) = fp8_e5m2_from_f32(value),
+        _ => {}
+    }
+}
+
+/// IEEE 754 FP8 E4M3 — 1 sign + 4 exponent + 3 mantissa bits, no infinity,
+/// only one NaN encoding (0x7F / 0xFF). Bias = 7. Range ≈ ±448, ULP at 1.0
+/// is 1/8. Common dequant target for INT4 → FP8 → FP16 pipelines.
+fn fp8_e4m3_to_f32(byte: u8) -> f32 {
+    let sign = (byte >> 7) & 0x1;
+    let exp = (byte >> 3) & 0xF;
+    let mant = byte & 0x7;
+    if exp == 0 && mant == 0 {
+        return if sign == 0 { 0.0 } else { -0.0 };
+    }
+    if exp == 0xF && mant == 0x7 {
+        return f32::NAN;
+    }
+    let s = if sign == 0 { 1.0f32 } else { -1.0f32 };
+    if exp == 0 {
+        // subnormal
+        s * (mant as f32) * (1.0 / 8.0) * 2.0f32.powi(-6)
+    } else {
+        let m = 1.0f32 + (mant as f32) / 8.0;
+        s * m * 2.0f32.powi(exp as i32 - 7)
+    }
+}
+
+fn fp8_e4m3_from_f32(value: f32) -> u8 {
+    if value.is_nan() {
+        return 0x7F;
+    }
+    let sign_bit: u8 = if value.is_sign_negative() { 0x80 } else { 0 };
+    let abs = value.abs();
+    if abs == 0.0 {
+        return sign_bit;
+    }
+    // Clamp to E4M3 range (max = 448.0)
+    let clamped = abs.min(448.0);
+    let bits = clamped.to_bits();
+    let f32_exp = ((bits >> 23) & 0xFF) as i32 - 127;
+    let f32_mant = bits & 0x7FFFFF;
+
+    if f32_exp < -6 {
+        // Subnormal in E4M3 (or zero)
+        // value = mant_e4m3 / 8 * 2^-6
+        let scaled = (clamped / 2.0f32.powi(-6)) * 8.0;
+        let m = scaled.round().clamp(0.0, 7.0) as u8;
+        return sign_bit | m;
+    }
+    let exp_e4m3 = f32_exp + 7;
+    if exp_e4m3 >= 0xF {
+        // Saturate just below the NaN encoding
+        return sign_bit | ((0xF) << 3) | 0x6;
+    }
+    // Round mantissa: f32 has 23 bits, E4M3 has 3.
+    let m = (f32_mant >> 20) as u8;
+    // Round-to-nearest-even on the discarded bits
+    let lsb_mask = 1u32 << 20;
+    let half_mask = 1u32 << 19;
+    let round_bits = f32_mant & ((1u32 << 20) - 1);
+    let rounded =
+        if round_bits > half_mask || (round_bits == half_mask && (f32_mant & lsb_mask) != 0) {
+            m.saturating_add(1)
+        } else {
+            m
+        };
+    if rounded > 7 {
+        // mantissa overflow → bump exponent
+        let new_exp = (exp_e4m3 as u8) + 1;
+        if new_exp >= 0xF {
+            return sign_bit | (0xF << 3) | 0x6;
+        }
+        sign_bit | (new_exp << 3)
+    } else {
+        sign_bit | ((exp_e4m3 as u8) << 3) | rounded
+    }
+}
+
+/// IEEE 754 FP8 E5M2 — 1 sign + 5 exponent + 2 mantissa bits, supports inf
+/// and standard NaN encodings. Bias = 15. Range ≈ ±57344, ULP at 1.0 = 1/4.
+fn fp8_e5m2_to_f32(byte: u8) -> f32 {
+    let sign = (byte >> 7) & 0x1;
+    let exp = (byte >> 2) & 0x1F;
+    let mant = byte & 0x3;
+    if exp == 0 && mant == 0 {
+        return if sign == 0 { 0.0 } else { -0.0 };
+    }
+    if exp == 0x1F {
+        if mant == 0 {
+            return if sign == 0 {
+                f32::INFINITY
+            } else {
+                f32::NEG_INFINITY
+            };
+        }
+        return f32::NAN;
+    }
+    let s = if sign == 0 { 1.0f32 } else { -1.0f32 };
+    if exp == 0 {
+        s * (mant as f32) * (1.0 / 4.0) * 2.0f32.powi(-14)
+    } else {
+        let m = 1.0f32 + (mant as f32) / 4.0;
+        s * m * 2.0f32.powi(exp as i32 - 15)
+    }
+}
+
+fn fp8_e5m2_from_f32(value: f32) -> u8 {
+    if value.is_nan() {
+        return 0x7F;
+    }
+    let sign_bit: u8 = if value.is_sign_negative() { 0x80 } else { 0 };
+    if value.is_infinite() {
+        return sign_bit | (0x1F << 2);
+    }
+    let abs = value.abs();
+    if abs == 0.0 {
+        return sign_bit;
+    }
+    let bits = abs.to_bits();
+    let f32_exp = ((bits >> 23) & 0xFF) as i32 - 127;
+    let f32_mant = bits & 0x7FFFFF;
+    if f32_exp < -14 {
+        let scaled = (abs / 2.0f32.powi(-14)) * 4.0;
+        let m = scaled.round().clamp(0.0, 3.0) as u8;
+        return sign_bit | m;
+    }
+    let exp_e5m2 = f32_exp + 15;
+    if exp_e5m2 >= 0x1F {
+        return sign_bit | (0x1F << 2); // saturate to ±inf
+    }
+    let m = (f32_mant >> 21) as u8 & 0x3;
+    let half_mask = 1u32 << 20;
+    let round_bits = f32_mant & ((1u32 << 21) - 1);
+    let rounded =
+        if round_bits > half_mask || (round_bits == half_mask && (f32_mant >> 21) & 0x1 != 0) {
+            m.saturating_add(1)
+        } else {
+            m
+        };
+    if rounded > 3 {
+        let new_exp = (exp_e5m2 as u8) + 1;
+        if new_exp >= 0x1F {
+            return sign_bit | (0x1F << 2);
+        }
+        sign_bit | (new_exp << 2)
+    } else {
+        sign_bit | ((exp_e5m2 as u8) << 2) | rounded
+    }
+}
+
+/// Bulk-fill `numel` elements at `data` with the given f32 value, in the
+/// storage representation specified by `dtype`. Used by ones/full/zeros.
+#[inline]
+unsafe fn fill_dtype(data: *mut u8, numel: usize, dtype: u8, value: f32) {
+    if value == 0.0 {
+        // Every supported storage format encodes +0.0 as all zero bytes.
+        std::ptr::write_bytes(data, 0, numel * dtype_size(dtype));
+        return;
+    }
+    for i in 0..numel {
+        store_f32_at(data, i, dtype, value);
     }
 }
 
@@ -121,15 +328,7 @@ unsafe fn alloc_tensor(shape: &[usize], dtype: u8, fill: Option<f32>) -> i64 {
 
     // Fill data
     if let Some(val) = fill {
-        if dtype == DTYPE_F32 {
-            let f32_ptr = data as *mut f32;
-            for i in 0..numel {
-                *f32_ptr.add(i) = val;
-            }
-        } else {
-            // Zero-fill for other dtypes when fill is 0
-            std::ptr::write_bytes(data, 0, data_bytes);
-        }
+        fill_dtype(data, numel, dtype, val);
     } else {
         std::ptr::write_bytes(data, 0, data_bytes);
     }
@@ -228,24 +427,13 @@ pub unsafe extern "C" fn rayzor_tensor_from_array(data_ptr: i64, data_len: i64, 
 
     let tensor = &*(tensor_ptr as *const RayzorTensor);
 
-    // Copy f64 data from Haxe Array<Float>, converting to target dtype
+    // Copy f64 data from Haxe Array<Float>, converting to target dtype.
+    // Goes through the generic store_f32_at helper so every supported
+    // dtype (F32 / F16 / BF16 / I32 / I8 / U8 / FP8_E4M3 / FP8_E5M2) is
+    // populated with the right storage format.
     let src = data_ptr as *const f64;
-    if dtype_u8 == DTYPE_F32 {
-        let dst = tensor.data as *mut f32;
-        for i in 0..numel {
-            *dst.add(i) = *src.add(i) as f32;
-        }
-    } else if dtype_u8 == DTYPE_I32 {
-        let dst = tensor.data as *mut i32;
-        for i in 0..numel {
-            *dst.add(i) = *src.add(i) as i32;
-        }
-    } else {
-        // Fallback: copy as f32 (most common GPU dtype)
-        let dst = tensor.data as *mut f32;
-        for i in 0..numel {
-            *dst.add(i) = *src.add(i) as f32;
-        }
+    for i in 0..numel {
+        store_f32_at(tensor.data, i, dtype_u8, *src.add(i) as f32);
     }
 
     tensor_ptr
@@ -404,13 +592,7 @@ pub unsafe extern "C" fn rayzor_tensor_get(tensor_ptr: i64, indices_ptr: i64, nd
 
     let indices = read_shape(indices_ptr, ndim as usize);
     let off = t.offset(&indices);
-
-    if t.dtype == DTYPE_F32 {
-        let val = *(t.data as *const f32).add(off);
-        val as f64
-    } else {
-        0.0
-    }
+    load_f32_at(t.data, off, t.dtype) as f64
 }
 
 /// tensor.set(indices_ptr, ndim, value) -> void
@@ -428,10 +610,7 @@ pub unsafe extern "C" fn rayzor_tensor_set(
 
     let indices = read_shape(indices_ptr, ndim as usize);
     let off = t.offset(&indices);
-
-    if t.dtype == DTYPE_F32 {
-        *(t.data as *mut f32).add(off) = value as f32;
-    }
+    store_f32_at(t.data, off, t.dtype, value as f32);
 }
 
 // ============================================================================
@@ -709,6 +888,32 @@ unsafe fn prepare_binop<'a>(
     Some((a_slice, b_slice, r_slice, result))
 }
 
+/// Scalar fallback for elementwise binary ops on non-f32 dtypes.
+/// Both inputs must share dtype + numel. The output tensor is allocated
+/// in the same dtype, kernel runs in f32 in-register.
+unsafe fn tensor_binop_scalar(a_ptr: i64, b_ptr: i64, op: fn(f32, f32) -> f32) -> i64 {
+    if a_ptr == 0 || b_ptr == 0 {
+        return 0;
+    }
+    let a = &*(a_ptr as *const RayzorTensor);
+    let b = &*(b_ptr as *const RayzorTensor);
+    if a.numel != b.numel || a.dtype != b.dtype {
+        return 0;
+    }
+    let shape = std::slice::from_raw_parts(a.shape, a.ndim);
+    let result = alloc_tensor(shape, a.dtype, None);
+    if result == 0 {
+        return 0;
+    }
+    let r = &*(result as *const RayzorTensor);
+    for i in 0..a.numel {
+        let av = load_f32_at(a.data, i, a.dtype);
+        let bv = load_f32_at(b.data, i, a.dtype);
+        store_f32_at(r.data, i, a.dtype, op(av, bv));
+    }
+    result
+}
+
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_add(a: i64, b: i64) -> i64 {
     match prepare_binop(a, b) {
@@ -716,7 +921,7 @@ pub unsafe extern "C" fn rayzor_tensor_add(a: i64, b: i64) -> i64 {
             crate::tensor_simd::add_slice(r_s, a_s, b_s);
             result
         }
-        None => 0,
+        None => tensor_binop_scalar(a, b, |x, y| x + y),
     }
 }
 
@@ -727,7 +932,7 @@ pub unsafe extern "C" fn rayzor_tensor_sub(a: i64, b: i64) -> i64 {
             crate::tensor_simd::sub_slice(r_s, a_s, b_s);
             result
         }
-        None => 0,
+        None => tensor_binop_scalar(a, b, |x, y| x - y),
     }
 }
 
@@ -738,7 +943,7 @@ pub unsafe extern "C" fn rayzor_tensor_mul(a: i64, b: i64) -> i64 {
             crate::tensor_simd::mul_slice(r_s, a_s, b_s);
             result
         }
-        None => 0,
+        None => tensor_binop_scalar(a, b, |x, y| x * y),
     }
 }
 
@@ -749,7 +954,7 @@ pub unsafe extern "C" fn rayzor_tensor_div(a: i64, b: i64) -> i64 {
             crate::tensor_simd::div_slice(r_s, a_s, b_s);
             result
         }
-        None => 0,
+        None => tensor_binop_scalar(a, b, |x, y| x / y),
     }
 }
 
@@ -762,22 +967,30 @@ unsafe fn tensor_unary(a_ptr: i64, op: fn(f32) -> f32) -> i64 {
         return 0;
     }
     let a = &*(a_ptr as *const RayzorTensor);
-    if a.dtype != DTYPE_F32 {
-        return 0;
-    }
 
     let shape = std::slice::from_raw_parts(a.shape, a.ndim);
-    let result = alloc_tensor(shape, DTYPE_F32, None);
+    let result = alloc_tensor(shape, a.dtype, None);
     if result == 0 {
         return 0;
     }
 
     let r = &*(result as *const RayzorTensor);
-    let a_data = a.data as *const f32;
-    let r_data = r.data as *mut f32;
 
-    for i in 0..a.numel {
-        *r_data.add(i) = op(*a_data.add(i));
+    if a.dtype == DTYPE_F32 {
+        // Fast path: contiguous f32 → SIMD-friendly straight loop. The
+        // SIMD-specialised unary kernels live in tensor_simd; non-SIMD
+        // ops (e.g. transcendentals) stay scalar but in-register.
+        let a_data = a.data as *const f32;
+        let r_data = r.data as *mut f32;
+        for i in 0..a.numel {
+            *r_data.add(i) = op(*a_data.add(i));
+        }
+    } else {
+        // Generic dtype path — convert to f32, compute, convert back.
+        for i in 0..a.numel {
+            let v = load_f32_at(a.data, i, a.dtype);
+            store_f32_at(r.data, i, a.dtype, op(v));
+        }
     }
 
     result
@@ -804,20 +1017,25 @@ pub unsafe extern "C" fn rayzor_tensor_relu(a_ptr: i64) -> i64 {
         return 0;
     }
     let a = &*(a_ptr as *const RayzorTensor);
-    if a.dtype != DTYPE_F32 {
-        return 0;
-    }
 
     let shape = std::slice::from_raw_parts(a.shape, a.ndim);
-    let result = alloc_tensor(shape, DTYPE_F32, None);
+    let result = alloc_tensor(shape, a.dtype, None);
     if result == 0 {
         return 0;
     }
     let r = &*(result as *const RayzorTensor);
     let n = a.numel;
-    let a_s = std::slice::from_raw_parts(a.data as *const f32, n);
-    let r_s = std::slice::from_raw_parts_mut(r.data as *mut f32, n);
-    crate::tensor_simd::relu_slice(r_s, a_s);
+
+    if a.dtype == DTYPE_F32 {
+        let a_s = std::slice::from_raw_parts(a.data as *const f32, n);
+        let r_s = std::slice::from_raw_parts_mut(r.data as *mut f32, n);
+        crate::tensor_simd::relu_slice(r_s, a_s);
+    } else {
+        for i in 0..n {
+            let v = load_f32_at(a.data, i, a.dtype);
+            store_f32_at(r.data, i, a.dtype, v.max(0.0));
+        }
+    }
     result
 }
 
@@ -844,44 +1062,63 @@ pub unsafe extern "C" fn rayzor_tensor_softmax(a_ptr: i64) -> i64 {
         return 0;
     }
     let a = &*(a_ptr as *const RayzorTensor);
-    if a.dtype != DTYPE_F32 || a.ndim == 0 {
+    if a.ndim == 0 {
         return 0;
     }
 
     let shape = std::slice::from_raw_parts(a.shape, a.ndim);
-    let result = alloc_tensor(shape, DTYPE_F32, None);
+    let result = alloc_tensor(shape, a.dtype, None);
     if result == 0 {
         return 0;
     }
 
     let r = &*(result as *const RayzorTensor);
-    let a_data = a.data as *const f32;
-    let r_data = r.data as *mut f32;
     let last = shape[a.ndim - 1];
     let groups = a.numel.checked_div(last).unwrap_or(0);
 
+    if a.dtype == DTYPE_F32 {
+        let a_data = a.data as *const f32;
+        let r_data = r.data as *mut f32;
+        for g in 0..groups {
+            let base = g * last;
+            let a_row = std::slice::from_raw_parts(a_data.add(base), last);
+            let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
+            let maxv = crate::tensor_simd::max_slice(a_row);
+            for i in 0..last {
+                r_row[i] = (a_row[i] - maxv).exp();
+            }
+            let sum = crate::tensor_simd::sum_slice(r_row);
+            if sum > 0.0 {
+                let inv = 1.0 / sum;
+                for v in r_row.iter_mut() {
+                    *v *= inv;
+                }
+            }
+        }
+        return result;
+    }
+
+    // Generic dtype path: f32-in-register softmax with storage conversion.
+    let mut row_buf = vec![0.0f32; last];
     for g in 0..groups {
         let base = g * last;
-        let a_row = std::slice::from_raw_parts(a_data.add(base), last);
-        let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
-
-        // SIMD: max for numeric stability.
-        let maxv = crate::tensor_simd::max_slice(a_row);
-
-        // exp(x - max) — transcendental, scalar.
-        for i in 0..last {
-            r_row[i] = (a_row[i] - maxv).exp();
+        for (i, slot) in row_buf.iter_mut().enumerate() {
+            *slot = load_f32_at(a.data, base + i, a.dtype);
         }
-
-        // SIMD: sum of exponentiated values.
-        let sum = crate::tensor_simd::sum_slice(r_row);
-        if sum > 0.0 {
-            let inv = 1.0 / sum;
-            // SIMD: scale by reciprocal via in-place axpy with zero accumulator.
-            // Using scale_slice keeps the loop tight.
-            for v in r_row.iter_mut() {
-                *v *= inv;
+        let mut maxv = f32::NEG_INFINITY;
+        for &v in &row_buf {
+            if v > maxv {
+                maxv = v;
             }
+        }
+        let mut sum = 0.0f32;
+        for v in row_buf.iter_mut() {
+            *v = (*v - maxv).exp();
+            sum += *v;
+        }
+        let inv = if sum > 0.0 { 1.0 / sum } else { 0.0 };
+        for (i, &v) in row_buf.iter().enumerate() {
+            store_f32_at(r.data, base + i, a.dtype, v * inv);
         }
     }
     result
@@ -895,39 +1132,58 @@ pub unsafe extern "C" fn rayzor_tensor_layer_norm(a_ptr: i64, eps: f64) -> i64 {
         return 0;
     }
     let a = &*(a_ptr as *const RayzorTensor);
-    if a.dtype != DTYPE_F32 || a.ndim == 0 {
+    if a.ndim == 0 {
         return 0;
     }
 
     let shape = std::slice::from_raw_parts(a.shape, a.ndim);
-    let result = alloc_tensor(shape, DTYPE_F32, None);
+    let result = alloc_tensor(shape, a.dtype, None);
     if result == 0 {
         return 0;
     }
 
     let r = &*(result as *const RayzorTensor);
-    let a_data = a.data as *const f32;
-    let r_data = r.data as *mut f32;
     let last = shape[a.ndim - 1];
     let groups = a.numel.checked_div(last).unwrap_or(0);
-    let eps = eps as f32;
+    let eps_f32 = eps as f32;
     let n = last as f32;
 
+    if a.dtype == DTYPE_F32 {
+        let a_data = a.data as *const f32;
+        let r_data = r.data as *mut f32;
+        for g in 0..groups {
+            let base = g * last;
+            let a_row = std::slice::from_raw_parts(a_data.add(base), last);
+            let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
+            let mean = crate::tensor_simd::sum_slice(a_row) / n;
+            crate::tensor_simd::sub_const_slice(r_row, a_row, mean);
+            let var = crate::tensor_simd::sum_of_squares(r_row) / n;
+            let inv = 1.0 / (var + eps_f32).sqrt();
+            for v in r_row.iter_mut() {
+                *v *= inv;
+            }
+        }
+        return result;
+    }
+
+    // Generic dtype path: f32-in-register stats with storage conversion.
+    let mut row_buf = vec![0.0f32; last];
     for g in 0..groups {
         let base = g * last;
-        let a_row = std::slice::from_raw_parts(a_data.add(base), last);
-        let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
-
-        // SIMD: mean.
-        let mean = crate::tensor_simd::sum_slice(a_row) / n;
-
-        // Variance: (a - mean)^2 sum. Done in place via r_row to reuse SIMD
-        // sub + mul.
-        crate::tensor_simd::sub_const_slice(r_row, a_row, mean);
-        let var = crate::tensor_simd::sum_of_squares(r_row) / n;
-        let inv = 1.0 / (var + eps).sqrt();
-        for v in r_row.iter_mut() {
-            *v *= inv;
+        let mut sum = 0.0f32;
+        for (i, slot) in row_buf.iter_mut().enumerate() {
+            *slot = load_f32_at(a.data, base + i, a.dtype);
+            sum += *slot;
+        }
+        let mean = sum / n;
+        let mut sumsq = 0.0f32;
+        for v in row_buf.iter_mut() {
+            *v -= mean;
+            sumsq += *v * *v;
+        }
+        let inv = 1.0 / (sumsq / n + eps_f32).sqrt();
+        for (i, &v) in row_buf.iter().enumerate() {
+            store_f32_at(r.data, base + i, a.dtype, v * inv);
         }
     }
     result
@@ -940,32 +1196,48 @@ pub unsafe extern "C" fn rayzor_tensor_rms_norm(a_ptr: i64, eps: f64) -> i64 {
         return 0;
     }
     let a = &*(a_ptr as *const RayzorTensor);
-    if a.dtype != DTYPE_F32 || a.ndim == 0 {
+    if a.ndim == 0 {
         return 0;
     }
 
     let shape = std::slice::from_raw_parts(a.shape, a.ndim);
-    let result = alloc_tensor(shape, DTYPE_F32, None);
+    let result = alloc_tensor(shape, a.dtype, None);
     if result == 0 {
         return 0;
     }
 
     let r = &*(result as *const RayzorTensor);
-    let a_data = a.data as *const f32;
-    let r_data = r.data as *mut f32;
     let last = shape[a.ndim - 1];
     let groups = a.numel.checked_div(last).unwrap_or(0);
-    let eps = eps as f32;
+    let eps_f32 = eps as f32;
     let n = last as f32;
+
+    if a.dtype == DTYPE_F32 {
+        let a_data = a.data as *const f32;
+        let r_data = r.data as *mut f32;
+        for g in 0..groups {
+            let base = g * last;
+            let a_row = std::slice::from_raw_parts(a_data.add(base), last);
+            let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
+            let ms = crate::tensor_simd::sum_of_squares(a_row) / n;
+            let inv = 1.0 / (ms + eps_f32).sqrt();
+            crate::tensor_simd::mul_const_slice(r_row, a_row, inv);
+        }
+        return result;
+    }
 
     for g in 0..groups {
         let base = g * last;
-        let a_row = std::slice::from_raw_parts(a_data.add(base), last);
-        let r_row = std::slice::from_raw_parts_mut(r_data.add(base), last);
-
-        let ms = crate::tensor_simd::sum_of_squares(a_row) / n;
-        let inv = 1.0 / (ms + eps).sqrt();
-        crate::tensor_simd::mul_const_slice(r_row, a_row, inv);
+        let mut sumsq = 0.0f32;
+        for i in 0..last {
+            let v = load_f32_at(a.data, base + i, a.dtype);
+            sumsq += v * v;
+        }
+        let inv = 1.0 / (sumsq / n + eps_f32).sqrt();
+        for i in 0..last {
+            let v = load_f32_at(a.data, base + i, a.dtype);
+            store_f32_at(r.data, base + i, a.dtype, v * inv);
+        }
     }
     result
 }
@@ -981,11 +1253,15 @@ pub unsafe extern "C" fn rayzor_tensor_sum(tensor_ptr: i64) -> f64 {
         return 0.0;
     }
     let t = &*(tensor_ptr as *const RayzorTensor);
-    if t.dtype != DTYPE_F32 {
-        return 0.0;
+    if t.dtype == DTYPE_F32 {
+        let data = std::slice::from_raw_parts(t.data as *const f32, t.numel);
+        return crate::tensor_simd::sum_slice(data) as f64;
     }
-    let data = std::slice::from_raw_parts(t.data as *const f32, t.numel);
-    crate::tensor_simd::sum_slice(data) as f64
+    let mut acc = 0.0f64;
+    for i in 0..t.numel {
+        acc += load_f32_at(t.data, i, t.dtype) as f64;
+    }
+    acc
 }
 
 /// tensor.max() -> f64 (returns -inf for empty tensors)
@@ -995,11 +1271,21 @@ pub unsafe extern "C" fn rayzor_tensor_max(tensor_ptr: i64) -> f64 {
         return f64::NEG_INFINITY;
     }
     let t = &*(tensor_ptr as *const RayzorTensor);
-    if t.dtype != DTYPE_F32 || t.numel == 0 {
+    if t.numel == 0 {
         return f64::NEG_INFINITY;
     }
-    let data = std::slice::from_raw_parts(t.data as *const f32, t.numel);
-    crate::tensor_simd::max_slice(data) as f64
+    if t.dtype == DTYPE_F32 {
+        let data = std::slice::from_raw_parts(t.data as *const f32, t.numel);
+        return crate::tensor_simd::max_slice(data) as f64;
+    }
+    let mut m = f32::NEG_INFINITY;
+    for i in 0..t.numel {
+        let v = load_f32_at(t.data, i, t.dtype);
+        if v > m {
+            m = v;
+        }
+    }
+    m as f64
 }
 
 /// tensor.min() -> f64 (returns +inf for empty tensors)
@@ -1009,11 +1295,21 @@ pub unsafe extern "C" fn rayzor_tensor_min(tensor_ptr: i64) -> f64 {
         return f64::INFINITY;
     }
     let t = &*(tensor_ptr as *const RayzorTensor);
-    if t.dtype != DTYPE_F32 || t.numel == 0 {
+    if t.numel == 0 {
         return f64::INFINITY;
     }
-    let data = std::slice::from_raw_parts(t.data as *const f32, t.numel);
-    crate::tensor_simd::min_slice(data) as f64
+    if t.dtype == DTYPE_F32 {
+        let data = std::slice::from_raw_parts(t.data as *const f32, t.numel);
+        return crate::tensor_simd::min_slice(data) as f64;
+    }
+    let mut m = f32::INFINITY;
+    for i in 0..t.numel {
+        let v = load_f32_at(t.data, i, t.dtype);
+        if v < m {
+            m = v;
+        }
+    }
+    m as f64
 }
 
 /// tensor.mean() -> f64
@@ -1037,13 +1333,22 @@ pub unsafe extern "C" fn rayzor_tensor_dot(a_ptr: i64, b_ptr: i64) -> f64 {
     }
     let a = &*(a_ptr as *const RayzorTensor);
     let b = &*(b_ptr as *const RayzorTensor);
-    if a.numel != b.numel || a.dtype != DTYPE_F32 || b.dtype != DTYPE_F32 {
+    if a.numel != b.numel || a.dtype != b.dtype {
         return 0.0;
     }
 
-    let a_s = std::slice::from_raw_parts(a.data as *const f32, a.numel);
-    let b_s = std::slice::from_raw_parts(b.data as *const f32, b.numel);
-    crate::tensor_simd::dot_slice(a_s, b_s)
+    if a.dtype == DTYPE_F32 {
+        let a_s = std::slice::from_raw_parts(a.data as *const f32, a.numel);
+        let b_s = std::slice::from_raw_parts(b.data as *const f32, b.numel);
+        return crate::tensor_simd::dot_slice(a_s, b_s) as f64;
+    }
+    let mut acc = 0.0f64;
+    for i in 0..a.numel {
+        let av = load_f32_at(a.data, i, a.dtype) as f64;
+        let bv = load_f32_at(b.data, i, a.dtype) as f64;
+        acc += av * bv;
+    }
+    acc
 }
 
 // ============================================================================
@@ -1060,7 +1365,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul(a_ptr: i64, b_ptr: i64) -> i64 {
     let a = &*(a_ptr as *const RayzorTensor);
     let b = &*(b_ptr as *const RayzorTensor);
 
-    if a.ndim != 2 || b.ndim != 2 || a.dtype != DTYPE_F32 || b.dtype != DTYPE_F32 {
+    if a.ndim != 2 || b.ndim != 2 || a.dtype != b.dtype {
         return 0;
     }
 
@@ -1075,48 +1380,70 @@ pub unsafe extern "C" fn rayzor_tensor_matmul(a_ptr: i64, b_ptr: i64) -> i64 {
     } // dimension mismatch
 
     let out_shape = [m, n];
-    let result = alloc_tensor(&out_shape, DTYPE_F32, Some(0.0));
+    let result = alloc_tensor(&out_shape, a.dtype, Some(0.0));
     if result == 0 {
         return 0;
     }
 
     let r = &*(result as *const RayzorTensor);
-    let a_data = a.data as *const f32;
-    let b_data = b.data as *const f32;
-    let r_data = r.data as *mut f32;
-
     let a_strides = std::slice::from_raw_parts(a.strides, 2);
     let b_strides = std::slice::from_raw_parts(b.strides, 2);
 
-    // Fast path: both A and B row-major (innermost stride == 1). Loop order
-    // is (i, k, j) so the inner `j` loop accumulates into a contiguous row of
-    // R with broadcast a_ik — the textbook SIMD-friendly matmul.
-    if a_strides[1] == 1 && b_strides[1] == 1 {
-        let r_row_size = n;
+    if a.dtype == DTYPE_F32 {
+        let a_data = a.data as *const f32;
+        let b_data = b.data as *const f32;
+        let r_data = r.data as *mut f32;
+
+        // Fast path: both A and B row-major (innermost stride == 1). Loop
+        // order is (i, k, j) so the inner `j` loop accumulates into a
+        // contiguous row of R with broadcast a_ik — the textbook
+        // SIMD-friendly matmul.
+        if a_strides[1] == 1 && b_strides[1] == 1 {
+            let r_row_size = n;
+            for i in 0..m {
+                let a_row = a_data.add(i * a_strides[0]);
+                let r_row = r_data.add(i * r_row_size);
+                for p in 0..k {
+                    let a_ik = *a_row.add(p);
+                    let b_row = b_data.add(p * b_strides[0]);
+                    let r_slice = std::slice::from_raw_parts_mut(r_row, n);
+                    let b_slice = std::slice::from_raw_parts(b_row, n);
+                    crate::tensor_simd::axpy_slice(r_slice, a_ik, b_slice);
+                }
+            }
+            return result;
+        }
+
+        // Strided fallback (e.g. transposed views).
         for i in 0..m {
-            let a_row = a_data.add(i * a_strides[0]);
-            let r_row = r_data.add(i * r_row_size);
-            for p in 0..k {
-                let a_ik = *a_row.add(p);
-                let b_row = b_data.add(p * b_strides[0]);
-                let r_slice = std::slice::from_raw_parts_mut(r_row, n);
-                let b_slice = std::slice::from_raw_parts(b_row, n);
-                crate::tensor_simd::axpy_slice(r_slice, a_ik, b_slice);
+            for j in 0..n {
+                let mut sum = 0.0f32;
+                for p in 0..k {
+                    let a_val = *a_data.add(i * a_strides[0] + p * a_strides[1]);
+                    let b_val = *b_data.add(p * b_strides[0] + j * b_strides[1]);
+                    sum += a_val * b_val;
+                }
+                *r_data.add(i * n + j) = sum;
             }
         }
         return result;
     }
 
-    // Strided fallback (e.g. transposed views).
+    // Generic dtype path: convert each element to f32 in-register, accumulate
+    // in f32 (or f64 for very wide reductions), store back as the source
+    // dtype. Phase 3c specialises the F16/BF16 case to NEON / x86 F16C.
+    let dtype = a.dtype;
     for i in 0..m {
         for j in 0..n {
             let mut sum = 0.0f32;
             for p in 0..k {
-                let a_val = *a_data.add(i * a_strides[0] + p * a_strides[1]);
-                let b_val = *b_data.add(p * b_strides[0] + j * b_strides[1]);
+                let a_off = i * a_strides[0] + p * a_strides[1];
+                let b_off = p * b_strides[0] + j * b_strides[1];
+                let a_val = load_f32_at(a.data, a_off, dtype);
+                let b_val = load_f32_at(b.data, b_off, dtype);
                 sum += a_val * b_val;
             }
-            *r_data.add(i * n + j) = sum;
+            store_f32_at(r.data, i * n + j, dtype, sum);
         }
     }
 
