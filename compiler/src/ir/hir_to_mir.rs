@@ -286,6 +286,17 @@ pub struct HirToMirContext<'a> {
     /// Used to create transitive vtables for implementing classes
     interface_extends: BTreeMap<SymbolId, Vec<SymbolId>>,
 
+    /// Registers holding interface fat pointers built at call boundaries
+    /// (`maybe_materialize_for_call` Path 3) that wrap a class arg for an
+    /// interface-typed parameter. Such wrappers may escape via the callee
+    /// (e.g. pushed into a long-lived `Array<I>`), so callers must NOT add
+    /// them to `temp_heap_values` — auto-freeing them after the call would
+    /// cause a use-after-free for the array reference. Best-effort: this
+    /// trades a transient leak for correctness; refining the lifetime
+    /// analysis (only retain when the call returns the fat ptr or stores
+    /// it) is a follow-up.
+    interface_wrapped_args: std::collections::BTreeSet<IrId>,
+
     /// Class method lookup: maps (class_symbol, method_name) → method SymbolId
     /// Populated during register_class_metadata for iterator protocol dispatch
     class_method_symbols: BTreeMap<(SymbolId, InternedString), SymbolId>,
@@ -608,6 +619,7 @@ impl<'a> HirToMirContext<'a> {
             interface_method_return_types: BTreeMap::new(),
             interface_vtables: BTreeMap::new(),
             interface_extends: BTreeMap::new(),
+            interface_wrapped_args: std::collections::BTreeSet::new(),
             class_method_symbols: BTreeMap::new(),
             constrained_param_interfaces: BTreeMap::new(),
             abstract_from_rules: BTreeMap::new(),
@@ -3698,6 +3710,34 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Apply field initializers declared at field-declaration sites
+        // (e.g. `public var num:Int = 42;`). These run after super() but before
+        // the user-written body so explicit assignments in the body can override.
+        for field_init in &constructor.field_inits {
+            let Some(value_reg) = self.lower_expression(&field_init.value) else {
+                continue;
+            };
+            let Some(&(_class_type, field_index)) = self.field_index_map.get(&field_init.field)
+            else {
+                continue;
+            };
+            let Some(index_const) = self.builder.build_const(IrValue::I32(field_index as i32))
+            else {
+                continue;
+            };
+            let field_ty = self
+                .symbol_table
+                .get_symbol(field_init.field)
+                .map(|s| self.convert_type(s.type_id))
+                .unwrap_or(IrType::I32);
+            if let Some(field_ptr) = self
+                .builder
+                .build_gep(this_reg, vec![index_const], field_ty)
+            {
+                self.builder.build_store(field_ptr, value_reg);
+            }
+        }
+
         // Lower constructor body statements
         for stmt in &constructor.body.statements {
             self.lower_statement(stmt);
@@ -4036,160 +4076,6 @@ impl<'a> HirToMirContext<'a> {
         // }
         self.builder.finish_function();
         // debug!("  Function finished, context cleared");
-
-        // Clear per-function state
-        self.symbol_map.clear();
-        self.block_map.clear();
-    }
-
-    /// Lower a constructor to MIR
-    /// Constructors are similar to instance methods but handle field initialization
-    fn lower_constructor(
-        &mut self,
-        class_symbol: SymbolId,
-        constructor: &HirConstructor,
-        class_type_id: TypeId,
-    ) {
-        // debug!("lower_constructor - class_symbol={:?}", class_symbol);
-
-        // Build signature using the builder
-        // 'this' is always a pointer to the class instance, regardless of generic parameters
-        let this_type = match self.convert_type(class_type_id) {
-            IrType::Ptr(_) => IrType::Ptr(Box::new(IrType::Void)),
-            // If convert_type failed to resolve (e.g., generic class without instantiation),
-            // default to pointer since 'this' is always a pointer to instance
-            _ => IrType::Ptr(Box::new(IrType::Void)),
-        };
-        let mut sig_builder = FunctionSignatureBuilder::new().param("this".to_string(), this_type);
-
-        // Add constructor parameters
-        for param in &constructor.params {
-            let param_name = self
-                .string_interner
-                .get(param.name)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| format!("param_{}", param.symbol_id.as_raw()));
-            let ir_type = self.convert_type(param.ty);
-            let type_kind = self
-                .type_table
-                .get(param.ty)
-                .map(|t| format!("{:?}", t.kind));
-            sig_builder = sig_builder.param(param_name, ir_type);
-        }
-
-        // Constructor returns void
-        let signature = sig_builder.returns(IrType::Void).build();
-
-        // Start building the constructor function
-        let func_name = "new".to_string();
-        let func_id = self
-            .builder
-            .start_function(class_symbol, func_name, signature);
-
-        // Register this function in the function map
-        self.function_map.insert(class_symbol, func_id);
-
-        // Register in constructor_map by TypeId for new expressions
-        self.constructor_map.insert(class_type_id, func_id);
-        self.register_constructor_by_name(class_symbol, func_id);
-
-        // Also register with TypeId derived from class SymbolId as a fallback
-        // This handles cases where expression TypeIds differ from types map TypeIds
-        let fallback_type_id = TypeId::from_raw(class_symbol.as_raw());
-        if fallback_type_id != class_type_id {
-            self.constructor_map.insert(fallback_type_id, func_id);
-        }
-
-        // Note: start_function already creates the entry block and switches to it
-        // No need to create another block here - just use the current block
-
-        // Map 'this' parameter (IrId(0) is the first parameter)
-        let this_reg = IrId::new(0);
-
-        // Register 'this' in symbol_map so implicit this.field access works
-        self.symbol_map.insert(SymbolId::from_raw(0), this_reg);
-
-        // Map constructor parameters
-        for (i, param) in constructor.params.iter().enumerate() {
-            let param_reg = IrId::new((i + 1) as u32); // Parameters start after 'this'
-            self.symbol_map.insert(param.symbol_id, param_reg);
-        }
-
-        // Clear per-function drop tracking state
-        self.owned_heap_values.clear();
-        self.drop_scope_stack.clear();
-        self.temp_heap_values.clear();
-        self.reassigned_in_scope.clear();
-
-        // Enter function-level scope
-        self.enter_drop_scope();
-
-        // Lower field initializations
-        for field_init in &constructor.field_inits {
-            if let Some(value_reg) = self.lower_expression(&field_init.value) {
-                // Store to field using field_index_map
-                if let Some(&(_class_type, field_index)) =
-                    self.field_index_map.get(&field_init.field)
-                {
-                    if let Some(index_const) =
-                        self.builder.build_const(IrValue::I32(field_index as i32))
-                    {
-                        // Get the actual field type from the symbol table
-                        let field_ty = self
-                            .symbol_table
-                            .get_symbol(field_init.field)
-                            .map(|s| self.convert_type(s.type_id))
-                            .unwrap_or(IrType::I32);
-                        if let Some(field_ptr) =
-                            self.builder
-                                .build_gep(this_reg, vec![index_const], field_ty)
-                        {
-                            self.builder.build_store(field_ptr, value_reg);
-                        }
-                    }
-                }
-            }
-        }
-
-        // Lower constructor body
-        // debug!("Constructor body has {} statements", constructor.body.statements.len());
-        // for (i, stmt) in constructor.body.statements.iter().enumerate() {
-        //     // debug!("Constructor stmt {}: {:?}", i, std::mem::discriminant(stmt));
-        // }
-        self.lower_block(&constructor.body);
-
-        // Ensure void return
-        if !self.is_terminated() {
-            self.builder.build_return(None);
-        }
-
-        // debug!("===== FINISHING FUNCTION =====");
-        // Before finishing, dump the terminator for this function
-        // if let Some(func) = self.builder.current_function() {
-        //     eprintln!(
-        //         "DEBUG   Function '{}' entry block terminator: {:?}",
-        //         func.name,
-        //         func.cfg
-        //             .get_block(func.entry_block())
-        //             .map(|b| &b.terminator)
-        //     );
-        // }
-        // Set qualified name and @:export flag for constructor BEFORE finish
-        if let Some(func_mut) = self.builder.module.functions.get_mut(&func_id) {
-            if let Some(class_sym) = self.symbol_table.get_symbol(class_symbol) {
-                let class_name = class_sym
-                    .qualified_name
-                    .and_then(|n| self.string_interner.get(n))
-                    .or_else(|| self.string_interner.get(class_sym.name))
-                    .unwrap_or("Unknown");
-                func_mut.qualified_name = Some(format!("{}.new", class_name));
-                if class_sym.flags.is_wasm_export() {
-                    func_mut.wasm_export = true;
-                }
-            }
-        }
-
-        self.builder.finish_function();
 
         // Clear per-function state
         self.symbol_map.clear();
@@ -7926,7 +7812,42 @@ impl<'a> HirToMirContext<'a> {
     }
 
     /// Lower a HIR expression to MIR value
+    /// Public entry: lower a HIR expression to MIR, then post-process to
+    /// wrap a Class value as an interface fat pointer when the expression's
+    /// static type was promoted to an Interface by the typechecker (e.g.
+    /// when used as a function arg, return value, or array element where
+    /// the slot expects an interface). Without this, stdlib calls like
+    /// `array_push` and any non-user-function dispatch would store a raw
+    /// class pointer, breaking subsequent interface dispatch on reads.
     fn lower_expression(&mut self, expr: &HirExpr) -> Option<IrId> {
+        let result = self.lower_expression_inner(expr)?;
+        // Promotion wrap: only fires when expr.ty IS an interface AND the
+        // expression kind reveals an underlying class. Variable expressions
+        // whose symbol is interface-typed correctly skip this (their
+        // underlying type is also interface, get_class_symbol returns None).
+        // Inner Let/Cast handlers also produce wrapped fat pointers when
+        // their RHS is a class; that runs first, and by then expr.ty for
+        // the outer expression is the interface, leaving the underlying
+        // unchanged — but our extractor only fires when it can extract a
+        // class from `kind`, which a Let-result expression cannot, so no
+        // double-wrap.
+        if let Some(iface_sym) = self.get_interface_symbol(expr.ty) {
+            if let Some(class_sym) = self.extract_underlying_class_symbol(expr) {
+                if self.interface_vtables.contains_key(&(class_sym, iface_sym)) {
+                    if let Some(wrapped) =
+                        self.wrap_in_interface_fat_ptr(result, class_sym, iface_sym)
+                    {
+                        // Track for the same lifetime caveat as Path 3.
+                        self.interface_wrapped_args.insert(wrapped);
+                        return Some(wrapped);
+                    }
+                }
+            }
+        }
+        Some(result)
+    }
+
+    fn lower_expression_inner(&mut self, expr: &HirExpr) -> Option<IrId> {
         // DEBUG: Check if this is Field expression being lowered
         if matches!(&expr.kind, HirExprKind::Field { .. }) {
             debug!("[lower_expression] START - Field expression");
@@ -10139,7 +10060,8 @@ impl<'a> HirToMirContext<'a> {
                                             HirExprKind::New { .. } | HirExprKind::Call { .. }
                                         ) && self
                                             .get_drop_behavior(arg.ty)
-                                            == DropBehavior::AutoDrop;
+                                            == DropBehavior::AutoDrop
+                                            && !self.interface_wrapped_args.contains(&reg);
                                         if is_heap_intermediate {
                                             self.temp_heap_values.push(reg);
                                         }
@@ -16405,7 +16327,8 @@ impl<'a> HirToMirContext<'a> {
                                             HirExprKind::New { .. } | HirExprKind::Call { .. }
                                         ) && self
                                             .get_drop_behavior(arg.ty)
-                                            == DropBehavior::AutoDrop;
+                                            == DropBehavior::AutoDrop
+                                            && !self.interface_wrapped_args.contains(&reg);
                                         if is_heap_intermediate {
                                             self.temp_heap_values.push(reg);
                                         }
@@ -19244,7 +19167,7 @@ impl<'a> HirToMirContext<'a> {
                 method_symbol,
             } => self.lower_method_reference(receiver, *method_symbol),
 
-            HirExprKind::Array { elements } => self.lower_array_literal(elements),
+            HirExprKind::Array { elements } => self.lower_array_literal(elements, expr.ty),
 
             HirExprKind::Map { entries } => self.lower_map_literal(entries),
 
@@ -22368,6 +22291,30 @@ impl<'a> HirToMirContext<'a> {
                                 }
                             }
                             _ => {}
+                        }
+                    }
+
+                    // Path 3: Class → Interface at call boundary. When the callee
+                    // expects an interface-typed parameter and the arg is a class
+                    // implementing that interface, wrap the class pointer in a fat
+                    // pointer so the callee can do virtual dispatch via the vtable.
+                    // Without this, methods called on the parameter would resolve
+                    // through a raw class pointer and read garbage.
+                    if let Some(iface_sym) = self.get_interface_symbol(resolved_param) {
+                        if let Some(class_sym) = self.get_class_symbol(resolved_arg) {
+                            if self.interface_vtables.contains_key(&(class_sym, iface_sym)) {
+                                if let Some(wrapped) =
+                                    self.wrap_in_interface_fat_ptr(arg_reg, class_sym, iface_sym)
+                                {
+                                    // The wrapped fat pointer may escape via the
+                                    // callee (e.g. push into a long-lived Array<I>),
+                                    // so we cannot auto-free it on return. Mark it
+                                    // as escaped so callers skip the
+                                    // `temp_heap_values` push that would emit Free.
+                                    self.interface_wrapped_args.insert(wrapped);
+                                    return wrapped;
+                                }
+                            }
                         }
                     }
                 }
@@ -30875,7 +30822,32 @@ impl<'a> HirToMirContext<'a> {
         self.lower_lambda_body(context, params, body)
     }
 
-    fn lower_array_literal(&mut self, elements: &[HirExpr]) -> Option<IrId> {
+    fn lower_array_literal(&mut self, elements: &[HirExpr], array_type: TypeId) -> Option<IrId> {
+        // If the array's element type is an interface, each Class element
+        // needs to be wrapped in a fat pointer before being stored, so the
+        // array holds interface-dispatchable values. Determine the element
+        // type's interface symbol once up front.
+        //
+        // KNOWN LIMITATION: when an array literal is assigned to a
+        // variable of type `Array<Interface>` whose element type doesn't
+        // propagate to the literal's `expr.ty` (typechecker infers the
+        // literal as `Array<ConcreteClass>` from the elements), this lookup
+        // returns None and the elements are stored as raw class pointers.
+        // Downstream `arr[i].method()` then segfaults on interface dispatch.
+        // Proper fix requires either (a) typechecker-side coercion to insert
+        // `Cast` nodes for Class→Interface in array literals, or (b)
+        // plumbing the assignment target's type down into the literal's
+        // lowering. See bugs_known.md Quirk 3.
+        let elem_iface_sym = {
+            let element_type_id = {
+                let type_table = self.type_table;
+                type_table.get(array_type).and_then(|t| match &t.kind {
+                    TypeKind::Array { element_type } => Some(*element_type),
+                    _ => None,
+                })
+            };
+            element_type_id.and_then(|et| self.get_interface_symbol(et))
+        };
         // Array literal: [e1, e2, e3, ...]
         //
         // HaxeArray is a 32-byte struct (4 x 8-byte fields): ptr, len, cap, elem_size
@@ -30983,6 +30955,26 @@ impl<'a> HirToMirContext<'a> {
                     .iter()
                     .map(|elem| {
                         let v = self.lower_expression(elem)?;
+                        let v = if let Some(iface_sym) = elem_iface_sym {
+                            if let Some(class_sym) = self.get_class_symbol(elem.ty) {
+                                if self.interface_vtables.contains_key(&(class_sym, iface_sym)) {
+                                    if let Some(wrapped) =
+                                        self.wrap_in_interface_fat_ptr(v, class_sym, iface_sym)
+                                    {
+                                        self.interface_wrapped_args.insert(wrapped);
+                                        wrapped
+                                    } else {
+                                        v
+                                    }
+                                } else {
+                                    v
+                                }
+                            } else {
+                                v
+                            }
+                        } else {
+                            v
+                        };
                         let t = self.builder.get_register_type(v);
                         let hir_kind = {
                             let type_table = self.type_table;
@@ -31652,6 +31644,35 @@ impl<'a> HirToMirContext<'a> {
     /// Check if a type is a class type and return its SymbolId
     fn get_class_symbol(&self, type_id: TypeId) -> Option<SymbolId> {
         self.resolve_receiver_class_symbol(type_id)
+    }
+
+    /// Walk a HirExpr's kind to find the underlying class the expression
+    /// _actually_ produces, regardless of how the expression's static `.ty`
+    /// was promoted by the typechecker. Used to detect Class→Interface
+    /// promotions when the HirExpr.ty has already become the interface
+    /// (e.g. call args inferred from the parameter type, returns whose
+    /// expression is a class, array push values).
+    fn extract_underlying_class_symbol(&self, expr: &HirExpr) -> Option<SymbolId> {
+        match &expr.kind {
+            HirExprKind::New { class_type, .. } => self.get_class_symbol(*class_type),
+            HirExprKind::Variable { symbol, .. } => {
+                let sym_type = self.symbol_table.get_symbol(*symbol)?.type_id;
+                self.get_class_symbol(sym_type)
+            }
+            HirExprKind::Cast { expr: inner, .. } => self.extract_underlying_class_symbol(inner),
+            HirExprKind::Block(block) => block
+                .expr
+                .as_ref()
+                .and_then(|e| self.extract_underlying_class_symbol(e)),
+            HirExprKind::If {
+                then_expr,
+                else_expr,
+                ..
+            } => self
+                .extract_underlying_class_symbol(then_expr)
+                .or_else(|| self.extract_underlying_class_symbol(else_expr)),
+            _ => None,
+        }
     }
 
     /// If value_type is a class and target_type is an interface the class implements,

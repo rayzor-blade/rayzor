@@ -552,9 +552,12 @@ impl<'a> TastToHirContext<'a> {
         let mut hir_methods = Vec::new();
         let mut hir_constructor = None;
 
-        // Process constructors (take only the first)
+        // Process constructors (take only the first). We pass the class
+        // fields in so the constructor can run any declaration-site
+        // defaults (`var x:T = expr;`) at the top of its body — without
+        // this, those defaults would silently never execute.
         if let Some(constructor) = class.constructors.first() {
-            hir_constructor = Some(self.lower_constructor(constructor));
+            hir_constructor = Some(self.lower_constructor(constructor, &class.fields));
         }
 
         // Process methods
@@ -1021,8 +1024,24 @@ impl<'a> TastToHirContext<'a> {
         hints
     }
 
-    /// Lower a constructor
-    fn lower_constructor(&mut self, method: &TypedFunction) -> HirConstructor {
+    /// Lower a constructor, threading any class-level field defaults into
+    /// `field_inits` so they execute at the top of the constructor body.
+    ///
+    /// Without this, a declaration-site default like
+    /// ```haxe
+    /// class Foo { var arr:Array<Int> = []; public function new() {} }
+    /// ```
+    /// would silently leave `arr` null — the default expression is parsed
+    /// into `TypedField.initializer`, lowered to HIR via the field loop
+    /// in `lower_class`, but never threaded into the constructor's
+    /// execution. The MIR consumer at `hir_to_mir.rs:4128+` already
+    /// knows how to emit a Store for each `HirFieldInit`; the missing
+    /// piece was just populating the list.
+    fn lower_constructor(
+        &mut self,
+        method: &TypedFunction,
+        class_fields: &[crate::tast::node::TypedField],
+    ) -> HirConstructor {
         let mut body = self.lower_block(&method.body);
 
         // Extract super() call from constructor body if present.
@@ -1068,6 +1087,18 @@ impl<'a> TastToHirContext<'a> {
             Vec::new()
         };
 
+        // Collect declaration-site defaults for instance fields. Statics
+        // are class-level (handled by global initialisation), and fields
+        // without an initialiser are zero/null by default — no work needed.
+        let field_inits: Vec<HirFieldInit> = class_fields
+            .iter()
+            .filter(|f| !f.is_static && f.initializer.is_some())
+            .map(|f| HirFieldInit {
+                field: f.symbol_id,
+                value: self.lower_expression(f.initializer.as_ref().unwrap()),
+            })
+            .collect();
+
         HirConstructor {
             params: method
                 .parameters
@@ -1075,7 +1106,7 @@ impl<'a> TastToHirContext<'a> {
                 .map(|p| self.lower_param(p))
                 .collect(),
             super_call,
-            field_inits: Vec::new(),
+            field_inits,
             pre_super_stmts,
             body,
         }
@@ -1891,7 +1922,27 @@ impl<'a> TastToHirContext<'a> {
                 // receiver.method(args) becomes method(receiver, args)
                 let receiver_expr = self.lower_expression(receiver);
                 let mut call_args = vec![receiver_expr];
-                call_args.extend(arguments.iter().map(|a| self.lower_expression(a)));
+                for arg in arguments.iter() {
+                    let lowered = self.lower_expression(arg);
+                    // Class → Interface coercion at the method-call boundary.
+                    // The typechecker accepts a class arg for an interface-typed
+                    // parameter without inserting a Cast, leaving the HIR arg
+                    // typed as the concrete class. MIR's Class→Interface Cast
+                    // arm produces the fat pointer wrap — wrapping in a Cast
+                    // here routes through it, fixing dispatch on the resulting
+                    // value when stored (e.g. into Array<I>).
+                    let promoted = self.maybe_promote_class_arg_to_interface(
+                        lowered,
+                        receiver.expr_type,
+                        *method_symbol,
+                        arguments
+                            .iter()
+                            .position(|a| std::ptr::eq(a, arg))
+                            .unwrap_or(0),
+                        expr.source_location,
+                    );
+                    call_args.push(promoted);
+                }
 
                 HirExprKind::Call {
                     callee: Box::new(HirExpr::new(
@@ -3191,6 +3242,72 @@ impl<'a> TastToHirContext<'a> {
     fn lower_metadata(&mut self, _metadata: &[TypedMetadata]) -> Vec<HirAttribute> {
         // TODO: Implement metadata lowering
         Vec::new()
+    }
+
+    /// At a method-call boundary, when the receiver is `Array<Interface>`
+    /// (or any generic container whose first type arg is an interface) and
+    /// the arg is a Class implementing that interface, wrap the arg in a
+    /// `HirExprKind::Cast`. MIR's Cast handler then emits the fat-pointer
+    /// wrap, so subsequent dispatches via the stored interface value work
+    /// instead of segfaulting on a raw class pointer.
+    ///
+    /// Looking up the method's signature directly fails for stdlib methods
+    /// (their type_id is invalid). Instead we drive the coercion from the
+    /// receiver's container element type — sufficient for `push`,
+    /// `unshift`, `set`, etc., where the parameter is `T`.
+    fn maybe_promote_class_arg_to_interface(
+        &mut self,
+        arg: HirExpr,
+        receiver_type: TypeId,
+        _method_symbol: SymbolId,
+        _param_index: usize,
+        source_location: SourceLocation,
+    ) -> HirExpr {
+        // Extract the receiver's element/first-type-arg.
+        let element_type = {
+            let type_table = self.type_table.borrow();
+            match type_table.get(receiver_type).map(|t| &t.kind) {
+                Some(crate::tast::TypeKind::Array { element_type }) => Some(*element_type),
+                Some(crate::tast::TypeKind::GenericInstance { type_args, .. })
+                    if !type_args.is_empty() =>
+                {
+                    Some(type_args[0])
+                }
+                _ => None,
+            }
+        };
+        let Some(element_type) = element_type else {
+            return arg;
+        };
+
+        // Check: element_type is Interface, arg.ty is Class implementing it.
+        let (elem_is_iface, arg_is_class) = {
+            let type_table = self.type_table.borrow();
+            let elem_iface = matches!(
+                type_table.get(element_type).map(|t| &t.kind),
+                Some(crate::tast::TypeKind::Interface { .. })
+            );
+            let arg_class = matches!(
+                type_table.get(arg.ty).map(|t| &t.kind),
+                Some(crate::tast::TypeKind::Class { .. })
+            );
+            (elem_iface, arg_class)
+        };
+        if !elem_is_iface || !arg_is_class {
+            return arg;
+        }
+
+        // Wrap in Cast(arg → interface).
+        HirExpr::new(
+            HirExprKind::Cast {
+                expr: Box::new(arg),
+                target: element_type,
+                is_safe: true,
+            },
+            element_type,
+            self.current_lifetime,
+            source_location,
+        )
     }
 
     /// Desugar array comprehension into a loop that builds an array
