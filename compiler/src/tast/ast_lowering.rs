@@ -4589,6 +4589,94 @@ impl<'a> AstLowering<'a> {
     /// Infer generic type arguments from constructor argument types.
     /// When `new Container(42)` is written without explicit `<Int>`, this matches
     /// constructor param types (TypeParameter) against argument types to infer type args.
+    /// Resolve `@:multiType` for the `haxe.ds.Map` abstract. When the
+    /// caller writes `new Map<K, V>(...)`, replace the construction with
+    /// the right concrete container based on K:
+    ///
+    ///   - K = String      → haxe.ds.StringMap<V>
+    ///   - K = Int         → haxe.ds.IntMap<V>
+    ///   - K = EnumValue   → haxe.ds.EnumValueMap<K, V>
+    ///   - otherwise       → haxe.ds.ObjectMap<K, V>
+    ///
+    /// Returns `(class_type, type_args, class_name_override)`. When the
+    /// receiver isn't `Map`, returns the inputs unchanged. This is a
+    /// targeted shim — proper `@:multiType` parsing + general resolution
+    /// is the long-term fix (would also unlock `EnumMap`, custom user
+    /// abstracts that use the same dispatch trick, etc.). For now `Map`
+    /// is the only abstract that needs this and using a non-Map abstract
+    /// here would be a no-op pass-through.
+    fn maybe_resolve_multitype_map(
+        &self,
+        original_class_type: TypeId,
+        original_type_args: Vec<TypeId>,
+        type_path: &parser::TypePath,
+    ) -> (TypeId, Vec<TypeId>, Option<String>) {
+        // Detect `Map` (with or without `haxe.ds.` package qualifier).
+        let is_map = type_path.name == "Map"
+            && (type_path.package.is_empty()
+                || type_path.package == vec!["haxe".to_string(), "ds".to_string()]);
+        if !is_map || original_type_args.len() != 2 {
+            return (original_class_type, original_type_args, None);
+        }
+
+        let key_ty = original_type_args[0];
+        let value_ty = original_type_args[1];
+
+        // Pick the concrete container name + remaining type args from K's kind.
+        let (concrete_name, concrete_type_args): (&str, Vec<TypeId>) = {
+            let tt = self.context.type_table.borrow();
+            let key_kind = tt.get(key_ty).map(|t| &t.kind);
+            match key_kind {
+                Some(crate::tast::core::TypeKind::String) => ("StringMap", vec![value_ty]),
+                Some(crate::tast::core::TypeKind::Int) => ("IntMap", vec![value_ty]),
+                Some(crate::tast::core::TypeKind::Enum { .. }) => {
+                    ("EnumValueMap", vec![key_ty, value_ty])
+                }
+                Some(crate::tast::core::TypeKind::Class { .. })
+                | Some(crate::tast::core::TypeKind::Interface { .. })
+                | Some(crate::tast::core::TypeKind::Anonymous { .. })
+                | Some(crate::tast::core::TypeKind::GenericInstance { .. }) => {
+                    ("ObjectMap", vec![key_ty, value_ty])
+                }
+                _ => {
+                    // Unknown / type-parameter / dynamic K — leave as-is.
+                    // Honors the "no silent fallthrough" principle: we can't
+                    // pick a concrete safely, so the caller continues with
+                    // the abstract resolution path (which will surface any
+                    // failure modes downstream rather than guessing here).
+                    return (original_class_type, original_type_args, None);
+                }
+            }
+        };
+
+        // Resolve the concrete class symbol by name. Stdlib extern classes
+        // register under their simple name (StringMap / IntMap / etc.) in
+        // the root scope even when the FQN is `haxe.ds.StringMap`.
+        let concrete_name_interned = self.context.string_interner.intern(concrete_name);
+        let symbol = match self
+            .context
+            .symbol_table
+            .lookup_symbol(ScopeId::first(), concrete_name_interned)
+        {
+            Some(sym) => sym,
+            None => {
+                // Concrete class isn't loaded — keep the original to avoid
+                // a worse downstream failure. Caller will see whatever the
+                // abstract resolution produces.
+                return (original_class_type, original_type_args, None);
+            }
+        };
+
+        let concrete_class_type = self
+            .context
+            .type_table
+            .borrow_mut()
+            .create_class_type(symbol.id, concrete_type_args.clone());
+
+        let qualified_name = format!("haxe.ds.{}", concrete_name);
+        (concrete_class_type, concrete_type_args, Some(qualified_name))
+    }
+
     fn infer_type_args_from_constructor(
         &self,
         class_type_id: TypeId,
@@ -7128,21 +7216,35 @@ impl<'a> AstLowering<'a> {
                         .unwrap_or(base_class_type_id)
                 };
 
-                // Extract and intern the class name for extern stdlib classes
-                // Use fully qualified name (package + name) when package is non-empty
-                // so that subclass constructors (e.g., sys.ssl.Socket extends sys.net.Socket)
-                // resolve to the correct runtime function instead of the parent's.
-                let class_name_str = if type_path.package.is_empty() {
-                    type_path.name.clone()
-                } else {
-                    format!("{}.{}", type_path.package.join("."), type_path.name)
+                // `@:multiType` abstract resolution. `Map<K, V>` in haxe-std is
+                // declared as `@:multiType` and selects a concrete underlying
+                // (StringMap / IntMap / EnumValueMap / ObjectMap) per K. We
+                // don't parse `@:multiType` metadata yet, but the rule for
+                // `haxe.ds.Map` is fixed and load-bearing — `new Map<String,
+                // V>()` must construct a `StringMap<V>` (extern, routed
+                // through `haxe_stringmap_*` runtime), not fall through to
+                // `BalancedTree`. Anything else returns garbage at runtime
+                // with no diagnostic (the typechecker silently picks the
+                // first `IMap` implementer when no rule is honored). See
+                // memory/feedback_no_silent_dispatch_fallthrough.md.
+                let (final_class_type, final_type_args, final_class_name) =
+                    self.maybe_resolve_multitype_map(
+                        actual_class_type,
+                        type_args,
+                        type_path,
+                    );
+
+                let class_name_str = match final_class_name {
+                    Some(name) => name,
+                    None if type_path.package.is_empty() => type_path.name.clone(),
+                    None => format!("{}.{}", type_path.package.join("."), type_path.name),
                 };
                 let interned_class_name = self.context.string_interner.intern(&class_name_str);
 
                 TypedExpressionKind::New {
-                    class_type: actual_class_type,
+                    class_type: final_class_type,
                     arguments: arg_exprs,
-                    type_arguments: type_args,
+                    type_arguments: final_type_args,
                     class_name: Some(interned_class_name),
                 }
             }
