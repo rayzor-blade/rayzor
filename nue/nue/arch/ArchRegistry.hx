@@ -2,6 +2,7 @@ package nue.arch;
 
 import nue.Module;
 import nue.model.ModelMetadata;
+import nue.model.NamedTensorMap;
 import rayzor.ds.Tensor;
 
 /**
@@ -99,7 +100,7 @@ class ArchRegistry {
      * `ArchBuilder` value taken out of an array goes through the
      * `Dynamic`-typed shim.
      */
-    public function build(metadata:ModelMetadata, weights:Map<String, Tensor>):Module {
+    public function build(metadata:ModelMetadata, weights:NamedTensorMap):Module {
         var arch:Dynamic = get(metadata.architecture);
         if (arch == null) {
             throw "nue.arch: no builder registered for architecture '"

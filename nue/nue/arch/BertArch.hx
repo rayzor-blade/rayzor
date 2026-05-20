@@ -5,6 +5,7 @@ import nue.Linear;
 import nue.Embedding;
 import nue.EncoderModel;
 import nue.model.ModelMetadata;
+import nue.model.NamedTensorMap;
 import nue.transformer.LayerNorm;
 import nue.transformer.MultiHeadAttention;
 import nue.transformer.GeluFFN;
@@ -46,7 +47,7 @@ class BertArch implements ArchBuilder {
         return true;
     }
 
-    public function build(meta:ModelMetadata, weights:Map<String, Tensor>):Module {
+    public function build(meta:ModelMetadata, weights:NamedTensorMap):Module {
         throw "nue.arch.BertArch.build: not yet implemented — see class docs";
     }
 }

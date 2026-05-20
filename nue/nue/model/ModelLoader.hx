@@ -2,6 +2,7 @@ package nue.model;
 
 import nue.Module;
 import rayzor.ds.Tensor;
+import nue.model.NamedTensorMap;
 
 /**
  * Format-agnostic interface for loading a model from disk.
@@ -35,7 +36,7 @@ interface ModelLoader {
      * normalises ONNX/safetensors names into this convention so the
      * arch builder doesn't need to know which format the bytes came from.
      */
-    function readNamedTensors(path:String):Map<String, Tensor>;
+    function readNamedTensors(path:String):NamedTensorMap;
 
     /**
      * Convenience wrapper: read metadata + tensors, look up the
