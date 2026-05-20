@@ -5740,8 +5740,30 @@ impl CompilationUnit {
                 // ("can't resolve symbol spawn"). For MIR wrappers we also skip
                 // the NativePlugin entry entirely since the builtin path handles
                 // them via stdlib MIR module merging.
-                let builtin_match =
-                    builtin_mapping.find_by_name(&underscore_class_name, &method_name);
+                // Match the builtin mapping by the qualified (underscored) class
+                // name first, then by the simple class name. The builtin mapping
+                // registers map_method! entries with simple names like "StringMap",
+                // "IntMap", etc. — the `class_matches` helper supports suffix-
+                // matching the other direction ("StringMap" matches
+                // "haxe_ds_StringMap"), but NOT the lookup direction. Without the
+                // simple-name fallback the override never fires for haxe.ds.*
+                // classes and the auto-registration registers
+                // `(class="haxe.ds.StringMap", method="set", runtime="set")` as a
+                // bogus mapping that the dispatch then picks up — see the user's
+                // "no silent dispatch fallthrough" feedback.
+                // Try multiple naming conventions to find the builtin mapping.
+                // `class_native_name` can come in as `haxe::ds::StringMap`,
+                // `haxe.ds.StringMap`, or `haxe_ds_StringMap` depending on the
+                // upstream source — and the simple bare name (`StringMap`) is
+                // what the macro-registered map_method! entries use.
+                let bare_name = underscore_class_name
+                    .rsplit(|c| c == '_' || c == '.')
+                    .next()
+                    .unwrap_or(&underscore_class_name);
+                let builtin_match = builtin_mapping
+                    .find_by_name(&underscore_class_name, &method_name)
+                    .or_else(|| builtin_mapping.find_by_name(&class_dot_name, &method_name))
+                    .or_else(|| builtin_mapping.find_by_name(bare_name, &method_name));
                 if let Some((_sig, call)) = builtin_match {
                     // Record the mapping under the Haxe-qualified name so the
                     // WASM backend stub redirect still finds a canonical symbol.

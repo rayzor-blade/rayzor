@@ -6039,6 +6039,10 @@ impl<'a> HirToMirContext<'a> {
                         "[get_stdlib_runtime_info] Found {}.{} ({} params) via qualified name -> {}",
                         qn, method_name, count, mapping.runtime_name
                     );
+                    debug!(
+                        "[get_stdlib_runtime_info] Found {}.{} ({} params) via qualified name -> {}",
+                        qn, method_name, count, mapping.runtime_name
+                    );
                     return Some((sig.class, sig.method, mapping));
                 }
             }
