@@ -1,0 +1,6 @@
+[project]
+name = "phase8-sampling"
+entry = "Main.hx"
+
+[build]
+class-paths = [".", "../../"]
