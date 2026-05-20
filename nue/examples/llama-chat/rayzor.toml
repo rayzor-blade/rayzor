@@ -1,0 +1,6 @@
+[project]
+name = "llama-chat"
+entry = "Main.hx"
+
+[build]
+class-paths = [".", "../../"]
