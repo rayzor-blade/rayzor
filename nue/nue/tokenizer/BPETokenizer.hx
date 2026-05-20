@@ -19,11 +19,16 @@ package nue.tokenizer;
  * remapping (replace control bytes with printable Unicode aliases so
  * the JSON vocab stays printable); decode unmaps them.
  *
- * **Performance.** Pure Haxe; expected ~10–50× slower than a Rust
- * tokenizer for long prompts. Tokenisation is <1% of inference time
- * for an LLM, so we ship pure Haxe in v1. Merge lookup is O(N)
- * linear scan because `Map<String, V>.get` doesn't reliably return
- * values in the current rayzor stdlib.
+ * **Performance.** Pure Haxe lowered to native machine code through
+ * rayzor's JIT, so per-instruction cost matches a Rust tokenizer of
+ * the same algorithm. The current bottleneck is algorithmic: merge
+ * lookup is an O(N) linear scan over `merges` because `Map<String,
+ * V>.get` doesn't return correctly-typed values in the current
+ * stdlib (the runtime returns a raw `u64` and the compiler's
+ * `returns_raw_value` post-cast only handles `I32`/`Bool` — pointer
+ * and `Null<T>` return types fall through unchanged). Swapping the
+ * linear scan for a real hash map is a one-line change once that's
+ * fixed.
  *
  * **Special tokens** are stored on top of the merged vocab. Encode
  * scans for known special-token literals before applying BPE so they
