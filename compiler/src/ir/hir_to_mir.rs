@@ -12093,6 +12093,32 @@ impl<'a> HirToMirContext<'a> {
 
                                 // Handle returns_raw_value: cast raw U64 to the appropriate type
                                 if returns_raw_value {
+                                    // Compute the actual element type T from the receiver's
+                                    // generic args. When T resolves (e.g. `Map<String, Tensor>`
+                                    // → T = Tensor), the u64 returned by the runtime is a
+                                    // pointer that needs bit-reinterpret to the right Ptr
+                                    // type. When T is unresolved (`new StringMap()` with no
+                                    // type args), the value is a primitive stored as raw
+                                    // bits — keep on the U64→I64 cast path for downstream
+                                    // unboxing.
+                                    let resolved_value_ty: Option<IrType> = {
+                                        let type_table = self.type_table;
+                                        type_table.get(receiver_type).and_then(|ti| match &ti.kind {
+                                            crate::tast::TypeKind::Class { type_args, .. }
+                                            | crate::tast::TypeKind::GenericInstance {
+                                                type_args, ..
+                                            } => {
+                                                // Value T is the LAST type arg: StringMap<T> /
+                                                // IntMap<T> have type_args=[T]; ObjectMap<K, V>
+                                                // has type_args=[K, V] — the value lives at the
+                                                // tail in both cases.
+                                                type_args
+                                                    .last()
+                                                    .map(|ta| self.convert_type(*ta))
+                                            }
+                                            _ => None,
+                                        })
+                                    };
                                     let final_result = match &result_type {
                                         IrType::I32 => self.builder.build_cast(
                                             call_result,
@@ -12135,8 +12161,19 @@ impl<'a> HirToMirContext<'a> {
                                                 result_type.clone(),
                                             )
                                         }
+                                        IrType::Ptr(_) if resolved_value_ty.is_some() => {
+                                            // Receiver was parameterised with a concrete
+                                            // pointer-typed T (extern class, user class,
+                                            // array). Bit-reinterpret the runtime u64 as
+                                            // the resolved pointer type.
+                                            self.builder.build_bitcast(
+                                                call_result,
+                                                resolved_value_ty.unwrap(),
+                                            )
+                                        }
                                         _ => {
-                                            // Unresolved T or Dynamic: keep as I64
+                                            // Unresolved T or Dynamic: keep as I64 so
+                                            // the value isn't misinterpreted as a pointer.
                                             self.builder.build_cast(
                                                 call_result,
                                                 IrType::U64,
@@ -14070,41 +14107,50 @@ impl<'a> HirToMirContext<'a> {
                                     // 1. Resolve the actual type parameter T from the receiver's generic args
                                     // 2. Call with U64 return type
                                     // 3. Cast the result to the resolved type
-                                    let resolved_return_type = if returns_raw_value {
-                                        // Try to resolve T from receiver's generic arguments
+                                    //
+                                    // `resolved_from_type_args` records whether the resolution
+                                    // came from a real receiver type_arg substitution (true) or
+                                    // fell through to `result_type` because there were no type
+                                    // args. The U64 → Ptr post-cast uses this to decide whether
+                                    // bitcasting a Ptr-typed result is safe — bitcasting a Ptr
+                                    // when the source u64 actually holds an Int (because T was
+                                    // unresolved) would silently produce a garbage address.
+                                    let (resolved_return_type, resolved_from_type_args) = if returns_raw_value {
+                                        // Resolve value T from receiver's type args. The
+                                        // LAST type arg is V — covers both single-param
+                                        // (StringMap<T>, IntMap<T>) and two-param
+                                        // (ObjectMap<K, V>) container shapes.
                                         let type_table = self.type_table;
-                                        if let Some(receiver_info) = type_table.get(receiver_type) {
-                                            if let crate::tast::TypeKind::Class {
-                                                type_args, ..
-                                            } = &receiver_info.kind
-                                            {
-                                                if !type_args.is_empty() {
-                                                    let concrete_type =
-                                                        self.convert_type(type_args[0]);
-                                                    concrete_type
-                                                } else {
-                                                    result_type.clone()
-                                                }
-                                            } else {
-                                                result_type.clone()
+                                        let resolved = if let Some(receiver_info) = type_table.get(receiver_type) {
+                                            match &receiver_info.kind {
+                                                crate::tast::TypeKind::Class { type_args, .. }
+                                                | crate::tast::TypeKind::GenericInstance {
+                                                    type_args, ..
+                                                } => type_args
+                                                    .last()
+                                                    .map(|ta| self.convert_type(*ta)),
+                                                _ => None,
                                             }
                                         } else {
-                                            result_type.clone()
+                                            None
+                                        };
+                                        match resolved {
+                                            Some(t) => (t, true),
+                                            None => (result_type.clone(), false),
                                         }
                                     } else {
                                         // IMPORTANT: For MIR wrappers, use their actual return type instead of HIR type
                                         // HIR type may be Dynamic/Ptr(Void) but the wrapper returns a concrete type (e.g., Bool)
-                                        self.get_stdlib_mir_wrapper_signature(&runtime_func)
+                                        let ret = self.get_stdlib_mir_wrapper_signature(&runtime_func)
                                             .map(|(_, ret_ty)| ret_ty)
                                             .unwrap_or_else(|| {
-                                                // If no explicit signature, check has_return flag
-                                                // This fixes array.push() returning void but being tracked for drop
                                                 if has_return {
                                                     result_type.clone()
                                                 } else {
                                                     IrType::Void
                                                 }
-                                            })
+                                            });
+                                        (ret, false)
                                     };
                                     debug!(
                                     "[RESOLVED RETURN TYPE] runtime_func={}, result_type={:?}, resolved={:?}",
@@ -14168,19 +14214,33 @@ impl<'a> HirToMirContext<'a> {
                                                     IrType::U64,
                                                     IrType::Bool,
                                                 ),
-                                                IrType::Ptr(ref inner)
-                                                    if !matches!(inner.as_ref(), IrType::Void) =>
-                                                {
-                                                    // Concrete pointer type (e.g., Ptr(String))
-                                                    self.builder.build_cast(
-                                                        raw_reg,
-                                                        IrType::U64,
-                                                        resolved_return_type.clone(),
-                                                    )
+                                                IrType::Ptr(_) => {
+                                                    // Pointer type — bit-reinterpret u64 → ptr,
+                                                    // BUT only when we actually resolved T from
+                                                    // the receiver's type_args. When T was
+                                                    // unresolved (e.g. `new StringMap()` with
+                                                    // no type args), the user is storing
+                                                    // primitives as raw bits — bitcasting to
+                                                    // Ptr would silently mangle them. The
+                                                    // legacy U64→I64 cast keeps the bits as
+                                                    // an integer for downstream unboxing.
+                                                    if resolved_from_type_args {
+                                                        self.builder.build_bitcast(
+                                                            raw_reg,
+                                                            resolved_return_type.clone(),
+                                                        )
+                                                    } else {
+                                                        self.builder.build_cast(
+                                                            raw_reg,
+                                                            IrType::U64,
+                                                            IrType::I64,
+                                                        )
+                                                    }
                                                 }
                                                 _ => {
-                                                    // Unresolved T (Ptr(Void)/Dynamic) or unknown: keep as I64
-                                                    // so the raw value isn't misinterpreted as a pointer
+                                                    // Truly unresolved T (Dynamic, type parameter)
+                                                    // — keep as I64 so the raw value isn't
+                                                    // misinterpreted as anything else.
                                                     self.builder.build_cast(
                                                         raw_reg,
                                                         IrType::U64,
@@ -22886,6 +22946,21 @@ impl<'a> HirToMirContext<'a> {
                 return self.builder.build_cast(value, IrType::F32, IrType::F64);
             }
             _ => {}
+        }
+
+        // raw_value_params expect U64 — if the actual is a pointer
+        // (class instance, array, etc.), reinterpret its bits as U64
+        // so the runtime sees the address as an inline 64-bit value
+        // rather than receiving a register-tagged Ptr value where the
+        // ABI expects a u64 integer. Use bitcast (no-op bit
+        // reinterpretation) rather than numeric cast — pointers and
+        // u64 share representation. Without this, Map<K, ExternClass>.set
+        // passed a Ptr-typed register where U64 was expected and
+        // Cranelift's calling convention dropped or extended bits.
+        if matches!(expected_ty, IrType::U64) {
+            if matches!(actual_ty, IrType::Ptr(_)) {
+                return self.builder.build_bitcast(value, IrType::U64);
+            }
         }
 
         // Only box if expected is Ptr(U8) and actual is a primitive
