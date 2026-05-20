@@ -2,6 +2,7 @@ package nue.arch;
 
 import nue.Module;
 import nue.model.ModelMetadata;
+import nue.model.NamedTensorMap;
 import rayzor.ds.Tensor;
 
 /**
@@ -30,5 +31,5 @@ interface ArchBuilder {
     function validate(metadata:ModelMetadata):Bool;
 
     /** Wire the Module tree using the supplied named weight tensors. */
-    function build(metadata:ModelMetadata, weights:Map<String, Tensor>):Module;
+    function build(metadata:ModelMetadata, weights:NamedTensorMap):Module;
 }

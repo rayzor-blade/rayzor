@@ -4,6 +4,7 @@ import nue.Module;
 import nue.Linear;
 import nue.Embedding;
 import nue.model.ModelMetadata;
+import nue.model.NamedTensorMap;
 import nue.transformer.RMSNorm;
 import nue.transformer.RoPE;
 import nue.transformer.SwiGLU;
@@ -53,7 +54,7 @@ class LlamaArch implements ArchBuilder {
         return true;
     }
 
-    public function build(meta:ModelMetadata, weights:Map<String, Tensor>):Module {
+    public function build(meta:ModelMetadata, weights:NamedTensorMap):Module {
         var dtype = inferDType(weights, "token_embd.weight");
         var rope = new RoPE(meta.headDim, meta.maxSeqLen, meta.ropeBase);
 
@@ -83,7 +84,7 @@ class LlamaArch implements ArchBuilder {
 
     static function buildBlock(
         meta:ModelMetadata, layerIndex:Int, dtype:DType,
-        rope:RoPE, weights:Map<String, Tensor>
+        rope:RoPE, weights:NamedTensorMap
     ):TransformerBlock {
         var prefix = "blk." + layerIndex + ".";
         var attnNorm = new RMSNorm(
@@ -120,13 +121,13 @@ class LlamaArch implements ArchBuilder {
      * silently zero-initing) when the file is missing a weight the
      * architecture needs — surfaces bad checkpoints early.
      */
-    static function takeWeight(weights:Map<String, Tensor>, name:String):Tensor {
+    static function takeWeight(weights:NamedTensorMap, name:String):Tensor {
         var t = weights.get(name);
         if (t == null) throw "nue.arch.Llama: missing weight '" + name + "'";
         return t;
     }
 
-    static function inferDType(weights:Map<String, Tensor>, sentinel:String):DType {
+    static function inferDType(weights:NamedTensorMap, sentinel:String):DType {
         var t = weights.get(sentinel);
         if (t == null) return F32;
         return t.dtype();

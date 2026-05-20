@@ -1,0 +1,6 @@
+[project]
+name = "phase7-loaders"
+entry = "Main.hx"
+
+[build]
+class-paths = [".", "../../"]
