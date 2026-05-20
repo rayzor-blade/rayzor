@@ -4202,7 +4202,35 @@ impl<'a> HirToMirContext<'a> {
                         None
                     };
 
-                    let value = self.lower_expression(init_expr);
+                    // Special case: if init is an array literal AND the var
+                    // has an explicit `Array<Interface>` type hint, the literal
+                    // expression's own `expr.ty` was inferred from the FIRST
+                    // element (typechecker doesn't propagate slot context), so
+                    // `lower_array_literal` reading `array_type=expr.ty` would
+                    // see `Array<ConcreteClass>` and skip the element wrap.
+                    // Bypass that and lower the literal with the declared
+                    // `Array<Interface>` slot type so each Class element gets
+                    // wrapped in a fat pointer at construction.
+                    let value = if let (HirExprKind::Array { elements }, Some(target_ty)) =
+                        (&init_expr.kind, type_hint)
+                    {
+                        let target_is_iface_array = {
+                            let type_table = self.type_table;
+                            type_table.get(*target_ty).and_then(|t| match &t.kind {
+                                TypeKind::Array { element_type } => {
+                                    self.get_interface_symbol(*element_type)
+                                }
+                                _ => None,
+                            })
+                        };
+                        if target_is_iface_array.is_some() {
+                            self.lower_array_literal(elements, *target_ty)
+                        } else {
+                            self.lower_expression(init_expr)
+                        }
+                    } else {
+                        self.lower_expression(init_expr)
+                    };
 
                     // If Copy type, emit shallow copy and mark as heap alloc for drop tracking
                     let value = if let (Some(class_sym), Some(val)) = (copy_class_sym, value) {
