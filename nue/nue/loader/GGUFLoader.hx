@@ -112,8 +112,7 @@ class GGUFLoader implements ModelLoader {
         return result;
     }
 
-    /** Lookup wrapper used by metadata helpers — adapts the reader's
-        parallel-array `findMeta` API to the previous Map-style call. */
+    /** Lookup wrapper used by metadata helpers. */
     private static inline function getMeta(reader:GGUFReader, key:String):GGUFReader.MetaValue {
         return reader.findMeta(key);
     }

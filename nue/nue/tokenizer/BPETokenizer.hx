@@ -1,5 +1,7 @@
 package nue.tokenizer;
 
+import haxe.ds.StringMap;
+
 /**
  * Byte-Pair Encoding tokenizer — the byte-level variant used by
  * tiktoken (GPT-2/3/4, Llama 3, Qwen) and the SentencePiece variant
@@ -21,14 +23,8 @@ package nue.tokenizer;
  *
  * **Performance.** Pure Haxe lowered to native machine code through
  * rayzor's JIT, so per-instruction cost matches a Rust tokenizer of
- * the same algorithm. The current bottleneck is algorithmic: merge
- * lookup is an O(N) linear scan over `merges` because `Map<String,
- * V>.get` doesn't return correctly-typed values in the current
- * stdlib (the runtime returns a raw `u64` and the compiler's
- * `returns_raw_value` post-cast only handles `I32`/`Bool` — pointer
- * and `Null<T>` return types fall through unchanged). Swapping the
- * linear scan for a real hash map is a one-line change once that's
- * fixed.
+ * the same algorithm. Merge lookup is `StringMap<Int>` keyed by the
+ * concatenated pair — O(1) per pair on the encode hot path.
  *
  * **Special tokens** are stored on top of the merged vocab. Encode
  * scans for known special-token literals before applying BPE so they
@@ -40,9 +36,10 @@ class BPETokenizer implements Tokenizer {
     public var vocab:Vocab;
     /** Ordered merge rules; index = priority (lower = applied first). */
     public var merges:Array<MergeRule>;
-    /** Parallel arrays for special tokens. */
-    public var specialNames:Array<String>;
-    public var specialIds:Array<Int>;
+    /** key (= left+right) → index into `merges`. O(1) priority lookup. */
+    public var rankIndex:StringMap<Int>;
+    /** Special token name → vocab ID. */
+    public var specials:StringMap<Int>;
     /** Byte-level tokenizers map raw bytes through a printable alias
         table — required for GPT-2/Llama 3 style vocabs. */
     public var byteLevel:Bool;
@@ -51,14 +48,16 @@ class BPETokenizer implements Tokenizer {
         this.vocab = vocab;
         this.merges = merges;
         this.byteLevel = byteLevel;
-        this.specialNames = [];
-        this.specialIds = [];
+        this.rankIndex = new StringMap<Int>();
+        for (i in 0...merges.length) {
+            rankIndex.set(merges[i].key, i);
+        }
+        this.specials = new StringMap<Int>();
     }
 
     /** Register a special token (name → existing vocab ID). */
     public function addSpecial(name:String, id:Int):Void {
-        specialNames.push(name);
-        specialIds.push(id);
+        specials.set(name, id);
     }
 
     public function vocabSize():Int {
@@ -66,20 +65,15 @@ class BPETokenizer implements Tokenizer {
     }
 
     public function specialId(name:String):Int {
-        for (i in 0...specialNames.length) {
-            if (specialNames[i] == name) return specialIds[i];
-        }
-        return -1;
+        var id = specials.get(name);
+        return (id == null) ? -1 : id;
     }
 
-    /** Linear scan for a merge rule matching `left + right`. Returns
+    /** O(1) lookup for a merge rule matching `left + right`. Returns
         -1 if no rule exists. */
     private function rankOf(left:String, right:String):Int {
-        var needle = left + right;
-        for (i in 0...merges.length) {
-            if (merges[i].key == needle) return i;
-        }
-        return -1;
+        var rank = rankIndex.get(left + right);
+        return (rank == null) ? -1 : rank;
     }
 
     /**

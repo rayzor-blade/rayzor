@@ -1,6 +1,7 @@
 package nue.loader;
 
 import haxe.io.Bytes;
+import haxe.ds.StringMap;
 
 /**
  * Low-level GGUF binary reader. Parses the header, KV metadata, and
@@ -24,11 +25,9 @@ import haxe.io.Bytes;
  * followed by UTF-8 bytes (no terminator). KV value layout depends
  * on the type tag — see `MetaValue` below.
  *
- * **Storage choice.** Metadata is held in parallel `metaKeys` /
- * `metaValues` arrays with a linear-scan `findMeta(key)`. The
- * current rayzor stdlib's `Map<String, V>.get` doesn't reliably
- * return values, so we avoid it here. GGUFs typically have ~30 KV
- * pairs, so O(N) lookup is fine.
+ * **Storage choice.** Metadata is held in a `StringMap<MetaValue>`
+ * keyed by the GGUF KV key. O(1) average lookup; insertion order is
+ * not preserved (and not needed — GGUF consumers always know the key).
  *
  * Reference: https://github.com/ggerganov/ggml/blob/master/docs/gguf.md
  */
@@ -40,8 +39,7 @@ class GGUFReader {
     public var version:Int;
     public var nTensors:Int;
     public var nMetaKv:Int;
-    public var metaKeys:Array<String>;
-    public var metaValues:Array<MetaValue>;
+    public var meta:StringMap<MetaValue>;
     public var tensorInfos:Array<TensorInfo>;
     /** Byte offset where the tensor data section begins. */
     public var dataStart:Int;
@@ -53,19 +51,14 @@ class GGUFReader {
     public function new(bytes:Bytes) {
         this.bytes = bytes;
         this.pos = 0;
-        this.metaKeys = [];
-        this.metaValues = [];
+        this.meta = new StringMap<MetaValue>();
         this.tensorInfos = [];
         parse();
     }
 
-    /** Linear-scan lookup of a metadata value. Returns `null` if
-        the key is absent. */
+    /** O(1) lookup of a metadata value. Returns `null` if absent. */
     public function findMeta(key:String):MetaValue {
-        for (i in 0...metaKeys.length) {
-            if (metaKeys[i] == key) return metaValues[i];
-        }
-        return null;
+        return meta.get(key);
     }
 
     private function parse():Void {
@@ -85,8 +78,7 @@ class GGUFReader {
             var key = readString();
             var typeTag = readU32();
             var value = readValue(typeTag);
-            metaKeys.push(key);
-            metaValues.push(value);
+            meta.set(key, value);
         }
 
         for (_ in 0...nTensors) {
