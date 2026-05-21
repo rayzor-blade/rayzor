@@ -1725,6 +1725,22 @@ impl CompilationUnit {
 
         // Simple class/enum name
         if let Some(symbol_id) = self.lookup_type_symbol(type_str) {
+            // If the resolved symbol is a TypeAlias, return its existing type_id
+            // (the TypeAlias type) instead of wrapping it in a Class type with the
+            // alias's symbol_id. Wrapping would synthesise a bogus Class { symbol_id:
+            // <typedef-symbol> } whose `symbol_id` doesn't point at a class — every
+            // downstream `resolve_type_to_class_symbol` then returns None and method
+            // dispatch silently falls through to the wrong class's same-named
+            // method (e.g., `bytes.set(...)` jumping into `VecI32.set`).
+            let alias_type = self
+                .symbol_table
+                .get_symbol(symbol_id)
+                .filter(|s| s.kind == crate::tast::symbols::SymbolKind::TypeAlias)
+                .map(|s| s.type_id)
+                .filter(|t| t.is_valid());
+            if let Some(t) = alias_type {
+                return t;
+            }
             return self
                 .type_table
                 .borrow_mut()
@@ -1776,10 +1792,33 @@ impl CompilationUnit {
 
     /// Look up a type symbol by name (checks short name in global scope)
     fn lookup_type_symbol(&self, name: &str) -> Option<SymbolId> {
-        // Try short name lookup in global scope
+        // Try short name lookup in global scope first.
         let interned = self.string_interner.intern(name);
         if let Some(symbol) = self.symbol_table.lookup_symbol(ScopeId::first(), interned) {
             return Some(symbol.id);
+        }
+
+        // Dotted names (e.g. "rayzor.Bytes"): split into bare short name and
+        // verify the resolved symbol's qualified_name matches. Without this,
+        // BLADE-preloaded typedefs like `haxe.io.Bytes = rayzor.Bytes` resolve
+        // their target to a Placeholder because the symbol is registered as
+        // bare name "Bytes".
+        if let Some(last_dot) = name.rfind('.') {
+            let short = &name[last_dot + 1..];
+            let short_interned = self.string_interner.intern(short);
+            if let Some(symbol) = self
+                .symbol_table
+                .lookup_symbol(ScopeId::first(), short_interned)
+            {
+                let qname_matches = symbol
+                    .qualified_name
+                    .and_then(|qn| self.string_interner.get(qn))
+                    .map(|qn| qn == name)
+                    .unwrap_or(false);
+                if qname_matches {
+                    return Some(symbol.id);
+                }
+            }
         }
 
         None
