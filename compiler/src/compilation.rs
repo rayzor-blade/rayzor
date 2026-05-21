@@ -580,21 +580,75 @@ impl CompilationUnit {
 
     // === BLADE Caching Methods ===
 
-    /// Get the BLADE cache path for a source file
+    /// Get the BLADE cache path for a source file.
+    ///
+    /// The cache filename is the module's fully-qualified name with `.blade`
+    /// appended (e.g. `nue.transformer.GQAttention.blade`). Two strategies
+    /// are tried in order:
+    ///
+    /// 1. **Known root strip** — `haxe-std/` or `/src/` in the path. Covers
+    ///    bundled stdlib and the common `src/`-rooted layout.
+    ///
+    /// 2. **Project class-path strip** — match the source against each
+    ///    configured source path (from rayzor.toml `class-paths`) and strip
+    ///    the longest matching prefix. Without this, projects whose Haxe
+    ///    sources don't live under `src/` (e.g. nue's `class-paths = ["."]`
+    ///    with files at `nue/nue/transformer/GQAttention.hx`) cache by
+    ///    bare filename only — `GQAttention.blade` — and short-name
+    ///    collisions between packages silently overwrite each other.
+    ///
+    /// Falls back to the filename only if nothing matches; that path is the
+    /// least desirable because it loses the package and risks collisions.
     fn blade_cache_path(&self, source_path: &str) -> Option<PathBuf> {
         let cache_dir = self.config.get_cache_dir();
-
-        // Extract module name from source path, stripping any prefix up to "haxe-std/"
-        // Works for both relative ("compiler/haxe-std/haxe/io/Bytes.hx")
-        // and absolute ("/Users/.../compiler/haxe-std/haxe/io/Bytes.hx")
         let normalized = source_path.replace('\\', "/");
-        let module_part = if let Some(pos) = normalized.rfind("haxe-std/") {
-            &normalized[pos + 9..] // after "haxe-std/"
+
+        let module_part: String = if let Some(pos) = normalized.rfind("haxe-std/") {
+            normalized[pos + 9..].to_string()
         } else if let Some(pos) = normalized.rfind("/src/") {
-            &normalized[pos + 5..] // after "/src/"
+            normalized[pos + 5..].to_string()
         } else {
-            // Use filename only
-            normalized.rsplit('/').next().unwrap_or(&normalized)
+            // Try stripping a project class-path (rayzor.toml `class-paths`).
+            // Pick the longest matching prefix so nested roots resolve in
+            // favour of the more-specific one.
+            let stripped = {
+                let abs = std::path::Path::new(&normalized)
+                    .canonicalize()
+                    .ok()
+                    .and_then(|p| p.to_str().map(|s| s.to_string()))
+                    .unwrap_or_else(|| normalized.clone());
+                let mut best: Option<String> = None;
+                for root in self.namespace_resolver.get_source_paths() {
+                    let root_str = root
+                        .canonicalize()
+                        .ok()
+                        .and_then(|p| p.to_str().map(|s| s.to_string()))
+                        .unwrap_or_else(|| root.to_string_lossy().to_string());
+                    let root_with_slash = if root_str.ends_with('/') {
+                        root_str.clone()
+                    } else {
+                        format!("{root_str}/")
+                    };
+                    if abs.starts_with(&root_with_slash) {
+                        let candidate = abs[root_with_slash.len()..].to_string();
+                        if best
+                            .as_ref()
+                            .map(|b| candidate.len() < b.len())
+                            .unwrap_or(true)
+                        {
+                            best = Some(candidate);
+                        }
+                    }
+                }
+                best
+            };
+            stripped.unwrap_or_else(|| {
+                normalized
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&normalized)
+                    .to_string()
+            })
         };
 
         let module_name = module_part.replace('/', ".").replace(".hx", "");
