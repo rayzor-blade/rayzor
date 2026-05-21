@@ -6553,27 +6553,10 @@ impl<'a> AstLowering<'a> {
                 // Try to resolve method from variable's type
                 if let Some(symbol) = self.context.symbol_table.get_symbol(*symbol_id) {
                     if let Some(class_symbol) = self.resolve_type_to_class_symbol(symbol.type_id) {
-                        // First check local class_methods (for classes lowered in this compilation unit)
-                        if let Some(methods) = self.class_methods.get(&class_symbol) {
-                            if let Some((_, method_symbol, _)) =
-                                methods.iter().find(|(name, _, _)| *name == method_name)
-                            {
-                                return *method_symbol;
-                            }
-                        }
-                        // Fallback: check the shared symbol table's class scope
-                        // (for extern classes compiled in a different compilation unit)
-                        if let Some(class_sym) = self.context.symbol_table.get_symbol(class_symbol)
+                        if let Some(found) =
+                            self.resolve_class_method_symbol(class_symbol, method_name)
                         {
-                            if let Some(method_sym) = self
-                                .context
-                                .symbol_table
-                                .lookup_symbol(class_sym.scope_id, method_name)
-                            {
-                                if method_sym.kind == crate::tast::symbols::SymbolKind::Function {
-                                    return method_sym.id;
-                                }
-                            }
+                            return found;
                         }
                     }
                 }
@@ -6791,10 +6774,42 @@ impl<'a> AstLowering<'a> {
         }
 
         // Strategy 3: class scope fallback
-        self.context
+        if let Some(sym) = self
+            .context
             .symbol_table
             .lookup_symbol(class_sym.scope_id, method_name)
-            .map(|sym| sym.id)
+        {
+            return Some(sym.id);
+        }
+
+        // Strategy 4: phantom-class fallback. BLADE can produce a Class symbol
+        // for a typedef target whose qualified name embeds the typedef's
+        // package (e.g., a `Bytes` Class with qname `haxe.io.Bytes` and an
+        // empty scope) while the real underlying class lives elsewhere as
+        // another `Bytes` Class with methods registered in its own scope.
+        // If the resolved class symbol has no methods of its own, walk the
+        // symbol table for ALL same-named classes and pick one whose scope
+        // does have this method.
+        let short_class_name = class_sym.name;
+        let mut candidates = self.context.symbol_table.find_symbols(|s| {
+            s.kind == crate::tast::symbols::SymbolKind::Class
+                && s.name == short_class_name
+                && s.id != class_symbol
+        });
+        candidates.sort_by_key(|s| s.id);
+        for cand in candidates {
+            if let Some(sym) = self
+                .context
+                .symbol_table
+                .lookup_symbol(cand.scope_id, method_name)
+            {
+                if sym.kind == crate::tast::symbols::SymbolKind::Function {
+                    return Some(sym.id);
+                }
+            }
+        }
+
+        None
     }
 
     /// Resolve a class-like symbol by simple name.
@@ -8813,6 +8828,16 @@ impl<'a> AstLowering<'a> {
                                         self.context.symbol_table.get_symbol(method_symbol)
                                     {
                                         let type_table = self.context.type_table.borrow();
+                                        let mt_kind = type_table.get(symbol.type_id).map(|t| {
+                                            format!("{:?}", &t.kind)
+                                                .chars()
+                                                .take(60)
+                                                .collect::<String>()
+                                        });
+                                        eprintln!("[STATIC] class_sym={:?} method_sym={:?} method_name={} method_type_id={:?} method_kind={:?}",
+                                            class_symbol, method_symbol,
+                                            self.context.string_interner.get(method_name).unwrap_or("?"),
+                                            symbol.type_id, mt_kind);
                                         if let Some(method_type) = type_table.get(symbol.type_id) {
                                             match &method_type.kind {
                                                 crate::tast::core::TypeKind::Function {
