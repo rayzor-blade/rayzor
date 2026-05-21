@@ -8,6 +8,7 @@ import nue.model.ModelMetadata;
 import nue.model.NamedTensorMap;
 import nue.loader.GGUFReader.MetaValue;
 import rayzor.ds.Tensor;
+import rayzor.ds.QTensor;
 import rayzor.ds.DType;
 
 /**
@@ -22,17 +23,20 @@ import rayzor.ds.DType;
  * builders don't need format awareness.
  *
  * **Status — supported tensor dtypes (v1):**
- *   - F32 (GGML type 0)  — decoded inline via `Tensor.fromArray`.
- *   - F16 (GGML type 1)  — TODO (need `Tensor.fromBytesF16` extern).
- *   - Q4_K_M (type 14)   — TODO (wire to `QTensor.wrapQ4KM`; the
- *                          runtime kernels are in place, the
- *                          loader-side wrapper isn't yet).
- *   - Q8_0 (type 8)      — TODO (similar to Q4_K_M).
+ *   - F32     (GGML 0)  — decoded inline via `Tensor.fromArray`.
+ *   - F16     (GGML 1)  — widened to F32 via `Tensor.fromBytesF16`.
+ *   - Q8_0    (GGML 8)  — dequantised to F32 via `Tensor.fromBytesQ8_0`.
+ *   - Q4_K_M  (GGML 14) — loaded as `QTensor.fromBytesQ4KM`, then
+ *                         dequantised to F32 via `qt.dequant()` so it
+ *                         drops into the existing `Tensor`-only
+ *                         `NamedTensorMap` / `Linear` plumbing. The
+ *                         compressed path (keeping weights as QTensor
+ *                         and routing through `QTensor.matmulF32`) is
+ *                         Phase 4b — requires `Linear` to accept a
+ *                         polymorphic weight.
  *
  * The metadata + tensor-info parsing is fully functional for every
- * dtype today — only the actual tensor-data materialisation paths
- * are dtype-gated. A model with mostly F32 weights will load cleanly;
- * the Llama 3.2 1B Q4_K_M demo is blocked on the QTensor wiring.
+ * dtype today.
  */
 class GGUFLoader implements ModelLoader {
     public function new() {}
@@ -118,10 +122,9 @@ class GGUFLoader implements ModelLoader {
     }
 
     /**
-     * Decode a single tensor's raw bytes into a `Tensor`. F32 is the
-     * only dtype materialised inline today. Other dtypes throw a
-     * descriptive error pointing at the missing extern — keeps the
-     * "unsupported" failure mode loud rather than silent.
+     * Decode a single tensor's raw bytes into a `Tensor`. Routes each
+     * GGML dtype to the right runtime materialiser; the F32 fast path
+     * stays inline because `Tensor.fromArray` is the most common shape.
      */
     private static function decodeTensor(raw:haxe.io.Bytes, info:GGUFReader.TensorInfo):Tensor {
         switch (info.dtype) {
@@ -136,15 +139,25 @@ class GGUFLoader implements ModelLoader {
                 }
                 var t = Tensor.fromArray(floats, F32);
                 return t.reshape(info.dims);
-            case 1:
-                throw "GGUFLoader: F16 tensors not yet supported — needs `Tensor.fromBytesF16` extern. Tensor '"
-                    + info.name + "' has dtype F16.";
-            case 8:
-                throw "GGUFLoader: Q8_0 tensors not yet supported — wire to `QTensor.wrapQ8` runtime entry. Tensor '"
-                    + info.name + "'.";
-            case 12, 14:
-                throw "GGUFLoader: Q4_K / Q4_K_M tensors not yet wired in the loader — wire to `QTensor.wrapQ4KM`. Tensor '"
-                    + info.name + "' has dtype Q4_K.";
+            case 1: // F16
+                return Tensor.fromBytesF16(raw, info.dims);
+            case 8: // Q8_0
+                return Tensor.fromBytesQ8_0(raw, info.dims);
+            case 12, 14: // Q4_K / Q4_K_M
+                // Q4_K_M tensors are always 2-D in Llama / Mistral / Qwen
+                // GGUFs (projection matrices and embeddings). Treat the
+                // last dim as cols, product-of-rest as rows.
+                var cols = info.dims[info.dims.length - 1];
+                var rows = 1;
+                for (i in 0...info.dims.length - 1) rows *= info.dims[i];
+                var qt = QTensor.fromBytesQ4KM(raw, rows, cols);
+                if (qt == null) {
+                    throw "GGUFLoader: QTensor.fromBytesQ4KM returned null for '"
+                        + info.name + "' (rows=" + rows + ", cols=" + cols + ").";
+                }
+                var dq = qt.dequant();
+                qt.free();
+                return (info.dims.length == 2) ? dq : dq.reshape(info.dims);
             case _:
                 throw "GGUFLoader: GGML dtype " + info.dtype + " not implemented (tensor '" + info.name + "').";
         }
