@@ -1406,7 +1406,10 @@ pub unsafe extern "C" fn rayzor_tensor_rope(
     }
     let half = head_dim / 2;
     let num_heads = if x.ndim >= 3 { x_shape[x.ndim - 2] } else { 1 };
-    let seq_len: usize = x_shape[..x.ndim.saturating_sub(2)].iter().product::<usize>().max(1)
+    let seq_len: usize = x_shape[..x.ndim.saturating_sub(2)]
+        .iter()
+        .product::<usize>()
+        .max(1)
         * (if x.ndim >= 3 { 1 } else { x_shape[0] });
     let cos_shape = std::slice::from_raw_parts(cos.shape, 2);
     let sin_shape = std::slice::from_raw_parts(sin.shape, 2);
@@ -1512,13 +1515,7 @@ pub unsafe extern "C" fn rayzor_tensor_rope_sin_table_f16(
     rope_table(head_dim, max_seq_len, base, DTYPE_F16, /* sin */ true)
 }
 
-unsafe fn rope_table(
-    head_dim: i64,
-    max_seq_len: i64,
-    base: f64,
-    dtype: u8,
-    want_sin: bool,
-) -> i64 {
+unsafe fn rope_table(head_dim: i64, max_seq_len: i64, base: f64, dtype: u8, want_sin: bool) -> i64 {
     if head_dim <= 0 || max_seq_len <= 0 || head_dim % 2 != 0 {
         return 0;
     }
@@ -1639,7 +1636,10 @@ pub unsafe extern "C" fn rayzor_tensor_causal_mask_(t_ptr: i64, position_offset:
     let shape = std::slice::from_raw_parts(t.shape, t.ndim);
     let cols = shape[t.ndim - 1];
     let rows = shape[t.ndim - 2];
-    let outer: usize = shape[..t.ndim.saturating_sub(2)].iter().product::<usize>().max(1);
+    let outer: usize = shape[..t.ndim.saturating_sub(2)]
+        .iter()
+        .product::<usize>()
+        .max(1);
     let pos = position_offset.max(0) as usize;
     let neg_inf = f32::NEG_INFINITY;
     for o in 0..outer {

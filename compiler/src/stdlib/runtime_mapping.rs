@@ -3417,7 +3417,6 @@ impl StdlibMapping {
                 types: &[I64, I64, F64] => PtrVoid),
             map_method!(static "rayzor_ds_Tensor", "ropeSinTableF16" => "Tensor_rope_sin_table_f16", params: 3, mir_wrapper,
                 types: &[I64, I64, F64] => PtrVoid),
-
             // Attention building blocks — composed by nue.transformer in Haxe
             // tensor.bmm(other: Tensor): Tensor   (batched 3-D matmul)
             map_method!(instance "rayzor_ds_Tensor", "bmm" => "Tensor_bmm", params: 1, mir_wrapper,

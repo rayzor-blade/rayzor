@@ -1183,8 +1183,8 @@ fn rope_dispatch(
 
             let result = MetalBuffer::allocate(metal_ctx, numel * elem_size)
                 .ok_or("failed to alloc rope result")?;
-            let params_buf = MetalBuffer::from_value(metal_ctx, &params)
-                .ok_or("failed to alloc rope params")?;
+            let params_buf =
+                MetalBuffer::from_value(metal_ctx, &params).ok_or("failed to alloc rope params")?;
 
             // Flat 1-D dispatch — `thread_position_in_grid` gives the
             // per-lane index inside the MSL shader.
