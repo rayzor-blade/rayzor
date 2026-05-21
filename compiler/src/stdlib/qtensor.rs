@@ -16,6 +16,7 @@ pub fn build_qtensor_types(builder: &mut MirBuilder) {
 
     build_qtensor_from_float32(builder);
     build_qtensor_wrap_q4_k_m(builder);
+    build_qtensor_from_bytes_q4_k_m(builder);
 
     build_qtensor_rows(builder);
     build_qtensor_cols(builder);
@@ -53,6 +54,17 @@ fn declare_qtensor_externs(builder: &mut MirBuilder) {
         .param("rows", i64_ty.clone())
         .param("cols", i64_ty.clone())
         .param("take_ownership", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // from_bytes_q4_k_m: (bytes_handle: i64, rows: i64, cols: i64) -> i64
+    let func_id = builder
+        .begin_function("rayzor_qtensor_from_bytes_q4_k_m")
+        .param("bytes_handle", i64_ty.clone())
+        .param("rows", i64_ty.clone())
+        .param("cols", i64_ty.clone())
         .returns(i64_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -159,6 +171,39 @@ fn build_qtensor_from_float32(builder: &mut MirBuilder) {
         .get_function_by_name("rayzor_qtensor_from_f32_int8")
         .expect("rayzor_qtensor_from_f32_int8 not found");
     let result = builder.call(extern_id, vec![data_ptr, rows, cols]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// QTensor_fromBytesQ4KM(bytes: Bytes, rows: Int, cols: Int) -> QTensor
+///
+/// Reads the underlying byte slice out of the Haxe `Bytes` handle, copies
+/// it into a freshly malloc'd buffer, and wraps it as a Q4_K_M QTensor with
+/// `owns_data=true`. The copy is intentional — see the runtime function's
+/// doc-comment for the lifetime reasoning.
+fn build_qtensor_from_bytes_q4_k_m(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+
+    let func_id = builder
+        .begin_function("QTensor_fromBytesQ4KM")
+        .param("bytes", i64_ty.clone())
+        .param("rows", i64_ty.clone())
+        .param("cols", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let bytes = builder.get_param(0);
+    let rows = builder.get_param(1);
+    let cols = builder.get_param(2);
+
+    let extern_id = builder
+        .get_function_by_name("rayzor_qtensor_from_bytes_q4_k_m")
+        .expect("rayzor_qtensor_from_bytes_q4_k_m not found");
+    let result = builder.call(extern_id, vec![bytes, rows, cols]).unwrap();
     builder.ret(Some(result));
 }
 

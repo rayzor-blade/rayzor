@@ -3300,6 +3300,12 @@ impl StdlibMapping {
             // Tensor.fromArray(data: Array<Float>, dtype: DType): Tensor
             map_method!(static "rayzor_ds_Tensor", "fromArray" => "Tensor_fromArray", params: 2, mir_wrapper,
                 types: &[PtrVoid, I64] => PtrVoid),
+            // Tensor.fromBytesF16(bytes: Bytes, shape: Array<Int>): Tensor
+            map_method!(static "rayzor_ds_Tensor", "fromBytesF16" => "Tensor_fromBytesF16", params: 2, mir_wrapper,
+                types: &[PtrVoid, PtrVoid] => PtrVoid),
+            // Tensor.fromBytesQ8_0(bytes: Bytes, shape: Array<Int>): Tensor
+            map_method!(static "rayzor_ds_Tensor", "fromBytesQ8_0" => "Tensor_fromBytesQ8_0", params: 2, mir_wrapper,
+                types: &[PtrVoid, PtrVoid] => PtrVoid),
             // Tensor.rand(shape: Array<Int>, dtype: DType): Tensor
             map_method!(static "rayzor_ds_Tensor", "rand" => "Tensor_rand", params: 2, mir_wrapper,
                 types: &[PtrVoid, I64] => PtrVoid),
@@ -3460,6 +3466,9 @@ impl StdlibMapping {
             // QTensor.wrapQ4KM(blockData: Ptr<Float>, rows: Int, cols: Int, takeOwnership: Bool): QTensor
             map_method!(static "rayzor_ds_QTensor", "wrapQ4KM" => "QTensor_wrapQ4KM",
                 params: 4, mir_wrapper, types: &[I64, I64, I64, I64] => PtrVoid),
+            // QTensor.fromBytesQ4KM(bytes: Bytes, rows: Int, cols: Int): QTensor
+            map_method!(static "rayzor_ds_QTensor", "fromBytesQ4KM" => "QTensor_fromBytesQ4KM",
+                params: 3, mir_wrapper, types: &[PtrVoid, I64, I64] => PtrVoid),
             // --- Properties (instance) ---
             map_method!(instance "rayzor_ds_QTensor", "rows" => "QTensor_rows",
                 params: 0, mir_wrapper, types: &[PtrVoid] => I64),

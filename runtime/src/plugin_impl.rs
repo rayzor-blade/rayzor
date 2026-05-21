@@ -1712,6 +1712,14 @@ register_symbol!(
     "rayzor_tensor_from_array",
     crate::tensor::rayzor_tensor_from_array
 );
+register_symbol!(
+    "rayzor_tensor_from_bytes_f16",
+    crate::tensor::rayzor_tensor_from_bytes_f16
+);
+register_symbol!(
+    "rayzor_tensor_from_bytes_q8_0",
+    crate::tensor::rayzor_tensor_from_bytes_q8_0
+);
 register_symbol!("rayzor_tensor_rand", crate::tensor::rayzor_tensor_rand);
 
 // Properties
@@ -1841,6 +1849,10 @@ register_symbol!(
 register_symbol!(
     "rayzor_qtensor_wrap_q4_k_m",
     crate::quant::rayzor_qtensor_wrap_q4_k_m
+);
+register_symbol!(
+    "rayzor_qtensor_from_bytes_q4_k_m",
+    crate::quant::rayzor_qtensor_from_bytes_q4_k_m
 );
 register_symbol!("rayzor_qtensor_rows", crate::quant::rayzor_qtensor_rows);
 register_symbol!("rayzor_qtensor_cols", crate::quant::rayzor_qtensor_cols);

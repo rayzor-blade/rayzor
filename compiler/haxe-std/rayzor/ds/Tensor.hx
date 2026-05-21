@@ -38,6 +38,25 @@ extern class Tensor {
     @:native("tensor_fromArray")
     public static function fromArray(data:Array<Float>, dtype:DType):Tensor;
 
+    /**
+     * Build an F32 Tensor of shape `shape` by widening a contiguous
+     * little-endian IEEE 754 half-precision (F16) byte buffer to f32.
+     * Output is always F32 (Phase-3 compute kernels for F16 aren't
+     * shipped yet; widening at load keeps the rest of the stack
+     * dtype-uniform).
+     */
+    @:native("tensor_fromBytesF16")
+    public static function fromBytesF16(bytes:haxe.io.Bytes, shape:Array<Int>):Tensor;
+
+    /**
+     * Build an F32 Tensor of shape `shape` by dequantising a GGML Q8_0
+     * byte buffer (32-element blocks of `[f16 scale][32 × i8]`, 34 bytes
+     * each). Output is F32 — Q8_0 is rare in Q4_K_M-quantised models so
+     * load-time expansion is the simplest path.
+     */
+    @:native("tensor_fromBytesQ8_0")
+    public static function fromBytesQ8_0(bytes:haxe.io.Bytes, shape:Array<Int>):Tensor;
+
     /** Create a tensor with random values in [0, 1) */
     @:native("tensor_rand")
     public static function rand(shape:Array<Int>, dtype:DType):Tensor;
