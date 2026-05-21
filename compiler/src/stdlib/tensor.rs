@@ -1058,12 +1058,20 @@ fn build_tensor_rope(builder: &mut MirBuilder) {
 
 /// Tensor_rope_cos_table(headDim: i64, maxSeqLen: i64, base: f64) -> i64
 fn build_tensor_rope_cos_table(builder: &mut MirBuilder) {
-    build_rope_table(builder, "Tensor_rope_cos_table", "rayzor_tensor_rope_cos_table");
+    build_rope_table(
+        builder,
+        "Tensor_rope_cos_table",
+        "rayzor_tensor_rope_cos_table",
+    );
 }
 
 /// Tensor_rope_sin_table(headDim: i64, maxSeqLen: i64, base: f64) -> i64
 fn build_tensor_rope_sin_table(builder: &mut MirBuilder) {
-    build_rope_table(builder, "Tensor_rope_sin_table", "rayzor_tensor_rope_sin_table");
+    build_rope_table(
+        builder,
+        "Tensor_rope_sin_table",
+        "rayzor_tensor_rope_sin_table",
+    );
 }
 
 fn build_tensor_rope_cos_table_f16(builder: &mut MirBuilder) {

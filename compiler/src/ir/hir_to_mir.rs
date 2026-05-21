@@ -4856,6 +4856,20 @@ impl<'a> HirToMirContext<'a> {
                         if let Some(boxed) = self.maybe_box_for_optional(val, e.ty, fn_ret_ty) {
                             return Some(boxed);
                         }
+                        // Inverse: function returns primitive `T` but expression
+                        // produces `Null<T>` (boxed `DynamicValue*`). Unbox via
+                        // the runtime helper. Without this the boxed pointer
+                        // gets returned as if it were the primitive — the
+                        // caller reads the pointer's address as the value and
+                        // sees garbage. Common case: returning a value pulled
+                        // from `StringMap<Int>.get(k)` (typed `Null<Int>`)
+                        // from a function declared `:Int` after a manual
+                        // null-coalesce ternary.
+                        if let Some(unboxed) =
+                            self.maybe_unbox_optional_for_target(val, e.ty, fn_ret_ty)
+                        {
+                            return Some(unboxed);
+                        }
                     }
                     result
                 });
@@ -12103,20 +12117,25 @@ impl<'a> HirToMirContext<'a> {
                                     // unboxing.
                                     let resolved_value_ty: Option<IrType> = {
                                         let type_table = self.type_table;
-                                        type_table.get(receiver_type).and_then(|ti| match &ti.kind {
-                                            crate::tast::TypeKind::Class { type_args, .. }
-                                            | crate::tast::TypeKind::GenericInstance {
-                                                type_args, ..
-                                            } => {
-                                                // Value T is the LAST type arg: StringMap<T> /
-                                                // IntMap<T> have type_args=[T]; ObjectMap<K, V>
-                                                // has type_args=[K, V] — the value lives at the
-                                                // tail in both cases.
-                                                type_args
-                                                    .last()
-                                                    .map(|ta| self.convert_type(*ta))
+                                        type_table.get(receiver_type).and_then(|ti| {
+                                            match &ti.kind {
+                                                crate::tast::TypeKind::Class {
+                                                    type_args, ..
+                                                }
+                                                | crate::tast::TypeKind::GenericInstance {
+                                                    type_args,
+                                                    ..
+                                                } => {
+                                                    // Value T is the LAST type arg: StringMap<T> /
+                                                    // IntMap<T> have type_args=[T]; ObjectMap<K, V>
+                                                    // has type_args=[K, V] — the value lives at the
+                                                    // tail in both cases.
+                                                    type_args
+                                                        .last()
+                                                        .map(|ta| self.convert_type(*ta))
+                                                }
+                                                _ => None,
                                             }
-                                            _ => None,
                                         })
                                     };
                                     let final_result = match &result_type {
@@ -12161,8 +12180,13 @@ impl<'a> HirToMirContext<'a> {
                                                 result_type.clone(),
                                             )
                                         }
-                                        IrType::Ptr(_) if resolved_value_ty.is_some() => {
-                                            // Receiver was parameterised with a concrete
+                                        IrType::Ptr(_)
+                                            if matches!(
+                                                resolved_value_ty.as_ref(),
+                                                Some(IrType::Ptr(_))
+                                            ) =>
+                                        {
+                                            // Receiver parameterised with a concrete
                                             // pointer-typed T (extern class, user class,
                                             // array). Bit-reinterpret the runtime u64 as
                                             // the resolved pointer type.
@@ -12172,8 +12196,14 @@ impl<'a> HirToMirContext<'a> {
                                             )
                                         }
                                         _ => {
-                                            // Unresolved T or Dynamic: keep as I64 so
-                                            // the value isn't misinterpreted as a pointer.
+                                            // Unresolved T or Dynamic, or T resolved to a
+                                            // primitive that arrived here boxed (result_type
+                                            // = Ptr<U8> from `Null<Int>`): keep as I64 so
+                                            // the downstream unbox path can extract the
+                                            // primitive value. Bitcasting U64 → I32 here
+                                            // would skip that boxing and produce values
+                                            // that don't match the consumer's expected
+                                            // register type.
                                             self.builder.build_cast(
                                                 call_result,
                                                 IrType::U64,
@@ -14115,14 +14145,18 @@ impl<'a> HirToMirContext<'a> {
                                     // bitcasting a Ptr-typed result is safe — bitcasting a Ptr
                                     // when the source u64 actually holds an Int (because T was
                                     // unresolved) would silently produce a garbage address.
-                                    let (resolved_return_type, resolved_from_type_args) = if returns_raw_value {
-                                        // Resolve value T from receiver's type args. The
-                                        // LAST type arg is V — covers both single-param
-                                        // (StringMap<T>, IntMap<T>) and two-param
-                                        // (ObjectMap<K, V>) container shapes.
-                                        let type_table = self.type_table;
-                                        let resolved = if let Some(receiver_info) = type_table.get(receiver_type) {
-                                            match &receiver_info.kind {
+                                    let (resolved_return_type, resolved_from_type_args) =
+                                        if returns_raw_value {
+                                            // Resolve value T from receiver's type args. The
+                                            // LAST type arg is V — covers both single-param
+                                            // (StringMap<T>, IntMap<T>) and two-param
+                                            // (ObjectMap<K, V>) container shapes.
+                                            let type_table = self.type_table;
+                                            let resolved =
+                                                if let Some(receiver_info) =
+                                                    type_table.get(receiver_type)
+                                                {
+                                                    match &receiver_info.kind {
                                                 crate::tast::TypeKind::Class { type_args, .. }
                                                 | crate::tast::TypeKind::GenericInstance {
                                                     type_args, ..
@@ -14131,27 +14165,28 @@ impl<'a> HirToMirContext<'a> {
                                                     .map(|ta| self.convert_type(*ta)),
                                                 _ => None,
                                             }
-                                        } else {
-                                            None
-                                        };
-                                        match resolved {
-                                            Some(t) => (t, true),
-                                            None => (result_type.clone(), false),
-                                        }
-                                    } else {
-                                        // IMPORTANT: For MIR wrappers, use their actual return type instead of HIR type
-                                        // HIR type may be Dynamic/Ptr(Void) but the wrapper returns a concrete type (e.g., Bool)
-                                        let ret = self.get_stdlib_mir_wrapper_signature(&runtime_func)
-                                            .map(|(_, ret_ty)| ret_ty)
-                                            .unwrap_or_else(|| {
-                                                if has_return {
-                                                    result_type.clone()
                                                 } else {
-                                                    IrType::Void
-                                                }
-                                            });
-                                        (ret, false)
-                                    };
+                                                    None
+                                                };
+                                            match resolved {
+                                                Some(t) => (t, true),
+                                                None => (result_type.clone(), false),
+                                            }
+                                        } else {
+                                            // IMPORTANT: For MIR wrappers, use their actual return type instead of HIR type
+                                            // HIR type may be Dynamic/Ptr(Void) but the wrapper returns a concrete type (e.g., Bool)
+                                            let ret = self
+                                                .get_stdlib_mir_wrapper_signature(&runtime_func)
+                                                .map(|(_, ret_ty)| ret_ty)
+                                                .unwrap_or_else(|| {
+                                                    if has_return {
+                                                        result_type.clone()
+                                                    } else {
+                                                        IrType::Void
+                                                    }
+                                                });
+                                            (ret, false)
+                                        };
                                     debug!(
                                     "[RESOLVED RETURN TYPE] runtime_func={}, result_type={:?}, resolved={:?}",
                                     runtime_func, result_type, resolved_return_type
@@ -21760,6 +21795,106 @@ impl<'a> HirToMirContext<'a> {
 
     /// Auto-box a primitive value when assigning to a Null<T> (Optional{primitive}) variable.
     /// Returns Some(boxed_ptr) if boxing was performed, None if not needed.
+    /// Inverse of `maybe_box_for_optional`: unbox a `Null<T>` value to its
+    /// primitive `T` when the target type is the bare primitive. Returns
+    /// the unboxed register, or `None` when the conversion doesn't apply.
+    /// Used at function-return / variable-assignment sites where the
+    /// declared target is a primitive but the expression produces a boxed
+    /// `Null<T>` (typically a `StringMap<T>.get(k)` result that's gone
+    /// through `(v == null) ? -1 : v` and the typechecker unified the
+    /// branches to `Null<T>`).
+    fn maybe_unbox_optional_for_target(
+        &mut self,
+        value: IrId,
+        _value_ty: TypeId,
+        target_ty: TypeId,
+    ) -> Option<IrId> {
+        // Driven by the MIR register type, not the HIR type. Common case
+        // that motivated this helper: a ternary `(v == null) ? -1 : v`
+        // unifies its branches to bare `Int` in TAST, so the HIR `value_ty`
+        // arrives here as `Int` even though the register actually holds a
+        // boxed `DynamicValue*` (because the non-null branch came from
+        // `StringMap<Int>.get(k)` returning `Null<Int>`). Comparing the
+        // register's runtime type against the target catches this mismatch
+        // regardless of what the HIR types claim.
+        let target_ir = self.convert_type(target_ty);
+
+        // Only apply to primitive targets — pointer/object targets are
+        // already in the right shape and any required null-handling
+        // belongs elsewhere.
+        if !matches!(
+            target_ir,
+            IrType::I32 | IrType::I64 | IrType::F64 | IrType::F32 | IrType::Bool
+        ) {
+            return None;
+        }
+
+        let val_ir = self.builder.get_register_type(value);
+        // Same shape already — no-op.
+        if matches!(&val_ir, Some(t) if *t == target_ir) {
+            return None;
+        }
+
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let is_ptr = matches!(val_ir, Some(IrType::Ptr(_)));
+        if is_ptr {
+            return match target_ir {
+                IrType::I32 => {
+                    let unbox_fn = self.get_or_register_extern_function(
+                        "haxe_unbox_int_ptr",
+                        vec![ptr_u8.clone()],
+                        IrType::I32,
+                    );
+                    self.builder
+                        .build_call_direct(unbox_fn, vec![value], IrType::I32)
+                }
+                IrType::I64 => {
+                    let unbox_fn = self.get_or_register_extern_function(
+                        "haxe_unbox_int_ptr",
+                        vec![ptr_u8.clone()],
+                        IrType::I32,
+                    );
+                    let i32_reg =
+                        self.builder
+                            .build_call_direct(unbox_fn, vec![value], IrType::I32)?;
+                    self.builder.build_cast(i32_reg, IrType::I32, IrType::I64)
+                }
+                IrType::F64 => {
+                    let unbox_fn = self.get_or_register_extern_function(
+                        "haxe_unbox_float_ptr",
+                        vec![ptr_u8.clone()],
+                        IrType::F64,
+                    );
+                    self.builder
+                        .build_call_direct(unbox_fn, vec![value], IrType::F64)
+                }
+                IrType::F32 => {
+                    let unbox_fn = self.get_or_register_extern_function(
+                        "haxe_unbox_float_ptr",
+                        vec![ptr_u8.clone()],
+                        IrType::F64,
+                    );
+                    let f64_reg =
+                        self.builder
+                            .build_call_direct(unbox_fn, vec![value], IrType::F64)?;
+                    self.builder.build_cast(f64_reg, IrType::F64, IrType::F32)
+                }
+                IrType::Bool => {
+                    let unbox_fn = self.get_or_register_extern_function(
+                        "haxe_unbox_bool_ptr",
+                        vec![ptr_u8.clone()],
+                        IrType::Bool,
+                    );
+                    self.builder
+                        .build_call_direct(unbox_fn, vec![value], IrType::Bool)
+                }
+                _ => None,
+            };
+        }
+
+        None
+    }
+
     fn maybe_box_for_optional(
         &mut self,
         value: IrId,

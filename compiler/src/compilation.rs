@@ -5757,7 +5757,7 @@ impl CompilationUnit {
                 // upstream source — and the simple bare name (`StringMap`) is
                 // what the macro-registered map_method! entries use.
                 let bare_name = underscore_class_name
-                    .rsplit(|c| c == '_' || c == '.')
+                    .rsplit(['_', '.'])
                     .next()
                     .unwrap_or(&underscore_class_name);
                 let builtin_match = builtin_mapping

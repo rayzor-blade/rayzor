@@ -4674,7 +4674,11 @@ impl<'a> AstLowering<'a> {
             .create_class_type(symbol.id, concrete_type_args.clone());
 
         let qualified_name = format!("haxe.ds.{}", concrete_name);
-        (concrete_class_type, concrete_type_args, Some(qualified_name))
+        (
+            concrete_class_type,
+            concrete_type_args,
+            Some(qualified_name),
+        )
     }
 
     fn infer_type_args_from_constructor(
@@ -7228,11 +7232,7 @@ impl<'a> AstLowering<'a> {
                 // first `IMap` implementer when no rule is honored). See
                 // memory/feedback_no_silent_dispatch_fallthrough.md.
                 let (final_class_type, final_type_args, final_class_name) =
-                    self.maybe_resolve_multitype_map(
-                        actual_class_type,
-                        type_args,
-                        type_path,
-                    );
+                    self.maybe_resolve_multitype_map(actual_class_type, type_args, type_path);
 
                 let class_name_str = match final_class_name {
                     Some(name) => name,
