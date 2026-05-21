@@ -47,6 +47,18 @@ extern class QTensor {
     @:native("qtensor_wrap_q4_k_m")
     public static function wrapQ4KM(blockData:Ptr<Float>, rows:Int, cols:Int, takeOwnership:Int):QTensor;
 
+    /**
+     * Build a Q4_K_M QTensor from a `haxe.io.Bytes` whose underlying buffer
+     * contains a contiguous sequence of `(rows * cols / 256)` Q4_K_M
+     * super-blocks (144 bytes each). The runtime copies the bytes into an
+     * owning buffer, so the source `Bytes` can be freed after this returns.
+     *
+     * Intended caller: the GGUF loader handing the runtime a tensor slice
+     * cut out of the on-disk weights file.
+     */
+    @:native("qtensor_from_bytes_q4_k_m")
+    public static function fromBytesQ4KM(bytes:haxe.io.Bytes, rows:Int, cols:Int):QTensor;
+
     /** Number of rows in this 2-D matrix. */
     @:native("qtensor_rows")
     public function rows():Int;

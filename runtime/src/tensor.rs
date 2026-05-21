@@ -558,6 +558,101 @@ pub unsafe extern "C" fn rayzor_tensor_from_array(data_ptr: i64, data_len: i64, 
     tensor_ptr
 }
 
+/// Materialise a fresh f32 Tensor from raw F16 bytes laid out in row-major
+/// order with the given shape. Used by the GGUF loader for GGML dtype=1
+/// (F16) tensors. The input is a `haxe.io.Bytes` whose underlying buffer
+/// holds `numel * 2` bytes of little-endian IEEE 754 half-precision.
+///
+/// Bytes are interpreted as f16, widened to f32, and stored — i.e. the
+/// output tensor is plain F32. Keeping it F32 sidesteps the half-kernel
+/// gap (Phase 3 is partial: storage works, compute kernels don't).
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_from_bytes_f16(
+    bytes_handle: i64,
+    shape_ptr: i64,
+    ndim: i64,
+) -> i64 {
+    if bytes_handle == 0 {
+        return 0;
+    }
+    let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
+    if bytes.ptr.is_null() {
+        return 0;
+    }
+    let shape = read_shape(shape_ptr, ndim as usize);
+    let numel: usize = shape.iter().product();
+    if bytes.len < numel * 2 {
+        return 0;
+    }
+
+    let tensor_ptr = alloc_tensor(&shape, DTYPE_F32, None);
+    if tensor_ptr == 0 {
+        return 0;
+    }
+    let tensor = &*(tensor_ptr as *const RayzorTensor);
+    let dst = tensor.data as *mut f32;
+    let src = bytes.ptr;
+    for i in 0..numel {
+        let lo = *src.add(i * 2) as u16;
+        let hi = *src.add(i * 2 + 1) as u16;
+        let bits = lo | (hi << 8);
+        *dst.add(i) = half::f16::from_bits(bits).to_f32();
+    }
+    tensor_ptr
+}
+
+/// Materialise a fresh f32 Tensor from raw GGML Q8_0 bytes laid out in
+/// 34-byte blocks (one f16 scale + 32 i8 weights). Used by the GGUF
+/// loader for GGML dtype=8 (Q8_0) tensors.
+///
+/// As with F16: output is F32 to avoid needing a Q8_0-aware compute
+/// kernel. Block-Q8_0 is uncommon in Q4_K_M models so the load-time
+/// expansion cost is modest.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_from_bytes_q8_0(
+    bytes_handle: i64,
+    shape_ptr: i64,
+    ndim: i64,
+) -> i64 {
+    if bytes_handle == 0 {
+        return 0;
+    }
+    let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
+    if bytes.ptr.is_null() {
+        return 0;
+    }
+    let shape = read_shape(shape_ptr, ndim as usize);
+    let numel: usize = shape.iter().product();
+    if !numel.is_multiple_of(32) {
+        return 0;
+    }
+    let n_blocks = numel / 32;
+    let expected = n_blocks * 34;
+    if bytes.len < expected {
+        return 0;
+    }
+
+    let tensor_ptr = alloc_tensor(&shape, DTYPE_F32, None);
+    if tensor_ptr == 0 {
+        return 0;
+    }
+    let tensor = &*(tensor_ptr as *const RayzorTensor);
+    let dst = tensor.data as *mut f32;
+    let src = bytes.ptr;
+    for b in 0..n_blocks {
+        let base = src.add(b * 34);
+        let lo = *base as u16;
+        let hi = *base.add(1) as u16;
+        let scale = half::f16::from_bits(lo | (hi << 8)).to_f32();
+        let q_base = base.add(2) as *const i8;
+        let out_base = dst.add(b * 32);
+        for j in 0..32 {
+            *out_base.add(j) = (*q_base.add(j)) as f32 * scale;
+        }
+    }
+    tensor_ptr
+}
+
 /// Tensor.rand(shape_ptr, ndim, dtype) -> i64
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_rand(shape_ptr: i64, ndim: i64, dtype: i64) -> i64 {
@@ -2170,6 +2265,90 @@ mod tests {
             rayzor_tensor_free(ident);
             rayzor_tensor_free(ones);
             rayzor_tensor_free(result);
+        }
+    }
+
+    #[test]
+    fn from_bytes_f16_widens_to_f32() {
+        // f16 0x3C00=1.0, 0x4000=2.0, 0xBC00=-1.0, 0x3800=0.5
+        let mut buf: Vec<u8> = vec![0x00, 0x3C, 0x00, 0x40, 0x00, 0xBC, 0x00, 0x38];
+        let bytes = crate::haxe_sys::HaxeBytes {
+            ptr: buf.as_mut_ptr(),
+            len: buf.len(),
+            cap: buf.capacity(),
+        };
+        let mut shape: Vec<i64> = vec![4];
+        unsafe {
+            let t = rayzor_tensor_from_bytes_f16(
+                &bytes as *const _ as i64,
+                shape.as_mut_ptr() as i64,
+                1,
+            );
+            assert!(t != 0);
+            let tensor = &*(t as *const RayzorTensor);
+            assert_eq!(tensor.dtype, DTYPE_F32);
+            let d = tensor.data as *const f32;
+            assert!((*d.add(0) - 1.0).abs() < 1e-3);
+            assert!((*d.add(1) - 2.0).abs() < 1e-3);
+            assert!((*d.add(2) - -1.0).abs() < 1e-3);
+            assert!((*d.add(3) - 0.5).abs() < 1e-3);
+            rayzor_tensor_free(t);
+        }
+    }
+
+    #[test]
+    fn from_bytes_q8_0_dequant() {
+        // One 34-byte Q8_0 block: f16(0.5) scale + 32 i8 weights.
+        // Expected outputs: weights * 0.5.
+        let mut buf = vec![0u8; 34];
+        buf[0] = 0x00;
+        buf[1] = 0x38; // f16 0.5
+        buf[2] = 2; // → 1.0
+        buf[3] = 0xFE; // -2 → -1.0
+        buf[4] = 0; // 0.0
+        buf[5] = 4; // 2.0
+        let bytes = crate::haxe_sys::HaxeBytes {
+            ptr: buf.as_mut_ptr(),
+            len: buf.len(),
+            cap: buf.capacity(),
+        };
+        let mut shape: Vec<i64> = vec![32];
+        unsafe {
+            let t = rayzor_tensor_from_bytes_q8_0(
+                &bytes as *const _ as i64,
+                shape.as_mut_ptr() as i64,
+                1,
+            );
+            assert!(t != 0);
+            let tensor = &*(t as *const RayzorTensor);
+            assert_eq!(tensor.dtype, DTYPE_F32);
+            let d = tensor.data as *const f32;
+            assert!((*d.add(0) - 1.0).abs() < 1e-3);
+            assert!((*d.add(1) - -1.0).abs() < 1e-3);
+            assert!((*d.add(2) - 0.0).abs() < 1e-3);
+            assert!((*d.add(3) - 2.0).abs() < 1e-3);
+            rayzor_tensor_free(t);
+        }
+    }
+
+    #[test]
+    fn from_bytes_f16_rejects_short_buffer() {
+        let mut buf = vec![0u8; 2]; // only 1 element worth
+        let bytes = crate::haxe_sys::HaxeBytes {
+            ptr: buf.as_mut_ptr(),
+            len: buf.len(),
+            cap: buf.capacity(),
+        };
+        let mut shape: Vec<i64> = vec![4]; // asks for 4 elements (8 bytes)
+        unsafe {
+            assert_eq!(
+                rayzor_tensor_from_bytes_f16(
+                    &bytes as *const _ as i64,
+                    shape.as_mut_ptr() as i64,
+                    1,
+                ),
+                0
+            );
         }
     }
 }

@@ -421,6 +421,61 @@ pub unsafe extern "C" fn rayzor_qtensor_wrap_q4_k_m(
     qt as i64
 }
 
+/// Copy a `haxe.io.Bytes` worth of pre-quantised Q4_K_M data into a fresh
+/// owning `QTensor`. The intended caller is the GGUF loader handing the
+/// runtime the raw byte slice returned by `GGUFReader.tensorBytes`.
+///
+/// The copy is intentional — the source Bytes' lifetime is tied to the
+/// GGUFReader, which goes out of scope after `load()` returns. Wrapping
+/// in-place with `owns_data=false` would leave the QTensor dangling.
+///
+/// `bytes_handle` is a `*const HaxeBytes` interpreted as i64.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q4_k_m(
+    bytes_handle: i64,
+    rows: i64,
+    cols: i64,
+) -> i64 {
+    if bytes_handle == 0 || rows <= 0 || cols <= 0 {
+        return 0;
+    }
+    let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
+    if bytes.ptr.is_null() {
+        return 0;
+    }
+    let rows = rows as usize;
+    let cols = cols as usize;
+    if !(rows * cols).is_multiple_of(Q4_K_M_BLOCK_SIZE) {
+        return 0;
+    }
+    let expected = (rows * cols / Q4_K_M_BLOCK_SIZE) * Q4_K_M_BLOCK_BYTES;
+    if bytes.len < expected {
+        return 0;
+    }
+    let buf = malloc(expected);
+    if buf.is_null() {
+        return 0;
+    }
+    std::ptr::copy_nonoverlapping(bytes.ptr, buf, expected);
+
+    let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
+    if qt.is_null() {
+        free(buf);
+        return 0;
+    }
+    *qt = RayzorQTensor {
+        data: buf,
+        meta: std::ptr::null_mut(),
+        numel: rows * cols,
+        group_size: Q4_K_M_BLOCK_SIZE,
+        scheme: QSCHEME_Q4_K_M,
+        owns_data: true,
+        rows,
+        cols,
+    };
+    qt as i64
+}
+
 /// `qt.rows() -> i64`
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_qtensor_rows(qt_ptr: i64) -> i64 {
@@ -739,5 +794,54 @@ mod tests {
                 assert!((out[i] - (-1.0)).abs() < 1e-3, "out[{i}] = {}", out[i]);
             }
         }
+    }
+
+    #[test]
+    fn from_bytes_q4_k_m_copies_and_wraps() {
+        // Build a single-block Q4_K_M buffer in a HaxeBytes-shaped struct,
+        // pass through the FFI, verify the resulting QTensor wraps an
+        // owning copy with the correct shape.
+        let mut block = vec![0u8; Q4_K_M_BLOCK_BYTES];
+        let d = f16::from_f32(1.0).to_bits();
+        let dmin = f16::from_f32(0.0).to_bits();
+        block[0..2].copy_from_slice(&d.to_le_bytes());
+        block[2..4].copy_from_slice(&dmin.to_le_bytes());
+
+        let bytes = crate::haxe_sys::HaxeBytes {
+            ptr: block.as_mut_ptr(),
+            len: block.len(),
+            cap: block.capacity(),
+        };
+        let bytes_handle = &bytes as *const _ as i64;
+        let qt = unsafe { rayzor_qtensor_from_bytes_q4_k_m(bytes_handle, 1, 256) };
+        assert!(qt != 0);
+        unsafe {
+            let qt_ref = &*(qt as *const RayzorQTensor);
+            assert_eq!(qt_ref.rows, 1);
+            assert_eq!(qt_ref.cols, 256);
+            assert_eq!(qt_ref.scheme, QSCHEME_Q4_K_M);
+            assert!(qt_ref.owns_data);
+            // The copied buffer should not alias the source — mutating
+            // `block` should leave the QTensor's data untouched.
+            assert_ne!(qt_ref.data, block.as_mut_ptr());
+            assert_eq!(*qt_ref.data, d.to_le_bytes()[0]);
+        }
+        unsafe { rayzor_qtensor_free(qt) };
+    }
+
+    #[test]
+    fn from_bytes_q4_k_m_rejects_bad_input() {
+        // Misaligned (rows * cols not multiple of 256) → returns 0.
+        let bytes = crate::haxe_sys::HaxeBytes {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        };
+        let handle = &bytes as *const _ as i64;
+        assert_eq!(
+            unsafe { rayzor_qtensor_from_bytes_q4_k_m(handle, 1, 100) },
+            0
+        );
+        assert_eq!(unsafe { rayzor_qtensor_from_bytes_q4_k_m(0, 1, 256) }, 0);
     }
 }
