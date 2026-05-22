@@ -2272,11 +2272,8 @@ mod tests {
     fn from_bytes_f16_widens_to_f32() {
         // f16 0x3C00=1.0, 0x4000=2.0, 0xBC00=-1.0, 0x3800=0.5
         let mut buf: Vec<u8> = vec![0x00, 0x3C, 0x00, 0x40, 0x00, 0xBC, 0x00, 0x38];
-        let bytes = crate::haxe_sys::HaxeBytes {
-            ptr: buf.as_mut_ptr(),
-            len: buf.len(),
-            cap: buf.capacity(),
-        };
+        let bytes =
+            crate::haxe_sys::HaxeBytes::new_malloc(buf.as_mut_ptr(), buf.len(), buf.capacity());
         let mut shape: Vec<i64> = vec![4];
         unsafe {
             let t = rayzor_tensor_from_bytes_f16(
@@ -2307,11 +2304,8 @@ mod tests {
         buf[3] = 0xFE; // -2 → -1.0
         buf[4] = 0; // 0.0
         buf[5] = 4; // 2.0
-        let bytes = crate::haxe_sys::HaxeBytes {
-            ptr: buf.as_mut_ptr(),
-            len: buf.len(),
-            cap: buf.capacity(),
-        };
+        let bytes =
+            crate::haxe_sys::HaxeBytes::new_malloc(buf.as_mut_ptr(), buf.len(), buf.capacity());
         let mut shape: Vec<i64> = vec![32];
         unsafe {
             let t = rayzor_tensor_from_bytes_q8_0(
@@ -2334,11 +2328,8 @@ mod tests {
     #[test]
     fn from_bytes_f16_rejects_short_buffer() {
         let mut buf = vec![0u8; 2]; // only 1 element worth
-        let bytes = crate::haxe_sys::HaxeBytes {
-            ptr: buf.as_mut_ptr(),
-            len: buf.len(),
-            cap: buf.capacity(),
-        };
+        let bytes =
+            crate::haxe_sys::HaxeBytes::new_malloc(buf.as_mut_ptr(), buf.len(), buf.capacity());
         let mut shape: Vec<i64> = vec![4]; // asks for 4 elements (8 bytes)
         unsafe {
             assert_eq!(

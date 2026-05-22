@@ -425,9 +425,13 @@ pub unsafe extern "C" fn rayzor_qtensor_wrap_q4_k_m(
 /// owning `QTensor`. The intended caller is the GGUF loader handing the
 /// runtime the raw byte slice returned by `GGUFReader.tensorBytes`.
 ///
-/// The copy is intentional — the source Bytes' lifetime is tied to the
-/// GGUFReader, which goes out of scope after `load()` returns. Wrapping
-/// in-place with `owns_data=false` would leave the QTensor dangling.
+/// **Zero-copy by default.** The QTensor points straight into the source
+/// `HaxeBytes` buffer with `owns_data=false`. For the dominant use case
+/// — mmap-backed GGUF files — the source Bytes lives for the program
+/// lifetime so the alias is safe. For non-mmap sources (e.g. a temporary
+/// `Bytes.alloc` buffer), callers must keep the source alive at least as
+/// long as the QTensor or use `wrap_q4_k_m` with `take_ownership=1` to
+/// transfer a malloc'd buffer's ownership in.
 ///
 /// `bytes_handle` is a `*const HaxeBytes` interpreted as i64.
 #[no_mangle]
@@ -452,24 +456,18 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q4_k_m(
     if bytes.len < expected {
         return 0;
     }
-    let buf = malloc(expected);
-    if buf.is_null() {
-        return 0;
-    }
-    std::ptr::copy_nonoverlapping(bytes.ptr, buf, expected);
 
     let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
     if qt.is_null() {
-        free(buf);
         return 0;
     }
     *qt = RayzorQTensor {
-        data: buf,
+        data: bytes.ptr,
         meta: std::ptr::null_mut(),
         numel: rows * cols,
         group_size: Q4_K_M_BLOCK_SIZE,
         scheme: QSCHEME_Q4_K_M,
-        owns_data: true,
+        owns_data: false,
         rows,
         cols,
     };
@@ -807,11 +805,11 @@ mod tests {
         block[0..2].copy_from_slice(&d.to_le_bytes());
         block[2..4].copy_from_slice(&dmin.to_le_bytes());
 
-        let bytes = crate::haxe_sys::HaxeBytes {
-            ptr: block.as_mut_ptr(),
-            len: block.len(),
-            cap: block.capacity(),
-        };
+        let bytes = crate::haxe_sys::HaxeBytes::new_malloc(
+            block.as_mut_ptr(),
+            block.len(),
+            block.capacity(),
+        );
         let bytes_handle = &bytes as *const _ as i64;
         let qt = unsafe { rayzor_qtensor_from_bytes_q4_k_m(bytes_handle, 1, 256) };
         assert!(qt != 0);
@@ -820,10 +818,9 @@ mod tests {
             assert_eq!(qt_ref.rows, 1);
             assert_eq!(qt_ref.cols, 256);
             assert_eq!(qt_ref.scheme, QSCHEME_Q4_K_M);
-            assert!(qt_ref.owns_data);
-            // The copied buffer should not alias the source — mutating
-            // `block` should leave the QTensor's data untouched.
-            assert_ne!(qt_ref.data, block.as_mut_ptr());
+            // Zero-copy: QTensor aliases the source buffer, doesn't own it.
+            assert!(!qt_ref.owns_data);
+            assert_eq!(qt_ref.data, block.as_mut_ptr());
             assert_eq!(*qt_ref.data, d.to_le_bytes()[0]);
         }
         unsafe { rayzor_qtensor_free(qt) };
@@ -832,11 +829,7 @@ mod tests {
     #[test]
     fn from_bytes_q4_k_m_rejects_bad_input() {
         // Misaligned (rows * cols not multiple of 256) → returns 0.
-        let bytes = crate::haxe_sys::HaxeBytes {
-            ptr: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        };
+        let bytes = crate::haxe_sys::HaxeBytes::new_malloc(std::ptr::null_mut(), 0, 0);
         let handle = &bytes as *const _ as i64;
         assert_eq!(
             unsafe { rayzor_qtensor_from_bytes_q4_k_m(handle, 1, 100) },
