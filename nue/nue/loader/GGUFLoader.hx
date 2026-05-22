@@ -7,6 +7,8 @@ import nue.model.ModelLoader;
 import nue.model.ModelMetadata;
 import nue.model.NamedTensorMap;
 import nue.loader.GGUFReader.MetaValue;
+import nue.loader.GGUFTokenizer;
+import nue.tokenizer.Tokenizer;
 import rayzor.ds.Tensor;
 import rayzor.ds.QTensor;
 import rayzor.ds.DType;
@@ -62,6 +64,34 @@ class GGUFLoader implements ModelLoader {
         var weights = tensorsFromReader(reader);
         var reg = (registry != null) ? registry : ArchRegistry.withDefaults();
         return reg.build(meta, weights);
+    }
+
+    /**
+     * Pull the embedded vocab + merges out of the GGUF metadata and
+     * build a `BPETokenizer`. Most GGUFs in circulation (Llama 1/2/3,
+     * Mistral, Qwen, …) carry the tokenizer inline so a single
+     * `.gguf` file is enough to encode prompts and decode generations.
+     */
+    public function tokenizer(path:String):Tokenizer {
+        var bytes = File.getBytes(path);
+        var reader = new GGUFReader(bytes);
+        return GGUFTokenizer.build(reader);
+    }
+
+    /**
+     * Open a GGUF once and return the model + tokenizer together.
+     * Cheaper than calling `load(path)` + `tokenizer(path)` separately
+     * (which would parse the header twice).
+     */
+    public function loadWithTokenizer(path:String):LoadedModel {
+        var bytes = File.getBytes(path);
+        var reader = new GGUFReader(bytes);
+        var meta = metadataFromReader(reader);
+        var weights = tensorsFromReader(reader);
+        var reg = (registry != null) ? registry : ArchRegistry.withDefaults();
+        var model = reg.build(meta, weights);
+        var tok = GGUFTokenizer.build(reader);
+        return { model: model, tokenizer: tok, metadata: meta };
     }
 
     /**
@@ -191,3 +221,9 @@ class GGUFLoader implements ModelLoader {
         };
     }
 }
+
+typedef LoadedModel = {
+    var model:Module;
+    var tokenizer:Tokenizer;
+    var metadata:ModelMetadata;
+};

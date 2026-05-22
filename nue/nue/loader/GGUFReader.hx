@@ -70,9 +70,15 @@ class GGUFReader {
         if (version < 2 || version > 3) {
             throw "GGUFReader: unsupported GGUF version " + version + " (need 2 or 3)";
         }
+        // GGUF v3 header layout:
+        //   offset  0..3   magic ("GGUF")
+        //   offset  4..7   version (u32)
+        //   offset  8..15  n_tensors (u64 — low 32 bits suffice)
+        //   offset 16..23  n_metadata_kv (u64 — low 32 bits suffice)
+        //   offset 24..    metadata KV pairs
         nTensors = bytes.getInt32(8);
-        nMetaKv = bytes.getInt32(24);
-        pos = 32;
+        nMetaKv = bytes.getInt32(16);
+        pos = 24;
 
         for (_ in 0...nMetaKv) {
             var key = readString();
@@ -111,7 +117,11 @@ class GGUFReader {
 
     private function readString():String {
         var len = readU64Truncated();
-        var s = bytes.getString(pos, len);
+        // `Bytes.getString` isn't exposed by the rayzor stdlib (it lives
+        // in `haxe.io.Bytes`'s pure-Haxe body which the rayzor typedef
+        // bypasses). `sub(pos, len).toString()` is the same operation and
+        // dispatches through real runtime entries.
+        var s = bytes.sub(pos, len).toString();
         pos += len;
         return s;
     }
@@ -213,6 +223,31 @@ class GGUFReader {
         return switch (v) {
             case Str(s): s;
             case _: throw "GGUFReader: meta key '" + key + "' is not a string";
+        };
+    }
+
+    /**
+     * Return the items of an `Arr` metadata value. Throws if the key
+     * is missing or the value isn't an array. Each element is still a
+     * `MetaValue` — the caller pattern-matches on the expected element
+     * type (e.g., `Str` for token strings).
+     */
+    public function metaArray(key:String):Array<MetaValue> {
+        var v = findMeta(key);
+        if (v == null) throw "GGUFReader: missing meta key '" + key + "'";
+        return switch (v) {
+            case Arr(_, items): items;
+            case _: throw "GGUFReader: meta key '" + key + "' is not an array";
+        };
+    }
+
+    /** Convenience: same as `metaArray` but returns `null` instead of throwing. */
+    public function metaArrayOr(key:String):Array<MetaValue> {
+        var v = findMeta(key);
+        if (v == null) return null;
+        return switch (v) {
+            case Arr(_, items): items;
+            case _: null;
         };
     }
 }
