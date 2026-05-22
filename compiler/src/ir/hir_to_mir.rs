@@ -21032,10 +21032,14 @@ impl<'a> HirToMirContext<'a> {
             None => return false,
         };
 
+        // A block is terminated if either:
+        // 1. Its terminator is non-default (Branch/CondBranch/Return/Switch/NoReturn), or
+        // 2. The terminator was explicitly set (covers deliberate `Unreachable`
+        //    after `throw`/`panic`, which shares the variant with the default).
         self.builder
             .current_function()
             .and_then(|func| func.cfg.get_block(block_id))
-            .map(|block| block.is_terminated())
+            .map(|block| block.is_terminated() || block.terminator_explicit)
             .unwrap_or(false)
     }
 
@@ -29678,61 +29682,85 @@ impl<'a> HirToMirContext<'a> {
             // Generate pattern test block
             self.builder.switch_to_block(test_block);
 
-            let pattern_matches = if case.patterns.is_empty() {
-                // No pattern means default case
-                self.builder.build_bool(true)
-            } else if case.patterns.len() == 1 {
-                self.lower_pattern_test(scrut_val, &case.patterns[0])
+            // A case whose pattern list contains *only* wildcards (or is
+            // empty) is unconditional — emit a plain branch instead of
+            // `br_if true, body, next_test`. Without this, the next_test
+            // and any downstream default/continuation blocks linger in the
+            // CFG with the wrong terminator type (e.g., `ret void` inside
+            // a non-void function) and Cranelift turns that into invalid
+            // machine code (UD2 / SIGILL) even though it's runtime-unreachable.
+            // The guard arm below keeps its conditional branch — a guard can
+            // still fail at runtime, so next_test is genuinely reachable.
+            //
+            // Note: the constructor-pattern switch path (HirStatement::Switch)
+            // is the only caller for cases reaching this point — non-Constructor
+            // patterns are already desugared to an if/else chain in tast_to_hir,
+            // which has its own wildcard short-circuit.
+            let all_wildcards = !case.patterns.is_empty()
+                && case
+                    .patterns
+                    .iter()
+                    .all(|p| matches!(p, HirPattern::Wildcard));
+
+            if all_wildcards && case.guard.is_none() {
+                self.builder.build_branch(body_block);
             } else {
-                // Multiple patterns per case: OR them all together
-                let mut result = self.lower_pattern_test(scrut_val, &case.patterns[0]);
-                for pat in &case.patterns[1..] {
-                    if let Some(prev) = result {
-                        if let Some(pat_match) = self.lower_pattern_test(scrut_val, pat) {
-                            result = self.builder.build_binop(BinaryOp::Or, prev, pat_match);
+                let pattern_matches = if case.patterns.is_empty() {
+                    // No pattern means default case
+                    self.builder.build_bool(true)
+                } else if case.patterns.len() == 1 {
+                    self.lower_pattern_test(scrut_val, &case.patterns[0])
+                } else {
+                    // Multiple patterns per case: OR them all together
+                    let mut result = self.lower_pattern_test(scrut_val, &case.patterns[0]);
+                    for pat in &case.patterns[1..] {
+                        if let Some(prev) = result {
+                            if let Some(pat_match) = self.lower_pattern_test(scrut_val, pat) {
+                                result = self.builder.build_binop(BinaryOp::Or, prev, pat_match);
+                            }
                         }
                     }
-                }
-                result
-            };
-
-            let pattern_matches = match pattern_matches {
-                Some(v) => v,
-                None => {
-                    // Pattern test failed, go to next
-                    self.builder.build_branch(next_test);
-                    continue;
-                }
-            };
-
-            // If there's a guard, test it
-            if let Some(ref guard) = case.guard {
-                let guard_block = match self.builder.create_block() {
-                    Some(b) => b,
-                    None => return,
+                    result
                 };
 
-                // Branch: if pattern matches, test guard; else try next pattern
-                self.builder
-                    .build_cond_branch(pattern_matches, guard_block, next_test);
-
-                // Guard test block
-                self.builder.switch_to_block(guard_block);
-                let guard_val = match self.lower_expression(guard) {
+                let pattern_matches = match pattern_matches {
                     Some(v) => v,
                     None => {
+                        // Pattern test failed, go to next
                         self.builder.build_branch(next_test);
                         continue;
                     }
                 };
 
-                // Branch: if guard true, execute body; else try next pattern
-                self.builder
-                    .build_cond_branch(guard_val, body_block, next_test);
-            } else {
-                // No guard, just test pattern
-                self.builder
-                    .build_cond_branch(pattern_matches, body_block, next_test);
+                // If there's a guard, test it
+                if let Some(ref guard) = case.guard {
+                    let guard_block = match self.builder.create_block() {
+                        Some(b) => b,
+                        None => return,
+                    };
+
+                    // Branch: if pattern matches, test guard; else try next pattern
+                    self.builder
+                        .build_cond_branch(pattern_matches, guard_block, next_test);
+
+                    // Guard test block
+                    self.builder.switch_to_block(guard_block);
+                    let guard_val = match self.lower_expression(guard) {
+                        Some(v) => v,
+                        None => {
+                            self.builder.build_branch(next_test);
+                            continue;
+                        }
+                    };
+
+                    // Branch: if guard true, execute body; else try next pattern
+                    self.builder
+                        .build_cond_branch(guard_val, body_block, next_test);
+                } else {
+                    // No guard, just test pattern
+                    self.builder
+                        .build_cond_branch(pattern_matches, body_block, next_test);
+                }
             }
 
             // Snapshot the symbol_map entries for tracked vars BEFORE the body,

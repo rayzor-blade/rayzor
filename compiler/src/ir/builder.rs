@@ -828,6 +828,9 @@ impl IrBuilder {
         // First, set the terminator
         let block = func.cfg.get_block_mut(block_id)?;
         block.set_terminator(term.clone());
+        // Mark this terminator as deliberately set — distinguishes explicit
+        // `Unreachable` (e.g. after throw) from the default uninitialized state.
+        block.terminator_explicit = true;
         // eprintln!("DEBUG set_terminator: terminator set on block successfully");
 
         // Then, update predecessor information based on the terminator
