@@ -6645,26 +6645,15 @@ impl<'a> AstLowering<'a> {
         }
 
         // Fallback: Try to resolve using the receiver expression's type
-        // (may differ from the variable symbol's type for extern classes)
+        // (may differ from the variable symbol's type for extern classes).
+        // Route through `resolve_class_method_symbol` so the phantom-class
+        // fallback (Strategy 4) fires for typedef'd receivers — e.g.
+        // `this.bytes.sub(...)` where `bytes:haxe.io.Bytes` resolves to a
+        // BLADE phantom Class with no methods and the real `rayzor.Bytes`
+        // class holds the method elsewhere.
         if let Some(class_symbol) = self.resolve_type_to_class_symbol(receiver.expr_type) {
-            if let Some(methods) = self.class_methods.get(&class_symbol) {
-                if let Some((_, method_symbol, _)) =
-                    methods.iter().find(|(name, _, _)| *name == method_name)
-                {
-                    return *method_symbol;
-                }
-            }
-            // Fallback: shared symbol table (cross-package classes)
-            if let Some(class_sym) = self.context.symbol_table.get_symbol(class_symbol) {
-                if let Some(method_sym) = self
-                    .context
-                    .symbol_table
-                    .lookup_symbol(class_sym.scope_id, method_name)
-                {
-                    if method_sym.kind == crate::tast::symbols::SymbolKind::Function {
-                        return method_sym.id;
-                    }
-                }
+            if let Some(found) = self.resolve_class_method_symbol(class_symbol, method_name) {
+                return found;
             }
         }
 
@@ -8828,16 +8817,6 @@ impl<'a> AstLowering<'a> {
                                         self.context.symbol_table.get_symbol(method_symbol)
                                     {
                                         let type_table = self.context.type_table.borrow();
-                                        let mt_kind = type_table.get(symbol.type_id).map(|t| {
-                                            format!("{:?}", &t.kind)
-                                                .chars()
-                                                .take(60)
-                                                .collect::<String>()
-                                        });
-                                        eprintln!("[STATIC] class_sym={:?} method_sym={:?} method_name={} method_type_id={:?} method_kind={:?}",
-                                            class_symbol, method_symbol,
-                                            self.context.string_interner.get(method_name).unwrap_or("?"),
-                                            symbol.type_id, mt_kind);
                                         if let Some(method_type) = type_table.get(symbol.type_id) {
                                             match &method_type.kind {
                                                 crate::tast::core::TypeKind::Function {
