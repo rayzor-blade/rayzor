@@ -2192,6 +2192,27 @@ impl<'a> AstLowering<'a> {
                 // Register symbol with package information (also sets qualified name)
                 self.register_symbol_with_package(enum_symbol, &enum_decl.name);
 
+                // Create the Enum type now so anything that resolves this enum
+                // during the first pass (e.g. a class field declared before the
+                // enum body has been lowered, or a cross-file user resolving
+                // `pkg.File.EnumName` via import) gets a real TypeId instead of
+                // a placeholder. Classes/Interfaces above already do this; the
+                // omission for enums made declaration order load-bearing — if
+                // the enum appeared *after* the class that referenced it in
+                // the same file, downstream method-dispatch lowering would
+                // silently elide calls returning the enum type.
+                let enum_type = self
+                    .context
+                    .type_table
+                    .borrow_mut()
+                    .create_enum_type(enum_symbol, Vec::new());
+                self.context
+                    .symbol_table
+                    .update_symbol_type(enum_symbol, enum_type);
+                self.context
+                    .symbol_table
+                    .register_type_symbol_mapping(enum_type, enum_symbol);
+
                 // Add to root scope for global resolution
                 self.context
                     .scope_tree
