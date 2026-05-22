@@ -1627,31 +1627,46 @@ pub extern "C" fn haxe_file_copy(src: *const HaxeString, dst: *const HaxeString)
     }
 }
 
-/// Read entire file content as binary bytes
+/// Read entire file content as binary bytes.
 /// File.getBytes(path: String): haxe.io.Bytes
+///
+/// On Unix the file is `mmap`-mapped with `MAP_PRIVATE` so memory cost
+/// is just the resident-set of pages touched, not the full file size.
+/// Modifications via `bytes.set(...)` get page-level copy-on-write and
+/// stay in this process (never written back to disk). The fd is held
+/// for the lifetime of the mapping as a Linux safety net.
+///
+/// On other platforms / mmap failure, falls back to a full read.
 #[no_mangle]
 pub extern "C" fn haxe_file_get_bytes(path: *const HaxeString) -> *mut HaxeBytes {
     unsafe {
-        match haxe_string_to_rust(path) {
-            Some(path_str) => {
-                match std::fs::read(&path_str) {
-                    Ok(content) => {
-                        // Create HaxeBytes from the file content
-                        let len = content.len();
-                        let cap = content.capacity();
-                        let ptr = content.as_ptr() as *mut u8;
-                        std::mem::forget(content); // Don't drop - HaxeBytes now owns the memory
+        let path_str = match haxe_string_to_rust(path) {
+            Some(s) => s,
+            None => return std::ptr::null_mut(),
+        };
 
-                        let bytes = Box::new(HaxeBytes { ptr, len, cap });
-                        Box::into_raw(bytes)
-                    }
-                    Err(e) => {
-                        debug!("File.getBytes error: {} - {}", path_str, e);
-                        std::ptr::null_mut()
-                    }
-                }
+        #[cfg(unix)]
+        {
+            let mapped = haxe_bytes_mmap_file(&path_str);
+            if !mapped.is_null() {
+                return mapped;
             }
-            None => std::ptr::null_mut(),
+            // mmap failed (e.g. tmpfs without mmap support, or a
+            // non-regular file). Fall through to the read path below.
+        }
+
+        match std::fs::read(&path_str) {
+            Ok(content) => {
+                let len = content.len();
+                let cap = content.capacity();
+                let ptr = content.as_ptr() as *mut u8;
+                std::mem::forget(content);
+                Box::into_raw(Box::new(HaxeBytes::new_malloc(ptr, len, cap)))
+            }
+            Err(e) => {
+                debug!("File.getBytes error: {} - {}", path_str, e);
+                std::ptr::null_mut()
+            }
         }
     }
 }
@@ -2235,7 +2250,7 @@ pub extern "C" fn haxe_fileinput_read_all(handle: *mut HaxeFileInput) -> *mut Ha
                 let cap = buf.capacity();
                 let ptr = buf.as_mut_ptr();
                 std::mem::forget(buf);
-                Box::into_raw(Box::new(HaxeBytes { ptr, len, cap }))
+                Box::into_raw(Box::new(HaxeBytes::new_malloc(ptr, len, cap)))
             }
             Err(_) => {
                 input.eof_reached = true;
@@ -2793,17 +2808,138 @@ pub extern "C" fn haxe_date_to_string(date: *const HaxeDate) -> *mut HaxeString 
 // ============================================================================
 //
 // Native byte buffer implementation.
-// Memory layout matches vec_u8: { ptr: *u8, len: u64, cap: u64 }
+//
+// Three backends share the same `HaxeBytes` shape:
+//   - `Malloc`: classic heap allocation. `cap >= len`. Free with `dealloc`.
+//   - `Mmap`:   `mmap`-backed read-only file mapping. `cap == len`. Free
+//               with `munmap` + `close(fd)`.
+//   - `View`:   zero-copy slice into an `owner` Bytes. `ptr = owner.ptr +
+//               offset`. Free decrements `owner.refcount`; releases the
+//               owner when its refcount hits zero. View's own `cap`/`fd`
+//               are zero.
+//
+// The `kind`/`owner`/`refcount`/`fd` fields are appended AFTER the
+// historical ptr/len/cap triple so any extern that reads only the first
+// three fields by offset (the F16/Q8_0/Q4_K_M tensor decoders, the
+// stdlib mappings, FFI bridges) continues to work without changes.
 
-/// Haxe Bytes - raw byte buffer
+/// Haxe Bytes — raw byte buffer with mmap + view backends.
 #[repr(C)]
 pub struct HaxeBytes {
     pub ptr: *mut u8,
     pub len: usize,
     pub cap: usize,
+    /// Backend tag: 0=Malloc, 1=Mmap, 2=View. See `HaxeBytesKind`.
+    pub kind: u8,
+    /// Padding so `owner` lands at an 8-byte boundary.
+    _pad: [u8; 7],
+    /// `View` only: the owner whose ptr we're aliasing. NULL otherwise.
+    pub owner: *mut HaxeBytes,
+    /// Reference count. `Malloc`/`Mmap` start at 1; views bump it.
+    /// Free decrements; the actual release happens at refcount 0.
+    pub refcount: i64,
+    /// `Mmap` only: the open file descriptor we hold so the inode stays
+    /// alive even if the file is unlinked under us. -1 otherwise.
+    pub fd: i32,
+    _pad2: [u8; 4],
 }
 
-/// Allocate a new Bytes of given size (zero-initialized)
+pub const HAXE_BYTES_KIND_MALLOC: u8 = 0;
+pub const HAXE_BYTES_KIND_MMAP: u8 = 1;
+pub const HAXE_BYTES_KIND_VIEW: u8 = 2;
+
+impl HaxeBytes {
+    /// Construct a malloc-backed `HaxeBytes` wrapping an existing buffer.
+    /// The buffer ownership transfers to the returned struct — callers
+    /// must not free the original pointer separately.
+    #[inline]
+    pub fn new_malloc(ptr: *mut u8, len: usize, cap: usize) -> Self {
+        HaxeBytes {
+            ptr,
+            len,
+            cap,
+            kind: HAXE_BYTES_KIND_MALLOC,
+            _pad: [0; 7],
+            owner: std::ptr::null_mut(),
+            refcount: 1,
+            fd: -1,
+            _pad2: [0; 4],
+        }
+    }
+}
+
+/// Mmap a file into a `HaxeBytes` as `MAP_PRIVATE`. The file descriptor
+/// is retained on the returned struct so the underlying inode stays
+/// alive even if the file is unlinked under us (a Linux safety net —
+/// macOS preserves the inode regardless, but `MAP_PRIVATE` makes the
+/// retention free).
+///
+/// Returns `null` on any failure (open, fstat, mmap, or non-file).
+/// Callers must `haxe_bytes_free` to release the mapping + close the fd.
+#[cfg(unix)]
+pub fn haxe_bytes_mmap_file(path: &str) -> *mut HaxeBytes {
+    use std::ffi::CString;
+    let cpath = match CString::new(path) {
+        Ok(c) => c,
+        Err(_) => return std::ptr::null_mut(),
+    };
+    unsafe {
+        let fd = libc::open(cpath.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+        if fd < 0 {
+            return std::ptr::null_mut();
+        }
+        let mut stat: libc::stat = std::mem::zeroed();
+        if libc::fstat(fd, &mut stat) != 0 {
+            libc::close(fd);
+            return std::ptr::null_mut();
+        }
+        // Reject non-regular files (sockets/FIFOs aren't mappable).
+        if (stat.st_mode & libc::S_IFMT) != libc::S_IFREG {
+            libc::close(fd);
+            return std::ptr::null_mut();
+        }
+        let len = stat.st_size as usize;
+        if len == 0 {
+            libc::close(fd);
+            // Zero-byte file — return an empty malloc-backed Bytes so
+            // callers get a non-null result with `length == 0`.
+            return haxe_bytes_alloc(0);
+        }
+        let ptr = libc::mmap(
+            std::ptr::null_mut(),
+            len,
+            libc::PROT_READ,
+            libc::MAP_PRIVATE,
+            fd,
+            0,
+        );
+        if ptr == libc::MAP_FAILED {
+            libc::close(fd);
+            return std::ptr::null_mut();
+        }
+        Box::into_raw(Box::new(HaxeBytes {
+            ptr: ptr as *mut u8,
+            len,
+            cap: len,
+            kind: HAXE_BYTES_KIND_MMAP,
+            _pad: [0; 7],
+            owner: std::ptr::null_mut(),
+            refcount: 1,
+            fd,
+            _pad2: [0; 4],
+        }))
+    }
+}
+
+/// Windows stub. The full implementation needs `CreateFileMappingA` +
+/// `MapViewOfFile`; until then, fall back to a buffered read so that
+/// callers don't get a null pointer surprise.
+#[cfg(not(unix))]
+pub fn haxe_bytes_mmap_file(_path: &str) -> *mut HaxeBytes {
+    std::ptr::null_mut()
+}
+
+/// Allocate a new Bytes of given size (zero-initialized).
 /// Bytes.alloc(size: Int): Bytes
 #[no_mangle]
 pub extern "C" fn haxe_bytes_alloc(size: i32) -> *mut HaxeBytes {
@@ -2821,6 +2957,12 @@ pub extern "C" fn haxe_bytes_alloc(size: i32) -> *mut HaxeBytes {
             ptr,
             len: size,
             cap,
+            kind: HAXE_BYTES_KIND_MALLOC,
+            _pad: [0; 7],
+            owner: std::ptr::null_mut(),
+            refcount: 1,
+            fd: -1,
+            _pad2: [0; 4],
         }))
     }
 }
@@ -2841,7 +2983,7 @@ pub extern "C" fn haxe_bytes_of_string(s: *const HaxeString) -> *mut HaxeBytes {
         let ptr = bytes.as_ptr() as *mut u8;
         std::mem::forget(bytes);
 
-        Box::into_raw(Box::new(HaxeBytes { ptr, len, cap }))
+        Box::into_raw(Box::new(HaxeBytes::new_malloc(ptr, len, cap)))
     }
 }
 
@@ -2887,26 +3029,60 @@ pub extern "C" fn haxe_bytes_set(bytes: *mut HaxeBytes, pos: i32, value: i32) {
     }
 }
 
-/// Get a sub-range as new Bytes
+/// Get a sub-range as a zero-copy view.
 /// bytes.sub(pos: Int, len: Int): Bytes
+///
+/// The returned `HaxeBytes` aliases the original buffer (`ptr = orig.ptr
+/// + pos`, no copy). It bumps the owner's refcount so the underlying
+/// allocation / mmap stays alive as long as the view does; `haxe_bytes_free`
+/// on the view will decrement and only release the owner at refcount 0.
+///
+/// This matters because GGUF loading does `bytes.sub(offset, size)` per
+/// tensor — turning a 4.9 GB model file into 300+ slices used to allocate
+/// a few GB of extra heap on top of the mapped file. With the view path
+/// the slice cost is one 64-byte `HaxeBytes` struct.
 #[no_mangle]
-pub extern "C" fn haxe_bytes_sub(bytes: *const HaxeBytes, pos: i32, len: i32) -> *mut HaxeBytes {
+pub extern "C" fn haxe_bytes_sub(bytes: *mut HaxeBytes, pos: i32, len: i32) -> *mut HaxeBytes {
+    haxe_bytes_sub_i64(bytes, pos as i64, len as i64)
+}
+
+/// Same as `haxe_bytes_sub` but accepts 64-bit offset + length. Needed for
+/// files larger than 2 GiB (e.g. a Llama-3-8B Q4_K_M GGUF whose tensor-data
+/// section starts past offset 2³¹).
+#[no_mangle]
+pub extern "C" fn haxe_bytes_sub_i64(bytes: *mut HaxeBytes, pos: i64, len: i64) -> *mut HaxeBytes {
     if bytes.is_null() || pos < 0 || len < 0 {
         return haxe_bytes_alloc(0);
     }
     unsafe {
-        let b = &*bytes;
-        let pos = pos as usize;
-        let len = len as usize;
-        if pos >= b.len || pos + len > b.len {
+        let b = &mut *bytes;
+        let pos_u = pos as usize;
+        let len_u = len as usize;
+        // pos == b.len with len == 0 is valid (empty slice at the end).
+        if pos_u > b.len || pos_u.saturating_add(len_u) > b.len {
             return haxe_bytes_alloc(0);
         }
-
-        let new_bytes = haxe_bytes_alloc(len as i32);
-        if !new_bytes.is_null() {
-            std::ptr::copy_nonoverlapping(b.ptr.add(pos), (*new_bytes).ptr, len);
-        }
-        new_bytes
+        // Bump the owner's refcount. For a `View` we share the original
+        // owner directly (chains stay flat); otherwise the source IS the
+        // owner.
+        let owner: *mut HaxeBytes = if b.kind == HAXE_BYTES_KIND_VIEW && !b.owner.is_null() {
+            (*b.owner).refcount += 1;
+            b.owner
+        } else {
+            b.refcount += 1;
+            bytes
+        };
+        Box::into_raw(Box::new(HaxeBytes {
+            ptr: b.ptr.add(pos_u),
+            len: len_u,
+            cap: 0,
+            kind: HAXE_BYTES_KIND_VIEW,
+            _pad: [0; 7],
+            owner,
+            refcount: 1,
+            fd: -1,
+            _pad2: [0; 4],
+        }))
     }
 }
 
@@ -3177,17 +3353,60 @@ pub extern "C" fn haxe_bytes_set_double(bytes: *mut HaxeBytes, pos: i32, value: 
     }
 }
 
-/// Free Bytes memory
+/// Release a `HaxeBytes` according to its backend.
+///
+/// - `View`: decrement the owner's refcount; if it hits 0, free the
+///   owner. Always frees the view struct itself.
+/// - `Mmap`: decrement own refcount; at 0, `munmap` the region and
+///   close the retained fd before freeing the struct.
+/// - `Malloc`: decrement own refcount; at 0, free the data buffer and
+///   the struct.
 #[no_mangle]
 pub extern "C" fn haxe_bytes_free(bytes: *mut HaxeBytes) {
     if bytes.is_null() {
         return;
     }
     unsafe {
-        let b = Box::from_raw(bytes);
-        if !b.ptr.is_null() && b.cap > 0 {
-            let layout = std::alloc::Layout::from_size_align(b.cap, 1).unwrap();
-            std::alloc::dealloc(b.ptr, layout);
+        let b = &mut *bytes;
+        match b.kind {
+            HAXE_BYTES_KIND_VIEW => {
+                let owner = b.owner;
+                let _ = Box::from_raw(bytes); // drop view struct
+                if !owner.is_null() {
+                    (*owner).refcount -= 1;
+                    if (*owner).refcount <= 0 {
+                        haxe_bytes_free(owner);
+                    }
+                }
+            }
+            HAXE_BYTES_KIND_MMAP => {
+                b.refcount -= 1;
+                if b.refcount <= 0 {
+                    let boxed = Box::from_raw(bytes);
+                    #[cfg(unix)]
+                    {
+                        if !boxed.ptr.is_null() && boxed.len > 0 {
+                            libc::munmap(boxed.ptr as *mut libc::c_void, boxed.len);
+                        }
+                        if boxed.fd >= 0 {
+                            libc::close(boxed.fd);
+                        }
+                    }
+                    // `boxed` drops here.
+                    let _ = boxed;
+                }
+            }
+            _ => {
+                // Malloc backend (legacy default).
+                b.refcount -= 1;
+                if b.refcount <= 0 {
+                    let boxed = Box::from_raw(bytes);
+                    if !boxed.ptr.is_null() && boxed.cap > 0 {
+                        let layout = std::alloc::Layout::from_size_align(boxed.cap, 1).unwrap();
+                        std::alloc::dealloc(boxed.ptr, layout);
+                    }
+                }
+            }
         }
     }
 }
