@@ -435,6 +435,13 @@ pub struct LoweringContext<'a> {
     pub current_package: Option<super::namespace::PackageId>,
     /// Current switch discriminant type (for resolving enum constructors in pattern matching)
     pub switch_discriminant_type: Option<TypeId>,
+    /// When set, an `ExprKind::New` with no explicit `<...>` params can borrow
+    /// the type arguments from this hint to make `var m:Map<String,Int> = new Map()`
+    /// behave the same as `var m = new Map<String,Int>()`. Used only to seed
+    /// `@:multiType` abstract resolution (e.g. `Map` → `StringMap`); a wrong
+    /// hint is harmless because the New site re-runs through type checking
+    /// against the declared variable type either way.
+    pub expected_new_type_hint: Option<TypeId>,
 }
 
 impl<'a> LoweringContext<'a> {
@@ -463,6 +470,7 @@ impl<'a> LoweringContext<'a> {
             import_resolver,
             current_package: None,
             switch_discriminant_type: None,
+            expected_new_type_hint: None,
         }
     }
 
@@ -4605,6 +4613,71 @@ impl<'a> AstLowering<'a> {
     /// abstracts that use the same dispatch trick, etc.). For now `Map`
     /// is the only abstract that needs this and using a non-Map abstract
     /// here would be a no-op pass-through.
+    /// Reverse of `resolve_multitype_map_to_concrete` for the cases where
+    /// the concrete arity dropped K. Returns the K TypeId given the
+    /// concrete container's class symbol — e.g. `StringMap` ↦ `String`,
+    /// `IntMap` ↦ `Int`. Returns `None` for `ObjectMap`/`EnumValueMap`
+    /// (their K is already carried, so the caller doesn't need this) or
+    /// unrecognized class names. Used when `var m:Map<String,V> = new Map()`
+    /// has been annotation-resolved to `StringMap<V>` and we need the
+    /// abstract's `<K, V>` type args back to re-run multiType cleanly at
+    /// the New site.
+    fn recover_map_key_type_from_concrete(&self, concrete_sym: SymbolId) -> Option<TypeId> {
+        let name = self.context.symbol_table.get_symbol(concrete_sym)?.name;
+        let name_str = self.context.string_interner.get(name)?.to_string();
+        let tt = self.context.type_table.borrow();
+        match name_str.as_str() {
+            "StringMap" => Some(tt.string_type()),
+            "IntMap" => Some(tt.int_type()),
+            _ => None,
+        }
+    }
+
+    /// Build the concrete `StringMap<V>` / `IntMap<V>` / `ObjectMap<K,V>`
+    /// type for a `Map<K, V>` annotation. Returns `None` if K is a type
+    /// parameter / Dynamic / unresolved (where we can't safely pick one),
+    /// or if the concrete container class isn't loaded yet. The returned
+    /// TypeId is a fully-formed class type and can be substituted wherever
+    /// the original `Map<K,V>` Abstract TypeId would have appeared.
+    fn resolve_multitype_map_to_concrete(&self, type_args: &[TypeId]) -> Option<TypeId> {
+        if type_args.len() != 2 {
+            return None;
+        }
+        let key_ty = type_args[0];
+        let value_ty = type_args[1];
+
+        let (concrete_name, concrete_type_args): (&str, Vec<TypeId>) = {
+            let tt = self.context.type_table.borrow();
+            let key_kind = tt.get(key_ty).map(|t| &t.kind);
+            match key_kind {
+                Some(crate::tast::core::TypeKind::String) => ("StringMap", vec![value_ty]),
+                Some(crate::tast::core::TypeKind::Int) => ("IntMap", vec![value_ty]),
+                Some(crate::tast::core::TypeKind::Enum { .. }) => {
+                    ("EnumValueMap", vec![key_ty, value_ty])
+                }
+                Some(crate::tast::core::TypeKind::Class { .. })
+                | Some(crate::tast::core::TypeKind::Interface { .. })
+                | Some(crate::tast::core::TypeKind::Anonymous { .. })
+                | Some(crate::tast::core::TypeKind::GenericInstance { .. }) => {
+                    ("ObjectMap", vec![key_ty, value_ty])
+                }
+                _ => return None,
+            }
+        };
+
+        let concrete_name_interned = self.context.string_interner.intern(concrete_name);
+        let symbol = self
+            .context
+            .symbol_table
+            .lookup_symbol(ScopeId::first(), concrete_name_interned)?;
+        Some(
+            self.context
+                .type_table
+                .borrow_mut()
+                .create_class_type(symbol.id, concrete_type_args),
+        )
+    }
+
     fn maybe_resolve_multitype_map(
         &self,
         original_class_type: TypeId,
@@ -5343,6 +5416,28 @@ impl<'a> AstLowering<'a> {
                             ))
                         }
                         crate::tast::SymbolKind::Abstract => {
+                            // `@:multiType` resolution at type-annotation level.
+                            // `Map<K, V>` is the only multiType abstract today;
+                            // declaring `var foo:Map<String, V>` (as a local, a
+                            // field, a parameter, or a return) must immediately
+                            // resolve to the concrete container per K so that
+                            // every downstream operation (construction,
+                            // dispatch, field load/store) sees the same type.
+                            // Resolving only at the New site, as the previous
+                            // fix did, fixed construction but left dispatch
+                            // through Map-typed fields silently broken — the
+                            // MIR lowerer ended up elided the call entirely.
+                            if path.name == "Map"
+                                && (path.package.is_empty()
+                                    || path.package == vec!["haxe".to_string(), "ds".to_string()])
+                                && type_arg_ids.len() == 2
+                            {
+                                if let Some(resolved) =
+                                    self.resolve_multitype_map_to_concrete(&type_arg_ids)
+                                {
+                                    return Ok(resolved);
+                                }
+                            }
                             let underlying = None; // Abstract enums have no explicit underlying type
                             Ok(self.context.type_table.borrow_mut().create_type(
                                 crate::tast::core::TypeKind::Abstract {
@@ -7106,7 +7201,19 @@ impl<'a> AstLowering<'a> {
             }
             ExprKind::Assign { left, op, right } => {
                 let target_expr = self.lower_expression(left)?;
-                let value_expr = self.lower_expression(right)?;
+                // Same `@:multiType` propagation as Var declarations: when
+                // the RHS is a bare `new C()`, the LHS's static type seeds
+                // the type args so e.g. `values = new Map()` against a
+                // `Map<String, V>` field still routes through StringMap.
+                // Without this the field assignment elides at MIR lowering
+                // and the constructor body becomes a no-op.
+                let value_expr = {
+                    let prev_hint = self.context.expected_new_type_hint;
+                    self.context.expected_new_type_hint = Some(target_expr.expr_type);
+                    let result = self.lower_expression(right);
+                    self.context.expected_new_type_hint = prev_hint;
+                    result?
+                };
 
                 match op {
                     parser::AssignOp::Assign => {
@@ -7166,8 +7273,13 @@ impl<'a> AstLowering<'a> {
                 params,
                 args,
             } => {
-                // Resolve the base class type from type_path
-                let base_class_type_id = self.resolve_type_path(type_path)?;
+                // Resolve the base class type from type_path.
+                // `mut` because the `expected_new_type_hint` block below may
+                // re-target construction to the concrete container when the
+                // hint and base disagree (e.g. hint `StringMap<V>` from
+                // `var m:Map<String,V>` annotation, base `Map` from
+                // `new Map()` call site).
+                let mut base_class_type_id = self.resolve_type_path(type_path)?;
 
                 // Lower constructor arguments
                 let arg_exprs = args
@@ -7176,10 +7288,112 @@ impl<'a> AstLowering<'a> {
                     .collect::<Result<Vec<_>, _>>()?;
 
                 // Lower type arguments from params
-                let type_args = params
+                let mut type_args = params
                     .iter()
                     .map(|param| self.lower_type(param))
                     .collect::<Result<Vec<_>, _>>()?;
+
+                // If the call site omitted explicit `<...>` params (e.g.
+                // `var m:Map<String,Int> = new Map();`), borrow them from
+                // the surrounding `expected_new_type_hint` when the hint
+                // is a generic instance of the same class. This is what
+                // makes `@:multiType` resolution fire on bare `new Map()`
+                // — without it the New site has zero type args and
+                // `maybe_resolve_multitype_map` bails, leaving Map
+                // unresolved and the whole containing function body
+                // silently elided at MIR lowering.
+                // Fill in `<...>` type args from `expected_new_type_hint`
+                // when the call site omitted them. The hint comes from the
+                // surrounding Var-declaration or Assign LHS type. We extract
+                // (symbol, type_args) and copy them in when either:
+                //   (a) hint and base classes match — straightforward
+                //       `var m:Foo<Int> = new Foo()` propagation, or
+                //   (b) base is the `Map` abstract and the hint is a
+                //       Map-concrete (StringMap/IntMap/etc.) — the LHS
+                //       annotation already underwent multiType resolution
+                //       in `lower_type`, so the hint carries `[V]` (the
+                //       concrete arity) but we want the abstract's
+                //       `[K, V]` here so `maybe_resolve_multitype_map`
+                //       below re-runs cleanly and supplies the right class
+                //       name (`haxe.ds.StringMap`). Just-using-the-hint
+                //       loses that name and the construction would fall
+                //       through to a generic allocator.
+                if type_args.is_empty() {
+                    if let Some(hint_ty) = self.context.expected_new_type_hint {
+                        let tt = self.context.type_table.borrow();
+                        fn extract_sym_and_args(
+                            tt: &crate::tast::core::TypeTable,
+                            ty: TypeId,
+                        ) -> Option<(SymbolId, Vec<TypeId>)> {
+                            let info = tt.get(ty)?;
+                            match &info.kind {
+                                crate::tast::core::TypeKind::Class {
+                                    symbol_id,
+                                    type_args,
+                                }
+                                | crate::tast::core::TypeKind::Abstract {
+                                    symbol_id,
+                                    type_args,
+                                    ..
+                                }
+                                | crate::tast::core::TypeKind::Interface {
+                                    symbol_id,
+                                    type_args,
+                                    ..
+                                } => Some((*symbol_id, type_args.clone())),
+                                crate::tast::core::TypeKind::GenericInstance {
+                                    base_type,
+                                    type_args,
+                                    ..
+                                } => {
+                                    let base_sym = tt.get(*base_type).and_then(|b| match &b.kind {
+                                        crate::tast::core::TypeKind::Class {
+                                            symbol_id, ..
+                                        }
+                                        | crate::tast::core::TypeKind::Abstract {
+                                            symbol_id, ..
+                                        }
+                                        | crate::tast::core::TypeKind::Interface {
+                                            symbol_id,
+                                            ..
+                                        } => Some(*symbol_id),
+                                        _ => None,
+                                    });
+                                    base_sym.map(|s| (s, type_args.clone()))
+                                }
+                                _ => None,
+                            }
+                        }
+                        let hint_parts = extract_sym_and_args(&tt, hint_ty);
+                        let base_sym =
+                            extract_sym_and_args(&tt, base_class_type_id).map(|(s, _)| s);
+                        let base_is_abstract_map = matches!(
+                            tt.get(base_class_type_id).map(|t| &t.kind),
+                            Some(crate::tast::core::TypeKind::Abstract { .. })
+                        ) && type_path.name == "Map";
+                        drop(tt);
+                        if let Some((hint_sym, hint_args)) = hint_parts {
+                            if Some(hint_sym) == base_sym && !hint_args.is_empty() {
+                                type_args = hint_args;
+                            } else if base_is_abstract_map && hint_args.len() == 1 {
+                                // `Map<K, V>` was resolved to a concrete
+                                // with arity 1 (StringMap<V> / IntMap<V>) —
+                                // we lost K. There's no general way to
+                                // recover it from the concrete, but we can
+                                // re-derive from the concrete's class name.
+                                if let Some(k_ty) =
+                                    self.recover_map_key_type_from_concrete(hint_sym)
+                                {
+                                    type_args = vec![k_ty, hint_args[0]];
+                                }
+                            } else if base_is_abstract_map && hint_args.len() == 2 {
+                                // `Map<K, V>` resolved to `ObjectMap<K, V>`
+                                // / `EnumValueMap<K, V>` — both keep arity 2.
+                                type_args = hint_args;
+                            }
+                        }
+                    }
+                }
 
                 // If type arguments are provided, create an instantiated type
                 // e.g., new Array<Thread<Int>>() should have type Array<Thread<Int>>, not just Array
@@ -7911,9 +8125,22 @@ impl<'a> AstLowering<'a> {
                     }
                 }
 
-                // Lower initializer expression first if it exists
+                // Lower initializer expression first if it exists.
+                //
+                // Pass the declared type as an `expected_new_type_hint` so a
+                // bare `new C()` initializer can pick up type arguments from
+                // the variable's annotation. This matters for `@:multiType`
+                // abstracts like `Map`: `var m:Map<String,Int> = new Map()`
+                // must resolve to `StringMap<Int>`, but without the hint the
+                // New site sees zero type args and falls through to the
+                // (broken) abstract path. Restored on the way out — nested
+                // declarations shouldn't leak their hint.
                 let initializer = if let Some(init_expr) = expr {
-                    self.lower_expression(init_expr)?
+                    let prev_hint = self.context.expected_new_type_hint;
+                    self.context.expected_new_type_hint = declared_type;
+                    let result = self.lower_expression(init_expr);
+                    self.context.expected_new_type_hint = prev_hint;
+                    result?
                 } else {
                     // Default to null if no initializer
                     TypedExpression {
@@ -13536,12 +13763,14 @@ impl<'a> AstLowering<'a> {
                 })
             }
             Pattern::Underscore => {
-                // Wildcard pattern - for now create a special marker
-                // In a full implementation, this would need special handling in switch
+                // Wildcard pattern. tast_to_hir uses TypedExpressionKind::Null as
+                // its wildcard sentinel (Pattern::Var follows the same path), so
+                // emit Null here rather than Bool(true) — using Bool(true) caused
+                // tast_to_hir to treat the wildcard as a `case true:` literal,
+                // which then lowered to `cmp eq scrutinee, true` and left the
+                // wildcard body unreachable for non-bool scrutinees.
                 Ok(TypedExpression {
-                    kind: TypedExpressionKind::Literal {
-                        value: LiteralValue::Bool(true), // Placeholder for wildcard
-                    },
+                    kind: TypedExpressionKind::Null,
                     expr_type: self.context.type_table.borrow().dynamic_type(),
                     usage: VariableUsage::Borrow,
                     lifetime_id: LifetimeId::from_raw(1),

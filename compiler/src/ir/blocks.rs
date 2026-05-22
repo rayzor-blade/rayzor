@@ -34,6 +34,15 @@ pub struct IrBasicBlock {
 
     /// Metadata for optimization hints
     pub metadata: BlockMetadata,
+
+    /// `true` once a terminator has been *explicitly* set on this block
+    /// (via the builder's `set_terminator`). Distinguishes deliberate
+    /// `Unreachable` (e.g. after `throw`) from the default uninitialized
+    /// state, which also uses `Unreachable` as its placeholder.
+    /// Not part of any external invariant — serialized as `false` by
+    /// default for backwards compat with pre-existing `.blade` caches.
+    #[serde(default)]
+    pub terminator_explicit: bool,
 }
 
 /// Unique identifier for basic blocks
@@ -154,6 +163,7 @@ impl IrBasicBlock {
             source_location: IrSourceLocation::unknown(),
             predecessors: Vec::new(),
             metadata: BlockMetadata::default(),
+            terminator_explicit: false,
         }
     }
 
@@ -194,7 +204,15 @@ impl IrBasicBlock {
         }
     }
 
-    /// Check if this block is terminated properly
+    /// Check if this block is terminated properly.
+    ///
+    /// Returns true for any non-default terminator. The default for newly
+    /// created blocks is `IrTerminator::Unreachable` (uninitialized state),
+    /// which reads as "not terminated" so the standard `ensure_terminator` /
+    /// branch-back-to-merge path can fill it in. Explicit `build_unreachable`
+    /// (after throw/panic) uses the same variant; callers that need to
+    /// distinguish explicit-noreturn from default-uninitialized must consult
+    /// `terminator_explicit` on the block instead.
     pub fn is_terminated(&self) -> bool {
         !matches!(self.terminator, IrTerminator::Unreachable)
     }

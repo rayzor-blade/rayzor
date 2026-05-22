@@ -2589,19 +2589,48 @@ impl<'a> TastToHirContext<'a> {
                                 | TypedExpressionKind::PatternPlaceholder { .. }
                         );
 
-                        let condition = if is_wildcard {
-                            // Variable pattern or wildcard: always matches (condition is guard or true)
-                            if let Some(ref guard) = case.guard {
-                                self.lower_expression(guard)
-                            } else {
-                                // Unconditional match (wildcard without guard)
-                                HirExpr::new(
-                                    HirExprKind::Literal(crate::ir::hir::HirLiteral::Bool(true)),
-                                    self.get_bool_type(),
+                        // Unconditional wildcard (no guard): the body always runs,
+                        // so emitting `if true { body } else { previous }` would
+                        // leave the else-branch in the CFG as dead code. For non-void
+                        // functions whose cases all `return`, that dead else block
+                        // contains the merge-point's `ret void`, which Cranelift then
+                        // codegens as invalid instructions (SIGILL at runtime). Skip
+                        // the `if` wrapper entirely — make the wildcard body the new
+                        // current_expr and continue. Pattern variable bindings (if any)
+                        // are wired up by the var_bindings branch below.
+                        if is_wildcard && case.guard.is_none() {
+                            if !var_bindings.is_empty() {
+                                let mut stmts = Vec::new();
+                                for (name, sym) in &var_bindings {
+                                    stmts.push(HirStatement::Let {
+                                        pattern: HirPattern::Variable {
+                                            name: *name,
+                                            symbol: *sym,
+                                        },
+                                        type_hint: None,
+                                        init: Some(discriminant_expr.clone()),
+                                        is_mutable: false,
+                                    });
+                                }
+                                current_expr = HirExpr::new(
+                                    HirExprKind::Block(HirBlock {
+                                        statements: stmts,
+                                        expr: Some(Box::new(case_body)),
+                                        scope: self.current_scope,
+                                    }),
+                                    expr.expr_type,
                                     self.current_lifetime,
                                     SourceLocation::unknown(),
-                                )
+                                );
+                            } else {
+                                current_expr = case_body;
                             }
+                            continue;
+                        }
+
+                        let condition = if is_wildcard {
+                            // Wildcard with guard: condition is the guard expression
+                            self.lower_expression(case.guard.as_ref().expect("guard checked above"))
                         } else {
                             // Literal value match
                             let case_value = self.lower_expression(&case.case_value);

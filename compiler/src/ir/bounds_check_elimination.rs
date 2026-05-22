@@ -837,6 +837,7 @@ mod tests {
                 source_location: IrSourceLocation::unknown(),
                 predecessors: vec![],
                 metadata: BlockMetadata::default(),
+                terminator_explicit: false,
             },
         );
 
@@ -868,6 +869,7 @@ mod tests {
                 source_location: IrSourceLocation::unknown(),
                 predecessors: vec![bb0, bb2],
                 metadata: BlockMetadata::default(),
+                terminator_explicit: false,
             },
         );
 
@@ -922,6 +924,7 @@ mod tests {
                 source_location: IrSourceLocation::unknown(),
                 predecessors: vec![bb1],
                 metadata: BlockMetadata::default(),
+                terminator_explicit: false,
             },
         );
 
@@ -937,6 +940,7 @@ mod tests {
                 source_location: IrSourceLocation::unknown(),
                 predecessors: vec![bb1],
                 metadata: BlockMetadata::default(),
+                terminator_explicit: false,
             },
         );
 
