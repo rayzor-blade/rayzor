@@ -152,6 +152,19 @@ pub struct CompilationUnit {
     import_class_method_symbols:
         BTreeMap<(crate::tast::SymbolId, crate::tast::InternedString), crate::tast::SymbolId>,
 
+    /// Accumulated interface metadata from imported files. Cross-file
+    /// interface dispatch (`var t:Iface = new Class(); t.method()` in a
+    /// file that imports `Iface`) requires this — otherwise the
+    /// per-file `HirToMirContext` starts empty and method lookup
+    /// silently falls through, dropping the call expression.
+    import_interface_method_names:
+        BTreeMap<crate::tast::SymbolId, Vec<crate::tast::InternedString>>,
+    import_interface_method_return_types:
+        BTreeMap<(crate::tast::SymbolId, crate::tast::InternedString), crate::tast::TypeId>,
+    import_interface_extends: BTreeMap<crate::tast::SymbolId, Vec<crate::tast::SymbolId>>,
+    import_interface_vtables:
+        BTreeMap<(crate::tast::SymbolId, crate::tast::SymbolId), Vec<crate::tast::SymbolId>>,
+
     /// Compiler plugin registry (builtin + HDLL plugins)
     compiler_plugin_registry: CompilerPluginRegistry,
 
@@ -478,6 +491,10 @@ impl CompilationUnit {
             import_class_alloc_sizes_by_name: BTreeMap::new(),
             import_class_type_to_symbol: BTreeMap::new(),
             import_class_method_symbols: BTreeMap::new(),
+            import_interface_method_names: BTreeMap::new(),
+            import_interface_method_return_types: BTreeMap::new(),
+            import_interface_extends: BTreeMap::new(),
+            import_interface_vtables: BTreeMap::new(),
             compiler_plugin_registry: CompilerPluginRegistry::new(),
             hdll_symbols: Vec::new(),
             loaded_hdlls: BTreeSet::new(),
@@ -4467,6 +4484,10 @@ impl CompilationUnit {
             constructor_param_counts,
             external_function_param_types,
             self.import_class_alloc_sizes_by_name.clone(),
+            self.import_interface_method_names.clone(),
+            self.import_interface_method_return_types.clone(),
+            self.import_interface_extends.clone(),
+            self.import_interface_vtables.clone(),
         )
         .map_err(|errors| {
             errors
@@ -4584,6 +4605,22 @@ impl CompilationUnit {
         }
         for (ty, sym) in mir_result.class_type_to_symbol {
             self.import_class_type_to_symbol.insert(ty, sym);
+        }
+
+        // Accumulate interface metadata so subsequent files can resolve
+        // cross-file interface dispatch (variable typed as the interface,
+        // method calls on it, fat-pointer wrapping at construction).
+        for (sym, methods) in mir_result.interface_method_names {
+            self.import_interface_method_names.insert(sym, methods);
+        }
+        for (key, ty) in mir_result.interface_method_return_types {
+            self.import_interface_method_return_types.insert(key, ty);
+        }
+        for (sym, parents) in mir_result.interface_extends {
+            self.import_interface_extends.insert(sym, parents);
+        }
+        for (key, vtable) in mir_result.interface_vtables {
+            self.import_interface_vtables.insert(key, vtable);
         }
 
         // NOTE: extern-only files are handled above (before MIR generation).
