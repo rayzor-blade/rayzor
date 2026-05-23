@@ -2953,8 +2953,42 @@ impl<'a> AstLowering<'a> {
             new_symbol
         };
 
-        // Enter class scope with name
-        let class_scope = self.context.enter_named_scope(ScopeKind::Class, class_name);
+        // Enter class scope with name. On a re-entry (this file is being
+        // compiled a second time after a prior attempt failed and was
+        // queued for retry), reuse the class scope that the first attempt
+        // already populated — class scopes are looked up by scope_id, and
+        // a fresh per-attempt scope means every retry starts with no
+        // visible members. Combined with the cross-file `stdlib_function_map`
+        // not being populated until success, that caused dependent files
+        // (Caller files compiled in the same pass) to bind to nothing and
+        // emit silent-elide MIR. Sticky-scope keeps the SymbolIds stable so
+        // a later retry can fill in the missing function_map entries by
+        // the same key. Mirrors the class-symbol reuse a few lines above.
+        let existing_scope = self
+            .context
+            .symbol_table
+            .get_symbol(class_symbol)
+            .map(|s| s.scope_id)
+            .filter(|sid| {
+                *sid != ScopeId::first()
+                    && *sid != ScopeId::invalid()
+                    && self
+                        .context
+                        .scope_tree
+                        .get_scope(*sid)
+                        .map(|sc| sc.kind == ScopeKind::Class)
+                        .unwrap_or(false)
+            });
+        let (class_scope, reusing_scope) = match existing_scope {
+            Some(sid) => {
+                self.context.current_scope = sid;
+                (sid, true)
+            }
+            None => (
+                self.context.enter_named_scope(ScopeKind::Class, class_name),
+                false,
+            ),
+        };
 
         // Note: The class symbol remains in the parent scope, while its members are in class_scope
         // This is correct because the class name should be accessible from outside
@@ -2968,9 +3002,20 @@ impl<'a> AstLowering<'a> {
         // Push class onto context stack for method resolution
         self.context.class_context_stack.push(class_symbol);
 
-        // Initialize method and field tracking for this class
-        self.class_methods.insert(class_symbol, Vec::new());
-        self.class_fields.insert(class_symbol, Vec::new());
+        // Initialize method and field tracking for this class. On a reused
+        // class scope, keep any prior entries — the per-method lookup
+        // below will find them and skip re-creating symbols.
+        if !reusing_scope {
+            self.class_methods.insert(class_symbol, Vec::new());
+            self.class_fields.insert(class_symbol, Vec::new());
+        } else {
+            self.class_methods
+                .entry(class_symbol)
+                .or_insert_with(Vec::new);
+            self.class_fields
+                .entry(class_symbol)
+                .or_insert_with(Vec::new);
+        }
 
         // Extract metadata flags from @:generic, @:final, @:native, etc.
         let mut symbol_flags = self.extract_metadata_flags(&class_decl.meta, class_symbol);
