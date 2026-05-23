@@ -21,8 +21,11 @@ TOTAL=0
 echo "Building rayzor..."
 cargo build --release -p rayzor 2>&1 | tail -3
 
-# Clear blade cache
+# Clear both BLADE and MIR caches. Stale MIR caches from a previous
+# compiler revision can mask a fix (the test re-runs against the old
+# MIR and shows the pre-fix failure), so we wipe both here.
 rm -f .rayzor/blade/cache/*.blade 2>/dev/null || true
+rm -f .rayzor/cache/*.mir.cache 2>/dev/null || true
 
 echo ""
 echo "Running all .hx tests in $TESTS_DIR"
