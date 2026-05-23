@@ -2420,11 +2420,23 @@ impl<'a> TastToHirContext<'a> {
             } => {
                 // Check if any case has constructor patterns (enum matching)
                 // Note: guards and variable bindings are handled in the if-else chain path
+                // Helper that also recognises Or-of-constructors so
+                // `case A(id) | B(id):` routes through the
+                // constructor-pattern compilation path (and not the
+                // value-equality if-else chain, which can't match enum
+                // constructors at all). Recursion handles nested Ors.
+                fn pattern_contains_constructor(p: &parser::Pattern) -> bool {
+                    match p {
+                        parser::Pattern::Constructor { .. } => true,
+                        parser::Pattern::Or(alts) => alts.iter().any(pattern_contains_constructor),
+                        _ => false,
+                    }
+                }
                 let has_constructor_patterns = cases.iter().any(|case| {
                     matches!(
                         &case.case_value.kind,
                         TypedExpressionKind::PatternPlaceholder { pattern, .. }
-                            if matches!(pattern, parser::Pattern::Constructor { .. })
+                            if pattern_contains_constructor(pattern)
                     )
                     || matches!(
                         &case.case_value.kind,
@@ -4140,6 +4152,22 @@ impl<'a> TastToHirContext<'a> {
                 HirPattern::Wildcard
             }
             parser::Pattern::Null => HirPattern::Wildcard,
+            parser::Pattern::Or(alternatives) => {
+                // Preserve every alternative so MIR's pattern-test path can
+                // emit a real OR (each alternative's discriminant check
+                // bitwise-ORed together) AND the exhaustiveness checker
+                // sees each variant covered. Without this branch the
+                // wildcard fallthrough below collapsed `A | B` into a
+                // wildcard, which both broke exhaustiveness ("missing
+                // variants: B") and caused a SIGILL at runtime because
+                // the supposed-wildcard arm ran on every value but its
+                // body had only been bound for `A`'s field shape.
+                let lowered: Vec<HirPattern> = alternatives
+                    .iter()
+                    .map(|p| self.lower_parser_pattern_to_hir_with_bindings(p, variable_bindings))
+                    .collect();
+                HirPattern::Or(lowered)
+            }
             _ => HirPattern::Wildcard,
         }
     }

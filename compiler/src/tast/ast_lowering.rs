@@ -13648,6 +13648,17 @@ impl<'a> AstLowering<'a> {
                 // Complex patterns that need later compilation
                 self.create_pattern_placeholder_with_bindings(pattern, variable_bindings)
             }
+            Pattern::Or(_) => {
+                // Or patterns (`case A(id) | B(id):`) must preserve all
+                // alternatives so MIR lowering can emit a pattern test
+                // that ORs each alternative's discriminant check. Falling
+                // through to `lower_pattern_to_expression` here would
+                // collapse to the first alternative only — the
+                // exhaustiveness checker would then report missing
+                // variants and (more importantly) the runtime test would
+                // miss every other alternative.
+                self.create_pattern_placeholder_with_bindings(pattern, variable_bindings)
+            }
             Pattern::Var(name) => {
                 // Check if this identifier is actually an enum variant (e.g., "None")
                 // The parser produces Var for bare identifiers like `case None:`

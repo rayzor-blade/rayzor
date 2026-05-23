@@ -1117,7 +1117,30 @@ impl<'a, 'b> RdParser<'a, 'b> {
     }
 
     /// Parse a switch case pattern.
+    /// Parse a case pattern, including or-patterns (`A(id) | B(id)`).
+    /// The parser builds one or more atom patterns separated by `|`; if
+    /// there is more than one, they are combined into `Pattern::Or`.
+    /// Without this, `| B(id)` was silently dropped (the parser parsed
+    /// `A(id)`, saw `|`, errored or recovered, and the second alternative
+    /// was lost — the supposed multi-variant `case` only matched the
+    /// first variant and the others fell through to `default` / no-match).
     fn parse_case_pattern(&mut self) -> Result<Pattern, ParseError> {
+        let first = self.parse_case_pattern_atom()?;
+        if !self.stream.at(TokenKind::Pipe) {
+            return Ok(first);
+        }
+        let mut alternatives = vec![first];
+        while self.stream.eat(TokenKind::Pipe).is_some() {
+            alternatives.push(self.parse_case_pattern_atom()?);
+        }
+        Ok(Pattern::Or(alternatives))
+    }
+
+    /// Parse a single case pattern atom (constructor, variable, literal,
+    /// array, etc.) — anything that does NOT contain an or-pattern.
+    /// `parse_case_pattern` wraps this with `|`-recognition so the atom
+    /// here doesn't need to know about or-patterns.
+    fn parse_case_pattern_atom(&mut self) -> Result<Pattern, ParseError> {
         match self.stream.peek().kind {
             // Underscore wildcard: `case _:`
             TokenKind::Ident if self.stream.current_text() == "_" => {
