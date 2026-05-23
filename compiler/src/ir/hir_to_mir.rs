@@ -9215,11 +9215,15 @@ impl<'a> HirToMirContext<'a> {
 
                             // Check if this is a method with optional params that needs param-count-aware lookup
                             if let Some(mn) = method_name_str {
-                                if (mn == "indexOf" || mn == "lastIndexOf") {
-                                    // Use param-count-aware lookup for indexOf/lastIndexOf
+                                if mn == "indexOf" || mn == "lastIndexOf" || mn == "substr" {
+                                    // Use param-count-aware lookup for overloaded String methods.
+                                    // `substr` has 1-arg (default len) and 2-arg forms registered
+                                    // as separate mappings; without param-count dispatch the
+                                    // generic name lookup matches the wrong arity and the call
+                                    // is lowered against a mismatched signature.
                                     let arg_count = args.len();
                                     debug!(
-                                        "[indexOf/lastIndexOf lookup] method={}, arg_count={}",
+                                        "[String overload lookup] method={}, arg_count={}",
                                         mn, arg_count
                                     );
                                     self.stdlib_mapping

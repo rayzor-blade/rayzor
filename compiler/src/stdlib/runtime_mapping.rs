@@ -1424,6 +1424,11 @@ impl StdlibMapping {
             // String transformations
             map_method!(instance "String", "split" => "haxe_string_split_array", params: 1, returns: primitive,
                 types: &[PtrString, PtrString] => PtrVoid),
+            // substr 1-arg: `s.substr(pos)` — defaults length to string.length - pos
+            // via the String_substr_1 MIR wrapper. Without this entry, the 1-arg form
+            // had no mapping and the dispatcher emitted an unresolved indirect call.
+            map_method!(instance "String", "substr" => "String_substr_1", params: 1, mir_wrapper,
+                types: &[PtrString, I32] => PtrString),
             map_method!(instance "String", "substr" => "haxe_string_substr_ptr", params: 2, returns: primitive,
                 types: &[PtrString, I32, I32] => PtrString),
             // substring uses MIR wrapper that forwards to haxe_string_substring_ptr
