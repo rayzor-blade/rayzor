@@ -851,14 +851,19 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Now emit drop calls and frees
+        // Emit drop+free ONLY for @:derive(Drop) classes. Non-Drop heap
+        // allocations are handled by InsertFreePass, which performs
+        // proper escape analysis (a local value passed to another
+        // constructor — e.g. `var v = new Vocab(); return new BPETokenizer(v, …)`
+        // — is correctly seen as escaping via the constructor arg).
+        // Freeing them here without that analysis caused a use-after-free
+        // on the returned object's captured field.
         for (symbol, ir_id) in to_free {
-            if !self.is_terminated() {
-                // @:derive(Drop) — call drop() before Free
+            if !self.is_terminated() && self.get_drop_class_for_ir(ir_id).is_some() {
                 self.maybe_emit_drop_call(ir_id);
                 self.builder.build_free(ir_id);
                 trace!(
-                    "Drop: Freed {:?} ({:?}) in cleanup_all_scopes",
+                    "Drop: Freed {:?} ({:?}) in cleanup_all_scopes (Drop class)",
                     symbol,
                     ir_id
                 );
