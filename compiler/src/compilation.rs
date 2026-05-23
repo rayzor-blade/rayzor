@@ -3142,7 +3142,7 @@ impl CompilationUnit {
     /// During renumbering, some refs couldn't be resolved because the target module hadn't
     /// been loaded yet. Now all modules are loaded and stdlib_function_name_map is complete.
     fn fixup_stale_cross_module_refs(&mut self) {
-        use crate::ir::IrInstruction;
+        use crate::ir::{IrInstruction, IrTerminator};
 
         // Build a set of all valid function IDs across all import modules
         let mut all_func_ids: std::collections::BTreeSet<crate::ir::IrFunctionId> =
@@ -3150,6 +3150,42 @@ impl CompilationUnit {
         for m in &self.import_mir_modules {
             all_func_ids.extend(m.functions.keys().copied());
             all_func_ids.extend(m.extern_functions.keys().copied());
+        }
+
+        // Also build a "forward-ref stub → name" map. A stub is an
+        // `IrFunction` registered by `register_stdlib_mir_forward_ref` while
+        // lowering a user file whose dispatch target wasn't yet compiled
+        // (e.g. `Caller.probe` calls `h.findMeta` before `Holder.hx`'s
+        // retry pass produced the real findMeta MIR). The stub exists in
+        // `module.functions` (so `all_func_ids` contains it) but has
+        // exactly one empty entry block with an `Unreachable` terminator
+        // — it's a placeholder, not a callable. Once `Holder.hx`'s real
+        // findMeta is registered in `stdlib_function_name_map`, we can
+        // rewrite any CallDirect to the stub so it targets the real
+        // function instead. Without this, the call survives merge as a
+        // dispatch into the empty stub and the runtime jumps into
+        // uninitialised code (UD2 / SIGILL).
+        //
+        // Key: name carried by the stub IrFunction (the qualified name
+        // passed to `register_stdlib_mir_forward_ref`, e.g.
+        // `pkg.Holder.findMeta`). Value: the stub's renumbered func_id.
+        let mut stub_ids_by_name: std::collections::BTreeMap<String, crate::ir::IrFunctionId> =
+            std::collections::BTreeMap::new();
+        for m in &self.import_mir_modules {
+            for (id, func) in &m.functions {
+                let is_empty_stub = func.cfg.blocks.len() == 1
+                    && func.cfg.blocks.values().all(|b| {
+                        b.instructions.is_empty()
+                            && matches!(b.terminator, IrTerminator::Unreachable)
+                    });
+                if is_empty_stub {
+                    let name = func
+                        .qualified_name
+                        .clone()
+                        .unwrap_or_else(|| func.name.clone());
+                    stub_ids_by_name.insert(name, *id);
+                }
+            }
         }
 
         for module in &mut self.import_mir_modules {
@@ -3162,16 +3198,46 @@ impl CompilationUnit {
                             IrInstruction::CallDirect { func_id, .. }
                             | IrInstruction::FunctionRef { func_id, .. }
                             | IrInstruction::MakeClosure { func_id, .. } => {
-                                // Skip if already valid
-                                if all_func_ids.contains(func_id) {
+                                // First, the original case: func_id refers
+                                // to a function that doesn't exist in any
+                                // merged module — resolve via name.
+                                if !all_func_ids.contains(func_id) {
+                                    if let Some(name) = ext_names.get(func_id) {
+                                        if let Some(&current_id) =
+                                            self.stdlib_function_name_map.get(name)
+                                        {
+                                            *func_id = current_id;
+                                        }
+                                    }
                                     continue;
                                 }
-                                // Try to resolve via external_function_names
-                                if let Some(name) = ext_names.get(func_id) {
-                                    if let Some(&current_id) =
-                                        self.stdlib_function_name_map.get(name)
+
+                                // New case: func_id is a forward-ref stub
+                                // (empty body, registered by name). If a
+                                // real implementation has been registered
+                                // under the same qualified name, redirect
+                                // the call to it. Otherwise leave as-is
+                                // (the call will fault at runtime, but
+                                // that surfaces the missing-impl error
+                                // rather than silently dispatching to an
+                                // unrelated function — exactly what the
+                                // "as long as we are not routing to the
+                                // wrong function" constraint asks for).
+                                if let Some(stub_name) =
+                                    stub_ids_by_name.iter().find_map(|(n, sid)| {
+                                        if sid == func_id {
+                                            Some(n.as_str())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                {
+                                    if let Some(&real_id) =
+                                        self.stdlib_function_name_map.get(stub_name)
                                     {
-                                        *func_id = current_id;
+                                        if real_id != *func_id {
+                                            *func_id = real_id;
+                                        }
                                     }
                                 }
                             }
