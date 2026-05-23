@@ -7943,8 +7943,17 @@ impl<'a> HirToMirContext<'a> {
 
                 // Check if this symbol is a function reference (local or external)
                 if let Some(func_id) = self.get_function_id(symbol) {
-                    // Create a function pointer constant for static methods
-                    return self.builder.build_function_ptr(func_id);
+                    // Use FunctionRef (not build_function_ptr / IrValue::Function).
+                    // The cranelift backend's CallIndirect path unifies on
+                    // closure objects: it loads fn_ptr from *(reg + 0) and
+                    // env_ptr from *(reg + 8). FunctionRef wraps the bare
+                    // function in exactly that {fn_ptr, env_ptr=null}
+                    // layout, so an indirect call against `var f = static_fn`
+                    // dereferences valid pointers. build_function_ptr only
+                    // produces the raw fn_addr — an indirect call then
+                    // reads the first 16 bytes of the function's code as
+                    // "fn_ptr, env_ptr" and SIGSEGVs.
+                    return self.builder.build_function_ref(func_id);
                 }
 
                 // IMPORTANT: If we're inside a lambda and this is a captured variable,
