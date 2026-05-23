@@ -660,6 +660,35 @@ impl<'a, 'b> RdParser<'a, 'b> {
         })
     }
 
+    /// Parse a single `for (...)` clause used inside a comprehension —
+    /// no body, no surrounding statement context. Supports both
+    /// `for (x in xs)` and `for (k => v in map)`. Returns the
+    /// `ComprehensionFor` so the caller can stack multiple clauses
+    /// (nested comprehensions: `[for (x in xs) for (y in ys) x + y]`).
+    fn parse_comprehension_for(&mut self) -> Result<ComprehensionFor, ParseError> {
+        let start = self.stream.current_offset();
+        self.stream.expect(TokenKind::KwFor)?;
+        self.stream.expect(TokenKind::LParen)?;
+        let first_name = self.stream.current_text().to_string();
+        self.stream.advance();
+        let (var, key_var) = if self.stream.eat(TokenKind::FatArrow).is_some() {
+            let value_name = self.stream.current_text().to_string();
+            self.stream.advance();
+            (value_name, Some(first_name))
+        } else {
+            (first_name, None)
+        };
+        self.stream.expect(TokenKind::KwIn)?;
+        let iter = self.parse_expression()?;
+        let end = self.stream.expect(TokenKind::RParen)?;
+        Ok(ComprehensionFor {
+            var,
+            key_var,
+            iter,
+            span: Span::new(start, end.end),
+        })
+    }
+
     fn parse_for_expr(&mut self) -> Result<Expr, ParseError> {
         let start = self.stream.current_offset();
         self.stream.expect(TokenKind::KwFor)?;
@@ -1293,6 +1322,43 @@ impl<'a, 'b> RdParser<'a, 'b> {
             let end = self.stream.expect(TokenKind::RBracket)?;
             return Ok(Expr {
                 kind: ExprKind::Array(Vec::new()),
+                span: Span::new(start, end.end),
+            });
+        }
+
+        // Array/map comprehension: `[for (...) expr]` / `[for (...) k => v]`.
+        // Without this, a leading `for` was just parsed as a single element of
+        // type ExprKind::For, and the resulting AST was `Array([For{...}])` —
+        // TAST then lowered as `ArrayLiteral { elements: [for_expr] }`, never
+        // hit the `ArrayComprehension` lowering, and the desugaring to
+        // `_tmp[idx]=expr; idx+=1` never ran. The visible failure was a
+        // zero-length result array.
+        if self.stream.at(TokenKind::KwFor) {
+            let mut for_parts = Vec::new();
+            // Parse one or more `for (...)` clauses (nested comprehensions).
+            while self.stream.at(TokenKind::KwFor) {
+                for_parts.push(self.parse_comprehension_for()?);
+            }
+            // Body expression that yields each element (or `k => v` for map).
+            let body = self.parse_expression()?;
+            if self.stream.eat(TokenKind::FatArrow).is_some() {
+                let value = self.parse_expression()?;
+                let end = self.stream.expect(TokenKind::RBracket)?;
+                return Ok(Expr {
+                    kind: ExprKind::MapComprehension {
+                        for_parts,
+                        key: Box::new(body),
+                        value: Box::new(value),
+                    },
+                    span: Span::new(start, end.end),
+                });
+            }
+            let end = self.stream.expect(TokenKind::RBracket)?;
+            return Ok(Expr {
+                kind: ExprKind::ArrayComprehension {
+                    for_parts,
+                    expr: Box::new(body),
+                },
                 span: Span::new(start, end.end),
             });
         }

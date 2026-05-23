@@ -3682,6 +3682,38 @@ impl<'a> HirToMirContext<'a> {
                                     }
                                 }
                             }
+
+                            // Final fallback: the parent's TypeId may have been
+                            // renumbered (e.g. across compilation contexts where
+                            // type_table entries get rebuilt) but `class_parent_map`
+                            // is keyed by the child's stable SymbolId and stores
+                            // the parent's stable SymbolId. Resolve through that
+                            // to the parent's name, then constructor_name_map.
+                            // Without this fallback, `class MyException extends
+                            // Exception { new(m) { super(m); } }` failed with
+                            // "Parent constructor not found for TypeId 237" —
+                            // the TAST-assigned parent TypeId no longer existed
+                            // in type_table by the time the constructor was
+                            // lowered, but `haxe.Exception` was still in
+                            // `constructor_name_map`.
+                            if let Some(&parent_sym) = self.class_parent_map.get(&class_symbol) {
+                                if let Some(sym_info) = self.symbol_table.get_symbol(parent_sym) {
+                                    if let Some(qual_name) = sym_info
+                                        .qualified_name
+                                        .and_then(|q| self.string_interner.get(q))
+                                    {
+                                        if let Some(&fid) = self.constructor_name_map.get(qual_name)
+                                        {
+                                            return Some(fid);
+                                        }
+                                    }
+                                    if let Some(name) = self.string_interner.get(sym_info.name) {
+                                        if let Some(&fid) = self.constructor_name_map.get(name) {
+                                            return Some(fid);
+                                        }
+                                    }
+                                }
+                            }
                             None
                         });
 
@@ -34059,17 +34091,41 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Record parent class relationship
+        // Record parent class relationship.
+        //
+        // `class.extends` may be one of two flavors of `TypeId`:
+        //  (a) a TAST type_id that resolves through `type_table`, or
+        //  (b) a *canonicalised* symbol-derived id produced in
+        //      `tast_to_hir.rs` as `TypeId::from_raw(parent_sym.as_raw())`
+        //      for cross-context stability.
+        // Form (b) doesn't lookup in `type_table` — we must convert it
+        // back to a `SymbolId` and consult the symbol table directly.
+        // Without the (b) fallback, `class MyException extends Exception`
+        // failed at super-call lowering because the registration here
+        // silently skipped the `class_parent_map.insert` (parent_symbol
+        // resolved to None), and the constructor body's name-based
+        // lookup also bottomed out.
         if let Some(extends_type_id) = class.extends {
             let parent_symbol = {
                 let type_table = self.type_table;
-                type_table.get(extends_type_id).and_then(|t| {
-                    if let TypeKind::Class { symbol_id, .. } = &t.kind {
-                        Some(*symbol_id)
-                    } else {
-                        None
-                    }
-                })
+                type_table
+                    .get(extends_type_id)
+                    .and_then(|t| match &t.kind {
+                        TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        // Form (b): treat raw bits as a SymbolId.
+                        let candidate = SymbolId::from_raw(extends_type_id.as_raw());
+                        self.symbol_table.get_symbol(candidate).and_then(|sym| {
+                            use crate::tast::SymbolKind;
+                            if matches!(sym.kind, SymbolKind::Class) {
+                                Some(candidate)
+                            } else {
+                                None
+                            }
+                        })
+                    })
             };
             if let Some(parent_sym) = parent_symbol {
                 self.class_parent_map.insert(class.symbol_id, parent_sym);

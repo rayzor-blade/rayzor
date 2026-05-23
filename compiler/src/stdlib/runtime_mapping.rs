@@ -3984,8 +3984,13 @@ impl StdlibMapping {
 
         let mappings = vec![
             // haxe.Json.parse(text:String):Dynamic
+            // arg is a real Haxe String — declare it as PtrString so the
+            // auto-box-to-Dynamic path (triggered by Ptr(U8) parameters)
+            // does NOT wrap the HaxeString* in a DynamicValue; the runtime
+            // dereferences the pointer as `*const HaxeString` and would
+            // SIGSEGV if it received a Dynamic box instead.
             map_method!(static "Json", "parse" => "haxe_json_parse", params: 1, returns: primitive,
-                types: &[PtrU8] => PtrU8),
+                types: &[PtrString] => PtrU8),
             // haxe.Json.stringify(value:Dynamic, ?replacer, ?space):String
             map_method!(static "Json", "stringify" => "haxe_json_stringify", params: 1, returns: primitive,
                 types: &[PtrU8] => PtrU8),
@@ -3996,7 +4001,7 @@ impl StdlibMapping {
             // `haxe_json_parse` shim. Same shape as Phase 1's `Json`
             // shadowing fix, on the runtime-mapping side.
             map_method!(static "haxe.format.JsonParser", "parse" => "haxe_json_parse", params: 1, returns: primitive,
-                types: &[PtrU8] => PtrU8),
+                types: &[PtrString] => PtrU8),
             // haxe.format.JsonPrinter.print(o:Dynamic, ?replacer, ?space):String
             map_method!(static "haxe.format.JsonPrinter", "print" => "haxe_json_stringify", params: 1, returns: primitive,
                 types: &[PtrU8] => PtrU8),
