@@ -2175,12 +2175,70 @@ impl<'a> AstLowering<'a> {
                 let enum_name = self.context.intern_string(&enum_decl.name);
 
                 // Check if this enum already exists in the root scope
-                if self
+                if let Some(existing) = self
                     .context
                     .symbol_table
                     .lookup_symbol(ScopeId::first(), enum_name)
-                    .is_some()
                 {
+                    let existing_id = existing.id;
+                    // The symbol may have been created as `SymbolKind::Class` by
+                    // earlier import resolution (e.g. a sibling file imported
+                    // `pkg.X.Y` before `Y`'s declaration was lowered, so the
+                    // namespace resolver registered `Y` as a generic Class
+                    // placeholder). Fix it to Enum now that we know the actual
+                    // declaration kind — otherwise the second compile of the
+                    // declaring file's class methods would resolve `Y` as a
+                    // Class through this stale entry, returning `Ptr(Void)`
+                    // from MIR `convert_type` instead of the boxed-enum I64
+                    // discriminant the first compile produced. The two compiles
+                    // would then have different signatures for the same method
+                    // and cross-file callers would dispatch to the wrong one.
+                    // Mirrors the Class-to-Abstract fixup a few cases below.
+                    let needs_fix = self
+                        .context
+                        .symbol_table
+                        .get_symbol(existing_id)
+                        .map(|s| s.kind == crate::tast::SymbolKind::Class)
+                        .unwrap_or(false);
+                    if needs_fix {
+                        if let Some(sym) = self.context.symbol_table.get_symbol_mut(existing_id) {
+                            sym.kind = crate::tast::SymbolKind::Enum;
+                        }
+                        let enum_type = self
+                            .context
+                            .type_table
+                            .borrow_mut()
+                            .create_enum_type(existing_id, Vec::new());
+                        self.context
+                            .symbol_table
+                            .update_symbol_type(existing_id, enum_type);
+                        self.context
+                            .symbol_table
+                            .register_type_symbol_mapping(enum_type, existing_id);
+
+                        // Register variants under the corrected enum symbol.
+                        for variant in &enum_decl.constructors {
+                            let variant_name = self.context.intern_string(&variant.name);
+                            let already_present = self
+                                .context
+                                .symbol_table
+                                .lookup_symbol(ScopeId::first(), variant_name)
+                                .is_some();
+                            if !already_present {
+                                let variant_symbol =
+                                    self.context.symbol_table.create_enum_variant_in_scope(
+                                        variant_name,
+                                        ScopeId::first(),
+                                        existing_id,
+                                    );
+                                self.context
+                                    .scope_tree
+                                    .get_scope_mut(ScopeId::first())
+                                    .expect("Root scope should exist")
+                                    .add_symbol(variant_symbol, variant_name);
+                            }
+                        }
+                    }
                     return Ok(());
                 }
 
