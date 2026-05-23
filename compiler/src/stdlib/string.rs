@@ -24,6 +24,10 @@ pub fn build_string_type(builder: &mut MirBuilder) {
     // MIR wrappers for charAt and substring
     build_string_charat_wrapper(builder);
     build_string_substring_wrapper(builder);
+    // substr has 1-arg and 2-arg forms. The 2-arg form is mapped directly
+    // to haxe_string_substr_ptr in runtime_mapping. The 1-arg form needs
+    // a wrapper that defaults length to (string.length - pos).
+    build_string_substr_1_wrapper(builder);
 }
 
 /// Declare extern runtime functions for string operations
@@ -95,6 +99,17 @@ fn declare_string_externs(builder: &mut MirBuilder) {
         .param("start_index", i32_ty.clone())
         .param("end_index", i32_ty.clone())
         .returns(string_ptr_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // extern fn haxe_string_length(s: *String) -> i64
+    // Returns the byte length of the string. Used by the 1-arg substr
+    // wrapper to compute the default trailing length.
+    let func_id = builder
+        .begin_function("haxe_string_length")
+        .param("s", string_ptr_ty.clone())
+        .returns(IrType::I64)
         .calling_convention(CallingConvention::C)
         .build();
     builder.mark_as_extern(func_id);
@@ -377,6 +392,57 @@ fn build_string_charat_wrapper(builder: &mut MirBuilder) {
         .get_function_by_name("haxe_string_char_at_ptr")
         .expect("haxe_string_char_at_ptr not found");
     let result = builder.call(extern_id, vec![s, index]).unwrap();
+
+    builder.ret(Some(result));
+}
+
+/// Build: fn String_substr_1(s: *String, pos: i32) -> *String
+/// MIR wrapper for the 1-arg form `s.substr(pos)`. The runtime function
+/// `haxe_string_substr_ptr(s, pos, len)` treats `len < 0` as "empty
+/// string" (matching SubStr semantics from negative lengths), so we
+/// cannot pass a sentinel — we must compute `string.length - pos` and
+/// forward that as the explicit length so the call returns the tail.
+///
+/// Without this wrapper, calls like `s.substr(pos)` had no stdlib
+/// mapping entry (only `params: 2` was registered), so the dispatcher
+/// fell through and the call lowered to an indirect call against an
+/// unresolved function — SIGILL at runtime.
+fn build_string_substr_1_wrapper(builder: &mut MirBuilder) {
+    let string_ptr_ty = IrType::Ptr(Box::new(IrType::String));
+    let i32_ty = IrType::I32;
+
+    let func_id = builder
+        .begin_function("String_substr_1")
+        .param("s", string_ptr_ty.clone())
+        .param("pos", i32_ty.clone())
+        .returns(string_ptr_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let s = builder.get_param(0);
+    let pos = builder.get_param(1);
+
+    // length = haxe_string_length(s) — returns i64
+    let length_fn = builder
+        .get_function_by_name("haxe_string_length")
+        .expect("haxe_string_length not found");
+    let length_i64 = builder.call(length_fn, vec![s]).unwrap();
+    let length_i32 = builder.cast(length_i64, IrType::I64, IrType::I32);
+    // remaining = length - pos (the haxe_string_substr_ptr runtime
+    // function clamps to bounds internally if pos > length, but if
+    // length - pos goes negative the runtime returns empty — that's
+    // the correct Haxe substr semantics for pos past the end).
+    let remaining = builder.sub(length_i32, pos, IrType::I32);
+
+    let extern_id = builder
+        .get_function_by_name("haxe_string_substr_ptr")
+        .expect("haxe_string_substr_ptr not found");
+    let result = builder.call(extern_id, vec![s, pos, remaining]).unwrap();
 
     builder.ret(Some(result));
 }
