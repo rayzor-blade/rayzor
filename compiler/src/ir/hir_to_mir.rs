@@ -4875,6 +4875,19 @@ impl<'a> HirToMirContext<'a> {
                         {
                             return Some(unboxed);
                         }
+                        // Interface return wrapping: if the function's return
+                        // type is an interface and the expression has the
+                        // implementing class type, wrap the raw class pointer
+                        // in a fat pointer so the caller can vtable-dispatch.
+                        // The auto-wrap in `lower_expression` only fires when
+                        // `expr.ty` is interface — for `return classInstance`
+                        // when the declared return type is the interface,
+                        // `expr.ty` stays as the class, so we wrap here.
+                        let (wrapped, did_wrap) =
+                            self.maybe_wrap_for_interface(val, e.ty, fn_ret_ty);
+                        if did_wrap {
+                            return Some(wrapped);
+                        }
                     }
                     result
                 });
@@ -31664,9 +31677,17 @@ impl<'a> HirToMirContext<'a> {
         };
         self.builder.build_store(fat_ptr, obj_as_i64);
 
-        // Store function pointers for each interface method
+        // Store function pointers for each interface method.
+        // Cross-file vtables (the class lives in one file, the constructor
+        // call lives in another) need to find the method's IrFunctionId in
+        // `external_function_map` — the per-context `function_map` only has
+        // functions lowered in *this* file.
         for (i, method_sym) in vtable.iter().enumerate() {
-            let func_id_opt = self.function_map.get(method_sym).copied();
+            let func_id_opt = self
+                .function_map
+                .get(method_sym)
+                .copied()
+                .or_else(|| self.external_function_map.get(method_sym).copied());
             if let Some(func_id) = func_id_opt {
                 let fn_ref = self.builder.build_function_ref(func_id)?;
                 let offset_val = self
@@ -35023,6 +35044,14 @@ pub struct MirLoweringResult {
     /// Field SymbolId → class name string. Used by BLADE cache to store field entries
     /// with class names that survive across compilation contexts (where TypeIds differ).
     pub field_class_names: BTreeMap<SymbolId, String>,
+    /// Interface metadata — accumulated across files so cross-file interface
+    /// dispatch (e.g. `var t:Tokenizer = ...; t.method()` in a file that
+    /// imports the interface declared elsewhere) can resolve methods, look
+    /// up vtable layout, and wrap class pointers in interface fat pointers.
+    pub interface_method_names: BTreeMap<SymbolId, Vec<InternedString>>,
+    pub interface_method_return_types: BTreeMap<(SymbolId, InternedString), TypeId>,
+    pub interface_extends: BTreeMap<SymbolId, Vec<SymbolId>>,
+    pub interface_vtables: BTreeMap<(SymbolId, SymbolId), Vec<SymbolId>>,
     /// Non-fatal diagnostics from the lowering pass (e.g., exhaustiveness warnings)
     pub diagnostics: Vec<diagnostics::Diagnostic>,
 }
@@ -35048,6 +35077,10 @@ pub fn lower_hir_to_mir_with_function_map(
     external_constructor_param_counts: BTreeMap<IrFunctionId, usize>,
     external_function_param_types: BTreeMap<IrFunctionId, Vec<IrType>>,
     external_class_alloc_sizes_by_name: BTreeMap<String, u64>,
+    external_interface_method_names: BTreeMap<SymbolId, Vec<InternedString>>,
+    external_interface_method_return_types: BTreeMap<(SymbolId, InternedString), TypeId>,
+    external_interface_extends: BTreeMap<SymbolId, Vec<SymbolId>>,
+    external_interface_vtables: BTreeMap<(SymbolId, SymbolId), Vec<SymbolId>>,
 ) -> Result<MirLoweringResult, Vec<LoweringError>> {
     let type_table_ref = type_table.borrow();
     let mut context = HirToMirContext::new(
@@ -35082,6 +35115,15 @@ pub fn lower_hir_to_mir_with_function_map(
 
     // Seed name-keyed alloc sizes from previously compiled imports (stable across contexts)
     context.class_alloc_sizes_by_name = external_class_alloc_sizes_by_name;
+
+    // Seed interface metadata from previously compiled imports so cross-file
+    // interface dispatch (assignment to interface-typed var, vtable-based call,
+    // fat-pointer wrap) can find the method ordering and vtable for interfaces
+    // declared in other files.
+    context.interface_method_names = external_interface_method_names;
+    context.interface_method_return_types = external_interface_method_return_types;
+    context.interface_extends = external_interface_extends;
+    context.interface_vtables = external_interface_vtables;
 
     // Also populate from the TypeId-keyed map + symbol table.
     for (&type_id, &size) in &context.class_alloc_sizes {
@@ -35179,6 +35221,10 @@ pub fn lower_hir_to_mir_with_function_map(
         class_method_symbols: context.class_method_symbols,
         class_type_to_symbol: context.class_type_to_symbol,
         field_class_names: context.field_class_names,
+        interface_method_names: context.interface_method_names,
+        interface_method_return_types: context.interface_method_return_types,
+        interface_extends: context.interface_extends,
+        interface_vtables: context.interface_vtables,
         diagnostics: context.diagnostics,
     })
 }
