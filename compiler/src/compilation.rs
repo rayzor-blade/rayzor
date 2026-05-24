@@ -2868,14 +2868,53 @@ impl CompilationUnit {
                 }
                 true
             }
-            Err(_e) => {
+            Err(errors) => {
+                // Surface import failures via the regular diagnostic
+                // pipeline. Previously these went only to debug-log and the
+                // caller saw "false" — so a parse/type error in an imported
+                // file (e.g. `var x = 1e-5` failing to lex as a Float)
+                // silently produced an empty MIR module. Downstream lookups
+                // for the imported class's methods then returned forward-ref
+                // stubs that ended in `unreachable`, surfacing as a SIGILL
+                // / silent exit at unrelated call sites in the importer.
                 debug!(
                     "[IMPORT_LOAD] Failed to compile {}: {} error(s)",
                     name,
-                    _e.len()
+                    errors.len()
                 );
-                for e in &_e {
+                for e in &errors {
                     debug!("  - {}", e.message);
+                    // Convert CompilationError → Diagnostic and add to the
+                    // collected pool so the runner prints it.
+                    let span = if e.location.is_valid() {
+                        let pos = diagnostics::SourcePosition::new(
+                            e.location.line as usize,
+                            e.location.column as usize,
+                            e.location.byte_offset as usize,
+                        );
+                        let end_pos = diagnostics::SourcePosition::new(
+                            e.location.line as usize,
+                            (e.location.column + 1) as usize,
+                            (e.location.byte_offset + 1) as usize,
+                        );
+                        diagnostics::SourceSpan::new(pos, end_pos, diagnostics::FileId::new(0))
+                    } else {
+                        diagnostics::SourceSpan::new(
+                            diagnostics::SourcePosition::new(0, 0, 0),
+                            diagnostics::SourcePosition::new(0, 1, 1),
+                            diagnostics::FileId::new(0),
+                        )
+                    };
+                    self.collected_diagnostics.push(diagnostics::Diagnostic {
+                        severity: diagnostics::DiagnosticSeverity::Error,
+                        code: Some(format!("IMPORT[{}]", name)),
+                        message: format!("imported file {}: {}", name, e.message),
+                        span,
+                        labels: Vec::new(),
+                        suggestions: Vec::new(),
+                        notes: Vec::new(),
+                        help: Vec::new(),
+                    });
                 }
                 false
             }
