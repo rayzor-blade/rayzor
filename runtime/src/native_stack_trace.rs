@@ -59,6 +59,58 @@ struct FunctionSourceInfo {
 static SOURCE_FILE_CACHE: LazyLock<RwLock<std::collections::HashMap<String, Vec<String>>>> =
     LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
 
+/// Cache of full source file contents: path → bytes.
+/// Used by the ariadne renderer, which needs the raw source to draw
+/// `(file_name, byte_range)` labels.
+static SOURCE_CONTENT_CACHE: LazyLock<RwLock<std::collections::HashMap<String, String>>> =
+    LazyLock::new(|| RwLock::new(std::collections::HashMap::new()));
+
+/// Look up the full raw content of a source file, reading and caching on miss.
+/// Returns empty string on failure.
+fn fetch_source_content(path: &str) -> String {
+    if path == "<unknown>" {
+        return String::new();
+    }
+    if let Ok(cache) = SOURCE_CONTENT_CACHE.read() {
+        if let Some(content) = cache.get(path) {
+            return content.clone();
+        }
+    }
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    if !content.is_empty() {
+        if let Ok(mut cache) = SOURCE_CONTENT_CACHE.write() {
+            cache.insert(path.to_string(), content.clone());
+        }
+    }
+    content
+}
+
+/// Resolve a (1-based line, 1-based column) pair to a byte offset within
+/// `content`. Returns None when the position is out of range.
+fn line_col_to_byte_offset(content: &str, line: u32, column: u32) -> Option<usize> {
+    if line == 0 {
+        return None;
+    }
+    let target_line = (line as usize).saturating_sub(1);
+    let mut current_line = 0usize;
+    let mut line_start = 0usize;
+    for (idx, ch) in content.char_indices() {
+        if current_line == target_line {
+            let col = (column.saturating_sub(1)) as usize;
+            return Some(line_start + col);
+        }
+        if ch == '\n' {
+            current_line += 1;
+            line_start = idx + 1;
+        }
+    }
+    if current_line == target_line {
+        let col = (column.saturating_sub(1)) as usize;
+        return Some(line_start + col);
+    }
+    None
+}
+
 /// Look up a source line from the cache, reading the file if necessary.
 /// Returns the raw (un-trimmed) line content, or empty string on failure.
 fn fetch_source_line(path: &str, line: u32) -> String {
@@ -311,6 +363,12 @@ pub extern "C" fn rayzor_update_call_frame_location(line: u32, column: u32) {
 
 /// Capture the current shadow call stack as a formatted string.
 /// Returns entries in reverse order (most recent call first).
+///
+/// Each frame is rendered through ariadne (the same formatter the
+/// compiler diagnostics use), so exception stack traces are visually
+/// consistent with compile-time errors. Frames whose source content
+/// can't be read fall back to a single-line `Called from X (file:l:c)`
+/// header so the trace still says something useful.
 pub fn capture_shadow_stack() -> String {
     SHADOW_STACK.with(|stack| {
         let stack = stack.borrow();
@@ -365,61 +423,93 @@ pub fn capture_shadow_stack() -> String {
                     result.push('\n');
                 }
 
-                result.push_str("Called from ");
-                result.push_str(&info.qualified_name);
-
-                if line > 0 {
-                    let filename = info
-                        .source_file
-                        .rsplit('/')
-                        .next()
-                        .unwrap_or(&info.source_file);
-                    // file:line:col — recognized as a clickable link by editors
-                    result.push_str(" (");
-                    result.push_str(filename);
-                    result.push(':');
-                    result.push_str(&line.to_string());
-                    if column > 0 {
-                        result.push(':');
-                        result.push_str(&column.to_string());
-                    }
-                    result.push(')');
-
-                    // Fetch the source line (may differ from the pre-cached snippet if the
-                    // runtime override points to a different line)
-                    let snippet = if frame.line > 0 && frame.line != info.line {
-                        fetch_source_line(&info.source_file, line)
-                    } else {
-                        info.source_snippet.clone()
-                    };
-
-                    if !snippet.is_empty() {
-                        let line_str = line.to_string();
-                        result.push('\n');
-                        let pad = 4usize.saturating_sub(line_str.len());
-                        for _ in 0..pad {
-                            result.push(' ');
-                        }
-                        result.push_str(&line_str);
-                        result.push_str(" | ");
-                        result.push_str(snippet.trim_end());
-
-                        if column > 0 {
-                            result.push('\n');
-                            result.push_str("     | ");
-                            let display_col = (column as usize).saturating_sub(1);
-                            for _ in 0..display_col {
-                                result.push(' ');
-                            }
-                            result.push('^');
-                        }
-                    }
-                }
+                let frame_str = render_frame_ariadne(info, line, column);
+                result.push_str(&frame_str);
             }
         }
 
         result
     })
+}
+
+/// Render a single stack frame through ariadne. Falls back to a plain
+/// `Called from X (file:line:col)` header when the source file can't be
+/// read (e.g. for stdlib functions whose sources aren't on disk relative
+/// to the cwd).
+fn render_frame_ariadne(info: &FunctionSourceInfo, line: u32, column: u32) -> String {
+    use ariadne::{Color, Config, Label, Report, ReportKind, Source};
+
+    let filename: &str = info
+        .source_file
+        .rsplit('/')
+        .next()
+        .unwrap_or(&info.source_file);
+
+    let header = if line > 0 && column > 0 {
+        format!(
+            "Called from {} ({}:{}:{})",
+            info.qualified_name, filename, line, column
+        )
+    } else if line > 0 {
+        format!(
+            "Called from {} ({}:{})",
+            info.qualified_name, filename, line
+        )
+    } else {
+        format!("Called from {}", info.qualified_name)
+    };
+
+    // Without a resolvable line we can't draw a frame; return the header
+    // and let the caller stack frames in plain text.
+    if line == 0 {
+        return header;
+    }
+
+    let content = fetch_source_content(&info.source_file);
+    if content.is_empty() {
+        // Source file unavailable — keep at least the header + snippet line
+        // that was pre-cached at registration time so the trace still says
+        // *something* about the call site.
+        let snippet = if !info.source_snippet.is_empty() {
+            info.source_snippet.clone()
+        } else {
+            fetch_source_line(&info.source_file, line)
+        };
+        if snippet.is_empty() {
+            return header;
+        }
+        return format!("{}\n   {} | {}", header, line, snippet.trim_end());
+    }
+
+    let offset = match line_col_to_byte_offset(&content, line, column.max(1)) {
+        Some(o) => o.min(content.len().saturating_sub(1)),
+        None => return header,
+    };
+    let end = (offset + 1).min(content.len());
+
+    let label = format!("Called from {}", info.qualified_name);
+
+    let mut builder = Report::<(&str, std::ops::Range<usize>)>::build(
+        ReportKind::Custom("trace", Color::Cyan),
+        filename,
+        offset,
+    )
+    .with_config(Config::default().with_color(true).with_compact(true));
+    builder = builder.with_label(
+        Label::new((filename, offset..end))
+            .with_message(label)
+            .with_color(Color::Cyan),
+    );
+
+    let report = builder.finish();
+    let mut buf: Vec<u8> = Vec::new();
+    if report
+        .write((filename, Source::from(content.as_str())), &mut buf)
+        .is_err()
+    {
+        return header;
+    }
+    String::from_utf8(buf).unwrap_or(header)
 }
 
 // ============================================================================
