@@ -1220,7 +1220,11 @@ fn run_file(
     let mut config = TieredConfig::from_preset(preset.to_tier_preset());
     config.verbosity = if verbose { 2 } else { 0 };
     config.start_interpreted = false; // Start with JIT for immediate execution
-    config.enable_stack_traces = false;
+    // In release mode, suppress stack-trace instrumentation overhead even if
+    // the preset enables it. Debug runs honour the preset.
+    if release {
+        config.enable_stack_traces = false;
+    }
 
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)?;
 

@@ -613,7 +613,7 @@ impl TierPreset {
                 start_interpreted: true,
                 bailout_strategy: BailoutStrategy::Quick,
                 enable_tier_promotion: true,
-                enable_stack_traces: false, // TEMP: disabled to test global store bug
+                enable_stack_traces: true,
             },
 
             TierPreset::Server => TieredConfig {
