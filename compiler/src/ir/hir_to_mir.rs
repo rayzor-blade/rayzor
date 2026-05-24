@@ -18709,6 +18709,38 @@ impl<'a> HirToMirContext<'a> {
                 let mut lhs_reg = self.lower_expression(lhs)?;
                 let mut rhs_reg = self.lower_expression(rhs)?;
 
+                // Auto-unbox Null<T> operands when the binop is arithmetic on
+                // primitives. Without this, `Null<Int> + Null<Int>` (or
+                // `Int + Null<Int>`) operates on raw DynamicValue* pointers,
+                // producing garbage / crashes. Unbox using each operand's
+                // OWN inner primitive type — not expr.ty, which may itself
+                // still be Optional after typechecking unified to Null<Int>.
+                if matches!(
+                    op,
+                    HirBinaryOp::Add
+                        | HirBinaryOp::Sub
+                        | HirBinaryOp::Mul
+                        | HirBinaryOp::Div
+                        | HirBinaryOp::Mod
+                ) {
+                    if self.is_optional_primitive(lhs.ty) {
+                        if let Some(inner) = self.optional_inner_type(lhs.ty) {
+                            if let Some(unboxed) = self.maybe_unbox_optional(lhs_reg, lhs.ty, inner)
+                            {
+                                lhs_reg = unboxed;
+                            }
+                        }
+                    }
+                    if self.is_optional_primitive(rhs.ty) {
+                        if let Some(inner) = self.optional_inner_type(rhs.ty) {
+                            if let Some(unboxed) = self.maybe_unbox_optional(rhs_reg, rhs.ty, inner)
+                            {
+                                rhs_reg = unboxed;
+                            }
+                        }
+                    }
+                }
+
                 let lhs_type = self.convert_type(lhs.ty);
                 let rhs_type = self.convert_type(rhs.ty);
 
@@ -22153,6 +22185,17 @@ impl<'a> HirToMirContext<'a> {
                         .build_call_direct(unbox_func, vec![value], IrType::I64)?;
                 self.builder.build_cast(result, IrType::I64, IrType::I32)
             }
+            // Generic-instantiated Null<T> where T is a TypeParameter lowers
+            // to (I64, I64): unbox via haxe_unbox_int_ptr and stay at I64.
+            (IrType::I64, IrType::I64) => {
+                let unbox_func = self.get_or_register_extern_function(
+                    "haxe_unbox_int_ptr",
+                    vec![ptr_u8],
+                    IrType::I64,
+                );
+                self.builder
+                    .build_call_direct(unbox_func, vec![value], IrType::I64)
+            }
             (IrType::F64, IrType::F64) => {
                 let unbox_func = self.get_or_register_extern_function(
                     "haxe_unbox_float_ptr",
@@ -22189,6 +22232,16 @@ impl<'a> HirToMirContext<'a> {
             )
         } else {
             false
+        }
+    }
+
+    /// Return the inner TypeId of an Optional, or None if not Optional.
+    fn optional_inner_type(&self, type_id: TypeId) -> Option<TypeId> {
+        use crate::tast::TypeKind;
+        let type_table = self.type_table;
+        match type_table.get(type_id).map(|t| &t.kind) {
+            Some(TypeKind::Optional { inner_type }) => Some(*inner_type),
+            _ => None,
         }
     }
 
