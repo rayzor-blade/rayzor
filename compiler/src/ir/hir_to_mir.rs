@@ -24623,16 +24623,35 @@ impl<'a> HirToMirContext<'a> {
         // Check if this is a property with a custom getter
         // Try direct SymbolId lookup first, then fall back to name-based matching
         let property_info_owned = self.property_access_map.get(&field).cloned().or_else(|| {
-            // Name-based fallback: SymbolIds may differ between import and user modules
+            // Name-based fallback: SymbolIds may differ between import and user modules.
+            // Prefer entries with `Method(...)` getters over `Default` — orphan entries
+            // from prior BLADE cache loads (with empty class_name and Default getter)
+            // can shadow the real definition when iteration order surfaces them first.
+            // See bugs_known.md for the StringBuf.length cross-test contamination case.
             let field_name = self.symbol_table.get_symbol(field).map(|s| s.name)?;
-            self.property_access_map.iter().find_map(|(sym_id, info)| {
-                let sym_name = self.symbol_table.get_symbol(*sym_id).map(|s| s.name)?;
-                if sym_name == field_name {
-                    Some(info.clone())
-                } else {
-                    None
+            let mut method_match: Option<crate::tast::PropertyAccessInfo> = None;
+            let mut default_match: Option<crate::tast::PropertyAccessInfo> = None;
+            for (sym_id, info) in &self.property_access_map {
+                let sym_name = match self.symbol_table.get_symbol(*sym_id) {
+                    Some(s) => s.name,
+                    None => continue,
+                };
+                if sym_name != field_name {
+                    continue;
                 }
-            })
+                match info.getter {
+                    crate::tast::PropertyAccessor::Method(_) => {
+                        method_match = Some(info.clone());
+                        break;
+                    }
+                    _ => {
+                        if default_match.is_none() {
+                            default_match = Some(info.clone());
+                        }
+                    }
+                }
+            }
+            method_match.or(default_match)
         });
         if let Some(property_info) = property_info_owned.as_ref() {
             match &property_info.getter {
@@ -25285,6 +25304,30 @@ impl<'a> HirToMirContext<'a> {
         if receiver_is_stdlib_property_target {
             return None;
         }
+
+        // If the receiver resolves to an EXTERN class (registered via @:native
+        // or an `extern class String { ... }` declaration), return None so the
+        // caller falls through to stdlib runtime dispatch instead of
+        // pretending a same-named user-class field is the right answer.
+        // Without this, a cached `StringBuf.length` entry in field_index_map
+        // (loaded from BLADE cache by a prior test) became the wrong-match
+        // answer for `s.length` where s is `String` (extern Class), and the
+        // GEP-based field access then errored with "Cannot access field
+        // 'length': class not registered or field does not exist".
+        let receiver_is_extern_class = self
+            .type_table
+            .get(receiver_ty)
+            .and_then(|ti| match &ti.kind {
+                TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                _ => None,
+            })
+            .and_then(|sym| self.symbol_table.get_symbol(sym))
+            .map(|s| s.flags.contains(SymbolFlags::EXTERN))
+            .unwrap_or(false);
+        if receiver_is_extern_class {
+            return None;
+        }
+
         Some(all_matches[0])
     }
 

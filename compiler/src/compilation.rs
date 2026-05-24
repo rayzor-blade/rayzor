@@ -920,8 +920,18 @@ impl CompilationUnit {
                         ),
                     }
                 };
+                // Skip orphan entries with no resolvable owning class — they
+                // can't be looked up correctly on restore (the load side keys
+                // by class_name) and just pollute the merged map. The
+                // name-based fallback in lower_field_access used to surface
+                // them first and shadow the real property (e.g. an empty
+                // `length` from ArrayIterator stole the StringBuf.length
+                // dispatch after a cross-test cache load).
+                let Some(class_name) = class_name else {
+                    continue;
+                };
                 properties.push(BladePropertyEntry {
-                    class_name: class_name.unwrap_or_default(),
+                    class_name,
                     field_name,
                     getter: to_blade(&prop_info.getter),
                     setter: to_blade(&prop_info.setter),
@@ -2753,10 +2763,8 @@ impl CompilationUnit {
                 .and_then(|s| s.to_str())
                 .unwrap_or("");
             if EXTERN_ONLY_STDLIB.contains(&base) {
-                // eprintln!("[TRY_COMPILE] {} → extern-only skip", name);
                 return true;
             }
-            // eprintln!("[TRY_COMPILE] {} → is_loaded but not extern, continuing", name);
         }
 
         // Mark as loaded
