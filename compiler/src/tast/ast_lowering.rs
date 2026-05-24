@@ -618,6 +618,16 @@ pub struct AstLowering<'a> {
     class_type_params: BTreeMap<SymbolId, Vec<TypeId>>,
     /// Constructor symbol for each class (class_symbol → constructor SymbolId)
     class_constructor_symbols: BTreeMap<SymbolId, SymbolId>,
+    /// Stack of expected lambda parameter types per active call-arg position.
+    /// Pushed before lowering an argument expression to a function whose formal
+    /// parameter at that position is a function type with concrete parameter
+    /// types. Pulled by `ExprKind::Function`/`ExprKind::Arrow` to fill in
+    /// untyped parameters (`function(i, n)` getting `(idx:Int, node:Int)`
+    /// from the formal `fn:(idx:Int, node:Int)->Void`). Without this, lambda
+    /// params default to `Dynamic` → MIR signature `(*void,*void,*void)` →
+    /// caller passes i32 reinterpreted as pointers and the lambda
+    /// dereferences address 0/1/2 producing garbage / null.
+    expected_lambda_params_stack: Vec<Option<Vec<TypeId>>>,
 }
 
 /// Result of type parameter substitution for generic method return types
@@ -1228,6 +1238,7 @@ impl<'a> AstLowering<'a> {
             in_static_method: false,
             class_type_params: BTreeMap::new(),
             class_constructor_symbols: BTreeMap::new(),
+            expected_lambda_params_stack: Vec::new(),
         }
     }
 
@@ -8057,10 +8068,28 @@ impl<'a> AstLowering<'a> {
                 // Function expression/lambda - create a new scope for the function body
                 let function_scope = self.context.enter_scope(ScopeKind::Function);
 
+                // If the surrounding call set up an expected lambda signature
+                // (e.g. `parallelFor(3, function(i, n) {...})` where the
+                // formal param is `fn:(idx:Int, node:Int)->Void`), use the
+                // expected param types to fill in any *untyped* lambda
+                // parameters. Without this, untyped params default to
+                // `Dynamic` and MIR ends up with `*void` formal types — the
+                // caller passes i32 args reinterpreted as pointers and the
+                // body dereferences address 0/1/2 producing "null" garbage.
+                let expected_params = self
+                    .expected_lambda_params_stack
+                    .last()
+                    .and_then(|p| p.clone());
+
                 // Lower parameters - they will be automatically registered in the function scope
                 let mut parameters = Vec::new();
-                for param in &func.params {
-                    let param_result = self.lower_function_param(param)?;
+                for (i, param) in func.params.iter().enumerate() {
+                    let expected_ty = expected_params.as_ref().and_then(|ps| ps.get(i).copied());
+                    let param_result = if param.type_hint.is_none() && expected_ty.is_some() {
+                        self.lower_function_param_with_type(param, expected_ty.unwrap())?
+                    } else {
+                        self.lower_function_param(param)?
+                    };
                     parameters.push(param_result);
                 }
 
@@ -8091,13 +8120,25 @@ impl<'a> AstLowering<'a> {
                 // Arrow function: x -> x * 2 or (x:Int) -> x * 2
                 let function_scope = self.context.enter_scope(ScopeKind::Function);
 
+                // Same expected-types-from-surrounding-call mechanism as
+                // ExprKind::Function above — see that branch for rationale.
+                let expected_params = self
+                    .expected_lambda_params_stack
+                    .last()
+                    .and_then(|p| p.clone());
+
                 let mut typed_params = Vec::new();
-                for param in params {
+                for (i, param) in params.iter().enumerate() {
                     let param_interned = self.context.string_interner.intern(&param.name);
 
-                    // Use type annotation if present, otherwise fall back to dynamic
+                    // Use type annotation if present, then expected-from-context,
+                    // otherwise fall back to dynamic.
                     let param_type = if let Some(ref type_hint) = param.type_hint {
                         self.lower_type(type_hint)?
+                    } else if let Some(expected) =
+                        expected_params.as_ref().and_then(|ps| ps.get(i).copied())
+                    {
+                        expected
                     } else {
                         self.context.type_table.borrow().dynamic_type()
                     };
@@ -8565,9 +8606,26 @@ impl<'a> AstLowering<'a> {
             }
         }
 
+        // Try to peek the callee's formal parameter types so we can supply
+        // expected lambda signatures to untyped function literals like
+        // `function(i, n) { ... }` (Phase 1c NumaPool callback case). This
+        // is best-effort: if we can't statically resolve a callee, we just
+        // lower args with no hints and the existing behavior applies.
+        let expected_param_types = self.resolve_callee_param_types(expr);
+
         let arg_exprs = args
             .iter()
-            .map(|arg| self.lower_expression(arg))
+            .enumerate()
+            .map(|(i, arg)| {
+                let hint = expected_param_types
+                    .as_ref()
+                    .and_then(|ps| ps.get(i).cloned())
+                    .flatten();
+                self.expected_lambda_params_stack.push(hint);
+                let result = self.lower_expression(arg);
+                self.expected_lambda_params_stack.pop();
+                result
+            })
             .collect::<Result<Vec<_>, _>>()?;
 
         // Check if this is a method call (field access being called)
@@ -14160,6 +14218,140 @@ impl<'a> AstLowering<'a> {
     }
 
     /// Lower a function parameter
+    /// Inspect a call's callee expression and, when each formal parameter
+    /// is itself a function type with concrete parameter types, return a
+    /// `Vec<Option<Vec<TypeId>>>` matching `args` positions. Used so that a
+    /// lambda argument passed to `parallelFor(items, fn:(idx:Int, node:Int)->Void)`
+    /// can pick up `[Int, Int]` for its untyped `function(i, n)` params.
+    /// Each inner `Option` is `Some(param_types)` only if THAT formal slot
+    /// is a function type — non-function slots return `None` so we don't
+    /// accidentally inject lambda types into unrelated args.
+    fn resolve_callee_param_types(&mut self, callee: &Expr) -> Option<Vec<Option<Vec<TypeId>>>> {
+        // Resolve callee's formal-parameter type list. Two cases handled:
+        //   (1) Direct call to a free function / static method via Ident
+        //   (2) Instance/static method call via Field { obj, field, .. }
+        let formal_param_types = self.resolve_callee_formal_param_types(callee)?;
+
+        let type_table = self.context.type_table.borrow();
+        Some(
+            formal_param_types
+                .iter()
+                .map(|pty| {
+                    let t = type_table.get(*pty)?;
+                    if let crate::tast::core::TypeKind::Function { params, .. } = &t.kind {
+                        Some(params.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// Best-effort lookup of a callee's formal parameter `TypeId`s. Returns
+    /// `None` if the callee can't be statically resolved (e.g. lambda call,
+    /// runtime extern with no signature, dynamic dispatch through a value
+    /// whose type isn't a `Function`). Callers should treat `None` as "no
+    /// expected types available — lower args with the existing defaults."
+    fn resolve_callee_formal_param_types(&mut self, callee: &Expr) -> Option<Vec<TypeId>> {
+        match &callee.kind {
+            ExprKind::Ident(name) => {
+                let name_interned = self.context.string_interner.intern(name);
+                let sym = self
+                    .context
+                    .symbol_table
+                    .lookup_symbol(self.context.current_scope, name_interned)?;
+                self.function_param_types_from_symbol(sym.id)
+            }
+            ExprKind::Field {
+                expr: obj, field, ..
+            } => {
+                // Static call: `ClassName.method(...)` — receiver is an Ident
+                // whose symbol is a Class. Look up the method in that class.
+                if let ExprKind::Ident(cls_name) = &obj.kind {
+                    let cls_name_interned = self.context.string_interner.intern(cls_name);
+                    if let Some(sym) = self
+                        .context
+                        .symbol_table
+                        .lookup_symbol(self.context.current_scope, cls_name_interned)
+                    {
+                        if sym.kind == crate::tast::symbols::SymbolKind::Class {
+                            let method_name = self.context.string_interner.intern(field);
+                            if let Some(method_sym) =
+                                self.resolve_class_method_symbol(sym.id, method_name)
+                            {
+                                return self.function_param_types_from_symbol(method_sym);
+                            }
+                        }
+                    }
+                }
+                // Instance call: lower the receiver to find its class, then
+                // look up the method in that class's scope.
+                let receiver_typed = self.lower_expression(obj).ok()?;
+                let receiver_type_id = receiver_typed.expr_type;
+                let class_symbol = {
+                    let type_table = self.context.type_table.borrow();
+                    let t = type_table.get(receiver_type_id)?;
+                    match &t.kind {
+                        crate::tast::core::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                        _ => None,
+                    }
+                }?;
+                let method_name = self.context.string_interner.intern(field);
+                let method_sym = self.resolve_class_method_symbol(class_symbol, method_name)?;
+                self.function_param_types_from_symbol(method_sym)
+            }
+            _ => None,
+        }
+    }
+
+    fn function_param_types_from_symbol(&self, sym_id: SymbolId) -> Option<Vec<TypeId>> {
+        let sym = self.context.symbol_table.get_symbol(sym_id)?;
+        let type_table = self.context.type_table.borrow();
+        let t = type_table.get(sym.type_id)?;
+        if let crate::tast::core::TypeKind::Function { params, .. } = &t.kind {
+            Some(params.clone())
+        } else {
+            None
+        }
+    }
+
+    /// Lower a function parameter, forcing its type to `param_type` (used
+    /// when the surrounding call supplies an expected lambda signature
+    /// and the parameter itself has no `type_hint`). Other than the type
+    /// substitution this mirrors `lower_function_param` exactly.
+    fn lower_function_param_with_type(
+        &mut self,
+        param: &parser::FunctionParam,
+        param_type: TypeId,
+    ) -> Result<TypedParameter, LoweringError> {
+        let param_name = self.context.string_interner.intern(&param.name);
+        let param_symbol = self
+            .context
+            .symbol_table
+            .create_variable_in_scope(param_name, self.context.current_scope);
+
+        self.context
+            .symbol_table
+            .update_symbol_type(param_symbol, param_type);
+
+        let default_value = if let Some(default_expr) = &param.default_value {
+            Some(self.lower_expression(default_expr)?)
+        } else {
+            None
+        };
+
+        Ok(TypedParameter {
+            symbol_id: param_symbol,
+            name: param_name,
+            param_type,
+            is_optional: param.optional,
+            default_value,
+            mutability: crate::tast::symbols::Mutability::Immutable,
+            source_location: self.context.span_to_location(&param.span),
+        })
+    }
+
     fn lower_function_param(
         &mut self,
         param: &parser::FunctionParam,
