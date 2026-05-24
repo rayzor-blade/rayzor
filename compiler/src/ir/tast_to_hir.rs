@@ -2465,19 +2465,52 @@ impl<'a> TastToHirContext<'a> {
 
                     let mut statements: Vec<HirStatement> = Vec::new();
 
-                    let init_null = HirExpr::new(
-                        HirExprKind::Null,
-                        result_type,
-                        self.current_lifetime,
-                        SourceLocation::unknown(),
-                    );
+                    // Build a type-appropriate default for the temp's initial
+                    // value. `null` only roundtrips through pointer / Optional
+                    // types; for primitive result types (Int / Float / Bool)
+                    // the load/store machinery treats the register as a value
+                    // type and a stored null pointer would be misinterpreted
+                    // on read (manifests as SIGSEGV in any switch-as-expression
+                    // whose result type is a bare primitive — every constructor
+                    // case binds correctly but the final read of the temp blows
+                    // up because the temp's register was never re-typed).
+                    let init_expr = {
+                        use crate::tast::core::TypeKind;
+                        let type_table = self.type_table.borrow();
+                        match type_table.get(result_type).map(|t| &t.kind) {
+                            Some(TypeKind::Int) => HirExpr::new(
+                                HirExprKind::Literal(HirLiteral::Int(0)),
+                                result_type,
+                                self.current_lifetime,
+                                SourceLocation::unknown(),
+                            ),
+                            Some(TypeKind::Float) => HirExpr::new(
+                                HirExprKind::Literal(HirLiteral::Float(0.0)),
+                                result_type,
+                                self.current_lifetime,
+                                SourceLocation::unknown(),
+                            ),
+                            Some(TypeKind::Bool) => HirExpr::new(
+                                HirExprKind::Literal(HirLiteral::Bool(false)),
+                                result_type,
+                                self.current_lifetime,
+                                SourceLocation::unknown(),
+                            ),
+                            _ => HirExpr::new(
+                                HirExprKind::Null,
+                                result_type,
+                                self.current_lifetime,
+                                SourceLocation::unknown(),
+                            ),
+                        }
+                    };
                     statements.push(HirStatement::Let {
                         pattern: HirPattern::Variable {
                             name: result_name.clone(),
                             symbol: result_symbol,
                         },
                         type_hint: Some(result_type),
-                        init: Some(init_null),
+                        init: Some(init_expr),
                         is_mutable: true,
                     });
 
