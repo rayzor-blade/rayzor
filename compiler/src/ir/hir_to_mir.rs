@@ -31289,16 +31289,19 @@ impl<'a> HirToMirContext<'a> {
                     .map(|elem| {
                         let v = self.lower_expression(elem)?;
                         let v = if let Some(iface_sym) = elem_iface_sym {
-                            if let Some(class_sym) = self.get_class_symbol(elem.ty) {
-                                if self.interface_vtables.contains_key(&(class_sym, iface_sym)) {
-                                    if let Some(wrapped) =
-                                        self.wrap_in_interface_fat_ptr(v, class_sym, iface_sym)
-                                    {
-                                        self.interface_wrapped_args.insert(wrapped);
-                                        wrapped
-                                    } else {
-                                        v
-                                    }
+                            let class_sym = self.get_class_symbol(elem.ty);
+                            if let Some(class_sym) = class_sym {
+                                // wrap_in_interface_fat_ptr lazily builds
+                                // the (class, iface) vtable if it wasn't
+                                // built eagerly (e.g. class compiled before
+                                // interface and saw `implements I` as a
+                                // Placeholder type), so we don't gate on
+                                // `interface_vtables.contains_key` here.
+                                if let Some(wrapped) =
+                                    self.wrap_in_interface_fat_ptr(v, class_sym, iface_sym)
+                                {
+                                    self.interface_wrapped_args.insert(wrapped);
+                                    wrapped
                                 } else {
                                     v
                                 }
@@ -31690,7 +31693,41 @@ impl<'a> HirToMirContext<'a> {
         let vtable = self
             .interface_vtables
             .get(&(class_symbol, interface_symbol))
-            .cloned()?;
+            .cloned()
+            .or_else(|| {
+                // Lazy build: when the (class, interface) pair didn't get a
+                // vtable during `register_class_metadata` — typically because
+                // the interface was compiled in a later file and the class's
+                // own metadata pass saw `implements I` as a `Placeholder`
+                // type — reconstruct the vtable from the symbol table.
+                //
+                // We can do this entirely from data already in the shared
+                // symbol table + the accumulated `interface_method_names`:
+                // walk each interface method name, find a class method with
+                // the same name, push its symbol. Same shape as the eager
+                // path in `register_class_metadata`. Insert the new vtable
+                // so subsequent wraps in the same context are O(1).
+                let method_names = self
+                    .interface_method_names
+                    .get(&interface_symbol)
+                    .cloned()?;
+                let mut entries: Vec<SymbolId> = Vec::with_capacity(method_names.len());
+                for mname in &method_names {
+                    let method_sym = self
+                        .class_method_symbols
+                        .get(&(class_symbol, *mname))
+                        .copied()
+                        .or_else(|| {
+                            self.class_method_by_name
+                                .get(&(class_symbol, *mname))
+                                .copied()
+                        })?;
+                    entries.push(method_sym);
+                }
+                self.interface_vtables
+                    .insert((class_symbol, interface_symbol), entries.clone());
+                Some(entries)
+            })?;
         let method_count = vtable.len();
         let fat_ptr_size = ((1 + method_count) * 8) as u64; // object_ptr + N function pointers
                                                             // Allocate fat pointer with malloc so IrInstruction::Free
@@ -31864,6 +31901,36 @@ impl<'a> HirToMirContext<'a> {
                     }
                 }
                 None
+            }
+            // Cross-file `Array<I>` where I is declared in another file
+            // sometimes lands as a Placeholder during this file's TAST
+            // lowering. The resolved Interface symbol IS present in the
+            // shared `interface_method_names` map — look the name up
+            // there to recover the proper SymbolId so element-wrap and
+            // virtual-dispatch paths fire correctly.
+            // Cross-file `Array<I>` where I is declared in another file
+            // sometimes lands as a Placeholder during this file's TAST
+            // lowering. Resolve via:
+            //   (1) already-loaded interface_method_names (fast path), or
+            //   (2) symbol-table walk for a symbol with that name whose
+            //       kind is Interface (handles the case where the file
+            //       declaring `I` hasn't run register_interface_metadata
+            //       in *this* context yet — see also the lazy vtable
+            //       construction in `wrap_in_interface_fat_ptr`).
+            TypeKind::Placeholder { name } => {
+                if let Some(&sym) = self.interface_method_names.keys().find(|sym_id| {
+                    self.symbol_table
+                        .get_symbol(**sym_id)
+                        .map(|s| s.name == *name)
+                        .unwrap_or(false)
+                }) {
+                    return Some(sym);
+                }
+                use crate::tast::SymbolKind;
+                self.symbol_table
+                    .all_symbols()
+                    .find(|s| s.name == *name && matches!(s.kind, SymbolKind::Interface))
+                    .map(|s| s.id)
             }
             _ => None,
         }
