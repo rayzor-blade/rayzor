@@ -19264,9 +19264,20 @@ impl<'a> HirToMirContext<'a> {
                             self.builder.build_const(IrValue::Bool(true))
                         } else if self.is_subclass_of(*expected, expr.ty) {
                             // Target is subclass of source (downcast) →
-                            // runtime check via object header
+                            // runtime check via object header. The header
+                            // stores the MIR typedef.type_id (matches the
+                            // value passed to `register_class_from_mir`),
+                            // which equals `runtime_type_id - 1000` for
+                            // classes. Using bare `tgt_sym.as_raw()` would
+                            // not match the registry key when the SymbolId
+                            // and MIR typedef IDs differ.
                             let value_reg = self.lower_expression(expr)?;
-                            let target_type_id = tgt_sym.as_raw() as i64;
+                            let encoded = self.runtime_type_id(*expected);
+                            let target_type_id = if encoded >= 1000 {
+                                (encoded - 1000) as i64
+                            } else {
+                                encoded as i64
+                            };
                             let type_id_const =
                                 self.builder.build_const(IrValue::I64(target_type_id))?;
                             let ptr_void = IrType::Ptr(Box::new(IrType::Void));
@@ -32110,7 +32121,24 @@ impl<'a> HirToMirContext<'a> {
                 let sym_type = self.symbol_table.get_symbol(*symbol)?.type_id;
                 self.get_class_symbol(sym_type)
             }
-            HirExprKind::Cast { expr: inner, .. } => self.extract_underlying_class_symbol(inner),
+            // Do NOT recurse through a Cast whose target is an interface: the
+            // Cast handler (class→interface case) already wrapped the inner
+            // class value in a fat pointer. Recursing would let the outer
+            // `lower_expression` post-process wrap the result a second time,
+            // producing fat_ptr{fat_ptr, fn_ptr} where `this` becomes the
+            // inner fat_ptr — observable as silent loss of receiver fields
+            // (e.g. `name` reads as empty) on the next interface dispatch.
+            HirExprKind::Cast {
+                expr: inner,
+                target,
+                ..
+            } => {
+                if self.get_interface_symbol(*target).is_some() {
+                    None
+                } else {
+                    self.extract_underlying_class_symbol(inner)
+                }
+            }
             HirExprKind::Block(block) => block
                 .expr
                 .as_ref()
@@ -32786,13 +32814,34 @@ impl<'a> HirToMirContext<'a> {
 
             match parent_type {
                 Some(parent_type_id) => {
-                    // Get parent's SymbolId from type_table
+                    // Get parent's SymbolId from type_table, with fallback to
+                    // the canonicalised form `TypeId::from_raw(symbol_id.as_raw())`
+                    // produced in `tast_to_hir.rs::extends_canonical`. Without
+                    // this fallback, `class Cat extends Animal` reports false
+                    // for `Cat is Animal` because the synthetic parent TypeId
+                    // doesn't resolve through `type_table`.
                     let parent_sym = {
                         let type_table = self.type_table;
-                        match type_table.get(parent_type_id).map(|ti| &ti.kind) {
-                            Some(TypeKind::Class { symbol_id, .. }) => *symbol_id,
-                            _ => return false,
-                        }
+                        type_table
+                            .get(parent_type_id)
+                            .and_then(|ti| match &ti.kind {
+                                TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                                _ => None,
+                            })
+                            .or_else(|| {
+                                let candidate = SymbolId::from_raw(parent_type_id.as_raw());
+                                self.symbol_table.get_symbol(candidate).and_then(|sym| {
+                                    use crate::tast::SymbolKind;
+                                    if matches!(sym.kind, SymbolKind::Class) {
+                                        Some(candidate)
+                                    } else {
+                                        None
+                                    }
+                                })
+                            })
+                    };
+                    let Some(parent_sym) = parent_sym else {
+                        return false;
                     };
                     if parent_sym == target_sym {
                         return true;
@@ -34127,13 +34176,32 @@ impl<'a> HirToMirContext<'a> {
         if let Some(extends_type_id) = class.extends {
             let parent_symbol = {
                 let type_table = self.type_table;
-                type_table.get(extends_type_id).and_then(|t| {
-                    if let TypeKind::Class { symbol_id, .. } = &t.kind {
-                        Some(*symbol_id)
-                    } else {
-                        None
-                    }
-                })
+                type_table
+                    .get(extends_type_id)
+                    .and_then(|t| {
+                        if let TypeKind::Class { symbol_id, .. } = &t.kind {
+                            Some(*symbol_id)
+                        } else {
+                            None
+                        }
+                    })
+                    .or_else(|| {
+                        // Fallback for canonicalised parent TypeId
+                        // (`TypeId::from_raw(parent_sym.as_raw())` produced in
+                        // `tast_to_hir.rs::extends_canonical`). Without this,
+                        // `Button extends Widget` doesn't inherit Widget's
+                        // (Widget, IDrawable) vtable, so `cast(btn, IDrawable)`
+                        // returns null.
+                        let candidate = SymbolId::from_raw(extends_type_id.as_raw());
+                        self.symbol_table.get_symbol(candidate).and_then(|sym| {
+                            use crate::tast::SymbolKind;
+                            if matches!(sym.kind, SymbolKind::Class) {
+                                Some(candidate)
+                            } else {
+                                None
+                            }
+                        })
+                    })
             };
             if let Some(parent_sym) = parent_symbol {
                 // Find all interfaces the parent implements
