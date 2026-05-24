@@ -1430,7 +1430,7 @@ impl<'a> AstLowering<'a> {
         }
 
         // Second pass: Process declarations with full type resolution
-        for (i, declaration) in file.declarations.iter().enumerate() {
+        for declaration in &file.declarations {
             match self.lower_declaration(declaration) {
                 Ok(typed_decl) => match typed_decl {
                     TypedDeclaration::Function(func) => typed_file.functions.push(func),
