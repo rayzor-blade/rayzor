@@ -2700,19 +2700,47 @@ impl CompilationUnit {
             compile_order.len(),
             compile_order
         );
-        let mut retry_queue: Vec<(String, PathBuf, String, Vec<String>)> = Vec::new();
+        // Snapshot the diagnostics length before each first-pass attempt so
+        // we can discard import errors that get resolved by the retry pass.
+        // Without this, every transient dependency-ordering failure surfaces
+        // (e.g. `Cannot find name 'FPHelper'` from haxe.io.Input compiled
+        // before haxe.io.FPHelper) even though the retry succeeds.
+        let mut retry_queue: Vec<(String, PathBuf, String, Vec<String>, usize)> = Vec::new();
         for name in compile_order {
             if let Some((file_path, source, deps)) = all_files.remove(&name) {
+                let diag_snapshot = self.collected_diagnostics.len();
                 if !self.try_compile_import(&name, &file_path, &source, deps.clone()) {
-                    retry_queue.push((name, file_path, source, deps));
+                    retry_queue.push((name, file_path, source, deps, diag_snapshot));
+                } else {
+                    // Success: any diagnostics pushed during this attempt were
+                    // recovered (e.g. from a partial parse) — keep them.
                 }
             }
         }
 
         // Retry failed files — their dependencies should now be registered
-        // from successful compilations in the first pass.
-        for (name, file_path, source, deps) in retry_queue {
-            self.try_compile_import(&name, &file_path, &source, deps);
+        // from successful compilations in the first pass. If retry succeeds,
+        // discard the first-pass errors (transient dependency ordering).
+        // If retry also fails, keep both attempts' errors so the user sees
+        // the actual problem.
+        for (name, file_path, source, deps, pre_first_snapshot) in retry_queue {
+            let pre_retry_snapshot = self.collected_diagnostics.len();
+            if self.try_compile_import(&name, &file_path, &source, deps) {
+                // Retry succeeded: discard the first-pass errors. The retry
+                // path also pushed no errors (Ok branch), so truncating to
+                // pre_first_snapshot drops only the now-irrelevant noise.
+                self.collected_diagnostics.truncate(pre_first_snapshot);
+            } else {
+                // Retry also failed: keep retry's errors, but drop the
+                // first-pass noise — the retry's diagnostic is the real
+                // signal (final ordering, all deps in place).
+                let retry_errors: Vec<_> = self
+                    .collected_diagnostics
+                    .drain(pre_retry_snapshot..)
+                    .collect();
+                self.collected_diagnostics.truncate(pre_first_snapshot);
+                self.collected_diagnostics.extend(retry_errors);
+            }
         }
 
         // Fixup pass: resolve stale cross-module refs that couldn't be resolved during
@@ -3392,6 +3420,27 @@ impl CompilationUnit {
             if let Some(&new_id) = id_map.get(func_id) {
                 *func_id = new_id;
             }
+        }
+
+        // Populate `stdlib_function_name_map` with this import's functions so
+        // downstream callers can resolve them by qualified name. The cache-hit
+        // path in `try_load_blade_cached_full` already does this (line ~2988);
+        // the fresh-compile path (this function) used to skip it, leaving
+        // user-package methods unreachable by name from callers in other
+        // files. Manifested as `loader.someMethod(...)` silently lowering to
+        // `unreachable` even though the function existed in MIR — the
+        // resolver in `hir_to_mir.rs::resolve_function_id_with_qualified_fallback`
+        // falls through to this map as a last resort.
+        for (func_id, func) in &import_mir.functions {
+            if func.cfg.blocks.is_empty() {
+                continue;
+            }
+            let map_name = func.qualified_name.as_deref().unwrap_or(&func.name);
+            // Don't overwrite an existing entry — first writer wins to keep
+            // BLADE-cache and fresh-compile entries from clobbering each other.
+            self.stdlib_function_name_map
+                .entry(map_name.to_string())
+                .or_insert(*func_id);
         }
 
         self.import_mir_modules.push(import_mir);

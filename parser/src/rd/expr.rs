@@ -764,7 +764,22 @@ impl<'a, 'b> RdParser<'a, 'b> {
         while !self.stream.at(TokenKind::RBrace) && !self.stream.is_eof() {
             if self.stream.eat(TokenKind::KwCase).is_some() {
                 let case_start = self.stream.current_offset();
-                let pattern = self.parse_case_pattern()?;
+                // Haxe lets a single case list multiple values:
+                //   case 12, 14:
+                // Treat it as the equivalent or-pattern
+                //   case 12 | 14:
+                // so downstream TAST/MIR (which already handles
+                // `Pattern::Or`) sees a single composite pattern.
+                let first_pattern = self.parse_case_pattern()?;
+                let pattern = if self.stream.at(TokenKind::Comma) {
+                    let mut alternatives = vec![first_pattern];
+                    while self.stream.eat(TokenKind::Comma).is_some() {
+                        alternatives.push(self.parse_case_pattern()?);
+                    }
+                    Pattern::Or(alternatives)
+                } else {
+                    first_pattern
+                };
                 // Guard: `case v if (condition):`
                 let guard = if self.stream.eat(TokenKind::KwIf).is_some() {
                     self.stream.expect(TokenKind::LParen)?;
