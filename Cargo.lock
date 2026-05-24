@@ -2730,6 +2730,7 @@ version = "0.1.0"
 name = "rayzor-runtime"
 version = "0.1.0"
 dependencies = [
+ "ariadne",
  "backtrace",
  "cc",
  "chrono",
