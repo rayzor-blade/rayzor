@@ -427,34 +427,50 @@ impl<'a> Lexer<'a> {
             self.pos += 1;
         }
 
-        // Check for float: digits followed by '.' then more digits
+        let mut is_float = false;
+
+        // Optional fractional part: '.' followed by digits.
         if self.pos < self.source.len()
             && self.source[self.pos] == b'.'
             && self.pos + 1 < self.source.len()
             && self.source[self.pos + 1].is_ascii_digit()
         {
+            is_float = true;
             self.pos += 1; // skip '.'
             while self.pos < self.source.len() && self.source[self.pos].is_ascii_digit() {
                 self.pos += 1;
             }
-            // Exponent: e or E
-            if self.pos < self.source.len()
-                && (self.source[self.pos] == b'e' || self.source[self.pos] == b'E')
+        }
+
+        // Optional exponent: e/E [+/-] digits. Valid after a bare integer
+        // (`1e5`, `1e-5`) OR after a fractional part (`1.0e5`). The
+        // exponent digits MUST follow — otherwise the `e` is an
+        // identifier (e.g. `var e = ...`), not a number exponent.
+        if self.pos < self.source.len()
+            && (self.source[self.pos] == b'e' || self.source[self.pos] == b'E')
+        {
+            // Lookahead to confirm this is an exponent: optionally a sign,
+            // then at least one digit.
+            let mut probe = self.pos + 1;
+            if probe < self.source.len()
+                && (self.source[probe] == b'+' || self.source[probe] == b'-')
             {
-                self.pos += 1;
-                if self.pos < self.source.len()
-                    && (self.source[self.pos] == b'+' || self.source[self.pos] == b'-')
-                {
-                    self.pos += 1;
-                }
+                probe += 1;
+            }
+            if probe < self.source.len() && self.source[probe].is_ascii_digit() {
+                is_float = true;
+                self.pos = probe;
                 while self.pos < self.source.len() && self.source[self.pos].is_ascii_digit() {
                     self.pos += 1;
                 }
             }
-            return Ok(Token::new(TokenKind::FloatLit, start, self.pos));
         }
 
-        Ok(Token::new(TokenKind::IntLit, start, self.pos))
+        if is_float {
+            Ok(Token::new(TokenKind::FloatLit, start, self.pos))
+        } else {
+            Ok(Token::new(TokenKind::IntLit, start, self.pos))
+        }
     }
 
     fn lex_identifier(&mut self, start: usize) -> Result<Token, LexError> {
