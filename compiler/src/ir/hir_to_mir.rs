@@ -99,6 +99,14 @@ pub struct HirToMirContext<'a> {
     /// Concrete TypeIds for pattern-bound variables (for toString dispatch on generic fields)
     symbol_type_ids: BTreeMap<SymbolId, TypeId>,
 
+    /// Target TypeId for the next object literal lowering — set by Return /
+    /// Let / Assign / call-arg handlers when they know the expected wider
+    /// typedef type, so `lower_object_literal` can compute slot indices
+    /// over the FULL field set (including optional fields not in the
+    /// literal). Without this the writer and reader sort over different
+    /// shapes and slot indices diverge — see anon-field scramble bug.
+    object_literal_target_ty: Option<TypeId>,
+
     /// Mapping from HIR function symbols to MIR function IDs
     function_map: BTreeMap<SymbolId, crate::ir::IrFunctionId>,
 
@@ -569,6 +577,7 @@ impl<'a> HirToMirContext<'a> {
             symbol_map: BTreeMap::new(),
             symbol_ir_types: BTreeMap::new(),
             symbol_type_ids: BTreeMap::new(),
+            object_literal_target_ty: None,
             function_map: BTreeMap::new(),
             global_symbol_map: BTreeMap::new(),
             external_function_map: BTreeMap::new(),
@@ -4266,7 +4275,18 @@ impl<'a> HirToMirContext<'a> {
                             self.lower_expression(init_expr)
                         }
                     } else {
-                        self.lower_expression(init_expr)
+                        // Anon-literal target hint: a typed Let on a wider
+                        // typedef carries optional fields the literal omits;
+                        // pass it down so the writer's slot layout matches
+                        // what readers compute from the typedef. Same fix
+                        // shape as the Return handler above.
+                        let prev_target = self.object_literal_target_ty.take();
+                        if matches!(&init_expr.kind, HirExprKind::ObjectLiteral { .. }) {
+                            self.object_literal_target_ty = *type_hint;
+                        }
+                        let v = self.lower_expression(init_expr);
+                        self.object_literal_target_ty = prev_target;
+                        v
                     };
 
                     // If Copy type, emit shallow copy and mark as heap alloc for drop tracking
@@ -4631,7 +4651,21 @@ impl<'a> HirToMirContext<'a> {
                     None
                 };
 
+                // Anon-literal target hint: assigning a typed-var = { ... }
+                // must pass the lhs type down so the writer's slot layout
+                // includes optional fields the literal omits.
+                let prev_anon_target = self.object_literal_target_ty.take();
+                if matches!(&rhs.kind, HirExprKind::ObjectLiteral { .. }) {
+                    if let Some(lhs_sym) = lhs_symbol {
+                        if let Some(sym_info) = self.symbol_table.get_symbol(lhs_sym) {
+                            if sym_info.type_id != TypeId::invalid() {
+                                self.object_literal_target_ty = Some(sym_info.type_id);
+                            }
+                        }
+                    }
+                }
                 let rhs_value = self.lower_expression(rhs);
+                self.object_literal_target_ty = prev_anon_target;
 
                 // If Copy type, emit shallow copy
                 let (rhs_value, rhs_was_copied) =
@@ -4951,7 +4985,15 @@ impl<'a> HirToMirContext<'a> {
                         "[Return]: Lowering return expression, expr kind: {:?}",
                         std::mem::discriminant(&e.kind)
                     );
+                    // Anon-literal target hint: if returning an ObjectLiteral
+                    // and the function's declared return is a wider typedef,
+                    // pass it down so optional fields land in the slot table.
+                    let prev_target = self.object_literal_target_ty.take();
+                    if matches!(&e.kind, HirExprKind::ObjectLiteral { .. }) {
+                        self.object_literal_target_ty = self.current_function_return_type;
+                    }
                     let result = self.lower_expression(e);
+                    self.object_literal_target_ty = prev_target;
                     debug!("[Return]: Return expression lowered to: {:?}", result);
                     if result.is_none() {
                         warn!("ERROR [Return]: Failed to lower return expression!");
@@ -32391,8 +32433,13 @@ impl<'a> HirToMirContext<'a> {
         }
 
         // Check if the expression type (resolved through aliases) has additional
-        // optional fields not present in the literal
-        let resolved_ty = self.resolve_through_aliases(expr_type);
+        // optional fields not present in the literal. The literal's own
+        // `expr_type` is its narrow inferred shape (just its own fields); if a
+        // wider typedef is expected at the use site (return, let, assign, call
+        // arg), prefer that — otherwise optional fields are silently dropped
+        // from the slot layout and reader/writer slot indices diverge.
+        let effective_ty = self.object_literal_target_ty.unwrap_or(expr_type);
+        let resolved_ty = self.resolve_through_aliases(effective_ty);
         let mut optional_defaults: Vec<String> = Vec::new();
         {
             let type_table = self.type_table;
