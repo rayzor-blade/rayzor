@@ -4755,6 +4755,78 @@ impl<'a> HirToMirContext<'a> {
                             (value, false)
                         };
 
+                        // Numeric promotion at assignment: `var f:Float = i;`
+                        // where i is an Int must sitofp-cast the int bits,
+                        // not reinterpret them as f64. Surfaces as
+                        // `case IntV(x): x` in a Float-returning switch
+                        // returning ~5e-322 — the switch-as-expression
+                        // desugar inits the temp to 0.0 (F64 register), but
+                        // the case-body assigns the i64 bit pattern of an
+                        // Int-bound pattern variable straight into an
+                        // f64-typed phi with no int→float instruction.
+                        //
+                        // Symbol-table lookup of the lhs's TypeId is
+                        // unreliable for synthetic temps from desugars —
+                        // `gen_temp_var()` allocates a SymbolId without
+                        // registering it. Fall back to the lhs register's
+                        // tracked IR type, which the Let-init already set
+                        // (e.g. 0.0 → F64).
+                        let value = {
+                            let tgt_ir_opt: Option<IrType> = match lhs {
+                                HirLValue::Variable(sym) => {
+                                    let from_symbol = self
+                                        .symbol_table
+                                        .get_symbol(*sym)
+                                        .map(|s| s.type_id)
+                                        .filter(|t| *t != TypeId::invalid())
+                                        .map(|t| self.convert_type(t));
+                                    from_symbol.or_else(|| {
+                                        self.symbol_map
+                                            .get(sym)
+                                            .and_then(|reg| self.builder.get_register_type(*reg))
+                                    })
+                                }
+                                _ => None,
+                            };
+                            if let Some(tgt_ir) = tgt_ir_opt {
+                                let val_ir =
+                                    self.builder.get_register_type(value).unwrap_or(IrType::I64);
+                                let needs_coerce = matches!(
+                                    (&val_ir, &tgt_ir),
+                                    (
+                                        IrType::I8
+                                            | IrType::I16
+                                            | IrType::I32
+                                            | IrType::I64
+                                            | IrType::U8
+                                            | IrType::U16
+                                            | IrType::U32
+                                            | IrType::U64,
+                                        IrType::F32 | IrType::F64,
+                                    ) | (
+                                        IrType::F32 | IrType::F64,
+                                        IrType::I8
+                                            | IrType::I16
+                                            | IrType::I32
+                                            | IrType::I64
+                                            | IrType::U8
+                                            | IrType::U16
+                                            | IrType::U32
+                                            | IrType::U64,
+                                    )
+                                );
+                                if needs_coerce {
+                                    self.builder
+                                        .build_cast(value, val_ir, tgt_ir)
+                                        .unwrap_or(value)
+                                } else {
+                                    value
+                                }
+                            } else {
+                                value
+                            }
+                        };
+
                         // Clone anonymous object handles for COW semantics on reassignment.
                         // Skip for object literals (fresh handles) and compound assignments.
                         let value = if op.is_none()
@@ -4919,6 +4991,52 @@ impl<'a> HirToMirContext<'a> {
                             self.maybe_wrap_for_interface(val, e.ty, fn_ret_ty);
                         if did_wrap {
                             return Some(wrapped);
+                        }
+
+                        // Numeric promotion: `function foo():Float { return x; }`
+                        // where x is an Int (e.g. bound from an enum variant
+                        // field, the case-arm result type-coerces to the
+                        // function's return type). The Let/Assign handlers do
+                        // this via `build_cast`, but Return doesn't — so the
+                        // raw int bits got reinterpreted as a float at the
+                        // callee/caller boundary. Surfaces as garbage like
+                        // 5e-322 from `case IntV(x): x;` when the function
+                        // returns Float. Cover Int→Float and Float→Int both
+                        // ways for parity with assignment behaviour.
+                        let val_ir = self.builder.get_register_type(val).unwrap_or(IrType::I64);
+                        let ret_ir = self.convert_type(fn_ret_ty);
+                        let needs_int_to_float = matches!(
+                            (&val_ir, &ret_ir),
+                            (
+                                IrType::I8
+                                    | IrType::I16
+                                    | IrType::I32
+                                    | IrType::I64
+                                    | IrType::U8
+                                    | IrType::U16
+                                    | IrType::U32
+                                    | IrType::U64,
+                                IrType::F32 | IrType::F64,
+                            )
+                        );
+                        let needs_float_to_int = matches!(
+                            (&val_ir, &ret_ir),
+                            (
+                                IrType::F32 | IrType::F64,
+                                IrType::I8
+                                    | IrType::I16
+                                    | IrType::I32
+                                    | IrType::I64
+                                    | IrType::U8
+                                    | IrType::U16
+                                    | IrType::U32
+                                    | IrType::U64,
+                            )
+                        );
+                        if needs_int_to_float || needs_float_to_int {
+                            if let Some(cast_val) = self.builder.build_cast(val, val_ir, ret_ir) {
+                                return Some(cast_val);
+                            }
                         }
                     }
                     result
