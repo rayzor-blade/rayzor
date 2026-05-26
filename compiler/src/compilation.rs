@@ -2755,6 +2755,7 @@ impl CompilationUnit {
         // with blade cache). Now that ALL modules are loaded, stdlib_function_name_map
         // is complete and we can resolve any remaining stale refs.
         self.fixup_stale_cross_module_refs();
+        self.fixup_stale_constructor_ids();
 
         Ok(())
     }
@@ -3355,6 +3356,37 @@ impl CompilationUnit {
                             _ => {}
                         }
                     }
+                }
+            }
+        }
+    }
+
+    /// Post-load fixup: rewrite stale constructor func_ids in
+    /// `import_constructor_name_map`.
+    ///
+    /// `restore_cached_maps` seeds this map from BLADE cache with func_ids
+    /// from the *saving* session — those ids encode that session's
+    /// `import_base + local_id`, which doesn't necessarily match the
+    /// current session's id assignment. Plain renumbering inside
+    /// `renumber_and_push_import_mir` only rewrites entries whose ids live
+    /// in *that* module's id_map, so a constructor cached at e.g. fn200007
+    /// (StringBuf in a session where it was at import index 10) stays at
+    /// fn200007 even when the current session puts StringBuf at index 2
+    /// (real id fn120007). The user file then lowers `new StringBuf()` to
+    /// `call fn200007` — an id that no longer exists — and SIGILLs.
+    ///
+    /// `stdlib_function_name_map` does carry the current ids of every
+    /// merged function keyed by qualified name (`StringBuf.new`), so we
+    /// rewrite each constructor map entry by name once all modules are in.
+    fn fixup_stale_constructor_ids(&mut self) {
+        // Snapshot the qualified lookup so we don't borrow self twice.
+        let map_snapshot: std::collections::BTreeMap<String, crate::ir::IrFunctionId> =
+            self.stdlib_function_name_map.clone();
+        for (class_name, func_id) in self.import_constructor_name_map.iter_mut() {
+            let qualified = format!("{}.new", class_name);
+            if let Some(&current_id) = map_snapshot.get(&qualified) {
+                if *func_id != current_id {
+                    *func_id = current_id;
                 }
             }
         }

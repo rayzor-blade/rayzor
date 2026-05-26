@@ -1488,7 +1488,45 @@ impl<'a, 'b> RdParser<'a, 'b> {
         self.stream.expect(TokenKind::LBrace)?;
         let mut elements = Vec::new();
         while !self.stream.at(TokenKind::RBrace) && !self.stream.is_eof() {
-            elements.push(BlockElement::Expr(self.parse_expression()?));
+            let expr = self.parse_expression()?;
+            let is_var = matches!(expr.kind, ExprKind::Var { .. });
+            elements.push(BlockElement::Expr(expr));
+            // Multi-var splice: `var a = 1, b = 2;` → two sibling Var
+            // block elements. Only triggers when the just-parsed expression
+            // is itself a Var; otherwise comma is left alone (it belongs to
+            // a containing list — argument list, array literal, etc).
+            if is_var {
+                while self.stream.at(TokenKind::Comma)
+                    && self.stream.peek_at(1).kind == TokenKind::Ident
+                {
+                    self.stream.advance(); // eat comma
+                    let sib_start = self.stream.current_offset();
+                    let name = self.stream.current_text().to_string();
+                    self.stream.advance();
+                    let type_hint = if self.stream.eat(TokenKind::Colon).is_some() {
+                        Some(self.parse_type()?)
+                    } else {
+                        None
+                    };
+                    let init = if self.stream.eat(TokenKind::Assign).is_some() {
+                        Some(Box::new(self.parse_expression()?))
+                    } else {
+                        None
+                    };
+                    let end_off = init
+                        .as_ref()
+                        .map(|e| e.span.end)
+                        .unwrap_or(self.stream.current_offset());
+                    elements.push(BlockElement::Expr(Expr {
+                        kind: ExprKind::Var {
+                            name,
+                            type_hint,
+                            expr: init,
+                        },
+                        span: Span::new(sib_start, end_off),
+                    }));
+                }
+            }
             self.stream.eat(TokenKind::Semicolon);
         }
         let end = self.stream.expect(TokenKind::RBrace)?;
