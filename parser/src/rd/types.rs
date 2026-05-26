@@ -217,6 +217,45 @@ impl<'a, 'b> RdParser<'a, 'b> {
             // class.
             let meta = self.parse_metadata_list();
             let optional_from_meta = meta.iter().any(|m| m.name == "optional");
+
+            // Function field: `function name(params):RetType`. Used by stdlib
+            // typedefs like `Iterable<T> = { function iterator():Iterator<T>; }`.
+            // We collect the params and return type into a `Type::Function`
+            // (the field's `type_hint`) so callers see the full signature.
+            if self.stream.at(TokenKind::KwFunction) {
+                self.stream.advance(); // 'function'
+                let field_name = self.stream.current_text().to_string();
+                self.stream.advance();
+                let params: Vec<Type> = if self.stream.at(TokenKind::LParen) {
+                    let fn_params = self.parse_function_params()?;
+                    fn_params
+                        .into_iter()
+                        .map(|p| p.type_hint.unwrap_or(Type::Wildcard { span: p.span }))
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+                self.stream.expect(TokenKind::Colon)?;
+                let ret = self.parse_type()?;
+                let field_span = self.stream.span_from(field_start);
+                fields.push(AnonField {
+                    name: field_name,
+                    optional: optional_from_meta,
+                    type_hint: Type::Function {
+                        params,
+                        ret: Box::new(ret),
+                        span: field_span,
+                    },
+                    span: field_span,
+                });
+                if !self.stream.at(TokenKind::RBrace) {
+                    if self.stream.eat(TokenKind::Comma).is_none() {
+                        self.stream.eat(TokenKind::Semicolon);
+                    }
+                }
+                continue;
+            }
+
             // Skip optional `var` or `final` keyword in struct fields
             self.stream.eat(TokenKind::KwVar);
             self.stream.eat(TokenKind::KwFinal);
