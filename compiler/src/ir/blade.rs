@@ -73,6 +73,17 @@ pub struct BladeMetadata {
 
     /// Compiler version that created this BLADE file
     pub compiler_version: String,
+
+    /// Build ID of the compiler binary that produced this cache. Set from
+    /// the `RAYZOR_BUILD_ID` env var at compiler build time (see
+    /// compiler/build.rs — emits a UNIX-epoch second tick). Used to
+    /// invalidate caches when the compiler is rebuilt — covers parser /
+    /// lowerer / MIR-shape changes that wouldn't bump `compiler_version`
+    /// (which is the semver in Cargo.toml). `#[serde(default)]` so old
+    /// caches without the field round-trip as `String::new()` and fail
+    /// validation against the current build ID.
+    #[serde(default)]
+    pub build_id: String,
 }
 
 /// MIR-level cross-reference maps for cache restoration.
@@ -964,6 +975,7 @@ mod tests {
             compile_timestamp: now,
             dependencies: vec![],
             compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+            build_id: env!("RAYZOR_BUILD_ID").to_string(),
         };
 
         // Serialize to bytes

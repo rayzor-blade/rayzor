@@ -701,18 +701,24 @@ impl CompilationUnit {
 
         match load_blade(&blade_path) {
             Ok((mir, metadata, _symbols, _cached_maps)) => {
-                // Validate cache by checking source hash
+                // Validate cache by checking source hash AND compiler
+                // build-id — see save_to_cache / matching check at the
+                // other load site for why both are required.
                 let current_hash = Self::hash_source(source);
-                if metadata.source_hash == current_hash {
+                let current_build_id = env!("RAYZOR_BUILD_ID");
+                if metadata.source_hash != current_hash {
+                    trace!("[BLADE] Cache stale (hash mismatch): {}", source_path);
+                    None
+                } else if metadata.build_id != current_build_id {
+                    trace!("[BLADE] Cache stale (build-id mismatch): {}", source_path);
+                    None
+                } else {
                     debug!(
                         "[BLADE] Cache hit: {} -> {}",
                         source_path,
                         blade_path.display()
                     );
                     Some(mir)
-                } else {
-                    trace!("[BLADE] Cache stale (hash mismatch): {}", source_path);
-                    None
                 }
             }
             Err(e) => {
@@ -764,6 +770,7 @@ impl CompilationUnit {
             compile_timestamp: now,
             dependencies,
             compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+            build_id: env!("RAYZOR_BUILD_ID").to_string(),
         };
 
         // Compute per-function granular invalidation hashes (§3.2)
@@ -3028,11 +3035,15 @@ impl CompilationUnit {
         match load_blade(&blade_path) {
             Ok((mir, metadata, symbols, cached_maps)) => {
                 let current_hash = Self::hash_source(source);
-                if metadata.source_hash == current_hash {
-                    Some((mir, metadata, symbols, cached_maps))
-                } else {
+                let current_build_id = env!("RAYZOR_BUILD_ID");
+                if metadata.source_hash != current_hash {
                     debug!("[BLADE] Cache stale (hash mismatch): {}", source_path);
                     None
+                } else if metadata.build_id != current_build_id {
+                    debug!("[BLADE] Cache stale (build-id mismatch): {}", source_path);
+                    None
+                } else {
+                    Some((mir, metadata, symbols, cached_maps))
                 }
             }
             Err(e) => {
@@ -5431,6 +5442,23 @@ impl CompilationUnit {
             return None;
         }
 
+        // Check compiler build-id matches. Parser/lowerer/MIR-shape
+        // changes within the same semver bump the build-id (see
+        // compiler/build.rs) and silently shift function IDs or AST
+        // structure for the same source — without this guard, MIR
+        // cached by an older binary loads into a newer compiler and
+        // surfaces as SIGILL at unrelated call sites.
+        let current_build_id = env!("RAYZOR_BUILD_ID");
+        if metadata.build_id != current_build_id {
+            if self.config.enable_cache {
+                debug!(
+                    "Cache build-id mismatch for {:?} (cache: {}, current: {})",
+                    source_path, metadata.build_id, current_build_id
+                );
+            }
+            return None;
+        }
+
         if self.config.enable_cache {
             debug!("Cache hit for {:?}", source_path);
         }
@@ -5477,6 +5505,7 @@ impl CompilationUnit {
             compile_timestamp,
             dependencies: Vec::new(), // TODO: Track dependencies for proper invalidation
             compiler_version: env!("CARGO_PKG_VERSION").to_string(),
+            build_id: env!("RAYZOR_BUILD_ID").to_string(),
         };
 
         // Save to BLADE file (no type info/maps for standalone compile command)
