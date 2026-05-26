@@ -3301,45 +3301,53 @@ impl CompilationUnit {
                             IrInstruction::CallDirect { func_id, .. }
                             | IrInstruction::FunctionRef { func_id, .. }
                             | IrInstruction::MakeClosure { func_id, .. } => {
-                                // First, the original case: func_id refers
-                                // to a function that doesn't exist in any
-                                // merged module — resolve via name.
-                                if !all_func_ids.contains(func_id) {
-                                    if let Some(name) = ext_names.get(func_id) {
-                                        if let Some(&current_id) =
-                                            self.stdlib_function_name_map.get(name)
-                                        {
-                                            *func_id = current_id;
-                                        }
+                                // If the cached MIR recorded this call site
+                                // as an external reference (ext_names has an
+                                // entry for the func_id), ALWAYS resolve it
+                                // by name. The previous "only fix when id
+                                // isn't valid" rule had a silent failure
+                                // mode: the cached id from session A could
+                                // happen to collide with a *different*
+                                // function's id in session B (both at
+                                // module-index 9, say) — the call would then
+                                // dispatch into an unrelated function and
+                                // SIGILL at runtime instead of resolving to
+                                // the named target. Name-first resolution
+                                // makes the fixup robust against any
+                                // import-order-dependent id assignment.
+                                if let Some(name) = ext_names.get(func_id) {
+                                    if let Some(&current_id) =
+                                        self.stdlib_function_name_map.get(name)
+                                    {
+                                        *func_id = current_id;
                                     }
                                     continue;
                                 }
 
-                                // New case: func_id is a forward-ref stub
-                                // (empty body, registered by name). If a
-                                // real implementation has been registered
-                                // under the same qualified name, redirect
-                                // the call to it. Otherwise leave as-is
-                                // (the call will fault at runtime, but
-                                // that surfaces the missing-impl error
-                                // rather than silently dispatching to an
-                                // unrelated function — exactly what the
-                                // "as long as we are not routing to the
-                                // wrong function" constraint asks for).
-                                if let Some(stub_name) =
-                                    stub_ids_by_name.iter().find_map(|(n, sid)| {
-                                        if sid == func_id {
-                                            Some(n.as_str())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                {
-                                    if let Some(&real_id) =
-                                        self.stdlib_function_name_map.get(stub_name)
+                                // Not an external reference: leave the id
+                                // alone if it's already valid. If not valid
+                                // and the cached id corresponds to a known
+                                // forward-ref stub by name, redirect to the
+                                // real implementation. Otherwise leave as-is
+                                // (will fault at runtime, surfacing the
+                                // missing-impl error rather than silently
+                                // dispatching to an unrelated function).
+                                if all_func_ids.contains(func_id) {
+                                    if let Some(stub_name) =
+                                        stub_ids_by_name.iter().find_map(|(n, sid)| {
+                                            if sid == func_id {
+                                                Some(n.as_str())
+                                            } else {
+                                                None
+                                            }
+                                        })
                                     {
-                                        if real_id != *func_id {
-                                            *func_id = real_id;
+                                        if let Some(&real_id) =
+                                            self.stdlib_function_name_map.get(stub_name)
+                                        {
+                                            if real_id != *func_id {
+                                                *func_id = real_id;
+                                            }
                                         }
                                     }
                                 }
@@ -3377,23 +3385,28 @@ impl CompilationUnit {
             let new_id = *id_map.get(&old_id).unwrap();
             func.id = new_id;
 
-            // Update internal CallDirect/FunctionRef/MakeClosure
+            // Update internal CallDirect/FunctionRef/MakeClosure. ext_names
+            // takes priority over id_map: if the cached MIR recorded this
+            // site as an external reference, resolve by name regardless of
+            // whether the cached id happens to alias something in this
+            // module's old id space. (Same robustness argument as the
+            // fixup pass: integer ids are not stable across compilation
+            // sessions with different import orderings.)
             for block in func.cfg.blocks.values_mut() {
                 for inst in &mut block.instructions {
                     match inst {
                         IrInstruction::CallDirect { func_id, .. }
                         | IrInstruction::FunctionRef { func_id, .. }
                         | IrInstruction::MakeClosure { func_id, .. } => {
-                            if let Some(new_func_id) = id_map.get(func_id) {
-                                *func_id = *new_func_id;
-                            } else if let Some(name) =
-                                import_mir.external_function_names.get(func_id)
-                            {
-                                // Resolve stale cross-module ref (from blade cache)
-                                // by looking up the function by qualified name
+                            if let Some(name) = import_mir.external_function_names.get(func_id) {
                                 if let Some(&current_id) = self.stdlib_function_name_map.get(name) {
                                     *func_id = current_id;
                                 }
+                                // If name lookup fails the post-pass
+                                // fixup_stale_cross_module_refs will retry
+                                // once all modules are loaded.
+                            } else if let Some(new_func_id) = id_map.get(func_id) {
+                                *func_id = *new_func_id;
                             }
                         }
                         _ => {}
