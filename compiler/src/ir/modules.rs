@@ -117,6 +117,17 @@ pub struct IrTypeDef {
     /// Original TAST type
     pub type_id: TypeId,
 
+    /// Deterministic runtime type id (FNV-1a hash of the qualified class
+    /// name, biased above the primitive type-id slots — see
+    /// `HirToMirContext::runtime_type_id`). Stable across compilation
+    /// sessions and import orders, so cached MIR's hardcoded type-id
+    /// constants (object headers, cast checks) remain valid no matter
+    /// which user file pulled this class in first. `None` for typedefs
+    /// emitted before this field existed; the backend falls back to
+    /// `type_id.0` in that case.
+    #[serde(default)]
+    pub runtime_type_id: Option<u32>,
+
     /// Type definition
     pub definition: IrTypeDefinition,
 

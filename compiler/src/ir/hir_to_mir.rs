@@ -6798,8 +6798,10 @@ impl<'a> HirToMirContext<'a> {
             return;
         }
 
-        // Calculate runtime type ID (TypeId + 1000 offset)
-        let runtime_type_id = type_id.as_raw() + 1000;
+        // Use the deterministic name-hash runtime_type_id so the RTTI
+        // entry's key matches every other site (object headers, vtable
+        // lookups, cast/is checks) for this enum, stable across sessions.
+        let runtime_type_id = self.runtime_type_id(type_id);
 
         // Get enum name from symbol table
         let enum_name = self
@@ -17942,12 +17944,13 @@ impl<'a> HirToMirContext<'a> {
                 // Store object header: runtime type_id at GEP index 0.
                 // Use the same class-id resolver as typed throw/catch (without +1000).
                 {
-                    let encoded_type_id = self.runtime_type_id(*class_type);
-                    let runtime_type_id = if encoded_type_id >= 1000 {
-                        (encoded_type_id - 1000) as i64
-                    } else {
-                        encoded_type_id as i64
-                    };
+                    // Store the runtime_type_id directly (no -1000 transform).
+                    // The id is now a stable name-hash; cast/is checks
+                    // compare with the same `runtime_type_id()` value, so
+                    // any offset transformation here would just have to be
+                    // mirrored on the comparison side. Keeping the id raw
+                    // makes both sides agree by construction.
+                    let runtime_type_id = self.runtime_type_id(*class_type) as i64;
                     if let Some(type_id_const) =
                         self.builder.build_const(IrValue::I64(runtime_type_id))
                     {
@@ -19280,13 +19283,14 @@ impl<'a> HirToMirContext<'a> {
                             self.builder.build_cast(value_reg, from_type, to_type)
                         } else {
                             // Downcast or unrelated: runtime check via object header.
-                            // haxe_safe_downcast_class reads raw TypeId from offset 0,
-                            // walks hierarchy, and returns obj_ptr or null.
-                            // Must resolve MIR runtime type_id to match object headers.
-                            // Object headers store resolve_runtime_class_type_id().as_raw()
-                            // (the New handler subtracts 1000 from runtime_type_id()).
-                            let resolved = self.resolve_runtime_class_type_id(*target, tgt_sym);
-                            let target_type_id = resolved.as_raw() as i64;
+                            // haxe_safe_downcast_class reads the type id from offset 0,
+                            // walks the hierarchy, and returns obj_ptr or null.
+                            // Use `runtime_type_id` directly so the value here
+                            // matches the value the New handler stored in the
+                            // header (both sides are now the deterministic
+                            // name-hash, no transform on either end).
+                            let _ = tgt_sym;
+                            let target_type_id = self.runtime_type_id(*target) as i64;
                             let type_id_const =
                                 self.builder.build_const(IrValue::I64(target_type_id))?;
                             let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
@@ -19347,9 +19351,11 @@ impl<'a> HirToMirContext<'a> {
                             .builder
                             .build_load(value_reg, IrType::Ptr(Box::new(IrType::U8)))?;
 
-                        // Downcast via object header type_id check
-                        let resolved = self.resolve_runtime_class_type_id(*target, tgt_sym);
-                        let target_type_id = resolved.as_raw() as i64;
+                        // Downcast via object header type_id check.
+                        // Match the New handler: object header stores the
+                        // raw `runtime_type_id` (deterministic name-hash).
+                        let _ = tgt_sym;
+                        let target_type_id = self.runtime_type_id(*target) as i64;
                         let type_id_const =
                             self.builder.build_const(IrValue::I64(target_type_id))?;
                         let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
@@ -19456,20 +19462,13 @@ impl<'a> HirToMirContext<'a> {
                             self.builder.build_const(IrValue::Bool(true))
                         } else if self.is_subclass_of(*expected, expr.ty) {
                             // Target is subclass of source (downcast) →
-                            // runtime check via object header. The header
-                            // stores the MIR typedef.type_id (matches the
-                            // value passed to `register_class_from_mir`),
-                            // which equals `runtime_type_id - 1000` for
-                            // classes. Using bare `tgt_sym.as_raw()` would
-                            // not match the registry key when the SymbolId
-                            // and MIR typedef IDs differ.
+                            // runtime check via object header. Both the
+                            // header (written by the New handler) and this
+                            // comparison use `runtime_type_id` directly,
+                            // which is the deterministic name-hash. No
+                            // ±1000 transform on either side.
                             let value_reg = self.lower_expression(expr)?;
-                            let encoded = self.runtime_type_id(*expected);
-                            let target_type_id = if encoded >= 1000 {
-                                (encoded - 1000) as i64
-                            } else {
-                                encoded as i64
-                            };
+                            let target_type_id = self.runtime_type_id(*expected) as i64;
                             let type_id_const =
                                 self.builder.build_const(IrValue::I64(target_type_id))?;
                             let ptr_void = IrType::Ptr(Box::new(IrType::Void));
@@ -32925,20 +32924,86 @@ impl<'a> HirToMirContext<'a> {
             Some(TypeKind::String) => 5,
             Some(TypeKind::Dynamic) => 5, // Dynamic matches anything
             Some(TypeKind::Class { symbol_id, .. }) => {
-                // Class runtime IDs must align with MIR typedef type_id used for RTTI
-                // registration and object headers.
-                self.resolve_runtime_class_type_id(type_id, *symbol_id)
-                    .as_raw()
-                    + 1000
+                // Class runtime IDs are derived from the qualified class
+                // name so they're identical across compilation sessions
+                // regardless of import order. Without this, `symbol_id + 1000`
+                // was the type_id — but symbol_ids depend on which file gets
+                // loaded first, so the cached MIR for StringTools (with
+                // StringBuf's type_id baked in as `Const I64(_)`) would have
+                // a different value depending on whether test_file_readall
+                // or test_stringbuf_stringtools compiled StringBuf first.
+                // Loading that cached MIR in a different session left the
+                // wrong type_id in object headers → instanceof/cast/vtable
+                // lookups missed → SIGILL.
+                self.deterministic_class_type_id(*symbol_id)
+                    .unwrap_or_else(|| {
+                        // Fallback for classes without a resolvable name —
+                        // keep the legacy behaviour.
+                        self.resolve_runtime_class_type_id(type_id, *symbol_id)
+                            .as_raw()
+                            + 1000
+                    })
             }
-            Some(TypeKind::Interface { .. }) => type_id.as_raw(),
-            Some(TypeKind::Enum { .. }) => type_id.as_raw() + 1000,
+            Some(TypeKind::Interface { symbol_id, .. }) => self
+                .deterministic_iface_or_enum_type_id(*symbol_id, "iface")
+                .unwrap_or_else(|| type_id.as_raw()),
+            Some(TypeKind::Enum { symbol_id, .. }) => self
+                .deterministic_iface_or_enum_type_id(*symbol_id, "enum")
+                .unwrap_or_else(|| type_id.as_raw() + 1000),
             Some(TypeKind::TypeAlias { target_type, .. }) => {
                 let target = *target_type;
                 self.runtime_type_id(target)
             }
             _ => 0, // default to void/unknown
         }
+    }
+
+    /// FNV-1a 32-bit hash over the qualified name of a class symbol,
+    /// biased into [1000, u32::MAX) so it never collides with the
+    /// primitive `runtime_type_id` slots (0=Void, 2=Bool, 3=Int, 4=Float,
+    /// 5=String). Returns None when the symbol has no resolvable name.
+    fn deterministic_class_type_id(&self, symbol_id: SymbolId) -> Option<u32> {
+        let sym = self.symbol_table.get_symbol(symbol_id)?;
+        // Prefer qualified_name; fall back to bare name. The bare-name
+        // fallback may collide across packages — acceptable in practice
+        // since the legacy `symbol_id + 1000` also lacked package isolation.
+        let qname = sym
+            .qualified_name
+            .and_then(|n| self.string_interner.get(n))
+            .or_else(|| self.string_interner.get(sym.name))?;
+        Some(Self::fnv1a_class_type_id(qname))
+    }
+
+    fn deterministic_iface_or_enum_type_id(
+        &self,
+        symbol_id: SymbolId,
+        kind_tag: &str,
+    ) -> Option<u32> {
+        let sym = self.symbol_table.get_symbol(symbol_id)?;
+        let qname = sym
+            .qualified_name
+            .and_then(|n| self.string_interner.get(n))
+            .or_else(|| self.string_interner.get(sym.name))?;
+        // Tag with kind so a class and an enum with the same qualified
+        // name can't collide. Output lives in the same biased range as
+        // class ids.
+        let key = format!("{}:{}", kind_tag, qname);
+        Some(Self::fnv1a_class_type_id(&key))
+    }
+
+    fn fnv1a_class_type_id(s: &str) -> u32 {
+        // FNV-1a 32-bit.
+        let mut hash: u32 = 0x811c9dc5;
+        for b in s.as_bytes() {
+            hash ^= *b as u32;
+            hash = hash.wrapping_mul(0x01000193);
+        }
+        // Bias above primitive type_ids (0..=5) and the legacy +1000 floor
+        // so cached MIR that does `runtime_type_id - 1000` and stores the
+        // result in the object header still gets a positive distinguishable
+        // value. Lower 12 bits get reserved for the bias floor.
+        const BIAS: u32 = 0x1000_0000;
+        BIAS | (hash & 0x0fff_ffff)
     }
 
     /// Resolve a TypeId through TypeAlias chains to find the underlying type.
@@ -33990,10 +34055,12 @@ impl<'a> HirToMirContext<'a> {
             });
         }
 
+        let enum_runtime_id = self.deterministic_iface_or_enum_type_id(enum_decl.symbol_id, "enum");
         let typedef = IrTypeDef {
             id: typedef_id,
             name: enum_name,
             type_id: sym_type_id,
+            runtime_type_id: enum_runtime_id,
             definition: IrTypeDefinition::Enum {
                 variants,
                 discriminant_type: IrType::I32,
@@ -34297,6 +34364,7 @@ impl<'a> HirToMirContext<'a> {
             field_index += 1;
         }
 
+        let class_runtime_id = self.deterministic_class_type_id(class.symbol_id);
         let typedef = IrTypeDef {
             id: typedef_id,
             name: self
@@ -34305,6 +34373,7 @@ impl<'a> HirToMirContext<'a> {
                 .unwrap_or("<unknown>")
                 .to_string(),
             type_id,
+            runtime_type_id: class_runtime_id,
             definition: IrTypeDefinition::Struct {
                 fields,
                 packed: false,
@@ -34681,6 +34750,8 @@ impl<'a> HirToMirContext<'a> {
             })
             .collect();
 
+        let interface_runtime_id =
+            self.deterministic_iface_or_enum_type_id(interface.symbol_id, "iface");
         let typedef = IrTypeDef {
             id: typedef_id,
             name: self
@@ -34689,6 +34760,7 @@ impl<'a> HirToMirContext<'a> {
                 .unwrap_or("<unknown>")
                 .to_string(),
             type_id,
+            runtime_type_id: interface_runtime_id,
             definition: IrTypeDefinition::Struct {
                 fields,
                 packed: false,
@@ -34716,6 +34788,7 @@ impl<'a> HirToMirContext<'a> {
                 .unwrap_or("<unknown>")
                 .to_string(),
             type_id,
+            runtime_type_id: None,
             definition: IrTypeDefinition::Alias {
                 aliased_type: IrType::Any, // TODO: Get underlying type
             },
@@ -34820,6 +34893,7 @@ impl<'a> HirToMirContext<'a> {
                         .unwrap_or("<unknown>")
                         .to_string(),
                     type_id,
+                    runtime_type_id: None,
                     definition: IrTypeDefinition::Struct {
                         fields: ir_fields,
                         packed: false,
@@ -34844,6 +34918,7 @@ impl<'a> HirToMirContext<'a> {
                 .unwrap_or("<unknown>")
                 .to_string(),
             type_id,
+            runtime_type_id: None,
             definition: IrTypeDefinition::Alias {
                 aliased_type: IrType::Any, // TODO: Convert aliased TypeId to IrType
             },
@@ -35206,7 +35281,14 @@ impl<'a> HirToMirContext<'a> {
 
         let class_vtables = self.class_vtables.clone();
         for (class_sym, vtable) in &class_vtables {
-            let type_id = class_sym.as_raw() as i32;
+            // Vtable keys must match the value stored in object headers
+            // (deterministic name-hash), since virtual dispatch reads the
+            // header and looks up the vtable by that id. Fall back to the
+            // legacy SymbolId encoding if name resolution fails.
+            let type_id = self
+                .deterministic_class_type_id(*class_sym)
+                .map(|h| h as i32)
+                .unwrap_or(class_sym.as_raw() as i32);
             let slot_count = vtable.len() as i32;
 
             // haxe_vtable_init(type_id, slot_count)
@@ -35235,11 +35317,20 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
-        // Register class -> interface implementation pairs for Std.is(..., Interface) runtime checks.
+        // Register class -> interface implementation pairs for Std.is(..., Interface)
+        // and interface-method dispatch. Use the deterministic name-hash for
+        // both sides so the runtime's class_implements lookup matches what the
+        // emit sites pass for type-id comparisons.
         let mut registered_iface_pairs: BTreeSet<(i64, i64)> = BTreeSet::new();
         let interface_vtables = self.interface_vtables.clone();
         for ((class_sym, iface_sym), _methods) in interface_vtables {
             let mut class_ids: BTreeSet<i64> = BTreeSet::new();
+            if let Some(h) = self.deterministic_class_type_id(class_sym) {
+                class_ids.insert(h as i64);
+            }
+            // Keep legacy aliases as fallback so any code that still emits
+            // the symbol-id form (or that the runtime might query via
+            // symbol-id during reflection) keeps resolving.
             class_ids.insert(class_sym.as_raw() as i64);
             class_ids.insert(class_sym.as_raw() as i64 + 1000);
             if let Some(sym) = self.symbol_table.get_symbol(class_sym) {
@@ -35247,6 +35338,9 @@ impl<'a> HirToMirContext<'a> {
             }
 
             let mut iface_ids: BTreeSet<i64> = BTreeSet::new();
+            if let Some(h) = self.deterministic_iface_or_enum_type_id(iface_sym, "iface") {
+                iface_ids.insert(h as i64);
+            }
             iface_ids.insert(iface_sym.as_raw() as i64);
             iface_ids.insert(iface_sym.as_raw() as i64 + 1000);
             if let Some(sym) = self.symbol_table.get_symbol(iface_sym) {
