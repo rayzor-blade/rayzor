@@ -145,6 +145,18 @@ pub struct BladeFuncEntry {
     /// If only this changes, only this function needs recompilation.
     #[serde(default)]
     pub body_hash: u64,
+    /// Per-parameter HIR type *name* (qualified name for classes/interfaces,
+    /// `None` for primitives/abstracts/anything Path 3 of
+    /// `maybe_materialize_for_call` doesn't care about).
+    ///
+    /// MIR alone erases interfaces and classes both to `Ptr(Void)`, so the
+    /// HIR-level type info is needed at call-boundary lowering to decide
+    /// whether to wrap a class arg in an interface fat pointer. Without
+    /// this, a class arg passed to an interface-typed constructor param
+    /// of an imported class stores the raw class pointer in the field and
+    /// SIGBUSes on first vtable dispatch.
+    #[serde(default)]
+    pub param_type_names: Vec<Option<String>>,
 }
 
 /// A field entry in the cached maps

@@ -396,6 +396,15 @@ pub struct HirToMirContext<'a> {
     /// Used for structural subtyping: detecting class→anon or wider-anon→anon at call sites.
     function_param_hir_types: BTreeMap<IrFunctionId, Vec<TypeId>>,
 
+    /// Per-parameter qualified type *names* for imported functions whose
+    /// HIR didn't go through this context's lowering (BLADE-cache loads
+    /// and cross-file fresh-compiled imports). MIR alone erases both
+    /// Class and Interface to `Ptr(Void)`, so without these names
+    /// `maybe_materialize_for_call` Path 3 silently skips the
+    /// class→interface fat-pointer wrap for any imported constructor.
+    /// `None` entries mark slots Path 3 should ignore (primitive, anon, …).
+    external_function_param_iface_names: BTreeMap<IrFunctionId, Vec<Option<String>>>,
+
     /// Current function's return TypeId, set in lower_function_body.
     /// Used by the Return handler to box values for Null<T> return types.
     current_function_return_type: Option<TypeId>,
@@ -651,6 +660,7 @@ impl<'a> HirToMirContext<'a> {
             external_constructor_param_counts: BTreeMap::new(),
             external_function_param_types: BTreeMap::new(),
             function_param_hir_types: BTreeMap::new(),
+            external_function_param_iface_names: BTreeMap::new(),
             current_function_return_type: None,
             anon_views: BTreeMap::new(),
             async_result_registers: BTreeSet::new(),
@@ -22864,7 +22874,67 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Path 3 fallback for imported callees: when the callee's HIR
+        // param types aren't in `function_param_hir_types` (cache-loaded
+        // or fresh-imported class — its HIR never went through *this*
+        // context's lowering), fall back to per-param qualified names
+        // captured in `external_function_param_iface_names`. Find the
+        // current-context Interface symbol by name and run the same
+        // wrap. Without this, every cross-file constructor that takes
+        // an interface-typed param stores the raw class pointer and
+        // SIGBUSes on first vtable dispatch.
+        if let Some(func_id) = callee_func_id {
+            if !self.function_param_hir_types.contains_key(&func_id) {
+                if let Some(names) = self.external_function_param_iface_names.get(&func_id) {
+                    if let Some(Some(param_name)) = names.get(param_index) {
+                        if let Some(class_sym) = self.get_class_symbol(arg_expr.ty) {
+                            if let Some(iface_sym) =
+                                self.lookup_interface_symbol_by_qualified_name(param_name)
+                            {
+                                if let Some(wrapped) =
+                                    self.wrap_in_interface_fat_ptr(arg_reg, class_sym, iface_sym)
+                                {
+                                    self.interface_wrapped_args.insert(wrapped);
+                                    return wrapped;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         arg_reg
+    }
+
+    /// Find the current-context Interface SymbolId for a qualified name
+    /// (e.g. `"nue.Module"` or bare `"Module"`). Used as the lookup half
+    /// of the cross-file Path 3 fallback in `maybe_materialize_for_call`
+    /// — see the call site comment for the why.
+    fn lookup_interface_symbol_by_qualified_name(&self, name: &str) -> Option<SymbolId> {
+        for i in 0..self.symbol_table.len() {
+            let sid = SymbolId::from_raw(i as u32);
+            let Some(sym) = self.symbol_table.get_symbol(sid) else {
+                continue;
+            };
+            if !matches!(sym.kind, crate::tast::SymbolKind::Interface) {
+                continue;
+            }
+            let matches = sym
+                .qualified_name
+                .and_then(|n| self.string_interner.get(n))
+                .map(|qn| qn == name)
+                .unwrap_or(false)
+                || self
+                    .string_interner
+                    .get(sym.name)
+                    .map(|n| n == name)
+                    .unwrap_or(false);
+            if matches {
+                return Some(sid);
+            }
+        }
+        None
     }
 
     /// Materialize a class-typed value into an AnonObject for a callee that expects anonymous type.
@@ -35637,6 +35707,13 @@ pub struct MirLoweringResult {
     pub interface_method_return_types: BTreeMap<(SymbolId, InternedString), TypeId>,
     pub interface_extends: BTreeMap<SymbolId, Vec<SymbolId>>,
     pub interface_vtables: BTreeMap<(SymbolId, SymbolId), Vec<SymbolId>>,
+    /// HIR-level param types per function id. Captured here so the BLADE
+    /// cache can persist them by qualified name and rebuild the map for
+    /// imported functions in a future compilation context — without it,
+    /// `maybe_materialize_for_call` Path 3 silently skips the
+    /// class→interface fat-pointer wrap for any imported constructor
+    /// (see [[nue-tiny-transformer-smoke]]).
+    pub function_param_hir_types: BTreeMap<IrFunctionId, Vec<TypeId>>,
     /// Non-fatal diagnostics from the lowering pass (e.g., exhaustiveness warnings)
     pub diagnostics: Vec<diagnostics::Diagnostic>,
 }
@@ -35666,6 +35743,7 @@ pub fn lower_hir_to_mir_with_function_map(
     external_interface_method_return_types: BTreeMap<(SymbolId, InternedString), TypeId>,
     external_interface_extends: BTreeMap<SymbolId, Vec<SymbolId>>,
     external_interface_vtables: BTreeMap<(SymbolId, SymbolId), Vec<SymbolId>>,
+    external_function_param_iface_names: BTreeMap<IrFunctionId, Vec<Option<String>>>,
 ) -> Result<MirLoweringResult, Vec<LoweringError>> {
     let type_table_ref = type_table.borrow();
     let mut context = HirToMirContext::new(
@@ -35700,6 +35778,11 @@ pub fn lower_hir_to_mir_with_function_map(
 
     // Seed name-keyed alloc sizes from previously compiled imports (stable across contexts)
     context.class_alloc_sizes_by_name = external_class_alloc_sizes_by_name;
+
+    // Seed per-function HIR param qualified names so Path 3 of
+    // `maybe_materialize_for_call` can recover class→interface wrap
+    // decisions for imported constructors.
+    context.external_function_param_iface_names = external_function_param_iface_names;
 
     // Seed interface metadata from previously compiled imports so cross-file
     // interface dispatch (assignment to interface-typed var, vtable-based call,
@@ -35810,6 +35893,7 @@ pub fn lower_hir_to_mir_with_function_map(
         interface_method_return_types: context.interface_method_return_types,
         interface_extends: context.interface_extends,
         interface_vtables: context.interface_vtables,
+        function_param_hir_types: context.function_param_hir_types,
         diagnostics: context.diagnostics,
     })
 }

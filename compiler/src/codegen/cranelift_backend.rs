@@ -1970,12 +1970,14 @@ impl CraneliftBackend {
             "haxe_array_get_ptr" if arg_values.len() == 2 => {
                 let arr_ptr = arg_values[0];
                 let index = arg_values[1];
-                let data_ptr = builder
-                    .ins()
-                    .load(types::I64, MemFlagsData::trusted(), arr_ptr, 0i32);
-                let elem_size = builder
-                    .ins()
-                    .load(types::I64, MemFlagsData::trusted(), arr_ptr, 24i32);
+                let data_ptr =
+                    builder
+                        .ins()
+                        .load(types::I64, MemFlagsData::trusted(), arr_ptr, 0i32);
+                let elem_size =
+                    builder
+                        .ins()
+                        .load(types::I64, MemFlagsData::trusted(), arr_ptr, 24i32);
                 let byte_offset = builder.ins().imul(index, elem_size);
                 let elem_ptr = builder.ins().iadd(data_ptr, byte_offset);
                 debug!("Array intrinsic: haxe_array_get_ptr -> inline pointer arithmetic");
@@ -2841,9 +2843,10 @@ impl CraneliftBackend {
                 })?;
 
                 // Load function pointer from offset 0
-                let func_code_ptr = builder
-                    .ins()
-                    .load(types::I64, MemFlagsData::new(), closure_ptr, 0);
+                let func_code_ptr =
+                    builder
+                        .ins()
+                        .load(types::I64, MemFlagsData::new(), closure_ptr, 0);
 
                 // Load environment pointer from offset 8
                 let env_ptr = builder
@@ -3134,18 +3137,26 @@ impl CraneliftBackend {
                 let result = match (src_ty, dest_ty) {
                     // Float to Int (reinterpret bits)
                     (types::F64, types::I64) => {
-                        builder.ins().bitcast(types::I64, MemFlagsData::new(), src_val)
+                        builder
+                            .ins()
+                            .bitcast(types::I64, MemFlagsData::new(), src_val)
                     }
                     (types::F32, types::I32) => {
-                        builder.ins().bitcast(types::I32, MemFlagsData::new(), src_val)
+                        builder
+                            .ins()
+                            .bitcast(types::I32, MemFlagsData::new(), src_val)
                     }
 
                     // Int to Float (reinterpret bits)
                     (types::I64, types::F64) => {
-                        builder.ins().bitcast(types::F64, MemFlagsData::new(), src_val)
+                        builder
+                            .ins()
+                            .bitcast(types::F64, MemFlagsData::new(), src_val)
                     }
                     (types::I32, types::F32) => {
-                        builder.ins().bitcast(types::F32, MemFlagsData::new(), src_val)
+                        builder
+                            .ins()
+                            .bitcast(types::F32, MemFlagsData::new(), src_val)
                     }
 
                     // Int width conversions (sign-extend or truncate)
@@ -3309,9 +3320,10 @@ impl CraneliftBackend {
 
                 // Load the field value
                 let field_cl_ty = CraneliftBackend::mir_type_to_cranelift_static(field_ty)?;
-                let field_value = builder
-                    .ins()
-                    .load(field_cl_ty, MemFlagsData::new(), field_ptr, 0);
+                let field_value =
+                    builder
+                        .ins()
+                        .load(field_cl_ty, MemFlagsData::new(), field_ptr, 0);
 
                 value_map.insert(*dest, field_value);
             }
@@ -3412,9 +3424,12 @@ impl CraneliftBackend {
                             .get(field_val_id)
                             .ok_or_else(|| format!("Struct field {:?} not found", field_val_id))?;
 
-                        builder
-                            .ins()
-                            .store(MemFlagsData::new(), field_val, slot_addr, offset as i32);
+                        builder.ins().store(
+                            MemFlagsData::new(),
+                            field_val,
+                            slot_addr,
+                            offset as i32,
+                        );
 
                         // Move offset forward by field size
                         offset += CraneliftBackend::type_size(&field_tys[i].ty);
@@ -3454,7 +3469,9 @@ impl CraneliftBackend {
                 let slot_addr = builder.ins().stack_addr(types::I64, union_slot, 0);
 
                 // Store tag at offset 0
-                builder.ins().store(MemFlagsData::new(), tag_val, slot_addr, 0);
+                builder
+                    .ins()
+                    .store(MemFlagsData::new(), tag_val, slot_addr, 0);
 
                 // Store value at offset 8 (after padding)
                 let value_offset = 8i32;
@@ -3526,7 +3543,9 @@ impl CraneliftBackend {
                     .ok_or_else(|| format!("VectorLoad ptr {:?} not found", ptr))?;
                 let cl_vec_ty = Self::mir_type_to_cranelift_static(vec_ty)?;
                 // Load vector from memory (aligned load)
-                let loaded = builder.ins().load(cl_vec_ty, MemFlagsData::new(), ptr_val, 0);
+                let loaded = builder
+                    .ins()
+                    .load(cl_vec_ty, MemFlagsData::new(), ptr_val, 0);
                 value_map.insert(*dest, loaded);
             }
 
@@ -3542,7 +3561,9 @@ impl CraneliftBackend {
                     .get(value)
                     .ok_or_else(|| format!("VectorStore value {:?} not found", value))?;
                 // Store vector to memory (aligned store)
-                builder.ins().store(MemFlagsData::new(), vec_val, ptr_val, 0);
+                builder
+                    .ins()
+                    .store(MemFlagsData::new(), vec_val, ptr_val, 0);
             }
 
             IrInstruction::VectorBinOp {
