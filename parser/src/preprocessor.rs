@@ -328,7 +328,8 @@ fn extract_conditional_block<'a>(lines: &[&'a str], start_idx: usize) -> (Vec<&'
             // Block-form #if at the line head. Count this one normally
             // and ALSO any inline #if/#end pairs after it.
             depth += 1;
-            depth += count_inline_directives(trimmed.strip_prefix("#if ").unwrap_or(trimmed), "#if ");
+            depth +=
+                count_inline_directives(trimmed.strip_prefix("#if ").unwrap_or(trimmed), "#if ");
             depth -= count_inline_directives(line, "#end");
         } else if trimmed.starts_with("#end") {
             depth -= 1;

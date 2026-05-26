@@ -248,8 +248,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
                     },
                     span: field_span,
                 });
-                if !self.stream.at(TokenKind::RBrace)
-                    && self.stream.eat(TokenKind::Comma).is_none()
+                if !self.stream.at(TokenKind::RBrace) && self.stream.eat(TokenKind::Comma).is_none()
                 {
                     self.stream.eat(TokenKind::Semicolon);
                 }
