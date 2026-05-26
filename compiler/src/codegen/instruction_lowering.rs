@@ -373,7 +373,7 @@ impl CraneliftBackend {
         let ptr_val = *self.value_map.get(&ptr).ok_or("Pointer not found")?;
         let cranelift_ty = self.mir_type_to_cranelift(ty)?;
 
-        let flags = MemFlags::new().with_aligned().with_notrap();
+        let flags = MemFlagsData::new().with_aligned().with_notrap();
         let value = builder.ins().load(cranelift_ty, flags, ptr_val, 0);
 
         Ok(value)
@@ -389,7 +389,7 @@ impl CraneliftBackend {
         let val = *self.value_map.get(&value).ok_or("Value not found")?;
         let ptr_val = *self.value_map.get(&ptr).ok_or("Pointer not found")?;
 
-        let flags = MemFlags::new().with_aligned().with_notrap();
+        let flags = MemFlagsData::new().with_aligned().with_notrap();
         builder.ins().store(flags, val, ptr_val, 0);
 
         Ok(())
@@ -871,7 +871,7 @@ impl CraneliftBackend {
     ) -> Result<Value, String> {
         let ptr_val = *value_map.get(&ptr).ok_or("Pointer not found")?;
         let cranelift_ty = Self::mir_type_to_cranelift_static(ty)?;
-        let flags = MemFlags::new().with_aligned().with_notrap();
+        let flags = MemFlagsData::new().with_aligned().with_notrap();
         let value = builder.ins().load(cranelift_ty, flags, ptr_val, 0);
         Ok(value)
     }
@@ -885,7 +885,7 @@ impl CraneliftBackend {
     ) -> Result<(), String> {
         let val = *value_map.get(&value).ok_or("Value not found")?;
         let ptr_val = *value_map.get(&ptr).ok_or("Pointer not found")?;
-        let flags = MemFlags::new().with_aligned().with_notrap();
+        let flags = MemFlagsData::new().with_aligned().with_notrap();
         builder.ins().store(flags, val, ptr_val, 0);
         Ok(())
     }

@@ -42,3 +42,16 @@ rayzor-lsp = { path = "lsp" }
 # when lowering TAST expressions. Using opt-level=2 instead of 3 prevents the bug.
 [profile.release.package.compiler]
 opt-level = 2
+
+# Cranelift 0.133.0 isn't on crates.io yet — sourced from the
+# darmie/wasmtime fork. Replace crates-io entries the resolver picks
+# up via the `0.133` constraint in compiler/Cargo.toml. Once a
+# tagged 0.133 release lands on crates.io, drop this block.
+[patch.crates-io]
+cranelift = { git = "https://github.com/darmie/wasmtime" }
+cranelift-codegen = { git = "https://github.com/darmie/wasmtime" }
+cranelift-frontend = { git = "https://github.com/darmie/wasmtime" }
+cranelift-module = { git = "https://github.com/darmie/wasmtime" }
+cranelift-jit = { git = "https://github.com/darmie/wasmtime" }
+cranelift-native = { git = "https://github.com/darmie/wasmtime" }
+cranelift-object = { git = "https://github.com/darmie/wasmtime" }
