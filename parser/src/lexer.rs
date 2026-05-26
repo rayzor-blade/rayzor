@@ -429,16 +429,30 @@ impl<'a> Lexer<'a> {
 
         let mut is_float = false;
 
-        // Optional fractional part: '.' followed by digits.
-        if self.pos < self.source.len()
-            && self.source[self.pos] == b'.'
-            && self.pos + 1 < self.source.len()
-            && self.source[self.pos + 1].is_ascii_digit()
-        {
-            is_float = true;
-            self.pos += 1; // skip '.'
-            while self.pos < self.source.len() && self.source[self.pos].is_ascii_digit() {
-                self.pos += 1;
+        // Optional fractional part: '.' followed by digits, OR a trailing
+        // dot with no fraction (`4503599627370496.` — Haxe-accepted float
+        // shorthand for `4503599627370496.0`). The lookahead must reject a
+        // second `.` (range operator `1..5`) or an identifier start (field
+        // access `1.toString()` — though Haxe rejects this anyway).
+        if self.pos < self.source.len() && self.source[self.pos] == b'.' {
+            let next = self.source.get(self.pos + 1).copied().unwrap_or(0);
+            // `.` followed by digit: standard fraction.
+            // `.` followed by anything that can't start a method call
+            //   (end-of-source, whitespace, `)`, `,`, `;`, `+`, `-`, `*`,
+            //   `/`, `=`, `<`, `>`, `]`): trailing-dot float.
+            // `.` followed by `.` is a range operator — leave it alone.
+            // `.` followed by alpha/`_` is field access — leave it alone.
+            let is_trailing_dot_float = !next.is_ascii_alphabetic() && next != b'_' && next != b'.';
+            let is_fraction = next.is_ascii_digit();
+            if is_fraction {
+                is_float = true;
+                self.pos += 1; // skip '.'
+                while self.pos < self.source.len() && self.source[self.pos].is_ascii_digit() {
+                    self.pos += 1;
+                }
+            } else if is_trailing_dot_float {
+                is_float = true;
+                self.pos += 1; // skip '.'
             }
         }
 

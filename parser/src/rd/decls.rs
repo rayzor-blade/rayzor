@@ -502,6 +502,25 @@ impl<'a, 'b> RdParser<'a, 'b> {
             } else {
                 None
             };
+
+            // Property with initializer: `var CHARS(default, null) = "...";`
+            // The AST's `Property` variant has no slot for an init expression,
+            // so downgrade to a `Var` when an `=` follows. We lose the access
+            // restriction (`(default, null)` = read-only outside the class),
+            // but the runtime value still initialises correctly — which is
+            // what stdlib files like Base64.hx rely on. Without this RD
+            // errors on the `=` and falls back to the legacy parser.
+            if self.stream.at(TokenKind::Assign) {
+                self.stream.advance();
+                let expr = Some(self.parse_expression()?);
+                self.stream.eat(TokenKind::Semicolon);
+                return Ok(ClassFieldKind::Var {
+                    name,
+                    type_hint,
+                    expr,
+                });
+            }
+
             self.stream.eat(TokenKind::Semicolon);
 
             return Ok(ClassFieldKind::Property {

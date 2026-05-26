@@ -139,6 +139,15 @@ impl<'a, 'b> RdParser<'a, 'b> {
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
         let start = self.stream.current_offset();
 
+        // Expression-level metadata: `@:privateAccess obj.field`. Haxe
+        // allows metadata prefixed onto any expression; we don't preserve
+        // it in the AST (no slot for it on Expr) but consuming the tokens
+        // lets the surrounding expression parse normally instead of
+        // erroring at the `@` and dropping back to the legacy parser.
+        if matches!(self.stream.peek().kind, TokenKind::At | TokenKind::AtColon) {
+            let _ = self.parse_metadata_list();
+        }
+
         match self.stream.peek().kind {
             TokenKind::Bang => {
                 self.stream.advance();
@@ -386,8 +395,18 @@ impl<'a, 'b> RdParser<'a, 'b> {
             }
             TokenKind::Ident => {
                 let name = token.text(self.source).to_string();
-                // Compiler-specific code block: __js__("code"), __cpp__("code", arg0, ...)
-                if name.starts_with("__") && name.ends_with("__") && name.len() > 4 {
+                // Compiler-specific code block: __js__("code"), __cpp__("code", arg0, ...).
+                // Some intrinsics take zero args (e.g. `__resources__()` in
+                // haxe/Resource.hx) — in that case parse_expression on the
+                // empty arg list would error at `)`. Treat zero-arg as a
+                // plain Ident + postfix-call so the caller's call handler
+                // picks it up uniformly.
+                if name.starts_with("__")
+                    && name.ends_with("__")
+                    && name.len() > 4
+                    && self.stream.peek_at(1).kind == TokenKind::LParen
+                    && self.stream.peek_at(2).kind != TokenKind::RParen
+                {
                     self.stream.advance();
                     self.stream.expect(TokenKind::LParen)?;
                     let code = self.parse_expression()?;
@@ -1196,21 +1215,15 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 self.stream.advance();
                 Ok(Pattern::Null)
             }
-            // Literal patterns
-            TokenKind::IntLit => {
-                let expr = self.parse_primary()?;
-                Ok(Pattern::Const(expr))
-            }
-            TokenKind::FloatLit => {
-                let expr = self.parse_primary()?;
-                Ok(Pattern::Const(expr))
-            }
-            TokenKind::StringLit => {
-                let expr = self.parse_primary()?;
-                Ok(Pattern::Const(expr))
-            }
-            TokenKind::KwTrue | TokenKind::KwFalse => {
-                let expr = self.parse_primary()?;
+            // Literal patterns — use parse_postfix so trailing accessors
+            // like `'&'.code` (Haxe char-literal-to-codepoint shorthand)
+            // attach to the literal instead of being left on the stream.
+            TokenKind::IntLit
+            | TokenKind::FloatLit
+            | TokenKind::StringLit
+            | TokenKind::KwTrue
+            | TokenKind::KwFalse => {
+                let expr = self.parse_postfix()?;
                 Ok(Pattern::Const(expr))
             }
             TokenKind::Minus => {
