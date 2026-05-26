@@ -209,10 +209,18 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
         while !self.stream.at(TokenKind::RBrace) && !self.stream.is_eof() {
             let field_start = self.stream.current_offset();
+            // Field-level metadata: `@:optional var x:T`. The `@:optional`
+            // metadata is the canonical Haxe spelling of an optional field
+            // (equivalent to the prefix-`?` shorthand); without recognising
+            // it the parser would error on the `@:`, silently fall back to
+            // the legacy nom parser, and from there drop the surrounding
+            // class.
+            let meta = self.parse_metadata_list();
+            let optional_from_meta = meta.iter().any(|m| m.name == "optional");
             // Skip optional `var` or `final` keyword in struct fields
             self.stream.eat(TokenKind::KwVar);
             self.stream.eat(TokenKind::KwFinal);
-            let optional = self.stream.eat(TokenKind::Question).is_some();
+            let optional_from_question = self.stream.eat(TokenKind::Question).is_some();
             let field_name = self.stream.current_text().to_string();
             self.stream.advance();
             self.stream.expect(TokenKind::Colon)?;
@@ -220,7 +228,7 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
             fields.push(AnonField {
                 name: field_name,
-                optional,
+                optional: optional_from_meta || optional_from_question,
                 type_hint,
                 span: self.stream.span_from(field_start),
             });
