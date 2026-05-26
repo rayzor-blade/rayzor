@@ -18009,12 +18009,33 @@ impl<'a> HirToMirContext<'a> {
 
                 // Look up constructor by TypeId - use the resolved constructor_type_id
                 let constructor_func_id = self.constructor_map.get(&constructor_type_id).copied();
-
                 if let Some(constructor_func_id) = constructor_func_id {
-                    // Call constructor with object as first argument
-                    let mut arg_regs: Vec<_> = std::iter::once(obj_ptr)
-                        .chain(args.iter().filter_map(|a| self.lower_expression(a)))
-                        .collect();
+                    // Call constructor with object as first argument.
+                    //
+                    // Each user arg goes through `maybe_materialize_for_call`
+                    // (handles anon-views, class→anon coercion, and the
+                    // class→interface fat-pointer wrap). Without this,
+                    // `new Holder(c)` where `Holder.new(it:I)` stores the
+                    // raw class pointer into the interface-typed field and
+                    // `h.slot.value()` SIGSEGVs on virtual dispatch.
+                    let mut arg_regs: Vec<IrId> = Vec::with_capacity(args.len() + 1);
+                    arg_regs.push(obj_ptr);
+                    // HIR constructor params don't include `this`, so user arg
+                    // `args[i]` lines up with HIR param index `i`. Don't shift
+                    // by +1 the way Call-method dispatch does — that would
+                    // bias the lookup off the end of `function_param_hir_types`
+                    // and silently skip Path 3 (class→interface wrap).
+                    for (i, a) in args.iter().enumerate() {
+                        if let Some(reg) = self.lower_expression(a) {
+                            let wrapped = self.maybe_materialize_for_call(
+                                a,
+                                reg,
+                                Some(constructor_func_id),
+                                i,
+                            );
+                            arg_regs.push(wrapped);
+                        }
+                    }
 
                     let pre_fill = arg_regs.len();
                     // Coerce Int→Float at cross-module call boundaries
@@ -22817,20 +22838,25 @@ impl<'a> HirToMirContext<'a> {
                     // pointer so the callee can do virtual dispatch via the vtable.
                     // Without this, methods called on the parameter would resolve
                     // through a raw class pointer and read garbage.
+                    //
+                    // We let `wrap_in_interface_fat_ptr` handle vtable presence
+                    // itself — it has a lazy-build fallback against
+                    // `interface_method_names` + `class_method_symbols` for
+                    // cases where eager registration in `register_class_metadata`
+                    // missed the (class, interface) pair (e.g. the interface
+                    // was declared in a later-loaded file).
                     if let Some(iface_sym) = self.get_interface_symbol(resolved_param) {
                         if let Some(class_sym) = self.get_class_symbol(resolved_arg) {
-                            if self.interface_vtables.contains_key(&(class_sym, iface_sym)) {
-                                if let Some(wrapped) =
-                                    self.wrap_in_interface_fat_ptr(arg_reg, class_sym, iface_sym)
-                                {
-                                    // The wrapped fat pointer may escape via the
-                                    // callee (e.g. push into a long-lived Array<I>),
-                                    // so we cannot auto-free it on return. Mark it
-                                    // as escaped so callers skip the
-                                    // `temp_heap_values` push that would emit Free.
-                                    self.interface_wrapped_args.insert(wrapped);
-                                    return wrapped;
-                                }
+                            if let Some(wrapped) =
+                                self.wrap_in_interface_fat_ptr(arg_reg, class_sym, iface_sym)
+                            {
+                                // The wrapped fat pointer may escape via the
+                                // callee (e.g. push into a long-lived Array<I>),
+                                // so we cannot auto-free it on return. Mark it
+                                // as escaped so callers skip the
+                                // `temp_heap_values` push that would emit Free.
+                                self.interface_wrapped_args.insert(wrapped);
+                                return wrapped;
                             }
                         }
                     }

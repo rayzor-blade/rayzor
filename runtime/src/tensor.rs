@@ -1102,6 +1102,55 @@ unsafe fn prepare_binop<'a>(
     Some((a_slice, b_slice, r_slice, result))
 }
 
+/// Row-broadcast f32 binop: `a [..., D] op b [D]` → result with `a`'s shape.
+///
+/// Common LLM pattern: RMSNorm/LayerNorm gain, dense-layer bias. Walks
+/// `a` in `last`-sized groups and applies the kernel against `b` slice
+/// repeated for each group. Returns 0 if the shapes don't match this
+/// exact "trailing-dim broadcast" form — the caller falls through to
+/// the elementwise scalar path which also fails on shape mismatch.
+unsafe fn tensor_binop_row_broadcast(
+    a_ptr: i64,
+    b_ptr: i64,
+    kernel: fn(&mut [f32], &[f32], &[f32]),
+) -> i64 {
+    if a_ptr == 0 || b_ptr == 0 {
+        return 0;
+    }
+    let a = &*(a_ptr as *const RayzorTensor);
+    let b = &*(b_ptr as *const RayzorTensor);
+    if a.dtype != DTYPE_F32 || b.dtype != DTYPE_F32 {
+        return 0;
+    }
+    if a.ndim == 0 || b.ndim != 1 {
+        return 0;
+    }
+    let a_shape = std::slice::from_raw_parts(a.shape, a.ndim);
+    let b_shape = std::slice::from_raw_parts(b.shape, 1);
+    let last = a_shape[a.ndim - 1];
+    if b_shape[0] != last || a.numel % last != 0 {
+        return 0;
+    }
+
+    let result = alloc_tensor(a_shape, DTYPE_F32, None);
+    if result == 0 {
+        return 0;
+    }
+    let r = &*(result as *const RayzorTensor);
+    let a_data = a.data as *const f32;
+    let b_data = b.data as *const f32;
+    let r_data = r.data as *mut f32;
+    let b_slice = std::slice::from_raw_parts(b_data, last);
+    let groups = a.numel / last;
+    for g in 0..groups {
+        let off = g * last;
+        let a_row = std::slice::from_raw_parts(a_data.add(off), last);
+        let r_row = std::slice::from_raw_parts_mut(r_data.add(off), last);
+        kernel(r_row, a_row, b_slice);
+    }
+    result
+}
+
 /// Scalar fallback for elementwise binary ops on non-f32 dtypes.
 /// Both inputs must share dtype + numel. The output tensor is allocated
 /// in the same dtype, kernel runs in f32 in-register.
@@ -1130,35 +1179,41 @@ unsafe fn tensor_binop_scalar(a_ptr: i64, b_ptr: i64, op: fn(f32, f32) -> f32) -
 
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_add(a: i64, b: i64) -> i64 {
-    match prepare_binop(a, b) {
-        Some((a_s, b_s, r_s, result)) => {
-            crate::tensor_simd::add_slice(r_s, a_s, b_s);
-            result
-        }
-        None => tensor_binop_scalar(a, b, |x, y| x + y),
+    if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
+        crate::tensor_simd::add_slice(r_s, a_s, b_s);
+        return result;
     }
+    let broadcast = tensor_binop_row_broadcast(a, b, crate::tensor_simd::add_slice);
+    if broadcast != 0 {
+        return broadcast;
+    }
+    tensor_binop_scalar(a, b, |x, y| x + y)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_sub(a: i64, b: i64) -> i64 {
-    match prepare_binop(a, b) {
-        Some((a_s, b_s, r_s, result)) => {
-            crate::tensor_simd::sub_slice(r_s, a_s, b_s);
-            result
-        }
-        None => tensor_binop_scalar(a, b, |x, y| x - y),
+    if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
+        crate::tensor_simd::sub_slice(r_s, a_s, b_s);
+        return result;
     }
+    let broadcast = tensor_binop_row_broadcast(a, b, crate::tensor_simd::sub_slice);
+    if broadcast != 0 {
+        return broadcast;
+    }
+    tensor_binop_scalar(a, b, |x, y| x - y)
 }
 
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_mul(a: i64, b: i64) -> i64 {
-    match prepare_binop(a, b) {
-        Some((a_s, b_s, r_s, result)) => {
-            crate::tensor_simd::mul_slice(r_s, a_s, b_s);
-            result
-        }
-        None => tensor_binop_scalar(a, b, |x, y| x * y),
+    if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
+        crate::tensor_simd::mul_slice(r_s, a_s, b_s);
+        return result;
     }
+    let broadcast = tensor_binop_row_broadcast(a, b, crate::tensor_simd::mul_slice);
+    if broadcast != 0 {
+        return broadcast;
+    }
+    tensor_binop_scalar(a, b, |x, y| x * y)
 }
 
 #[no_mangle]
