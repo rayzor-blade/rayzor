@@ -706,7 +706,7 @@ dependencies = [
 [[package]]
 name = "cranelift"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 dependencies = [
  "cranelift-codegen 0.133.0",
  "cranelift-frontend 0.133.0",
@@ -727,7 +727,7 @@ dependencies = [
 [[package]]
 name = "cranelift-assembler-x64"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 dependencies = [
  "cranelift-assembler-x64-meta 0.133.0",
 ]
@@ -744,7 +744,7 @@ dependencies = [
 [[package]]
 name = "cranelift-assembler-x64-meta"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 dependencies = [
  "cranelift-srcgen 0.133.0",
 ]
@@ -762,7 +762,7 @@ dependencies = [
 [[package]]
 name = "cranelift-bforest"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 dependencies = [
  "cranelift-entity 0.133.0",
  "wasmtime-internal-core 46.0.0",
@@ -782,7 +782,7 @@ dependencies = [
 [[package]]
 name = "cranelift-bitset"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 dependencies = [
  "wasmtime-internal-core 46.0.0",
 ]
@@ -818,7 +818,7 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 dependencies = [
  "bumpalo",
  "cranelift-assembler-x64 0.133.0",
@@ -857,7 +857,7 @@ dependencies = [
 [[package]]
 name = "cranelift-codegen-meta"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 dependencies = [
  "cranelift-assembler-x64-meta 0.133.0",
  "cranelift-codegen-shared 0.133.0",
@@ -874,7 +874,7 @@ checksum = "9195cd8aeecb55e401aa96b2eaa55921636e8246c127ed7908f7ef7e0d40f270"
 [[package]]
 name = "cranelift-codegen-shared"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 
 [[package]]
 name = "cranelift-control"
@@ -888,7 +888,7 @@ dependencies = [
 [[package]]
 name = "cranelift-control"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 dependencies = [
  "arbitrary",
 ]
@@ -908,7 +908,7 @@ dependencies = [
 [[package]]
 name = "cranelift-entity"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 dependencies = [
  "cranelift-bitset 0.133.0",
  "wasmtime-internal-core 46.0.0",
@@ -929,7 +929,7 @@ dependencies = [
 [[package]]
 name = "cranelift-frontend"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 dependencies = [
  "cranelift-codegen 0.133.0",
  "hashbrown 0.17.1",
@@ -947,12 +947,12 @@ checksum = "b5a90b6ed3aba84189352a87badeb93b2126d3724225a42dc67fdce53d1b139c"
 [[package]]
 name = "cranelift-isle"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 
 [[package]]
 name = "cranelift-jit"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 dependencies = [
  "anyhow",
  "cranelift-codegen 0.133.0",
@@ -972,7 +972,7 @@ dependencies = [
 [[package]]
 name = "cranelift-module"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 dependencies = [
  "anyhow",
  "cranelift-codegen 0.133.0",
@@ -993,7 +993,7 @@ dependencies = [
 [[package]]
 name = "cranelift-native"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 dependencies = [
  "cranelift-codegen 0.133.0",
  "libc",
@@ -1009,7 +1009,7 @@ checksum = "948865622f87f30907bb46fbb081b235ae63c1896a99a83c26a003305c1fa82d"
 [[package]]
 name = "cranelift-srcgen"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 
 [[package]]
 name = "crc32fast"
@@ -4062,7 +4062,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-core"
 version = "46.0.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 dependencies = [
  "hashbrown 0.17.1",
  "libm",
@@ -4137,7 +4137,7 @@ dependencies = [
 [[package]]
 name = "wasmtime-internal-jit-icache-coherence"
 version = "46.0.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"
 dependencies = [
  "cfg-if",
  "libc",
@@ -5027,4 +5027,4 @@ dependencies = [
 [[patch.unused]]
 name = "cranelift-object"
 version = "0.133.0"
-source = "git+https://github.com/darmie/wasmtime#ea9d1fedfdeca401c570f09b9e08db328dc3d04d"
+source = "git+https://github.com/darmie/wasmtime?branch=fix%2Fcranelift-object-darwin-platform#0aafd2170b44c52c8b5b91ce8d1f898d0a2f43ea"

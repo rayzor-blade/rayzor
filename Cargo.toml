@@ -44,14 +44,16 @@ rayzor-lsp = { path = "lsp" }
 opt-level = 2
 
 # Cranelift 0.133.0 isn't on crates.io yet — sourced from the
-# darmie/wasmtime fork. Replace crates-io entries the resolver picks
-# up via the `0.133` constraint in compiler/Cargo.toml. Once a
-# tagged 0.133 release lands on crates.io, drop this block.
+# `fix/cranelift-object-darwin-platform` branch of darmie/wasmtime
+# (carries the macOS-platform fix needed by cranelift-object alongside
+# the 0.133 codegen). Replace crates-io entries the resolver picks up
+# via the `0.133` constraint in compiler/Cargo.toml. Once a tagged
+# 0.133 release lands on crates.io, drop this block.
 [patch.crates-io]
-cranelift = { git = "https://github.com/darmie/wasmtime" }
-cranelift-codegen = { git = "https://github.com/darmie/wasmtime" }
-cranelift-frontend = { git = "https://github.com/darmie/wasmtime" }
-cranelift-module = { git = "https://github.com/darmie/wasmtime" }
-cranelift-jit = { git = "https://github.com/darmie/wasmtime" }
-cranelift-native = { git = "https://github.com/darmie/wasmtime" }
-cranelift-object = { git = "https://github.com/darmie/wasmtime" }
+cranelift = { git = "https://github.com/darmie/wasmtime", branch = "fix/cranelift-object-darwin-platform" }
+cranelift-codegen = { git = "https://github.com/darmie/wasmtime", branch = "fix/cranelift-object-darwin-platform" }
+cranelift-frontend = { git = "https://github.com/darmie/wasmtime", branch = "fix/cranelift-object-darwin-platform" }
+cranelift-module = { git = "https://github.com/darmie/wasmtime", branch = "fix/cranelift-object-darwin-platform" }
+cranelift-jit = { git = "https://github.com/darmie/wasmtime", branch = "fix/cranelift-object-darwin-platform" }
+cranelift-native = { git = "https://github.com/darmie/wasmtime", branch = "fix/cranelift-object-darwin-platform" }
+cranelift-object = { git = "https://github.com/darmie/wasmtime", branch = "fix/cranelift-object-darwin-platform" }
