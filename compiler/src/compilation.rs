@@ -135,6 +135,15 @@ pub struct CompilationUnit {
     /// Passed to user file's MIR lowering so it can resolve `new ClassName()` for imported classes
     import_constructor_name_map: BTreeMap<String, crate::ir::IrFunctionId>,
 
+    /// Per-parameter qualified type names for imported functions, keyed by
+    /// renumbered IrFunctionId. Recovers HIR-level info that MIR alone
+    /// erases (Class and Interface both become `Ptr(Void)`), so the user
+    /// file's `maybe_materialize_for_call` Path 3 can decide whether to
+    /// wrap a class arg in an interface fat pointer when calling an
+    /// imported constructor. None entries mean the slot isn't a
+    /// class/interface (primitive, anonymous, etc.).
+    import_function_param_iface_names: BTreeMap<crate::ir::IrFunctionId, Vec<Option<String>>>,
+
     /// Accumulated class allocation sizes from imported files (TypeId -> byte size)
     /// Passed to user file's MIR lowering so it knows how much memory to allocate for imported classes
     import_class_alloc_sizes: BTreeMap<crate::tast::TypeId, u64>,
@@ -487,6 +496,7 @@ impl CompilationUnit {
             import_field_class_names: BTreeMap::new(),
             import_property_access_map: BTreeMap::new(),
             import_constructor_name_map: BTreeMap::new(),
+            import_function_param_iface_names: BTreeMap::new(),
             import_class_alloc_sizes: BTreeMap::new(),
             import_class_alloc_sizes_by_name: BTreeMap::new(),
             import_class_type_to_symbol: BTreeMap::new(),
@@ -812,10 +822,37 @@ impl CompilationUnit {
         class_alloc_sizes: &BTreeMap<crate::tast::TypeId, u64>,
         field_class_names: &BTreeMap<crate::tast::SymbolId, String>,
         property_access_map: &BTreeMap<crate::tast::SymbolId, crate::tast::PropertyAccessInfo>,
+        function_param_hir_types: &BTreeMap<crate::ir::IrFunctionId, Vec<crate::tast::TypeId>>,
     ) -> BladeCachedMaps {
         let mut functions = Vec::new();
         let mut fields = Vec::new();
         let mut class_sizes = Vec::new();
+
+        // Resolve a HIR TypeId to a qualified-name string for the cache.
+        // Only Class/Interface types matter to Path 3 of
+        // `maybe_materialize_for_call`; everything else (primitives,
+        // abstracts, anonymous, …) we encode as None so the restore
+        // side leaves the corresponding param-type slot unwrapped.
+        let resolve_hir_type_name = |ty: crate::tast::TypeId| -> Option<String> {
+            let type_table = self.type_table.borrow();
+            let info = type_table.get(ty)?;
+            let symbol_id = match &info.kind {
+                crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                crate::tast::TypeKind::Interface { symbol_id, .. } => Some(*symbol_id),
+                _ => None,
+            }?;
+            let sym = self.symbol_table.get_symbol(symbol_id)?;
+            sym.qualified_name
+                .and_then(|n| self.string_interner.get(n))
+                .or_else(|| self.string_interner.get(sym.name))
+                .map(|s| s.to_string())
+        };
+        let param_names_for = |func_id: crate::ir::IrFunctionId| -> Vec<Option<String>> {
+            function_param_hir_types
+                .get(&func_id)
+                .map(|tys| tys.iter().copied().map(resolve_hir_type_name).collect())
+                .unwrap_or_default()
+        };
 
         // Convert function_map: SymbolId → IrFunctionId to (class_name, method_name, func_id)
         for (symbol_id, func_id) in function_map {
@@ -843,6 +880,7 @@ impl CompilationUnit {
                     is_constructor: false,
                     signature_hash: 0, // computed at save time from MIR
                     body_hash: 0,
+                    param_type_names: param_names_for(*func_id),
                 });
             }
         }
@@ -856,6 +894,7 @@ impl CompilationUnit {
                 is_constructor: true,
                 signature_hash: 0,
                 body_hash: 0,
+                param_type_names: param_names_for(*func_id),
             });
         }
 
@@ -3107,6 +3146,14 @@ impl CompilationUnit {
 
         // Restore function mappings: find method SymbolId in registered class scopes
         for entry in &cached_maps.functions {
+            // Stash per-param interface-name info under the *cached* func_id;
+            // renumber_and_push_import_mir later remaps the keys. Only store
+            // entries that carry at least one name — empty Vecs are no-ops.
+            if entry.param_type_names.iter().any(|name| name.is_some()) {
+                self.import_function_param_iface_names
+                    .insert(IrFunctionId(entry.func_id), entry.param_type_names.clone());
+            }
+
             if entry.is_constructor {
                 // Constructors are keyed by class name
                 self.import_constructor_name_map
@@ -3476,6 +3523,14 @@ impl CompilationUnit {
             if let Some(&new_id) = id_map.get(func_id) {
                 *func_id = new_id;
             }
+        }
+        // Re-key import_function_param_iface_names from pre-renumber to
+        // post-renumber func_ids. Drain into a temp so we don't iterate
+        // and mutate the same map.
+        let stale_iface_names = std::mem::take(&mut self.import_function_param_iface_names);
+        for (old_id, names) in stale_iface_names {
+            let new_id = id_map.get(&old_id).copied().unwrap_or(old_id);
+            self.import_function_param_iface_names.insert(new_id, names);
         }
 
         // Populate `stdlib_function_name_map` with this import's functions so
@@ -4640,6 +4695,7 @@ impl CompilationUnit {
             self.import_interface_method_return_types.clone(),
             self.import_interface_extends.clone(),
             self.import_interface_vtables.clone(),
+            self.import_function_param_iface_names.clone(),
         )
         .map_err(|errors| {
             errors
@@ -4678,6 +4734,7 @@ impl CompilationUnit {
                 &mir_result.class_alloc_sizes,
                 &mir_result.field_class_names,
                 &mir_result.property_access_map,
+                &mir_result.function_param_hir_types,
             );
             self.last_compiled_cached_maps = Some(cached_maps);
         }
@@ -4773,6 +4830,39 @@ impl CompilationUnit {
         }
         for (key, vtable) in mir_result.interface_vtables {
             self.import_interface_vtables.insert(key, vtable);
+        }
+
+        // Harvest per-function HIR param types so the user file's
+        // `maybe_materialize_for_call` Path 3 can recover class→interface
+        // wrap decisions for imported constructors. MIR alone erases both
+        // Class and Interface to `Ptr(Void)`; without these names the
+        // wrap is silently skipped and raw class pointers land in
+        // interface-typed fields (SIGBUS on first vtable dispatch).
+        {
+            let type_table = self.type_table.borrow();
+            let string_interner = &self.string_interner;
+            let symbol_table = &self.symbol_table;
+            let resolve_name = |ty: crate::tast::TypeId| -> Option<String> {
+                let info = type_table.get(ty)?;
+                let symbol_id = match &info.kind {
+                    crate::tast::TypeKind::Class { symbol_id, .. } => Some(*symbol_id),
+                    crate::tast::TypeKind::Interface { symbol_id, .. } => Some(*symbol_id),
+                    _ => None,
+                }?;
+                let sym = symbol_table.get_symbol(symbol_id)?;
+                sym.qualified_name
+                    .and_then(|n| string_interner.get(n))
+                    .or_else(|| string_interner.get(sym.name))
+                    .map(|s| s.to_string())
+            };
+            for (func_id, type_ids) in &mir_result.function_param_hir_types {
+                let names: Vec<Option<String>> =
+                    type_ids.iter().copied().map(resolve_name).collect();
+                if names.iter().any(|n| n.is_some()) {
+                    self.import_function_param_iface_names
+                        .insert(*func_id, names);
+                }
+            }
         }
 
         // NOTE: extern-only files are handled above (before MIR generation).
