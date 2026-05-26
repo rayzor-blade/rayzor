@@ -1,0 +1,6 @@
+[project]
+name = "tiny-transformer"
+entry = "Main.hx"
+
+[build]
+class-paths = [".", "../../"]
