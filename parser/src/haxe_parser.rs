@@ -85,11 +85,33 @@ pub fn parse_haxe_file_with_config(
     // Preprocess to handle conditional compilation directives
     let preprocessed = crate::preprocessor::preprocess(input, preprocessor_config);
 
-    // Try the recursive descent parser first (15x faster than nom)
+    // Try the recursive descent parser first (15x faster than nom).
+    // If RD fails we fall back to the legacy nom parser for recovery, but
+    // surface the RD errors first — a silently-swallowed RD bug caused the
+    // anon-field scramble that masqueraded as a runtime issue for weeks
+    // (typedef body with `@:optional` errored in RD, fell through to nom,
+    // and nom quietly dropped the surrounding class). Dedupe by
+    // (file, offset, message) so each unique RD failure surfaces once per
+    // process — files like Math.hx get parsed dozens of times during
+    // compilation and we don't want to drown the user in repeats.
     match crate::rd::rd_parse(&preprocessed, file_name, is_import_file, debug) {
         Ok(file) => return Ok(file),
-        Err(_rd_errors) => {
-            // RD parser failed — fall back to nom parser for error recovery
+        Err(rd_errors) => {
+            use std::sync::Mutex;
+            static SEEN: std::sync::OnceLock<Mutex<std::collections::HashSet<String>>> =
+                std::sync::OnceLock::new();
+            let seen = SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+            if let Ok(mut s) = seen.lock() {
+                for e in &rd_errors {
+                    let key = format!("{}|{}|{}", file_name, e.span.start, e.message);
+                    if s.insert(key) {
+                        eprintln!(
+                            "warning: RD parser failed in {} at offset {}: {}; falling back to legacy parser",
+                            file_name, e.span.start, e.message
+                        );
+                    }
+                }
+            }
         }
     }
 

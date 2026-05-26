@@ -429,8 +429,37 @@ impl<'a, 'b> RdParser<'a, 'b> {
         let meta = self.parse_metadata_list();
         let (access, modifiers) = self.parse_access_and_modifiers();
 
+        // `final` is collected as a Modifier by parse_access_and_modifiers,
+        // so when the user wrote `final array:Array<T>;` we're now positioned
+        // on the bare identifier `array` with no remaining keyword token.
+        // Mirror the module-field path: if Final was consumed and current is
+        // an Ident, treat it as a `final`-typed var field.
+        let has_final_modifier = modifiers.iter().any(|m| matches!(m, Modifier::Final));
+
         let kind = if self.stream.at(TokenKind::KwVar) || self.stream.at(TokenKind::KwFinal) {
             self.parse_var_or_property_field()?
+        } else if has_final_modifier && self.stream.at(TokenKind::Ident) {
+            // `final name:Type [= expr];` — the `final` token was already
+            // consumed as a modifier. Reuse the var-field parser path by
+            // synthesising a name+type+expr triple.
+            let name = self.stream.current_text().to_string();
+            self.stream.advance();
+            let type_hint = if self.stream.eat(TokenKind::Colon).is_some() {
+                Some(self.parse_type()?)
+            } else {
+                None
+            };
+            let default = if self.stream.eat(TokenKind::Assign).is_some() {
+                Some(self.parse_expression()?)
+            } else {
+                None
+            };
+            self.stream.eat(TokenKind::Semicolon);
+            ClassFieldKind::Final {
+                name,
+                type_hint,
+                expr: default,
+            }
         } else if self.stream.at(TokenKind::KwFunction) {
             ClassFieldKind::Function(self.parse_function_decl()?)
         } else {
