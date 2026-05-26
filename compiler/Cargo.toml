@@ -33,13 +33,16 @@ chrono = "0.4"  # Date/time for benchmark results
 zstd = "0.13"  # Bundle compression
 toml = "0.8"   # Workspace manifest parsing
 
-# Cranelift JIT compilation - fork with ARM64 PLT fixes + MAP_JIT for 100% stability
-cranelift = { git = "https://github.com/darmie/wasmtime", branch = "fix-plt-aarch64", package = "cranelift", features = ["jit", "module", "native"] }
-cranelift-module = { git = "https://github.com/darmie/wasmtime", branch = "fix-plt-aarch64", package = "cranelift-module" }
-cranelift-jit = { git = "https://github.com/darmie/wasmtime", branch = "fix-plt-aarch64", package = "cranelift-jit" }
-cranelift-codegen = { git = "https://github.com/darmie/wasmtime", branch = "fix-plt-aarch64", package = "cranelift-codegen" }
-cranelift-frontend = { git = "https://github.com/darmie/wasmtime", branch = "fix-plt-aarch64", package = "cranelift-frontend" }
-cranelift-native = { git = "https://github.com/darmie/wasmtime", branch = "fix-plt-aarch64", package = "cranelift-native" }
+# Cranelift JIT compilation — upstream stable from crates.io. (Was previously
+# `darmie/wasmtime#fix-plt-aarch64` which carried a single patch narrowing
+# `pthread_jit_write_protect_np` to actual write sites in cranelift-jit;
+# trying upstream to see whether 0.132's W^X handling on aarch64 is adequate.)
+cranelift = { version = "0.130.2", features = ["jit", "module", "native"] }
+cranelift-module = "0.130.2"
+cranelift-jit = "0.130.2"
+cranelift-codegen = "0.130.2"
+cranelift-frontend = "0.130.2"
+cranelift-native = "0.130.2"
 target-lexicon = "0.12"
 
 # WASM backend — direct MIR → WebAssembly via wasm-encoder
@@ -47,9 +50,10 @@ wasm-encoder = "0.245"
 wasmparser = "0.245"  # WASM linker — parse runtime .wasm for merging
 wit-component = "0.245"  # WASI P2 Component wrapping (core module → component)
 
-# WASM runtime — embedded wasmtime for `rayzor run --wasm`
-wasmtime = { git = "https://github.com/darmie/wasmtime", branch = "fix-plt-aarch64", package = "wasmtime", optional = true }
-wasi-common = { git = "https://github.com/darmie/wasmtime", branch = "fix-plt-aarch64", package = "wasmtime-wasi", optional = true }
+# WASM runtime — embedded wasmtime for `rayzor run --wasm`. Stable from
+# crates.io to match the cranelift-* upstream switch above.
+wasmtime = { version = "43.0.2", optional = true }
+wasi-common = { version = "43.0.2", package = "wasmtime-wasi", optional = true }
 
 # wgpu-backed Tensor compute for `rayzor run --wasm` (native compute via Metal/Vulkan/DX12)
 rayzor-gpu = { path = "../gpu", default-features = false, features = ["webgpu-backend"], optional = true }
