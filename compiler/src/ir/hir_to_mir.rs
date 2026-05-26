@@ -22885,15 +22885,33 @@ impl<'a> HirToMirContext<'a> {
         // SIGBUSes on first vtable dispatch.
         if let Some(func_id) = callee_func_id {
             if !self.function_param_hir_types.contains_key(&func_id) {
-                if let Some(names) = self.external_function_param_iface_names.get(&func_id) {
+                if let Some(names) = self
+                    .external_function_param_iface_names
+                    .get(&func_id)
+                    .cloned()
+                {
                     if let Some(Some(param_name)) = names.get(param_index) {
                         if let Some(class_sym) = self.get_class_symbol(arg_expr.ty) {
                             if let Some(iface_sym) =
                                 self.lookup_interface_symbol_by_qualified_name(param_name)
                             {
-                                if let Some(wrapped) =
-                                    self.wrap_in_interface_fat_ptr(arg_reg, class_sym, iface_sym)
-                                {
+                                // Drop any pre-cached vtable for this
+                                // (class, iface) pair before wrapping: the
+                                // cached entry may carry method SymbolIds
+                                // from the file that originally lowered
+                                // the class, and SymbolIds aren't stable
+                                // across contexts — looking them up in
+                                // *this* context's function_map can land
+                                // on an unrelated method (e.g. SymbolId 17
+                                // was LlamaModel.forward in nue.arch but
+                                // BPETokenizer.encode in this context).
+                                // Forcing the lazy name-based rebuild
+                                // produces a vtable resolved against the
+                                // current symbol table.
+                                self.interface_vtables.remove(&(class_sym, iface_sym));
+                                if let Some(wrapped) = self.wrap_in_interface_fat_ptr(
+                                    arg_reg, class_sym, iface_sym,
+                                ) {
                                     self.interface_wrapped_args.insert(wrapped);
                                     return wrapped;
                                 }
