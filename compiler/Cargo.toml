@@ -33,16 +33,17 @@ chrono = "0.4"  # Date/time for benchmark results
 zstd = "0.13"  # Bundle compression
 toml = "0.8"   # Workspace manifest parsing
 
-# Cranelift JIT compilation — upstream stable from crates.io. (Was previously
-# `darmie/wasmtime#fix-plt-aarch64` which carried a single patch narrowing
-# `pthread_jit_write_protect_np` to actual write sites in cranelift-jit;
-# trying upstream to see whether 0.132's W^X handling on aarch64 is adequate.)
-cranelift = { version = "0.130.2", features = ["jit", "module", "native"] }
-cranelift-module = "0.130.2"
-cranelift-jit = "0.130.2"
-cranelift-codegen = "0.130.2"
-cranelift-frontend = "0.130.2"
-cranelift-native = "0.130.2"
+# Cranelift JIT compilation. Versions are sourced from the
+# `darmie/wasmtime` fork (cranelift 0.133.0 series) via the
+# `[patch.crates-io]` block in the rayzor workspace root. The
+# 0.133 declaration here just lines the resolver up with the patched
+# source — the actual code comes from the git checkout.
+cranelift = { version = "0.133", features = ["jit", "module", "native"] }
+cranelift-module = "0.133"
+cranelift-jit = "0.133"
+cranelift-codegen = "0.133"
+cranelift-frontend = "0.133"
+cranelift-native = "0.133"
 target-lexicon = "0.12"
 
 # WASM backend — direct MIR → WebAssembly via wasm-encoder
