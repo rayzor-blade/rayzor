@@ -92,15 +92,14 @@ impl<'a, 'b> RdParser<'a, 'b> {
                 continue;
             }
 
-            // Try type declaration or module field
+            // Try type declaration or module field. The spec restricts
+            // import.hx to imports/usings only, but practical usage in this
+            // codebase (and the legacy nom parser) tolerates typedefs,
+            // interfaces, and helper classes here. Parse them through
+            // instead of erroring — being stricter than the existing
+            // parser would just route every import.hx file through the
+            // legacy fallback for no functional gain.
             if self.is_at_type_declaration() {
-                if is_import_file {
-                    let offset = self.stream.current_offset();
-                    return Err(vec![ParseError::new(
-                        "import.hx files must only contain import/using statements",
-                        Span::new(offset, offset + 1),
-                    )]);
-                }
                 match self.parse_type_declaration() {
                     Ok(decl) => declarations.push(decl),
                     Err(e) => {
@@ -113,13 +112,6 @@ impl<'a, 'b> RdParser<'a, 'b> {
 
             // Module-level field (var, final, function with modifiers/metadata)
             if self.is_at_module_field() {
-                if is_import_file {
-                    let offset = self.stream.current_offset();
-                    return Err(vec![ParseError::new(
-                        "import.hx files must only contain import/using statements",
-                        Span::new(offset, offset + 1),
-                    )]);
-                }
                 match self.parse_module_field() {
                     Ok(field) => module_fields.push(field),
                     Err(e) => {

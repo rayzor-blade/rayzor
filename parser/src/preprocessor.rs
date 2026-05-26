@@ -82,15 +82,14 @@ pub fn preprocess(source: &str, config: &PreprocessorConfig) -> String {
             // Process the conditional block and extract the appropriate branch
             let selected_lines = process_conditional_block(&block_lines, condition, config);
 
-            // Add the selected lines to the result
-            // Also apply inline conditional processing to each line
-            for line in selected_lines {
-                if line.contains("#if ") && line.contains("#end") {
-                    let processed = process_inline_conditionals(line, config);
-                    result.push_str(&processed);
-                } else {
-                    result.push_str(line);
-                }
+            // Recursively preprocess the selected branch so nested
+            // `#if/#end` blocks inside the chosen branch are also resolved.
+            // Without this a nested `#if flash` inside an active `#if !eval`
+            // would leak through as raw tokens and break downstream parsing.
+            let joined: String = selected_lines.join("\n");
+            let nested = preprocess(&joined, config);
+            result.push_str(&nested);
+            if !nested.is_empty() {
                 result.push('\n');
             }
 
@@ -318,10 +317,25 @@ fn extract_conditional_block<'a>(lines: &[&'a str], start_idx: usize) -> (Vec<&'
         let line = lines[i];
         let trimmed = line.trim_start();
 
+        // Inline `#if ... #end` on a single line balances out; count
+        // BOTH directives by occurrence so a body line like
+        // `#if lua return foo; #else return bar; #end` contributes net 0
+        // to the nesting depth (one for #if, one for #end). Without
+        // this an inline pair stuck depth at 2 and the outer block's
+        // matching `#end` never zeroed it, so the recursive
+        // preprocessor consumed the rest of the file.
         if trimmed.starts_with("#if ") {
+            // Block-form #if at the line head. Count this one normally
+            // and ALSO any inline #if/#end pairs after it.
             depth += 1;
+            depth += count_inline_directives(trimmed.strip_prefix("#if ").unwrap_or(trimmed), "#if ");
+            depth -= count_inline_directives(line, "#end");
         } else if trimmed.starts_with("#end") {
             depth -= 1;
+        } else {
+            // Plain content line — may still contain inline #if/#end pairs.
+            depth += count_inline_directives(line, "#if ");
+            depth -= count_inline_directives(line, "#end");
         }
 
         block.push(line);
@@ -335,6 +349,16 @@ fn extract_conditional_block<'a>(lines: &[&'a str], start_idx: usize) -> (Vec<&'
 
     // Unclosed block
     (block, i - 1)
+}
+
+fn count_inline_directives(s: &str, needle: &str) -> i32 {
+    let mut count = 0i32;
+    let mut rest = s;
+    while let Some(idx) = rest.find(needle) {
+        count += 1;
+        rest = &rest[idx + needle.len()..];
+    }
+    count
 }
 
 /// Evaluate a conditional compilation condition
