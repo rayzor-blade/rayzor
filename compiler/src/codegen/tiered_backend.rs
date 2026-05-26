@@ -2281,8 +2281,15 @@ impl TieredBackend {
 
                 let super_type_id = typedef.super_type_id.map(|t| t.0);
 
+                // Prefer the deterministic runtime_type_id when present so
+                // the RTTI registry key matches what the New handler stores
+                // in object headers across import orders.
+                let rtti_key = typedef
+                    .runtime_type_id
+                    .map(|h| h as u32)
+                    .unwrap_or(typedef.type_id.0);
                 register_class_from_mir(
-                    typedef.type_id.0,
+                    rtti_key,
                     &typedef.name,
                     super_type_id,
                     &instance_fields,

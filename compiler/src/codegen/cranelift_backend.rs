@@ -4253,8 +4253,17 @@ impl CraneliftBackend {
                     let static_fields: Vec<String> = Vec::new();
                     let super_type_id = typedef.super_type_id.map(|t| t.0);
 
+                    // Prefer the deterministic runtime_type_id (FNV-1a hash
+                    // of the qualified class name) when present so cached
+                    // MIR's hard-coded type-id constants line up with the
+                    // RTTI registry across import orders. Fall back to
+                    // typedef.type_id.0 for older cached typedefs.
+                    let rtti_key = typedef
+                        .runtime_type_id
+                        .map(|h| h as u32)
+                        .unwrap_or(typedef.type_id.0);
                     register_class_from_mir(
-                        typedef.type_id.0,
+                        rtti_key,
                         &typedef.name,
                         super_type_id,
                         &instance_fields,
