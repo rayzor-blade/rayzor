@@ -179,24 +179,33 @@ class GGUFLoader implements ModelLoader {
                 return Tensor.fromBytesF16(raw, info.dims);
             case 8: // Q8_0
                 return Tensor.fromBytesQ8_0(raw, info.dims);
-            case 12, 14: // Q4_K / Q4_K_M
-                // Q4_K_M tensors are always 2-D in Llama / Mistral / Qwen
-                // GGUFs (projection matrices and embeddings). Treat the
-                // last dim as cols, product-of-rest as rows.
-                var cols = info.dims[info.dims.length - 1];
-                var rows = 1;
-                for (i in 0...info.dims.length - 1) rows *= info.dims[i];
-                var qt = QTensor.fromBytesQ4KM(raw, rows, cols);
-                if (qt == null) {
-                    throw "GGUFLoader: QTensor.fromBytesQ4KM returned null for '"
-                        + info.name + "' (rows=" + rows + ", cols=" + cols + ").";
-                }
-                var dq = qt.dequant();
-                qt.free();
-                return (info.dims.length == 2) ? dq : dq.reshape(info.dims);
+            // Q4_K / Q4_K_M — split into two single-value cases
+            // because `case 12, 14:` multi-value clauses currently
+            // only match the first literal (the compiler treats the
+            // second one as wildcard fall-through). Filed as a
+            // separate bug; this duplication is the workaround.
+            case 12: return decodeQ4KM(raw, info);
+            case 14: return decodeQ4KM(raw, info);
             case _:
                 throw "GGUFLoader: GGML dtype " + info.dtype + " not implemented (tensor '" + info.name + "').";
         }
+    }
+
+    /** Q4_K / Q4_K_M body extracted from `decodeTensor`'s switch so
+     *  the parent switch stays simple (helps the compiler emit a
+     *  single coherent dispatch). */
+    private static function decodeQ4KM(raw:haxe.io.Bytes, info:GGUFReader.TensorInfo):Tensor {
+        var cols = info.dims[info.dims.length - 1];
+        var rows = 1;
+        for (i in 0...info.dims.length - 1) rows *= info.dims[i];
+        var qt = QTensor.fromBytesQ4KM(raw, rows, cols);
+        if (qt == null) {
+            throw "GGUFLoader: QTensor.fromBytesQ4KM returned null for '"
+                + info.name + "' (rows=" + rows + ", cols=" + cols + ").";
+        }
+        var dq = qt.dequant();
+        qt.free();
+        return (info.dims.length == 2) ? dq : dq.reshape(info.dims);
     }
 
     private static function readIntOr(reader:GGUFReader, key:String, fallback:Int):Int {
