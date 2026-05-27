@@ -403,10 +403,65 @@ impl DropPointAnalyzer {
     }
 
     fn mark_escaping(&mut self, expr: &HirExpr) {
-        // Mark variables used in the expression as potentially escaping
+        // Mark every variable that flows into this expression as
+        // potentially escaping. The previous implementation only
+        // matched bare `Variable` and silently no-op'd for composite
+        // expressions — so `f(obj.field)` would not mark `obj` as
+        // escaping, and `f(arr[i])` would not mark `arr` or `i`.
+        // That caused use-after-free on long loop bodies where the
+        // last *direct* use of a variable was a call earlier in the
+        // iteration, while a later call passed `var.field` (which
+        // didn't extend the variable's recorded lifetime through
+        // this path).
         match &expr.kind {
             HirExprKind::Variable { symbol, .. } => {
                 self.escaping.insert(*symbol);
+            }
+            HirExprKind::Field { object, .. } => {
+                self.mark_escaping(object);
+            }
+            HirExprKind::Index { object, index } => {
+                self.mark_escaping(object);
+                self.mark_escaping(index);
+            }
+            HirExprKind::Cast { expr: inner, .. } => {
+                self.mark_escaping(inner);
+            }
+            HirExprKind::Unary { operand, .. } => {
+                self.mark_escaping(operand);
+            }
+            HirExprKind::Binary { lhs, rhs, .. } => {
+                self.mark_escaping(lhs);
+                self.mark_escaping(rhs);
+            }
+            HirExprKind::Call { callee, args, .. } => {
+                // The callee receiver and every arg flow through:
+                // any variable in the sub-tree may be captured by
+                // the callee, so mark them all escaping. The
+                // ordinary `analyze_expr` recursion records last-use
+                // separately.
+                self.mark_escaping(callee);
+                for arg in args {
+                    self.mark_escaping(arg);
+                }
+            }
+            HirExprKind::New { args, .. } => {
+                for arg in args {
+                    self.mark_escaping(arg);
+                }
+            }
+            HirExprKind::Array { elements } => {
+                for elem in elements {
+                    self.mark_escaping(elem);
+                }
+            }
+            HirExprKind::If {
+                condition: _,
+                then_expr,
+                else_expr,
+            } => {
+                self.mark_escaping(then_expr);
+                self.mark_escaping(else_expr);
             }
             _ => {}
         }
