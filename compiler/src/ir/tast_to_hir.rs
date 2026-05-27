@@ -2518,26 +2518,7 @@ impl<'a> TastToHirContext<'a> {
 
                     for case in cases {
                         let patterns = vec![self.lower_case_value_pattern(&case.case_value)];
-                        let body = match &case.body {
-                            TypedStatement::Expression { expression, .. } => {
-                                let case_expr = self.lower_expression(expression);
-                                let assign = HirStatement::Assign {
-                                    lhs: HirLValue::Variable(result_symbol),
-                                    rhs: case_expr,
-                                    op: None,
-                                };
-                                HirBlock {
-                                    statements: vec![assign],
-                                    expr: None,
-                                    scope: self.current_scope,
-                                }
-                            }
-                            _ => HirBlock {
-                                statements: vec![self.lower_statement(&case.body)],
-                                expr: None,
-                                scope: self.current_scope,
-                            },
-                        };
+                        let body = self.lower_case_body_to_assign(&case.body, result_symbol);
 
                         hir_cases.push(HirMatchCase {
                             patterns,
@@ -2596,24 +2577,7 @@ impl<'a> TastToHirContext<'a> {
 
                     // Build if-then-else chain from right to left
                     for case in cases.iter().rev() {
-                        let case_body = match &case.body {
-                            TypedStatement::Expression { expression, .. } => {
-                                self.lower_expression(expression)
-                            }
-                            _ => {
-                                let block = HirBlock {
-                                    statements: vec![self.lower_statement(&case.body)],
-                                    expr: None,
-                                    scope: self.current_scope,
-                                };
-                                HirExpr::new(
-                                    HirExprKind::Block(block),
-                                    expr.expr_type,
-                                    self.current_lifetime,
-                                    SourceLocation::unknown(),
-                                )
-                            }
-                        };
+                        let case_body = self.lower_case_body_to_expr(&case.body, expr.expr_type);
 
                         // Extract variable bindings for PatternPlaceholder cases
                         let var_bindings: Vec<(InternedString, SymbolId)> =
@@ -3641,6 +3605,173 @@ impl<'a> TastToHirContext<'a> {
         HirExpr::new(
             HirExprKind::Null,
             self.get_null_type(),
+            self.current_lifetime,
+            SourceLocation::unknown(),
+        )
+    }
+
+    /// Lower a case body into an `HirBlock` whose effect is to assign
+    /// the case's "value" to `result_symbol` (the switch-as-expression
+    /// temp). Two shapes:
+    ///
+    /// - `case X: <expr>;` — the body is a single `Expression`
+    ///   statement; lower the expression and emit `result = expr`.
+    /// - `case X: <stmt>; ...; <expr>;` — the body is a `Block`. Lower
+    ///   every leading statement as-is, then turn the trailing
+    ///   expression (if present) into the assignment. Without this
+    ///   split, the trailing expression of a multi-statement case
+    ///   body would be buried inside a `HirStatement::Expression`
+    ///   and the switch's result temp would keep its default value
+    ///   (manifests as the case body running to completion but the
+    ///   post-switch read getting the wrong value, often SIGILLs
+    ///   downstream).
+    /// - Anything else — lower as a single statement with no
+    ///   assignment; result keeps its default (rare).
+    fn lower_case_body_to_assign(
+        &mut self,
+        body: &TypedStatement,
+        result_symbol: SymbolId,
+    ) -> HirBlock {
+        // Multi-statement case bodies (e.g. `case 14: var x = …; x * 2;`)
+        // arrive from the parser as `Expression { Block { statements } }`,
+        // not as a `TypedStatement::Block` directly. Unwrap that shape
+        // so the trailing expression can be hoisted into the
+        // result-temp assignment.
+        if let TypedStatement::Expression { expression, .. } = body {
+            if let TypedExpressionKind::Block { statements, .. } = &expression.kind {
+                return self.lower_block_stmts_to_assign(statements, result_symbol);
+            }
+        }
+        match body {
+            TypedStatement::Expression { expression, .. } => {
+                let case_expr = self.lower_expression(expression);
+                let assign = HirStatement::Assign {
+                    lhs: HirLValue::Variable(result_symbol),
+                    rhs: case_expr,
+                    op: None,
+                };
+                HirBlock {
+                    statements: vec![assign],
+                    expr: None,
+                    scope: self.current_scope,
+                }
+            }
+            TypedStatement::Block { statements, .. } => {
+                self.lower_block_stmts_to_assign(statements, result_symbol)
+            }
+            _ => HirBlock {
+                statements: vec![self.lower_statement(body)],
+                expr: None,
+                scope: self.current_scope,
+            },
+        }
+    }
+
+    /// Shared body: take a slice of `TypedStatement`s, split off the
+    /// trailing `Expression` (if any), lower the leading statements
+    /// in order, then append `result_symbol = trailing_expr`. Used
+    /// by both the direct `TypedStatement::Block` arm and the
+    /// `Expression { Block { … } }` shape that comes out of the
+    /// parser for multi-statement case bodies.
+    fn lower_block_stmts_to_assign(
+        &mut self,
+        statements: &[TypedStatement],
+        result_symbol: SymbolId,
+    ) -> HirBlock {
+        let mut leading = statements.to_vec();
+        let trailing_expr = match leading.last() {
+            Some(TypedStatement::Expression { expression, .. }) => {
+                let e = expression.clone();
+                leading.pop();
+                Some(e)
+            }
+            _ => None,
+        };
+        let mut hir_stmts: Vec<HirStatement> =
+            leading.iter().map(|s| self.lower_statement(s)).collect();
+        if let Some(tail) = trailing_expr {
+            let case_expr = self.lower_expression(&tail);
+            hir_stmts.push(HirStatement::Assign {
+                lhs: HirLValue::Variable(result_symbol),
+                rhs: case_expr,
+                op: None,
+            });
+        }
+        HirBlock {
+            statements: hir_stmts,
+            expr: None,
+            scope: self.current_scope,
+        }
+    }
+
+    /// Lower a case body into a value-producing `HirExpr` for the
+    /// if-else-chain lowering of switch-as-expression with literal
+    /// patterns. Mirrors `lower_case_body_to_assign` but produces an
+    /// `HirExpr` (the chain's branch value) rather than emitting an
+    /// assignment statement.
+    fn lower_case_body_to_expr(
+        &mut self,
+        body: &TypedStatement,
+        result_ty: crate::tast::TypeId,
+    ) -> HirExpr {
+        // Same unwrap as the assign variant: multi-statement case
+        // bodies are `Expression { Block { … } }` — drill in so the
+        // block's trailing expression becomes the produced value
+        // instead of being buried as an inner `Expression` statement
+        // with no escape.
+        if let TypedStatement::Expression { expression, .. } = body {
+            if let TypedExpressionKind::Block { statements, .. } = &expression.kind {
+                return self.lower_block_stmts_to_expr(statements, result_ty);
+            }
+        }
+        match body {
+            TypedStatement::Expression { expression, .. } => self.lower_expression(expression),
+            TypedStatement::Block { statements, .. } => {
+                self.lower_block_stmts_to_expr(statements, result_ty)
+            }
+            _ => {
+                let block = HirBlock {
+                    statements: vec![self.lower_statement(body)],
+                    expr: None,
+                    scope: self.current_scope,
+                };
+                HirExpr::new(
+                    HirExprKind::Block(block),
+                    result_ty,
+                    self.current_lifetime,
+                    SourceLocation::unknown(),
+                )
+            }
+        }
+    }
+
+    /// Shared body for `lower_case_body_to_expr`. Returns an
+    /// `HirExpr::Block` whose trailing expression IS the case's value.
+    fn lower_block_stmts_to_expr(
+        &mut self,
+        statements: &[TypedStatement],
+        result_ty: crate::tast::TypeId,
+    ) -> HirExpr {
+        let mut leading = statements.to_vec();
+        let trailing_expr = match leading.last() {
+            Some(TypedStatement::Expression { expression, .. }) => {
+                let e = expression.clone();
+                leading.pop();
+                Some(e)
+            }
+            _ => None,
+        };
+        let hir_stmts: Vec<HirStatement> =
+            leading.iter().map(|s| self.lower_statement(s)).collect();
+        let trailing_hir = trailing_expr.map(|e| Box::new(self.lower_expression(&e)));
+        let block = HirBlock {
+            statements: hir_stmts,
+            expr: trailing_hir,
+            scope: self.current_scope,
+        };
+        HirExpr::new(
+            HirExprKind::Block(block),
+            result_ty,
             self.current_lifetime,
             SourceLocation::unknown(),
         )
