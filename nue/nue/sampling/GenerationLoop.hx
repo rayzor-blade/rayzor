@@ -117,6 +117,11 @@ class GenerationLoop {
         var shape = logits.shape();
         if (shape.length <= 1) return logits;
         var lastIdx = shape[0] - 1;
-        return logits.slice(0, lastIdx, lastIdx + 1);
+        // `slice` keeps the sliced axis (`[lastIdx, lastIdx+1)`),
+        // returning shape `[1, vocab_size]`. Samplers index logits
+        // with a single coordinate (`logits.get([i])`), so collapse
+        // to `[vocab_size]` before handing off.
+        var vocab = shape[shape.length - 1];
+        return logits.slice(0, lastIdx, lastIdx + 1).reshape([vocab]);
     }
 }

@@ -299,6 +299,21 @@ impl StdlibMapping {
         self.mappings.get(sig)
     }
 
+    /// Find any zero-arg instance property by name (e.g. `length` on
+    /// Array/String/Bytes/StringBuf, …). Used to dispatch a field read
+    /// on a Dynamic-typed receiver whose actual class is unknown at
+    /// compile time but whose runtime value is one of the stdlib
+    /// reference types. Returns the first matching `(signature,
+    /// runtime call)` — the dispatch then runs against the raw pointer.
+    pub fn find_instance_property_by_name(
+        &self,
+        method: &str,
+    ) -> Option<(&MethodSignature, &RuntimeFunctionCall)> {
+        self.mappings
+            .iter()
+            .find(|(sig, call)| !sig.is_static && sig.method == method && call.param_count == 0)
+    }
+
     /// Check if a method is a stdlib method with runtime mapping
     pub fn has_mapping(&self, class: &str, method: &str, is_static: bool) -> bool {
         self.mappings.keys().any(|sig| {

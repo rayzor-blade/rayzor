@@ -19,7 +19,7 @@ use crate::ir::{
     IrLocal, IrModule, IrParameter, IrPhiNode, IrSourceLocation, IrTerminator, IrType, IrTypeDef,
     IrTypeDefId, IrTypeDefinition, IrValue, Linkage, UnaryOp,
 };
-use crate::stdlib::{MethodSignature, StdlibMapping};
+use crate::stdlib::{IrTypeDescriptor, MethodSignature, StdlibMapping};
 use crate::tast::symbols::SymbolFlags;
 use crate::tast::{
     InternedString, SourceLocation, StringInterner, SymbolId, SymbolTable, TypeId, TypeKind,
@@ -29,6 +29,16 @@ use log::{debug, trace, warn};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::rc::Rc;
+
+/// Which `haxe_box_*_ptr` helper to use when wrapping a primitive
+/// MIR value as a `DynamicValue*`. Keeps the runtime-symbol names
+/// centralised in `box_primitive_as_dynamic`.
+#[derive(Clone, Copy, Debug)]
+enum PrimBoxKind {
+    Int,
+    Float,
+    Bool,
+}
 
 /// Layout information for a single field in a @:cstruct class
 #[derive(Debug, Clone)]
@@ -24739,12 +24749,35 @@ impl<'a> HirToMirContext<'a> {
             let obj_ir_type = self.builder.get_register_type(obj);
             if let Some(ty) = type_table.get(receiver_ty) {
                 if matches!(ty.kind, TypeKind::Dynamic) {
-                    // Dynamic-typed receiver: may be a boxed DynamicValue* (from Let handler boxing)
-                    // or a raw pointer from StringMap/IntMap.get().
-                    // For Ptr(Void): unbox first to get the actual object pointer, then
-                    // decide class vs anonymous path.
+                    // Cross-context iface dispatch fallback: when the receiver's
+                    // HIR type is `Dynamic` (interface method return type wasn't
+                    // resolved cross-file) but the MIR value is already a raw
+                    // pointer to a stdlib reference type (HaxeArray, HaxeString,
+                    // Bytes), the unbox-then-class-or-reflect path below treats
+                    // those bytes as a `DynamicValue` header and SIGBUSes.
+                    //
+                    // Check the stdlib mapping by field name against the common
+                    // reference classes first. If `length` matches `Array.length`,
+                    // call `array_length` directly with the raw pointer — the
+                    // runtime reads `HaxeArray.len` at a fixed offset and works.
+                    //
+                    // Class instances retain their `__type_id` header; for those,
+                    // `field_exists_in_any_class` further down handles dispatch
+                    // correctly after unboxing.
                     if let Some(IrType::Ptr(inner)) = &obj_ir_type {
                         if matches!(**inner, IrType::Void) {
+                            // Try the stdlib name-based dispatch first. Only
+                            // covers `Array.length`-style zero-arg properties
+                            // returning a primitive; boxes the result so
+                            // downstream Dynamic-aware code (string concat,
+                            // trace) gets a `DynamicValue*` rather than a
+                            // raw i32 it would later deref as a pointer.
+                            if let Some(boxed) =
+                                self.try_dynamic_stdlib_property_dispatch(obj, field)
+                            {
+                                return Some(boxed);
+                            }
+
                             let field_in_class = self.field_exists_in_any_class(field);
 
                             // Unbox to get the actual object pointer from DynamicValue*
@@ -25718,6 +25751,75 @@ impl<'a> HirToMirContext<'a> {
     /// Dynamic field READ fallback via Reflect API.
     /// Used when receiver is Dynamic and field_index_map has no matching class field.
     /// The object may be a boxed DynamicValue (from boxing) — unbox to get the anonymous handle.
+    /// Try to dispatch a Dynamic-receiver field read to a stdlib runtime
+    /// property getter (e.g. `Array.length`, `String.length`, …) before
+    /// falling through to `haxe_unbox_reference_ptr` + reflect.
+    ///
+    /// Walks the stdlib mapping by field name — any zero-arg instance
+    /// property whose name matches qualifies. Boxes primitive results
+    /// as `DynamicValue*` so downstream Dynamic-aware code (string
+    /// concat, trace, `+`) sees what it expects rather than a raw
+    /// integer it would later dereference as a pointer.
+    fn try_dynamic_stdlib_property_dispatch(&mut self, obj: IrId, field: SymbolId) -> Option<IrId> {
+        let field_name = self
+            .symbol_table
+            .get_symbol(field)
+            .and_then(|s| self.string_interner.get(s.name))
+            .map(|s| s.to_string())?;
+        let (_, call) = self
+            .stdlib_mapping
+            .find_instance_property_by_name(&field_name)?;
+
+        let (runtime_ret_ty, box_kind) =
+            match call.return_type.as_ref().unwrap_or(&IrTypeDescriptor::I64) {
+                IrTypeDescriptor::I32 => (IrType::I32, Some(PrimBoxKind::Int)),
+                IrTypeDescriptor::I64 => (IrType::I64, Some(PrimBoxKind::Int)),
+                IrTypeDescriptor::F64 | IrTypeDescriptor::F32 => {
+                    (IrType::F64, Some(PrimBoxKind::Float))
+                }
+                IrTypeDescriptor::Bool => (IrType::Bool, Some(PrimBoxKind::Bool)),
+                _ => (IrType::Ptr(Box::new(IrType::U8)), None),
+            };
+        let func_id = self.get_or_register_extern_function(
+            call.runtime_name,
+            vec![IrType::Ptr(Box::new(IrType::Void))],
+            runtime_ret_ty.clone(),
+        );
+        let raw = self
+            .builder
+            .build_call_direct(func_id, vec![obj], runtime_ret_ty.clone())?;
+        match box_kind {
+            Some(kind) => self.box_primitive_as_dynamic(raw, runtime_ret_ty, kind),
+            None => Some(raw),
+        }
+    }
+
+    /// Box a primitive MIR value into a `DynamicValue*` via the
+    /// corresponding `haxe_box_*_ptr` runtime helper. Centralised so
+    /// the runtime-symbol names live in one place; widening (i32 → i64
+    /// for the int boxer) is handled here.
+    fn box_primitive_as_dynamic(
+        &mut self,
+        value: IrId,
+        value_ty: IrType,
+        kind: PrimBoxKind,
+    ) -> Option<IrId> {
+        let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+        let (box_fn, box_arg_ty) = match kind {
+            PrimBoxKind::Int => ("haxe_box_int_ptr", IrType::I64),
+            PrimBoxKind::Float => ("haxe_box_float_ptr", IrType::F64),
+            PrimBoxKind::Bool => ("haxe_box_bool_ptr", IrType::Bool),
+        };
+        let widened = if matches!(kind, PrimBoxKind::Int) && matches!(value_ty, IrType::I32) {
+            self.builder.build_cast(value, IrType::I32, IrType::I64)?
+        } else {
+            value
+        };
+        let box_id = self.get_or_register_extern_function(box_fn, vec![box_arg_ty], ptr_u8.clone());
+        self.builder
+            .build_call_direct(box_id, vec![widened], ptr_u8)
+    }
+
     fn dynamic_reflect_field_read(
         &mut self,
         obj: IrId,
