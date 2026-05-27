@@ -624,6 +624,12 @@ impl CraneliftBackend {
             // Skip unmonomorphized generic template functions
             if !function.signature.type_params.is_empty() {
                 debug!("Skipping generic template function: {}", function.name);
+                if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
+                    eprintln!(
+                        "[trap-stub:generic] {:?} {} (qn={:?})",
+                        func_id, function.name, function.qualified_name
+                    );
+                }
                 if let Err(_) = self.define_trap_stub(*func_id, function) {}
                 continue;
             }
@@ -645,6 +651,32 @@ impl CraneliftBackend {
                     "Skipping function '{}' (calls a failed function)",
                     function.name
                 );
+                if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
+                    let failed_callees: Vec<_> = function
+                        .cfg
+                        .blocks
+                        .values()
+                        .flat_map(|b| b.instructions.iter())
+                        .filter_map(|inst| {
+                            if let crate::ir::IrInstruction::CallDirect {
+                                func_id: callee, ..
+                            } = inst
+                            {
+                                if failed_funcs.contains(callee) {
+                                    Some(*callee)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    eprintln!(
+                        "[trap-stub:cascade] {:?} {} calls failed: {:?}",
+                        func_id, function.name, failed_callees
+                    );
+                }
                 failed_funcs.insert(*func_id);
                 if let Err(_) = self.define_trap_stub(*func_id, function) {}
                 continue;
@@ -820,6 +852,12 @@ impl CraneliftBackend {
             }
             if !function.signature.type_params.is_empty() {
                 debug!("Skipping generic template function: {}", function.name);
+                if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
+                    eprintln!(
+                        "[trap-stub:generic] {:?} {} (qn={:?})",
+                        func_id, function.name, function.qualified_name
+                    );
+                }
                 if let Err(_) = self.define_trap_stub(*func_id, function) {}
                 continue;
             }
@@ -841,6 +879,32 @@ impl CraneliftBackend {
                     "Skipping function '{}' (calls a failed function)",
                     function.name
                 );
+                if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
+                    let failed_callees: Vec<_> = function
+                        .cfg
+                        .blocks
+                        .values()
+                        .flat_map(|b| b.instructions.iter())
+                        .filter_map(|inst| {
+                            if let crate::ir::IrInstruction::CallDirect {
+                                func_id: callee, ..
+                            } = inst
+                            {
+                                if failed_funcs.contains(callee) {
+                                    Some(*callee)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                    eprintln!(
+                        "[trap-stub:cascade] {:?} {} calls failed: {:?}",
+                        func_id, function.name, failed_callees
+                    );
+                }
                 failed_funcs.insert(*func_id);
                 if let Err(_) = self.define_trap_stub(*func_id, function) {}
                 continue;
@@ -852,6 +916,12 @@ impl CraneliftBackend {
                         "[COMPILE_FAIL] Skipping function '{}' ({:?}): {}",
                         function.name, func_id, e
                     );
+                    if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
+                        eprintln!(
+                            "[trap-stub:compile-fail] {:?} {} (qn={:?}): {}",
+                            func_id, function.name, function.qualified_name, e
+                        );
+                    }
                     failed_funcs.insert(*func_id);
                     if let Err(e2) = self.define_trap_stub(*func_id, function) {
                         warn!(
@@ -1734,6 +1804,26 @@ impl CraneliftBackend {
             debug!("\n=== Cranelift IR for {} ===", function.name);
             debug!("{}", self.ctx.func.display());
             trace!("=== End Cranelift IR ===\n");
+        }
+        // RAYZOR_DUMP_CLIF=<substr> — dump CLIF for any function whose
+        // name contains <substr>. One-shot debug helper; remove or
+        // gate behind a proper flag once `rayzor debug` exists.
+        if let Ok(pat) = std::env::var("RAYZOR_DUMP_CLIF") {
+            if function.name.contains(&pat)
+                || function
+                    .qualified_name
+                    .as_deref()
+                    .map(|n| n.contains(&pat))
+                    .unwrap_or(false)
+            {
+                eprintln!(
+                    "\n=== CLIF for {} (mir={:?}, cl={:?}) ===\n{}\n=== /CLIF ===\n",
+                    function.name,
+                    mir_func_id,
+                    func_id,
+                    self.ctx.func.display()
+                );
+            }
         }
         // Verify the function before defining (debug builds only)
         // This catches IR errors early but adds compilation overhead

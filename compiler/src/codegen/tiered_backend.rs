@@ -1976,6 +1976,14 @@ impl TieredBackend {
                     continue;
                 }
                 if let Ok(ptr) = backend.get_function_ptr(*func_id) {
+                    if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
+                        eprintln!(
+                            "[fn-ptr] {:?} {} -> 0x{:x}",
+                            func_id,
+                            function.qualified_name.as_deref().unwrap_or(&function.name),
+                            ptr as usize
+                        );
+                    }
                     self.function_pointers
                         .write()
                         .unwrap()
