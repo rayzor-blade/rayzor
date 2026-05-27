@@ -1638,8 +1638,18 @@ impl StdlibMapping {
             // I/O
             map_method!(static "Sys", "print" => "haxe_string_print", params: 1, returns: void,
                 types: &[PtrVoid]),
-            map_method!(static "Sys", "println" => "haxe_sys_println", params: 0, returns: void,
-                types: &[]),
+            // `Sys.println(v:Dynamic):Void` — one arg, not zero.
+            // Previously declared with `params: 0`, which dispatched
+            // to a no-arg `haxe_sys_println()` (just a newline) and
+            // *silently dropped* the source-level argument. The
+            // dropped arg's IrId remained in the MIR but wasn't
+            // wired into any call — later codegen could fail with
+            // "Argument IrId(N) not found in value_map" if the
+            // numbering aligned with a downstream concat call.
+            // `haxe_string_println(s)` does the same as
+            // `print(s); println();`.
+            map_method!(static "Sys", "println" => "haxe_string_println", params: 1, returns: void,
+                types: &[PtrVoid]),
             // Program control
             map_method!(static "Sys", "exit" => "haxe_sys_exit", params: 1, returns: void,
                 types: &[I64]),
