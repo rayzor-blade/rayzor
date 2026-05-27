@@ -22909,9 +22909,9 @@ impl<'a> HirToMirContext<'a> {
                                 // produces a vtable resolved against the
                                 // current symbol table.
                                 self.interface_vtables.remove(&(class_sym, iface_sym));
-                                if let Some(wrapped) = self.wrap_in_interface_fat_ptr(
-                                    arg_reg, class_sym, iface_sym,
-                                ) {
+                                if let Some(wrapped) =
+                                    self.wrap_in_interface_fat_ptr(arg_reg, class_sym, iface_sym)
+                                {
                                     self.interface_wrapped_args.insert(wrapped);
                                     return wrapped;
                                 }
@@ -23305,6 +23305,15 @@ impl<'a> HirToMirContext<'a> {
         // If it's already a primitive (I64, I32, F64, Bool) rather than a pointer (Ptr(U8)),
         // then it's NOT a boxed Dynamic value — skip unboxing.
         // This handles MIR wrapper returns (e.g., Usize ops return I64 typed as Dynamic in HIR).
+        //
+        // The same logic applies to pointer-to-reference targets (Array, Interface,
+        // Anonymous, Class): if the value's MIR type is already a `Ptr(Void)` /
+        // `Ptr(U8)` produced by a callee that returns raw pointers (e.g. a cross-
+        // file interface dispatch whose HIR result type is treated as Dynamic
+        // because the call_indirect result type info didn't propagate), the value
+        // is the unwrapped pointer already. Running `haxe_unbox_reference_ptr` on
+        // it interprets the first 8 bytes of the HaxeArray (or class header) as a
+        // `DynamicValue.value_ptr`, returning garbage and SIGBUSing at first use.
         let actual_mir_type = self.builder.get_register_type(value);
         if let Some(ref mir_ty) = actual_mir_type {
             let is_already_unboxed = matches!(
@@ -23315,6 +23324,23 @@ impl<'a> HirToMirContext<'a> {
                 debug!(
                     "[UNBOXING] Skipping unbox — value MIR type {:?} is already a primitive",
                     mir_ty
+                );
+                return Some(value);
+            }
+            // Target is a reference-typed Haxe kind (Array, Interface, Anonymous,
+            // Class). When the MIR value is already a pointer, skip the
+            // haxe_unbox_reference_ptr — see comment above.
+            if matches!(mir_ty, IrType::Ptr(_))
+                && matches!(
+                    &target_kind_cloned,
+                    Some(TypeKind::Array { .. })
+                        | Some(TypeKind::Interface { .. })
+                        | Some(TypeKind::Anonymous { .. })
+                )
+            {
+                debug!(
+                    "[UNBOXING] Skipping unbox — value MIR type {:?} is already a pointer for reference target {:?}",
+                    mir_ty, target_kind_cloned
                 );
                 return Some(value);
             }
