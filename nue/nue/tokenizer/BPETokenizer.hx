@@ -70,15 +70,22 @@ class BPETokenizer implements Tokenizer {
     }
 
     public function specialId(name:String):Int {
-        var id = specials.get(name);
-        return (id == null) ? -1 : id;
+        // See `rankOf` for why this uses `exists` instead of `Null<T>`.
+        if (!specials.exists(name)) return -1;
+        return specials.get(name);
     }
 
     /** O(1) lookup for a merge rule matching `left + right`. Returns
-        -1 if no rule exists. */
+        -1 if no rule exists.
+        Uses an explicit `exists` check rather than relying on the
+        `Null<Int>` semantics of `StringMap.get` — the runtime returns
+        raw `0u64` for missing keys (not boxed null), so `get(...) ==
+        null` would be `false` for missing keys and miscompare against
+        a real 0 entry. See `bugs_stringmap_null_get.md`. */
     private function rankOf(left:String, right:String):Int {
-        var rank = rankIndex.get(left + right);
-        return (rank == null) ? -1 : rank;
+        var key = left + right;
+        if (!rankIndex.exists(key)) return -1;
+        return rankIndex.get(key);
     }
 
     /**
