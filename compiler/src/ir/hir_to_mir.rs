@@ -28146,11 +28146,31 @@ impl<'a> HirToMirContext<'a> {
 
         // Create phi for expression result if both branches returned values
         let mut result_phi = None;
-        // eprintln!(
-        //     "DEBUG: Checking if need result phi: then_val={:?}, else_val={:?}",
-        //     then_val.is_some(),
-        //     else_val.is_some()
-        // );
+
+        // Asymmetric case: ONE branch terminated (throw / return /
+        // unreachable infinite loop) while the OTHER produced a
+        // value. The if-as-expression still has a value at the merge
+        // point — it's just the non-terminated branch's value
+        // unconditionally, because the terminated branch never
+        // reaches merge. Without this, e.g.
+        //
+        //   var x:Int = if (cond) 42 else throw "...";
+        //
+        // returns `None` from `lower_conditional_typed`, and the
+        // surrounding `return x` becomes `Return(None)` in MIR —
+        // which the cranelift backend rejects for a typed-return
+        // function ("Return with no value"). The merge block has a
+        // single predecessor (the value branch), so no phi is
+        // needed; reuse the live value directly. Same applies for
+        // `return switch { … case _: throw … };` where the throw is
+        // the if-chain's terminal else.
+        if !then_terminated && else_terminated && then_val.is_some() {
+            return then_val;
+        }
+        if then_terminated && !else_terminated && else_val.is_some() {
+            return else_val;
+        }
+
         // Only create result phi if BOTH branches return values (for expression-style ifs)
         // If only one returns a value, that's a type error - skip result phi
         if then_val.is_some() && else_val.is_some() {
