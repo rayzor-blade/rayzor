@@ -138,7 +138,13 @@ class GGUFLoader implements ModelLoader {
 
     private static function tensorsFromReader(reader:GGUFReader):NamedTensorMap {
         var result = new NamedTensorMap();
-        for (info in reader.tensorInfos) {
+        // Bind the array to a typed local before iterating — direct
+        // `for (info in reader.tensorInfos)` silently exits the loop
+        // after the first element in cross-file class-field-access
+        // contexts. The pre-bind dodges that path until the
+        // compiler-side fix lands.
+        var infos:Array<GGUFReader.TensorInfo> = reader.tensorInfos;
+        for (info in infos) {
             var raw = reader.tensorBytes(info);
             var tensor = decodeTensor(raw, info);
             result.set(info.name, tensor);
