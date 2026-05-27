@@ -236,6 +236,27 @@ pub struct HirToMirContext<'a> {
     /// Set by the Dynamic/TypeParameter method dispatch handler after MIR wrapper calls.
     register_class_hints: BTreeMap<IrId, String>,
 
+    /// Result registers from cross-context interface method calls whose
+    /// HIR result type was `Dynamic` (because TAST couldn't resolve the
+    /// iface method's return type) but for which we successfully
+    /// re-resolved a concrete TypeId via `interface_method_return_types`
+    /// at MIR-lowering time. Lets `Let` propagate the concrete type
+    /// down through variable bindings so subsequent receiver dispatch
+    /// sees the real type instead of falling into the Dynamic path.
+    interface_call_result_types: BTreeMap<IrId, TypeId>,
+
+    /// Variables whose declared HIR type is `Dynamic` but whose RHS at
+    /// the binding site was a tracked `interface_call_result_types`
+    /// register. Receiver-type lookups (Call method dispatch, field
+    /// access) consult this map and treat the variable as the
+    /// concrete type instead of `Dynamic`.
+    var_concrete_overrides: BTreeMap<SymbolId, TypeId>,
+
+    /// Dedup set for `emit_iface_return_diagnostic` so the same
+    /// `(method, file, line, col)` doesn't dump dozens of identical
+    /// warnings when a generic helper is called many times.
+    iface_diag_seen: BTreeSet<(String, u32, u32, u32)>,
+
     /// Enums that need RTTI registration
     /// Maps enum SymbolId -> (runtime_type_id, enum_name, variant_names)
     enums_for_registration: BTreeMap<SymbolId, (u32, String, Vec<String>)>,
@@ -628,6 +649,9 @@ impl<'a> HirToMirContext<'a> {
             current_this_type: None,
             monomorphized_var_types: BTreeMap::new(),
             register_class_hints: BTreeMap::new(),
+            interface_call_result_types: BTreeMap::new(),
+            var_concrete_overrides: BTreeMap::new(),
+            iface_diag_seen: BTreeSet::new(),
             enums_for_registration: BTreeMap::new(),
             next_wrapper_id: 0,
             // Drop tracking initialization
@@ -4371,6 +4395,43 @@ impl<'a> HirToMirContext<'a> {
                             if let Some(class_hint) = self.register_class_hints.get(&value_reg) {
                                 self.monomorphized_var_types
                                     .insert(*symbol, class_hint.clone());
+                            }
+                        }
+
+                        // Cross-context interface return-type propagation:
+                        // when the RHS register came from an iface
+                        // method call whose return type was Dynamic at
+                        // TAST but we re-resolved a concrete TypeId at
+                        // MIR, override the variable's effective HIR
+                        // type so subsequent receiver dispatch sees the
+                        // real type (e.g. `Array<Int>`) instead of
+                        // routing into the Dynamic-fallback path.
+                        //
+                        // Propagate when the variable's "declared" type
+                        // (`type_hint`) is itself Dynamic/Placeholder/
+                        // Unknown — that's the inference fallback TAST
+                        // emits when it couldn't pin a real type
+                        // cross-context. A real user annotation
+                        // (`var x:Array<Int> = …`) pins a concrete
+                        // hint, which the assign-side coercion already
+                        // handles, so we skip in that case.
+                        if let HirPattern::Variable { symbol, .. } = pattern {
+                            if let Some(&real_ty) = self.interface_call_result_types.get(&value_reg)
+                            {
+                                let hint_is_concrete = type_hint
+                                    .and_then(|tid| self.type_table.get(tid))
+                                    .map(|t| {
+                                        !matches!(
+                                            t.kind,
+                                            TypeKind::Dynamic
+                                                | TypeKind::Placeholder { .. }
+                                                | TypeKind::Unknown
+                                        )
+                                    })
+                                    .unwrap_or(false);
+                                if !hint_is_concrete {
+                                    self.var_concrete_overrides.insert(*symbol, real_ty);
+                                }
                             }
                         }
 
@@ -9396,8 +9457,21 @@ impl<'a> HirToMirContext<'a> {
                                 // Resolve return type from the method's symbol type,
                                 // not expr.ty (which may be the interface type instead
                                 // of the method's return type in some TAST configurations)
-                                let return_ir_type =
-                                    self.resolve_interface_method_return_type(*field, expr.ty);
+                                let (return_ir_type, resolved_ret_type_id) =
+                                    self.resolve_interface_method_return_type_full(*field, expr.ty);
+                                // If the HIR `expr.ty` was Dynamic-shaped (a Ptr
+                                // after `convert_type`) but the cross-context
+                                // map resolved a concrete return type, emit
+                                // either a hint (resolved) or a warning
+                                // (still missing). The warning fires when the
+                                // user would benefit from an explicit
+                                // annotation at the binding site.
+                                self.emit_iface_return_diagnostic(
+                                    *field,
+                                    expr.ty,
+                                    resolved_ret_type_id,
+                                    expr.source_location,
+                                );
                                 let return_type = Box::new(return_ir_type);
                                 let func_signature = IrType::Function {
                                     params: param_types,
@@ -9405,11 +9479,22 @@ impl<'a> HirToMirContext<'a> {
                                     varargs: false,
                                 };
 
-                                return self.builder.build_call_indirect(
+                                let call_result = self.builder.build_call_indirect(
                                     fn_ptr,
                                     call_args,
                                     func_signature,
-                                );
+                                )?;
+                                // Track for cross-Let type propagation: when
+                                // the iface call result's HIR type was
+                                // Dynamic but we re-resolved a concrete
+                                // TypeId, store the (register → TypeId) so
+                                // the binding site can override the
+                                // variable's effective type.
+                                if let Some(real_ty) = resolved_ret_type_id {
+                                    self.interface_call_result_types
+                                        .insert(call_result, real_ty);
+                                }
+                                return Some(call_result);
                             }
                         }
                     }
@@ -11874,8 +11959,16 @@ impl<'a> HirToMirContext<'a> {
                                     // Resolve return type from the method's symbol type,
                                     // not expr.ty (which may be the interface type instead
                                     // of the method's return type in some TAST configurations)
-                                    let return_ir_type =
-                                        self.resolve_interface_method_return_type(*symbol, expr.ty);
+                                    let (return_ir_type, resolved_ret_type_id) = self
+                                        .resolve_interface_method_return_type_full(
+                                            *symbol, expr.ty,
+                                        );
+                                    self.emit_iface_return_diagnostic(
+                                        *symbol,
+                                        expr.ty,
+                                        resolved_ret_type_id,
+                                        expr.source_location,
+                                    );
                                     let return_type = Box::new(return_ir_type);
                                     let func_signature = IrType::Function {
                                         params: param_types,
@@ -11883,11 +11976,16 @@ impl<'a> HirToMirContext<'a> {
                                         varargs: false,
                                     };
 
-                                    return self.builder.build_call_indirect(
+                                    let call_result = self.builder.build_call_indirect(
                                         fn_ptr,
                                         call_args,
                                         func_signature,
-                                    );
+                                    )?;
+                                    if let Some(real_ty) = resolved_ret_type_id {
+                                        self.interface_call_result_types
+                                            .insert(call_result, real_ty);
+                                    }
+                                    return Some(call_result);
                                 }
                             }
                         }
@@ -13163,8 +13261,22 @@ impl<'a> HirToMirContext<'a> {
                     // Note: Static methods like Thread.spawn() can also come through here with is_method=true
                     if *is_method && !args.is_empty() {
                         // The first arg is the receiver for instance method calls
-                        // Resolve TypeAlias to get the actual receiver type
-                        let receiver_type = self.resolve_through_aliases(args[0].ty);
+                        // Resolve TypeAlias to get the actual receiver type.
+                        //
+                        // Cross-context override: when the receiver
+                        // expression is a Variable whose binding was
+                        // populated by an iface call whose return type
+                        // we re-resolved at MIR time (Dynamic →
+                        // concrete), use that override instead of the
+                        // poisoned `args[0].ty`. Without this, the
+                        // dispatch falls into the Dynamic-receiver path
+                        // and the downstream MIR-wrapper boxing
+                        // produces a malformed call (SIGSEGVs on
+                        // e.g. `Array.push`).
+                        let receiver_type = self
+                            .effective_receiver_type(&args[0])
+                            .map(|tid| self.resolve_through_aliases(tid))
+                            .unwrap_or_else(|| self.resolve_through_aliases(args[0].ty));
 
                         {
                             let type_table = self.type_table;
@@ -32363,6 +32475,192 @@ impl<'a> HirToMirContext<'a> {
         Some(cloned_ptr)
     }
 
+    /// Return the "effective" HIR type for a receiver expression — i.e.
+    /// the type that should drive dispatch decisions. Currently this
+    /// only differs from `expr.ty` when the receiver is a bare
+    /// `Variable` whose binding picked up a cross-context iface return
+    /// type that TAST couldn't resolve (see
+    /// `var_concrete_overrides`). Returns `None` if no override
+    /// applies, so callers can keep their existing `args[0].ty`
+    /// path as the default.
+    fn effective_receiver_type(&self, receiver: &HirExpr) -> Option<TypeId> {
+        if let HirExprKind::Variable { symbol, .. } = &receiver.kind {
+            self.var_concrete_overrides.get(symbol).copied()
+        } else {
+            None
+        }
+    }
+
+    /// Emit a diagnostic at an interface method call site when the
+    /// call-side HIR type was `Dynamic`-shaped (a Ptr after
+    /// `convert_type`). Two cases:
+    ///
+    /// - `resolved` is `Some` → we recovered the concrete return type
+    ///   from `interface_method_return_types`. Emit a `Hint` so the
+    ///   user knows an annotation at the binding site would silence
+    ///   the recovery layer and the runtime extra work it implies.
+    /// - `resolved` is `None` → we did NOT find a matching iface
+    ///   method return type. The value will flow through downstream
+    ///   code as `Dynamic`, which is a footgun (boxed eq, reflect
+    ///   field reads, SIGSEGV-prone method dispatch). Emit a
+    ///   `Warning` recommending an explicit `:T` annotation.
+    ///
+    /// Both diagnostics are no-ops when the HIR type is already
+    /// concrete (the common path, fired millions of times per
+    /// compile) so the cost stays in the cross-context case.
+    fn emit_iface_return_diagnostic(
+        &mut self,
+        method_symbol: SymbolId,
+        expr_ty: TypeId,
+        resolved: Option<TypeId>,
+        location: SourceLocation,
+    ) {
+        use crate::tast::TypeKind;
+        // Only diagnose call sites whose HIR-level type kind is the
+        // erased fallback (Dynamic / Placeholder / Unknown). A concrete
+        // TAST type means the type checker already resolved it; no
+        // user-actionable advice to offer.
+        let expr_kind = self.type_table.get(expr_ty).map(|t| t.kind.clone());
+        let is_erased = matches!(
+            expr_kind,
+            Some(TypeKind::Dynamic) | Some(TypeKind::Placeholder { .. }) | Some(TypeKind::Unknown)
+        );
+        if !is_erased {
+            return;
+        }
+        // Suppress diagnostics for Void-returning methods: there's no
+        // value flowing downstream, so there's no annotation to add
+        // and no misdispatch risk. (Common for things like
+        // `cache.reset()` on an iface field.)
+        if let Some(real_ty) = resolved {
+            if matches!(
+                self.type_table.get(real_ty).map(|t| &t.kind),
+                Some(TypeKind::Void)
+            ) {
+                return;
+            }
+        }
+        let method_name = self
+            .symbol_table
+            .get_symbol(method_symbol)
+            .and_then(|s| self.string_interner.get(s.name))
+            .unwrap_or("<unknown>")
+            .to_string();
+        // Deduplicate: same (method, source line/col) fires once per
+        // compile. Without this, generic helpers called from many
+        // sites would dump dozens of identical warnings.
+        let dedup_key = (
+            method_name.clone(),
+            location.file_id,
+            location.line,
+            location.column,
+        );
+        if !self.iface_diag_seen.insert(dedup_key) {
+            return;
+        }
+        let span = Self::source_location_to_span(&location);
+        let diag = match resolved {
+            Some(real_ty) => {
+                let ty_name = self.format_type_for_hint(real_ty);
+                diagnostics::DiagnosticBuilder::hint(
+                    format!(
+                        "interface method `{}()` return type recovered as `{}` at MIR; \
+                         annotating the binding site (e.g. `var x:{} = …`) makes the \
+                         concrete type visible to earlier compiler passes too",
+                        method_name, ty_name, ty_name
+                    ),
+                    span.clone(),
+                )
+                .code("W0014")
+                .label(span, "cross-context iface return resolved late")
+                .build()
+            }
+            None => diagnostics::DiagnosticBuilder::warning(
+                format!(
+                    "cannot resolve return type of interface method `{}()` across \
+                     compilation contexts — value will flow as `Dynamic` and \
+                     downstream `.method()` / `==` may misdispatch or crash; \
+                     annotate the binding site (e.g. `var x:T = …`) to silence",
+                    method_name
+                ),
+                span.clone(),
+            )
+            .code("W0015")
+            .label(span, "iface return erased to Dynamic")
+            .build(),
+        };
+        self.diagnostics.push(diag);
+    }
+
+    /// Best-effort short type-name for a TypeId, for hint messages.
+    /// Falls back to a debug-ish form when the type table can't render
+    /// a clean name (we don't ship a full pretty-printer here — the
+    /// goal is to help the user write `var x:T = …`, not produce
+    /// canonical source).
+    fn format_type_for_hint(&self, type_id: TypeId) -> String {
+        let type_table = self.type_table;
+        let ti = match type_table.get(type_id) {
+            Some(ti) => ti,
+            None => return "<unknown>".to_string(),
+        };
+        let sym_name = |sid: SymbolId| -> String {
+            self.symbol_table
+                .get_symbol(sid)
+                .and_then(|s| self.string_interner.get(s.name))
+                .unwrap_or("<class>")
+                .to_string()
+        };
+        let render_args = |args: &[TypeId]| -> String {
+            args.iter()
+                .map(|&t| self.format_type_for_hint(t))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        match &ti.kind {
+            crate::tast::TypeKind::Int => "Int".to_string(),
+            crate::tast::TypeKind::Float => "Float".to_string(),
+            crate::tast::TypeKind::Bool => "Bool".to_string(),
+            crate::tast::TypeKind::String => "String".to_string(),
+            crate::tast::TypeKind::Void => "Void".to_string(),
+            crate::tast::TypeKind::Dynamic => "Dynamic".to_string(),
+            crate::tast::TypeKind::Array { element_type } => {
+                format!("Array<{}>", self.format_type_for_hint(*element_type))
+            }
+            crate::tast::TypeKind::Class {
+                symbol_id,
+                type_args,
+            }
+            | crate::tast::TypeKind::Interface {
+                symbol_id,
+                type_args,
+            }
+            | crate::tast::TypeKind::Enum {
+                symbol_id,
+                type_args,
+            } => {
+                let base = sym_name(*symbol_id);
+                if type_args.is_empty() {
+                    base
+                } else {
+                    format!("{}<{}>", base, render_args(type_args))
+                }
+            }
+            crate::tast::TypeKind::GenericInstance {
+                base_type,
+                type_args,
+                ..
+            } => {
+                let base = self.format_type_for_hint(*base_type);
+                if type_args.is_empty() {
+                    base
+                } else {
+                    format!("{}<{}>", base, render_args(type_args))
+                }
+            }
+            _ => format!("{:?}", ti.kind),
+        }
+    }
+
     /// Resolve the return type for an interface method call.
     /// If the method symbol has a Function type in the type table, extract the return type.
     /// Otherwise fall back to convert_type(expr_ty).
@@ -32371,25 +32669,70 @@ impl<'a> HirToMirContext<'a> {
         method_symbol: SymbolId,
         expr_ty: TypeId,
     ) -> IrType {
+        self.resolve_interface_method_return_type_full(method_symbol, expr_ty)
+            .0
+    }
+
+    /// Variant of [`resolve_interface_method_return_type`] that also
+    /// returns the resolved concrete `TypeId` when re-resolution
+    /// succeeded. The `TypeId` is `Some` iff we replaced a Ptr fallback
+    /// with a concrete entry from `interface_method_return_types`. Used
+    /// by call-site tracking to propagate the concrete type through
+    /// subsequent `Let` bindings so downstream receivers don't fall
+    /// into the Dynamic-dispatch path.
+    fn resolve_interface_method_return_type_full(
+        &self,
+        method_symbol: SymbolId,
+        expr_ty: TypeId,
+    ) -> (IrType, Option<TypeId>) {
+        use crate::tast::TypeKind;
         let fallback = self.convert_type(expr_ty);
-        // If fallback is already a concrete type (not Ptr), it's correct
-        if !matches!(fallback, IrType::Ptr(_)) {
-            return fallback;
+        // Compare TypeKinds, not IrTypes — `Array<Int>`, `Class`, and
+        // `Dynamic` all convert to `Ptr(Void)` so an IrType test would
+        // discard every reference-typed iface return. Look at the
+        // call-site `expr_ty`'s TypeKind: if it's already concrete
+        // (not Dynamic / Placeholder / Unknown), the type checker
+        // already knows what it is — return the fallback and skip
+        // the map lookup.
+        let expr_kind = self.type_table.get(expr_ty).map(|t| t.kind.clone());
+        let needs_resolve = matches!(
+            expr_kind,
+            Some(TypeKind::Dynamic) | Some(TypeKind::Placeholder { .. }) | Some(TypeKind::Unknown)
+        );
+        if !needs_resolve {
+            return (fallback, None);
         }
-        // Look up the method name from the symbol table
-        let method_name_interned = self.symbol_table.get_symbol(method_symbol).map(|s| s.name);
-        if let Some(method_name) = method_name_interned {
-            // Search all interfaces for this method's return type
+        // String-compare method names — entries loaded from a BLADE
+        // cache may have been interned in a different session, so raw
+        // InternedString ids won't match even when the names do.
+        let method_name_str = self
+            .symbol_table
+            .get_symbol(method_symbol)
+            .and_then(|s| self.string_interner.get(s.name));
+        if let Some(method_name) = method_name_str {
             for ((_, name), &ret_type_id) in &self.interface_method_return_types {
-                if *name == method_name {
-                    let resolved = self.convert_type(ret_type_id);
-                    if !matches!(resolved, IrType::Ptr(_)) {
-                        return resolved;
-                    }
+                let entry_name = self.string_interner.get(*name);
+                if entry_name != Some(method_name) {
+                    continue;
+                }
+                // Accept the map entry whenever its TypeKind is more
+                // specific than `Dynamic`. Map is authoritative for
+                // cross-file return types; the only "no-op" case is
+                // when the entry is itself Dynamic-shaped.
+                let entry_kind = self.type_table.get(ret_type_id).map(|t| t.kind.clone());
+                let is_concrete = !matches!(
+                    entry_kind,
+                    Some(TypeKind::Dynamic)
+                        | Some(TypeKind::Placeholder { .. })
+                        | Some(TypeKind::Unknown)
+                        | None
+                );
+                if is_concrete {
+                    return (self.convert_type(ret_type_id), Some(ret_type_id));
                 }
             }
         }
-        fallback
+        (fallback, None)
     }
 
     /// Check if a type is an interface type and return its SymbolId.

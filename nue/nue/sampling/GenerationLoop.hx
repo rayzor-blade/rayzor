@@ -62,28 +62,13 @@ class GenerationLoop {
     public function generate(prompt:String, onToken:Int->String->Bool):String {
         model.resetCache();
 
-        // Explicit `Array<Int>` annotation: when the tokenizer is held
-        // behind the `Tokenizer` interface and lives in a different
-        // compilation context, the iface vtable's return type is
-        // erased to `Dynamic`. Inferring `ids` from the raw call leaves
-        // it `Dynamic` too, and downstream `ids.push(...)` routes
-        // through the Dynamic-method dispatch path instead of the
-        // direct `array_push` runtime stub — which segfaults reading
-        // the HaxeArray header as a `DynamicValue` box. Annotating
-        // forces the assign-site coercion to keep `ids` as
-        // `Array<Int>`.
-        var ids:Array<Int> = tokenizer.encode(prompt);
+        var ids = tokenizer.encode(prompt);
         if (ids.length == 0) return prompt;
 
         // Prefill: feed the entire prompt; take the last row of logits
         // as the prediction for "what comes after the prompt".
         var logits = model.forwardIds(ids);
-        // Same cross-context iface-return rationale as `ids` above:
-        // `sampler` is a `Sampler` interface field, so without an
-        // explicit `:Int` annotation the inferred type is `Dynamic`
-        // and the `nextId == eosId` comparison goes through boxed
-        // equality instead of native int compare.
-        var nextId:Int = sampler.sample(lastRow(logits));
+        var nextId = sampler.sample(lastRow(logits));
 
         var generated:Array<Int> = [];
         var step = 0;
@@ -108,7 +93,7 @@ class GenerationLoop {
             // Decode step: only feed the latest token; KV cache
             // carries the rest of the context.
             logits = model.forwardIds([nextId]);
-            nextId = (sampler.sample(lastRow(logits)) : Int);
+            nextId = sampler.sample(lastRow(logits));
         }
 
         return prompt + tokenizer.decode(generated);
