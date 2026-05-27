@@ -50,9 +50,14 @@ class Vocab {
         return tokens[id];
     }
 
-    /** Token → ID. Returns -1 when not found. */
+    /** Token → ID. Returns -1 when not found.
+        Uses an explicit `exists` check because the runtime's
+        `StringMap<Int>.get` returns raw `0u64` for missing keys
+        rather than boxed null — so `get(...) == null` would be
+        false for missing keys and miscompare against a real 0 entry
+        (see `bugs_stringmap_null_get.md`). */
     public function lookup(token:String):Int {
-        var id = idOf.get(token);
-        return (id == null) ? -1 : id;
+        if (!idOf.exists(token)) return -1;
+        return idOf.get(token);
     }
 }
