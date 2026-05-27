@@ -790,8 +790,17 @@ pub struct TypedCatchClause {
 /// Switch case
 #[derive(Debug, Clone)]
 pub struct TypedSwitchCase {
-    /// Case value (constant expression)
+    /// Case value (constant expression). For multi-value clauses
+    /// like `case 12, 14:` this holds the FIRST value; the rest go
+    /// in `extra_case_values`.
     pub case_value: TypedExpression,
+
+    /// Additional case values for multi-value clauses (`case A, B:`
+    /// or `case A | B:`). Empty for single-value cases. The full
+    /// list of "match if any of these" is `[case_value] ++ extra_case_values`.
+    /// See `bugs_multi_value_case_clause` — prior to this field, all
+    /// extra values were silently dropped.
+    pub extra_case_values: Vec<TypedExpression>,
 
     /// Optional guard expression (`case v if v > 0:`)
     pub guard: Option<TypedExpression>,
