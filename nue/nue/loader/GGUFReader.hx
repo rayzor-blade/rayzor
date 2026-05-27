@@ -64,11 +64,15 @@ class GGUFReader {
     private function parse():Void {
         var magic = bytes.getInt32(0);
         // Inline the MAGIC literal rather than referencing the
-        // `static inline var MAGIC` — cross-context static-inline-var
-        // expansion can deliver a stale or wrong constant when
-        // GGUFReader is compiled inside a larger import graph (see
-        // bugs_static_inline_var_cross_context). The literal here is
-        // "GGUF" little-endian.
+        // `static inline var MAGIC` — the Variable→LoadGlobal
+        // fallback at hir_to_mir.rs:8497+ kicks in for cross-context
+        // static-inline-var references and emits a load of an
+        // uninitialized global slot. The inline_var_values map is
+        // populated (HIR-level probe confirms it returns the right
+        // literal), but the MIR somehow still gets a LoadGlobal
+        // wired into the comparison's RHS. The literal at the use
+        // site sidesteps that path entirely. See
+        // bugs_static_inline_var_cross_context for the full trace.
         if (magic != 0x46554747) {
             throw "GGUFReader: bad magic 0x" + StringTools.hex(magic) + " (expected 'GGUF')";
         }
