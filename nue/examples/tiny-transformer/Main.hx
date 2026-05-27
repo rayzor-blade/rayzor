@@ -77,15 +77,19 @@ class Main {
         }
         model.resetCache();
 
-        // Streaming generation with argmax.
+        // Streaming generation with argmax. Vocab is the single chars
+        // `0`..`7` so the model's VOCAB-wide logits map 1:1 to token
+        // strings; the prompt `"1"` encodes to id 1 directly (one
+        // piece per char, no merges).
         var vocab = new Vocab();
-        for (i in 0...VOCAB) vocab.add("t" + i);
+        var glyphs = ["0", "1", "2", "3", "4", "5", "6", "7"];
+        for (g in glyphs) vocab.add(g);
         var tok = new BPETokenizer(vocab, [], false);
         var sampler = new ArgmaxSampler();
         var loop = new GenerationLoop(model, tok, sampler, -1, 5);
 
         var generated:Array<Int> = [];
-        loop.generate("t1", function(id:Int, _partial:String):Bool {
+        loop.generate("1", function(id:Int, _partial:String):Bool {
             generated.push(id);
             trace("[step] id=" + id);
             return true;
@@ -98,7 +102,7 @@ class Main {
         // Determinism: argmax + same weights ⇒ identical sequence.
         model.resetCache();
         var generated2:Array<Int> = [];
-        loop.generate("t1", function(id:Int, _p:String):Bool {
+        loop.generate("1", function(id:Int, _p:String):Bool {
             generated2.push(id);
             return true;
         });
