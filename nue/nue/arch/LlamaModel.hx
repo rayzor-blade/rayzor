@@ -69,13 +69,19 @@ class LlamaModel implements CausalLanguageModel {
     }
 
     public function resetCache():Void {
-        for (block in blocks) {
-            // The cache is the GQAttention.cache field — reach in via
-            // a downcast since the generic TransformerBlock holds the
-            // attention as a `Module`.
-            var tb:Dynamic = block;
-            if (tb.attn != null && tb.attn.cache != null) {
-                tb.attn.cache.reset();
+        // Concrete downcasts, not `Dynamic` field access. The blocks are
+        // held as Array<Module>, so each element arrives here as an
+        // interface fat pointer (`obj_ptr @ offset 0, fn_ptr_N @ offset
+        // 8(N+1)`). Dynamic field access reads offset 0 as a class
+        // type-id header — for a fat pointer that's the inner obj_ptr's
+        // address truncated to i64, which lands on a class id that
+        // either doesn't exist or maps to an unrelated class. The
+        // class→class cast lowering unwraps the fat pointer correctly.
+        for (i in 0...blocks.length) {
+            var tb = cast(blocks[i], TransformerBlock);
+            var attn = cast(tb.attn, GQAttention);
+            if (attn != null && attn.cache != null) {
+                attn.cache.reset();
             }
         }
     }
