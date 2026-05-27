@@ -916,12 +916,21 @@ impl CraneliftBackend {
                         "[COMPILE_FAIL] Skipping function '{}' ({:?}): {}",
                         function.name, func_id, e
                     );
-                    if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
-                        eprintln!(
-                            "[trap-stub:compile-fail] {:?} {} (qn={:?}): {}",
-                            func_id, function.name, function.qualified_name, e
-                        );
-                    }
+                    // Always surface compile-fail as a visible
+                    // diagnostic — these are real codegen bugs that
+                    // produce silent SIGILLs at runtime via the
+                    // trap-stub mechanism. Suppressing them by
+                    // default (only printing under
+                    // RAYZOR_DUMP_FN_PTRS=1) wasted real engineering
+                    // hours on multiple investigations. See
+                    // `bugs_trap_stub_cascade` for the full mechanism.
+                    let qn = function.qualified_name.as_deref().unwrap_or(&function.name);
+                    eprintln!(
+                        "\x1b[33mWarning:\x1b[0m [W0020] cannot compile `{}`; runtime calls will SIGILL.\n  \
+                         reason: {}\n  \
+                         set RAYZOR_DUMP_FN_PTRS=1 for the full trap-stub install log.",
+                        qn, e
+                    );
                     failed_funcs.insert(*func_id);
                     if let Err(e2) = self.define_trap_stub(*func_id, function) {
                         warn!(

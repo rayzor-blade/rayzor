@@ -63,7 +63,13 @@ class GGUFReader {
 
     private function parse():Void {
         var magic = bytes.getInt32(0);
-        if (magic != MAGIC) {
+        // Inline the MAGIC literal rather than referencing the
+        // `static inline var MAGIC` — cross-context static-inline-var
+        // expansion can deliver a stale or wrong constant when
+        // GGUFReader is compiled inside a larger import graph (see
+        // bugs_static_inline_var_cross_context). The literal here is
+        // "GGUF" little-endian.
+        if (magic != 0x46554747) {
             throw "GGUFReader: bad magic 0x" + StringTools.hex(magic) + " (expected 'GGUF')";
         }
         version = bytes.getInt32(4);
