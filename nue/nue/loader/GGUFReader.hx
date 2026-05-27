@@ -176,30 +176,18 @@ class GGUFReader {
         return bytes.sub(start, size);
     }
 
-    /** Compute the on-disk byte size of a tensor (dtype-dependent).
-     *
-     * The default case lifts the `throw` out of the switch — a
-     * divergent default inside a switch-as-expression's value path
-     * trips the MIR-to-CLIF translator (it emits a `Return` with no
-     * value because the throw block never falls through, but the
-     * function signature demands an Int return on every path).
-     * Compute a sentinel from the switch then throw after, which
-     * avoids the codegen pothole. */
+    /** Compute the on-disk byte size of a tensor (dtype-dependent). */
     public static function tensorByteSize(info:TensorInfo):Int {
         var nElem = 1;
         for (d in info.dims) nElem *= d;
-        var size = switch (info.dtype) {
+        return switch (info.dtype) {
             case 0: nElem * 4;
             case 1: nElem * 2;
             case 8: nElem + Std.int(nElem / 32) * 2;
             case 12: blockedSize(nElem, 32, 18);
             case 14: blockedSize(nElem, 256, 144);
-            case _: -1;
+            case _: throw "GGUFReader: byte-size for dtype " + info.dtype + " not implemented";
         };
-        if (size < 0) {
-            throw "GGUFReader: byte-size for dtype " + info.dtype + " not implemented";
-        }
-        return size;
     }
 
     private static inline function blockedSize(nElem:Int, blockElems:Int, blockBytes:Int):Int {
