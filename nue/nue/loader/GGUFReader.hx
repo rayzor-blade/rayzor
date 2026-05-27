@@ -97,7 +97,7 @@ class GGUFReader {
             }
             var dtype = readU32();
             var offset = readU64Truncated();
-            tensorInfos.push({ name: name, dims: dims, dtype: dtype, offset: offset });
+            tensorInfos.push(new TensorInfo(name, dims, dtype, offset));
         }
 
         alignment = ALIGNMENT_DEFAULT;
@@ -252,12 +252,29 @@ class GGUFReader {
     }
 }
 
-typedef TensorInfo = {
-    var name:String;
-    var dims:Array<Int>;
-    var dtype:Int;
-    var offset:Int;
-};
+/**
+ * Per-tensor index entry: name, shape (dims), GGML dtype code, and
+ * byte offset within the file's data region.
+ *
+ * Modelled as a class (not a `typedef = {...}` anon struct) so the
+ * per-field offsets stay stable when an `Array<TensorInfo>` crosses
+ * compilation contexts. The anon-struct read path scrambles field
+ * indices cross-file (see `bugs_anon_field_scramble`); class field
+ * accesses go through a fixed GEP layout that survives BLADE
+ * save/load.
+ */
+class TensorInfo {
+    public var name:String;
+    public var dims:Array<Int>;
+    public var dtype:Int;
+    public var offset:Int;
+    public function new(name:String, dims:Array<Int>, dtype:Int, offset:Int) {
+        this.name = name;
+        this.dims = dims;
+        this.dtype = dtype;
+        this.offset = offset;
+    }
+}
 
 /**
  * Tagged-union encoding of every GGUF metadata value. Pattern-match
