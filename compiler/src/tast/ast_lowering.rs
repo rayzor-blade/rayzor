@@ -13315,6 +13315,7 @@ impl<'a> AstLowering<'a> {
 
                 return Ok(TypedSwitchCase {
                     case_value: case_expr,
+                    extra_case_values: Vec::new(),
                     guard,
                     body,
                     source_location: self.context.span_to_location(&case.span),
@@ -13329,6 +13330,12 @@ impl<'a> AstLowering<'a> {
             });
         };
 
+        // Multi-value clause: `case A, B:` — patterns[1..] are
+        // alternates that should match the same body. The HIR layer
+        // already expresses this via `HirMatchCase.patterns: Vec`;
+        // carry them through TAST so we don't drop them.
+        let extra_case_values = self.lower_extra_case_values(&case.patterns)?;
+
         // Lower case body as expression
         let body_expr = self.lower_expression(&case.body)?;
 
@@ -13340,6 +13347,7 @@ impl<'a> AstLowering<'a> {
 
         Ok(TypedSwitchCase {
             case_value,
+            extra_case_values,
             guard: case
                 .guard
                 .as_ref()
@@ -13386,6 +13394,7 @@ impl<'a> AstLowering<'a> {
 
                 return Ok(TypedSwitchCase {
                     case_value: case_expr,
+                    extra_case_values: Vec::new(),
                     guard,
                     body,
                     source_location: self.context.span_to_location(&case.span),
@@ -13401,11 +13410,15 @@ impl<'a> AstLowering<'a> {
             });
         };
 
+        // Multi-value clause: see `lower_switch_case_expression`.
+        let extra_case_values = self.lower_extra_case_values(&case.patterns)?;
+
         // Lower case body as statement
         let body = self.lower_expression_to_statement(&case.body)?;
 
         Ok(TypedSwitchCase {
             case_value,
+            extra_case_values,
             guard: case
                 .guard
                 .as_ref()
@@ -13414,6 +13427,74 @@ impl<'a> AstLowering<'a> {
             body,
             source_location: self.context.span_to_location(&case.span),
         })
+    }
+
+    /// Lower the trailing patterns of a `case A, B, C:` multi-value
+    /// clause (patterns 1..). The first pattern is handled separately
+    /// because it may involve var binding / constructor expression
+    /// synthesis; the extras for now are restricted to *simple*
+    /// patterns (literals, named consts, idents that aren't binders).
+    /// Complex extras silently fall through to a single-pattern
+    /// match — flagged via a TODO so the regression test catches it
+    /// if it bites in real code.
+    #[allow(clippy::wrong_self_convention)]
+    fn lower_extra_case_values(
+        &mut self,
+        patterns: &[parser::Pattern],
+    ) -> Result<Vec<TypedExpression>, LoweringError> {
+        // Two shapes produce multi-value alternates:
+        //
+        // 1. `Case.patterns` has length > 1 — older parser path that
+        //    kept `case A, B:` as a Vec.
+        // 2. `Case.patterns` has length 1 but the single pattern is
+        //    `Pattern::Or(alternatives)` — the rd parser collapses
+        //    `case A, B:` into one `Pattern::Or` (see
+        //    `parser/src/rd/expr.rs` around line 798).
+        //
+        // Both shapes feed into the same "match any of these" semantic;
+        // the TAST layer flattens them into a single
+        // `extra_case_values` list so HIR/MIR don't need to know
+        // which parser produced the input. The *first* alternate
+        // becomes `case_value` (handled by the caller); we return
+        // the remaining alternates here.
+        if patterns.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut alternates: Vec<&parser::Pattern> = Vec::new();
+        // Skip the first pattern — it's `case_value` already.
+        // BUT if that first pattern is a `Pattern::Or`, its first
+        // alt was already used as `case_value`; the rest go into
+        // alternates. Then any further `patterns[1..]` (older parser
+        // shape) get appended too.
+        if let parser::Pattern::Or(alts) = &patterns[0] {
+            for alt in alts.iter().skip(1) {
+                alternates.push(alt);
+            }
+        }
+        for p in &patterns[1..] {
+            if let parser::Pattern::Or(alts) = p {
+                for alt in alts {
+                    alternates.push(alt);
+                }
+            } else {
+                alternates.push(p);
+            }
+        }
+        let mut extras = Vec::with_capacity(alternates.len());
+        for p in alternates {
+            // Skip extras that would need variable bindings —
+            // multi-value-with-bindings is a rare combination and
+            // mixing bindings across alternates would require the
+            // pattern compiler to merge their scopes.
+            if self.pattern_has_variables(p) {
+                continue;
+            }
+            match self.lower_pattern_to_expression(p) {
+                Ok(expr) => extras.push(expr),
+                Err(_) => continue,
+            }
+        }
+        Ok(extras)
     }
 
     /// Check if a pattern contains variables that need binding

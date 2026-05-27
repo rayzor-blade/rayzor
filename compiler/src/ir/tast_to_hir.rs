@@ -1187,8 +1187,15 @@ impl<'a> TastToHirContext<'a> {
                 let mut hir_cases = Vec::new();
 
                 for case in cases {
-                    // TAST TypedSwitchCase has case_value and body
-                    let patterns = vec![self.lower_case_value_pattern(&case.case_value)];
+                    // TAST TypedSwitchCase has case_value plus optional
+                    // extra_case_values for `case A, B:` multi-value
+                    // clauses. The HIR/MIR layer already dispatches
+                    // on Vec<HirPattern> via OR-chaining — just need
+                    // to fill the Vec.
+                    let mut patterns = vec![self.lower_case_value_pattern(&case.case_value)];
+                    for extra in &case.extra_case_values {
+                        patterns.push(self.lower_case_value_pattern(extra));
+                    }
 
                     let guard = case.guard.as_ref().map(|g| self.lower_expression(g));
                     let body = self.lower_statement_as_block(&case.body);
@@ -2517,7 +2524,10 @@ impl<'a> TastToHirContext<'a> {
                     let mut hir_cases = Vec::new();
 
                     for case in cases {
-                        let patterns = vec![self.lower_case_value_pattern(&case.case_value)];
+                        let mut patterns = vec![self.lower_case_value_pattern(&case.case_value)];
+                        for extra in &case.extra_case_values {
+                            patterns.push(self.lower_case_value_pattern(extra));
+                        }
                         let body = self.lower_case_body_to_assign(&case.body, result_symbol);
 
                         hir_cases.push(HirMatchCase {
@@ -2641,9 +2651,11 @@ impl<'a> TastToHirContext<'a> {
                             // Wildcard with guard: condition is the guard expression
                             self.lower_expression(case.guard.as_ref().expect("guard checked above"))
                         } else {
-                            // Literal value match
+                            // Literal value match. For `case A, B:`
+                            // build `disc == A || disc == B || …` so
+                            // every alternate routes to this branch.
                             let case_value = self.lower_expression(&case.case_value);
-                            let eq_condition = HirExpr::new(
+                            let mut eq_condition = HirExpr::new(
                                 HirExprKind::Binary {
                                     lhs: Box::new(discriminant_expr.clone()),
                                     op: crate::ir::hir::HirBinaryOp::Eq,
@@ -2653,6 +2665,29 @@ impl<'a> TastToHirContext<'a> {
                                 self.current_lifetime,
                                 SourceLocation::unknown(),
                             );
+                            for extra in &case.extra_case_values {
+                                let extra_v = self.lower_expression(extra);
+                                let extra_eq = HirExpr::new(
+                                    HirExprKind::Binary {
+                                        lhs: Box::new(discriminant_expr.clone()),
+                                        op: crate::ir::hir::HirBinaryOp::Eq,
+                                        rhs: Box::new(extra_v),
+                                    },
+                                    self.get_bool_type(),
+                                    self.current_lifetime,
+                                    SourceLocation::unknown(),
+                                );
+                                eq_condition = HirExpr::new(
+                                    HirExprKind::Binary {
+                                        lhs: Box::new(eq_condition),
+                                        op: crate::ir::hir::HirBinaryOp::Or,
+                                        rhs: Box::new(extra_eq),
+                                    },
+                                    self.get_bool_type(),
+                                    self.current_lifetime,
+                                    SourceLocation::unknown(),
+                                );
+                            }
 
                             // If there's a guard, combine with AND
                             if let Some(ref guard) = case.guard {

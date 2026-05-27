@@ -179,13 +179,8 @@ class GGUFLoader implements ModelLoader {
                 return Tensor.fromBytesF16(raw, info.dims);
             case 8: // Q8_0
                 return Tensor.fromBytesQ8_0(raw, info.dims);
-            // Q4_K / Q4_K_M — split into two single-value cases
-            // because `case 12, 14:` multi-value clauses currently
-            // only match the first literal (the compiler treats the
-            // second one as wildcard fall-through). Filed as a
-            // separate bug; this duplication is the workaround.
-            case 12: return decodeQ4KM(raw, info);
-            case 14: return decodeQ4KM(raw, info);
+            case 12, 14: // Q4_K / Q4_K_M
+                return decodeQ4KM(raw, info);
             case _:
                 throw "GGUFLoader: GGML dtype " + info.dtype + " not implemented (tensor '" + info.name + "').";
         }
