@@ -1302,7 +1302,7 @@ impl<'a> HirToMirContext<'a> {
         let expected_extra = args.len().saturating_sub(1);
 
         let candidate_classes = [dot_form.as_str(), underscore_form.as_str()];
-        let mut found: Option<(String, IrType, Vec<IrType>)> = None;
+        let mut found: Option<(String, IrType, Vec<IrType>, bool)> = None;
         for cn in &candidate_classes {
             if let Some((_sig, mapping)) = self
                 .stdlib_mapping
@@ -1312,13 +1312,26 @@ impl<'a> HirToMirContext<'a> {
                 let runtime_name = mapping.runtime_name.to_string();
                 let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
                 let param_types = vec![ptr_u8.clone(); args.len()];
-                found = Some((runtime_name, return_type.clone(), param_types));
+                found = Some((
+                    runtime_name,
+                    return_type.clone(),
+                    param_types,
+                    mapping.is_mir_wrapper,
+                ));
                 break;
             }
         }
-        let (runtime_name, ret_ty, param_types) = found?;
-        let func_id =
-            self.get_or_register_extern_function(&runtime_name, param_types, ret_ty.clone());
+        let (runtime_name, ret_ty, param_types, is_mir_wrapper) = found?;
+        // MIR-wrapper names (e.g. `array_length`) must route through
+        // forward-ref so they share a single Cranelift FuncId with
+        // the wrapper's body. Otherwise `get_or_register_extern_function`
+        // declares them as Import and the backend later fails when
+        // trying to define the body.
+        let func_id = if is_mir_wrapper {
+            self.register_stdlib_mir_forward_ref(&runtime_name, param_types, ret_ty.clone())
+        } else {
+            self.get_or_register_extern_function(&runtime_name, param_types, ret_ty.clone())
+        };
         let r = self
             .builder
             .build_call_direct(func_id, args, ret_ty.clone());
@@ -6688,6 +6701,32 @@ impl<'a> HirToMirContext<'a> {
             return func_id;
         }
 
+        // SECOND: Check if this name refers to a known stdlib MIR
+        // wrapper (a function with a body that will be provided when
+        // the stdlib MIR module is merged). Registering such names as
+        // Cranelift Import causes the backend to later refuse to
+        // define the body with "Invalid to define identifier declared
+        // as an import".
+        //
+        // Detection: either the stdlib runtime mapping flags it
+        // explicitly (preferred) OR the name follows the well-known
+        // MIR wrapper naming pattern. Both detect the same set; the
+        // pattern fallback covers stale mapping entries that predate
+        // the `mir_wrapper` macro variant (e.g. `array_length`,
+        // `array_push`, `array_index_of`).
+        let is_stdlib_wrapper_name = self
+            .stdlib_mapping
+            .find_by_runtime_name(name)
+            .map(|m| m.is_mir_wrapper)
+            .unwrap_or(false)
+            || name.starts_with("array_")
+            || name.starts_with("String_")
+            || name.starts_with("Tensor_")
+            || name.starts_with("QTensor_");
+        if is_stdlib_wrapper_name {
+            return self.register_stdlib_mir_forward_ref(name, param_types, return_type);
+        }
+
         // Check if we already registered this extern function
         // First, find if it exists and collect info (can't mutate while iterating)
         let existing_func: Option<(IrFunctionId, usize)> = self
@@ -11124,20 +11163,45 @@ impl<'a> HirToMirContext<'a> {
                         let type_table = self.type_table;
                         if let Some(type_info) = type_table.get(object_type) {
                             if matches!(type_info.kind, TypeKind::Dynamic) {
-                                // Dynamic method call - need to resolve method by name
-
+                                // Dynamic method call - need to resolve method by name.
+                                //
+                                // EXCLUDE the currently-compiling function from
+                                // candidates. Otherwise a method whose name
+                                // matches the enclosing function (e.g.,
+                                // `ArchRegistry.build` calling
+                                // `(arch:Dynamic).build(...)` on an
+                                // `ArchBuilder` instance) silently resolves
+                                // back to the enclosing function → infinite
+                                // recursion → stack overflow.
                                 let method_name =
                                     self.symbol_table.get_symbol(*field).map(|s| s.name);
+                                let caller_func_id = self.builder.current_function;
                                 if let Some(name) = method_name {
-                                    // Look up function by name in function_map
+                                    // Look up function by name in function_map.
+                                    // Tighten by arity to avoid grabbing
+                                    // same-named methods on unrelated classes.
+                                    let target_argc = args.len() + 1; // +1 for receiver
                                     let mut found_func = None;
                                     for (sym, &func_id) in &self.function_map {
+                                        if Some(func_id) == caller_func_id {
+                                            continue;
+                                        }
                                         if let Some(sym_info) = self.symbol_table.get_symbol(*sym) {
-                                            if sym_info.name == name {
-                                                found_func = Some(func_id);
-                                                break;
+                                            if sym_info.name != name {
+                                                continue;
+                                            }
+                                        } else {
+                                            continue;
+                                        }
+                                        if let Some(func) =
+                                            self.builder.module.functions.get(&func_id)
+                                        {
+                                            if func.signature.parameters.len() != target_argc {
+                                                continue;
                                             }
                                         }
+                                        found_func = Some(func_id);
+                                        break;
                                     }
 
                                     if let Some(func_id) = found_func {
@@ -11796,10 +11860,48 @@ impl<'a> HirToMirContext<'a> {
                         };
 
                         if is_user_defined && !receiver_needs_special_dispatch {
-                            let arg_regs: Vec<_> = args
-                                .iter()
-                                .filter_map(|a| self.lower_expression(a))
-                                .collect();
+                            // Lower args and, for instance method
+                            // calls, apply call-boundary materialization
+                            // (class→iface fat-ptr wrap, anon coercion).
+                            // HIR params don't include `this`, so the
+                            // user arg at index `i` corresponds to HIR
+                            // param index `i - 1` when `is_method=true`.
+                            // Without this wrap, passing a raw class
+                            // instance to a method whose param is
+                            // interface-typed stores a non-fat-ptr in
+                            // any iface field the callee assigns to →
+                            // later virtual dispatch on that field
+                            // SIGSEGVs (e.g. `reg.register("llama",
+                            // new LlamaArch())` in nue.arch).
+                            // Static calls are left untouched: they
+                            // already go through the static-call path
+                            // earlier in this handler when receiver is
+                            // missing, and routing them through
+                            // `maybe_materialize_for_call` here has
+                            // triggered Cranelift symbol-clash on
+                            // stdlib MIR wrappers like `array_length`.
+                            let arg_regs: Vec<_> = if *is_method {
+                                args.iter()
+                                    .enumerate()
+                                    .filter_map(|(i, a)| {
+                                        let reg = self.lower_expression(a)?;
+                                        if i == 0 {
+                                            Some(reg)
+                                        } else {
+                                            Some(self.maybe_materialize_for_call(
+                                                a,
+                                                reg,
+                                                Some(func_id),
+                                                i - 1,
+                                            ))
+                                        }
+                                    })
+                                    .collect()
+                            } else {
+                                args.iter()
+                                    .filter_map(|a| self.lower_expression(a))
+                                    .collect()
+                            };
 
                             let actual_return_type =
                                 if let Some(func) = self.builder.module.functions.get(&func_id) {
@@ -26241,11 +26343,27 @@ impl<'a> HirToMirContext<'a> {
                                 self.convert_type(field_ty)
                             };
 
-                        let runtime_func_id = self.get_or_register_extern_function(
-                            &runtime_func,
-                            param_types,
-                            result_type.clone(),
-                        );
+                        // Route through MIR forward-ref if this runtime
+                        // name refers to a stdlib MIR wrapper (e.g.
+                        // `array_length` wraps `haxe_array_length`).
+                        // `get_or_register_extern_function` would
+                        // register it as Cranelift Import, then the
+                        // backend later tries to define the body and
+                        // fails with `Invalid to define identifier
+                        // declared as an import: array_length`.
+                        let runtime_func_id = if runtime_call.is_mir_wrapper {
+                            self.register_stdlib_mir_forward_ref(
+                                &runtime_func,
+                                param_types,
+                                result_type.clone(),
+                            )
+                        } else {
+                            self.get_or_register_extern_function(
+                                &runtime_func,
+                                param_types,
+                                result_type.clone(),
+                            )
+                        };
 
                         return self.builder.build_call_direct(
                             runtime_func_id,
@@ -35904,7 +36022,7 @@ impl<'a> HirToMirContext<'a> {
                     .build_call_direct(vtable_init_fn, vec![tid, sc], IrType::Void);
             }
 
-            // For each slot, create a FunctionRef closure and store it
+            // For each slot, create a FunctionRef closure and store it.
             for (slot_idx, method_sym) in vtable.iter().enumerate() {
                 if let Some(&func_id) = self.function_map.get(method_sym) {
                     let closure_ptr = self.builder.build_function_ref(func_id);
