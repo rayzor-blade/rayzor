@@ -80,11 +80,12 @@ class ArchRegistry {
 
     /** Look up a builder by architecture name. Returns null if unknown. */
     public function get(name:String):ArchBuilder {
-        // Scan reverse so newer registrations take precedence.
-        var i = entries.length - 1;
-        while (i >= 0) {
-            if (entries[i].name == name) return entries[i].builder;
-            i -= 1;
+        // Use forward `for-in` iteration (not `while` + `entries[i]`).
+        // Indexed `Array<ArchEntry>` access has surfaced JIT instability
+        // in cross-context contexts during Phase 4b — the iterator path
+        // stays correct.
+        for (e in entries) {
+            if (e.name == name) return e.builder;
         }
         return null;
     }
@@ -101,7 +102,7 @@ class ArchRegistry {
      * `Dynamic`-typed shim.
      */
     public function build(metadata:ModelMetadata, weights:NamedTensorMap):Module {
-        var arch:Dynamic = get(metadata.architecture);
+        var arch:ArchBuilder = get(metadata.architecture);
         if (arch == null) {
             throw "nue.arch: no builder registered for architecture '"
                 + metadata.architecture + "'";

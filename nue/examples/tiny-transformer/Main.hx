@@ -61,7 +61,8 @@ class Main {
         var blocks:Array<Module> = [];
         for (i in 0...LAYERS) blocks.push(buildBlock(i));
         var outputNorm = new RMSNorm(onesWeight(HIDDEN), meta.normEps, "weight");
-        var lmHead = new Linear(deterministicWeight([HIDDEN, VOCAB], 0.02, 9));
+        // Linear weights are PyTorch-shaped [out, in].
+        var lmHead = new Linear(deterministicWeight([VOCAB, HIDDEN], 0.02, 9));
         var model = new LlamaModel(meta, embed, blocks, outputNorm, lmHead, rope);
 
         trace("[build] LlamaModel hidden=" + HIDDEN + " layers=" + LAYERS
@@ -139,18 +140,19 @@ class Main {
         var cache = new KVCache(MAX_SEQ, NKVH, HEAD_DIM, F32);
 
         var attnNorm = new RMSNorm(onesWeight(HIDDEN), 1e-5, "weight");
-        var qProj = new Linear(deterministicWeight([HIDDEN, NHEADS * HEAD_DIM], 0.05, layerIdx * 7 + 1));
-        var kProj = new Linear(deterministicWeight([HIDDEN, NKVH * HEAD_DIM], 0.05, layerIdx * 7 + 2));
-        var vProj = new Linear(deterministicWeight([HIDDEN, NKVH * HEAD_DIM], 0.05, layerIdx * 7 + 3));
-        var oProj = new Linear(deterministicWeight([NHEADS * HEAD_DIM, HIDDEN], 0.05, layerIdx * 7 + 4));
+        // PyTorch [out, in] for every Linear weight.
+        var qProj = new Linear(deterministicWeight([NHEADS * HEAD_DIM, HIDDEN], 0.05, layerIdx * 7 + 1));
+        var kProj = new Linear(deterministicWeight([NKVH * HEAD_DIM, HIDDEN], 0.05, layerIdx * 7 + 2));
+        var vProj = new Linear(deterministicWeight([NKVH * HEAD_DIM, HIDDEN], 0.05, layerIdx * 7 + 3));
+        var oProj = new Linear(deterministicWeight([HIDDEN, NHEADS * HEAD_DIM], 0.05, layerIdx * 7 + 4));
         var attn = new GQAttention(qProj, kProj, vProj, oProj, rope, cache,
             NHEADS, NKVH, HEAD_DIM);
 
         var ffnNorm = new RMSNorm(onesWeight(HIDDEN), 1e-5, "weight");
         var ffn = new SwiGLU(
-            new Linear(deterministicWeight([HIDDEN, FFN], 0.03, layerIdx * 7 + 5)),
-            new Linear(deterministicWeight([HIDDEN, FFN], 0.03, layerIdx * 7 + 6)),
-            new Linear(deterministicWeight([FFN, HIDDEN], 0.03, layerIdx * 7 + 7))
+            new Linear(deterministicWeight([FFN, HIDDEN], 0.03, layerIdx * 7 + 5)),
+            new Linear(deterministicWeight([FFN, HIDDEN], 0.03, layerIdx * 7 + 6)),
+            new Linear(deterministicWeight([HIDDEN, FFN], 0.03, layerIdx * 7 + 7))
         );
 
         return new TransformerBlock(attnNorm, attn, ffnNorm, ffn, "blk." + layerIdx + ".");
