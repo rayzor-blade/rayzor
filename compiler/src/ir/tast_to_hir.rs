@@ -1496,8 +1496,50 @@ impl<'a> TastToHirContext<'a> {
                 HirExprKind::Literal(self.lower_literal(value))
             }
             TypedExpressionKind::Variable { symbol_id } => {
-                // First check if this is a pre-evaluated inline variable (e.g., SOLAR_MASS = 4.0 * PI * PI)
-                if let Some(literal) = self.inline_var_values.get(symbol_id).cloned() {
+                // First check if this is a pre-evaluated inline variable (e.g., SOLAR_MASS = 4.0 * PI * PI).
+                // Direct SymbolId lookup, then name-based fallback for cross-context references
+                // where the TAST's SymbolId may differ from the one in inline_var_values
+                // (e.g., the defining file was loaded from BLADE cache so its symbols got
+                // renumbered, but the referring file still holds the original SymbolId).
+                let inline_lookup = self.inline_var_values.get(symbol_id).cloned().or_else(|| {
+                    let want_name = self
+                        .symbol_table
+                        .get_symbol(*symbol_id)
+                        .and_then(|s| self.string_interner.get(s.name))?
+                        .to_string();
+                    if want_name.is_empty() {
+                        return None;
+                    }
+                    let want_qname = self
+                        .symbol_table
+                        .get_symbol(*symbol_id)
+                        .and_then(|s| s.qualified_name)
+                        .and_then(|n| self.string_interner.get(n))
+                        .map(|s| s.to_string());
+                    for (sym_id, lit) in &self.inline_var_values {
+                        let sym = self.symbol_table.get_symbol(*sym_id)?;
+                        let cand_name = self.string_interner.get(sym.name)?;
+                        if cand_name != want_name {
+                            continue;
+                        }
+                        // Prefer matching qualified name when available; otherwise
+                        // any same-name candidate is acceptable (no qualified info
+                        // means we can't disambiguate, and ambiguity here is rare
+                        // for static-inline-var constants).
+                        let cand_qname = sym
+                            .qualified_name
+                            .and_then(|n| self.string_interner.get(n))
+                            .map(|s| s.to_string());
+                        if let (Some(want), Some(cand)) = (&want_qname, &cand_qname) {
+                            if want != cand {
+                                continue;
+                            }
+                        }
+                        return Some(lit.clone());
+                    }
+                    None
+                });
+                if let Some(literal) = inline_lookup {
                     return HirExpr {
                         kind: HirExprKind::Literal(literal),
                         ty: expr.expr_type,

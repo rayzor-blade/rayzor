@@ -647,6 +647,111 @@ pub unsafe extern "C" fn rayzor_qtensor_matmul_f32(qt_a: i64, b_tensor: i64) -> 
     out_tensor
 }
 
+/// Compute `Y[B, N] = X[B, K] × Wq[N, K]^T`, with Wq quantised Q4_K_M.
+///
+/// This is the natural matmul for a PyTorch-style `Linear(in=K, out=N)` whose
+/// weight is loaded directly from a GGUF Q4_K_M tensor: Wq has shape
+/// `[out, in]` (rows=out, cols=in) with 256-element blocks along the inner
+/// `in` (= K) dim — exactly what `GGUFLoader.decodeQ4KM` now produces.
+///
+/// Computes `y[b, n] = Σ_k x[b, k] * Wq[n, k]` without ever materialising
+/// a dequant'd F32 copy of Wq. The kernel dequants each row of Wq once
+/// into a small per-thread scratch buffer (K f32s) and then reuses it
+/// across the batch — so the dequant cost amortises across B.
+///
+/// `x_tensor` and `qt_w` are taken as i64 pointers (matches the Haxe FFI).
+/// Returns a fresh f32 Tensor on the heap; returns 0 on shape mismatch.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x_tensor: i64, qt_w: i64) -> i64 {
+    if x_tensor == 0 || qt_w == 0 {
+        return 0;
+    }
+    let qt = &*(qt_w as *const RayzorQTensor);
+    if qt.scheme != QSCHEME_Q4_K_M {
+        return 0;
+    }
+
+    // Pull X's shape + data. Mirror the TensorHead layout used elsewhere
+    // in this file for FFI-safe field access.
+    #[repr(C)]
+    struct TensorHead {
+        data: *mut u8,
+        shape: *mut usize,
+        strides: *mut usize,
+        ndim: usize,
+        numel: usize,
+        dtype: u8,
+        owns_data: bool,
+        device: u8,
+        numa_node: i32,
+    }
+    let x_head = &*(x_tensor as *const TensorHead);
+    if x_head.ndim != 2 || x_head.dtype != 0
+    /* DTYPE_F32 */
+    {
+        return 0;
+    }
+    let x_shape = std::slice::from_raw_parts(x_head.shape, 2);
+    let x_strides = std::slice::from_raw_parts(x_head.strides, 2);
+    let batch = x_shape[0];
+    let k = x_shape[1];
+
+    // K must match Wq's cols and be a multiple of the Q4_K_M block size.
+    if k != qt.cols || !k.is_multiple_of(Q4_K_M_BLOCK_SIZE) {
+        return 0;
+    }
+    let n = qt.rows; // out_features
+    let blocks_per_row = k / Q4_K_M_BLOCK_SIZE;
+
+    // Allocate Y[batch, N] f32.
+    let out_shape = [batch, n];
+    let out_tensor = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);
+    if out_tensor == 0 {
+        return 0;
+    }
+    let y_head = &*(out_tensor as *const TensorHead);
+    let y_data = y_head.data as *mut f32;
+    let x_data = x_head.data as *const f32;
+
+    // Per-row scratch for Wq's dequant'd row.
+    let mut row_scratch: Vec<f32> = vec![0.0; k];
+    let mut stage = [0.0f32; Q4_K_M_BLOCK_SIZE];
+
+    // Fast path requires X contiguous along its inner dim.
+    let x_contig = x_strides[1] == 1;
+
+    for n_idx in 0..n {
+        // Dequant Wq's row n_idx in full.
+        let row_ptr = qt.data.add(n_idx * blocks_per_row * Q4_K_M_BLOCK_BYTES);
+        for b_idx in 0..blocks_per_row {
+            let block = decode_q4_k_block(row_ptr.add(b_idx * Q4_K_M_BLOCK_BYTES));
+            dequant_q4_k_block(&block, &mut stage);
+            let dst = row_scratch.as_mut_ptr().add(b_idx * Q4_K_M_BLOCK_SIZE);
+            std::ptr::copy_nonoverlapping(stage.as_ptr(), dst, Q4_K_M_BLOCK_SIZE);
+        }
+
+        // For each batch: dot product x[b, :] · Wq_row.
+        for b in 0..batch {
+            let x_row_off = b * x_strides[0];
+            let mut sum = 0.0f32;
+            if x_contig {
+                let x_row = std::slice::from_raw_parts(x_data.add(x_row_off), k);
+                for p in 0..k {
+                    sum += x_row[p] * row_scratch[p];
+                }
+            } else {
+                for p in 0..k {
+                    let xv = *x_data.add(x_row_off + p * x_strides[1]);
+                    sum += xv * row_scratch[p];
+                }
+            }
+            *y_data.add(b * n + n_idx) = sum;
+        }
+    }
+
+    out_tensor
+}
+
 /// Release a QTensor. The runtime frees `data` and `meta` if `owns_data`.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_qtensor_free(qt_ptr: i64) {
@@ -836,5 +941,355 @@ mod tests {
             0
         );
         assert_eq!(unsafe { rayzor_qtensor_from_bytes_q4_k_m(0, 1, 256) }, 0);
+    }
+
+    /// Build a single Q4_K_M block whose dequant yields the constant `value`
+    /// for every element. Sets d=value, every sub-block scale=1 / min=0,
+    /// quants[..]=0x11 (q_lo=q_hi=1) → out = scale*q - min = value*1 - 0 = value.
+    ///
+    /// Header layout per `q4_k_get_scale_min`:
+    ///   - sub-blocks 0..3: scale = block[4..8] & 63, min = block[8..12] & 63
+    ///   - sub-blocks 4..7: scale = (block[12..16] & 0x0F) | ((block[4..8] >> 6) << 4),
+    ///                      min   = (block[12..16] >> 4)   | ((block[8..12] >> 6) << 4)
+    fn build_constant_block(value: f32) -> [u8; Q4_K_M_BLOCK_BYTES] {
+        let mut block = [0u8; Q4_K_M_BLOCK_BYTES];
+        let d = f16::from_f32(value).to_bits();
+        let dmin = f16::from_f32(0.0).to_bits();
+        block[0..2].copy_from_slice(&d.to_le_bytes());
+        block[2..4].copy_from_slice(&dmin.to_le_bytes());
+        // Sub-blocks 0..3: low 6 bits of block[4..8] = scale = 1; block[8..12] = min = 0.
+        for j in 0..4 {
+            block[4 + j] = 1;
+            block[8 + j] = 0;
+        }
+        // Sub-blocks 4..7: scale's low nibble in block[12..16] = 1, upper 2 bits from
+        // block[4..8] high bits (already 0 since we wrote 1). Mins' low nibble (upper
+        // half of block[12..16]) = 0. So block[12..16] = 0x01.
+        for j in 0..4 {
+            block[12 + j] = 0x01;
+        }
+        // Quants: 128 bytes, each holds two nibbles. q_lo=q_hi=1 → byte = 0x11.
+        for i in 16..16 + 128 {
+            block[i] = 0x11;
+        }
+        block
+    }
+
+    #[test]
+    fn dequant_preserves_block_order_in_linear_memory() {
+        // Critical test for GGUF Q4_K_M correctness: build 4 blocks with
+        // distinct constant values (1.0, 2.0, 3.0, 4.0) and verify the
+        // dequant output places them contiguously in linear memory in the
+        // order they appear in the source buffer — independent of the
+        // (rows, cols) shape interpretation. This is the invariant that
+        // GGUFLoader's `decodeQ4KM` (which does rows=in, cols=out) relies
+        // on for correctness.
+        let blocks: Vec<u8> = (1..=4)
+            .flat_map(|v| build_constant_block(v as f32).to_vec())
+            .collect();
+        assert_eq!(blocks.len(), 4 * Q4_K_M_BLOCK_BYTES);
+        let total_elems = 4 * Q4_K_M_BLOCK_SIZE;
+
+        // Try the interpretation GGUFLoader actually uses for a tensor whose
+        // GGUF dims=[in=4, out=256] (i.e., 4 rows of 256-elem blocks each).
+        let mut src = blocks.clone();
+        let bytes =
+            crate::haxe_sys::HaxeBytes::new_malloc(src.as_mut_ptr(), src.len(), src.capacity());
+        let handle = &bytes as *const _ as i64;
+
+        unsafe {
+            // rows=4, cols=256 → 4 rows × 1 block per row = 4 blocks.
+            // Linear output memory: [block0 (256), block1 (256), block2, block3].
+            let qt = rayzor_qtensor_from_bytes_q4_k_m(handle, 4, 256);
+            assert!(qt != 0);
+            let dq = rayzor_qtensor_dequant(qt);
+            assert!(dq != 0);
+
+            #[repr(C)]
+            struct TensorHead {
+                data: *mut u8,
+                _shape: *mut usize,
+                _strides: *mut usize,
+                _ndim: usize,
+                _numel: usize,
+                _dtype: u8,
+            }
+            let head = &*(dq as *const TensorHead);
+            let out = std::slice::from_raw_parts(head.data as *const f32, total_elems);
+
+            // Block 0 (value 1.0) in positions 0..256.
+            for i in 0..256 {
+                assert!(
+                    (out[i] - 1.0).abs() < 1e-3,
+                    "block0[{i}] = {} (expected 1.0)",
+                    out[i]
+                );
+            }
+            // Block 1 (value 2.0) in positions 256..512.
+            for i in 0..256 {
+                assert!(
+                    (out[256 + i] - 2.0).abs() < 1e-3,
+                    "block1[{i}] = {} (expected 2.0)",
+                    out[256 + i]
+                );
+            }
+            // Block 2 (value 3.0) in positions 512..768.
+            for i in 0..256 {
+                assert!(
+                    (out[512 + i] - 3.0).abs() < 1e-3,
+                    "block2[{i}] = {} (expected 3.0)",
+                    out[512 + i]
+                );
+            }
+            // Block 3 (value 4.0) in positions 768..1024.
+            for i in 0..256 {
+                assert!(
+                    (out[768 + i] - 4.0).abs() < 1e-3,
+                    "block3[{i}] = {} (expected 4.0)",
+                    out[768 + i]
+                );
+            }
+
+            rayzor_qtensor_free(qt);
+        }
+
+        // Same bytes, alternate shape (1, 1024). Output memory MUST be
+        // identical — only the logical shape label changes.
+        let mut src2 = blocks.clone();
+        let bytes2 =
+            crate::haxe_sys::HaxeBytes::new_malloc(src2.as_mut_ptr(), src2.len(), src2.capacity());
+        let handle2 = &bytes2 as *const _ as i64;
+        unsafe {
+            let qt = rayzor_qtensor_from_bytes_q4_k_m(handle2, 1, 1024);
+            assert!(qt != 0);
+            let dq = rayzor_qtensor_dequant(qt);
+            assert!(dq != 0);
+
+            #[repr(C)]
+            struct TensorHead {
+                data: *mut u8,
+                _shape: *mut usize,
+                _strides: *mut usize,
+                _ndim: usize,
+                _numel: usize,
+                _dtype: u8,
+            }
+            let head = &*(dq as *const TensorHead);
+            let out = std::slice::from_raw_parts(head.data as *const f32, total_elems);
+            // Same as above — linear memory has block0..block3 contiguously.
+            for (b, expected) in (1..=4).enumerate() {
+                for i in 0..256 {
+                    assert!(
+                        (out[b * 256 + i] - expected as f32).abs() < 1e-3,
+                        "alt-shape block{b}[{i}] = {} (expected {})",
+                        out[b * 256 + i],
+                        expected
+                    );
+                }
+            }
+            rayzor_qtensor_free(qt);
+        }
+    }
+
+    /// Sanity-check Linear-style matmul against a Q4_K_M weight constructed
+    /// to mimic a PyTorch-style `[out=2, in=512]` matrix where:
+    ///   row 0 (output 0) = all 1.0
+    ///   row 1 (output 1) = all 2.0
+    ///
+    /// In a GGUF file, this matrix is stored row-major as PyTorch [out, in]
+    /// (out outermost = slowest = physical rows; in innermost = fastest with
+    /// 256-element Q4_K_M blocks). So the file's 4 blocks appear in order:
+    ///   [block(1.0), block(1.0), block(2.0), block(2.0)]
+    /// (output 0's two in-blocks, then output 1's two in-blocks).
+    ///
+    /// The current `GGUFReader.decodeQ4KM` would interpret dims=[in=512, out=2]
+    /// with rows=in=512, cols=out=2. But cols=2 < 256 is INVALID for Q4_K_M,
+    /// so the existing path can't even represent this small case. Use a
+    /// 256×512 (or 512×512) shape for the realistic test below.
+    ///
+    /// This test EXPOSES the layout/shape mismatch when the weight is
+    /// interpreted under different (rows, cols) conventions — confirming
+    /// whether Linear-style `x @ dq` produces sensible outputs.
+    #[test]
+    fn dequant_shape_matches_pytorch_weight_layout() {
+        // PyTorch weight w[out=256, in=512]:
+        //   w[o, *] = (o + 1) as f32, for o in 0..256
+        // File layout (PyTorch row-major): blocks along in (= innermost).
+        //   - 256 rows × 2 blocks per row = 512 blocks total
+        //   - Block order: row 0 b0 (=1), row 0 b1 (=1), row 1 b0 (=2), row 1 b1 (=2), ..., row 255 b0 (=256), row 255 b1 (=256)
+        let mut blocks: Vec<u8> = Vec::with_capacity(512 * Q4_K_M_BLOCK_BYTES);
+        for o in 0..256 {
+            let v = (o + 1) as f32;
+            // Output row o has 2 blocks of value v.
+            blocks.extend_from_slice(&build_constant_block(v));
+            blocks.extend_from_slice(&build_constant_block(v));
+        }
+        assert_eq!(blocks.len(), 512 * Q4_K_M_BLOCK_BYTES);
+
+        // GGUF dims would be [in=512, out=256]. Existing decodeQ4KM does:
+        //   rows = product of all-but-last = 512 = in
+        //   cols = dims[last] = 256 = out
+        // We mirror that here:
+        let mut src = blocks.clone();
+        let bytes =
+            crate::haxe_sys::HaxeBytes::new_malloc(src.as_mut_ptr(), src.len(), src.capacity());
+        let handle = &bytes as *const _ as i64;
+
+        unsafe {
+            // PROPOSED FIX convention: rows=out=256 (= dims[last]),
+            //                          cols=in=512 (= product of all but last)
+            // This matches the file's physical layout: 256 PyTorch-output
+            // rows × 512 in-elements each.
+            let qt = rayzor_qtensor_from_bytes_q4_k_m(handle, 256, 512);
+            assert!(qt != 0);
+            let dq = rayzor_qtensor_dequant(qt);
+            assert!(dq != 0);
+
+            #[repr(C)]
+            struct TensorHead {
+                data: *mut u8,
+                _shape: *mut usize,
+                _strides: *mut usize,
+                _ndim: usize,
+                _numel: usize,
+                _dtype: u8,
+            }
+            let head = &*(dq as *const TensorHead);
+            let dq_slice = std::slice::from_raw_parts(head.data as *const f32, 256 * 512);
+
+            // With rows=out=256, cols=in=512: dq is PyTorch_w directly:
+            // dq[o, i] = (o + 1) for all o in 0..256, i in 0..512.
+            // dq_slice[o * 512 + i] must equal (o + 1).
+            let mut mismatches = 0;
+            let mut sample_wrong: Option<(usize, usize, f32, f32)> = None;
+            for o in 0..256 {
+                for i in 0..512 {
+                    let expected = (o + 1) as f32;
+                    let actual = dq_slice[o * 512 + i];
+                    if (actual - expected).abs() > 1e-3 {
+                        mismatches += 1;
+                        if sample_wrong.is_none() {
+                            sample_wrong = Some((o, i, actual, expected));
+                        }
+                    }
+                }
+            }
+            if mismatches > 0 {
+                let (o, i, a, e) = sample_wrong.unwrap();
+                panic!(
+                    "decodeQ4KM (proposed-fix convention rows=out, cols=in) STILL \
+                     doesn't match PyTorch_w layout.\n  \
+                     Mismatches: {} / {}.\n  \
+                     Sample: dq[o={}, i={}] = {} (expected {}).",
+                    mismatches,
+                    256 * 512,
+                    o,
+                    i,
+                    a,
+                    e
+                );
+            }
+            rayzor_qtensor_free(qt);
+        }
+    }
+
+    /// Phase 4b correctness: `rayzor_tensor_matmul_qt_t_f32` must produce
+    /// the same output as dequant'ing Wq to F32 and running a regular
+    /// `y = x @ w.T` matmul.
+    #[test]
+    fn matmul_qt_t_f32_matches_dequant_then_matmul_t() {
+        // Build a 256×512 Q4_K_M weight where output row o = constant (o+1).
+        let mut blocks: Vec<u8> = Vec::with_capacity(512 * Q4_K_M_BLOCK_BYTES);
+        for o in 0..256 {
+            let v = (o + 1) as f32;
+            blocks.extend_from_slice(&build_constant_block(v));
+            blocks.extend_from_slice(&build_constant_block(v));
+        }
+
+        // Wrap as a QTensor with the PyTorch [out=256, in=512] convention.
+        let mut src = blocks.clone();
+        let bytes =
+            crate::haxe_sys::HaxeBytes::new_malloc(src.as_mut_ptr(), src.len(), src.capacity());
+        let handle = &bytes as *const _ as i64;
+
+        // Build a 3-row batch of distinct inputs:
+        //   x[0, :] = 1.0   (constant)
+        //   x[1, :] = 0.5
+        //   x[2, k] = (k as f32) / 256.0   (varies along k)
+        let batch = 3usize;
+        let k = 512usize;
+        let mut x_data: Vec<f32> = Vec::with_capacity(batch * k);
+        for _ in 0..k {
+            x_data.push(1.0);
+        }
+        for _ in 0..k {
+            x_data.push(0.5);
+        }
+        for kk in 0..k {
+            x_data.push(kk as f32 / 256.0);
+        }
+        let x_shape = [batch, k];
+        let x_tensor = unsafe {
+            crate::tensor::rayzor_tensor_zeros(x_shape.as_ptr() as i64, 2, 0 /* F32 */)
+        };
+        assert!(x_tensor != 0);
+        #[repr(C)]
+        struct TensorHead {
+            data: *mut u8,
+            shape: *mut usize,
+            strides: *mut usize,
+            ndim: usize,
+            numel: usize,
+            dtype: u8,
+            owns_data: bool,
+            device: u8,
+            numa_node: i32,
+        }
+        unsafe {
+            let x_head = &*(x_tensor as *const TensorHead);
+            std::ptr::copy_nonoverlapping(x_data.as_ptr(), x_head.data as *mut f32, batch * k);
+
+            // Path A: dequant Wq to F32, then matmul_t.
+            let qt_a = rayzor_qtensor_from_bytes_q4_k_m(handle, 256, 512);
+            assert!(qt_a != 0);
+            let dq = rayzor_qtensor_dequant(qt_a);
+            assert!(dq != 0);
+            let y_dq = crate::tensor::rayzor_tensor_matmul_t(x_tensor, dq);
+            assert!(y_dq != 0);
+            let y_dq_head = &*(y_dq as *const TensorHead);
+            let y_dq_slice = std::slice::from_raw_parts(y_dq_head.data as *const f32, batch * 256);
+
+            // Path B: the new fused kernel.
+            let mut src2 = blocks.clone();
+            let bytes2 = crate::haxe_sys::HaxeBytes::new_malloc(
+                src2.as_mut_ptr(),
+                src2.len(),
+                src2.capacity(),
+            );
+            let handle2 = &bytes2 as *const _ as i64;
+            let qt_b = rayzor_qtensor_from_bytes_q4_k_m(handle2, 256, 512);
+            assert!(qt_b != 0);
+            let y_fused = rayzor_tensor_matmul_qt_t_f32(x_tensor, qt_b);
+            assert!(y_fused != 0);
+            let y_fused_head = &*(y_fused as *const TensorHead);
+            let y_fused_slice =
+                std::slice::from_raw_parts(y_fused_head.data as *const f32, batch * 256);
+
+            // Match element-wise. Q4_K_M dequant is deterministic so exact
+            // equality should hold (or within 1e-4 for accumulated f32).
+            for i in 0..(batch * 256) {
+                let diff = (y_dq_slice[i] - y_fused_slice[i]).abs();
+                assert!(
+                    diff < 1e-3,
+                    "y[{i}]: dequant-then-matmul_t={}, fused={}, diff={}",
+                    y_dq_slice[i],
+                    y_fused_slice[i],
+                    diff,
+                );
+            }
+
+            rayzor_qtensor_free(qt_a);
+            rayzor_qtensor_free(qt_b);
+        }
     }
 }

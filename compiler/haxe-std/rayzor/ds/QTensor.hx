@@ -90,6 +90,18 @@ extern class QTensor {
     @:native("qtensor_matmul_f32")
     public function matmulF32(b:Tensor):Tensor;
 
+    /**
+     * Linear-style fused matmul: `out[B, N] = x[B, K] × self[N, K].T`, with
+     * `self` Q4_K_M `[N, K]` (rows=N=out, cols=K=in; blocks along K). This
+     * is the operation a PyTorch `nn.Linear` performs against its weight,
+     * skipping the F32 dequant entirely. Dequant happens one Wq row at a
+     * time into a small scratch buffer (amortised across the batch).
+     *
+     * Returns a fresh f32 `Tensor`; null if shapes mismatch.
+     */
+    @:native("tensor_matmul_qt_t_f32")
+    public function matmulXTQ(x:Tensor):Tensor;
+
     /** Free the quantised storage. */
     @:native("qtensor_free")
     public function free():Void;

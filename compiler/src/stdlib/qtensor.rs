@@ -25,6 +25,7 @@ pub fn build_qtensor_types(builder: &mut MirBuilder) {
 
     build_qtensor_dequant(builder);
     build_qtensor_matmul_f32(builder);
+    build_qtensor_matmul_xtq(builder);
     build_qtensor_free(builder);
 }
 
@@ -100,6 +101,16 @@ fn declare_qtensor_externs(builder: &mut MirBuilder) {
         .begin_function("rayzor_qtensor_matmul_f32")
         .param("qt", i64_ty.clone())
         .param("b_tensor", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // matmul_qt_t_f32: (x_tensor, qt) -> i64  (y = x @ qt.T)
+    let func_id = builder
+        .begin_function("rayzor_tensor_matmul_qt_t_f32")
+        .param("x_tensor", i64_ty.clone())
+        .param("qt", i64_ty.clone())
         .returns(i64_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -303,6 +314,33 @@ fn build_qtensor_matmul_f32(builder: &mut MirBuilder) {
         .get_function_by_name("rayzor_qtensor_matmul_f32")
         .expect("rayzor_qtensor_matmul_f32 not found");
     let result = builder.call(extern_id, vec![qt, b]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// QTensor_matmulXTQ(qt, x) -> y where y = x @ qt.T.
+/// The Haxe-facing receiver is `qt`; the runtime takes (x, qt) order.
+fn build_qtensor_matmul_xtq(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+
+    let func_id = builder
+        .begin_function("QTensor_matmulXTQ")
+        .param("qt", i64_ty.clone())
+        .param("x", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let qt = builder.get_param(0);
+    let x = builder.get_param(1);
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_matmul_qt_t_f32")
+        .expect("rayzor_tensor_matmul_qt_t_f32 not found");
+    // Runtime fn order: (x_tensor, qt). Swap from Haxe's (qt, x).
+    let result = builder.call(extern_id, vec![x, qt]).unwrap();
     builder.ret(Some(result));
 }
 
