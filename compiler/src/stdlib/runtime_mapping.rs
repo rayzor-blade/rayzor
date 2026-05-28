@@ -2647,6 +2647,12 @@ impl StdlibMapping {
             // bytes.sub(pos: Int, len: Int): Bytes
             map_method!(instance "rayzor_Bytes", "sub" => "haxe_bytes_sub", params: 2, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
+            // bytes.subU64(posLo: Int, posHi: Int, len: Int): Bytes — view past 2 GiB
+            map_method!(instance "rayzor_Bytes", "subU64" => "haxe_bytes_sub_u64lh", params: 3, returns: primitive,
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
+            // bytes.subWithBase(base, offLo, offHi, len): Bytes — base + u64-offset view
+            map_method!(instance "rayzor_Bytes", "subWithBase" => "haxe_bytes_sub_base_u64lh", params: 4, returns: primitive,
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
             // bytes.blit(srcPos: Int, dest: Bytes, destPos: Int, len: Int): Void
             map_method!(instance "rayzor_Bytes", "blit" => "haxe_bytes_blit", params: 4, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
@@ -2708,6 +2714,10 @@ impl StdlibMapping {
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
             map_method!(instance "haxe_io_Bytes", "sub" => "haxe_bytes_sub", params: 2, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
+            map_method!(instance "haxe_io_Bytes", "subU64" => "haxe_bytes_sub_u64lh", params: 3, returns: primitive,
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
+            map_method!(instance "haxe_io_Bytes", "subWithBase" => "haxe_bytes_sub_base_u64lh", params: 4, returns: primitive,
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
             map_method!(instance "haxe_io_Bytes", "blit" => "haxe_bytes_blit", params: 4, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
             map_method!(instance "haxe_io_Bytes", "fill" => "haxe_bytes_fill", params: 3, returns: void,
@@ -2751,6 +2761,10 @@ impl StdlibMapping {
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
             map_method!(instance "Bytes", "sub" => "haxe_bytes_sub", params: 2, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
+            map_method!(instance "Bytes", "subU64" => "haxe_bytes_sub_u64lh", params: 3, returns: primitive,
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
+            map_method!(instance "Bytes", "subWithBase" => "haxe_bytes_sub_base_u64lh", params: 4, returns: primitive,
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32, IrTypeDescriptor::I32] => IrTypeDescriptor::PtrVoid),
             map_method!(instance "Bytes", "blit" => "haxe_bytes_blit", params: 4, returns: void,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I32]),
             map_method!(instance "Bytes", "fill" => "haxe_bytes_fill", params: 3, returns: void,
@@ -3395,6 +3409,9 @@ impl StdlibMapping {
             // tensor.matmul(other: Tensor): Tensor
             map_method!(instance "rayzor_ds_Tensor", "matmul" => "Tensor_matmul", params: 1, mir_wrapper,
                 types: &[PtrVoid, PtrVoid] => PtrVoid),
+            // tensor.matmulT(other: Tensor): Tensor — y = a @ b.T (b implicitly transposed)
+            map_method!(instance "rayzor_ds_Tensor", "matmulT" => "Tensor_matmulT", params: 1, mir_wrapper,
+                types: &[PtrVoid, PtrVoid] => PtrVoid),
             // tensor.dot(other: Tensor): Float
             map_method!(instance "rayzor_ds_Tensor", "dot" => "Tensor_dot", params: 1, mir_wrapper,
                 types: &[PtrVoid, PtrVoid] => F64),
@@ -3514,6 +3531,9 @@ impl StdlibMapping {
                 params: 0, mir_wrapper, types: &[PtrVoid] => PtrVoid),
             // qt.matmulF32(b: Tensor): Tensor
             map_method!(instance "rayzor_ds_QTensor", "matmulF32" => "QTensor_matmulF32",
+                params: 1, mir_wrapper, types: &[PtrVoid, PtrVoid] => PtrVoid),
+            // qt.matmulXTQ(x: Tensor): Tensor  — y = x @ self.T (Linear forward)
+            map_method!(instance "rayzor_ds_QTensor", "matmulXTQ" => "QTensor_matmulXTQ",
                 params: 1, mir_wrapper, types: &[PtrVoid, PtrVoid] => PtrVoid),
             // --- Lifetime ---
             map_method!(instance "rayzor_ds_QTensor", "free" => "QTensor_free",

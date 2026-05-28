@@ -77,6 +77,7 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
 
     // Linear algebra
     build_tensor_matmul(builder);
+    build_tensor_matmul_t(builder);
     build_tensor_bmm(builder);
 
     // Attention building blocks (composed by nue.transformer in Haxe)
@@ -262,6 +263,7 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
         "rayzor_tensor_mul",
         "rayzor_tensor_div",
         "rayzor_tensor_matmul",
+        "rayzor_tensor_matmul_t",
         "rayzor_tensor_bmm",
     ] {
         let func_id = builder
@@ -814,6 +816,11 @@ build_binop_i64!(build_tensor_sub, "Tensor_sub", "rayzor_tensor_sub");
 build_binop_i64!(build_tensor_mul, "Tensor_mul", "rayzor_tensor_mul");
 build_binop_i64!(build_tensor_div, "Tensor_div", "rayzor_tensor_div");
 build_binop_i64!(build_tensor_matmul, "Tensor_matmul", "rayzor_tensor_matmul");
+build_binop_i64!(
+    build_tensor_matmul_t,
+    "Tensor_matmulT",
+    "rayzor_tensor_matmul_t"
+);
 build_binop_i64!(build_tensor_bmm, "Tensor_bmm", "rayzor_tensor_bmm");
 
 /// Tensor_causal_mask_(self, position_offset) -> i64

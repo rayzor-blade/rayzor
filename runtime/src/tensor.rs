@@ -2198,6 +2198,88 @@ pub unsafe extern "C" fn rayzor_tensor_matmul(a_ptr: i64, b_ptr: i64) -> i64 {
     result
 }
 
+/// Matmul with transposed RHS: `y[i, j] = sum_k a[i, k] * b[j, k]`.
+///
+/// A is `[M, K]`, B is `[N, K]` (logically transposed — its second dim is
+/// the K of matmul). Result is `[M, N]`. This is the natural shape for
+/// PyTorch-style `Linear`: `y = x @ w.T` with `w[out, in]` and
+/// `x[batch, in]`.
+///
+/// Iteration loops as (i, j, k) — the innermost k is a dot product of two
+/// contiguous rows when both A and B are row-major (their row strides are
+/// each non-unit but their column strides are 1). That's SIMD-friendly:
+/// the inner loop becomes a fused-multiply-add reduction. Compared to
+/// `rayzor_tensor_matmul` (which uses axpy along columns of B), this
+/// avoids the strided B access entirely.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_matmul_t(a_ptr: i64, b_ptr: i64) -> i64 {
+    if a_ptr == 0 || b_ptr == 0 {
+        return 0;
+    }
+    let a = &*(a_ptr as *const RayzorTensor);
+    let b = &*(b_ptr as *const RayzorTensor);
+
+    if a.ndim != 2 || b.ndim != 2 || a.dtype != b.dtype {
+        return 0;
+    }
+
+    let a_shape = std::slice::from_raw_parts(a.shape, 2);
+    let b_shape = std::slice::from_raw_parts(b.shape, 2);
+    let m = a_shape[0];
+    let k = a_shape[1];
+    let n = b_shape[0];
+
+    if k != b_shape[1] {
+        return 0;
+    }
+
+    let out_shape = [m, n];
+    let result = alloc_tensor(&out_shape, a.dtype, Some(0.0));
+    if result == 0 {
+        return 0;
+    }
+
+    let r = &*(result as *const RayzorTensor);
+    let a_strides = std::slice::from_raw_parts(a.strides, 2);
+    let b_strides = std::slice::from_raw_parts(b.strides, 2);
+
+    if a.dtype == DTYPE_F32 && a_strides[1] == 1 && b_strides[1] == 1 {
+        let a_data = a.data as *const f32;
+        let b_data = b.data as *const f32;
+        let r_data = r.data as *mut f32;
+        for i in 0..m {
+            let a_row = std::slice::from_raw_parts(a_data.add(i * a_strides[0]), k);
+            for j in 0..n {
+                let b_row = std::slice::from_raw_parts(b_data.add(j * b_strides[0]), k);
+                let mut sum = 0.0f32;
+                for p in 0..k {
+                    sum += a_row[p] * b_row[p];
+                }
+                *r_data.add(i * n + j) = sum;
+            }
+        }
+        return result;
+    }
+
+    // Generic fallback for non-F32 / strided inputs.
+    let dtype = a.dtype;
+    for i in 0..m {
+        for j in 0..n {
+            let mut sum = 0.0f32;
+            for p in 0..k {
+                let a_off = i * a_strides[0] + p * a_strides[1];
+                let b_off = j * b_strides[0] + p * b_strides[1];
+                let a_val = load_f32_at(a.data, a_off, dtype);
+                let b_val = load_f32_at(b.data, b_off, dtype);
+                sum += a_val * b_val;
+            }
+            store_f32_at(r.data, i * n + j, dtype, sum);
+        }
+    }
+
+    result
+}
+
 // ============================================================================
 // Interop
 // ============================================================================

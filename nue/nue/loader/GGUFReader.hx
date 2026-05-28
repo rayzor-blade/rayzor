@@ -63,17 +63,7 @@ class GGUFReader {
 
     private function parse():Void {
         var magic = bytes.getInt32(0);
-        // Inline the MAGIC literal rather than referencing the
-        // `static inline var MAGIC` — the Variable→LoadGlobal
-        // fallback at hir_to_mir.rs:8497+ kicks in for cross-context
-        // static-inline-var references and emits a load of an
-        // uninitialized global slot. The inline_var_values map is
-        // populated (HIR-level probe confirms it returns the right
-        // literal), but the MIR somehow still gets a LoadGlobal
-        // wired into the comparison's RHS. The literal at the use
-        // site sidesteps that path entirely. See
-        // bugs_static_inline_var_cross_context for the full trace.
-        if (magic != 0x46554747) {
+        if (magic != MAGIC) {
             throw "GGUFReader: bad magic 0x" + StringTools.hex(magic) + " (expected 'GGUF')";
         }
         version = bytes.getInt32(4);
@@ -106,8 +96,10 @@ class GGUFReader {
                 pos += 4;
             }
             var dtype = readU32();
-            var offset = readU64Truncated();
-            tensorInfos.push(new TensorInfo(name, dims, dtype, offset));
+            var offsetLo = bytes.getInt32(pos);
+            var offsetHi = bytes.getInt32(pos + 4);
+            pos += 8;
+            tensorInfos.push(new TensorInfo(name, dims, dtype, offsetLo, offsetHi));
         }
 
         alignment = ALIGNMENT_DEFAULT;
@@ -179,11 +171,15 @@ class GGUFReader {
     }
 
     /** Return the raw bytes of the tensor at `info`. The slice is
-        a view into the underlying file Bytes — do not free. */
+        a view into the underlying file Bytes — do not free.
+
+        Uses `bytes.subWithBase` so the combined `dataStart + offset` can
+        exceed 2 GiB without sign-extending into negative i32 territory.
+        The runtime handles the u64 add-with-carry; we just pass the three
+        components through unchanged. **/
     public function tensorBytes(info:TensorInfo):Bytes {
-        var start = dataStart + info.offset;
         var size = tensorByteSize(info);
-        return bytes.sub(start, size);
+        return bytes.subWithBase(dataStart, info.offsetLo, info.offsetHi, size);
     }
 
     /** Compute the on-disk byte size of a tensor (dtype-dependent). */
@@ -277,12 +273,17 @@ class TensorInfo {
     public var name:String;
     public var dims:Array<Int>;
     public var dtype:Int;
-    public var offset:Int;
-    public function new(name:String, dims:Array<Int>, dtype:Int, offset:Int) {
+    /** Low 32 bits of the u64 byte offset within the file's data region. */
+    public var offsetLo:Int;
+    /** High 32 bits of the u64 byte offset. Non-zero for files >4 GiB or
+        for tensors past the 2 GiB mark when the low 32 bits sign-extend. */
+    public var offsetHi:Int;
+    public function new(name:String, dims:Array<Int>, dtype:Int, offsetLo:Int, offsetHi:Int) {
         this.name = name;
         this.dims = dims;
         this.dtype = dtype;
-        this.offset = offset;
+        this.offsetLo = offsetLo;
+        this.offsetHi = offsetHi;
     }
 }
 

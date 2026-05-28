@@ -3046,6 +3046,46 @@ pub extern "C" fn haxe_bytes_sub(bytes: *mut HaxeBytes, pos: i32, len: i32) -> *
     haxe_bytes_sub_i64(bytes, pos as i64, len as i64)
 }
 
+/// Same as `haxe_bytes_sub` but accepts the offset as two i32 halves
+/// (low + high). Lets pure-Haxe callers address >2 GiB into a mmap-backed
+/// Bytes without needing a 64-bit `Int` (Haxe `Int` is i32). The two halves
+/// are combined as `((hi as u32 as u64) << 32) | (lo as u32 as u64)` so
+/// callers can read a GGUF-style u64 offset via two `bytes.getInt32` calls
+/// and pass the raw values through unchanged.
+#[no_mangle]
+pub extern "C" fn haxe_bytes_sub_u64lh(
+    bytes: *mut HaxeBytes,
+    pos_lo: i32,
+    pos_hi: i32,
+    len: i32,
+) -> *mut HaxeBytes {
+    let pos = (((pos_hi as u32) as u64) << 32) | ((pos_lo as u32) as u64);
+    haxe_bytes_sub_i64(bytes, pos as i64, len as i64)
+}
+
+/// Variant of `haxe_bytes_sub_u64lh` that adds a non-negative `base`
+/// (i32) to the (lo, hi) offset before slicing. Encapsulates the
+/// add-with-carry that would otherwise have to be expressed in Haxe with
+/// brittle signed-arithmetic tricks. `base` represents the GGUF
+/// `dataStart` (offset of the tensor-data section within the file, well
+/// under 2 GiB for any realistic header), and `(off_lo, off_hi)` is the
+/// per-tensor u64 offset within that section.
+#[no_mangle]
+pub extern "C" fn haxe_bytes_sub_base_u64lh(
+    bytes: *mut HaxeBytes,
+    base: i32,
+    off_lo: i32,
+    off_hi: i32,
+    len: i32,
+) -> *mut HaxeBytes {
+    if base < 0 {
+        return haxe_bytes_alloc(0);
+    }
+    let off = (((off_hi as u32) as u64) << 32) | ((off_lo as u32) as u64);
+    let pos = off.saturating_add(base as u64);
+    haxe_bytes_sub_i64(bytes, pos as i64, len as i64)
+}
+
 /// Same as `haxe_bytes_sub` but accepts 64-bit offset + length. Needed for
 /// files larger than 2 GiB (e.g. a Llama-3-8B Q4_K_M GGUF whose tensor-data
 /// section starts past offset 2³¹).

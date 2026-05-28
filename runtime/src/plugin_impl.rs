@@ -735,6 +735,14 @@ register_symbol!("haxe_bytes_length", crate::haxe_sys::haxe_bytes_length);
 register_symbol!("haxe_bytes_get", crate::haxe_sys::haxe_bytes_get);
 register_symbol!("haxe_bytes_set", crate::haxe_sys::haxe_bytes_set);
 register_symbol!("haxe_bytes_sub", crate::haxe_sys::haxe_bytes_sub);
+register_symbol!(
+    "haxe_bytes_sub_u64lh",
+    crate::haxe_sys::haxe_bytes_sub_u64lh
+);
+register_symbol!(
+    "haxe_bytes_sub_base_u64lh",
+    crate::haxe_sys::haxe_bytes_sub_base_u64lh
+);
 register_symbol!("haxe_bytes_blit", crate::haxe_sys::haxe_bytes_blit);
 register_symbol!("haxe_bytes_fill", crate::haxe_sys::haxe_bytes_fill);
 register_symbol!("haxe_bytes_compare", crate::haxe_sys::haxe_bytes_compare);
@@ -1795,6 +1803,10 @@ register_symbol!("rayzor_tensor_dot", crate::tensor::rayzor_tensor_dot);
 
 // Linear algebra
 register_symbol!("rayzor_tensor_matmul", crate::tensor::rayzor_tensor_matmul);
+register_symbol!(
+    "rayzor_tensor_matmul_t",
+    crate::tensor::rayzor_tensor_matmul_t
+);
 
 // Rotary position embedding (RoPE) — transformer primitive (Phase 5)
 register_symbol!("rayzor_tensor_rope", crate::tensor::rayzor_tensor_rope);
@@ -1865,6 +1877,10 @@ register_symbol!(
 register_symbol!(
     "rayzor_qtensor_matmul_f32",
     crate::quant::rayzor_qtensor_matmul_f32
+);
+register_symbol!(
+    "rayzor_tensor_matmul_qt_t_f32",
+    crate::quant::rayzor_tensor_matmul_qt_t_f32
 );
 register_symbol!("rayzor_qtensor_free", crate::quant::rayzor_qtensor_free);
 

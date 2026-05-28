@@ -78,6 +78,37 @@ extern class Bytes {
     public function sub(pos: Int, len: Int): Bytes;
 
     /**
+        Returns a sub-range of bytes as a new Bytes view, addressing the
+        start position with a 64-bit unsigned offset given as two 32-bit
+        halves (low + high). Used for files larger than 2 GiB, where the
+        offset doesn't fit in a Haxe `Int` (i32). The combined offset is
+        `((posHi as u32) << 32) | (posLo as u32)`.
+
+        @param posLo Low 32 bits of the starting position
+        @param posHi High 32 bits of the starting position
+        @param len Number of bytes (still i32 — single tensor fits in i32)
+        @return A new Bytes view at the combined offset
+    **/
+    public function subU64(posLo: Int, posHi: Int, len: Int): Bytes;
+
+    /**
+        Returns a sub-range of bytes as a new Bytes view at offset
+        `base + ((offHi as u32) << 32 | offLo as u32)`. The runtime
+        performs the add-with-carry in u64, so neither half of the offset
+        nor the combined position need to fit in a Haxe `Int`. Useful for
+        GGUF-style consumers where `base` is the (positive i32) data-section
+        start and `(offLo, offHi)` is a per-tensor u64 offset within that
+        section that may push the absolute position past 2 GiB.
+
+        @param base Non-negative i32 base offset to add
+        @param offLo Low 32 bits of the per-record u64 offset
+        @param offHi High 32 bits of the per-record u64 offset
+        @param len Number of bytes to view
+        @return A new Bytes view at `base + offset`
+    **/
+    public function subWithBase(base: Int, offLo: Int, offHi: Int, len: Int): Bytes;
+
+    /**
         Copies bytes from source to this buffer.
 
         @param srcPos Position in source to start copying from

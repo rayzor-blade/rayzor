@@ -153,6 +153,16 @@ extern class Tensor {
     public function matmul(other:Tensor):Tensor;
 
     /**
+     * Matmul with transposed RHS: `y[i, j] = sum_k a[i, k] * b[j, k]`.
+     *
+     * `self` is `[M, K]`, `other` is `[N, K]` (its second dim is the K of
+     * matmul). Output is `[M, N]`. The natural shape for PyTorch-style
+     * `Linear`: `y = x @ w.T` with `w[out, in]` and `x[batch, in]`.
+     */
+    @:native("tensor_matmul_t")
+    public function matmulT(other:Tensor):Tensor;
+
+    /**
      * Batched 3-D matrix multiplication. `self [batch, M, K]` ×
      * `other [batch, K, N]` → `[batch, M, N]`. Each batch slice runs an
      * independent matmul; SIMD axpy fast path on F32, scalar fallback on
