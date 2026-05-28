@@ -47,10 +47,16 @@ class LlamaArch implements ArchBuilder {
     }
 
     public function validate(meta:ModelMetadata):Bool {
-        if (meta.numHeads <= 0 || meta.numKvHeads <= 0) return false;
-        if (meta.numHeads % meta.numKvHeads != 0) return false;
-        if (meta.headDim * meta.numHeads != meta.hiddenSize) return false;
-        if (meta.numLayers <= 0 || meta.vocabSize <= 0) return false;
+        var nh = meta.numHeads;
+        var nkv = meta.numKvHeads;
+        if (nh <= 0 || nkv <= 0) return false;
+        if (nh % nkv != 0) return false;
+        var hd = meta.headDim;
+        var hs = meta.hiddenSize;
+        if (hd * nh != hs) return false;
+        var nl = meta.numLayers;
+        var vs = meta.vocabSize;
+        if (nl <= 0 || vs <= 0) return false;
         return true;
     }
 
@@ -58,10 +64,11 @@ class LlamaArch implements ArchBuilder {
         var dtype = inferDType(weights, "token_embd.weight");
         var rope = new RoPE(meta.headDim, meta.maxSeqLen, meta.ropeBase);
 
-        var embed = new Embedding(
-            takeWeight(weights, "token_embd.weight"),
-            meta.vocabSize, meta.hiddenSize, "weight"
-        );
+        // Embedding *must* be F32 — the gather kernel doesn't accept QTensors.
+        // GGUF Q4_K_M embeds are rare in practice; if encountered, dequant.
+        var embedTensor = takeWeightOrDequant(weights, "token_embd.weight");
+        var embed = new Embedding(embedTensor,
+            meta.vocabSize, meta.hiddenSize, "weight");
 
         var blocks:Array<Module> = [];
         for (i in 0...meta.numLayers) {
@@ -73,11 +80,14 @@ class LlamaArch implements ArchBuilder {
             meta.normEps, "weight"
         );
 
-        // LM head — tied with embed weight when the file says so.
-        var lmHead = if (meta.tieWordEmbeddings)
+        // LM head — tied with embed weight when the metadata says so OR
+        // when no separate output weight exists (e.g. Llama 3.2 1B's GGUF
+        // omits both the `tie_word_embeddings` flag and `output.weight`,
+        // implying tied embeddings).
+        var lmHead = if (meta.tieWordEmbeddings || !weights.exists("output.weight"))
             new Linear(embed.embedTable(), null, "weight")
         else
-            new Linear(takeWeight(weights, "output.weight"), null, "weight");
+            buildLinear(weights, "output.weight", null);
 
         return new LlamaModel(meta, embed, blocks, outputNorm, lmHead, rope);
     }
@@ -93,10 +103,10 @@ class LlamaArch implements ArchBuilder {
         );
 
         var cache = new KVCache(meta.maxSeqLen, meta.numKvHeads, meta.headDim, dtype);
-        var qProj = new Linear(takeWeight(weights, prefix + "attn_q.weight"), null, "weight");
-        var kProj = new Linear(takeWeight(weights, prefix + "attn_k.weight"), null, "weight");
-        var vProj = new Linear(takeWeight(weights, prefix + "attn_v.weight"), null, "weight");
-        var oProj = new Linear(takeWeight(weights, prefix + "attn_output.weight"), null, "weight");
+        var qProj = buildLinear(weights, prefix + "attn_q.weight", null);
+        var kProj = buildLinear(weights, prefix + "attn_k.weight", null);
+        var vProj = buildLinear(weights, prefix + "attn_v.weight", null);
+        var oProj = buildLinear(weights, prefix + "attn_output.weight", null);
         var attn = new GQAttention(
             qProj, kProj, vProj, oProj, rope, cache,
             meta.numHeads, meta.numKvHeads, meta.headDim
@@ -108,12 +118,28 @@ class LlamaArch implements ArchBuilder {
         );
 
         var ffn = new SwiGLU(
-            new Linear(takeWeight(weights, prefix + "ffn_gate.weight"), null, "weight"),
-            new Linear(takeWeight(weights, prefix + "ffn_up.weight"), null, "weight"),
-            new Linear(takeWeight(weights, prefix + "ffn_down.weight"), null, "weight")
+            buildLinear(weights, prefix + "ffn_gate.weight", null),
+            buildLinear(weights, prefix + "ffn_up.weight", null),
+            buildLinear(weights, prefix + "ffn_down.weight", null)
         );
 
         return new TransformerBlock(attnNorm, attn, ffnNorm, ffn, prefix);
+    }
+
+    /** Build a Linear from a weight name, picking the QTensor path when
+     *  the loader registered a quantised entry. Bias is also F32 in GGUF
+     *  even for Q4_K_M weights, so it's read via the F32 path. */
+    static function buildLinear(weights:NamedTensorMap, weightName:String,
+                                biasName:Null<String>):Linear {
+        var b:Null<Tensor> = (biasName == null) ? null : weights.get(biasName);
+        if (weights.isQuantised(weightName)) {
+            var qw = weights.getQuant(weightName);
+            if (qw == null) {
+                throw "nue.arch.Llama: missing quant weight '" + weightName + "'";
+            }
+            return Linear.fromQuant(qw, b, "weight");
+        }
+        return new Linear(takeWeight(weights, weightName), b, "weight");
     }
 
     /**
@@ -125,6 +151,20 @@ class LlamaArch implements ArchBuilder {
         var t = weights.get(name);
         if (t == null) throw "nue.arch.Llama: missing weight '" + name + "'";
         return t;
+    }
+
+    /** Same as `takeWeight` but dequants on the fly if the entry was
+     *  stored as a QTensor. Used for tensors that the F32 kernels need
+     *  in materialised form (embedding lookup, RMSNorm scale). */
+    static function takeWeightOrDequant(weights:NamedTensorMap, name:String):Tensor {
+        if (weights.isQuantised(name)) {
+            var qw = weights.getQuant(name);
+            if (qw == null) {
+                throw "nue.arch.Llama: missing quant weight '" + name + "'";
+            }
+            return qw.dequant();
+        }
+        return takeWeight(weights, name);
     }
 
     static function inferDType(weights:NamedTensorMap, sentinel:String):DType {

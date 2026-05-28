@@ -137,18 +137,16 @@ class GGUFLoader implements ModelLoader {
     }
 
     private static function tensorsFromReader(reader:GGUFReader):NamedTensorMap {
+        trace("[tfr] start");
         var result = new NamedTensorMap();
-        // Bind the array to a typed local before iterating — direct
-        // `for (info in reader.tensorInfos)` silently exits the loop
-        // after the first element in cross-file class-field-access
-        // contexts. The pre-bind dodges that path until the
-        // compiler-side fix lands.
+        trace("[tfr] result created");
         var infos:Array<GGUFReader.TensorInfo> = reader.tensorInfos;
+        trace("[tfr] infos length=" + infos.length);
         for (info in infos) {
             var raw = reader.tensorBytes(info);
-            var tensor = decodeTensor(raw, info);
-            result.set(info.name, tensor);
+            populateTensor(result, raw, info);
         }
+        trace("[tfr] done");
         return result;
     }
 
@@ -158,11 +156,13 @@ class GGUFLoader implements ModelLoader {
     }
 
     /**
-     * Decode a single tensor's raw bytes into a `Tensor`. Routes each
-     * GGML dtype to the right runtime materialiser; the F32 fast path
-     * stays inline because `Tensor.fromArray` is the most common shape.
+     * Decode a single tensor's raw bytes and register it in the result
+     * map. Q4_K_M weights go in as QTensors (no dequant, no F32 copy);
+     * other dtypes go in as F32/F16/Q8_0 `Tensor` values.
      */
-    private static function decodeTensor(raw:haxe.io.Bytes, info:GGUFReader.TensorInfo):Tensor {
+    private static function populateTensor(
+        result:NamedTensorMap, raw:haxe.io.Bytes, info:GGUFReader.TensorInfo
+    ):Void {
         switch (info.dtype) {
             case 0: // F32
                 var nElem = 1;
@@ -173,31 +173,40 @@ class GGUFLoader implements ModelLoader {
                     floats.push(raw.getFloat(pos));
                     pos += 4;
                 }
-                var t = Tensor.fromArray(floats, F32);
-                return t.reshape(info.dims);
+                var t = Tensor.fromArray(floats, F32).reshape(info.dims);
+                result.set(info.name, t);
             case 1: // F16
-                return Tensor.fromBytesF16(raw, info.dims);
+                result.set(info.name, Tensor.fromBytesF16(raw, info.dims));
             case 8: // Q8_0
-                return Tensor.fromBytesQ8_0(raw, info.dims);
-            case 12, 14: // Q4_K / Q4_K_M
-                return decodeQ4KM(raw, info);
+                result.set(info.name, Tensor.fromBytesQ8_0(raw, info.dims));
+            case 12, 14: // Q4_K / Q4_K_M — Phase 4b: keep compressed.
+                result.setQuant(info.name, decodeQ4KMRaw(raw, info));
             case _:
                 throw "GGUFLoader: GGML dtype " + info.dtype + " not implemented (tensor '" + info.name + "').";
         }
     }
 
-    /** Q4_K / Q4_K_M body extracted from `decodeTensor`'s switch so
-     *  the parent switch stays simple (helps the compiler emit a
-     *  single coherent dispatch). */
-    private static function decodeQ4KM(raw:haxe.io.Bytes, info:GGUFReader.TensorInfo):Tensor {
-        var cols = info.dims[info.dims.length - 1];
-        var rows = 1;
-        for (i in 0...info.dims.length - 1) rows *= info.dims[i];
+    /** Build a Q4_K_M `QTensor` view over the file's raw bytes without
+     *  dequantising. The QTensor has `rows = out = dims[last]` and
+     *  `cols = in = product of earlier dims` — the PyTorch `[out, in]`
+     *  orientation that `Linear.fromQuant` expects. */
+    private static function decodeQ4KMRaw(raw:haxe.io.Bytes, info:GGUFReader.TensorInfo):QTensor {
+        var rows = info.dims[info.dims.length - 1];
+        var cols = 1;
+        for (i in 0...info.dims.length - 1) cols *= info.dims[i];
         var qt = QTensor.fromBytesQ4KM(raw, rows, cols);
         if (qt == null) {
             throw "GGUFLoader: QTensor.fromBytesQ4KM returned null for '"
                 + info.name + "' (rows=" + rows + ", cols=" + cols + ").";
         }
+        return qt;
+    }
+
+    /** Legacy F32-dequant path, retained for diagnostic / regression use.
+     *  Not on the hot inference path — `populateTensor` ships QTensors
+     *  through directly. */
+    private static function decodeQ4KM(raw:haxe.io.Bytes, info:GGUFReader.TensorInfo):Tensor {
+        var qt = decodeQ4KMRaw(raw, info);
         var dq = qt.dequant();
         qt.free();
         return (info.dims.length == 2) ? dq : dq.reshape(info.dims);
