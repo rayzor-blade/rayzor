@@ -6890,11 +6890,36 @@ impl<'a> AstLowering<'a> {
         // Last resort: scan ALL class_methods for a match by name.
         // This handles extern classes where TypeId is invalid but the method
         // definition symbols have full metadata (qualified_name, native_name, etc.).
+        //
+        // CRITICAL: when the receiver's type is Dynamic (or otherwise
+        // unresolved), exclude the class we're currently lowering from
+        // candidates. Class_methods is populated incrementally during
+        // lowering — if only the current class's methods are visible at
+        // this point, the scan would always return the enclosing function
+        // (the "lexical match" trap), producing a silent self-recursive
+        // call at runtime. Excluding the enclosing class forces the
+        // lookup to either find a real cross-class candidate or fall
+        // through to the placeholder path (which gets a qualified name
+        // and goes through proper Dynamic dispatch downstream).
+        let receiver_is_dynamic = {
+            let tt = self.context.type_table.borrow();
+            tt.get(receiver.expr_type)
+                .map(|t| matches!(t.kind, crate::tast::core::TypeKind::Dynamic))
+                .unwrap_or(false)
+        };
+        let current_class = if receiver_is_dynamic {
+            self.context.class_context_stack.last().copied()
+        } else {
+            None
+        };
         {
             let mut found: Option<(SymbolId, SymbolId)> = None; // (class_sym, method_sym)
             let mut ambiguous = false;
             let mut all_matches: Vec<(SymbolId, SymbolId)> = Vec::new();
             for (class_sym, methods) in &self.class_methods {
+                if Some(*class_sym) == current_class {
+                    continue;
+                }
                 if let Some((_, method_symbol, _)) =
                     methods.iter().find(|(name, _, _)| *name == method_name)
                 {
