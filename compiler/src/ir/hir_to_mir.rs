@@ -36149,11 +36149,14 @@ impl<'a> HirToMirContext<'a> {
             let iface_tid = self.deterministic_iface_or_enum_type_id(*iface_sym, "iface");
             if let (Some(class_tid), Some(iface_tid)) = (class_tid, iface_tid) {
                 for (slot_idx, method_sym) in methods.iter().enumerate() {
-                    let func_id = self
-                        .function_map
-                        .get(method_sym)
-                        .copied()
-                        .or_else(|| self.external_function_map.get(method_sym).copied());
+                    // Only emit for locally-compiled methods. Imported
+                    // methods get their slot from their own file's
+                    // `__vtable_init__`. Using `external_function_map`
+                    // as a fallback feeds `build_function_ref` a
+                    // renumbered import id Cranelift can't resolve
+                    // ("Function {id} not found in function_map") and
+                    // trap-stubs the entire init.
+                    let func_id = self.function_map.get(method_sym).copied();
                     if let Some(func_id) = func_id {
                         let closure_ptr = self.builder.build_function_ref(func_id);
                         let class_tid_reg =
