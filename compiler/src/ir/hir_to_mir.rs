@@ -19626,10 +19626,93 @@ impl<'a> HirToMirContext<'a> {
                         )
                     }
 
-                    // Interface → Interface: pass-through cast (both are fat pointers)
-                    (Some(TypeKind::Interface { .. }), Some(TypeKind::Interface { .. })) => {
-                        let value_reg = self.lower_expression(expr)?;
-                        self.builder.build_cast(value_reg, from_type, to_type)
+                    // Interface → Interface cast.
+                    //
+                    // Three sub-cases:
+                    //
+                    // - Same iface or source has ≥ target's methods: the
+                    //   existing fat pointer's vtable already covers the
+                    //   target's slots (interface-method order is stable
+                    //   per declared interface), so a pass-through cast is
+                    //   safe.
+                    //
+                    // - Source has fewer methods than target (e.g.
+                    //   `Module` → `CausalLanguageModel`): the source fat
+                    //   pointer was built with only the source iface's
+                    //   slots. Reading the target's extra slots from the
+                    //   source fat pointer runs past the allocated method
+                    //   slots into garbage → call-indirect to a bogus
+                    //   address → SIGSEGV.
+                    //
+                    //   Rebuild via `haxe_iface_fat_ptr_build`: extract
+                    //   the obj_ptr from the source fat pointer, read the
+                    //   class type_id from the object header, look up the
+                    //   per-(class, target_iface) vtable populated in
+                    //   `__vtable_init__`, and allocate a fresh fat
+                    //   pointer with the correct method slots.
+                    (
+                        Some(TypeKind::Interface {
+                            symbol_id: src_iface_sym,
+                            ..
+                        }),
+                        Some(TypeKind::Interface {
+                            symbol_id: tgt_iface_sym,
+                            ..
+                        }),
+                    ) => {
+                        let src_iface_sym = *src_iface_sym;
+                        let tgt_iface_sym = *tgt_iface_sym;
+                        let src_method_count = self
+                            .interface_method_names
+                            .get(&src_iface_sym)
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                        let tgt_method_count = self
+                            .interface_method_names
+                            .get(&tgt_iface_sym)
+                            .map(|m| m.len())
+                            .unwrap_or(0);
+                        if src_method_count >= tgt_method_count {
+                            // Source vtable covers the target's slots —
+                            // existing pass-through behaviour is fine.
+                            let value_reg = self.lower_expression(expr)?;
+                            self.builder.build_cast(value_reg, from_type, to_type)
+                        } else {
+                            // Target has methods source doesn't —
+                            // rebuild the fat pointer with the target's
+                            // method slots via the runtime registry.
+                            let value_reg = self.lower_expression(expr)?;
+                            let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+                            let src_ptr = {
+                                let src_ty = self
+                                    .builder
+                                    .get_register_type(value_reg)
+                                    .unwrap_or(IrType::I64);
+                                if matches!(src_ty, IrType::Ptr(_)) {
+                                    value_reg
+                                } else {
+                                    self.builder.build_bitcast(value_reg, ptr_u8.clone())?
+                                }
+                            };
+                            let obj_ptr = self.builder.build_load(src_ptr, ptr_u8.clone())?;
+                            let target_iface_type_id = self
+                                .deterministic_iface_or_enum_type_id(tgt_iface_sym, "iface")
+                                .unwrap_or(tgt_iface_sym.as_raw())
+                                as i32;
+                            let iface_tid_reg = self
+                                .builder
+                                .build_const(IrValue::I32(target_iface_type_id))?;
+                            let rebuild_fn = self.get_or_register_extern_function(
+                                "haxe_iface_fat_ptr_build",
+                                vec![ptr_u8.clone(), IrType::I32],
+                                ptr_u8.clone(),
+                            );
+                            self.builder.build_call_direct(
+                                rebuild_fn,
+                                vec![obj_ptr, iface_tid_reg],
+                                ptr_u8,
+                            )
+                        }
                     }
 
                     // Fallback: emit raw cast (same as unsafe)
@@ -36001,6 +36084,11 @@ impl<'a> HirToMirContext<'a> {
             vec![IrType::I64, IrType::I64],
             IrType::Void,
         );
+        let iface_vtable_set_slot_fn = self.get_or_register_extern_function(
+            "haxe_iface_vtable_set_slot",
+            vec![IrType::I32, IrType::I32, IrType::I32, IrType::I64],
+            IrType::Void,
+        );
 
         let class_vtables = self.class_vtables.clone();
         for (class_sym, vtable) in &class_vtables {
@@ -36044,8 +36132,48 @@ impl<'a> HirToMirContext<'a> {
         // and interface-method dispatch. Use the deterministic name-hash for
         // both sides so the runtime's class_implements lookup matches what the
         // emit sites pass for type-id comparisons.
+        //
+        // Also register per-(class, iface, slot) closure pointers so that
+        // iface-to-iface casts (e.g. `cast(model:Module, CausalLanguageModel)`)
+        // can call `haxe_iface_fat_ptr_build` to rebuild a fat pointer with
+        // the target interface's full method set — without this the
+        // pass-through cast emits a Module-shaped fat ptr that's read as
+        // CausalLanguageModel, and the larger interface's method-slot
+        // reads run off the end of the source vtable into garbage.
         let mut registered_iface_pairs: BTreeSet<(i64, i64)> = BTreeSet::new();
         let interface_vtables = self.interface_vtables.clone();
+        // Use the deterministic name-hash type ids consistent with what the
+        // cast emit sites and runtime registrations use.
+        for ((class_sym, iface_sym), methods) in &interface_vtables {
+            let class_tid = self.deterministic_class_type_id(*class_sym);
+            let iface_tid = self.deterministic_iface_or_enum_type_id(*iface_sym, "iface");
+            if let (Some(class_tid), Some(iface_tid)) = (class_tid, iface_tid) {
+                for (slot_idx, method_sym) in methods.iter().enumerate() {
+                    let func_id = self
+                        .function_map
+                        .get(method_sym)
+                        .copied()
+                        .or_else(|| self.external_function_map.get(method_sym).copied());
+                    if let Some(func_id) = func_id {
+                        let closure_ptr = self.builder.build_function_ref(func_id);
+                        let class_tid_reg =
+                            self.builder.build_const(IrValue::I32(class_tid as i32));
+                        let iface_tid_reg =
+                            self.builder.build_const(IrValue::I32(iface_tid as i32));
+                        let slot_idx_reg = self.builder.build_const(IrValue::I32(slot_idx as i32));
+                        if let (Some(ctid), Some(itid), Some(sidx), Some(cp)) =
+                            (class_tid_reg, iface_tid_reg, slot_idx_reg, closure_ptr)
+                        {
+                            self.builder.build_call_direct(
+                                iface_vtable_set_slot_fn,
+                                vec![ctid, itid, sidx, cp],
+                                IrType::Void,
+                            );
+                        }
+                    }
+                }
+            }
+        }
         for ((class_sym, iface_sym), _methods) in interface_vtables {
             let mut class_ids: BTreeSet<i64> = BTreeSet::new();
             if let Some(h) = self.deterministic_class_type_id(class_sym) {
