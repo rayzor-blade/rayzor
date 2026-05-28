@@ -1672,6 +1672,14 @@ register_symbol!(
     crate::type_system::haxe_vtable_set_slot
 );
 register_symbol!("haxe_vtable_lookup", crate::type_system::haxe_vtable_lookup);
+register_symbol!(
+    "haxe_iface_vtable_set_slot",
+    crate::type_system::haxe_iface_vtable_set_slot
+);
+register_symbol!(
+    "haxe_iface_fat_ptr_build",
+    crate::type_system::haxe_iface_fat_ptr_build
+);
 
 // ============================================================================
 // Memory Allocation (libc malloc/free for heap allocations)

@@ -2855,6 +2855,70 @@ pub extern "C" fn haxe_vtable_set_slot(type_id: i32, slot_index: i32, closure_pt
     }
 }
 
+/// Per-(class_type_id, iface_type_id) closure-pointer table. Populated
+/// from `__vtable_init__` so that iface-to-iface casts (Module →
+/// CausalLanguageModel etc.) can rebuild a fat pointer with the
+/// correct method slots for the target interface, without the
+/// compiler needing to know the runtime class at the cast site.
+static IFACE_VTABLE_REGISTRY: RwLock<Option<HashMap<(u32, u32), Vec<i64>>>> = RwLock::new(None);
+
+/// Register one (class, iface, slot) → closure_ptr entry. Called once
+/// per (class, iface, method) tuple during program startup from
+/// `__vtable_init__`.
+#[no_mangle]
+pub extern "C" fn haxe_iface_vtable_set_slot(
+    class_type_id: i32,
+    iface_type_id: i32,
+    slot_index: i32,
+    closure_ptr: i64,
+) {
+    let mut registry = IFACE_VTABLE_REGISTRY.write().unwrap();
+    let map = registry.get_or_insert_with(HashMap::new);
+    let key = (class_type_id as u32, iface_type_id as u32);
+    let slots = map.entry(key).or_default();
+    let idx = slot_index as usize;
+    while slots.len() <= idx {
+        slots.push(0);
+    }
+    slots[idx] = closure_ptr;
+}
+
+/// Build a fresh interface fat pointer from a class instance, looking
+/// up the (class, target_iface) vtable in the runtime registry. Used
+/// by iface-to-iface casts (e.g. `cast(model:Module, CausalLanguageModel)`)
+/// where the source fat pointer's vtable doesn't cover the target
+/// interface's full method set.
+///
+/// Returns null if the object's class doesn't implement the target
+/// interface (no registry entry).
+#[no_mangle]
+pub extern "C" fn haxe_iface_fat_ptr_build(obj_ptr: *mut u8, iface_type_id: i32) -> *mut u8 {
+    if obj_ptr.is_null() || (obj_ptr as usize) < 0x1000 {
+        return std::ptr::null_mut();
+    }
+    let class_type_id = unsafe { *(obj_ptr as *const i64) } as u32;
+    let registry = IFACE_VTABLE_REGISTRY.read().unwrap();
+    let Some(map) = registry.as_ref() else {
+        return std::ptr::null_mut();
+    };
+    let key = (class_type_id, iface_type_id as u32);
+    let Some(vtable) = map.get(&key) else {
+        return std::ptr::null_mut();
+    };
+    let total_size = 8 + 8 * vtable.len();
+    let new_ptr = unsafe { libc::malloc(total_size) as *mut u8 };
+    if new_ptr.is_null() {
+        return std::ptr::null_mut();
+    }
+    unsafe {
+        *(new_ptr as *mut *mut u8) = obj_ptr;
+        for (i, &fn_p) in vtable.iter().enumerate() {
+            *(new_ptr.add(8 + 8 * i) as *mut i64) = fn_p;
+        }
+    }
+    new_ptr
+}
+
 /// Freeze the vtable registry into a flat array for O(1) lookup.
 /// Copies slot data so the flat table owns everything and survives
 /// registry mutations between benchmark runs.
