@@ -52,11 +52,11 @@ class Main {
         var loader = new GGUFLoader();
         trace("[load] reading GGUF (dequants Q4_K_M weights to F32)...");
         var startLoad = Sys.time();
-        var loaded:GGUFLoader.LoadedModel = loader.loadWithTokenizer(path);
+        var loaded = loader.loadWithTokenizer(path);
         trace("[load] done in " + fmt(Sys.time() - startLoad) + "s");
 
-        var meta:nue.model.ModelMetadata = loaded.metadata;
-        var tok:nue.tokenizer.Tokenizer = loaded.tokenizer;
+        var meta = loaded.metadata;
+        var tok = loaded.tokenizer;
         // Loader returns `Module`; `GenerationLoop` needs the causal
         // LM facet (forwardIds + resetCache). All `ArchBuilder`s
         // hand back a `CausalLanguageModel`, so the cast is safe.
