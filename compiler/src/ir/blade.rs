@@ -104,6 +104,30 @@ pub struct BladeCachedMaps {
     /// These are compile-time constants that consumers need for cross-file resolution.
     #[serde(default)]
     pub inline_vars: Vec<BladeInlineVarEntry>,
+    /// Interface vtable entries: `(class_qname, iface_qname) →
+    /// Vec<method_qname>`. Keyed by qualified name so SymbolIds can
+    /// be re-resolved in the consuming compilation context.
+    ///
+    /// Required for iface-to-iface casts (e.g. `cast(model:Module,
+    /// CausalLanguageModel)`) on classes defined in cached modules —
+    /// without this the `(class, iface)` pair never reaches the user
+    /// context's `interface_vtables` map, and the runtime
+    /// `IFACE_VTABLE_REGISTRY` lookup at the cast site returns null.
+    #[serde(default)]
+    pub interface_vtables: Vec<BladeIfaceVtableEntry>,
+}
+
+/// One (class, iface) → method-list entry in the BLADE cache.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BladeIfaceVtableEntry {
+    /// Qualified class name (e.g. `nue.arch.LlamaModel`).
+    pub class_name: String,
+    /// Qualified interface name (e.g. `nue.CausalLanguageModel`).
+    pub iface_name: String,
+    /// Method qualified names in interface-declaration order. Used to
+    /// resolve each entry back to a `SymbolId` in the consuming
+    /// context's symbol table.
+    pub method_qnames: Vec<String>,
 }
 
 /// A static inline var constant stored in the cache

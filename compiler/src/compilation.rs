@@ -823,6 +823,10 @@ impl CompilationUnit {
         field_class_names: &BTreeMap<crate::tast::SymbolId, String>,
         property_access_map: &BTreeMap<crate::tast::SymbolId, crate::tast::PropertyAccessInfo>,
         function_param_hir_types: &BTreeMap<crate::ir::IrFunctionId, Vec<crate::tast::TypeId>>,
+        interface_vtables: &BTreeMap<
+            (crate::tast::SymbolId, crate::tast::SymbolId),
+            Vec<crate::tast::SymbolId>,
+        >,
     ) -> BladeCachedMaps {
         let mut functions = Vec::new();
         let mut fields = Vec::new();
@@ -985,12 +989,44 @@ impl CompilationUnit {
             }
         }
 
+        // Convert interface_vtables: (class_sym, iface_sym) → Vec<method_sym>
+        // into qualified-name triples so the SymbolIds survive
+        // re-numbering on restore.
+        let mut iface_vtable_entries: Vec<crate::ir::blade::BladeIfaceVtableEntry> = Vec::new();
+        let qname_of = |sid: crate::tast::SymbolId| -> Option<String> {
+            let sym = self.symbol_table.get_symbol(sid)?;
+            sym.qualified_name
+                .and_then(|n| self.string_interner.get(n))
+                .or_else(|| self.string_interner.get(sym.name))
+                .map(|s| s.to_string())
+        };
+        for ((class_sym, iface_sym), methods) in interface_vtables {
+            let Some(class_name) = qname_of(*class_sym) else {
+                continue;
+            };
+            let Some(iface_name) = qname_of(*iface_sym) else {
+                continue;
+            };
+            let method_qnames: Vec<String> = methods.iter().filter_map(|m| qname_of(*m)).collect();
+            // Skip entries that lost their methods on resolution — they
+            // can't be reconstructed deterministically on restore.
+            if method_qnames.len() != methods.len() {
+                continue;
+            }
+            iface_vtable_entries.push(crate::ir::blade::BladeIfaceVtableEntry {
+                class_name,
+                iface_name,
+                method_qnames,
+            });
+        }
+
         BladeCachedMaps {
             functions,
             fields,
             class_sizes,
             properties,
             inline_vars: Vec::new(), // populated separately in try_compile_import
+            interface_vtables: iface_vtable_entries,
         }
     }
 
@@ -3243,6 +3279,46 @@ impl CompilationUnit {
             }
         }
 
+        // Restore interface_vtables entries — these survive across
+        // compilations because they're keyed by qualified name. For
+        // each (class_qname, iface_qname, method_qnames) entry, look
+        // up the SymbolIds in the current context and insert into
+        // import_interface_vtables so iface-to-iface casts can
+        // emit `haxe_iface_vtable_set_slot` registrations from the
+        // user-module's __vtable_init__.
+        for entry in &cached_maps.interface_vtables {
+            let Some((class_sym, _, _)) = registered.get(&entry.class_name) else {
+                continue;
+            };
+            let Some((iface_sym, _, iface_scope)) = registered.get(&entry.iface_name) else {
+                continue;
+            };
+            let Some(iface_scope) = self.scope_tree.get_scope(*iface_scope) else {
+                continue;
+            };
+            // Resolve each method qname's local name (the trailing
+            // segment after the last `.`) back to a SymbolId in the
+            // interface's own scope.
+            let mut method_syms: Vec<crate::tast::SymbolId> =
+                Vec::with_capacity(entry.method_qnames.len());
+            let mut all_found = true;
+            for qname in &entry.method_qnames {
+                let local = qname.rsplit('.').next().unwrap_or(qname.as_str());
+                let interned = self.string_interner.intern(local);
+                if let Some(method_sym) = iface_scope.get_symbol(interned) {
+                    method_syms.push(method_sym);
+                } else {
+                    all_found = false;
+                    break;
+                }
+            }
+            if !all_found {
+                continue;
+            }
+            self.import_interface_vtables
+                .insert((*class_sym, *iface_sym), method_syms);
+        }
+
         // Restore property access mappings
         for entry in &cached_maps.properties {
             if let Some((_class_sym, _class_type, class_scope)) = registered.get(&entry.class_name)
@@ -4735,6 +4811,7 @@ impl CompilationUnit {
                 &mir_result.field_class_names,
                 &mir_result.property_access_map,
                 &mir_result.function_param_hir_types,
+                &mir_result.interface_vtables,
             );
             self.last_compiled_cached_maps = Some(cached_maps);
         }
