@@ -84,13 +84,21 @@ class GGUFLoader implements ModelLoader {
      * (which would parse the header twice).
      */
     public function loadWithTokenizer(path:String):LoadedModel {
+        trace("[lwt] 1");
         var bytes = File.getBytes(path);
+        trace("[lwt] 2");
         var reader = new GGUFReader(bytes);
+        trace("[lwt] 3");
         var meta = metadataFromReader(reader);
+        trace("[lwt] 4");
         var weights = tensorsFromReader(reader);
+        trace("[lwt] 5");
         var reg = (registry != null) ? registry : ArchRegistry.withDefaults();
+        trace("[lwt] 6");
         var model = reg.build(meta, weights);
+        trace("[lwt] 7");
         var tok = GGUFTokenizer.build(reader);
+        trace("[lwt] 8");
         return { model: model, tokenizer: tok, metadata: meta };
     }
 
@@ -137,16 +145,12 @@ class GGUFLoader implements ModelLoader {
     }
 
     private static function tensorsFromReader(reader:GGUFReader):NamedTensorMap {
-        trace("[tfr] start");
         var result = new NamedTensorMap();
-        trace("[tfr] result created");
         var infos:Array<GGUFReader.TensorInfo> = reader.tensorInfos;
-        trace("[tfr] infos length=" + infos.length);
         for (info in infos) {
             var raw = reader.tensorBytes(info);
             populateTensor(result, raw, info);
         }
-        trace("[tfr] done");
         return result;
     }
 
