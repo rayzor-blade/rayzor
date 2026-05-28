@@ -1428,13 +1428,22 @@ impl TieredBackend {
         interp.reset_iteration_count();
         interp.set_max_iterations(u64::MAX);
         for module in modules {
+            // Run every `__vtable_init__` / `__init__` in the module
+            // (see the native equivalent above for the why). The
+            // interpreter is forgiving of missing externs (returns
+            // default), so we don't need a trap-stub-skip here.
             for init_name in ["__vtable_init__", "__init__"] {
-                let Some(init) = module.functions.values().find(|f| f.name == init_name) else {
-                    continue;
-                };
-                interp
-                    .execute(module, init.id, vec![])
-                    .map_err(|e| format!("Interpreter error in {}: {}", init_name, e))?;
+                let init_ids: Vec<_> = module
+                    .functions
+                    .values()
+                    .filter(|f| f.name == init_name)
+                    .map(|f| f.id)
+                    .collect();
+                for init_id in init_ids {
+                    interp
+                        .execute(module, init_id, vec![])
+                        .map_err(|e| format!("Interpreter error in {}: {}", init_name, e))?;
+                }
             }
         }
         interp.reset_iteration_count();
@@ -1446,21 +1455,35 @@ impl TieredBackend {
         let function_pointers = self.function_pointers.read().unwrap();
 
         for module in modules {
+            // Every contributing file leaves its own `__vtable_init__` /
+            // `__init__` with a distinct IrFunctionId. Running just the
+            // first one silently dropped vtable + iface registrations
+            // from every other file, which broke iface-to-iface casts
+            // on classes defined outside the entry file (the
+            // (class, iface) entry was never put in the runtime
+            // `IFACE_VTABLE_REGISTRY`).
+            //
+            // Skip entries whose JIT compilation failed (no
+            // function_pointers entry) — calling a trap-stub at
+            // startup would SIGILL before user code begins. The
+            // missing entries from a single skipped init are
+            // recoverable, but a SIGILL is not.
             for init_name in ["__vtable_init__", "__init__"] {
-                let Some(init) = module.functions.values().find(|f| f.name == init_name) else {
-                    continue;
-                };
-
-                let Some(&func_ptr) = function_pointers.get(&init.id) else {
-                    return Err(format!(
-                        "JIT-compiled {} {:?} not found in function_pointers",
-                        init_name, init.id
-                    ));
-                };
-
-                unsafe {
-                    let init_fn: extern "C" fn(i64) = std::mem::transmute(func_ptr as *const u8);
-                    init_fn(0);
+                let init_ids: Vec<_> = module
+                    .functions
+                    .values()
+                    .filter(|f| f.name == init_name)
+                    .map(|f| f.id)
+                    .collect();
+                for init_id in init_ids {
+                    let Some(&func_ptr) = function_pointers.get(&init_id) else {
+                        continue;
+                    };
+                    unsafe {
+                        let init_fn: extern "C" fn(i64) =
+                            std::mem::transmute(func_ptr as *const u8);
+                        init_fn(0);
+                    }
                 }
             }
         }
