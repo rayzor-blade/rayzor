@@ -12064,6 +12064,47 @@ impl<'a> AstLowering<'a> {
                 field_symbol,
                 ..
             } => {
+                // PRIORITY: when the receiver is an anonymous type, read the
+                // field type directly from the receiver's shape. The
+                // symbol-table lookup below uses the field's NAME symbol
+                // (shared across all anonymous types that use this name),
+                // and its type_id is whichever anon happened to last set
+                // it — typically a narrow/empty shape from another
+                // literal. That stale type then propagates to bindings
+                // (`var x = q.child`), and downstream `x.field` reads
+                // miss the slot and return null. Reading the shape
+                // directly off the receiver dodges the collision.
+                let want_name = self
+                    .context
+                    .symbol_table
+                    .get_symbol(*field_symbol)
+                    .map(|s| s.name);
+                if let Some(name) = want_name {
+                    let type_table = self.context.type_table.borrow();
+                    // Walk through TypeAlias chains so typedef-wrapped
+                    // anons (`typedef Inner = {x:Int}`) participate in
+                    // this lookup too.
+                    let mut current = object.expr_type;
+                    let mut hops = 0;
+                    while hops < 8 {
+                        let Some(t) = type_table.get(current) else {
+                            break;
+                        };
+                        match &t.kind {
+                            crate::tast::core::TypeKind::Anonymous { fields } => {
+                                if let Some(field) = fields.iter().find(|f| f.name == name) {
+                                    return Ok(field.type_id);
+                                }
+                                break;
+                            }
+                            crate::tast::core::TypeKind::TypeAlias { target_type, .. } => {
+                                current = *target_type;
+                                hops += 1;
+                            }
+                            _ => break,
+                        }
+                    }
+                }
                 // Look up field type from symbol table
                 if let Some(symbol) = self.context.symbol_table.get_symbol(*field_symbol) {
                     // Check if this is a valid typed symbol
