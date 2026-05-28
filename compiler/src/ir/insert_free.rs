@@ -37,6 +37,10 @@ struct AllocFuncIds {
     anon_drop_ids: BTreeSet<IrFunctionId>,
     /// Functions that take an anon handle as first arg but don't capture it
     anon_safe_ids: BTreeSet<IrFunctionId>,
+    /// Anon setters: third arg is the stored value, which escapes via the
+    /// receiver. Tracked separately from anon_safe_ids so we can flag the
+    /// value-arg as an escape without losing the receiver-is-safe semantics.
+    anon_setter_ids: BTreeSet<IrFunctionId>,
 }
 
 pub struct InsertFreePass;
@@ -62,6 +66,7 @@ impl OptimizationPass for InsertFreePass {
             anon_new_ids: BTreeSet::new(),
             anon_drop_ids: BTreeSet::new(),
             anon_safe_ids: BTreeSet::new(),
+            anon_setter_ids: BTreeSet::new(),
         };
 
         // Scan both local and extern functions for known names
@@ -144,6 +149,12 @@ fn classify_func(fid: IrFunctionId, name: &str, ids: &mut AllocFuncIds) {
         }
         _ if name.starts_with("rayzor_anon_") || name.starts_with("haxe_reflect_") => {
             ids.anon_safe_ids.insert(fid);
+            // Setters store their VALUE arg inside the receiver — track
+            // them so `pointer_escapes` can flag value-as-escape even
+            // when the call is otherwise "safe" for the receiver.
+            if name == "rayzor_anon_set_field_by_index" || name == "rayzor_anon_set_field_by_name" {
+                ids.anon_setter_ids.insert(fid);
+            }
         }
         _ => {}
     }
@@ -220,7 +231,7 @@ fn insert_free_for_function(function: &mut IrFunction, ids: &AllocFuncIds) -> us
         // For anon allocs, use modified escape analysis that whitelists safe accessors
         let empty = BTreeSet::new();
         let safe_ids = if is_anon { &ids.anon_safe_ids } else { &empty };
-        if !pointer_escapes(alloc_id, &derived, function, safe_ids) {
+        if !pointer_escapes(alloc_id, &derived, function, safe_ids, &ids.anon_setter_ids) {
             allocs_needing_free.push(alloc_id);
         }
     }
@@ -376,6 +387,7 @@ fn pointer_escapes(
     derived: &BTreeSet<IrId>,
     function: &IrFunction,
     safe_call_ids: &BTreeSet<IrFunctionId>,
+    anon_setter_ids: &BTreeSet<IrFunctionId>,
 ) -> bool {
     for block in function.cfg.blocks.values() {
         for inst in &block.instructions {
@@ -386,6 +398,27 @@ fn pointer_escapes(
                     if !safe_call_ids.contains(func_id) {
                         for arg in args {
                             if *arg == alloc_id || derived.contains(arg) {
+                                return true;
+                            }
+                        }
+                    } else if anon_setter_ids.contains(func_id) {
+                        // `rayzor_anon_set_field_by_index(receiver, idx, value)`
+                        // is safe for the receiver (arg 0) and index (arg 1),
+                        // but the VALUE arg (arg 2) gets stored inside the
+                        // receiver's slot table — i.e. the value escapes via
+                        // the receiver. If the receiver itself later escapes
+                        // (return / store / etc.), the value transitively
+                        // escapes too.
+                        //
+                        // For correctness we conservatively treat the value
+                        // arg as an escape source. Without this, returning
+                        // an outer anon that stores an inner anon
+                        // (`{ inner: i }`) frees `i` at function exit and
+                        // the caller reads a dangling pointer → SIGSEGV on
+                        // first nested field access.
+                        if args.len() >= 3 {
+                            let value_arg = args[2];
+                            if value_arg == alloc_id || derived.contains(&value_arg) {
                                 return true;
                             }
                         }
