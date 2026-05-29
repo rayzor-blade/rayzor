@@ -1,3 +1,4 @@
+#![cfg_attr(target_arch = "aarch64", feature(stdarch_neon_dotprod))]
 //! Rayzor Runtime Library
 //!
 //! Provides memory management and runtime support for compiled Haxe code.
