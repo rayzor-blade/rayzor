@@ -628,6 +628,13 @@ pub struct AstLowering<'a> {
     /// caller passes i32 reinterpreted as pointers and the lambda
     /// dereferences address 0/1/2 producing garbage / null.
     expected_lambda_params_stack: Vec<Option<Vec<TypeId>>>,
+    /// Per-arg expected type for the current call/init context. Lets
+    /// `lower_expression(Ident("F32"))` disambiguate between enum variants
+    /// with the same simple name (e.g. `DType.F32` vs `MetaValue.F32`) by
+    /// preferring the variant whose parent enum matches the expected type.
+    /// `None` at the top means no usable hint (untyped lambda call, dynamic
+    /// dispatch, …) — the existing scope-walk resolution applies.
+    expected_arg_type_stack: Vec<Option<TypeId>>,
 }
 
 /// Result of type parameter substitution for generic method return types
@@ -1239,6 +1246,7 @@ impl<'a> AstLowering<'a> {
             class_type_params: BTreeMap::new(),
             class_constructor_symbols: BTreeMap::new(),
             expected_lambda_params_stack: Vec::new(),
+            expected_arg_type_stack: Vec::new(),
         }
     }
 
@@ -7204,12 +7212,82 @@ impl<'a> AstLowering<'a> {
                 let id_name = self.context.intern_string(name);
 
                 // Need to resolve symbol by walking up the scope hierarchy
-                let symbol_id =
+                let mut symbol_id =
                     self.resolve_symbol_in_scope_hierarchy(id_name)
                         .ok_or_else(|| LoweringError::UnresolvedSymbol {
                             name: name.clone(),
                             location: self.context.create_location_from_span(expression.span),
                         })?;
+
+                // Enum-variant disambiguation. If the scope-walk found an enum
+                // variant but the expected arg type is a *different* enum,
+                // re-resolve to that enum's variant of the same name when one
+                // exists. This catches the cross-file shadowing where, e.g.,
+                // `Tensor.zeros([…], F32)` in a file that has both `DType.F32`
+                // and `MetaValue.F32` in scope would otherwise pick the first
+                // one the scope walk found (which is often the wrong one).
+                // See bugs_dtype_enum_cross_file_pointer.
+                let prefer = self.expected_arg_type_stack.last().copied().flatten();
+                if let Some(expected_ty) = prefer {
+                    let needs_reresolve = {
+                        let sym = self.context.symbol_table.get_symbol(symbol_id);
+                        let sym_is_variant = sym
+                            .map(|s| s.kind == crate::tast::symbols::SymbolKind::EnumVariant)
+                            .unwrap_or(false);
+                        if !sym_is_variant {
+                            false
+                        } else {
+                            // Look at expected_ty's TypeKind: if it's an Enum E,
+                            // and the resolved variant's parent enum != E, we want
+                            // to look up the variant within E's scope.
+                            let type_table = self.context.type_table.borrow();
+                            let expected_enum_sym =
+                                type_table.get(expected_ty).and_then(|t| match &t.kind {
+                                    crate::tast::core::TypeKind::Enum { symbol_id, .. } => {
+                                        Some(*symbol_id)
+                                    }
+                                    _ => None,
+                                });
+                            if let Some(expected_enum) = expected_enum_sym {
+                                let resolved_parent_enum = self
+                                    .context
+                                    .symbol_table
+                                    .find_parent_enum_for_constructor(symbol_id);
+                                resolved_parent_enum.map_or(true, |p| p != expected_enum)
+                            } else {
+                                false
+                            }
+                        }
+                    };
+                    if needs_reresolve {
+                        if let Some(expected_enum_sym) = {
+                            let type_table = self.context.type_table.borrow();
+                            type_table.get(expected_ty).and_then(|t| match &t.kind {
+                                crate::tast::core::TypeKind::Enum { symbol_id, .. } => {
+                                    Some(*symbol_id)
+                                }
+                                _ => None,
+                            })
+                        } {
+                            if let Some(variants) = self
+                                .context
+                                .symbol_table
+                                .get_enum_variants(expected_enum_sym)
+                            {
+                                for &variant_sym in variants {
+                                    if let Some(vsym) =
+                                        self.context.symbol_table.get_symbol(variant_sym)
+                                    {
+                                        if vsym.name == id_name {
+                                            symbol_id = variant_sym;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
 
                 // Check if this symbol is an instance VAR field of the current class
                 // (not a method). If so, we need to create a FieldAccess with implicit
@@ -8637,6 +8715,7 @@ impl<'a> AstLowering<'a> {
         // is best-effort: if we can't statically resolve a callee, we just
         // lower args with no hints and the existing behavior applies.
         let expected_param_types = self.resolve_callee_param_types(expr);
+        let expected_arg_types = self.resolve_callee_formal_param_types(expr);
 
         let arg_exprs = args
             .iter()
@@ -8646,8 +8725,13 @@ impl<'a> AstLowering<'a> {
                     .as_ref()
                     .and_then(|ps| ps.get(i).cloned())
                     .flatten();
+                let arg_type_hint = expected_arg_types
+                    .as_ref()
+                    .and_then(|ts| ts.get(i).copied());
                 self.expected_lambda_params_stack.push(hint);
+                self.expected_arg_type_stack.push(arg_type_hint);
                 let result = self.lower_expression(arg);
+                self.expected_arg_type_stack.pop();
                 self.expected_lambda_params_stack.pop();
                 result
             })
