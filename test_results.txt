@@ -1,6 +1,6 @@
 ============================================
   Rayzor Haxe Test Results
-  Wed Mar 25 02:36:11 GMT 2026
+  Fri May 29 14:33:38 BST 2026
 ============================================
 
 --- DebugChecksum [PASS] ---
@@ -271,6 +271,15 @@ Running compiler/tests/haxe/test_anon_simple.hx [debug] [preset: Application]...
 
 --- test_array_comprehension_scope [PASS] ---
 Running compiler/tests/haxe/test_array_comprehension_scope.hx [debug] [preset: Application]...
+0
+1
+2
+10
+11
+12
+2
+4
+6
 
 --- test_array_iterator [PASS] ---
 Running compiler/tests/haxe/test_array_iterator.hx [debug] [preset: Application]...
@@ -355,6 +364,22 @@ Expected: 65536
 5 | 3 = 7
 5 ^ 3 = 6
 10 % 3 = 1
+
+--- test_class_instance_reflection [PASS] ---
+Running compiler/tests/haxe/test_class_instance_reflection.hx [debug] [preset: Application]...
+Dog
+[name, legs, breed]
+Labrador
+Rex
+Golden Retriever
+[name, legs, breed]
+true
+false
+Dog
+TClass(Dog)
+true
+false
+null
 
 --- test_closures [PASS] ---
 Running compiler/tests/haxe/test_closures.hx [debug] [preset: Application]...
@@ -571,6 +596,19 @@ Green
 Blue
 done
 
+--- test_enum_reflection_value_apis [PASS] ---
+Running compiler/tests/haxe/test_enum_reflection_value_apis.hx [debug] [preset: Application]...
+Some
+1
+[42]
+None
+0
+[]
+Red
+0
+Blue
+2
+
 --- test_enum_switch [PASS] ---
 Running compiler/tests/haxe/test_enum_switch.hx [debug] [preset: Application]...
 42
@@ -610,7 +648,7 @@ done
 Running compiler/tests/haxe/test_exception.hx [debug] [preset: Application]...
 basic error
 custom error
-specific
+WRONG
 42
 caught dynamic
 has stack
@@ -621,12 +659,44 @@ done
 Running compiler/tests/haxe/test_exception_method_parity.hx [debug] [preset: Application]...
 message=boom
 toString=boom
-details=boom
+details=Exception: "boom"
+[36mtrace:[0m 
+   [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0mtest_exception_method_parity.hx:5:15[38;5;246m][0m
+ [38;5;246m5 │[0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249mt[0m[38;5;249mh[0m[38;5;249mr[0m[38;5;249mo[0m[38;5;249mw[0m[38;5;249m [0m[36mn[0m[38;5;249me[0m[38;5;249mw[0m[38;5;249m [0m[38;5;249mE[0m[38;5;249mx[0m[38;5;249mc[0m[38;5;249me[0m[38;5;249mp[0m[38;5;249mt[0m[38;5;249mi[0m[38;5;249mo[0m[38;5;249mn[0m[38;5;249m([0m[38;5;249m"[0m[38;5;249mb[0m[38;5;249mo[0m[38;5;249mo[0m[38;5;249mm[0m[38;5;249m"[0m[38;5;249m)[0m[38;5;249m;[0m
+ [38;5;240m  │[0m              [36m╰[0m[36m─[0m Called from Main.thrower
+
+[36mtrace:[0m 
+    [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0mtest_exception_method_parity.hx:10:13[38;5;246m][0m
+ [38;5;246m10 │[0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[36mt[0m[38;5;249mh[0m[38;5;249mr[0m[38;5;249mo[0m[38;5;249mw[0m[38;5;249me[0m[38;5;249mr[0m[38;5;249m([0m[38;5;249m)[0m[38;5;249m;[0m
+ [38;5;240m   │[0m            [36m╰[0m[36m─[0m Called from Main.main
+
 hasMessage=true
-hasStack=false
+hasStack=true
 
 --- test_exhaustive_switch [PASS] ---
 Running compiler/tests/haxe/test_exhaustive_switch.hx [debug] [preset: Application]...
+[33mWarning:[0m [W0006] non-exhaustive switch on enum 'Color'
+    [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0mcompiler/tests/haxe/test_exhaustive_switch.hx:23:21[38;5;246m][0m
+    [38;5;246m│[0m
+ [38;5;246m23 │[0m [38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249ms[0m[38;5;249mw[0m[38;5;249mi[0m[38;5;249mt[0m[38;5;249mc[0m[38;5;249mh[0m[38;5;249m [0m[38;5;249m([0m[38;5;249mc[0m[38;5;249m)[0m[38;5;249m [0m[38;5;249m{[0m
+ [38;5;240m   │[0m                     [31m┬[0m  
+ [38;5;240m   │[0m                     [31m╰[0m[31m─[0m[31m─[0m missing variants: Blue
+ [38;5;240m   │[0m 
+ [38;5;240m   │[0m [38;5;115mHelp[0m: consider adding a default case with `default:`
+ [38;5;240m   │[0m 
+ [38;5;240m   │[0m [38;5;115mNote[0m: add case for `Blue`
+[38;5;246m────╯[0m
+[33mWarning:[0m [W0006] non-exhaustive switch on enum 'Option'
+    [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0mcompiler/tests/haxe/test_exhaustive_switch.hx:43:6[38;5;246m][0m
+    [38;5;246m│[0m
+ [38;5;246m43 │[0m [38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[31m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249mc[0m[38;5;249ma[0m[38;5;249ms[0m[38;5;249me[0m[38;5;249m [0m[38;5;249mS[0m[38;5;249mo[0m[38;5;249mm[0m[38;5;249me[0m[38;5;249m([0m[38;5;249mv[0m[38;5;249m)[0m[38;5;249m:[0m[38;5;249m [0m[38;5;249mt[0m[38;5;249mr[0m[38;5;249ma[0m[38;5;249mc[0m[38;5;249me[0m[38;5;249m([0m[38;5;249mv[0m[38;5;249m)[0m[38;5;249m;[0m
+ [38;5;240m   │[0m      [31m┬[0m  
+ [38;5;240m   │[0m      [31m╰[0m[31m─[0m[31m─[0m missing variants: None
+ [38;5;240m   │[0m 
+ [38;5;240m   │[0m [38;5;115mHelp[0m: consider adding a default case with `default:`
+ [38;5;240m   │[0m 
+ [38;5;240m   │[0m [38;5;115mNote[0m: add case for `None`
+[38;5;246m────╯[0m
 red
 red
 red
@@ -654,9 +724,9 @@ Running compiler/tests/haxe/test_for_in.hx [debug] [preset: Application]...
 2
 hello
 world
-30
 10
 20
+30
 done
 
 --- test_forward [PASS] ---
@@ -720,7 +790,7 @@ hello
 
 --- test_host_localhost [PASS] ---
 Running compiler/tests/haxe/test_host_localhost.hx [debug] [preset: Application]...
-Damilares-MBP.lan
+Damilares-MacBook-Pro.local
 
 --- test_host_simple [PASS] ---
 Running compiler/tests/haxe/test_host_simple.hx [debug] [preset: Application]...
@@ -732,6 +802,20 @@ square
 
 --- test_interface_cast [PASS] ---
 Running compiler/tests/haxe/test_interface_cast.hx [debug] [preset: Application]...
+[38;5;147mAdvice:[0m [W0014] interface method `draw()` return type recovered as `String` at MIR; annotating the binding site (e.g. `var x:String = …`) makes the concrete type visible to earlier compiler passes too
+    [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0mcompiler/tests/haxe/test_interface_cast.hx:37:21[38;5;246m][0m
+    [38;5;246m│[0m
+ [38;5;246m37 │[0m [38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249mt[0m[38;5;249mr[0m[38;5;249ma[0m[38;5;249mc[0m[38;5;249me[0m[38;5;249m([0m[38;5;249md[0m[38;5;249m.[0m[31md[0m[38;5;249mr[0m[38;5;249ma[0m[38;5;249mw[0m[38;5;249m([0m[38;5;249m)[0m[38;5;249m)[0m[38;5;249m;[0m[38;5;249m [0m[38;5;249m [0m[38;5;249m/[0m[38;5;249m/[0m[38;5;249m [0m[38;5;249md[0m[38;5;249mr[0m[38;5;249ma[0m[38;5;249mw[0m[38;5;249m:[0m[38;5;249mb[0m[38;5;249mo[0m[38;5;249mx[0m
+ [38;5;240m   │[0m                     [31m┬[0m  
+ [38;5;240m   │[0m                     [31m╰[0m[31m─[0m[31m─[0m cross-context iface return resolved late
+[38;5;246m────╯[0m
+[38;5;147mAdvice:[0m [W0014] interface method `draw()` return type recovered as `String` at MIR; annotating the binding site (e.g. `var x:String = …`) makes the concrete type visible to earlier compiler passes too
+    [38;5;246m╭[0m[38;5;246m─[0m[38;5;246m[[0mcompiler/tests/haxe/test_interface_cast.hx:62:27[38;5;246m][0m
+    [38;5;246m│[0m
+ [38;5;246m62 │[0m [38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249m [0m[38;5;249mt[0m[38;5;249mr[0m[38;5;249ma[0m[38;5;249mc[0m[38;5;249me[0m[38;5;249m([0m[38;5;249md[0m[38;5;249m2[0m[38;5;249m.[0m[38;5;249md[0m[38;5;249mr[0m[38;5;249ma[0m[38;5;249mw[0m[38;5;249m([0m[31m)[0m[38;5;249m)[0m[38;5;249m;[0m[38;5;249m [0m[38;5;249m [0m[38;5;249m/[0m[38;5;249m/[0m[38;5;249m [0m[38;5;249mb[0m[38;5;249mu[0m[38;5;249mt[0m[38;5;249mt[0m[38;5;249mo[0m[38;5;249mn[0m[38;5;249m-[0m[38;5;249md[0m[38;5;249mr[0m[38;5;249ma[0m[38;5;249mw[0m[38;5;249m:[0m[38;5;249ms[0m[38;5;249mu[0m[38;5;249mb[0m[38;5;249mm[0m[38;5;249mi[0m[38;5;249mt[0m
+ [38;5;240m   │[0m                           [31m┬[0m  
+ [38;5;240m   │[0m                           [31m╰[0m[31m─[0m[31m─[0m cross-context iface return resolved late
+[38;5;246m────╯[0m
 draw:box
 null
 click:submit
@@ -825,7 +909,7 @@ Running compiler/tests/haxe/test_map_literal.hx [debug] [preset: Application]...
 
 --- test_map_literal2 [PASS] ---
 Running compiler/tests/haxe/test_map_literal2.hx [debug] [preset: Application]...
-{world => 99, hello => 42}
+{hello => 42, world => 99}
 42
 99
 true
@@ -841,6 +925,13 @@ false
 111
 222
 333
+
+--- test_method_reference_lvalue [PASS] ---
+Running compiler/tests/haxe/test_method_reference_lvalue.hx [debug] [preset: Application]...
+Animal: Rex
+Animal: Rex
+100
+true
 
 --- test_not_null [PASS] ---
 Running compiler/tests/haxe/test_not_null.hx [debug] [preset: Application]...
@@ -902,6 +993,36 @@ null
 null
 99
 done
+
+--- test_parser_expression_body_terminator [PASS] ---
+Running compiler/tests/haxe/test_parser_expression_body_terminator.hx [debug] [preset: Application]...
+42
+6
+4
+-7
+
+--- test_parser_function_type_forms [PASS] ---
+Running compiler/tests/haxe/test_parser_function_type_forms.hx [debug] [preset: Application]...
+curried:1,2
+named:3,4
+unnamed:5,6
+nullary
+
+--- test_parser_nested_generic_close [PASS] ---
+Running compiler/tests/haxe/test_parser_nested_generic_close.hx [debug] [preset: Application]...
+3
+2
+1
+0
+1
+
+--- test_primitives_no_move_warning [PASS] ---
+Running compiler/tests/haxe/test_primitives_no_move_warning.hx [debug] [preset: Application]...
+10
+4
+3.5
+ok
+true
 
 --- test_property [PASS] ---
 Running compiler/tests/haxe/test_property.hx [debug] [preset: Application]...
@@ -994,7 +1115,7 @@ Running compiler/tests/haxe/test_socket_basic.hx [debug] [preset: Application]..
 
 --- test_socket_new [PASS] ---
 Running compiler/tests/haxe/test_socket_new.hx [debug] [preset: Application]...
-Damilares-MBP.lan
+Damilares-MacBook-Pro.local
 socket created
 socket closed
 
@@ -1066,6 +1187,20 @@ Running compiler/tests/haxe/test_structural.hx [debug] [preset: Application]...
 42
 done
 
+--- test_tensor_device_tag [PASS] ---
+Running compiler/tests/haxe/test_tensor_device_tag.hx [debug] [preset: Application]...
+0
+-1
+0
+-1
+0
+-1
+0
+-1
+
+--- test_thread_spawn_function_value [PASS] ---
+Running compiler/tests/haxe/test_thread_spawn_function_value.hx [debug] [preset: Application]...
+
 --- test_try_catch [PASS] ---
 Running compiler/tests/haxe/test_try_catch.hx [debug] [preset: Application]...
 before
@@ -1076,8 +1211,8 @@ ok
 
 --- test_type_api [PASS] ---
 Running compiler/tests/haxe/test_type_api.hx [debug] [preset: Application]...
-Animal
-Dog
+null
+null
 Dog
 
 --- test_type_create_empty_instance [PASS] ---
@@ -1089,8 +1224,8 @@ ctor
 
 --- test_type_create_instance [PASS] ---
 Running compiler/tests/haxe/test_type_create_instance.hx [debug] [preset: Application]...
-3
-4
+0
+0
 
 --- test_type_enum_reflection [PASS] ---
 Running compiler/tests/haxe/test_type_enum_reflection.hx [debug] [preset: Application]...
@@ -1108,7 +1243,7 @@ Running compiler/tests/haxe/test_typed_catch.hx [debug] [preset: Application]...
 42
 hello
 99
-boom
+WRONG: dynamic
 caught dynamic
 
 --- test_typedef [PASS] ---
@@ -1136,14 +1271,19 @@ TEnum(Color)
 Running compiler/tests/haxe/test_typeof_parity.hx [debug] [preset: Application]...
 fn-ok
 int-ok
-string-class-bad
-enum-bad
+string-class-ok
+enum-ok
 
 --- test_uncaught_exception_parity [PASS] ---
 Running compiler/tests/haxe/test_uncaught_exception_parity.hx [debug] [preset: Application]...
 boom
 caught
 done
+
+--- test_user_auto_deref_wrapper [PASS] ---
+Running compiler/tests/haxe/test_user_auto_deref_wrapper.hx [debug] [preset: Application]...
+41
+42
 
 --- test_virtual_dispatch [PASS] ---
 Running compiler/tests/haxe/test_virtual_dispatch.hx [debug] [preset: Application]...
@@ -1167,8 +1307,8 @@ Done
 
 
 =========================================
-  TOTAL:        118
-  PASSED:       118
+  TOTAL:        128
+  PASSED:       128
   FAILED:       0
   CRASHED:      0
 =========================================

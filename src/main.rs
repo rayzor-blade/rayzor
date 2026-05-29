@@ -1220,8 +1220,8 @@ fn run_file(
     let mut config = TieredConfig::from_preset(preset.to_tier_preset());
     config.verbosity = if verbose { 2 } else { 0 };
     config.start_interpreted = false; // Start with JIT for immediate execution
-    // In release mode, suppress stack-trace instrumentation overhead even if
-    // the preset enables it. Debug runs honour the preset.
+                                      // In release mode, suppress stack-trace instrumentation overhead even if
+                                      // the preset enables it. Debug runs honour the preset.
     if release {
         config.enable_stack_traces = false;
     }

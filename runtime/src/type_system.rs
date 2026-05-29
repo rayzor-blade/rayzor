@@ -2860,7 +2860,8 @@ pub extern "C" fn haxe_vtable_set_slot(type_id: i32, slot_index: i32, closure_pt
 /// CausalLanguageModel etc.) can rebuild a fat pointer with the
 /// correct method slots for the target interface, without the
 /// compiler needing to know the runtime class at the cast site.
-static IFACE_VTABLE_REGISTRY: RwLock<Option<HashMap<(u32, u32), Vec<i64>>>> = RwLock::new(None);
+type IfaceVtableMap = HashMap<(u32, u32), Vec<i64>>;
+static IFACE_VTABLE_REGISTRY: RwLock<Option<IfaceVtableMap>> = RwLock::new(None);
 
 /// Register one (class, iface, slot) → closure_ptr entry. Called once
 /// per (class, iface, method) tuple during program startup from
