@@ -298,21 +298,28 @@ class Main {
         // user sees tokens appear in real time. The callback's
         // `partial` is the full decoded tail so far, not just the
         // newest piece, so we track the previous length and slice.
-        var prevLen = 0;
+        //
+        // Counters live in single-element arrays because Rayzor
+        // closures capture primitives by value — `prevLen++` inside
+        // the closure wouldn't be visible to the outer scope (every
+        // tick would see `prevLen = 0` and print the full partial,
+        // producing the "TheThe corrected" duplicated-prefix effect).
+        // Arrays are heap objects and capture by reference.
+        var prevLen = [0];
+        var nTokens = [0];
         var startedAt = Sys.time();
-        var nTokens = 0;
         var output = loop.generate(modelPrompt, function(_id:Int, partial:String):Bool {
-            var delta = partial.substr(prevLen);
-            prevLen = partial.length;
+            var delta = partial.substr(prevLen[0]);
+            prevLen[0] = partial.length;
             Sys.print(delta);
-            nTokens++;
+            nTokens[0] = nTokens[0] + 1;
             return true;
         });
         var elapsed = Sys.time() - startedAt;
         Sys.println("");
         trace("");
-        trace("[done] " + nTokens + " tokens in " + fmt(elapsed) + "s ("
-            + fmt(nTokens / elapsed) + " tok/s)");
+        trace("[done] " + nTokens[0] + " tokens in " + fmt(elapsed) + "s ("
+            + fmt(nTokens[0] / elapsed) + " tok/s)");
         trace("[output] " + output);
     }
 
