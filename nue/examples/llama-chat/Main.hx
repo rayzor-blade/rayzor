@@ -29,22 +29,42 @@ import nue.CausalLanguageModel;
 class Main {
     static inline var DEFAULT_PROMPT = "Hello";
     static inline var DEFAULT_MAX_TOKENS = 32;
+    // Default context cap. GGUFs advertise up to 131072 (Llama 3.2 1B);
+    // honouring that pre-allocates ~8.6 GB of empty KV cache per layer at
+    // F32. 4096 is plenty for short prompts + generation and keeps the
+    // KV cache around ~135 MB.
+    static inline var DEFAULT_CTX = 4096;
 
     static function main() {
         var args = Sys.args();
         if (args.length < 1) {
-            Sys.println("usage: rayzor run Main.hx -- <model.gguf> [prompt] [max_tokens]");
+            Sys.println("usage: rayzor run Main.hx -- <model.gguf> [prompt] [max_tokens] [ctx]");
             Sys.exit(1);
         }
         var path = args[0];
         var prompt = (args.length > 1) ? args[1] : DEFAULT_PROMPT;
-        var maxNew = (args.length > 2) ? Std.parseInt(args[2]) : DEFAULT_MAX_TOKENS;
-        if (maxNew == null || maxNew <= 0) maxNew = DEFAULT_MAX_TOKENS;
+        var maxNewRaw = (args.length > 2) ? Std.parseInt(args[2]) : null;
+        var maxNew:Int = DEFAULT_MAX_TOKENS;
+        if (maxNewRaw != null) {
+            var unboxed = maxNewRaw + 0;
+            if (unboxed > 0) maxNew = unboxed;
+        }
+        var ctxRaw = (args.length > 3) ? Std.parseInt(args[3]) : null;
+        var ctx:Int = DEFAULT_CTX;
+        if (ctxRaw != null) {
+            // `+ 0` forces an Int unbox of the Null<Int> result — assigning
+            // `ctxRaw` to an Int local without an arithmetic op leaves the
+            // boxed pointer in the register, which then propagates as
+            // garbage across cross-file function calls.
+            var unboxed = ctxRaw + 0;
+            if (unboxed > 0) ctx = unboxed;
+        }
 
         trace("=== nue llama-chat ===");
         trace("model:  " + path);
         trace("prompt: \"" + prompt + "\"");
         trace("max:    " + maxNew + " tokens");
+        trace("ctx:    " + ctx + " tokens");
         trace("");
 
         // One open of the file: header + tensor index parsed once,
@@ -52,7 +72,7 @@ class Main {
         var loader = new GGUFLoader();
         trace("[load] reading GGUF (dequants Q4_K_M weights to F32)...");
         var startLoad = Sys.time();
-        var loaded = loader.loadWithTokenizer(path);
+        var loaded = loader.loadWithTokenizer(path, ctx);
         trace("[load] done in " + fmt(Sys.time() - startLoad) + "s");
 
         var meta = loaded.metadata;
@@ -78,7 +98,35 @@ class Main {
         trace("[tok]  eos=" + eos);
         trace("");
 
+        // Argmax (greedy) sampling. Top-P/Top-K would be the standard
+        // chat preset but `TopPSampler`'s insertion sort is O(n²) over
+        // the full vocab (128k tokens for Llama 3) and burns minutes
+        // per token here; landing a partial-sort variant is the natural
+        // follow-up. Greedy + chat template avoids the repetition loop
+        // that plain greedy hits because the template gives the model
+        // a clear EOS condition.
         var sampler = new ArgmaxSampler();
+
+        // Instruct models behave best when the prompt is wrapped in the
+        // model's chat template. Llama-3 uses
+        //   <|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n
+        //   {prompt}<|eot_id|>
+        //   <|start_header_id|>assistant<|end_header_id|>\n\n
+        // The BPE tokenizer recognises registered specials as atomic
+        // ids; GGUFTokenizer registers the Llama-3 chat specials by
+        // direct vocab lookup so this string round-trips correctly.
+        var startHdr = tok.specialId("<|start_header_id|>");
+        var modelPrompt:String = prompt;
+        if (startHdr >= 0) {
+            modelPrompt =
+                "<|begin_of_text|>"
+                + "<|start_header_id|>user<|end_header_id|>\n\n"
+                + prompt
+                + "<|eot_id|>"
+                + "<|start_header_id|>assistant<|end_header_id|>\n\n";
+            trace("[chat] wrapping prompt in Llama-3 Instruct template");
+        }
+
         var loop = new GenerationLoop(model, tok, sampler, eos, maxNew);
 
         trace("[gen] streaming...");
@@ -89,7 +137,7 @@ class Main {
         var prevLen = 0;
         var startedAt = Sys.time();
         var nTokens = 0;
-        var output = loop.generate(prompt, function(_id:Int, partial:String):Bool {
+        var output = loop.generate(modelPrompt, function(_id:Int, partial:String):Bool {
             var delta = partial.substr(prevLen);
             prevLen = partial.length;
             Sys.print(delta);

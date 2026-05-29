@@ -83,6 +83,25 @@ class GGUFTokenizer {
         registerSpecial(tok, reader, "tokenizer.ggml.padding_token_id", "<|pad|>");
         registerSpecial(tok, reader, "tokenizer.ggml.unknown_token_id", "<|unk|>");
 
+        // Llama-3 chat-template specials live as ordinary vocab entries
+        // with no dedicated GGUF metadata key. Look them up directly so
+        // callers can construct chat-formatted prompts without hard-
+        // coded numeric IDs.
+        var chatSpecials = [
+            "<|eot_id|>",
+            "<|start_header_id|>",
+            "<|end_header_id|>",
+            "<|begin_of_text|>",
+            "<|end_of_text|>"
+        ];
+        for (i in 0...chatSpecials.length) {
+            var name = chatSpecials[i];
+            var id = vocab.lookup(name);
+            if (id < 0) continue;
+            if (tok.specialId(name) >= 0) continue;
+            tok.addSpecial(name, id);
+        }
+
         return tok;
     }
 

@@ -45,6 +45,10 @@ class BPETokenizer implements Tokenizer {
     public var rankIndex:StringMap<Int>;
     /** Special token name → vocab ID. */
     public var specials:StringMap<Int>;
+    /** Parallel array of registered special-token names. `StringMap`
+        doesn't expose stable key iteration in Rayzor, so we mirror the
+        names here for the encoder's inline special-detection pass. */
+    public var specialNames:Array<String>;
     /** Byte-level tokenizers map raw bytes through a printable alias
         table — required for GPT-2/Llama 3 style vocabs. */
     public var byteLevel:Bool;
@@ -58,10 +62,12 @@ class BPETokenizer implements Tokenizer {
             rankIndex.set(merges[i].key, i);
         }
         this.specials = new StringMap<Int>();
+        this.specialNames = [];
     }
 
     /** Register a special token (name → existing vocab ID). */
     public function addSpecial(name:String, id:Int):Void {
+        if (!specials.exists(name)) specialNames.push(name);
         specials.set(name, id);
     }
 
@@ -91,8 +97,61 @@ class BPETokenizer implements Tokenizer {
     /**
      * Encode a UTF-8 string. Byte-encodes (when configured), then runs
      * BPE merges across the whole input.
+     *
+     * Special tokens registered via `addSpecial` are recognised as
+     * literal substrings — the encoder walks the input, emits each
+     * special's atomic ID when matched (longest-prefix wins on
+     * collision), and BPE-encodes the runs of normal text between
+     * specials. This is what lets chat-template strings like
+     * `<|begin_of_text|>...<|eot_id|>` round-trip cleanly without
+     * the literal `<|...|>` getting byte-split.
      */
     public function encode(text:String):Array<Int> {
+        if (specialNames.length == 0) {
+            return encodeBPE(text);
+        }
+
+        var ids:Array<Int> = [];
+        var i = 0;
+        var n = text.length;
+        var chunkStart = 0;
+        while (i < n) {
+            var bestMatched = -1;
+            var bestLen = 0;
+            for (k in 0...specialNames.length) {
+                var name = specialNames[k];
+                var slen = name.length;
+                if (slen <= bestLen) continue;
+                if (i + slen > n) continue;
+                if (substringEq(text, i, name)) {
+                    bestMatched = specials.get(name);
+                    bestLen = slen;
+                }
+            }
+            if (bestMatched >= 0) {
+                if (i > chunkStart) {
+                    var sub = text.substr(chunkStart, i - chunkStart);
+                    var subIds = encodeBPE(sub);
+                    for (id in subIds) ids.push(id);
+                }
+                ids.push(bestMatched);
+                i += bestLen;
+                chunkStart = i;
+            } else {
+                i++;
+            }
+        }
+        if (chunkStart < n) {
+            var tail = text.substr(chunkStart, n - chunkStart);
+            var tailIds = encodeBPE(tail);
+            for (id in tailIds) ids.push(id);
+        }
+        return ids;
+    }
+
+    /** Raw BPE encode of a span — no special-token recognition. */
+    private function encodeBPE(text:String):Array<Int> {
+        if (text.length == 0) return [];
         var pieces:Array<String>;
         if (byteLevel) {
             pieces = byteEncodePieces(text);
@@ -142,6 +201,16 @@ class BPETokenizer implements Tokenizer {
             if (id >= 0) ids.push(id);
         }
         return ids;
+    }
+
+    /** Byte-level substring equality: `text[pos..pos+needle.length] == needle`. */
+    private static function substringEq(text:String, pos:Int, needle:String):Bool {
+        var nlen = needle.length;
+        if (pos + nlen > text.length) return false;
+        for (j in 0...nlen) {
+            if (text.charCodeAt(pos + j) != needle.charCodeAt(j)) return false;
+        }
+        return true;
     }
 
     public function decode(ids:Array<Int>):String {
