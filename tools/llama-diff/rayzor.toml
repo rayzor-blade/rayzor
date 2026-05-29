@@ -1,0 +1,6 @@
+[project]
+name = "llama-diff-dump"
+entry = "DumpLayers.hx"
+
+[build]
+class-paths = [".", "../../nue/"]
