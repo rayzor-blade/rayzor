@@ -1,58 +1,62 @@
 package rayzor.concurrent;
 
 /**
- * NUMA-aware thread pool for data-parallel work.
+ * Worker pool for data-parallel CPU work.
  *
- * `NumaPool` is the canonical entry point for CPU-parallel kernels in
+ * `WorkerPool` is the canonical entry point for CPU-parallel kernels in
  * rayzor / nue — anything that iterates over a large index range (matmul
  * rows, conv tiles, attention heads, elementwise sweeps, KV-cache fills,
- * etc.) should route through `NumaPool.global().parallelFor(...)` so
- * workers stay pinned to their NUMA node and produce node-local
- * first-touch allocations.
+ * etc.) should route through `WorkerPool.global().parallelFor(...)`.
+ *
+ * On multi-NUMA-node systems (multi-socket Linux / Windows servers) the
+ * pool pins one worker per node via `CpuTopology.bindToNode(node)` so
+ * memory allocations land first-touch on the bound node's controller.
+ * On UMA hardware (M1/M2, single-socket Linux, Windows laptops, wasm)
+ * `CpuTopology.nodeCount()` returns 1 and the pool either runs inline
+ * on the calling thread or fans out via `withForcedNodes(N)`.
  *
  * Behaviour:
  * - **Multi-node**: spawns one worker per NUMA node, each pinned via
- *   `NumaTopology.bindCurrent(node)` before invoking the user closure
- *   on its chunk. The user `fn` is captured by every worker — its
- *   captures must be `Send` (compiler validates at the spawn site).
- * - **Single-node** (macOS, single-socket Linux, wasm, Windows with
- *   one node): no fanout — runs inline on the calling thread.
+ *   `CpuTopology.bindToNode(node)` before invoking the user closure.
+ * - **Single-node** (M1/M2, single-socket Linux, wasm, Windows laptops):
+ *   no fanout — runs inline on the calling thread. Use
+ *   `withForcedNodes(N)` to fan out anyway.
  * - **Small work** (`items < nodeCount * 2`): also inline.
  *
  * Example:
  * ```haxe
- * var pool = NumaPool.global();
+ * var pool = WorkerPool.global();
  * pool.parallelFor(1000000, function(idx:Int, node:Int):Void {
  *     // Each worker runs on a NUMA-pinned thread when nodeCount > 1.
  * });
  * ```
  */
-class NumaPool {
+class WorkerPool {
     private var _nodeCount:Int;
 
     public function new() {
-        _nodeCount = NumaTopology.nodeCount();
+        _nodeCount = CpuTopology.nodeCount();
     }
 
     /**
      * Construct a pool with a forced node count, ignoring the runtime
-     * topology. Useful for exercising the multi-node fanout path on
-     * single-NUMA-node hardware and for unit testing. `bindCurrent`
-     * becomes a soft-affinity hint on no-NUMA platforms, but the
-     * `Thread.spawn` dispatch is real.
+     * topology. Useful for fan-out on UMA hardware where the topology
+     * reports 1 node but we want N workers. `bindToNode` becomes a
+     * soft-affinity hint on no-NUMA platforms, but the `Thread.spawn`
+     * dispatch is real.
      */
-    public static function withForcedNodes(nodes:Int):NumaPool {
-        var p = new NumaPool();
+    public static function withForcedNodes(nodes:Int):WorkerPool {
+        var p = new WorkerPool();
         if (nodes > 0) p._nodeCount = nodes;
         return p;
     }
 
-    /** Number of NUMA nodes this pool fans out across. */
+    /** Number of worker slots this pool fans out across. */
     public function nodeCount():Int return _nodeCount;
 
     /**
      * Iterate `items` indices with the user closure `fn(idx, node)`,
-     * partitioned across NUMA nodes.
+     * partitioned across worker slots.
      */
     public function parallelFor(items:Int, fn:(idx:Int, node:Int)->Void):Void {
         if (items <= 0) return;
@@ -76,7 +80,7 @@ class NumaPool {
             var node = n;
             var f = fn;
             var t = Thread.spawn(function():Int {
-                NumaTopology.bindCurrent(node);
+                CpuTopology.bindToNode(node);
                 var i = lo;
                 while (i < hi) {
                     f(i, node);
@@ -93,8 +97,8 @@ class NumaPool {
     }
 
     /**
-     * Block-partitioned variant: invoke `fn(rowStart, rowEnd, node)` once
-     * per node with a contiguous half-open block range.
+     * Block-partitioned variant: invoke `fn(rowStart, rowEnd, node)`
+     * once per worker with a contiguous half-open block range.
      */
     public function parallelRows(
         rows:Int,
@@ -117,7 +121,7 @@ class NumaPool {
             var node = n;
             var f = fn;
             var t = Thread.spawn(function():Int {
-                NumaTopology.bindCurrent(node);
+                CpuTopology.bindToNode(node);
                 f(lo, hi, node);
                 return 0;
             });
@@ -129,10 +133,10 @@ class NumaPool {
         }
     }
 
-    private static var _instance:NumaPool;
+    private static var _instance:WorkerPool;
     /** Process-wide singleton pool, lazily constructed on first call. */
-    public static function global():NumaPool {
-        if (_instance == null) _instance = new NumaPool();
+    public static function global():WorkerPool {
+        if (_instance == null) _instance = new WorkerPool();
         return _instance;
     }
 }

@@ -6,7 +6,6 @@ members = [
     "source_map",
     "runtime",
     "gpu",
-    "numa",
     "window",
     "lsp",
     "plugin"

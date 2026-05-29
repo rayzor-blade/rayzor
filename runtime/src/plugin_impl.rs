@@ -1913,6 +1913,35 @@ register_symbol!(
 register_symbol!("rayzor_qtensor_free", crate::quant::rayzor_qtensor_free);
 
 // ============================================================================
+// CPU Topology + thread affinity (rayzor.concurrent.CpuTopology)
+// ============================================================================
+register_symbol!(
+    "rayzor_topology_multi_node",
+    crate::topology::rayzor_topology_multi_node
+);
+register_symbol!(
+    "rayzor_topology_node_count",
+    crate::topology::rayzor_topology_node_count
+);
+register_symbol!(
+    "rayzor_topology_cpu_count",
+    crate::topology::rayzor_topology_cpu_count
+);
+register_symbol!(
+    "rayzor_topology_cpu_to_node",
+    crate::topology::rayzor_topology_cpu_to_node
+);
+register_symbol!(
+    "rayzor_topology_node_cpus",
+    crate::topology::rayzor_topology_node_cpus
+);
+register_symbol!(
+    "rayzor_topology_bind_to_node",
+    crate::topology::rayzor_topology_bind_to_node
+);
+register_symbol!("rayzor_topology_unbind", crate::topology::rayzor_topology_unbind);
+
+// ============================================================================
 // Exception Handling (setjmp/longjmp)
 // ============================================================================
 register_symbol!(
