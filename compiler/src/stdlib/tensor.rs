@@ -21,6 +21,7 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
     build_tensor_full(builder);
     build_tensor_from_array(builder);
     build_tensor_from_bytes_f16(builder);
+    build_tensor_from_bytes_f32(builder);
     build_tensor_from_bytes_q8_0(builder);
     build_tensor_rand(builder);
 
@@ -143,6 +144,17 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
     // from_bytes_f16: (bytes_handle, shape_ptr, ndim) -> i64
     let func_id = builder
         .begin_function("rayzor_tensor_from_bytes_f16")
+        .param("bytes_handle", i64_ty.clone())
+        .param("shape_ptr", i64_ty.clone())
+        .param("ndim", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // from_bytes_f32: (bytes_handle, shape_ptr, ndim) -> i64
+    let func_id = builder
+        .begin_function("rayzor_tensor_from_bytes_f32")
         .param("bytes_handle", i64_ty.clone())
         .param("shape_ptr", i64_ty.clone())
         .param("ndim", i64_ty.clone())
@@ -594,6 +606,39 @@ fn build_tensor_from_bytes_f16(builder: &mut MirBuilder) {
     let extern_id = builder
         .get_function_by_name("rayzor_tensor_from_bytes_f16")
         .expect("rayzor_tensor_from_bytes_f16 not found");
+    let result = builder
+        .call(extern_id, vec![bytes, shape_ptr, ndim])
+        .unwrap();
+    builder.ret(Some(result));
+}
+
+/// Tensor_fromBytesF32(bytes: Bytes, shape: Array<Int>) -> Tensor
+///
+/// Memcpy F32 bytes straight into a fresh F32 tensor. Bypasses the
+/// Tensor.fromArray(Array<Float>, DType.F32) round-trip that loses
+/// precision crossing the array_push i64 wrapper.
+fn build_tensor_from_bytes_f32(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+
+    let func_id = builder
+        .begin_function("Tensor_fromBytesF32")
+        .param("bytes", i64_ty.clone())
+        .param("shape_arr", i64_ty.clone())
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let bytes = builder.get_param(0);
+    let shape_arr = builder.get_param(1);
+    let (shape_ptr, ndim) = extract_array_ptr_len(builder, shape_arr);
+
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_from_bytes_f32")
+        .expect("rayzor_tensor_from_bytes_f32 not found");
     let result = builder
         .call(extern_id, vec![bytes, shape_ptr, ndim])
         .unwrap();

@@ -45,10 +45,17 @@ use half::f16;
 /// Quantisation scheme tag. Used by the Haxe-side `QScheme` enum.
 pub const QSCHEME_INT8: u8 = 0;
 pub const QSCHEME_Q4_K_M: u8 = 1;
+pub const QSCHEME_Q6_K: u8 = 2;
 
 /// Q4_K_M block dimensions. These are fixed by the GGUF spec.
 pub const Q4_K_M_BLOCK_SIZE: usize = 256;
 pub const Q4_K_M_BLOCK_BYTES: usize = 144;
+
+/// Q6_K block dimensions. Despite the "Q4_K_M" model-suffix using both,
+/// GGUF's dtype 14 is Q6_K (token_embd, attn_v, ffn_down in K_M variants).
+/// Layout (210 bytes): ql[128] + qh[64] + scales[16, i8] + d[f16].
+pub const Q6_K_BLOCK_SIZE: usize = 256;
+pub const Q6_K_BLOCK_BYTES: usize = 210;
 
 /// Internal opaque tensor representation. The layout depends on `scheme`:
 ///
@@ -82,6 +89,7 @@ impl RayzorQTensor {
         match self.scheme {
             QSCHEME_INT8 => self.numel,
             QSCHEME_Q4_K_M => (self.numel / Q4_K_M_BLOCK_SIZE) * Q4_K_M_BLOCK_BYTES,
+            QSCHEME_Q6_K => (self.numel / Q6_K_BLOCK_SIZE) * Q6_K_BLOCK_BYTES,
             _ => 0,
         }
     }
@@ -222,6 +230,61 @@ unsafe fn decode_q4_k_block(block_ptr: *const u8) -> Q4KBlock {
         scales,
         mins,
         quants,
+    }
+}
+
+/// Dequant a single Q6_K block into 256 f32 values.
+///
+/// Q6_K layout (210 bytes per super-block of 256 weights):
+///   ql[128]    : lower 4 bits of each 6-bit quant
+///   qh[64]     : upper 2 bits of each 6-bit quant (4 quants packed per byte)
+///   scales[16] : i8 per-sub-block scales (16 sub-blocks × 16 weights each)
+///   d          : f16 super-block scale
+///
+/// Final value = d * scale * (q - 32), where q is the recombined 6-bit value
+/// (0..63) with a -32 bias to make it signed.
+///
+/// Mirrors `ggml_dequant_row_q6_K` in llama.cpp.
+#[inline]
+unsafe fn dequant_q6_k_block(block_ptr: *const u8, out: &mut [f32]) {
+    debug_assert_eq!(out.len(), Q6_K_BLOCK_SIZE);
+    let ql = std::slice::from_raw_parts(block_ptr, 128);
+    let qh = std::slice::from_raw_parts(block_ptr.add(128), 64);
+    let scales = std::slice::from_raw_parts(block_ptr.add(192) as *const i8, 16);
+    let d_bits = std::ptr::read_unaligned(block_ptr.add(208) as *const u16);
+    let d = f16::from_bits(d_bits).to_f32();
+
+    // Two halves of 128 weights each. Per half:
+    //   - ql_off advances by 64 bytes (lower nibbles span 128 weights)
+    //   - qh_off advances by 32 bytes (2-bit quants span 128 weights)
+    //   - sc_off advances by 8 (8 scales per half)
+    for n in 0..2 {
+        let ql_off = n * 64;
+        let qh_off = n * 32;
+        let sc_off = n * 8;
+        let out_off = n * 128;
+        for l in 0..32 {
+            // 4 quants per (l, n) — at positions 0, 32, 64, 96 within the half.
+            // Each takes 4 bits from ql + 2 bits from qh.
+            let qh_byte = qh[qh_off + l];
+            let q1 = ((ql[ql_off + l] & 0x0F) as i32) | (((qh_byte & 3) as i32) << 4);
+            let q2 = ((ql[ql_off + l + 32] & 0x0F) as i32) | ((((qh_byte >> 2) & 3) as i32) << 4);
+            let q3 = ((ql[ql_off + l] >> 4) as i32) | ((((qh_byte >> 4) & 3) as i32) << 4);
+            let q4 = ((ql[ql_off + l + 32] >> 4) as i32) | ((((qh_byte >> 6) & 3) as i32) << 4);
+
+            // Sub-block scale index: l < 16 → first scale slot, l >= 16 → second.
+            let is_idx = l / 16;
+            let s0 = scales[sc_off + is_idx] as i32;
+            let s2 = scales[sc_off + 2 + is_idx] as i32;
+            let s4 = scales[sc_off + 4 + is_idx] as i32;
+            let s6 = scales[sc_off + 6 + is_idx] as i32;
+
+            // Bias of -32 makes the unsigned 6-bit value (0..63) signed (-32..31).
+            out[out_off + l] = d * (s0 as f32) * ((q1 - 32) as f32);
+            out[out_off + l + 32] = d * (s2 as f32) * ((q2 - 32) as f32);
+            out[out_off + l + 64] = d * (s4 as f32) * ((q3 - 32) as f32);
+            out[out_off + l + 96] = d * (s6 as f32) * ((q4 - 32) as f32);
+        }
     }
 }
 
@@ -474,6 +537,49 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q4_k_m(
     qt as i64
 }
 
+/// Wrap a `HaxeBytes` slice as a Q6_K-backed QTensor. Same zero-copy
+/// semantics as `rayzor_qtensor_from_bytes_q4_k_m`. Used for GGUF's
+/// dtype 14 (token_embd, attn_v, ffn_down in Q4_K_M variants).
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q6_k(
+    bytes_handle: i64,
+    rows: i64,
+    cols: i64,
+) -> i64 {
+    if bytes_handle == 0 || rows <= 0 || cols <= 0 {
+        return 0;
+    }
+    let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
+    if bytes.ptr.is_null() {
+        return 0;
+    }
+    let rows = rows as usize;
+    let cols = cols as usize;
+    if !(rows * cols).is_multiple_of(Q6_K_BLOCK_SIZE) {
+        return 0;
+    }
+    let expected = (rows * cols / Q6_K_BLOCK_SIZE) * Q6_K_BLOCK_BYTES;
+    if bytes.len < expected {
+        return 0;
+    }
+
+    let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
+    if qt.is_null() {
+        return 0;
+    }
+    *qt = RayzorQTensor {
+        data: bytes.ptr,
+        meta: std::ptr::null_mut(),
+        numel: rows * cols,
+        group_size: Q6_K_BLOCK_SIZE,
+        scheme: QSCHEME_Q6_K,
+        owns_data: false,
+        rows,
+        cols,
+    };
+    qt as i64
+}
+
 /// `qt.rows() -> i64`
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_qtensor_rows(qt_ptr: i64) -> i64 {
@@ -567,6 +673,18 @@ pub unsafe extern "C" fn rayzor_qtensor_dequant(qt_ptr: i64) -> i64 {
                     dequant_q4_k_block(&block, &mut stage);
                     let dst = out.add(r * qt.cols + b * Q4_K_M_BLOCK_SIZE);
                     std::ptr::copy_nonoverlapping(stage.as_ptr(), dst, Q4_K_M_BLOCK_SIZE);
+                }
+            }
+        }
+        QSCHEME_Q6_K => {
+            let blocks_per_row = qt.cols / Q6_K_BLOCK_SIZE;
+            let mut stage = [0.0f32; Q6_K_BLOCK_SIZE];
+            for r in 0..qt.rows {
+                let row_ptr = qt.data.add(r * blocks_per_row * Q6_K_BLOCK_BYTES);
+                for b in 0..blocks_per_row {
+                    dequant_q6_k_block(row_ptr.add(b * Q6_K_BLOCK_BYTES), &mut stage);
+                    let dst = out.add(r * qt.cols + b * Q6_K_BLOCK_SIZE);
+                    std::ptr::copy_nonoverlapping(stage.as_ptr(), dst, Q6_K_BLOCK_SIZE);
                 }
             }
         }
@@ -667,9 +785,13 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x_tensor: i64, qt_w: i64)
         return 0;
     }
     let qt = &*(qt_w as *const RayzorQTensor);
-    if qt.scheme != QSCHEME_Q4_K_M {
-        return 0;
-    }
+    // Per-scheme block layout. Both schemes use 256-element super-blocks
+    // along the inner (K) dim — only the bytes-per-block differ.
+    let (block_size, block_bytes) = match qt.scheme {
+        QSCHEME_Q4_K_M => (Q4_K_M_BLOCK_SIZE, Q4_K_M_BLOCK_BYTES),
+        QSCHEME_Q6_K => (Q6_K_BLOCK_SIZE, Q6_K_BLOCK_BYTES),
+        _ => return 0,
+    };
 
     // Pull X's shape + data. Mirror the TensorHead layout used elsewhere
     // in this file for FFI-safe field access.
@@ -696,12 +818,12 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x_tensor: i64, qt_w: i64)
     let batch = x_shape[0];
     let k = x_shape[1];
 
-    // K must match Wq's cols and be a multiple of the Q4_K_M block size.
-    if k != qt.cols || !k.is_multiple_of(Q4_K_M_BLOCK_SIZE) {
+    // K must match Wq's cols and be a multiple of the super-block size.
+    if k != qt.cols || !k.is_multiple_of(block_size) {
         return 0;
     }
     let n = qt.rows; // out_features
-    let blocks_per_row = k / Q4_K_M_BLOCK_SIZE;
+    let blocks_per_row = k / block_size;
 
     // Allocate Y[batch, N] f32.
     let out_shape = [batch, n];
@@ -715,19 +837,28 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x_tensor: i64, qt_w: i64)
 
     // Per-row scratch for Wq's dequant'd row.
     let mut row_scratch: Vec<f32> = vec![0.0; k];
-    let mut stage = [0.0f32; Q4_K_M_BLOCK_SIZE];
+    let mut stage = [0.0f32; 256]; // Q4_K_M_BLOCK_SIZE == Q6_K_BLOCK_SIZE == 256
 
     // Fast path requires X contiguous along its inner dim.
     let x_contig = x_strides[1] == 1;
 
     for n_idx in 0..n {
-        // Dequant Wq's row n_idx in full.
-        let row_ptr = qt.data.add(n_idx * blocks_per_row * Q4_K_M_BLOCK_BYTES);
+        // Dequant Wq's row n_idx in full, branching on scheme.
+        let row_ptr = qt.data.add(n_idx * blocks_per_row * block_bytes);
         for b_idx in 0..blocks_per_row {
-            let block = decode_q4_k_block(row_ptr.add(b_idx * Q4_K_M_BLOCK_BYTES));
-            dequant_q4_k_block(&block, &mut stage);
-            let dst = row_scratch.as_mut_ptr().add(b_idx * Q4_K_M_BLOCK_SIZE);
-            std::ptr::copy_nonoverlapping(stage.as_ptr(), dst, Q4_K_M_BLOCK_SIZE);
+            let bp = row_ptr.add(b_idx * block_bytes);
+            match qt.scheme {
+                QSCHEME_Q4_K_M => {
+                    let block = decode_q4_k_block(bp);
+                    dequant_q4_k_block(&block, &mut stage);
+                }
+                QSCHEME_Q6_K => {
+                    dequant_q6_k_block(bp, &mut stage);
+                }
+                _ => unreachable!(),
+            }
+            let dst = row_scratch.as_mut_ptr().add(b_idx * block_size);
+            std::ptr::copy_nonoverlapping(stage.as_ptr(), dst, block_size);
         }
 
         // For each batch: dot product x[b, :] · Wq_row.
@@ -740,9 +871,9 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x_tensor: i64, qt_w: i64)
                     sum += x_row[p] * row_scratch[p];
                 }
             } else {
-                for p in 0..k {
+                for (p, rs) in row_scratch.iter().enumerate().take(k) {
                     let xv = *x_data.add(x_row_off + p * x_strides[1]);
-                    sum += xv * row_scratch[p];
+                    sum += xv * rs;
                 }
             }
             *y_data.add(b * n + n_idx) = sum;
@@ -859,6 +990,46 @@ mod tests {
             }
 
             rayzor_qtensor_free(qt);
+        }
+    }
+
+    #[test]
+    fn q6_k_block_dequant_matches_reference() {
+        // Build a Q6_K block with known d, scales, and quants.
+        // Layout: ql[128] | qh[64] | scales[16, i8] | d[f16, 2 bytes] = 210 bytes.
+        //
+        // We pick a single non-zero per-half slot and verify the produced f32
+        // matches the spec formula: f = d * scale * (q - 32) where q is the
+        // 6-bit value reconstructed from ql + qh.
+        let mut block = [0u8; Q6_K_BLOCK_BYTES];
+
+        // Quant slot (n=0, l=0, position 0 within the half).
+        // We want q1 = (ql[0] & 0xF) | ((qh[0] & 3) << 4) = some known 6-bit value.
+        // Set ql[0] = 0x0A (low nibble = 10), qh[0] bits 0..1 = 0b10 (=2).
+        // → q1 = 10 | (2 << 4) = 10 | 32 = 42. After -32 bias: 10.
+        block[0] = 0x0A;
+        block[128] = 0b00000010;
+
+        // scales[0] = 3 (i8). d = 0.25 (f16).
+        block[192] = 3;
+        let d_bits = f16::from_f32(0.25).to_bits();
+        block[208..210].copy_from_slice(&d_bits.to_le_bytes());
+
+        let mut out = [0.0f32; Q6_K_BLOCK_SIZE];
+        unsafe {
+            dequant_q6_k_block(block.as_ptr(), &mut out);
+        }
+
+        // Expected: out[0] = d * scales[0] * (q1 - 32) = 0.25 * 3 * 10 = 7.5.
+        assert!(
+            (out[0] - 7.5).abs() < 1e-3,
+            "out[0] = {} (expected 7.5)",
+            out[0]
+        );
+        // All other slots should be d * scale * (-32) = 0.25 * 3 * (-32) = -24
+        // for the first 16 positions (which share scales[0]), then change.
+        for i in 1..16 {
+            assert!((out[i] - (-24.0)).abs() < 1e-3, "out[{i}] = {}", out[i]);
         }
     }
 

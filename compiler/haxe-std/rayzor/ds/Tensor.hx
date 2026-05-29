@@ -49,6 +49,16 @@ extern class Tensor {
     public static function fromBytesF16(bytes:haxe.io.Bytes, shape:Array<Int>):Tensor;
 
     /**
+     * Build an F32 Tensor by memcpying raw F32 bytes (little-endian) with
+     * the given shape. Used by the GGUF loader for dtype=0 weights.
+     * Bypasses the `fromArray(Array<Float>, DType.F32)` round-trip whose
+     * `Array<Float>.push` wrapper loses precision when crossing the i64
+     * extern boundary.
+     */
+    @:native("tensor_fromBytesF32")
+    public static function fromBytesF32(bytes:haxe.io.Bytes, shape:Array<Int>):Tensor;
+
+    /**
      * Build an F32 Tensor of shape `shape` by dequantising a GGML Q8_0
      * byte buffer (32-element blocks of `[f16 scale][32 × i8]`, 34 bytes
      * each). Output is F32 — Q8_0 is rare in Q4_K_M-quantised models so
