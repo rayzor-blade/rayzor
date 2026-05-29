@@ -5,3 +5,15 @@
 
 [target.'cfg(target_os = "linux")']
 rustflags = ["-C", "link-args=-rdynamic"]
+
+# Enable `dotprod` (ARMv8.2-A SDOT/UDOT) for the aarch64 ML kernels.
+# M1+, Cortex-A75+, A76+, X1+ and every modern Apple / ARM Server SKU
+# has this feature. The Q4_K_M matmul's SDOT inner loop only inlines
+# when the caller's target-feature set includes `dotprod` — wedging it
+# at the build level here keeps the Rust source clean and avoids
+# `#[target_feature]` annotations that disable inlining.
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-feature=+dotprod"]
+
+[target.aarch64-unknown-linux-gnu]
+rustflags = ["-C", "target-feature=+dotprod"]

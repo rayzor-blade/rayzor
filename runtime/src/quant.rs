@@ -389,6 +389,231 @@ fn dequant_q4_k_block(block: &Q4KBlock, out: &mut [f32]) {
     }
 }
 
+/// Runtime toggle for the SDOT path. Defaults ON for aarch64 builds
+/// (target-feature=+dotprod is set crate-wide via .cargo/config.toml).
+/// Set `RAYZOR_USE_SDOT=0` to fall back to the F32 SIMD path for A/B
+/// comparison.
+#[cfg(target_arch = "aarch64")]
+fn sdot_enabled() -> bool {
+    use std::sync::atomic::{AtomicI8, Ordering};
+    static CACHED: AtomicI8 = AtomicI8::new(-1);
+    let cur = CACHED.load(Ordering::Relaxed);
+    if cur >= 0 {
+        return cur == 1;
+    }
+    let on = std::env::var("RAYZOR_USE_SDOT")
+        .map(|v| v != "0" && !v.is_empty())
+        .unwrap_or(true); // default ON
+    CACHED.store(if on { 1 } else { 0 }, Ordering::Relaxed);
+    on
+}
+
+// ============================================================================
+// INT8 / SDOT inner path for Q4_K_M
+//
+// The F32 NEON path above hits ~4 cycles per output element — close to the
+// peak NEON FMA throughput on M1. The next density jump is `vdotq_s32`
+// (ARMv8.2-A SDOT / equivalent AVX-VNNI on x86_64), which does 16 INT8
+// multiplies and four 32-bit accumulations in one instruction.
+//
+// To use it we (1) quantise X to INT8 with one F32 scale per 256-element
+// super-block, (2) read the Q4_K_M block's 4-bit weights as INT8 (low/high
+// nibbles), (3) SDOT the two INT8 vectors, (4) fold the result back through
+// the (super-scale × X scale) and (super-min × Σx) into the final F32 sum.
+//
+// `quantize_x_block_q8` is called once per chunk call per batch row (cheap
+// — typically 16 blocks for k=2048 = a few hundred SIMD ops). `dot_q4_k_q8`
+// then does each per-row dot product in pure INT8 arithmetic.
+// ============================================================================
+
+/// Per-super-block scratch produced by `quantize_x_block_q8`. One entry
+/// per 256-element block of X.
+struct Q8Block {
+    /// 256 INT8 quants.
+    quants: [i8; 256],
+    /// F32 quantisation scale (`x[i] ≈ scale * quants[i]`).
+    scale: f32,
+    /// Σ of `quants[s*32 .. (s+1)*32]` per sub-block (8 sub-blocks).
+    /// Used to fold the Q4_K_M min term out of the SDOT result.
+    bsums: [i32; 8],
+}
+
+/// Quantise a 256-element span of `x` to INT8 with one F32 scale + the
+/// 8 per-sub-block sums.
+#[inline]
+unsafe fn quantize_x_block_q8(x: *const f32) -> Q8Block {
+    // Pass 1: find the absolute max over 256 elements (NEON 4×4-lane
+    // unrolled). Used to pick a symmetric scale so quants land in
+    // [-127, 127].
+    let mut max_abs = 0.0f32;
+    #[cfg(target_arch = "aarch64")]
+    {
+        use std::arch::aarch64::*;
+        let pa = x;
+        let mut m0 = vdupq_n_f32(0.0);
+        let mut m1 = vdupq_n_f32(0.0);
+        let mut m2 = vdupq_n_f32(0.0);
+        let mut m3 = vdupq_n_f32(0.0);
+        let abs_mask = vreinterpretq_f32_u32(vdupq_n_u32(0x7FFF_FFFF));
+        let mut i = 0;
+        while i < 256 {
+            let v0 = vandq_u32(vreinterpretq_u32_f32(vld1q_f32(pa.add(i))), vreinterpretq_u32_f32(abs_mask));
+            let v1 = vandq_u32(vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 4))), vreinterpretq_u32_f32(abs_mask));
+            let v2 = vandq_u32(vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 8))), vreinterpretq_u32_f32(abs_mask));
+            let v3 = vandq_u32(vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 12))), vreinterpretq_u32_f32(abs_mask));
+            m0 = vmaxq_f32(m0, vreinterpretq_f32_u32(v0));
+            m1 = vmaxq_f32(m1, vreinterpretq_f32_u32(v1));
+            m2 = vmaxq_f32(m2, vreinterpretq_f32_u32(v2));
+            m3 = vmaxq_f32(m3, vreinterpretq_f32_u32(v3));
+            i += 16;
+        }
+        let m = vmaxq_f32(vmaxq_f32(m0, m1), vmaxq_f32(m2, m3));
+        max_abs = vmaxvq_f32(m);
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        for i in 0..256 {
+            let v = (*x.add(i)).abs();
+            if v > max_abs {
+                max_abs = v;
+            }
+        }
+    }
+
+    let mut block = Q8Block {
+        quants: [0i8; 256],
+        scale: 0.0,
+        bsums: [0i32; 8],
+    };
+
+    if max_abs == 0.0 {
+        block.scale = 1.0;
+        return block;
+    }
+    block.scale = max_abs / 127.0;
+    let inv_scale = 127.0 / max_abs;
+
+    // Pass 2: quantise, accumulate sub-block sums.
+    for s in 0..8 {
+        let mut sum: i32 = 0;
+        for j in 0..32 {
+            let v = *x.add(s * 32 + j) * inv_scale;
+            // Round-to-nearest, clamp.
+            let q = v.round().clamp(-128.0, 127.0) as i8;
+            block.quants[s * 32 + j] = q;
+            sum += q as i32;
+        }
+        block.bsums[s] = sum;
+    }
+    block
+}
+
+/// Lazy populator for the X→Q8 cache. Returns a borrowed reference to
+/// the slot for block index `b_idx`, quantising the matching 256-element
+/// span of X on first access.
+#[inline]
+unsafe fn x_q8_cache_get<'a>(
+    cache: &'a mut [Q8Block],
+    init: &mut [bool],
+    b_idx: usize,
+    x_ptr: *const f32,
+) -> &'a Q8Block {
+    if !init[b_idx] {
+        cache[b_idx] = quantize_x_block_q8(x_ptr);
+        init[b_idx] = true;
+    }
+    &cache[b_idx]
+}
+
+/// Q4_K_M × Q8 dot product for one 256-element block.
+///
+/// Computes `Σ_i (q4_dequant[i] * x[i])` for the 256 elements covered
+/// by one Q4_K_M block, using SDOT instructions on the 4-bit weights
+/// versus the INT8-quantised X. Mirrors llama.cpp's
+/// `ggml_vec_dot_q4_K_q8_K` block kernel.
+///
+/// Math: each sub-block `s` contributes
+/// ```
+///   sub_scale_s = d * scale6bit_s              (effective f32 scale)
+///   sub_min_s   = dmin * min6bit_s             (effective f32 offset)
+///   Σ x[i] * (sub_scale_s * q4[i] - sub_min_s)
+///     = sub_scale_s * Σ x[i] * q4[i]  -  sub_min_s * Σ x[i]
+///     = sub_scale_s * x_scale * sdot(x_q[s..], q4[s..])
+///       - sub_min_s * x_scale * bsums[s]
+/// ```
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn dot_q4_k_q8(q4_block_ptr: *const u8, x_q8: &Q8Block) -> f32 {
+    use std::arch::aarch64::*;
+
+    let d_bits = std::ptr::read_unaligned(q4_block_ptr as *const u16);
+    let dmin_bits = std::ptr::read_unaligned(q4_block_ptr.add(2) as *const u16);
+    let d = half::f16::from_bits(d_bits).to_f32();
+    let dmin = half::f16::from_bits(dmin_bits).to_f32();
+
+    // 12-byte header for the 6-bit scales and mins.
+    let mut header = [0u8; 12];
+    for (i, slot) in header.iter_mut().enumerate() {
+        *slot = *q4_block_ptr.add(4 + i);
+    }
+    let quants_ptr = q4_block_ptr.add(16);
+
+    let mut sum_term1 = 0.0f32; // Σ sub_scale_s * x_scale * sdot_s
+    let mut sum_term2 = 0.0f32; // Σ sub_min_s   * x_scale * bsum_s
+
+    let mask_nibble = vdupq_n_u8(0x0F);
+
+    // Sub-blocks pair up: bytes [32*p .. 32*p+32] hold the 4-bit quants
+    // for sub-blocks 2p (low nibbles) and 2p+1 (high nibbles).
+    for p in 0..4 {
+        let (sc_lo6, mn_lo6) = q4_k_get_scale_min(2 * p, &header);
+        let (sc_hi6, mn_hi6) = q4_k_get_scale_min(2 * p + 1, &header);
+        let sub_scale_lo = d * sc_lo6 as f32;
+        let sub_min_lo = dmin * mn_lo6 as f32;
+        let sub_scale_hi = d * sc_hi6 as f32;
+        let sub_min_hi = dmin * mn_hi6 as f32;
+
+        // 32 quant bytes → 32 lo-nibble + 32 hi-nibble values.
+        let q1 = vld1q_u8(quants_ptr.add(p * 32));
+        let q2 = vld1q_u8(quants_ptr.add(p * 32 + 16));
+
+        // Low nibbles (sub-block 2p), high nibbles (sub-block 2p+1).
+        let lo1 = vreinterpretq_s8_u8(vandq_u8(q1, mask_nibble));
+        let lo2 = vreinterpretq_s8_u8(vandq_u8(q2, mask_nibble));
+        let hi1 = vreinterpretq_s8_u8(vshrq_n_u8::<4>(q1));
+        let hi2 = vreinterpretq_s8_u8(vshrq_n_u8::<4>(q2));
+
+        // X int8 for sub-block 2p (32 i8) and sub-block 2p+1 (32 i8).
+        let x_lo_ptr = x_q8.quants.as_ptr().add(2 * p * 32);
+        let x_hi_ptr = x_q8.quants.as_ptr().add((2 * p + 1) * 32);
+        let xlo1 = vld1q_s8(x_lo_ptr);
+        let xlo2 = vld1q_s8(x_lo_ptr.add(16));
+        let xhi1 = vld1q_s8(x_hi_ptr);
+        let xhi2 = vld1q_s8(x_hi_ptr.add(16));
+
+        // SDOT: each call does Σ_{j in 16-lane group} a[j] * b[j] →
+        // accumulated into 4 i32 lanes; we sum across lanes at the end.
+        let mut acc_lo = vdupq_n_s32(0);
+        acc_lo = vdotq_s32(acc_lo, xlo1, lo1);
+        acc_lo = vdotq_s32(acc_lo, xlo2, lo2);
+
+        let mut acc_hi = vdupq_n_s32(0);
+        acc_hi = vdotq_s32(acc_hi, xhi1, hi1);
+        acc_hi = vdotq_s32(acc_hi, xhi2, hi2);
+
+        let lo_sdot = vaddvq_s32(acc_lo) as f32;
+        let hi_sdot = vaddvq_s32(acc_hi) as f32;
+
+        sum_term1 += sub_scale_lo * lo_sdot;
+        sum_term1 += sub_scale_hi * hi_sdot;
+
+        sum_term2 += sub_min_lo * x_q8.bsums[2 * p] as f32;
+        sum_term2 += sub_min_hi * x_q8.bsums[2 * p + 1] as f32;
+    }
+
+    x_q8.scale * (sum_term1 - sum_term2)
+}
+
 /// Q4_K_M × f32 matmul. A is `[M, K]` quantised; B is `[K, N]` f32; C is
 /// `[M, N]` f32. Dequant happens one block at a time into a small f32
 /// stage buffer, then reuses the existing SIMD axpy kernel for the
@@ -1150,30 +1375,68 @@ unsafe fn qmatmul_chunk_impl(
     // fast path below skips this entirely.
     let mut row_sums: Vec<f32> = vec![0.0; batch.max(1)];
 
+    // Lazy cache of `quantize_x_block_q8` results for the SDOT path.
+    // Each chunk call reuses the same X across every `n_idx` in
+    // `[lo, hi)`, so quantising it once amortises across the whole
+    // chunk. Populated on the first use of each block index.
+    let mut x_q8_cache: Vec<Q8Block> = Vec::new();
+    let mut x_q8_init: Vec<bool> = Vec::new();
+    if cfg!(target_arch = "aarch64") && batch == 1 && x_contig && qt.scheme == QSCHEME_Q4_K_M {
+        x_q8_cache.reserve_exact(blocks_per_row);
+        for _ in 0..blocks_per_row {
+            x_q8_cache.push(Q8Block {
+                quants: [0i8; 256],
+                scale: 0.0,
+                bsums: [0i32; 8],
+            });
+        }
+        x_q8_init = vec![false; blocks_per_row];
+    }
+
     for n_idx in lo..hi {
         let row_ptr = qt.data.add(n_idx * blocks_per_row * block_bytes);
 
         if batch == 1 && x_contig {
-            // Decode fast path: single batch row, contiguous X. One
-            // accumulator, never touches main memory for the F32 row.
+            // Decode fast path: single batch row, contiguous X. Q4_K_M
+            // can route through the SDOT kernel when `RAYZOR_USE_SDOT=1`
+            // is set; the F32 path remains the default until A/B
+            // measurement shows SDOT wins on this hardware.
             let mut sum = 0.0f32;
+            #[cfg(target_arch = "aarch64")]
+            let use_sdot = sdot_enabled();
             for b_idx in 0..blocks_per_row {
                 let bp = row_ptr.add(b_idx * block_bytes);
                 match qt.scheme {
                     QSCHEME_Q4_K_M => {
+                        #[cfg(target_arch = "aarch64")]
+                        if use_sdot {
+                            let x_q8 = x_q8_cache_get(
+                                &mut x_q8_cache,
+                                &mut x_q8_init,
+                                b_idx,
+                                x_data.add(b_idx * block_size),
+                            );
+                            sum += dot_q4_k_q8(bp, x_q8);
+                            continue;
+                        }
                         let block = decode_q4_k_block(bp);
                         dequant_q4_k_block(&block, &mut stage);
+                        let x_chunk = std::slice::from_raw_parts(
+                            x_data.add(b_idx * block_size),
+                            block_size,
+                        );
+                        sum += dot_f32_simd(x_chunk, &stage);
                     }
                     QSCHEME_Q6_K => {
                         dequant_q6_k_block(bp, &mut stage);
+                        let x_chunk = std::slice::from_raw_parts(
+                            x_data.add(b_idx * block_size),
+                            block_size,
+                        );
+                        sum += dot_f32_simd(x_chunk, &stage);
                     }
                     _ => unreachable!(),
                 }
-                let x_chunk = std::slice::from_raw_parts(
-                    x_data.add(b_idx * block_size),
-                    block_size,
-                );
-                sum += dot_f32_simd(x_chunk, &stage);
             }
             *y_data.add(n_idx) = sum;
             continue;
