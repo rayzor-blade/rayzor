@@ -392,10 +392,16 @@ impl IrBuilder {
                             | (IrType::F64 | IrType::F32, IrType::I32 | IrType::I64)
                             | (IrType::I64, IrType::Ptr(_))
                             | (IrType::Ptr(_), IrType::I64)
+                            // F64 → `Any` slot (e.g. Array.push value: Any).
+                            // Without bitcast, the f64 sits in xmm0 but the
+                            // i64-typed callee reads rdi — value lost.
+                            | (IrType::F64, IrType::Any)
+                            | (IrType::Any, IrType::F64)
                     );
                     if needs_cast {
                         // I32→F64/F32: value conversion (Haxe Int→Float coercion).
                         // I64↔F64: bitcast (generic type erasure, bit-preserving).
+                        // F64↔Any: bitcast to I64 — `Any` is the 8-byte erased slot.
                         // Ptr↔I64: bitcast (pointer reinterpretation).
                         let use_bitcast = matches!(
                             (&arg_ty, param_ty),
@@ -403,9 +409,26 @@ impl IrBuilder {
                                 | (IrType::I64, IrType::F64)
                                 | (IrType::I64, IrType::Ptr(_))
                                 | (IrType::Ptr(_), IrType::I64)
+                                | (IrType::F64, IrType::Any)
+                                | (IrType::Any, IrType::F64)
                         );
+                        // For F64→Any (and Any→F64), bitcast THROUGH I64 so the
+                        // result register has a concrete type Cranelift can map
+                        // to the integer-side calling-convention slot.
+                        let bitcast_target = if matches!(
+                            (&arg_ty, param_ty),
+                            (IrType::F64, IrType::Any) | (IrType::Any, IrType::F64)
+                        ) {
+                            if matches!(&arg_ty, IrType::F64) {
+                                IrType::I64
+                            } else {
+                                IrType::F64
+                            }
+                        } else {
+                            param_ty.clone()
+                        };
                         let cast_id = if use_bitcast {
-                            self.build_bitcast(*arg_id, param_ty.clone())
+                            self.build_bitcast(*arg_id, bitcast_target)
                         } else {
                             self.build_cast(*arg_id, arg_ty, param_ty.clone())
                         };

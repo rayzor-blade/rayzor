@@ -1509,14 +1509,23 @@ impl StdlibMapping {
             // Properties (treated as getters with 0 params)
             map_method!(instance "Array", "length" => "array_length", params: 0, returns: primitive),
             // Modification methods
-            // push and pop use MIR wrappers that handle Any type parameters internally
-            map_method!(instance "Array", "push" => "array_push", params: 1, returns: void),
+            // push and pop use MIR wrappers. The value param is declared I64 so the
+            // forward-ref signature matches `build_array_push`'s declared param,
+            // and the `build_call_direct` coercion bitcasts F64→I64 at the call
+            // site. Without this, Array<Float>.push silently truncated every value.
+            map_method!(instance "Array", "push" => "array_push", params: 1, mir_wrapper,
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I64]),
             map_method!(instance "Array", "pop" => "array_pop", params: 0, mir_wrapper,
                 types: &[PtrU8] => I64),
             map_method!(instance "Array", "reverse" => "haxe_array_reverse", params: 0, returns: void),
-            // insert(pos:Int, x:T): arg[0]=array, arg[1]=pos (no conversion), arg[2]=value (needs ptr conversion)
-            // Bitmask: 0b100 = bit 2 set (param index 2)
-            map_method!(instance "Array", "insert" => "haxe_array_insert", params: 2, returns: void, ptr_params: 0b100),
+            // insert(pos:Int, x:T): routes through MIR wrapper `array_insert` that
+            // stack-allocates 8 bytes for the value and passes a pointer to it.
+            // The previous `ptr_params: 0b100` form boxed Float values via
+            // `haxe_box_float_ptr` (→ DynamicValue), so the runtime read 8 bytes
+            // of DynamicValue header instead of the raw f64 — Array<Float>.insert
+            // silently corrupted every value.
+            map_method!(instance "Array", "insert" => "array_insert", params: 2, mir_wrapper,
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32, IrTypeDescriptor::I64]),
             // remove(x:T): arg[0]=array, arg[1]=value (needs ptr conversion)
             // Bitmask: 0b10 = bit 1 set
             map_method!(instance "Array", "remove" => "haxe_array_remove", params: 1, returns: primitive, ptr_params: 0b10),
@@ -1534,7 +1543,10 @@ impl StdlibMapping {
             // Mutation methods — MIR wrappers handle Any→Ptr conversion
             map_method!(instance "Array", "shift" => "array_shift", params: 0, mir_wrapper,
                 types: &[PtrU8] => PtrU8),
-            map_method!(instance "Array", "unshift" => "array_unshift", params: 1, returns: void),
+            // unshift: same fix shape as push — value typed I64 so the call-site
+            // bitcast preserves f64 bits across the integer-typed slot.
+            map_method!(instance "Array", "unshift" => "array_unshift", params: 1, mir_wrapper,
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I64]),
             map_method!(instance "Array", "resize" => "array_resize", params: 1, returns: void),
             // concat and splice use MIR wrappers that handle out-param allocation
             map_method!(instance "Array", "concat" => "array_concat", params: 1, returns: primitive),
@@ -2678,7 +2690,7 @@ impl StdlibMapping {
             // Float getters (little-endian)
             // bytes.getFloat(pos: Int): Float
             map_method!(instance "rayzor_Bytes", "getFloat" => "haxe_bytes_get_float", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F32),
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
             // bytes.getDouble(pos: Int): Float
             map_method!(instance "rayzor_Bytes", "getDouble" => "haxe_bytes_get_double", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
@@ -2733,7 +2745,7 @@ impl StdlibMapping {
             map_method!(instance "haxe_io_Bytes", "getInt64" => "haxe_bytes_get_int64", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I64),
             map_method!(instance "haxe_io_Bytes", "getFloat" => "haxe_bytes_get_float", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F32),
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
             map_method!(instance "haxe_io_Bytes", "getDouble" => "haxe_bytes_get_double", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
             map_method!(instance "haxe_io_Bytes", "setInt16" => "haxe_bytes_set_int16", params: 2, returns: void,
@@ -2780,7 +2792,7 @@ impl StdlibMapping {
             map_method!(instance "Bytes", "getInt64" => "haxe_bytes_get_int64", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::I64),
             map_method!(instance "Bytes", "getFloat" => "haxe_bytes_get_float", params: 1, returns: primitive,
-                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F32),
+                types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
             map_method!(instance "Bytes", "getDouble" => "haxe_bytes_get_double", params: 1, returns: primitive,
                 types: &[IrTypeDescriptor::PtrVoid, IrTypeDescriptor::I32] => IrTypeDescriptor::F64),
             map_method!(instance "Bytes", "setInt16" => "haxe_bytes_set_int16", params: 2, returns: void,
@@ -3347,6 +3359,9 @@ impl StdlibMapping {
             // Tensor.fromBytesF16(bytes: Bytes, shape: Array<Int>): Tensor
             map_method!(static "rayzor_ds_Tensor", "fromBytesF16" => "Tensor_fromBytesF16", params: 2, mir_wrapper,
                 types: &[PtrVoid, PtrVoid] => PtrVoid),
+            // Tensor.fromBytesF32(bytes: Bytes, shape: Array<Int>): Tensor
+            map_method!(static "rayzor_ds_Tensor", "fromBytesF32" => "Tensor_fromBytesF32", params: 2, mir_wrapper,
+                types: &[PtrVoid, PtrVoid] => PtrVoid),
             // Tensor.fromBytesQ8_0(bytes: Bytes, shape: Array<Int>): Tensor
             map_method!(static "rayzor_ds_Tensor", "fromBytesQ8_0" => "Tensor_fromBytesQ8_0", params: 2, mir_wrapper,
                 types: &[PtrVoid, PtrVoid] => PtrVoid),
@@ -3515,6 +3530,9 @@ impl StdlibMapping {
                 params: 4, mir_wrapper, types: &[I64, I64, I64, I64] => PtrVoid),
             // QTensor.fromBytesQ4KM(bytes: Bytes, rows: Int, cols: Int): QTensor
             map_method!(static "rayzor_ds_QTensor", "fromBytesQ4KM" => "QTensor_fromBytesQ4KM",
+                params: 3, mir_wrapper, types: &[PtrVoid, I64, I64] => PtrVoid),
+            // QTensor.fromBytesQ6K(bytes: Bytes, rows: Int, cols: Int): QTensor
+            map_method!(static "rayzor_ds_QTensor", "fromBytesQ6K" => "QTensor_fromBytesQ6K",
                 params: 3, mir_wrapper, types: &[PtrVoid, I64, I64] => PtrVoid),
             // --- Properties (instance) ---
             map_method!(instance "rayzor_ds_QTensor", "rows" => "QTensor_rows",

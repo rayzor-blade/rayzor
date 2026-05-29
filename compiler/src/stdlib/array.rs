@@ -32,6 +32,7 @@ pub fn build_array_type(builder: &mut MirBuilder) {
     build_array_last_index_of(builder);
     build_array_shift(builder);
     build_array_unshift(builder);
+    build_array_insert(builder);
     build_array_resize(builder);
     build_array_concat(builder);
     build_array_splice(builder);
@@ -235,6 +236,17 @@ fn declare_array_externs(builder: &mut MirBuilder) {
         .build();
     builder.mark_as_extern(func_id);
 
+    // haxe_array_insert(arr: *mut HaxeArray, index: i32, data: *const u8)
+    let func_id = builder
+        .begin_function("haxe_array_insert")
+        .param("arr", ptr_void.clone())
+        .param("index", IrType::I32)
+        .param("data", IrType::Ptr(Box::new(IrType::U8)))
+        .returns(void_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
     // haxe_array_concat(out: *mut HaxeArray, arr: *const HaxeArray, other: *const HaxeArray)
     let func_id = builder
         .begin_function("haxe_array_concat")
@@ -261,6 +273,15 @@ fn declare_array_externs(builder: &mut MirBuilder) {
     // haxe_array_to_string(arr: *const HaxeArray) -> *mut HaxeString
     let func_id = builder
         .begin_function("haxe_array_to_string")
+        .param("arr", ptr_void.clone())
+        .returns(ptr_void.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // haxe_array_to_string_f64: typed stringifier for Array<Float> / Array<Double>
+    let func_id = builder
+        .begin_function("haxe_array_to_string_f64")
         .param("arr", ptr_void.clone())
         .returns(ptr_void.clone())
         .calling_convention(CallingConvention::C)
@@ -356,15 +377,22 @@ fn declare_array_externs(builder: &mut MirBuilder) {
     builder.mark_as_extern(func_id);
 }
 
-/// Build: fn array_push(arr: Any, value: Any) -> void
-/// Appends an element to the array
-/// Note: Any is represented as i64 in LLVM, matching pointer-sized values
+/// Build: fn array_push(arr: Ptr<Void>, value: I64) -> void
+///
+/// Appends an 8-byte element to the array. The value param is declared as
+/// `I64` rather than `Any` so the call-site coercion in `build_call_direct`
+/// (which has explicit F64↔I64 bitcast logic) fires for `Array<Float>.push`:
+/// the f64 bits get reinterpreted as i64, passed in the integer register,
+/// and stored as 8 raw bytes. The matching `haxe_array_get_f64` reads them
+/// back as f64 unchanged. The earlier `Any` typing silently lost f64
+/// precision because the (F64, Any) mismatch had no coercion rule.
 fn build_array_push(builder: &mut MirBuilder) {
     let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let i64_ty = IrType::I64;
     let func_id = builder
         .begin_function("array_push")
-        .param("arr", IrType::Any)
-        .param("value", IrType::Any)
+        .param("arr", ptr_void.clone())
+        .param("value", i64_ty.clone())
         .returns(IrType::Void)
         .calling_convention(CallingConvention::C)
         .build();
@@ -374,14 +402,10 @@ fn build_array_push(builder: &mut MirBuilder) {
     let entry = builder.create_block("entry");
     builder.set_insert_point(entry);
 
-    let arr = builder.get_param(0);
+    let arr_ptr = builder.get_param(0);
     let value = builder.get_param(1);
 
-    // Cast arr from Any (i64) to ptr for extern call
-    let arr_ptr = builder.cast(arr, IrType::Any, ptr_void);
-
-    // Call runtime function haxe_array_push_i64(arr: *HaxeArray, val: i64)
-    // value is already i64 (Any), which matches haxe_array_push_i64's signature
+    // value is already i64 (matches haxe_array_push_i64's signature directly).
     let extern_func = builder
         .get_function_by_name("haxe_array_push_i64")
         .expect("haxe_array_push_i64 extern not found");
@@ -656,11 +680,14 @@ fn build_array_shift(builder: &mut MirBuilder) {
 /// Wrapper: adds element at the beginning
 fn build_array_unshift(builder: &mut MirBuilder) {
     let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let i64_ty = IrType::I64;
 
+    // See `build_array_push` — value typed I64 (not Any) so the build_call_direct
+    // F64↔I64 bitcast fires for Array<Float>.unshift.
     let func_id = builder
         .begin_function("array_unshift")
-        .param("arr", IrType::Any)
-        .param("value", IrType::Any)
+        .param("arr", ptr_void.clone())
+        .param("value", i64_ty.clone())
         .returns(IrType::Void)
         .calling_convention(CallingConvention::C)
         .build();
@@ -669,15 +696,56 @@ fn build_array_unshift(builder: &mut MirBuilder) {
     let entry = builder.create_block("entry");
     builder.set_insert_point(entry);
 
-    let arr = builder.get_param(0);
+    let arr_ptr = builder.get_param(0);
     let value = builder.get_param(1);
-    let arr_ptr = builder.cast(arr, IrType::Any, ptr_void);
 
     let unshift_func = builder
         .get_function_by_name("haxe_array_unshift")
         .expect("haxe_array_unshift extern not found");
 
     builder.call(unshift_func, vec![arr_ptr, value]);
+    builder.ret(None);
+}
+
+/// Build: fn array_insert(arr: Ptr<Void>, pos: I32, value: I64) -> void
+///
+/// MIR wrapper that bypasses the `ptr_params` boxing path (which routed
+/// Float through `haxe_box_float_ptr` → DynamicValue, causing the runtime
+/// to read 8 bytes of DynamicValue header instead of the raw f64).
+///
+/// Stack-allocates 8 bytes for the value, stores `value` (I64-typed, with
+/// F64→I64 bitcast at call site preserving the bits), and passes that
+/// pointer as `data` to `haxe_array_insert`. The runtime memcpy's
+/// `elem_size` (8) bytes from `data` into the array slot.
+fn build_array_insert(builder: &mut MirBuilder) {
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let ptr_u8 = IrType::Ptr(Box::new(IrType::U8));
+    let func_id = builder
+        .begin_function("array_insert")
+        .param("arr", ptr_void.clone())
+        .param("pos", IrType::I32)
+        .param("value", IrType::I64)
+        .returns(IrType::Void)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let arr_ptr = builder.get_param(0);
+    let pos = builder.get_param(1);
+    let value = builder.get_param(2);
+
+    let stack_slot = builder.alloc(IrType::I64, None);
+    builder.store(stack_slot, value);
+    let data_ptr = builder.cast(stack_slot, IrType::Ptr(Box::new(IrType::I64)), ptr_u8);
+
+    let insert_func = builder
+        .get_function_by_name("haxe_array_insert")
+        .expect("haxe_array_insert extern not found");
+
+    builder.call(insert_func, vec![arr_ptr, pos, data_ptr]);
     builder.ret(None);
 }
 

@@ -1399,6 +1399,44 @@ pub extern "C" fn haxe_array_resize(arr: *mut HaxeArray, new_len: i64) {
     }
 }
 
+/// toString for an Array whose elements are all `f64` — `Array<Float>`
+/// or `Array<rayzor.Double>`. Renders each 8-byte slot via the standard
+/// `Std.string(f64)` formatter rather than the generic
+/// `format_array_slot` heuristic (which would misclassify f64 bit
+/// patterns as either small ints or pointer-shaped garbage).
+///
+/// The compiler dispatches `Array<Float>.toString` to this variant when
+/// the element type is statically known to be F64.
+#[no_mangle]
+pub extern "C" fn haxe_array_to_string_f64(arr: *const HaxeArray) -> *mut HaxeString {
+    unsafe {
+        let result_layout = Layout::new::<HaxeString>();
+        let result_ptr = alloc(result_layout) as *mut HaxeString;
+        if result_ptr.is_null() {
+            panic!("Failed to allocate HaxeString for toString");
+        }
+        if arr.is_null() || (*arr).len == 0 {
+            crate::haxe_string::haxe_string_from_bytes(result_ptr, b"[]".as_ptr(), 2);
+            return result_ptr;
+        }
+        let arr_ref = &*arr;
+        let mut s = String::with_capacity(arr_ref.len * 8 + 2);
+        s.push('[');
+        let data = arr_ref.ptr as *const f64;
+        for i in 0..arr_ref.len {
+            if i > 0 {
+                s.push_str(", ");
+            }
+            let v = *data.add(i);
+            s.push_str(&crate::haxe_sys::format_f64_for_string(v));
+        }
+        s.push(']');
+        let bytes = s.as_bytes();
+        crate::haxe_string::haxe_string_from_bytes(result_ptr, bytes.as_ptr(), bytes.len());
+        result_ptr
+    }
+}
+
 /// toString: create string representation "[elem0, elem1, ...]"
 ///
 /// Each `i64` slot is rendered with the same heuristic as
