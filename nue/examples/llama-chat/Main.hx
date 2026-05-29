@@ -7,47 +7,95 @@ import nue.CausalLanguageModel;
 import rayzor.ds.Tensor;
 
 /**
- * Local temperature sampler. Lifted out of `nue.sampling.TemperatureSampler`
- * to dodge a current JIT issue: importing that class causes a trap-stub
- * cascade in unrelated functions even when nothing instantiates it.
- * Under investigation; meanwhile this inline copy gets the demo
- * working with temperature-controlled sampling.
+ * Local temperature + repetition-penalty sampler. Lifted out of
+ * `nue.sampling.TemperatureSampler` to dodge a current JIT issue:
+ * importing that class triggers a trap-stub cascade in unrelated
+ * functions even when nothing instantiates it. Under investigation;
+ * meanwhile this inline copy gets the demo working.
+ *
+ * Temperature: scales logits before the softmax. 0.7 is the standard
+ * Llama-3 chat preset; lower = more deterministic, higher = more
+ * random. Internally clamps to 1e-8 so a zero passed in still works.
+ *
+ * Repetition penalty: divides positive logits by `penalty` and
+ * multiplies negative ones for every token in the recent-output
+ * window (last RECENT_CAP samples). 1.0 disables it; 1.1–1.3 is the
+ * typical chat range. Breaks the "in in in in" greedy/low-temp loops
+ * that the small 1B Instruct model otherwise falls into.
  */
 class LocalTempSampler implements Sampler {
     public var temperature:Float;
+    public var repetitionPenalty:Float;
     private var state:Int;
+    private var recent:Array<Int>;
+    private var recentWrite:Int;
+    private static inline var RECENT_CAP:Int = 64;
 
-    public function new(temperature:Float, seed:Int) {
+    public function new(temperature:Float, repetitionPenalty:Float, seed:Int) {
         this.temperature = temperature;
+        this.repetitionPenalty = repetitionPenalty;
         this.state = seed;
+        this.recent = [for (_ in 0...RECENT_CAP) -1];
+        this.recentWrite = 0;
     }
 
     public function sample(logits:Tensor):Int {
         var shape = logits.shape();
         var n = shape[shape.length - 1];
         var t = (temperature <= 0.0) ? 0.00000001 : temperature;
+        var penalize = repetitionPenalty > 1.0;
+        var rp = repetitionPenalty;
 
-        var maxLogit = logits.get([0]);
+        // Pass 1: maxLogit (with the same per-id penalty applied so
+        // the softmax denominator matches the values we'll exp().
+        var maxLogit = adjusted(logits.get([0]), 0, penalize, rp);
         for (i in 1...n) {
-            var v = logits.get([i]);
-            if (v > maxLogit) maxLogit = v;
+            var lg = adjusted(logits.get([i]), i, penalize, rp);
+            if (lg > maxLogit) maxLogit = lg;
         }
 
-        // Two-pass: accumulate `total` while computing exp(logit/t)
-        // on the fly the SECOND time. Skips the Array<Float> buffer
-        // entirely so we don't trip any precision/JIT bugs.
+        // Pass 2: accumulate softmax denominator.
         var total = 0.0;
         for (i in 0...n) {
-            total += Math.exp((logits.get([i]) - maxLogit) / t);
+            var lg = adjusted(logits.get([i]), i, penalize, rp);
+            total += Math.exp((lg - maxLogit) / t);
         }
 
+        // Pass 3: cumulative draw against `total`.
         var r = nextFloat() * total;
         var acc = 0.0;
         for (i in 0...n) {
-            acc += Math.exp((logits.get([i]) - maxLogit) / t);
-            if (r <= acc) return i;
+            var lg = adjusted(logits.get([i]), i, penalize, rp);
+            acc += Math.exp((lg - maxLogit) / t);
+            if (r <= acc) {
+                pushRecent(i);
+                return i;
+            }
         }
+        pushRecent(n - 1);
         return n - 1;
+    }
+
+    /** Apply repetition penalty if `id` is in the recent window. */
+    private inline function adjusted(lg:Float, id:Int, penalize:Bool, rp:Float):Float {
+        if (!penalize) return lg;
+        if (!isRecent(id)) return lg;
+        return (lg > 0.0) ? lg / rp : lg * rp;
+    }
+
+    /** Linear scan of the 64-entry recent buffer — small enough that
+        a hashmap probe would cost more than the loop. */
+    private function isRecent(id:Int):Bool {
+        for (k in 0...RECENT_CAP) {
+            if (recent[k] == id) return true;
+        }
+        return false;
+    }
+
+    /** Rolling write into the recent-id ring buffer. */
+    private function pushRecent(id:Int):Void {
+        recent[recentWrite] = id;
+        recentWrite = (recentWrite + 1) % RECENT_CAP;
     }
 
     private function nextFloat():Float {
@@ -170,8 +218,11 @@ class Main {
         //     lands. Plain temperature scaling is the fast knob for
         //     breaking greedy-loop repetitions while keeping per-token
         //     cost in the same ballpark as argmax.
+        // 1.15 repetition penalty: meaningful enough to break the
+        // "in in in" tail loops the small 1B Instruct hits, gentle
+        // enough to not flatten the distribution.
         var sampler:Sampler = (temperature > 0.0)
-            ? new LocalTempSampler(temperature, 42)
+            ? new LocalTempSampler(temperature, 1.15, 42)
             : new ArgmaxSampler();
 
         // Instruct models behave best when the prompt is wrapped in the
