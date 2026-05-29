@@ -279,6 +279,14 @@ class Main {
         // The BPE tokenizer recognises registered specials as atomic
         // ids; GGUFTokenizer registers the Llama-3 chat specials by
         // direct vocab lookup so this string round-trips correctly.
+        //
+        // A system prompt would normally help the model stay in
+        // character, but on the 1B Instruct the extra context seems
+        // to make the precision drift through 16 layers worse (a
+        // greedy-decode run with a short system prompt SIGSEGVs;
+        // sampled runs free-associate about whatever the system
+        // prompt mentioned). Skip it until the precision-drift work
+        // lands.
         var startHdr = tok.specialId("<|start_header_id|>");
         var modelPrompt:String = prompt;
         if (startHdr >= 0) {
