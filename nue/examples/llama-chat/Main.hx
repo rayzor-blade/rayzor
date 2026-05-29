@@ -7,36 +7,57 @@ import nue.CausalLanguageModel;
 import rayzor.ds.Tensor;
 
 /**
- * Local temperature + repetition-penalty sampler. Lifted out of
- * `nue.sampling.TemperatureSampler` to dodge a current JIT issue:
- * importing that class triggers a trap-stub cascade in unrelated
- * functions even when nothing instantiates it. Under investigation;
- * meanwhile this inline copy gets the demo working.
+ * Local Top-K + temperature + repetition-penalty sampler.
  *
- * Temperature: scales logits before the softmax. 0.7 is the standard
- * Llama-3 chat preset; lower = more deterministic, higher = more
- * random. Internally clamps to 1e-8 so a zero passed in still works.
+ * Walks the full logits vector once and tracks the K highest scores
+ * in a sorted parallel-array pair (`topKLogits`, `topKIds`). With
+ * `k = 50` and a 128k-vocab Llama tokenizer that's a single linear
+ * scan plus an insertion sort into a 50-entry buffer — O(n * log k)
+ * in practice with constant ~50 movements per replace, vs the
+ * O(n²) full sort `TopPSampler` does.
  *
- * Repetition penalty: divides positive logits by `penalty` and
+ * Sampling then runs the standard temperature-softmax + multinomial
+ * draw, but over only `k` candidates — much sharper than pure
+ * temperature over the full vocab and the standard chat-quality
+ * recipe (Llama / GPT defaults to k=50 + temperature ≈ 0.7).
+ *
+ * Repetition penalty divides positive logits by `penalty` and
  * multiplies negative ones for every token in the recent-output
- * window (last RECENT_CAP samples). 1.0 disables it; 1.1–1.3 is the
- * typical chat range. Breaks the "in in in in" greedy/low-temp loops
- * that the small 1B Instruct model otherwise falls into.
+ * window (last RECENT_CAP samples) **before** Top-K selection, so a
+ * recently-emitted token won't even land in the candidate pool. 1.0
+ * disables it; 1.1–1.3 is the typical chat range. Breaks the
+ * "in in in" loops the small 1B Instruct model otherwise hits.
+ *
+ * Why inline rather than reuse `nue.sampling.TemperatureSampler` /
+ * `TopKSampler`: importing those classes currently triggers a trap-
+ * stub cascade in unrelated functions even with no instance created.
+ * Root cause under investigation; meanwhile this inline copy is the
+ * working path.
  */
 class LocalTempSampler implements Sampler {
     public var temperature:Float;
     public var repetitionPenalty:Float;
+    public var topK:Int;
     private var state:Int;
     private var recent:Array<Int>;
     private var recentWrite:Int;
+    private var topKLogits:Array<Float>;
+    private var topKIds:Array<Int>;
     private static inline var RECENT_CAP:Int = 64;
 
-    public function new(temperature:Float, repetitionPenalty:Float, seed:Int) {
+    public function new(temperature:Float, repetitionPenalty:Float, topK:Int, seed:Int) {
         this.temperature = temperature;
         this.repetitionPenalty = repetitionPenalty;
+        this.topK = topK;
         this.state = seed;
         this.recent = [for (_ in 0...RECENT_CAP) -1];
         this.recentWrite = 0;
+        // Pre-allocate the Top-K scratch arrays; both get reset per
+        // `sample` call. Size always == topK; -1 / 0.0 fill is just
+        // an initial value — overwritten before any read.
+        var k = (topK > 0) ? topK : 1;
+        this.topKLogits = [for (_ in 0...k) 0.0];
+        this.topKIds = [for (_ in 0...k) -1];
     }
 
     public function sample(logits:Tensor):Int {
@@ -45,35 +66,58 @@ class LocalTempSampler implements Sampler {
         var t = (temperature <= 0.0) ? 0.00000001 : temperature;
         var penalize = repetitionPenalty > 1.0;
         var rp = repetitionPenalty;
+        var k = (topK > 0 && topK < n) ? topK : n;
 
-        // Pass 1: maxLogit (with the same per-id penalty applied so
-        // the softmax denominator matches the values we'll exp().
-        var maxLogit = adjusted(logits.get([0]), 0, penalize, rp);
-        for (i in 1...n) {
-            var lg = adjusted(logits.get([i]), i, penalize, rp);
-            if (lg > maxLogit) maxLogit = lg;
-        }
-
-        // Pass 2: accumulate softmax denominator.
-        var total = 0.0;
+        // -------- Top-K selection ----------
+        // Maintain `topKLogits` sorted DESCENDING so [0] is largest,
+        // [k-1] is the cutoff. For each new logit larger than the
+        // cutoff (or until we've filled k slots), do an insertion
+        // shift to keep the array sorted.
+        var sz = 0;
         for (i in 0...n) {
             var lg = adjusted(logits.get([i]), i, penalize, rp);
-            total += Math.exp((lg - maxLogit) / t);
-        }
-
-        // Pass 3: cumulative draw against `total`.
-        var r = nextFloat() * total;
-        var acc = 0.0;
-        for (i in 0...n) {
-            var lg = adjusted(logits.get([i]), i, penalize, rp);
-            acc += Math.exp((lg - maxLogit) / t);
-            if (r <= acc) {
-                pushRecent(i);
-                return i;
+            if (sz < k) {
+                var pos = sz;
+                while (pos > 0 && topKLogits[pos - 1] < lg) {
+                    topKLogits[pos] = topKLogits[pos - 1];
+                    topKIds[pos] = topKIds[pos - 1];
+                    pos--;
+                }
+                topKLogits[pos] = lg;
+                topKIds[pos] = i;
+                sz++;
+            } else if (lg > topKLogits[k - 1]) {
+                var pos = k - 1;
+                while (pos > 0 && topKLogits[pos - 1] < lg) {
+                    topKLogits[pos] = topKLogits[pos - 1];
+                    topKIds[pos] = topKIds[pos - 1];
+                    pos--;
+                }
+                topKLogits[pos] = lg;
+                topKIds[pos] = i;
             }
         }
-        pushRecent(n - 1);
-        return n - 1;
+
+        // -------- Temperature softmax over the k survivors ----------
+        var maxLogit = topKLogits[0];
+        var total = 0.0;
+        for (i in 0...k) {
+            total += Math.exp((topKLogits[i] - maxLogit) / t);
+        }
+
+        var r = nextFloat() * total;
+        var acc = 0.0;
+        for (i in 0...k) {
+            acc += Math.exp((topKLogits[i] - maxLogit) / t);
+            if (r <= acc) {
+                var id = topKIds[i];
+                pushRecent(id);
+                return id;
+            }
+        }
+        var id = topKIds[k - 1];
+        pushRecent(id);
+        return id;
     }
 
     /** Apply repetition penalty if `id` is in the recent window. */
@@ -218,11 +262,13 @@ class Main {
         //     lands. Plain temperature scaling is the fast knob for
         //     breaking greedy-loop repetitions while keeping per-token
         //     cost in the same ballpark as argmax.
-        // 1.15 repetition penalty: meaningful enough to break the
-        // "in in in" tail loops the small 1B Instruct hits, gentle
-        // enough to not flatten the distribution.
+        // Top-K=50 + temperature + 1.15 repetition penalty. Standard
+        // chat-quality recipe (Llama / GPT defaults). Sharper than
+        // pure temperature over the 128k vocab — the model only ever
+        // chooses from the 50 most-likely tokens — and stays O(n) per
+        // token thanks to the insertion-sort-into-50-slot scratch.
         var sampler:Sampler = (temperature > 0.0)
-            ? new LocalTempSampler(temperature, 1.15, 42)
+            ? new LocalTempSampler(temperature, 1.15, 50, 42)
             : new ArgmaxSampler();
 
         // Instruct models behave best when the prompt is wrapped in the
