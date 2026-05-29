@@ -59,6 +59,15 @@ extern class QTensor {
     @:native("qtensor_from_bytes_q4_k_m")
     public static function fromBytesQ4KM(bytes:haxe.io.Bytes, rows:Int, cols:Int):QTensor;
 
+    /**
+     * Build a Q6_K QTensor. Same shape/semantics as `fromBytesQ4KM` but for
+     * GGUF dtype 14, which uses 210-byte super-blocks. Used by `Q4_K_M`
+     * GGUF variants for the token-embedding, attention-V, and FFN-down
+     * weights where Q6_K accuracy is preferred over Q4_K compression.
+     */
+    @:native("qtensor_from_bytes_q6_k")
+    public static function fromBytesQ6K(bytes:haxe.io.Bytes, rows:Int, cols:Int):QTensor;
+
     /** Number of rows in this 2-D matrix. */
     @:native("qtensor_rows")
     public function rows():Int;

@@ -17,6 +17,7 @@ pub fn build_qtensor_types(builder: &mut MirBuilder) {
     build_qtensor_from_float32(builder);
     build_qtensor_wrap_q4_k_m(builder);
     build_qtensor_from_bytes_q4_k_m(builder);
+    build_qtensor_from_bytes_q6_k(builder);
 
     build_qtensor_rows(builder);
     build_qtensor_cols(builder);
@@ -63,6 +64,17 @@ fn declare_qtensor_externs(builder: &mut MirBuilder) {
     // from_bytes_q4_k_m: (bytes_handle: i64, rows: i64, cols: i64) -> i64
     let func_id = builder
         .begin_function("rayzor_qtensor_from_bytes_q4_k_m")
+        .param("bytes_handle", i64_ty.clone())
+        .param("rows", i64_ty.clone())
+        .param("cols", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // from_bytes_q6_k: (bytes_handle: i64, rows: i64, cols: i64) -> i64
+    let func_id = builder
+        .begin_function("rayzor_qtensor_from_bytes_q6_k")
         .param("bytes_handle", i64_ty.clone())
         .param("rows", i64_ty.clone())
         .param("cols", i64_ty.clone())
@@ -214,6 +226,37 @@ fn build_qtensor_from_bytes_q4_k_m(builder: &mut MirBuilder) {
     let extern_id = builder
         .get_function_by_name("rayzor_qtensor_from_bytes_q4_k_m")
         .expect("rayzor_qtensor_from_bytes_q4_k_m not found");
+    let result = builder.call(extern_id, vec![bytes, rows, cols]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// QTensor_fromBytesQ6K(bytes: Bytes, rows: Int, cols: Int) -> QTensor
+///
+/// Same as `QTensor_fromBytesQ4KM` but routes to the Q6_K runtime
+/// constructor (210-byte super-blocks instead of 144).
+fn build_qtensor_from_bytes_q6_k(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+
+    let func_id = builder
+        .begin_function("QTensor_fromBytesQ6K")
+        .param("bytes", i64_ty.clone())
+        .param("rows", i64_ty.clone())
+        .param("cols", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let bytes = builder.get_param(0);
+    let rows = builder.get_param(1);
+    let cols = builder.get_param(2);
+
+    let extern_id = builder
+        .get_function_by_name("rayzor_qtensor_from_bytes_q6_k")
+        .expect("rayzor_qtensor_from_bytes_q6_k not found");
     let result = builder.call(extern_id, vec![bytes, rows, cols]).unwrap();
     builder.ret(Some(result));
 }
