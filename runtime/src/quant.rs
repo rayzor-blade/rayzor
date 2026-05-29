@@ -289,22 +289,102 @@ unsafe fn dequant_q6_k_block(block_ptr: *const u8, out: &mut [f32]) {
 }
 
 /// Dequant a single Q4_K_M block into 256 f32 values.
+///
+/// Within a super-block, two adjacent sub-blocks (32 elements each) share
+/// 32 bytes of quants: the low nibbles of bytes 0..32 hold sub-block 2*s,
+/// the high nibbles hold sub-block 2*s+1.
+#[inline]
 fn dequant_q4_k_block(block: &Q4KBlock, out: &mut [f32]) {
     debug_assert_eq!(out.len(), Q4_K_M_BLOCK_SIZE);
-    // Within a super-block, two adjacent sub-blocks (32 elements each) share
-    // 32 bytes of quants: the low nibbles of bytes 0..32 hold sub-block 2*s,
-    // the high nibbles hold sub-block 2*s+1.
-    for s in 0..4 {
-        let sc_lo = block.scales[2 * s];
-        let mn_lo = block.mins[2 * s];
-        let sc_hi = block.scales[2 * s + 1];
-        let mn_hi = block.mins[2 * s + 1];
-        for i in 0..32 {
-            let byte = block.quants[s * 32 + i];
-            let q_lo = byte & 0x0F;
-            let q_hi = byte >> 4;
-            out[(2 * s) * 32 + i] = sc_lo * (q_lo as f32) - mn_lo;
-            out[(2 * s + 1) * 32 + i] = sc_hi * (q_hi as f32) - mn_hi;
+
+    #[cfg(target_arch = "aarch64")]
+    // SAFETY: NEON is unconditional on aarch64; we read 32 bytes per
+    // `s` iteration from `block.quants` (size 128, indices 0..127) and
+    // write to `out` strictly within `[0, 256)`.
+    unsafe {
+        use std::arch::aarch64::*;
+        let q_ptr = block.quants.as_ptr();
+        let out_ptr = out.as_mut_ptr();
+
+        for s in 0..4 {
+            let sc_lo = vdupq_n_f32(block.scales[2 * s]);
+            // Negate the min once so we can fold `out = sc*q - mn`
+            // into `vfmaq_f32(neg_mn, sc, q)` — one FMA instead of
+            // mul+sub. Single rounding, one fewer instruction in the
+            // inner loop.
+            let neg_mn_lo = vdupq_n_f32(-block.mins[2 * s]);
+            let sc_hi = vdupq_n_f32(block.scales[2 * s + 1]);
+            let neg_mn_hi = vdupq_n_f32(-block.mins[2 * s + 1]);
+
+            // Process the 32 quant bytes in 2 chunks of 16. Each
+            // byte's low nibble goes to sub-block 2s, high nibble to
+            // sub-block 2s+1.
+            for chunk in 0..2 {
+                let bytes16 = vld1q_u8(q_ptr.add(s * 32 + chunk * 16));
+                let mask = vdupq_n_u8(0x0F);
+                let lo = vandq_u8(bytes16, mask);
+                let hi = vshrq_n_u8::<4>(bytes16);
+
+                // Widen lo to u16 then to two u32 vectors, convert to f32,
+                // apply scale and min.
+                let lo_lo16 = vmovl_u8(vget_low_u8(lo));
+                let lo_hi16 = vmovl_u8(vget_high_u8(lo));
+                let hi_lo16 = vmovl_u8(vget_low_u8(hi));
+                let hi_hi16 = vmovl_u8(vget_high_u8(hi));
+
+                let lo_q0 = vcvtq_f32_u32(vmovl_u16(vget_low_u16(lo_lo16)));
+                let lo_q1 = vcvtq_f32_u32(vmovl_u16(vget_high_u16(lo_lo16)));
+                let lo_q2 = vcvtq_f32_u32(vmovl_u16(vget_low_u16(lo_hi16)));
+                let lo_q3 = vcvtq_f32_u32(vmovl_u16(vget_high_u16(lo_hi16)));
+                let hi_q0 = vcvtq_f32_u32(vmovl_u16(vget_low_u16(hi_lo16)));
+                let hi_q1 = vcvtq_f32_u32(vmovl_u16(vget_high_u16(hi_lo16)));
+                let hi_q2 = vcvtq_f32_u32(vmovl_u16(vget_low_u16(hi_hi16)));
+                let hi_q3 = vcvtq_f32_u32(vmovl_u16(vget_high_u16(hi_hi16)));
+
+                // out = scale * q - min  ≡ fma(neg_min, scale, q).
+                let lo_out0 = vfmaq_f32(neg_mn_lo, sc_lo, lo_q0);
+                let lo_out1 = vfmaq_f32(neg_mn_lo, sc_lo, lo_q1);
+                let lo_out2 = vfmaq_f32(neg_mn_lo, sc_lo, lo_q2);
+                let lo_out3 = vfmaq_f32(neg_mn_lo, sc_lo, lo_q3);
+                let hi_out0 = vfmaq_f32(neg_mn_hi, sc_hi, hi_q0);
+                let hi_out1 = vfmaq_f32(neg_mn_hi, sc_hi, hi_q1);
+                let hi_out2 = vfmaq_f32(neg_mn_hi, sc_hi, hi_q2);
+                let hi_out3 = vfmaq_f32(neg_mn_hi, sc_hi, hi_q3);
+
+                // Sub-block 2*s receives 16 outputs starting at
+                // (2*s)*32 + chunk*16.
+                let lo_dst = out_ptr.add((2 * s) * 32 + chunk * 16);
+                vst1q_f32(lo_dst, lo_out0);
+                vst1q_f32(lo_dst.add(4), lo_out1);
+                vst1q_f32(lo_dst.add(8), lo_out2);
+                vst1q_f32(lo_dst.add(12), lo_out3);
+
+                let hi_dst = out_ptr.add((2 * s + 1) * 32 + chunk * 16);
+                vst1q_f32(hi_dst, hi_out0);
+                vst1q_f32(hi_dst.add(4), hi_out1);
+                vst1q_f32(hi_dst.add(8), hi_out2);
+                vst1q_f32(hi_dst.add(12), hi_out3);
+            }
+        }
+        return;
+    }
+
+    // Scalar fallback — x86_64 (where llvm autovectorises this well
+    // anyway), wasm, and the unreachable-after-aarch64 path.
+    #[allow(unreachable_code)]
+    {
+        for s in 0..4 {
+            let sc_lo = block.scales[2 * s];
+            let mn_lo = block.mins[2 * s];
+            let sc_hi = block.scales[2 * s + 1];
+            let mn_hi = block.mins[2 * s + 1];
+            for i in 0..32 {
+                let byte = block.quants[s * 32 + i];
+                let q_lo = byte & 0x0F;
+                let q_hi = byte >> 4;
+                out[(2 * s) * 32 + i] = sc_lo * (q_lo as f32) - mn_lo;
+                out[(2 * s + 1) * 32 + i] = sc_hi * (q_hi as f32) - mn_hi;
+            }
         }
     }
 }
@@ -1058,13 +1138,51 @@ unsafe fn qmatmul_chunk_impl(
     let x_data = x_head.data as *const f32;
     let x_contig = x_strides[1] == 1;
 
-    // Per-thread scratch for the dequanted Wq row.
-    let mut row_scratch: Vec<f32> = vec![0.0; k];
+    // Stage buffer for one dequanted block — 256 floats stays hot in
+    // L1 across the (dequant, dot) pair, so we never write a
+    // full-row scratch. Each `n_idx` iteration walks blocks_per_row
+    // (8 for k=2048) blocks; each block is decoded, dotted against
+    // the matching X chunk, sum accumulated, then discarded.
     let mut stage = [0.0f32; 256]; // Q4_K_M_BLOCK_SIZE == Q6_K_BLOCK_SIZE == 256
 
+    // Per-row sums. Sized to `batch` so the general path can write
+    // into it for any value of `batch`; the `batch == 1 && x_contig`
+    // fast path below skips this entirely.
+    let mut row_sums: Vec<f32> = vec![0.0; batch.max(1)];
+
     for n_idx in lo..hi {
-        // Dequant Wq's row n_idx in full, branching on scheme.
         let row_ptr = qt.data.add(n_idx * blocks_per_row * block_bytes);
+
+        if batch == 1 && x_contig {
+            // Decode fast path: single batch row, contiguous X. One
+            // accumulator, never touches main memory for the F32 row.
+            let mut sum = 0.0f32;
+            for b_idx in 0..blocks_per_row {
+                let bp = row_ptr.add(b_idx * block_bytes);
+                match qt.scheme {
+                    QSCHEME_Q4_K_M => {
+                        let block = decode_q4_k_block(bp);
+                        dequant_q4_k_block(&block, &mut stage);
+                    }
+                    QSCHEME_Q6_K => {
+                        dequant_q6_k_block(bp, &mut stage);
+                    }
+                    _ => unreachable!(),
+                }
+                let x_chunk = std::slice::from_raw_parts(
+                    x_data.add(b_idx * block_size),
+                    block_size,
+                );
+                sum += dot_f32_simd(x_chunk, &stage);
+            }
+            *y_data.add(n_idx) = sum;
+            continue;
+        }
+
+        // General path: batch > 1 or non-contiguous X. Accumulate one
+        // running sum per batch row; flush at the end of the row.
+        row_sums.iter_mut().for_each(|s| *s = 0.0);
+
         for b_idx in 0..blocks_per_row {
             let bp = row_ptr.add(b_idx * block_bytes);
             match qt.scheme {
@@ -1077,24 +1195,27 @@ unsafe fn qmatmul_chunk_impl(
                 }
                 _ => unreachable!(),
             }
-            let dst = row_scratch.as_mut_ptr().add(b_idx * block_size);
-            std::ptr::copy_nonoverlapping(stage.as_ptr(), dst, block_size);
-        }
 
-        // For each batch row: dot(X[b, :], row_scratch).
-        for b in 0..batch {
-            let x_row_off = b * x_strides[0];
-            let mut sum = 0.0f32;
-            if x_contig {
-                let x_row = std::slice::from_raw_parts(x_data.add(x_row_off), k);
-                sum = dot_f32_simd(x_row, &row_scratch);
-            } else {
-                for (p, rs) in row_scratch.iter().enumerate().take(k) {
-                    let xv = *x_data.add(x_row_off + p * x_strides[1]);
-                    sum += xv * rs;
+            for b in 0..batch {
+                let x_off = b * x_strides[0] + b_idx * block_size;
+                if x_contig {
+                    let x_chunk =
+                        std::slice::from_raw_parts(x_data.add(x_off), block_size);
+                    row_sums[b] += dot_f32_simd(x_chunk, &stage);
+                } else {
+                    let stride = x_strides[1];
+                    let mut partial = 0.0f32;
+                    let x_base = b * x_strides[0] + b_idx * block_size * stride;
+                    for p in 0..block_size {
+                        partial += *x_data.add(x_base + p * stride) * stage[p];
+                    }
+                    row_sums[b] += partial;
                 }
             }
-            *y_data.add(b * n + n_idx) = sum;
+        }
+
+        for b in 0..batch {
+            *y_data.add(b * n + n_idx) = row_sums[b];
         }
     }
 }
@@ -1798,12 +1919,21 @@ mod tests {
             // equality should hold (or within 1e-4 for accumulated f32).
             for i in 0..(batch * 256) {
                 let diff = (y_dq_slice[i] - y_fused_slice[i]).abs();
+                // Relative tolerance — the two paths accumulate K=256
+                // dot-product terms through different SIMD/scalar
+                // sequences, so rounding can drift a few ULPs per
+                // element. 1e-4 of the larger operand covers F32
+                // accumulation noise; the end-to-end layer-diff
+                // harness compares against llama.cpp directly for the
+                // real bitwise sanity check.
+                let tol = 1e-4 * y_dq_slice[i].abs().max(1.0);
                 assert!(
-                    diff < 1e-3,
-                    "y[{i}]: dequant-then-matmul_t={}, fused={}, diff={}",
+                    diff < tol,
+                    "y[{i}]: dequant-then-matmul_t={}, fused={}, diff={}, tol={}",
                     y_dq_slice[i],
                     y_fused_slice[i],
                     diff,
+                    tol,
                 );
             }
 
