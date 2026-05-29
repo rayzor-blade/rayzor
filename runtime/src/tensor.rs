@@ -601,6 +601,39 @@ pub unsafe extern "C" fn rayzor_tensor_from_bytes_f16(
     tensor_ptr
 }
 
+/// Materialise a fresh F32 Tensor from raw F32 bytes laid out row-major.
+/// Bypasses the `Array<Float>` round-trip used by Tensor.fromArray, which
+/// loses precision when crossing the array_push wrapper that takes the
+/// element as `Any` (i64). For GGUF F32 tensors the bytes are already
+/// little-endian f32, so we just memcpy them into a freshly allocated
+/// tensor buffer.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_from_bytes_f32(
+    bytes_handle: i64,
+    shape_ptr: i64,
+    ndim: i64,
+) -> i64 {
+    if bytes_handle == 0 {
+        return 0;
+    }
+    let bytes = &*(bytes_handle as *const crate::haxe_sys::HaxeBytes);
+    if bytes.ptr.is_null() {
+        return 0;
+    }
+    let shape = read_shape(shape_ptr, ndim as usize);
+    let numel: usize = shape.iter().product();
+    if bytes.len < numel * 4 {
+        return 0;
+    }
+    let tensor_ptr = alloc_tensor(&shape, DTYPE_F32, None);
+    if tensor_ptr == 0 {
+        return 0;
+    }
+    let tensor = &*(tensor_ptr as *const RayzorTensor);
+    std::ptr::copy_nonoverlapping(bytes.ptr, tensor.data, numel * 4);
+    tensor_ptr
+}
+
 /// Materialise a fresh f32 Tensor from raw GGML Q8_0 bytes laid out in
 /// 34-byte blocks (one f16 scale + 32 i8 weights). Used by the GGUF
 /// loader for GGML dtype=8 (Q8_0) tensors.
@@ -850,47 +883,101 @@ pub unsafe extern "C" fn rayzor_tensor_reshape(tensor_ptr: i64, shape_ptr: i64, 
 
     let new_ndim = new_shape.len();
 
-    // Allocate new shape
-    let new_shape_ptr = malloc(new_ndim * std::mem::size_of::<usize>()) as *mut usize;
-    if new_shape_ptr.is_null() {
+    // numpy/torch semantics: reshape only returns a view when the source
+    // memory is already laid out in the requested order — i.e. the source
+    // is contiguous in its CURRENT shape. After `permute([1, 0, 2])` the
+    // strides are non-canonical and the data isn't laid out in the new
+    // shape's order, so a view would mean every subsequent read using the
+    // freshly-computed contiguous strides lands on the wrong element.
+    // For the GQAttention out-projection that meant garbage hidden states
+    // (`context.permute([1,0,2]).reshape([seqQ, numQHeads*headDim])`),
+    // which is one of the dominant remaining coherence bugs.
+    //
+    // Detect non-contiguous sources and materialise: walk the source via
+    // its real strides into a fresh contiguous buffer, then return a
+    // contiguous tensor with the new shape.
+    let src_shape = std::slice::from_raw_parts(t.shape, t.ndim);
+    let src_strides = std::slice::from_raw_parts(t.strides, t.ndim);
+    let canonical_strides = RayzorTensor::compute_strides(src_shape);
+    let is_contig = src_strides == canonical_strides.as_slice();
+
+    if is_contig {
+        // Allocate new shape
+        let new_shape_ptr = malloc(new_ndim * std::mem::size_of::<usize>()) as *mut usize;
+        if new_shape_ptr.is_null() {
+            return 0;
+        }
+        for i in 0..new_ndim {
+            *new_shape_ptr.add(i) = new_shape[i];
+        }
+
+        // Compute new strides
+        let strides = RayzorTensor::compute_strides(&new_shape);
+        let new_strides_ptr = malloc(new_ndim * std::mem::size_of::<usize>()) as *mut usize;
+        if new_strides_ptr.is_null() {
+            free(new_shape_ptr as *mut u8);
+            return 0;
+        }
+        for i in 0..new_ndim {
+            *new_strides_ptr.add(i) = strides[i];
+        }
+
+        // Allocate new tensor struct (view — shares data)
+        let new_t = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
+        if new_t.is_null() {
+            free(new_shape_ptr as *mut u8);
+            free(new_strides_ptr as *mut u8);
+            return 0;
+        }
+
+        *new_t = RayzorTensor {
+            data: t.data, // shared
+            shape: new_shape_ptr,
+            strides: new_strides_ptr,
+            ndim: new_ndim,
+            numel: new_numel,
+            dtype: t.dtype,
+            owns_data: false, // view
+            device: t.device,
+            numa_node: t.numa_node,
+        };
+
+        return new_t as i64;
+    }
+
+    // Materialise the strided source into a fresh contiguous tensor with
+    // the new shape. Walk the source's element-by-element using its real
+    // strides; write into the new tensor's row-major linear order.
+    let result = alloc_tensor(&new_shape, t.dtype, None);
+    if result == 0 {
         return 0;
     }
-    for i in 0..new_ndim {
-        *new_shape_ptr.add(i) = new_shape[i];
+    let r = &*(result as *const RayzorTensor);
+
+    // Multi-dim iteration via index vector over the SOURCE shape; the
+    // linear write index into the new contiguous buffer increments
+    // monotonically because both source and dest visit the same numel.
+    let src_ndim = t.ndim;
+    let mut idx = vec![0usize; src_ndim];
+    for linear in 0..t.numel {
+        // Compute source memory offset from current multi-index + strides.
+        let mut src_off = 0usize;
+        for (axis, &i) in idx.iter().enumerate() {
+            src_off += i * src_strides[axis];
+        }
+        let v = load_f32_at(t.data, src_off, t.dtype);
+        store_f32_at(r.data, linear, t.dtype, v);
+        // Increment multi-index (rightmost-axis varies fastest).
+        for axis in (0..src_ndim).rev() {
+            idx[axis] += 1;
+            if idx[axis] < src_shape[axis] {
+                break;
+            }
+            idx[axis] = 0;
+        }
     }
 
-    // Compute new strides
-    let strides = RayzorTensor::compute_strides(&new_shape);
-    let new_strides_ptr = malloc(new_ndim * std::mem::size_of::<usize>()) as *mut usize;
-    if new_strides_ptr.is_null() {
-        free(new_shape_ptr as *mut u8);
-        return 0;
-    }
-    for i in 0..new_ndim {
-        *new_strides_ptr.add(i) = strides[i];
-    }
-
-    // Allocate new tensor struct (view — shares data)
-    let new_t = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
-    if new_t.is_null() {
-        free(new_shape_ptr as *mut u8);
-        free(new_strides_ptr as *mut u8);
-        return 0;
-    }
-
-    *new_t = RayzorTensor {
-        data: t.data, // shared
-        shape: new_shape_ptr,
-        strides: new_strides_ptr,
-        ndim: new_ndim,
-        numel: new_numel,
-        dtype: t.dtype,
-        owns_data: false, // view
-        device: t.device,
-        numa_node: t.numa_node,
-    };
-
-    new_t as i64
+    result
 }
 
 /// tensor.permute(axes_ptr, ndim) -> i64 (n-D permutation — reorders shape/strides, view)
@@ -1128,7 +1215,7 @@ unsafe fn tensor_binop_row_broadcast(
     let a_shape = std::slice::from_raw_parts(a.shape, a.ndim);
     let b_shape = std::slice::from_raw_parts(b.shape, 1);
     let last = a_shape[a.ndim - 1];
-    if b_shape[0] != last || a.numel % last != 0 {
+    if b_shape[0] != last || !a.numel.is_multiple_of(last) {
         return 0;
     }
 
@@ -1594,8 +1681,19 @@ pub unsafe extern "C" fn rayzor_tensor_rope(
                 let cos_v = load_f32_at(cos.data, pos * half + i, cos.dtype);
                 let sin_v = load_f32_at(sin.data, pos * half + i, sin.dtype);
                 let base = s * elements_per_row + h * elements_per_head;
-                let off_lo = base + 2 * i;
-                let off_hi = base + 2 * i + 1;
+                // Llama 3 (and most modern LLMs — Mistral, Qwen, Phi…) use
+                // *half-split* RoPE: dim `i` pairs with dim `i + half`.
+                // The older "interleaved" convention pairs (x[2i], x[2i+1])
+                // and is what HF Falcon / some GPT variants use. We had the
+                // interleaved layout; this caused Llama 3's Q and K to rotate
+                // along the wrong pairs of axes, producing attention scores
+                // that didn't correlate prompt and prediction. Symptom: model
+                // sampled near-uniform low-id tokens (byte-fallback territory)
+                // regardless of prompt content. See llama.cpp ggml_rope_impl
+                // and HF `transformers/models/llama/modeling_llama.py`
+                // (`rotate_half`).
+                let off_lo = base + i;
+                let off_hi = base + i + half;
                 let xlo = load_f32_at(x.data, off_lo, x.dtype);
                 let xhi = load_f32_at(x.data, off_hi, x.dtype);
                 store_f32_at(r.data, off_lo, x.dtype, xlo * cos_v - xhi * sin_v);
@@ -1709,6 +1807,8 @@ pub unsafe extern "C" fn rayzor_tensor_bmm(a_ptr: i64, b_ptr: i64) -> i64 {
     }
     let a_shape = std::slice::from_raw_parts(a.shape, 3);
     let b_shape = std::slice::from_raw_parts(b.shape, 3);
+    let a_strides = std::slice::from_raw_parts(a.strides, 3);
+    let b_strides = std::slice::from_raw_parts(b.strides, 3);
     let batch = a_shape[0];
     let m = a_shape[1];
     let k = a_shape[2];
@@ -1723,41 +1823,60 @@ pub unsafe extern "C" fn rayzor_tensor_bmm(a_ptr: i64, b_ptr: i64) -> i64 {
     }
     let r = &*(result as *const RayzorTensor);
     let dtype = a.dtype;
-    let elem = dtype_size(dtype);
-    let a_step = m * k * elem;
-    let b_step = k * n * elem;
-    let c_step = m * n * elem;
+
+    // Result is contiguous (freshly allocated). Walk per batch using
+    // each input's *actual* strides — bmm callers in the transformer hot
+    // path (GQAttention's qByHead.bmm(kT) and attn.bmm(vAllExpanded)) feed
+    // non-contiguous views from `.permute` / `.transposeLast2`. Previously
+    // bmm assumed `[batch, M, K]` row-major contiguous and read the wrong
+    // memory; attention scores were garbage, leading to incoherent
+    // generation regardless of how correct the rest of the pipeline was.
+    let a_b_stride = a_strides[0];
+    let a_m_stride = a_strides[1];
+    let a_k_stride = a_strides[2];
+    let b_b_stride = b_strides[0];
+    let b_k_stride = b_strides[1];
+    let b_n_stride = b_strides[2];
+
+    let a_contig_inner = a_k_stride == 1;
+    let b_contig_inner = b_n_stride == 1;
 
     for batch_i in 0..batch {
-        let a_data = a.data.add(batch_i * a_step);
-        let b_data = b.data.add(batch_i * b_step);
-        let c_data = r.data.add(batch_i * c_step);
-        if dtype == DTYPE_F32 {
-            let a_f = a_data as *const f32;
-            let b_f = b_data as *const f32;
-            let c_f = c_data as *mut f32;
+        let a_batch_off = batch_i * a_b_stride;
+        let b_batch_off = batch_i * b_b_stride;
+        let c_batch_off = batch_i * m * n;
+
+        if dtype == DTYPE_F32 && a_contig_inner && b_contig_inner {
+            // Inner dim contiguous on both → SIMD axpy fast path.
+            let a_f = a.data as *const f32;
+            let b_f = b.data as *const f32;
+            let c_f = r.data as *mut f32;
             for i in 0..m {
-                let a_row = a_f.add(i * k);
-                let c_row = c_f.add(i * n);
+                let c_row_off = c_batch_off + i * n;
+                let a_row_off = a_batch_off + i * a_m_stride;
                 for p in 0..k {
-                    let a_ik = *a_row.add(p);
-                    let b_row = b_f.add(p * n);
-                    let c_slice = std::slice::from_raw_parts_mut(c_row, n);
-                    let b_slice = std::slice::from_raw_parts(b_row, n);
+                    let a_ik = *a_f.add(a_row_off + p);
+                    let b_row_off = b_batch_off + p * b_k_stride;
+                    let c_slice = std::slice::from_raw_parts_mut(c_f.add(c_row_off), n);
+                    let b_slice = std::slice::from_raw_parts(b_f.add(b_row_off), n);
                     crate::tensor_simd::axpy_slice(c_slice, a_ik, b_slice);
                 }
             }
             continue;
         }
+
+        // General strided / non-F32 path.
         for i in 0..m {
             for j in 0..n {
                 let mut acc = 0.0f32;
                 for p in 0..k {
-                    let av = load_f32_at(a_data, i * k + p, dtype);
-                    let bv = load_f32_at(b_data, p * n + j, dtype);
+                    let av =
+                        load_f32_at(a.data, a_batch_off + i * a_m_stride + p * a_k_stride, dtype);
+                    let bv =
+                        load_f32_at(b.data, b_batch_off + p * b_k_stride + j * b_n_stride, dtype);
                     acc += av * bv;
                 }
-                store_f32_at(c_data, i * n + j, dtype, acc);
+                store_f32_at(r.data, c_batch_off + i * n + j, dtype, acc);
             }
         }
     }
