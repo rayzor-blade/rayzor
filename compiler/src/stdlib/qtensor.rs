@@ -27,6 +27,8 @@ pub fn build_qtensor_types(builder: &mut MirBuilder) {
     build_qtensor_dequant(builder);
     build_qtensor_matmul_f32(builder);
     build_qtensor_matmul_xtq(builder);
+    build_qtensor_matmul_xtq_chunk(builder);
+    build_qtensor_matmul_xtq_threaded(builder);
     build_qtensor_free(builder);
 }
 
@@ -123,6 +125,35 @@ fn declare_qtensor_externs(builder: &mut MirBuilder) {
         .begin_function("rayzor_tensor_matmul_qt_t_f32")
         .param("x_tensor", i64_ty.clone())
         .param("qt", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // matmul_qt_t_f32_chunk: (x_tensor, qt, y_tensor, n_start, n_end) -> i64
+    // Fills rows [n_start, n_end) of y in-place. Used by NumaPool's
+    // parallelRows dispatch to thread the qmatmul over output features.
+    let func_id = builder
+        .begin_function("rayzor_tensor_matmul_qt_t_f32_chunk")
+        .param("x_tensor", i64_ty.clone())
+        .param("qt", i64_ty.clone())
+        .param("y_tensor", i64_ty.clone())
+        .param("n_start", i64_ty.clone())
+        .param("n_end", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // matmul_qt_t_f32_threaded: (x_tensor, qt, threads) -> i64
+    // Per-call fork-join via std::thread::scope. `threads = 0` picks
+    // a default; this is the practical threading path until
+    // NumaPool import cascade is fixed.
+    let func_id = builder
+        .begin_function("rayzor_tensor_matmul_qt_t_f32_threaded")
+        .param("x_tensor", i64_ty.clone())
+        .param("qt", i64_ty.clone())
+        .param("threads", i64_ty.clone())
         .returns(i64_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -384,6 +415,76 @@ fn build_qtensor_matmul_xtq(builder: &mut MirBuilder) {
         .expect("rayzor_tensor_matmul_qt_t_f32 not found");
     // Runtime fn order: (x_tensor, qt). Swap from Haxe's (qt, x).
     let result = builder.call(extern_id, vec![x, qt]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// QTensor_matmulXTQChunk(qt, x, y, n_start, n_end) -> i64
+///
+/// Fills rows `[n_start, n_end)` of a pre-allocated `y` tensor in
+/// place. The Haxe `NumaPool.parallelRows` dispatcher splits the row
+/// range across workers and calls this per chunk. Haxe receiver
+/// order is `(qt, x, y, n_start, n_end)`; the runtime takes
+/// `(x_tensor, qt, y_tensor, n_start, n_end)`.
+fn build_qtensor_matmul_xtq_chunk(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+
+    let func_id = builder
+        .begin_function("QTensor_matmulXTQChunk")
+        .param("qt", i64_ty.clone())
+        .param("x", i64_ty.clone())
+        .param("y", i64_ty.clone())
+        .param("n_start", i64_ty.clone())
+        .param("n_end", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let qt = builder.get_param(0);
+    let x = builder.get_param(1);
+    let y = builder.get_param(2);
+    let n_start = builder.get_param(3);
+    let n_end = builder.get_param(4);
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_matmul_qt_t_f32_chunk")
+        .expect("rayzor_tensor_matmul_qt_t_f32_chunk not found");
+    // Runtime fn order: (x_tensor, qt, y_tensor, n_start, n_end).
+    let result = builder
+        .call(extern_id, vec![x, qt, y, n_start, n_end])
+        .unwrap();
+    builder.ret(Some(result));
+}
+
+/// QTensor_matmulXTQThreaded(qt, x, threads) -> y where y = x @ qt.T.
+/// Per-call fork-join over output rows via std::thread::scope in the
+/// runtime. `threads = 0` picks an auto default.
+fn build_qtensor_matmul_xtq_threaded(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+
+    let func_id = builder
+        .begin_function("QTensor_matmulXTQThreaded")
+        .param("qt", i64_ty.clone())
+        .param("x", i64_ty.clone())
+        .param("threads", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let qt = builder.get_param(0);
+    let x = builder.get_param(1);
+    let threads = builder.get_param(2);
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_matmul_qt_t_f32_threaded")
+        .expect("rayzor_tensor_matmul_qt_t_f32_threaded not found");
+    // Runtime order: (x_tensor, qt, threads). Swap from Haxe receiver order.
+    let result = builder.call(extern_id, vec![x, qt, threads]).unwrap();
     builder.ret(Some(result));
 }
 

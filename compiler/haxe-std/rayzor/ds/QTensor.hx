@@ -111,6 +111,38 @@ extern class QTensor {
     @:native("tensor_matmul_qt_t_f32")
     public function matmulXTQ(x:Tensor):Tensor;
 
+    /**
+     * Threaded chunk variant: fills rows `[nStart, nEnd)` of a pre-
+     * allocated F32 result tensor `y[B, N]` with the same dot products
+     * `matmulXTQ` computes. Workers split disjoint `[nStart, nEnd)`
+     * ranges and write to non-overlapping columns of `y`, so no
+     * synchronisation is needed beyond the caller's fork-join barrier.
+     *
+     * Used by `rayzor.concurrent.NumaPool.parallelRows` to multi-thread
+     * the large projection matmuls (Q/K/V/O, FFN gate/up/down) without
+     * a hidden Rust thread pool.
+     *
+     * Returns 1 on success, 0 on shape mismatch / null input.
+     */
+    @:native("tensor_matmul_qt_t_f32_chunk")
+    public function matmulXTQChunk(x:Tensor, y:Tensor, nStart:Int, nEnd:Int):Int;
+
+    /**
+     * Threaded `y = x @ self.T`: per-call fork-join over output rows
+     * via `std::thread::scope` in the runtime. `threads = 0` picks a
+     * default (currently 6, sized for M1 Pro's 8 P-cores with
+     * headroom). Workers split disjoint output-row ranges; the join
+     * is implicit at the scope boundary, no pool outlives the call.
+     *
+     * This is the practical threading path while the Haxe-side
+     * `NumaPool` import currently triggers a JIT trap-stub cascade
+     * when imported from `nue.Linear`.
+     *
+     * Returns a fresh F32 `Tensor`; null on shape mismatch.
+     */
+    @:native("tensor_matmul_qt_t_f32_threaded")
+    public function matmulXTQThreaded(x:Tensor, threads:Int):Tensor;
+
     /** Free the quantised storage. */
     @:native("qtensor_free")
     public function free():Void;
