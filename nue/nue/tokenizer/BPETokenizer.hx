@@ -132,7 +132,10 @@ class BPETokenizer implements Tokenizer {
                 if (i > chunkStart) {
                     var sub = text.substr(chunkStart, i - chunkStart);
                     var subIds = encodeBPE(sub);
-                    for (id in subIds) ids.push(id);
+                    // Index iteration: `for (id in subIds)` desugars to
+                    // `haxe.iterators.ArrayIterator.new` which is trap-
+                    // stubbed in the current JIT and would SIGILL.
+                    for (kk in 0...subIds.length) ids.push(subIds[kk]);
                 }
                 ids.push(bestMatched);
                 i += bestLen;
@@ -144,7 +147,7 @@ class BPETokenizer implements Tokenizer {
         if (chunkStart < n) {
             var tail = text.substr(chunkStart, n - chunkStart);
             var tailIds = encodeBPE(tail);
-            for (id in tailIds) ids.push(id);
+            for (kk in 0...tailIds.length) ids.push(tailIds[kk]);
         }
         return ids;
     }
