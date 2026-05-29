@@ -1336,28 +1336,19 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
     let qh = qt_w;
     let yh = out_tensor;
 
-    // Bias the spawning thread toward the performance cores. On macOS
-    // the QoS class is inherited by threads spawned via `std::thread`,
-    // so a single call here propagates to every worker without a
-    // per-spawn syscall.
-    bias_to_performance_core();
-
-    let chunk = n.div_ceil(t);
-    std::thread::scope(|s| {
-        for w in 0..t {
-            let lo = w * chunk;
-            if lo >= n {
-                break;
-            }
-            let hi = (lo + chunk).min(n);
-            s.spawn(move || {
-                // SAFETY: each worker writes Y[*, lo..hi); ranges are
-                // disjoint, no aliasing across threads. X and Wq are
-                // read-only.
-                unsafe {
-                    qmatmul_chunk_impl(xh, qh, yh, lo as i64, hi as i64);
-                }
-            });
+    // Persistent worker pool eliminates the ~30 ms/token of per-call
+    // `std::thread::scope` spawn-and-join overhead we were paying with
+    // 112 Linears × 6 workers per token. The pool's `parallel_rows`
+    // enqueues `t` jobs into a condvar-backed shared queue and waits
+    // for `t` completion signals — single-digit µs of dispatch per call.
+    // The pool is process-wide, created on first use via OnceLock.
+    crate::worker_pool::global().parallel_rows(n, t, move |lo, hi| {
+        // SAFETY: each worker writes Y[*, lo..hi); ranges are disjoint
+        // across calls (the pool guarantees this for a single
+        // parallel_rows invocation) so there's no aliasing on Y. X
+        // and Wq are read-only.
+        unsafe {
+            qmatmul_chunk_impl(xh, qh, yh, lo as i64, hi as i64);
         }
     });
     out_tensor
