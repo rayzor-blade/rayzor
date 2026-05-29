@@ -433,9 +433,12 @@ struct Q8Block {
     quants: [i8; 256],
     /// F32 quantisation scale (`x[i] ≈ scale * quants[i]`).
     scale: f32,
-    /// Σ of `quants[s*32 .. (s+1)*32]` per sub-block (8 sub-blocks).
-    /// Used to fold the Q4_K_M min term out of the SDOT result.
+    /// Σ of `quants[s*32 .. (s+1)*32]` per Q4_K_M-style 32-elem
+    /// sub-block (8 entries). Used to fold the Q4_K_M min term.
     bsums: [i32; 8],
+    /// Σ of `quants[s*16 .. (s+1)*16]` per Q6_K-style 16-elem
+    /// sub-block (16 entries). Used to fold the Q6_K `-32` bias.
+    bsums_16: [i32; 16],
 }
 
 /// Quantise a 256-element span of `x` to INT8 with one F32 scale + the
@@ -484,6 +487,7 @@ unsafe fn quantize_x_block_q8(x: *const f32) -> Q8Block {
         quants: [0i8; 256],
         scale: 0.0,
         bsums: [0i32; 8],
+        bsums_16: [0i32; 16],
     };
 
     if max_abs == 0.0 {
@@ -493,17 +497,20 @@ unsafe fn quantize_x_block_q8(x: *const f32) -> Q8Block {
     block.scale = max_abs / 127.0;
     let inv_scale = 127.0 / max_abs;
 
-    // Pass 2: quantise, accumulate sub-block sums.
-    for s in 0..8 {
+    // Pass 2: quantise + accumulate per-16 sums; pair them up for
+    // the Q4_K_M per-32 sums.
+    for s16 in 0..16 {
         let mut sum: i32 = 0;
-        for j in 0..32 {
-            let v = *x.add(s * 32 + j) * inv_scale;
-            // Round-to-nearest, clamp.
+        for j in 0..16 {
+            let v = *x.add(s16 * 16 + j) * inv_scale;
             let q = v.round().clamp(-128.0, 127.0) as i8;
-            block.quants[s * 32 + j] = q;
+            block.quants[s16 * 16 + j] = q;
             sum += q as i32;
         }
-        block.bsums[s] = sum;
+        block.bsums_16[s16] = sum;
+    }
+    for s in 0..8 {
+        block.bsums[s] = block.bsums_16[2 * s] + block.bsums_16[2 * s + 1];
     }
     block
 }
@@ -609,6 +616,152 @@ unsafe fn dot_q4_k_q8(q4_block_ptr: *const u8, x_q8: &Q8Block) -> f32 {
 
         sum_term2 += sub_min_lo * x_q8.bsums[2 * p] as f32;
         sum_term2 += sub_min_hi * x_q8.bsums[2 * p + 1] as f32;
+    }
+
+    x_q8.scale * (sum_term1 - sum_term2)
+}
+
+/// Q6_K × Q8 dot product for one 256-element block.
+///
+/// Q6_K layout (210 bytes / super-block, mirrors `dequant_q6_k_block`):
+///   ql[128]     : lower 4 bits of each 6-bit quant
+///   qh[64]      : upper 2 bits of each 6-bit quant (4 quants / byte)
+///   scales[16]  : i8 per-sub-block scale (16 sub-blocks × 16 weights)
+///   d           : f16 super-block scale
+///
+/// Per-quant value = `d * scale_s * (q - 32)`, where `q ∈ [0, 63]`.
+///
+/// Math, mirroring the Q4_K SDOT trick:
+/// ```
+///   Σ x[i] * d * scale_s * (q[i] − 32)
+///     = d * scale_s * (Σ x[i] * q[i] − 32 * Σ x[i])
+///     = d * scale_s * x_scale * (sdot − 32 * bsum16_s)
+/// ```
+/// where `bsum16_s` is `Σ quants_int8[s*16 .. (s+1)*16]` from
+/// `Q8Block::bsums_16` (populated by `quantize_x_block_q8`).
+///
+/// Per `n in 0..2` half we read 32 ql + 16 qh bytes, build four
+/// 32-weight 6-bit spans, and split each into 16-lo + 16-hi SDOT
+/// pairs since each 16-weight Q6_K sub-block has its own scale.
+#[cfg(target_arch = "aarch64")]
+#[inline]
+unsafe fn dot_q6_k_q8(q6_block_ptr: *const u8, x_q8: &Q8Block) -> f32 {
+    use std::arch::aarch64::*;
+
+    let ql_ptr = q6_block_ptr;
+    let qh_ptr = q6_block_ptr.add(128);
+    let scales_ptr = q6_block_ptr.add(192) as *const i8;
+    let d_bits = std::ptr::read_unaligned(q6_block_ptr.add(208) as *const u16);
+    let d = half::f16::from_bits(d_bits).to_f32();
+
+    let mut sum_term1 = 0.0f32;
+    let mut sum_term2 = 0.0f32;
+
+    let mask_4bit = vdupq_n_u8(0x0F);
+
+    for n in 0..2 {
+        // Each half spans 128 weights in `out`, indexed
+        // out[out_off + l + j*32] for j in 0..4 and l in 0..32.
+        // Read 32 ql bytes + 32 qh bytes. (`qh` half is 32 bytes; we
+        // load it once but shift differently per j.)
+        let ql_off = n * 64;
+        let qh_off = n * 32;
+        let sc_off = n * 8;
+        let out_off = n * 128;
+
+        let ql0 = vld1q_u8(ql_ptr.add(ql_off));
+        let ql1 = vld1q_u8(ql_ptr.add(ql_off + 16));
+        let ql2 = vld1q_u8(ql_ptr.add(ql_off + 32));
+        let ql3 = vld1q_u8(ql_ptr.add(ql_off + 48));
+        let qh0 = vld1q_u8(qh_ptr.add(qh_off));
+        let qh1 = vld1q_u8(qh_ptr.add(qh_off + 16));
+
+        // Reconstruct the four 32-weight spans per half.
+        // For each l in 0..32 the dequant formula picks one of four
+        // ql / qh-shift combinations (see `dequant_q6_k_block`).
+        // `shift_amt` is the right-shift of `qh` before masking with 3.
+        let bsum_base = n * 8;
+        for j in 0..4 {
+            // (j, ql, qh-shift) layout, mirrors dequant_q6_k_block:
+            //   j=0: ql[ql_off + l]     low4, qh & 3                → out + l
+            //   j=1: ql[ql_off + l +32] low4, (qh >> 2) & 3         → out + l + 32
+            //   j=2: ql[ql_off + l]     high4, (qh >> 4) & 3        → out + l + 64
+            //   j=3: ql[ql_off + l +32] high4, (qh >> 6) & 3        → out + l + 96
+            let (ql_part0, ql_part1) = match j {
+                0 => (vandq_u8(ql0, mask_4bit), vandq_u8(ql1, mask_4bit)),
+                1 => (vandq_u8(ql2, mask_4bit), vandq_u8(ql3, mask_4bit)),
+                2 => (vshrq_n_u8::<4>(ql0), vshrq_n_u8::<4>(ql1)),
+                3 => (vshrq_n_u8::<4>(ql2), vshrq_n_u8::<4>(ql3)),
+                _ => unreachable!(),
+            };
+            let (qh_part0, qh_part1) = match j {
+                0 => (
+                    vandq_u8(qh0, vdupq_n_u8(0x03)),
+                    vandq_u8(qh1, vdupq_n_u8(0x03)),
+                ),
+                1 => (
+                    vandq_u8(vshrq_n_u8::<2>(qh0), vdupq_n_u8(0x03)),
+                    vandq_u8(vshrq_n_u8::<2>(qh1), vdupq_n_u8(0x03)),
+                ),
+                2 => (
+                    vandq_u8(vshrq_n_u8::<4>(qh0), vdupq_n_u8(0x03)),
+                    vandq_u8(vshrq_n_u8::<4>(qh1), vdupq_n_u8(0x03)),
+                ),
+                3 => (vshrq_n_u8::<6>(qh0), vshrq_n_u8::<6>(qh1)),
+                _ => unreachable!(),
+            };
+
+            // q = ql_part | (qh_part << 4), range [0, 63]. We keep it
+            // as u8 — SDOT interprets bits as signed, but with values
+            // in [0, 63] the high bit is zero so signed == unsigned.
+            // The −32 bias is folded out via the `bsums_16` correction
+            // below.
+            let q_lo16 = vreinterpretq_s8_u8(vorrq_u8(ql_part0, vshlq_n_u8::<4>(qh_part0)));
+            let q_hi16 = vreinterpretq_s8_u8(vorrq_u8(ql_part1, vshlq_n_u8::<4>(qh_part1)));
+
+            // 32 i8 of X for this 32-weight span.
+            let x_span_off = out_off + j * 32;
+            let x_lo = vld1q_s8(x_q8.quants.as_ptr().add(x_span_off));
+            let x_hi = vld1q_s8(x_q8.quants.as_ptr().add(x_span_off + 16));
+
+            // SDOT each 16-weight half against its sub-block scale.
+            let mut acc_lo = vdupq_n_s32(0);
+            acc_lo = vdotq_s32(acc_lo, x_lo, q_lo16);
+            let sdot_lo = vaddvq_s32(acc_lo) as f32;
+            let mut acc_hi = vdupq_n_s32(0);
+            acc_hi = vdotq_s32(acc_hi, x_hi, q_hi16);
+            let sdot_hi = vaddvq_s32(acc_hi) as f32;
+
+            // The 32-weight span splits across two 16-elem Q6_K sub-
+            // blocks with separate scales — the existing `scales[]`
+            // array indexes sc_off + 2*j (lo half) and sc_off + 2*j+1
+            // (hi half) for the first 32 weights of this `n`-half;
+            // and sc_off + 2*j + 1 / sc_off + 2*j  for the four spans
+            // collectively cover sub-blocks sc_off+0..sc_off+8.
+            // To match `dequant_q6_k_block`'s scale picks, the lookup
+            // is `sc_off + 2*j + (l/16)`.
+            let scale_lo = *scales_ptr.add(sc_off + 2 * j) as f32;
+            let scale_hi = *scales_ptr.add(sc_off + 2 * j + 1) as f32;
+            let d_sc_lo = d * scale_lo;
+            let d_sc_hi = d * scale_hi;
+
+            sum_term1 += d_sc_lo * sdot_lo;
+            sum_term1 += d_sc_hi * sdot_hi;
+
+            // bsums_16 is indexed by 16-elem sub-block of X. The two
+            // halves of this 32-weight span use bsums_16[bsum_base +
+            // 2*j] (lo) and bsums_16[bsum_base + 2*j + 1] (hi). The
+            // outer base offset is the first 16-block in this n-half:
+            //   bsum_16 index = x_span_off / 16
+            let bsum_lo = x_q8.bsums_16[(x_span_off / 16)] as f32;
+            let bsum_hi = x_q8.bsums_16[(x_span_off / 16) + 1] as f32;
+            // Suppress the warning even though bsum_base is the
+            // sub-block-pair start — the index above already encodes it.
+            let _ = bsum_base;
+
+            sum_term2 += 32.0 * d_sc_lo * bsum_lo;
+            sum_term2 += 32.0 * d_sc_hi * bsum_hi;
+        }
     }
 
     x_q8.scale * (sum_term1 - sum_term2)
@@ -1379,15 +1532,19 @@ unsafe fn qmatmul_chunk_impl(
     // Each chunk call reuses the same X across every `n_idx` in
     // `[lo, hi)`, so quantising it once amortises across the whole
     // chunk. Populated on the first use of each block index.
+    #[cfg(target_arch = "aarch64")]
+    let use_sdot = sdot_enabled() && batch == 1 && x_contig && qt.scheme == QSCHEME_Q4_K_M;
     let mut x_q8_cache: Vec<Q8Block> = Vec::new();
     let mut x_q8_init: Vec<bool> = Vec::new();
-    if cfg!(target_arch = "aarch64") && batch == 1 && x_contig && qt.scheme == QSCHEME_Q4_K_M {
+    #[cfg(target_arch = "aarch64")]
+    if use_sdot {
         x_q8_cache.reserve_exact(blocks_per_row);
         for _ in 0..blocks_per_row {
             x_q8_cache.push(Q8Block {
                 quants: [0i8; 256],
                 scale: 0.0,
                 bsums: [0i32; 8],
+                bsums_16: [0i32; 16],
             });
         }
         x_q8_init = vec![false; blocks_per_row];
@@ -1402,8 +1559,6 @@ unsafe fn qmatmul_chunk_impl(
             // is set; the F32 path remains the default until A/B
             // measurement shows SDOT wins on this hardware.
             let mut sum = 0.0f32;
-            #[cfg(target_arch = "aarch64")]
-            let use_sdot = sdot_enabled();
             for b_idx in 0..blocks_per_row {
                 let bp = row_ptr.add(b_idx * block_bytes);
                 match qt.scheme {
@@ -1428,6 +1583,14 @@ unsafe fn qmatmul_chunk_impl(
                         sum += dot_f32_simd(x_chunk, &stage);
                     }
                     QSCHEME_Q6_K => {
+                        // Q6_K SDOT was tried (see git history at
+                        // "perf(qmatmul): SDOT...Q6_K") and measured no
+                        // wall-time improvement on M1 Pro — the per-block
+                        // reconstruction overhead (4 shift/mask pairs per
+                        // 16-weight span) eats the SDOT density win at
+                        // this batch size. Keeping the F32 dequant + dot
+                        // here until we have a 2x2 tile that processes
+                        // multiple Q6_K blocks per X load.
                         dequant_q6_k_block(bp, &mut stage);
                         let x_chunk = std::slice::from_raw_parts(
                             x_data.add(b_idx * block_size),
