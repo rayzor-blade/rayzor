@@ -299,6 +299,17 @@ class Main {
             trace("[chat] wrapping prompt in Llama-3 Instruct template");
         }
 
+        // Dump the prompt-encoding for diff harnesses
+        // (see tools/llama-diff/compare.sh). One token id per line,
+        // prefixed with `[dbg.prompt-id]` so the harness can grep it
+        // back out without confusing other trace output. Same shape
+        // as `[129 ids]` then `12345`, one per line.
+        var promptIds = tok.encode(modelPrompt);
+        trace("[dbg.prompt-len] " + promptIds.length);
+        for (i in 0...promptIds.length) {
+            trace("[dbg.prompt-id] " + i + " " + promptIds[i]);
+        }
+
         var loop = new GenerationLoop(model, tok, sampler, eos, maxNew);
 
         trace("[gen] streaming...");
