@@ -83,13 +83,16 @@ class GGUFLoader implements ModelLoader {
      * Cheaper than calling `load(path)` + `tokenizer(path)` separately
      * (which would parse the header twice).
      */
-    public function loadWithTokenizer(path:String):LoadedModel {
+    public function loadWithTokenizer(path:String, maxCtx:Int = 0):LoadedModel {
         trace("[lwt] 1");
         var bytes = File.getBytes(path);
         trace("[lwt] 2");
         var reader = new GGUFReader(bytes);
         trace("[lwt] 3");
         var meta = metadataFromReader(reader);
+        if (maxCtx > 0 && maxCtx < meta.maxSeqLen) {
+            meta.maxSeqLen = maxCtx;
+        }
         trace("[lwt] 4");
         var weights = tensorsFromReader(reader);
         trace("[lwt] 5");
@@ -168,23 +171,20 @@ class GGUFLoader implements ModelLoader {
         result:NamedTensorMap, raw:haxe.io.Bytes, info:GGUFReader.TensorInfo
     ):Void {
         switch (info.dtype) {
-            case 0: // F32
-                var nElem = 1;
-                for (d in info.dims) nElem *= d;
-                var floats:Array<Float> = [];
-                var pos = 0;
-                for (_ in 0...nElem) {
-                    floats.push(raw.getFloat(pos));
-                    pos += 4;
-                }
-                var t = Tensor.fromArray(floats, F32).reshape(info.dims);
-                result.set(info.name, t);
+            case 0: // F32 — memcpy bytes directly into a fresh F32 tensor.
+                    // Avoids the `Array<Float>.push` precision-loss bug
+                    // (boxes via i64) when crossing the runtime boundary.
+                result.set(info.name, Tensor.fromBytesF32(raw, info.dims));
             case 1: // F16
                 result.set(info.name, Tensor.fromBytesF16(raw, info.dims));
             case 8: // Q8_0
                 result.set(info.name, Tensor.fromBytesQ8_0(raw, info.dims));
-            case 12, 14: // Q4_K / Q4_K_M — Phase 4b: keep compressed.
+            case 12: // Q4_K — 144-byte super-blocks; the dominant Q4_K_M weight scheme.
                 result.setQuant(info.name, decodeQ4KMRaw(raw, info));
+            case 14: // Q6_K — 210-byte super-blocks. Used in Q4_K_M variants for
+                     // token_embd, attn_v, and ffn_down (where K_M means "mixed":
+                     // some weights get Q6_K to preserve accuracy).
+                result.setQuant(info.name, decodeQ6KRaw(raw, info));
             case _:
                 throw "GGUFLoader: GGML dtype " + info.dtype + " not implemented (tensor '" + info.name + "').";
         }
@@ -201,6 +201,22 @@ class GGUFLoader implements ModelLoader {
         var qt = QTensor.fromBytesQ4KM(raw, rows, cols);
         if (qt == null) {
             throw "GGUFLoader: QTensor.fromBytesQ4KM returned null for '"
+                + info.name + "' (rows=" + rows + ", cols=" + cols + ").";
+        }
+        return qt;
+    }
+
+    /** Same as `decodeQ4KMRaw` but for Q6_K (GGUF dtype 14) — 210-byte
+     *  super-blocks of 256 weights. Used for token_embd, attn_v, and
+     *  ffn_down in `Q4_K_M` variant GGUFs (the "M" / "mixed" suffix
+     *  promotes accuracy-sensitive weights from Q4_K up to Q6_K). */
+    private static function decodeQ6KRaw(raw:haxe.io.Bytes, info:GGUFReader.TensorInfo):QTensor {
+        var rows = info.dims[info.dims.length - 1];
+        var cols = 1;
+        for (i in 0...info.dims.length - 1) cols *= info.dims[i];
+        var qt = QTensor.fromBytesQ6K(raw, rows, cols);
+        if (qt == null) {
+            throw "GGUFLoader: QTensor.fromBytesQ6K returned null for '"
                 + info.name + "' (rows=" + rows + ", cols=" + cols + ").";
         }
         return qt;
