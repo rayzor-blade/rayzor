@@ -1,8 +1,60 @@
 import nue.loader.GGUFLoader;
 import nue.sampling.ArgmaxSampler;
+import nue.sampling.Sampler;
 import nue.sampling.GenerationLoop;
 import nue.tokenizer.Tokenizer;
 import nue.CausalLanguageModel;
+import rayzor.ds.Tensor;
+
+/**
+ * Local temperature sampler. Lifted out of `nue.sampling.TemperatureSampler`
+ * to dodge a current JIT issue: importing that class causes a trap-stub
+ * cascade in unrelated functions even when nothing instantiates it.
+ * Under investigation; meanwhile this inline copy gets the demo
+ * working with temperature-controlled sampling.
+ */
+class LocalTempSampler implements Sampler {
+    public var temperature:Float;
+    private var state:Int;
+
+    public function new(temperature:Float, seed:Int) {
+        this.temperature = temperature;
+        this.state = seed;
+    }
+
+    public function sample(logits:Tensor):Int {
+        var shape = logits.shape();
+        var n = shape[shape.length - 1];
+        var t = (temperature <= 0.0) ? 0.00000001 : temperature;
+
+        var maxLogit = logits.get([0]);
+        for (i in 1...n) {
+            var v = logits.get([i]);
+            if (v > maxLogit) maxLogit = v;
+        }
+
+        // Two-pass: accumulate `total` while computing exp(logit/t)
+        // on the fly the SECOND time. Skips the Array<Float> buffer
+        // entirely so we don't trip any precision/JIT bugs.
+        var total = 0.0;
+        for (i in 0...n) {
+            total += Math.exp((logits.get([i]) - maxLogit) / t);
+        }
+
+        var r = nextFloat() * total;
+        var acc = 0.0;
+        for (i in 0...n) {
+            acc += Math.exp((logits.get([i]) - maxLogit) / t);
+            if (r <= acc) return i;
+        }
+        return n - 1;
+    }
+
+    private function nextFloat():Float {
+        state = (state * 1664525 + 1013904223) & 0x7FFFFFFF;
+        return state / 2147483648.0;
+    }
+}
 
 /**
  * Phase 9 demo — load a real GGUF off disk, build the model + tokenizer,
@@ -38,7 +90,7 @@ class Main {
     static function main() {
         var args = Sys.args();
         if (args.length < 1) {
-            Sys.println("usage: rayzor run Main.hx -- <model.gguf> [prompt] [max_tokens] [ctx]");
+            Sys.println("usage: rayzor run Main.hx -- <model.gguf> [prompt] [max_tokens] [ctx] [temperature]");
             Sys.exit(1);
         }
         var path = args[0];
@@ -59,12 +111,23 @@ class Main {
             var unboxed = ctxRaw + 0;
             if (unboxed > 0) ctx = unboxed;
         }
+        // Temperature for sampling. 0.0 → greedy (Argmax). 0.7 → standard
+        // chat preset. Higher = more random. Default 0.0 keeps the run
+        // deterministic; pass a non-zero value to break greedy loops.
+        var temperature:Float = 0.0;
+        if (args.length > 4) {
+            var parsed = Std.parseFloat(args[4]);
+            // Guard against NaN by comparing against itself (only NaN
+            // != NaN). Negative temps clamp to 0 (greedy).
+            if (parsed == parsed && parsed >= 0.0) temperature = parsed;
+        }
 
         trace("=== nue llama-chat ===");
         trace("model:  " + path);
         trace("prompt: \"" + prompt + "\"");
         trace("max:    " + maxNew + " tokens");
         trace("ctx:    " + ctx + " tokens");
+        trace("temp:   " + temperature);
         trace("");
 
         // One open of the file: header + tensor index parsed once,
@@ -98,14 +161,18 @@ class Main {
         trace("[tok]  eos=" + eos);
         trace("");
 
-        // Argmax (greedy) sampling. Top-P/Top-K would be the standard
-        // chat preset but `TopPSampler`'s insertion sort is O(n²) over
-        // the full vocab (128k tokens for Llama 3) and burns minutes
-        // per token here; landing a partial-sort variant is the natural
-        // follow-up. Greedy + chat template avoids the repetition loop
-        // that plain greedy hits because the template gives the model
-        // a clear EOS condition.
-        var sampler = new ArgmaxSampler();
+        // Sampler choice:
+        //   temp = 0.0 → Argmax (deterministic, greedy).
+        //   temp > 0.0 → TemperatureSampler with softmax + multinomial
+        //     draw. O(n) per token over the full vocab — TopP/TopK
+        //     would add a sort over 128k tokens (Llama 3 vocab) which
+        //     burns minutes per token until a partial-sort variant
+        //     lands. Plain temperature scaling is the fast knob for
+        //     breaking greedy-loop repetitions while keeping per-token
+        //     cost in the same ballpark as argmax.
+        var sampler:Sampler = (temperature > 0.0)
+            ? new LocalTempSampler(temperature, 42)
+            : new ArgmaxSampler();
 
         // Instruct models behave best when the prompt is wrapped in the
         // model's chat template. Llama-3 uses
