@@ -1681,19 +1681,22 @@ pub unsafe extern "C" fn rayzor_tensor_rope(
                 let cos_v = load_f32_at(cos.data, pos * half + i, cos.dtype);
                 let sin_v = load_f32_at(sin.data, pos * half + i, sin.dtype);
                 let base = s * elements_per_row + h * elements_per_head;
-                // Llama 3 (and most modern LLMs — Mistral, Qwen, Phi…) use
-                // *half-split* RoPE: dim `i` pairs with dim `i + half`.
-                // The older "interleaved" convention pairs (x[2i], x[2i+1])
-                // and is what HF Falcon / some GPT variants use. We had the
-                // interleaved layout; this caused Llama 3's Q and K to rotate
-                // along the wrong pairs of axes, producing attention scores
-                // that didn't correlate prompt and prediction. Symptom: model
-                // sampled near-uniform low-id tokens (byte-fallback territory)
-                // regardless of prompt content. See llama.cpp ggml_rope_impl
-                // and HF `transformers/models/llama/modeling_llama.py`
-                // (`rotate_half`).
-                let off_lo = base + i;
-                let off_hi = base + i + half;
+                // GGUF Llama models use the *interleaved* RoPE convention
+                // (llama.cpp's GGML_ROPE_TYPE_NORMAL = 0): consecutive
+                // dimensions are paired (x[2i], x[2i+1]). The HF
+                // `transformers/models/llama/modeling_llama.py::rotate_half`
+                // path is half-split (x[i], x[i+half]), but the
+                // HF-to-GGUF converter permutes the Q/K weight matrices
+                // so the GGUF weights work with the interleaved layout
+                // — i.e. the model file already bakes in the convention
+                // it expects. Loading those weights and applying half-
+                // split RoPE rotates along the wrong pairs of dims, which
+                // shows up as a 78% relative error on `Qcur-rope.sum()`
+                // vs the llama.cpp reference and a degenerate downstream
+                // attention pattern. See ggml-cpu/ops.cpp `ggml_compute_forward_rope`
+                // and the `rope type = 0` print_info in `llama-eval-callback -lv 4`.
+                let off_lo = base + 2 * i;
+                let off_hi = base + 2 * i + 1;
                 let xlo = load_f32_at(x.data, off_lo, x.dtype);
                 let xhi = load_f32_at(x.data, off_hi, x.dtype);
                 store_f32_at(r.data, off_lo, x.dtype, xlo * cos_v - xhi * sin_v);
