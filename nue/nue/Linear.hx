@@ -2,6 +2,7 @@ package nue;
 
 import rayzor.ds.Tensor;
 import rayzor.ds.QTensor;
+import rayzor.ds.DType;
 
 /**
  * Standard linear (matmul + optional bias) layer used by every transformer
@@ -50,6 +51,11 @@ class Linear implements Module {
      * sentinel to keep the class layout stable (see class doc).
      */
     public static function fromQuant(qweight:QTensor, ?bias:Tensor, paramName:String = "weight"):Linear {
+        // Bare `F32` — TAST enum-variant disambiguation picks DType.F32 because
+        // Tensor.zeros's dtype param is typed as DType. Before the disambiguation
+        // landed, scope-walk could land on MetaValue.F32 (different enum, same
+        // simple name) and silently pass a pointer to dtype. See
+        // bugs_dtype_enum_cross_file_pointer.
         var sentinel = Tensor.zeros([1, 1], F32);
         var l = new Linear(sentinel, bias, paramName);
         l.qweight = qweight;

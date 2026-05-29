@@ -143,6 +143,8 @@ class GQAttention implements Module {
         var seqK = s[0];
         var headDimV = s[2];
         var group = Std.int(numQHeads / numKvHeads);
+        // Bare `F32` — TAST enum-variant disambiguation picks DType.F32 because
+        // Tensor.zeros's dtype param is typed as DType.
         var out = Tensor.zeros([numQHeads, seqK, headDimV], F32);
         for (qh in 0...numQHeads) {
             var kvh = Std.int(qh / group);

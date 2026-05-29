@@ -187,11 +187,11 @@ class GGUFReader {
         var nElem = 1;
         for (d in info.dims) nElem *= d;
         return switch (info.dtype) {
-            case 0: nElem * 4;
-            case 1: nElem * 2;
-            case 8: nElem + Std.int(nElem / 32) * 2;
-            case 12: blockedSize(nElem, 32, 18);
-            case 14: blockedSize(nElem, 256, 144);
+            case 0: nElem * 4;       // F32
+            case 1: nElem * 2;       // F16
+            case 8: nElem + Std.int(nElem / 32) * 2;   // Q8_0
+            case 12: blockedSize(nElem, 256, 144);     // Q4_K — 144-byte super-blocks
+            case 14: blockedSize(nElem, 256, 210);     // Q6_K — 210-byte super-blocks
             case _: throw "GGUFReader: byte-size for dtype " + info.dtype + " not implemented";
         };
     }
