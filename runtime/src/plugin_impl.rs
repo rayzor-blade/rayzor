@@ -201,6 +201,10 @@ register_symbol!(
     "haxe_array_to_string",
     crate::haxe_array::haxe_array_to_string
 );
+register_symbol!(
+    "haxe_array_to_string_f64",
+    crate::haxe_array::haxe_array_to_string_f64
+);
 
 // Higher-order methods
 register_symbol!("haxe_array_map", crate::haxe_array::haxe_array_map);
@@ -1733,6 +1737,10 @@ register_symbol!(
     crate::tensor::rayzor_tensor_from_bytes_f16
 );
 register_symbol!(
+    "rayzor_tensor_from_bytes_f32",
+    crate::tensor::rayzor_tensor_from_bytes_f32
+);
+register_symbol!(
     "rayzor_tensor_from_bytes_q8_0",
     crate::tensor::rayzor_tensor_from_bytes_q8_0
 );
@@ -1873,6 +1881,10 @@ register_symbol!(
 register_symbol!(
     "rayzor_qtensor_from_bytes_q4_k_m",
     crate::quant::rayzor_qtensor_from_bytes_q4_k_m
+);
+register_symbol!(
+    "rayzor_qtensor_from_bytes_q6_k",
+    crate::quant::rayzor_qtensor_from_bytes_q6_k
 );
 register_symbol!("rayzor_qtensor_rows", crate::quant::rayzor_qtensor_rows);
 register_symbol!("rayzor_qtensor_cols", crate::quant::rayzor_qtensor_cols);

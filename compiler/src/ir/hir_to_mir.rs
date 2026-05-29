@@ -9456,6 +9456,43 @@ impl<'a> HirToMirContext<'a> {
                                 .interface_method_names
                                 .get(&iface_sym)
                                 .and_then(|names| names.iter().position(|n| *n == method_name_i));
+                            {
+                                use std::io::Write;
+                                let mn = self
+                                    .string_interner
+                                    .get(method_name_i)
+                                    .unwrap_or("?")
+                                    .to_string();
+                                let iname = self
+                                    .symbol_table
+                                    .get_symbol(iface_sym)
+                                    .and_then(|s| s.qualified_name)
+                                    .and_then(|n| self.string_interner.get(n))
+                                    .unwrap_or("?")
+                                    .to_string();
+                                let names_list =
+                                    self.interface_method_names.get(&iface_sym).map(|v| {
+                                        v.iter()
+                                            .filter_map(|n| self.string_interner.get(*n))
+                                            .collect::<Vec<_>>()
+                                            .join(",")
+                                    });
+                                let _ = std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open("/tmp/rayzor_diag.log")
+                                    .and_then(|mut f| {
+                                        writeln!(
+                                            f,
+                                            "[disp] mod={} iface={} method={} idx={:?} names={:?}",
+                                            self.builder.module.name,
+                                            iname,
+                                            mn,
+                                            method_index,
+                                            names_list
+                                        )
+                                    });
+                            }
 
                             if let Some(idx) = method_index {
                                 // Lower the object (fat pointer)
@@ -10430,6 +10467,24 @@ impl<'a> HirToMirContext<'a> {
                                                     IrType::U64,
                                                     IrType::Bool,
                                                 ),
+                                                // F64/F32: bitcast raw u64 bits back to float.
+                                                // Map<K,Float>.get stores f64 bits as u64; this
+                                                // reverses the set-side bitcast so reads return
+                                                // the original f64 value (was returning u64 bits
+                                                // mis-interpreted as a giant int).
+                                                IrType::F64 => {
+                                                    self.builder.build_bitcast(raw_reg, IrType::F64)
+                                                }
+                                                IrType::F32 => {
+                                                    let f64v = self
+                                                        .builder
+                                                        .build_bitcast(raw_reg, IrType::F64)?;
+                                                    self.builder.build_cast(
+                                                        f64v,
+                                                        IrType::F64,
+                                                        IrType::F32,
+                                                    )
+                                                }
                                                 _ => Some(raw_reg),
                                             };
                                         }
@@ -12583,7 +12638,29 @@ impl<'a> HirToMirContext<'a> {
                                             }
                                         })
                                     };
-                                    let final_result = match &result_type {
+                                    // When the HIR result_type is opaque (Any/I64/Ptr<U8>) because
+                                    // the Haxe surface declares `Null<V>` for Map.get, the *real*
+                                    // value type is `resolved_value_ty` (V from receiver's type
+                                    // args). For F64/F32 V, bitcast the raw u64 bits directly to
+                                    // float rather than try to unbox a DynamicValue (the runtime
+                                    // stores raw bits, not a heap-boxed value, so the unbox path
+                                    // would mis-interpret the bytes).
+                                    let result_is_opaque = match &result_type {
+                                        IrType::Any | IrType::I64 => true,
+                                        IrType::Ptr(inner) => {
+                                            matches!(**inner, IrType::U8 | IrType::Void)
+                                        }
+                                        _ => false,
+                                    };
+                                    let effective_ty = match resolved_value_ty.as_ref() {
+                                        Some(rty @ (IrType::F64 | IrType::F32))
+                                            if result_is_opaque =>
+                                        {
+                                            rty.clone()
+                                        }
+                                        _ => result_type.clone(),
+                                    };
+                                    let final_result = match &effective_ty {
                                         IrType::I32 => self.builder.build_cast(
                                             call_result,
                                             IrType::U64,
@@ -23830,8 +23907,30 @@ impl<'a> HirToMirContext<'a> {
         // passed a Ptr-typed register where U64 was expected and
         // Cranelift's calling convention dropped or extended bits.
         if matches!(expected_ty, IrType::U64) {
-            if matches!(actual_ty, IrType::Ptr(_)) {
-                return self.builder.build_bitcast(value, IrType::U64);
+            match actual_ty {
+                IrType::Ptr(_) => {
+                    return self.builder.build_bitcast(value, IrType::U64);
+                }
+                IrType::F64 => {
+                    // f64 bits → u64 raw bits. The Map runtime stores raw u64;
+                    // reads back via the corresponding F64 typed `get` reverse
+                    // the bitcast. Without this, Map<K,Float>.set wrote zeros.
+                    return self.builder.build_bitcast(value, IrType::U64);
+                }
+                IrType::F32 => {
+                    // Promote f32 → f64 (so we have 8 bytes) then bitcast.
+                    let promoted = self.builder.build_cast(value, IrType::F32, IrType::F64)?;
+                    return self.builder.build_bitcast(promoted, IrType::U64);
+                }
+                IrType::I32 => {
+                    // Zero-extend i32 → i64 → u64 bits.
+                    let extended = self.builder.build_cast(value, IrType::I32, IrType::I64)?;
+                    return self.builder.build_bitcast(extended, IrType::U64);
+                }
+                IrType::I64 => {
+                    return self.builder.build_bitcast(value, IrType::U64);
+                }
+                _ => {}
             }
         }
 
@@ -23932,6 +24031,17 @@ impl<'a> HirToMirContext<'a> {
             // Without this, the I64 gets bitcast to F64 when passed as Float.
             if matches!(actual_ty, IrType::I64) && matches!(expected_ty, IrType::I32) {
                 return self.builder.build_cast(value, IrType::I64, IrType::I32);
+            }
+            // Map<K,Float>.get / .iterator and other raw-u64 returners hand back
+            // an 8-byte bit pattern. When the caller expects Float, reinterpret
+            // those bits as f64. Without this, `m.get("pi")` returns the u64
+            // pattern of π (a giant integer) instead of 3.14159265.
+            if matches!(actual_ty, IrType::U64) && matches!(expected_ty, IrType::F64) {
+                return self.builder.build_bitcast(value, IrType::F64);
+            }
+            if matches!(actual_ty, IrType::U64) && matches!(expected_ty, IrType::F32) {
+                let f64v = self.builder.build_bitcast(value, IrType::F64)?;
+                return self.builder.build_cast(f64v, IrType::F64, IrType::F32);
             }
             return Some(value);
         }

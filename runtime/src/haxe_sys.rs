@@ -309,6 +309,27 @@ pub(crate) fn format_array_slot_for_string(val: i64) -> String {
     format_array_slot(val)
 }
 
+/// Format an f64 for Std.string-style output. Matches Haxe's `Std.string`
+/// convention: integers show as integers (`3` not `3.0`), `-0.0` shows as
+/// `0`, and everything else uses Haxe's standard f64 printer.
+pub(crate) fn format_f64_for_string(v: f64) -> String {
+    if v.is_nan() {
+        return "NaN".to_string();
+    }
+    if v.is_infinite() {
+        return if v > 0.0 {
+            "Infinity".to_string()
+        } else {
+            "-Infinity".to_string()
+        };
+    }
+    // Integer-valued floats print without a fractional part (Haxe convention).
+    if v.fract() == 0.0 && v.abs() < 1e16 {
+        return (v as i64).to_string();
+    }
+    format!("{}", v)
+}
+
 fn format_array_slot(val: i64) -> String {
     // Null pointer (or integer 0) — for heterogeneous-array slots this
     // came from a `null` literal that the compiler stored as a raw
@@ -327,6 +348,23 @@ fn format_array_slot(val: i64) -> String {
     }
 
     let uval = val as u64;
+
+    // F64 plausibility check (run BEFORE the pointer-alignment gate).
+    // `Array<Float>` storing 3.14 has bit pattern 0x400921FB54442D1F whose
+    // low 3 bits are 0b111 — the pointer-alignment heuristic below would
+    // misclassify it as a raw int. But heap pointers (user-space range
+    // 4 GiB..16 TiB), reinterpreted as f64, give subnormal values
+    // ~10⁻³⁰⁸ — far below this window — so a value that decodes to a
+    // human-scale finite f64 (1e-10..1e15) is almost certainly the
+    // float a user put there, not a pointer the heuristic should keep
+    // chasing.
+    {
+        let as_f64 = f64::from_bits(uval);
+        let abs = as_f64.abs();
+        if as_f64.is_finite() && (1e-10..=1e15).contains(&abs) {
+            return format_f64_for_string(as_f64);
+        }
+    }
 
     // Pointer alignment heuristic. `DynamicValue` is `repr(C)` over a
     // `u32` and a `*mut u8`, so it must be at least 8-byte aligned on
@@ -3032,10 +3070,11 @@ pub extern "C" fn haxe_bytes_set(bytes: *mut HaxeBytes, pos: i32, value: i32) {
 /// Get a sub-range as a zero-copy view.
 /// bytes.sub(pos: Int, len: Int): Bytes
 ///
-/// The returned `HaxeBytes` aliases the original buffer (`ptr = orig.ptr
-/// + pos`, no copy). It bumps the owner's refcount so the underlying
-/// allocation / mmap stays alive as long as the view does; `haxe_bytes_free`
-/// on the view will decrement and only release the owner at refcount 0.
+/// The returned `HaxeBytes` aliases the original buffer
+/// (`ptr = orig.ptr + pos`, no copy). It bumps the owner's refcount so
+/// the underlying allocation / mmap stays alive as long as the view does;
+/// `haxe_bytes_free` on the view will decrement and only release the owner
+/// at refcount 0.
 ///
 /// This matters because GGUF loading does `bytes.sub(offset, size)` per
 /// tensor — turning a 4.9 GB model file into 300+ slices used to allocate
@@ -3267,10 +3306,16 @@ pub extern "C" fn haxe_bytes_get_int64(bytes: *const HaxeBytes, pos: i32) -> i64
     }
 }
 
-/// Get 32-bit float (little-endian)
-/// bytes.getFloat(pos: Int): Float
+/// Get 32-bit float (little-endian), promoted to Haxe `Float` (f64).
+///
+/// Haxe's `Bytes.getFloat(pos): Float` semantically reads a 32-bit IEEE-754
+/// float and returns it as a `Float` (f64). The Rust impl must do the
+/// f32→f64 promotion before returning, otherwise the calling convention
+/// reads the f32 bits as an f64 and the bytes' exponent area falls into
+/// f64's subnormal range — every value becomes ~2e-310. This broke
+/// GGUF F32-tensor loading (RMSNorm gains, RoPE frequencies) silently.
 #[no_mangle]
-pub extern "C" fn haxe_bytes_get_float(bytes: *const HaxeBytes, pos: i32) -> f32 {
+pub extern "C" fn haxe_bytes_get_float(bytes: *const HaxeBytes, pos: i32) -> f64 {
     if bytes.is_null() || pos < 0 {
         return 0.0;
     }
@@ -3281,7 +3326,7 @@ pub extern "C" fn haxe_bytes_get_float(bytes: *const HaxeBytes, pos: i32) -> f32
             return 0.0;
         }
         let ptr = b.ptr.add(pos) as *const u32;
-        f32::from_bits(u32::from_le(std::ptr::read_unaligned(ptr)))
+        f32::from_bits(u32::from_le(std::ptr::read_unaligned(ptr))) as f64
     }
 }
 
