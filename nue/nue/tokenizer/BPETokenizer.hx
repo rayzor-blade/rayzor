@@ -185,29 +185,62 @@ class BPETokenizer implements Tokenizer {
     }
 
     /**
-     * Inverse byte alphabet: walk the concatenated decoded string char
-     * by char, translate each codepoint back to its source byte, then
+     * Inverse byte alphabet: walk the input as UTF-8, decode codepoints,
+     * translate each codepoint back to its source byte via `rev`, then
      * reinterpret the byte sequence as UTF-8.
      *
-     * Uses an array-of-int reverse table (size 0x144 = U+0143 max) for
-     * O(1) lookup. Bytes go into an allocated `Bytes` then `toString`
-     * reinterprets them as UTF-8.
+     * CRITICAL: must walk UTF-8 codepoints, NOT raw bytes. Rayzor's
+     * `String.charCodeAt(i)` returns the i-th BYTE (Strings are byte-
+     * indexed); a naive per-char walk would split `Ġ` (UTF-8 `c4 a0`)
+     * into separate `0xC4` and `0xA0` codes. `rev[0xC4]` self-maps to
+     * byte 0xC4, `rev[0xA0]` is -1 → fallback writes `c2 a0`, producing
+     * invalid UTF-8 (`c4 c2`) → `Bytes.toString` emits `�`. The fix is
+     * to combine multi-byte UTF-8 sequences into a single codepoint
+     * before the reverse lookup.
      */
     static function byteDecode(s:String):String {
         if (s == null || s.length == 0) return "";
         var rev = byteDecoderArray();
         var n = s.length;
-        // Worst case: each input char is a 3-byte UTF-8 unknown that
+        // Worst case: each codepoint is a 4-byte UTF-8 unknown that
         // we pass through as raw codepoint bytes.
-        var buf = haxe.io.Bytes.alloc(n * 3);
+        var buf = haxe.io.Bytes.alloc(n * 4);
         var pos = 0;
-        for (i in 0...n) {
-            var code = s.charCodeAt(i);
+        var i = 0;
+        while (i < n) {
+            var b0 = s.charCodeAt(i);
+            var code:Int;
+            var consumed:Int;
+            if (b0 < 0x80) {
+                code = b0;
+                consumed = 1;
+            } else if ((b0 & 0xE0) == 0xC0 && i + 1 < n) {
+                var b1 = s.charCodeAt(i + 1);
+                code = ((b0 & 0x1F) << 6) | (b1 & 0x3F);
+                consumed = 2;
+            } else if ((b0 & 0xF0) == 0xE0 && i + 2 < n) {
+                var b1 = s.charCodeAt(i + 1);
+                var b2 = s.charCodeAt(i + 2);
+                code = ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F);
+                consumed = 3;
+            } else if ((b0 & 0xF8) == 0xF0 && i + 3 < n) {
+                var b1 = s.charCodeAt(i + 1);
+                var b2 = s.charCodeAt(i + 2);
+                var b3 = s.charCodeAt(i + 3);
+                code = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F);
+                consumed = 4;
+            } else {
+                // Malformed lead byte — pass through and advance one.
+                code = b0;
+                consumed = 1;
+            }
+
             var mapped = (code < rev.length) ? rev[code] : -1;
             if (mapped >= 0) {
                 buf.set(pos, mapped);
                 pos++;
             } else {
+                // Unknown codepoint — re-emit as UTF-8 verbatim.
                 if (code < 0x80) {
                     buf.set(pos, code);
                     pos++;
@@ -215,13 +248,20 @@ class BPETokenizer implements Tokenizer {
                     buf.set(pos, 0xC0 | (code >> 6));
                     buf.set(pos + 1, 0x80 | (code & 0x3F));
                     pos += 2;
-                } else {
+                } else if (code < 0x10000) {
                     buf.set(pos, 0xE0 | (code >> 12));
                     buf.set(pos + 1, 0x80 | ((code >> 6) & 0x3F));
                     buf.set(pos + 2, 0x80 | (code & 0x3F));
                     pos += 3;
+                } else {
+                    buf.set(pos, 0xF0 | (code >> 18));
+                    buf.set(pos + 1, 0x80 | ((code >> 12) & 0x3F));
+                    buf.set(pos + 2, 0x80 | ((code >> 6) & 0x3F));
+                    buf.set(pos + 3, 0x80 | (code & 0x3F));
+                    pos += 4;
                 }
             }
+            i += consumed;
         }
         return buf.sub(0, pos).toString();
     }
@@ -259,23 +299,45 @@ class BPETokenizer implements Tokenizer {
     }
 
     /**
-     * Reverse alphabet keyed by char-code → byte. Length 0x144 covers
+     * Reverse alphabet keyed by codepoint → byte. Length 0x144 covers
      * every codepoint the forward table can emit (0x00..0xFF self-maps
      * + the U+0100..U+0143 spillover range). Slots that aren't mapped
      * by the alphabet hold -1 so the caller can detect them.
+     *
+     * CRITICAL: Rayzor strings are UTF-8 byte arrays and `charCodeAt(i)`
+     * returns the i-th byte, not the codepoint. `String.fromCharCode(0x120)`
+     * returns a 2-byte UTF-8 string (`c4 a0`), so a naive `ch.charCodeAt(0)`
+     * would key the reverse map at 0xC4 instead of 0x120 — silently
+     * scrambling the table. Decode the codepoint from the UTF-8 bytes
+     * explicitly.
      */
     static function byteDecoderArray():Array<Int> {
         var table = byteEncoderTable();
         var rev:Array<Int> = [for (_ in 0...0x144) -1];
         for (b in 0...256) {
             var ch = table[b];
-            // Each entry is a single codepoint (BMP) — pull its char
-            // code and use as the reverse index.
-            if (ch.length > 0) {
-                var code = ch.charCodeAt(0);
-                if (code >= 0 && code < rev.length) {
-                    rev[code] = b;
-                }
+            if (ch.length == 0) continue;
+            var b0 = ch.charCodeAt(0);
+            var code:Int;
+            if (b0 < 0x80) {
+                code = b0;
+            } else if ((b0 & 0xE0) == 0xC0 && ch.length >= 2) {
+                var b1 = ch.charCodeAt(1);
+                code = ((b0 & 0x1F) << 6) | (b1 & 0x3F);
+            } else if ((b0 & 0xF0) == 0xE0 && ch.length >= 3) {
+                var b1 = ch.charCodeAt(1);
+                var b2 = ch.charCodeAt(2);
+                code = ((b0 & 0x0F) << 12) | ((b1 & 0x3F) << 6) | (b2 & 0x3F);
+            } else if ((b0 & 0xF8) == 0xF0 && ch.length >= 4) {
+                var b1 = ch.charCodeAt(1);
+                var b2 = ch.charCodeAt(2);
+                var b3 = ch.charCodeAt(3);
+                code = ((b0 & 0x07) << 18) | ((b1 & 0x3F) << 12) | ((b2 & 0x3F) << 6) | (b3 & 0x3F);
+            } else {
+                code = b0;
+            }
+            if (code >= 0 && code < rev.length) {
+                rev[code] = b;
             }
         }
         return rev;
