@@ -2873,15 +2873,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rayzor-numa"
-version = "0.1.0"
-dependencies = [
- "libc",
- "rayzor-plugin",
- "windows-sys 0.59.0",
-]
-
-[[package]]
 name = "rayzor-plugin"
 version = "0.1.0"
 

@@ -55,6 +55,7 @@ pub mod native_stack_trace; // NativeStackTrace (Rust backtrace capture + source
 pub mod panic_guard; // Panic guard for safe FFI (catch_unwind → Haxe exception)
 pub mod reflect; // Reflect + Type API for anonymous objects
 pub mod safety; // Safety validation and error reporting
+pub mod topology; // CPU topology + thread affinity (rayzor.concurrent.CpuTopology / WorkerPool)
 pub mod type_system; // Runtime type information for Dynamic values
 pub mod vec_plugin; // Pointer-based Vec API // Exception handling (setjmp/longjmp)
 

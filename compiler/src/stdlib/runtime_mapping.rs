@@ -263,6 +263,7 @@ impl StdlibMapping {
         mapping.register_simd4f_methods();
         mapping.register_tensor_methods();
         mapping.register_qtensor_methods();
+        mapping.register_cpu_topology_methods();
         // Reflect + Type API
         mapping.register_reflect_methods();
         mapping.register_type_methods();
@@ -3566,6 +3567,40 @@ impl StdlibMapping {
             // --- Lifetime ---
             map_method!(instance "rayzor_ds_QTensor", "free" => "QTensor_free",
                 params: 0, mir_wrapper, types: &[PtrVoid]),
+        ];
+
+        self.register_from_tuples(mappings);
+    }
+
+    // ============================================================================
+    // CPU Topology + Thread Affinity (rayzor.concurrent.CpuTopology)
+    //
+    // All methods are static and route directly to the runtime topology
+    // symbols — no MIR wrappers, no per-method shape transformation.
+    // ============================================================================
+
+    fn register_cpu_topology_methods(&mut self) {
+        use IrTypeDescriptor::*;
+
+        let mappings = vec![
+            map_method!(static "rayzor_concurrent_CpuTopology", "multiNode"
+                => "rayzor_topology_multi_node",
+                params: 0, returns: primitive, types: &[] => Bool),
+            map_method!(static "rayzor_concurrent_CpuTopology", "nodeCount"
+                => "rayzor_topology_node_count",
+                params: 0, returns: primitive, types: &[] => I32),
+            map_method!(static "rayzor_concurrent_CpuTopology", "cpuCount"
+                => "rayzor_topology_cpu_count",
+                params: 0, returns: primitive, types: &[] => I32),
+            map_method!(static "rayzor_concurrent_CpuTopology", "cpuToNode"
+                => "rayzor_topology_cpu_to_node",
+                params: 1, returns: primitive, types: &[I32] => I32),
+            map_method!(static "rayzor_concurrent_CpuTopology", "bindToNode"
+                => "rayzor_topology_bind_to_node",
+                params: 1, returns: primitive, types: &[I32] => I32),
+            map_method!(static "rayzor_concurrent_CpuTopology", "unbind"
+                => "rayzor_topology_unbind",
+                params: 0, returns: primitive, types: &[] => I32),
         ];
 
         self.register_from_tuples(mappings);

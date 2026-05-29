@@ -1,9 +1,0 @@
-[project]
-name = "numa-pool"
-entry = "Main.hx"
-
-[build]
-class-paths = ["."]
-
-[dependencies]
-rayzor-numa = { path = "../../numa" }
