@@ -65,7 +65,13 @@ class Linear implements Module {
     public function forward(x:Tensor):Tensor {
         var y:Tensor;
         if (qweight != null) {
-            y = qweight.matmulXTQ(x);
+            // Multi-thread the per-output-row Q4_K_M / Q6_K dequant +
+            // dot via a runtime-side fork-join (`std::thread::scope`).
+            // `0` picks the auto default (6 workers on M1 Pro). On 1B
+            // Q4_K_M this is the entire CPU hot loop — threading it is
+            // the single biggest end-to-end win available without a
+            // custom SIMD kernel.
+            y = qweight.matmulXTQThreaded(x, 0);
         } else {
             y = x.matmulT(weight);
         }

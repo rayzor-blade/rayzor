@@ -3553,6 +3553,16 @@ impl StdlibMapping {
             // qt.matmulXTQ(x: Tensor): Tensor  — y = x @ self.T (Linear forward)
             map_method!(instance "rayzor_ds_QTensor", "matmulXTQ" => "QTensor_matmulXTQ",
                 params: 1, mir_wrapper, types: &[PtrVoid, PtrVoid] => PtrVoid),
+            // qt.matmulXTQChunk(x: Tensor, y: Tensor, nStart: Int, nEnd: Int): Int
+            // The Haxe-side NumaPool dispatch builds Y itself, splits the
+            // row range across workers, and calls this per chunk.
+            map_method!(instance "rayzor_ds_QTensor", "matmulXTQChunk" => "QTensor_matmulXTQChunk",
+                params: 4, mir_wrapper, types: &[PtrVoid, PtrVoid, PtrVoid, I64, I64] => I64),
+            // qt.matmulXTQThreaded(x: Tensor, threads: Int): Tensor
+            // Runtime-side fork-join entry point. Use this until the
+            // NumaPool-import cascade in nue.Linear is resolved.
+            map_method!(instance "rayzor_ds_QTensor", "matmulXTQThreaded" => "QTensor_matmulXTQThreaded",
+                params: 2, mir_wrapper, types: &[PtrVoid, PtrVoid, I64] => PtrVoid),
             // --- Lifetime ---
             map_method!(instance "rayzor_ds_QTensor", "free" => "QTensor_free",
                 params: 0, mir_wrapper, types: &[PtrVoid]),

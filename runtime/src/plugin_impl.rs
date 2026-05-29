@@ -1902,6 +1902,14 @@ register_symbol!(
     "rayzor_tensor_matmul_qt_t_f32",
     crate::quant::rayzor_tensor_matmul_qt_t_f32
 );
+register_symbol!(
+    "rayzor_tensor_matmul_qt_t_f32_chunk",
+    crate::quant::rayzor_tensor_matmul_qt_t_f32_chunk
+);
+register_symbol!(
+    "rayzor_tensor_matmul_qt_t_f32_threaded",
+    crate::quant::rayzor_tensor_matmul_qt_t_f32_threaded
+);
 register_symbol!("rayzor_qtensor_free", crate::quant::rayzor_qtensor_free);
 
 // ============================================================================

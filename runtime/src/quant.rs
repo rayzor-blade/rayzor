@@ -779,22 +779,166 @@ pub unsafe extern "C" fn rayzor_qtensor_matmul_f32(qt_a: i64, b_tensor: i64) -> 
 ///
 /// `x_tensor` and `qt_w` are taken as i64 pointers (matches the Haxe FFI).
 /// Returns a fresh f32 Tensor on the heap; returns 0 on shape mismatch.
+///
+/// Single-threaded fallback. The Haxe path threads explicitly by
+/// allocating Y first and dispatching `rayzor_tensor_matmul_qt_t_f32_chunk`
+/// across workers via `rayzor.concurrent.NumaPool.parallelRows`.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x_tensor: i64, qt_w: i64) -> i64 {
     if x_tensor == 0 || qt_w == 0 {
         return 0;
     }
     let qt = &*(qt_w as *const RayzorQTensor);
-    // Per-scheme block layout. Both schemes use 256-element super-blocks
-    // along the inner (K) dim — only the bytes-per-block differ.
+
+    let (batch, n, k, _block_size, _block_bytes) = match qmatmul_prep(x_tensor, qt) {
+        Some(p) => p,
+        None => return 0,
+    };
+
+    // Allocate Y[batch, N] f32.
+    let out_shape = [batch, n];
+    let out_tensor = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);
+    if out_tensor == 0 {
+        return 0;
+    }
+
+    // Single-threaded fill of all rows.
+    qmatmul_chunk_impl(x_tensor, qt_w, out_tensor, 0, n as i64);
+    let _ = k; // K used inside the impl; suppress unused warning here.
+    out_tensor
+}
+
+/// Threaded variant of `rayzor_tensor_matmul_qt_t_f32`.
+///
+/// Allocates `Y`, then dispatches `qmatmul_chunk_impl` across N OS
+/// threads via `std::thread::scope`. Workers split the output-row
+/// range `[0, N)` disjointly so the writes into `Y` need no
+/// synchronisation. Joined at the scope boundary; no thread pool
+/// outlives the call.
+///
+/// `threads = 0` picks a default (see implementation). `threads = 1`
+/// falls through to the single-threaded path with no spawn overhead.
+///
+/// This lives next to the chunk entry point so the Haxe-side
+/// `NumaPool.parallelRows` route stays available; the threaded entry
+/// point exists because (a) importing `NumaPool` from `nue.Linear`
+/// currently triggers a JIT cascade we haven't isolated, and
+/// (b) for a single matmul-per-Linear-forward the fork-join cost
+/// shape is the same either way.
+///
+/// Returns a fresh F32 tensor; returns 0 on shape mismatch.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
+    x_tensor: i64,
+    qt_w: i64,
+    threads: i64,
+) -> i64 {
+    if x_tensor == 0 || qt_w == 0 {
+        return 0;
+    }
+    let qt = &*(qt_w as *const RayzorQTensor);
+
+    let (batch, n, _k, _block_size, _block_bytes) = match qmatmul_prep(x_tensor, qt) {
+        Some(p) => p,
+        None => return 0,
+    };
+
+    let out_shape = [batch, n];
+    let out_tensor = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);
+    if out_tensor == 0 {
+        return 0;
+    }
+
+    // Pick worker count: explicit > 0, or auto = 6 (sized for M1 Pro's
+    // 8 P-cores; leaves room for the OS and the calling thread).
+    // Cap at min(N, threads) — no point spawning more workers than
+    // output rows. Also cap at a sane upper bound.
+    let auto_threads: usize = 6;
+    let mut t = if threads > 0 {
+        (threads as usize).min(64)
+    } else {
+        auto_threads
+    };
+    if t > n {
+        t = n.max(1);
+    }
+    if t <= 1 {
+        qmatmul_chunk_impl(x_tensor, qt_w, out_tensor, 0, n as i64);
+        return out_tensor;
+    }
+
+    // Bundle the raw i64 handles into `Send + Copy` wrappers so we can
+    // capture them across `std::thread::scope`. The pointer-aliased
+    // memory is read-only for X/Wq and disjoint per-worker for Y.
+    let xh = x_tensor;
+    let qh = qt_w;
+    let yh = out_tensor;
+
+    let chunk = n.div_ceil(t);
+    std::thread::scope(|s| {
+        for w in 0..t {
+            let lo = w * chunk;
+            if lo >= n {
+                break;
+            }
+            let hi = (lo + chunk).min(n);
+            s.spawn(move || {
+                // SAFETY: each worker writes Y[*, lo..hi); ranges are
+                // disjoint, no aliasing across threads. X and Wq are
+                // read-only.
+                unsafe {
+                    qmatmul_chunk_impl(xh, qh, yh, lo as i64, hi as i64);
+                }
+            });
+        }
+    });
+    out_tensor
+}
+
+/// Compute output rows `[n_start, n_end)` of `Y = X @ Wq.T` and store
+/// them into a pre-allocated Y tensor.
+///
+/// This is the threading entry point. The caller (Haxe `NumaPool.parallelRows`)
+/// allocates Y once, then fans out non-overlapping `[n_start, n_end)` ranges
+/// to workers. Each call:
+///   - dequants its own slice of `Wq` rows into a thread-local scratch,
+///   - dots X against each dequanted row,
+///   - stores into `y[b, n_start..n_end)`.
+///
+/// Memory safety: workers write to disjoint columns of Y, so no
+/// synchronisation is needed beyond the standard fork-join barrier the
+/// Haxe pool provides. Returns 1 on success, 0 on shape mismatch / null.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_chunk(
+    x_tensor: i64,
+    qt_w: i64,
+    y_tensor: i64,
+    n_start: i64,
+    n_end: i64,
+) -> i64 {
+    if x_tensor == 0 || qt_w == 0 || y_tensor == 0 {
+        return 0;
+    }
+    let qt = &*(qt_w as *const RayzorQTensor);
+    if qmatmul_prep(x_tensor, qt).is_none() {
+        return 0;
+    }
+    qmatmul_chunk_impl(x_tensor, qt_w, y_tensor, n_start, n_end);
+    1
+}
+
+/// Shape-validate `X` and a `Wq` QTensor for `Y = X @ Wq.T`. Returns
+/// `(batch, n, k, block_size, block_bytes)` on success.
+unsafe fn qmatmul_prep(
+    x_tensor: i64,
+    qt: &RayzorQTensor,
+) -> Option<(usize, usize, usize, usize, usize)> {
     let (block_size, block_bytes) = match qt.scheme {
         QSCHEME_Q4_K_M => (Q4_K_M_BLOCK_SIZE, Q4_K_M_BLOCK_BYTES),
         QSCHEME_Q6_K => (Q6_K_BLOCK_SIZE, Q6_K_BLOCK_BYTES),
-        _ => return 0,
+        _ => return None,
     };
 
-    // Pull X's shape + data. Mirror the TensorHead layout used elsewhere
-    // in this file for FFI-safe field access.
     #[repr(C)]
     struct TensorHead {
         data: *mut u8,
@@ -811,38 +955,73 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x_tensor: i64, qt_w: i64)
     if x_head.ndim != 2 || x_head.dtype != 0
     /* DTYPE_F32 */
     {
-        return 0;
+        return None;
     }
+    let x_shape = std::slice::from_raw_parts(x_head.shape, 2);
+    let batch = x_shape[0];
+    let k = x_shape[1];
+
+    if k != qt.cols || !k.is_multiple_of(block_size) {
+        return None;
+    }
+    Some((batch, qt.rows, k, block_size, block_bytes))
+}
+
+/// Inner kernel for both the single-threaded fallback and the
+/// threaded-chunk entry point. Computes `y[b, n_idx] = X[b, :] · dequant(Wq[n_idx, :])`
+/// for `n_idx in [n_start, n_end)`. Worker buffers live on the stack/
+/// thread-local heap; cross-thread state is just the `*y` write band,
+/// which workers split disjointly so this needs no synchronisation.
+unsafe fn qmatmul_chunk_impl(
+    x_tensor: i64,
+    qt_w: i64,
+    y_tensor: i64,
+    n_start: i64,
+    n_end: i64,
+) {
+    let qt = &*(qt_w as *const RayzorQTensor);
+    let (block_size, block_bytes) = match qt.scheme {
+        QSCHEME_Q4_K_M => (Q4_K_M_BLOCK_SIZE, Q4_K_M_BLOCK_BYTES),
+        QSCHEME_Q6_K => (Q6_K_BLOCK_SIZE, Q6_K_BLOCK_BYTES),
+        _ => return,
+    };
+
+    #[repr(C)]
+    struct TensorHead {
+        data: *mut u8,
+        shape: *mut usize,
+        strides: *mut usize,
+        ndim: usize,
+        numel: usize,
+        dtype: u8,
+        owns_data: bool,
+        device: u8,
+        numa_node: i32,
+    }
+    let x_head = &*(x_tensor as *const TensorHead);
+    let y_head = &*(y_tensor as *const TensorHead);
     let x_shape = std::slice::from_raw_parts(x_head.shape, 2);
     let x_strides = std::slice::from_raw_parts(x_head.strides, 2);
     let batch = x_shape[0];
     let k = x_shape[1];
-
-    // K must match Wq's cols and be a multiple of the super-block size.
-    if k != qt.cols || !k.is_multiple_of(block_size) {
-        return 0;
-    }
-    let n = qt.rows; // out_features
+    let n = qt.rows;
     let blocks_per_row = k / block_size;
 
-    // Allocate Y[batch, N] f32.
-    let out_shape = [batch, n];
-    let out_tensor = crate::tensor::rayzor_tensor_zeros(out_shape.as_ptr() as i64, 2, 0);
-    if out_tensor == 0 {
-        return 0;
+    let lo = (n_start.max(0) as usize).min(n);
+    let hi = (n_end.max(0) as usize).min(n);
+    if lo >= hi {
+        return;
     }
-    let y_head = &*(out_tensor as *const TensorHead);
+
     let y_data = y_head.data as *mut f32;
     let x_data = x_head.data as *const f32;
+    let x_contig = x_strides[1] == 1;
 
-    // Per-row scratch for Wq's dequant'd row.
+    // Per-thread scratch for the dequanted Wq row.
     let mut row_scratch: Vec<f32> = vec![0.0; k];
     let mut stage = [0.0f32; 256]; // Q4_K_M_BLOCK_SIZE == Q6_K_BLOCK_SIZE == 256
 
-    // Fast path requires X contiguous along its inner dim.
-    let x_contig = x_strides[1] == 1;
-
-    for n_idx in 0..n {
+    for n_idx in lo..hi {
         // Dequant Wq's row n_idx in full, branching on scheme.
         let row_ptr = qt.data.add(n_idx * blocks_per_row * block_bytes);
         for b_idx in 0..blocks_per_row {
@@ -861,7 +1040,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x_tensor: i64, qt_w: i64)
             std::ptr::copy_nonoverlapping(stage.as_ptr(), dst, block_size);
         }
 
-        // For each batch: dot product x[b, :] · Wq_row.
+        // For each batch row: dot(X[b, :], row_scratch).
         for b in 0..batch {
             let x_row_off = b * x_strides[0];
             let mut sum = 0.0f32;
@@ -879,8 +1058,6 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x_tensor: i64, qt_w: i64)
             *y_data.add(b * n + n_idx) = sum;
         }
     }
-
-    out_tensor
 }
 
 /// Release a QTensor. The runtime frees `data` and `meta` if `owns_data`.
