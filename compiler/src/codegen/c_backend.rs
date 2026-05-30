@@ -640,7 +640,19 @@ impl CBackend {
             }
 
             IrInstruction::MarkMoved { .. } | IrInstruction::CheckLive { .. } => {
-                // No-op in C (ownership tracking is compile-time only)
+                // No-op in C backend.
+                //
+                // Strict @:move enforcement happens at the TAST -> HIR
+                // boundary via the E0300/E0382 use-after-move diagnostic
+                // pass; by the time MIR reaches a backend, any static
+                // use-after-move has already prevented compilation.
+                //
+                // The Cranelift backend lowers these to a stack-slot
+                // liveness check + `rayzor_panic_use_after_move` trap as a
+                // belt-and-braces guard for dynamic-dispatch escape cases
+                // the static analyser cannot prove. The C backend has no
+                // equivalent because it compiles AOT and runtime traps
+                // would be invisible to JIT-targeted debug tooling.
             }
 
             IrInstruction::Load { dest, ptr, ty } => {

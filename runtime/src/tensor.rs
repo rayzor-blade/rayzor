@@ -395,7 +395,15 @@ struct RayzorTensor {
     ndim: usize,
     numel: usize,
     dtype: u8,
-    owns_data: bool, // false for views
+    // `owns_data` indicates this wrapper owns its `data` / `shape` / `strides`
+    // allocations and is responsible for freeing them. **It does NOT imply a
+    // contiguous stride pattern**: `rayzor_tensor_clone` of a permuted/sliced
+    // view produces `owns_data=true` with the parent's non-contiguous strides
+    // and a buffer sized `(Σ(shape[i]-1)·strides[i] + 1) · elem_size`, not
+    // `numel · elem_size`. Any fast-path that takes a stride-1 shortcut on
+    // owns_data must check strides explicitly. See memory
+    // bugs_clone_view_passthrough_invariant.md.
+    owns_data: bool,
     // Device placement. `device` is the device tag (DEVICE_CPU/DEVICE_METAL/
     // DEVICE_CUDA/DEVICE_WEBGPU). `numa_node` is meaningful only when
     // device == DEVICE_CPU: -1 means "no affinity hint", >= 0 names a NUMA
