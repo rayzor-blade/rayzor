@@ -44,6 +44,21 @@ impl<'a> TraitChecker<'a> {
         }
     }
 
+    /// Extend the class lookup map with another batch of classes (e.g. stdlib
+    /// classes from `loaded_stdlib_typed_files`). Returns `self` for chaining.
+    ///
+    /// Without this, `requires_strict_move`, `is_copy`, `auto_derive_*` etc.
+    /// only see classes from a single `TypedFile` — cross-file `@:move`-annotated
+    /// stdlib types like `rayzor.ds.Tensor` / `rayzor.ds.QTensor` are silently
+    /// invisible and the move semantics never fire at user-call sites.
+    /// Existing entries take precedence; later additions don't shadow them.
+    pub fn extend_classes(mut self, classes: &'a [TypedClass]) -> Self {
+        for class in classes {
+            self.class_map.entry(class.symbol_id).or_insert(class);
+        }
+        self
+    }
+
     /// Check if a type implements the Send trait
     ///
     /// Send types can be transferred between threads safely.
@@ -68,6 +83,30 @@ impl<'a> TraitChecker<'a> {
     /// Check if a type implements the Copy trait
     pub fn is_copy(&self, type_id: TypeId) -> bool {
         self.implements_trait(type_id, DerivedTrait::Copy)
+    }
+
+    /// Check if a type is annotated with `@:move` — meaning aliasing it after
+    /// a move must be a hard compile error rather than a soft warning.
+    ///
+    /// Mirrors `is_copy`'s shape: resolve `TypeId → TypeKind::Class { symbol_id }`,
+    /// look the class up, and read its `has_move_annotation()` flag. Any other
+    /// type kind (primitives, arrays, references…) is never strictly-moved.
+    pub fn requires_strict_move(&self, type_id: TypeId) -> bool {
+        let type_kind = {
+            let type_table = self.type_table.borrow();
+            match type_table.get(type_id) {
+                Some(info) => info.kind.clone(),
+                None => return false,
+            }
+        };
+
+        match &type_kind {
+            TypeKind::Class { symbol_id, .. } => self
+                .find_class(*symbol_id)
+                .map(|c| c.has_move_annotation())
+                .unwrap_or(false),
+            _ => false,
+        }
     }
 
     /// Generic trait checking

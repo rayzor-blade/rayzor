@@ -4592,7 +4592,29 @@ impl CompilationUnit {
         if !is_stdlib && self.config.emit_safety_warnings && !has_safety_opt_out {
             let ownership_diagnostics = self.check_ownership_violations(&typed_file);
             if !ownership_diagnostics.is_empty() {
+                // Print everything (so the user sees warnings AND the error
+                // labels/help text), then if any diagnostic was strict
+                // (`@:move`) we fail compilation with a hard error.
                 self.print_mir_diagnostics(&ownership_diagnostics);
+                let strict_errors: Vec<CompilationError> = ownership_diagnostics
+                    .iter()
+                    .filter(|d| matches!(d.severity, diagnostics::DiagnosticSeverity::Error))
+                    .map(|d| CompilationError {
+                        message: d.message.clone(),
+                        location: SourceLocation {
+                            file_id: d.span.file_id.as_usize() as u32,
+                            byte_offset: d.span.start.byte_offset as u32,
+                            line: d.span.start.line as u32,
+                            column: d.span.start.column as u32,
+                        },
+                        category: ErrorCategory::OwnershipError,
+                        suggestion: d.help.first().cloned(),
+                        related_errors: Vec::new(),
+                    })
+                    .collect();
+                if !strict_errors.is_empty() {
+                    return Err(strict_errors);
+                }
             }
         }
 
@@ -5836,12 +5858,21 @@ impl CompilationUnit {
         // as moves; this filter removes the false positives at diagnostic
         // emission time. Classes that genuinely need move semantics (no
         // Copy derive) still surface their warnings.
-        let trait_checker = crate::tast::trait_checker::TraitChecker::new(
+        // Stdlib classes (Tensor, QTensor, …) live in `loaded_stdlib_typed_files`,
+        // not on the current `typed_file`. Without folding them into the trait
+        // checker's class map, `@:move` annotations on stdlib types are silently
+        // inert at user-call sites (requires_strict_move would return false
+        // because the class wouldn't be found at all). Chain every loaded stdlib
+        // file's classes into the lookup so cross-file move semantics fire.
+        let mut trait_checker = crate::tast::trait_checker::TraitChecker::new(
             self.type_table.as_ref(),
             &self.symbol_table,
             &self.string_interner,
             &typed_file.classes,
         );
+        for stdlib_file in &self.loaded_stdlib_typed_files {
+            trait_checker = trait_checker.extend_classes(&stdlib_file.classes);
+        }
 
         for violation in violations {
             if let crate::semantic_graph::OwnershipViolation::UseAfterMove {
@@ -5853,13 +5884,44 @@ impl CompilationUnit {
             {
                 // Skip if the variable is Copy — `i` in `i++`, primitives
                 // passed to functions, etc. shouldn't fire the warning.
+                // Also decide up-front whether the variable's class is
+                // `@:move`-annotated; if so, the diagnostic is a hard error
+                // (linear/affine semantics) rather than a soft warning.
+                // `@:move` (strict_q) takes precedence over auto-Copy: when the
+                // user explicitly opts into move semantics, we must NOT silently
+                // treat the value as Copy even if all its fields happen to be
+                // Copy-able. `is_copy` only skips the diagnostic when there is
+                // no `@:move` annotation.
+                let mut strict = false;
                 if let Some(node) = ownership_graph.variables.get(&variable) {
-                    if node.variable_type.is_valid() && trait_checker.is_copy(node.variable_type) {
-                        continue;
+                    if node.variable_type.is_valid() {
+                        let strict_q = trait_checker.requires_strict_move(node.variable_type);
+                        if !strict_q && trait_checker.is_copy(node.variable_type) {
+                            continue;
+                        }
+                        strict = strict_q;
                     }
                 }
 
                 let var_name = self.get_symbol_name(variable, typed_file);
+                // Opt-in debug for triaging E0382 sites — set RAYZOR_DEBUG_E0382 to
+                // print each violation's (var, symbol, file, line, col) so the
+                // diagnostic's "Main.hx fallback" rendering can be cross-referenced
+                // against the real source location.
+                if std::env::var("RAYZOR_DEBUG_E0382").is_ok() {
+                    eprintln!("[E0382-DEBUG] var={} sym={} typed_file={} severity={} move_file_id={} move_line={} move_col={} use_file_id={} use_line={} use_col={}",
+                        var_name,
+                        variable.as_raw(),
+                        typed_file.metadata.file_path,
+                        if strict { "Error" } else { "Warning" },
+                        move_location.file_id,
+                        move_location.line,
+                        move_location.column,
+                        use_location.file_id,
+                        use_location.line,
+                        use_location.column,
+                    );
+                }
                 let file_id = diagnostics::FileId::new(use_location.file_id as usize);
                 let use_start = diagnostics::SourcePosition::new(
                     use_location.line as usize,
@@ -5885,8 +5947,29 @@ impl CompilationUnit {
                 );
                 let move_span = diagnostics::SourceSpan::new(move_start, move_end, file_id);
 
+                let help = if strict {
+                    vec![
+                        format!(
+                            "`{}` is declared `@:move`, so its values cannot be aliased after a move.",
+                            var_name
+                        ),
+                        format!(
+                            "Clone the value explicitly (`var copy = {}.clone();`) or restructure the code so the original binding is no longer reachable.",
+                            var_name
+                        ),
+                    ]
+                } else {
+                    vec![format!(
+                        "Consider cloning: `var copy = {}.clone();`",
+                        var_name
+                    )]
+                };
                 let diag = diagnostics::Diagnostic {
-                    severity: diagnostics::DiagnosticSeverity::Warning,
+                    severity: if strict {
+                        diagnostics::DiagnosticSeverity::Error
+                    } else {
+                        diagnostics::DiagnosticSeverity::Warning
+                    },
                     code: Some("E0382".to_string()),
                     message: format!("use of moved value: `{}`", var_name),
                     span: use_span.clone(),
@@ -5896,10 +5979,7 @@ impl CompilationUnit {
                     ],
                     suggestions: vec![],
                     notes: vec![],
-                    help: vec![format!(
-                        "Consider cloning: `var copy = {}.clone();`",
-                        var_name
-                    )],
+                    help,
                 };
                 diagnostics.push(diag);
             }

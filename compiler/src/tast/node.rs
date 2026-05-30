@@ -1557,6 +1557,12 @@ impl TypedClass {
         self.memory_annotations.contains(&MemoryAnnotation::Managed)
     }
 
+    /// Check if this class is marked as @:move — values use strict move semantics
+    /// (aliasing them after a move is a hard compile error, not a warning).
+    pub fn has_move_annotation(&self) -> bool {
+        self.memory_annotations.contains(&MemoryAnnotation::Move)
+    }
+
     /// Check if this class uses manual memory management
     /// Returns true if @:safety is present, false if @:managed or no annotation (default is runtime-managed)
     pub fn uses_manual_memory(&self) -> bool {

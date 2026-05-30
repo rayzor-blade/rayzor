@@ -10,7 +10,7 @@
 /// - Compilation: 50-200ms per function
 /// - Runtime: 15-25x interpreter speed
 use cranelift::prelude::*;
-use cranelift_codegen::ir::{ArgumentPurpose, BlockArg, Function};
+use cranelift_codegen::ir::{ArgumentPurpose, BlockArg, Function, StackSlot};
 use cranelift_codegen::settings;
 use cranelift_frontend::Variable;
 use cranelift_jit::{JITBuilder, JITModule};
@@ -79,6 +79,21 @@ pub struct CraneliftBackend {
     /// Used to link forward references to actual implementations
     /// Key is qualified name (e.g., "StringTools.unsafeCodeAt")
     qualified_name_to_func: BTreeMap<String, FuncId>,
+
+    /// Per-function map from IrId to its liveness stack slot (1 byte, i8).
+    /// Used to lower MarkMoved/CheckLive: slot=1 means live, slot=0 means moved.
+    /// Cleared at the start of each `compile_function` call.
+    liveness_slots: BTreeMap<IrId, StackSlot>,
+
+    /// Per-function map from IrId to a user-visible variable name for use in
+    /// `rayzor_panic_use_after_move` diagnostics. Populated from
+    /// `IrFunction::locals` and `IrFunction::signature.parameters` at the
+    /// start of each `compile_function` call. The CheckLive lowering looks up
+    /// the name here (falling back to `<anon>`) so the panic data section
+    /// interns one `DataId` per distinct *variable name* instead of one per
+    /// `format!("{:?}", IrId(n))` call site (which produced a fresh DataId
+    /// per CheckLive use with useless content like `IrId(123)`).
+    liveness_names: BTreeMap<IrId, String>,
 }
 
 impl CraneliftBackend {
@@ -264,6 +279,8 @@ impl CraneliftBackend {
             string_data: BTreeMap::new(),
             string_counter: 0,
             qualified_name_to_func: BTreeMap::new(),
+            liveness_slots: BTreeMap::new(),
+            liveness_names: BTreeMap::new(),
         })
     }
 
@@ -1577,6 +1594,10 @@ impl CraneliftBackend {
         // Clear value map for new function
         self.value_map.clear();
 
+        // Clear per-function liveness slot tracking (MarkMoved/CheckLive)
+        self.liveness_slots.clear();
+        self.liveness_names.clear();
+
         // Create entry block
         let entry_block = builder.create_block();
         builder.append_block_params_for_function_params(entry_block);
@@ -1632,6 +1653,46 @@ impl CraneliftBackend {
         };
 
         // Note: Don't seal entry block yet, we need to add instructions first
+
+        // Pre-walk the function MIR to collect every IrId used by MarkMoved /
+        // CheckLive. Allocate a 1-byte ExplicitSlot per id up-front and seed
+        // it to `1` (live) at the *start* of the entry block. This guarantees
+        // that the slot dominates every CheckLive — not just CheckLives that
+        // happen to share a block with the seeding MarkMoved. Seeding at the
+        // first lexical encounter (the previous design) is unsound when the
+        // first encounter sits inside a conditional branch: a sibling path
+        // to CheckLive would observe an undefined slot.
+        let liveness_ids = Self::collect_liveness_ids(function);
+        for id in &liveness_ids {
+            let slot = builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                1, // 1 byte (i8): 1 = live, 0 = moved
+                1, // 1-byte alignment
+            ));
+            let one = builder.ins().iconst(types::I8, 1);
+            builder.ins().stack_store(one, slot, 0);
+            self.liveness_slots.insert(*id, slot);
+        }
+
+        // Build the IrId -> variable-name map used by the CheckLive lowering
+        // to emit a user-visible name in `rayzor_panic_use_after_move` and to
+        // keep the panic-name data section bounded (one DataId per distinct
+        // variable name, not per CheckLive site). Names come from the
+        // function's declared locals first and then its parameters; ids not
+        // present in either fall back to "<anon>" at the use site.
+        for id in &liveness_ids {
+            if let Some(local) = function.locals.get(id) {
+                if !local.name.is_empty() {
+                    self.liveness_names.insert(*id, local.name.clone());
+                    continue;
+                }
+            }
+            if let Some(param) = function.signature.parameters.iter().find(|p| p.reg == *id) {
+                if !param.name.is_empty() {
+                    self.liveness_names.insert(*id, param.name.clone());
+                }
+            }
+        }
 
         // First pass: Create all Cranelift blocks for MIR blocks
         let mut block_map = std::collections::BTreeMap::new();
@@ -1758,6 +1819,9 @@ impl CraneliftBackend {
                     &mut self.string_data,
                     &mut self.string_counter,
                     &self.functions_with_env,
+                    &mut self.liveness_slots,
+                    &self.liveness_names,
+                    entry_block,
                 );
                 inst_result?;
             }
@@ -2087,7 +2151,57 @@ impl CraneliftBackend {
         }
     }
 
+    /// Collect every IrId that appears as the `src` operand of a `MarkMoved`
+    /// or `CheckLive` instruction anywhere in the function.
+    ///
+    /// Used by `compile_function` to pre-allocate liveness stack slots and
+    /// seed them to `1` (live) in the entry block — *before* per-block
+    /// translation. Seeding at entry guarantees the slot is defined on
+    /// every control-flow path that reaches a `CheckLive`, even when the
+    /// first lexical occurrence is inside a conditional branch.
+    fn collect_liveness_ids(func: &IrFunction) -> BTreeSet<IrId> {
+        let mut ids = BTreeSet::new();
+        for (_block_id, block) in &func.cfg.blocks {
+            for inst in &block.instructions {
+                match inst {
+                    IrInstruction::MarkMoved { src } | IrInstruction::CheckLive { src, .. } => {
+                        ids.insert(*src);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        ids
+    }
+
+    /// Look up the per-IrId liveness stack slot used by `MarkMoved`/`CheckLive`.
+    ///
+    /// Slots are pre-allocated and pre-seeded to `1` (live) in the entry block
+    /// by `compile_function` *before* translation begins (see
+    /// `collect_liveness_ids`). This is a pure lookup: if the slot is missing
+    /// the pre-walk failed to find this IrId — which would be a compiler bug.
+    fn get_or_alloc_liveness_slot(
+        src: IrId,
+        liveness_slots: &mut BTreeMap<IrId, StackSlot>,
+        _builder: &mut FunctionBuilder,
+        _entry_block: Block,
+    ) -> StackSlot {
+        if let Some(&slot) = liveness_slots.get(&src) {
+            return slot;
+        }
+        // Pre-walk in `compile_function` should have collected every IrId
+        // used by MarkMoved/CheckLive. Reaching this path means a new
+        // ownership instruction shape was added without updating the
+        // pre-walk. Panic loudly so the bug is impossible to miss.
+        panic!(
+            "liveness slot for IrId {:?} was not pre-allocated by collect_liveness_ids; \
+             this indicates a MarkMoved/CheckLive site that the pre-walk missed",
+            src
+        );
+    }
+
     /// Translate a single MIR instruction to Cranelift IR (static method)
+    #[allow(clippy::too_many_arguments)]
     fn translate_instruction(
         value_map: &mut BTreeMap<IrId, Value>,
         builder: &mut FunctionBuilder,
@@ -2102,6 +2216,9 @@ impl CraneliftBackend {
         string_data: &mut BTreeMap<String, DataId>,
         string_counter: &mut usize,
         functions_with_env: &BTreeSet<IrFunctionId>,
+        liveness_slots: &mut BTreeMap<IrId, StackSlot>,
+        liveness_names: &BTreeMap<IrId, String>,
+        entry_block: Block,
     ) -> Result<(), String> {
         use crate::ir::IrInstruction;
 
@@ -2142,6 +2259,103 @@ impl CraneliftBackend {
                 // Invalidate source - any future use is a compile error (caught by MIR validation)
                 // In codegen, we just don't remove it from value_map to keep the value alive
                 // The MIR validator ensures src isn't used after the move
+            }
+
+            IrInstruction::MarkMoved { src } => {
+                // Ownership: mark the per-IrId liveness slot as 0 (moved).
+                // The slot is allocated on first use and initialized to 1 (live)
+                // at the function entry block.
+                let slot =
+                    Self::get_or_alloc_liveness_slot(*src, liveness_slots, builder, entry_block);
+                let zero = builder.ins().iconst(types::I8, 0);
+                builder.ins().stack_store(zero, slot, 0);
+            }
+
+            IrInstruction::CheckLive { src, location } => {
+                // Ownership: assert the per-IrId liveness slot is non-zero.
+                // If zero, call rayzor_panic_use_after_move(name_ptr, name_len, line)
+                // and trap. Otherwise continue at `live_block`.
+                let slot =
+                    Self::get_or_alloc_liveness_slot(*src, liveness_slots, builder, entry_block);
+                let live_byte = builder.ins().stack_load(types::I8, slot, 0);
+
+                let live_block = builder.create_block();
+                let trap_block = builder.create_block();
+                builder
+                    .ins()
+                    .brif(live_byte, live_block, &[], trap_block, &[]);
+
+                // ---- trap_block: call rayzor_panic_use_after_move(ptr, len, line); trap
+                builder.switch_to_block(trap_block);
+                builder.seal_block(trap_block);
+
+                // Intern the variable name as a string in the data section.
+                // Use the user-visible variable name from the per-function
+                // liveness_names map so the panic data is intelligible AND so
+                // `string_data` interns one DataId per distinct *variable
+                // name*. Previously this used `format!("{:?}", src)` which
+                // produced strings like `"IrId(123)"` that were both useless
+                // to users and effectively per-site unique (linear growth in
+                // CheckLive count). Fall back to "<anon>" for IrIds without
+                // a recorded name (e.g. compiler-synthesised temporaries).
+                let var_name: String = liveness_names
+                    .get(src)
+                    .cloned()
+                    .unwrap_or_else(|| "<anon>".to_string());
+                let data_id = if let Some(&existing) = string_data.get(&var_name) {
+                    existing
+                } else {
+                    let name = format!("str_{}", *string_counter);
+                    *string_counter += 1;
+                    let data_id = module
+                        .declare_data(&name, Linkage::Local, false, false)
+                        .map_err(|e| {
+                            format!("Failed to declare use-after-move var name data: {}", e)
+                        })?;
+                    let mut data_desc = DataDescription::new();
+                    data_desc.define(var_name.as_bytes().to_vec().into_boxed_slice());
+                    module.define_data(data_id, &data_desc).map_err(|e| {
+                        format!("Failed to define use-after-move var name data: {}", e)
+                    })?;
+                    string_data.insert(var_name.clone(), data_id);
+                    data_id
+                };
+                let gv = module.declare_data_in_func(data_id, builder.func);
+                let name_ptr = builder.ins().global_value(types::I64, gv);
+                let name_len = builder.ins().iconst(types::I64, var_name.len() as i64);
+                let line_val = builder.ins().iconst(types::I64, i64::from(location.line));
+
+                // Get or declare rayzor_panic_use_after_move(i64, i64, i64) -> noreturn
+                let panic_func_id =
+                    if let Some(&fid) = runtime_functions.get("rayzor_panic_use_after_move") {
+                        fid
+                    } else {
+                        let mut sig = module.make_signature();
+                        sig.params.push(AbiParam::new(types::I64)); // var_name ptr
+                        sig.params.push(AbiParam::new(types::I64)); // var_name len
+                        sig.params.push(AbiParam::new(types::I64)); // line
+                                                                    // No return type — function is noreturn (`-> !` in Rust).
+                        let fid = module
+                            .declare_function("rayzor_panic_use_after_move", Linkage::Import, &sig)
+                            .map_err(|e| {
+                                format!("Failed to declare rayzor_panic_use_after_move: {}", e)
+                            })?;
+                        runtime_functions.insert("rayzor_panic_use_after_move".to_string(), fid);
+                        fid
+                    };
+                let panic_ref = module.declare_func_in_func(panic_func_id, builder.func);
+                builder
+                    .ins()
+                    .call(panic_ref, &[name_ptr, name_len, line_val]);
+                // Function is noreturn but Cranelift doesn't know that; emit an
+                // explicit trap as the block terminator for verifier sanity.
+                builder
+                    .ins()
+                    .trap(cranelift_codegen::ir::TrapCode::user(2).unwrap());
+
+                // ---- live_block: continue normal execution
+                builder.switch_to_block(live_block);
+                builder.seal_block(live_block);
             }
 
             IrInstruction::BorrowImmutable {

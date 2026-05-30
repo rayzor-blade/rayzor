@@ -461,6 +461,20 @@ pub struct HirToMirContext<'a> {
     /// Classes that derive Clone — enables synthetic clone() method
     derive_clone_classes: BTreeSet<SymbolId>,
 
+    /// Classes annotated with `@:move` — values use strict move semantics.
+    /// Tracked in parallel with `derive_clone_classes` so MIR lowering can
+    /// emit `MarkMoved` / `CheckLive` opcodes for use-after-move analysis.
+    derive_move_classes: BTreeSet<SymbolId>,
+
+    /// IrIds bound to `@:move`-class locals. Reads of these registers
+    /// receive a `CheckLive` guard; consumes receive a `MarkMoved` marker.
+    strict_move_locals: BTreeSet<IrId>,
+
+    /// Tier B: extern classes whose @:derive(Clone) delegates to a runtime function
+    /// (e.g. rayzor.ds.Tensor → "rayzor_tensor_clone"). Looked up in lower_derived_clone
+    /// before field-by-field synthesis; if present, emits a single direct call.
+    derive_clone_extern_fns: BTreeMap<SymbolId, &'static str>,
+
     /// Classes that derive Copy — implicit shallow copy at Let/Assign/Call boundaries
     derive_copy_classes: BTreeSet<SymbolId>,
 
@@ -599,6 +613,10 @@ struct SavedLoweringState {
     value_type_symbols: BTreeSet<SymbolId>,
     anon_views: BTreeMap<SymbolId, AnonBacking>,
     raw_anon_symbols: BTreeSet<SymbolId>,
+    // Per-function @:move tracking — snapshot before switching into a
+    // lambda/async/inner function so the outer body's MarkMoved/CheckLive
+    // emission resumes correctly after restore.
+    strict_move_locals: BTreeSet<IrId>,
 }
 
 impl<'a> HirToMirContext<'a> {
@@ -702,6 +720,9 @@ impl<'a> HirToMirContext<'a> {
             derive_partial_ord_classes: BTreeSet::new(),
             derive_hash_classes: BTreeSet::new(),
             derive_clone_classes: BTreeSet::new(),
+            derive_move_classes: BTreeSet::new(),
+            strict_move_locals: BTreeSet::new(),
+            derive_clone_extern_fns: BTreeMap::new(),
             derive_copy_classes: BTreeSet::new(),
             derive_drop_classes: BTreeSet::new(),
             ir_to_drop_class: BTreeMap::new(),
@@ -3397,6 +3418,10 @@ impl<'a> HirToMirContext<'a> {
         // debug!("  Function finished, context cleared");
 
         self.symbol_map.clear();
+        // Per-function: strict_move_locals tracks IrIds bound to @:move locals in
+        // THIS function's SSA namespace; clearing prevents cross-function IrId
+        // pollution that would otherwise mis-emit MarkMoved/CheckLive.
+        self.strict_move_locals.clear();
         self.block_map.clear();
         self.current_this_type = None;
     }
@@ -3514,6 +3539,9 @@ impl<'a> HirToMirContext<'a> {
             self.builder.current_function = Some(inner_context.func_id);
             self.builder.current_block = Some(inner_context.entry_block);
             self.symbol_map.clear();
+            // Per-function isolation: inner async closure has its own SSA namespace;
+            // saved_state already snapshotted strict_move_locals for restore.
+            self.strict_move_locals.clear();
             self.current_env_layout = inner_context.env_layout.clone();
 
             // Clear drop tracking for inner function
@@ -3868,6 +3896,8 @@ impl<'a> HirToMirContext<'a> {
         // debug!("  Function finished, context cleared");
 
         self.symbol_map.clear();
+        // Per-function: clear strict_move_locals at constructor exit (parallels symbol_map).
+        self.strict_move_locals.clear();
         self.block_map.clear();
     }
 
@@ -4022,6 +4052,8 @@ impl<'a> HirToMirContext<'a> {
 
         // Clear per-function state
         self.symbol_map.clear();
+        // Per-function: clear strict_move_locals at lower_function exit (parallels symbol_map).
+        self.strict_move_locals.clear();
         self.block_map.clear();
     }
 
@@ -4182,6 +4214,8 @@ impl<'a> HirToMirContext<'a> {
 
         // Clear per-function state
         self.symbol_map.clear();
+        // Per-function: clear strict_move_locals at instance-method exit (parallels symbol_map).
+        self.strict_move_locals.clear();
         self.block_map.clear();
     }
 
@@ -4577,6 +4611,34 @@ impl<'a> HirToMirContext<'a> {
                         };
 
                         self.bind_pattern_with_type(pattern, final_value, var_type, *is_mutable);
+
+                        // @:move strict-move tracking: if the bound class is
+                        // annotated `@:move`, mark the destination register as
+                        // strict-move-tracked, and if the initializer consumed
+                        // another strict-move local, emit a `MarkMoved` for
+                        // the source so later reads through it trip CheckLive.
+                        {
+                            let bound_class_sym = var_type
+                                .and_then(|t| self.get_class_symbol(t))
+                                .or_else(|| self.get_class_symbol(init_expr.ty));
+                            let is_move_class = bound_class_sym
+                                .map(|s| self.derive_move_classes.contains(&s))
+                                .unwrap_or(false);
+                            if is_move_class {
+                                self.strict_move_locals.insert(final_value);
+                            }
+                            // Variable-on-RHS is a move-by-consume site.
+                            if let HirExprKind::Variable {
+                                symbol: src_symbol, ..
+                            } = &init_expr.kind
+                            {
+                                if let Some(&src_reg) = self.symbol_map.get(src_symbol) {
+                                    if self.strict_move_locals.contains(&src_reg) {
+                                        let _ = self.builder.build_mark_moved(src_reg);
+                                    }
+                                }
+                            }
+                        }
 
                         // Register heap-allocated value for drop tracking
                         // Only register AutoDrop types (user-defined classes), not RuntimeManaged
@@ -8332,6 +8394,13 @@ impl<'a> HirToMirContext<'a> {
                             .and_then(|s| self.string_interner.get(s.name));
                         let _ = _n; // symbol name used for debugging
                     }
+                    // @:move strict-move tracking: prepend a CheckLive guard
+                    // before every read of a strict-move local so backends /
+                    // ownership analysis can diagnose use-after-move.
+                    if self.strict_move_locals.contains(&reg) {
+                        let loc = self.convert_source_location(&expr.source_location);
+                        let _ = self.builder.build_check_live(reg, loc);
+                    }
                     // Check if we need to convert the type
                     // This handles cases where captured variables are stored as i64 in closure environment
                     // but need to be used as their original type (e.g., i32)
@@ -8602,6 +8671,16 @@ impl<'a> HirToMirContext<'a> {
                     "[Field expression] Object lowered to reg={}, now calling lower_field_access",
                     obj_reg
                 );
+
+                // @:move strict-move tracking: prepend a CheckLive guard if
+                // the field's receiver register is a strict-move local. The
+                // inner Variable arm may have already emitted one when the
+                // object expression is a bare local; this covers paths that
+                // bypass that arm (e.g. `this`-redirects, anon views).
+                if self.strict_move_locals.contains(&obj_reg) {
+                    let loc = self.convert_source_location(&expr.source_location);
+                    let _ = self.builder.build_check_live(obj_reg, loc);
+                }
 
                 // Track object as temp if it's an OWNED heap-allocated value
                 // This includes:
@@ -27196,6 +27275,18 @@ impl<'a> HirToMirContext<'a> {
     /// String and Array fields are deep-copied; class fields with Clone are recursively cloned;
     /// primitives and other pointers are shallow-copied.
     fn lower_derived_clone(&mut self, object: &HirExpr, class_sym: SymbolId) -> Option<IrId> {
+        // Tier B: extern runtime-backed clone (e.g. Tensor, QTensor).
+        // Delegate to a named extern (rayzor_tensor_clone / rayzor_qtensor_clone)
+        // with the receiver as a single i64 arg; field-by-field synthesis is skipped.
+        if let Some(&extern_name) = self.derive_clone_extern_fns.get(&class_sym) {
+            let obj_reg = self.lower_expression(object)?;
+            let clone_fn =
+                self.get_or_register_extern_function(extern_name, vec![IrType::I64], IrType::I64);
+            return self
+                .builder
+                .build_call_direct(clone_fn, vec![obj_reg], IrType::I64);
+        }
+
         let fields = self.class_instance_fields.get(&class_sym)?.clone();
         let obj_reg = self.lower_expression(object)?;
 
@@ -31646,6 +31737,7 @@ impl<'a> HirToMirContext<'a> {
             value_type_symbols: self.value_type_symbols.clone(),
             anon_views: self.anon_views.clone(),
             raw_anon_symbols: self.raw_anon_symbols.clone(),
+            strict_move_locals: self.strict_move_locals.clone(),
         }
     }
 
@@ -31665,6 +31757,7 @@ impl<'a> HirToMirContext<'a> {
         self.value_type_symbols = state.value_type_symbols;
         self.anon_views = state.anon_views;
         self.raw_anon_symbols = state.raw_anon_symbols;
+        self.strict_move_locals = state.strict_move_locals;
     }
 
     /// PASS 1: Create lambda skeleton with placeholder signature
@@ -31765,6 +31858,9 @@ impl<'a> HirToMirContext<'a> {
         self.builder.current_function = Some(func_id);
         self.builder.current_block = Some(entry_block);
         self.symbol_map.clear();
+        // Per-function isolation: lambda body has its own SSA register namespace;
+        // saved_state already snapshotted strict_move_locals for restore on exit.
+        self.strict_move_locals.clear();
         self.current_env_layout = env_layout.clone();
 
         // Clear drop tracking state for the lambda body.
@@ -35529,6 +35625,46 @@ impl<'a> HirToMirContext<'a> {
                     }
                     DerivedTrait::Clone => {
                         self.derive_clone_classes.insert(class.symbol_id);
+                        // Tier B: extern classes route to a named runtime fn.
+                        // Today: rayzor.ds.Tensor / rayzor.ds.QTensor.
+                        //
+                        // We match on the fully-qualified name (taken from the
+                        // class-level `@:native("rayzor::ds::Tensor")` metadata,
+                        // with `::` normalised to `.`) instead of the bare
+                        // `class.name` interner string. Matching on the bare
+                        // name would also catch any user-defined extern class
+                        // happening to be called `Tensor` / `QTensor` in some
+                        // other package and silently route its clone to the
+                        // wrong runtime symbol.
+                        if class.is_extern {
+                            let mut fqn: Option<String> = None;
+                            for attr in &class.metadata {
+                                let attr_name = self.string_interner.get(attr.name).unwrap_or("");
+                                if attr_name != "native" {
+                                    continue;
+                                }
+                                if let Some(first_arg) = attr.args.first() {
+                                    if let crate::ir::hir::HirAttributeArg::Literal(
+                                        crate::ir::hir::HirLiteral::String(s),
+                                    ) = first_arg
+                                    {
+                                        if let Some(raw) = self.string_interner.get(*s) {
+                                            fqn = Some(raw.replace("::", "."));
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            let extern_fn: Option<&'static str> = match fqn.as_deref() {
+                                Some("rayzor.ds.Tensor") => Some("rayzor_tensor_clone"),
+                                Some("rayzor.ds.QTensor") => Some("rayzor_qtensor_clone"),
+                                _ => None,
+                            };
+                            if let Some(fn_name) = extern_fn {
+                                self.derive_clone_extern_fns
+                                    .insert(class.symbol_id, fn_name);
+                            }
+                        }
                     }
                     DerivedTrait::Copy => {
                         self.derive_copy_classes.insert(class.symbol_id);
@@ -35548,6 +35684,22 @@ impl<'a> HirToMirContext<'a> {
                         self.derive_default_classes.insert(class.symbol_id);
                     }
                     _ => {}
+                }
+            }
+
+            // Track @:move-annotated classes for strict move-semantics
+            // diagnostics (use-after-move). Populated in parallel with the
+            // `derive_clone_classes` set above so MIR lowering can emit
+            // `MarkMoved` / `CheckLive` opcodes against bindings of these
+            // classes. `TypedClass::has_move_annotation()` lives on TAST;
+            // HirClass carries the same info via metadata, so we scan the
+            // attribute list directly here.
+            for attr in &class.metadata {
+                if let Some(attr_name) = self.string_interner.get(attr.name) {
+                    if attr_name == "move" {
+                        self.derive_move_classes.insert(class.symbol_id);
+                        break;
+                    }
                 }
             }
 
@@ -35900,7 +36052,12 @@ impl<'a> HirToMirContext<'a> {
         let saved_current_function = self.builder.current_function;
         let saved_current_block = self.builder.current_block;
         let saved_symbol_map = self.symbol_map.clone();
+        // Per-function isolation: thunk has its own SSA register namespace;
+        // snapshot and clear strict_move_locals so MarkMoved/CheckLive emitted
+        // inside the thunk body do not collide with the outer function's IrIds.
+        let saved_strict_move_locals = self.strict_move_locals.clone();
         self.symbol_map.clear();
+        self.strict_move_locals.clear();
 
         let thunk_id = self
             .builder
@@ -35914,6 +36071,7 @@ impl<'a> HirToMirContext<'a> {
                 self.builder.current_function = saved_current_function;
                 self.builder.current_block = saved_current_block;
                 self.symbol_map = saved_symbol_map;
+                self.strict_move_locals = saved_strict_move_locals;
                 return None;
             };
             let Some(env) = func.get_param_reg(0) else {
@@ -35921,6 +36079,7 @@ impl<'a> HirToMirContext<'a> {
                 self.builder.current_function = saved_current_function;
                 self.builder.current_block = saved_current_block;
                 self.symbol_map = saved_symbol_map;
+                self.strict_move_locals = saved_strict_move_locals;
                 return None;
             };
             let mut args: Vec<IrId> = Vec::new();
@@ -35949,6 +36108,7 @@ impl<'a> HirToMirContext<'a> {
         let Some(this_arg) = this_arg else {
             self.builder.finish_function();
             self.symbol_map = saved_symbol_map;
+            self.strict_move_locals = saved_strict_move_locals;
             return None;
         };
 
@@ -35974,6 +36134,7 @@ impl<'a> HirToMirContext<'a> {
         self.builder.current_function = saved_current_function;
         self.builder.current_block = saved_current_block;
         self.symbol_map = saved_symbol_map;
+        self.strict_move_locals = saved_strict_move_locals;
 
         self.method_ref_thunks.insert(method_func_id, thunk_id);
         Some(thunk_id)
@@ -36014,7 +36175,11 @@ impl<'a> HirToMirContext<'a> {
             .collect();
 
         let saved_symbol_map = self.symbol_map.clone();
+        // Per-function isolation: each reflect wrapper has its own SSA namespace;
+        // snapshot and clear strict_move_locals in parallel with symbol_map.
+        let saved_strict_move_locals = self.strict_move_locals.clone();
         self.symbol_map.clear();
+        self.strict_move_locals.clear();
 
         for (class_type_id, ctor_func_id) in ctor_entries {
             if self
@@ -36154,6 +36319,7 @@ impl<'a> HirToMirContext<'a> {
         }
 
         self.symbol_map = saved_symbol_map;
+        self.strict_move_locals = saved_strict_move_locals;
     }
 
     fn generate_vtable_init_function(&mut self) {
@@ -36171,7 +36337,11 @@ impl<'a> HirToMirContext<'a> {
                 .start_function(vtable_init_symbol, "__vtable_init__".to_string(), sig);
 
         let saved_symbol_map = self.symbol_map.clone();
+        // Per-function isolation: __vtable_init__ has its own SSA namespace;
+        // snapshot and clear strict_move_locals in parallel with symbol_map.
+        let saved_strict_move_locals = self.strict_move_locals.clone();
         self.symbol_map.clear();
+        self.strict_move_locals.clear();
 
         // Register extern functions for vtable operations
         let vtable_init_fn = self.get_or_register_extern_function(
@@ -36345,6 +36515,7 @@ impl<'a> HirToMirContext<'a> {
         self.builder.build_return(None);
         self.builder.finish_function();
         self.symbol_map = saved_symbol_map;
+        self.strict_move_locals = saved_strict_move_locals;
     }
 
     fn reset_value_for_global(&self, global: &IrGlobal) -> IrValue {
@@ -36389,7 +36560,11 @@ impl<'a> HirToMirContext<'a> {
 
         // Save current symbol map (should be empty, but just in case)
         let saved_symbol_map = self.symbol_map.clone();
+        // Per-function isolation: __init__ has its own SSA namespace; snapshot
+        // and clear strict_move_locals in parallel with symbol_map.
+        let saved_strict_move_locals = self.strict_move_locals.clone();
         self.symbol_map.clear();
+        self.strict_move_locals.clear();
 
         // Materialize every global into runtime/backend storage. Some backends load globals
         // via an out-of-line store rather than the object-file data segment, so constant
@@ -36476,6 +36651,7 @@ impl<'a> HirToMirContext<'a> {
 
         // Restore symbol map
         self.symbol_map = saved_symbol_map;
+        self.strict_move_locals = saved_strict_move_locals;
     }
 
     fn add_error(&mut self, msg: &str, location: SourceLocation) {
