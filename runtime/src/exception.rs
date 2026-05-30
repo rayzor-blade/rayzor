@@ -18,6 +18,12 @@ extern "C" {
 
 struct ExceptionHandler {
     jmp_buf: [u8; JMP_BUF_SIZE],
+    /// Shadow-stack depth at the time this handler was installed.
+    /// On `longjmp` we truncate the shadow stack back to this depth so
+    /// frames whose `Return` terminators were skipped by the unwind do
+    /// not leak. (The compiler emits `rayzor_pop_call_frame` only on
+    /// `IrTerminator::Return` blocks; a throw bypasses all of them.)
+    saved_shadow_depth: usize,
 }
 
 struct ExceptionState {
@@ -40,10 +46,12 @@ thread_local! {
 /// that the compiler should pass to _setjmp.
 #[no_mangle]
 pub extern "C" fn rayzor_exception_push_handler() -> *mut u8 {
+    let saved_shadow_depth = crate::native_stack_trace::shadow_stack_depth();
     STATE.with(|state| {
         let mut state = state.borrow_mut();
         state.handlers.push(ExceptionHandler {
             jmp_buf: [0u8; JMP_BUF_SIZE],
+            saved_shadow_depth,
         });
         let handler = state.handlers.last_mut().unwrap();
         handler.jmp_buf.as_mut_ptr()
@@ -85,9 +93,15 @@ pub extern "C" fn rayzor_throw_typed(exception_value: i64, type_id: u32) {
 
         if let Some(handler) = state.handlers.last_mut() {
             let buf_ptr = handler.jmp_buf.as_mut_ptr();
+            // Snapshot taken at push_handler time; truncate before longjmp
+            // so frames between the throw site and the catch landing pad
+            // (whose Return terminators are bypassed by the longjmp) are
+            // dropped instead of leaking on the shadow stack.
+            let restore_depth = handler.saved_shadow_depth;
 
             // Must drop the borrow before longjmp
             drop(state);
+            crate::native_stack_trace::truncate_shadow_stack(restore_depth);
             unsafe {
                 _longjmp(buf_ptr, 1);
             }
