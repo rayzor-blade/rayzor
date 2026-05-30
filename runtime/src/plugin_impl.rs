@@ -1705,6 +1705,14 @@ register_symbol!("rayzor_tracked_realloc", crate::rayzor_tracked_realloc);
 register_symbol!("rayzor_tracked_free", crate::rayzor_tracked_free);
 
 // ============================================================================
+// Runtime Panic Helpers
+// ============================================================================
+register_symbol!(
+    "rayzor_panic_use_after_move",
+    crate::rayzor_panic_use_after_move
+);
+
+// ============================================================================
 // CString Runtime (rayzor.CString — null-terminated C string interop)
 // ============================================================================
 register_symbol!(
@@ -1866,6 +1874,7 @@ register_symbol!(
 // Interop
 register_symbol!("rayzor_tensor_data", crate::tensor::rayzor_tensor_data);
 register_symbol!("rayzor_tensor_free", crate::tensor::rayzor_tensor_free);
+register_symbol!("rayzor_tensor_clone", crate::tensor::rayzor_tensor_clone);
 
 // ============================================================================
 // Quantised Tensor (rayzor.ds.QTensor)
@@ -1911,6 +1920,7 @@ register_symbol!(
     crate::quant::rayzor_tensor_matmul_qt_t_f32_threaded
 );
 register_symbol!("rayzor_qtensor_free", crate::quant::rayzor_qtensor_free);
+register_symbol!("rayzor_qtensor_clone", crate::quant::rayzor_qtensor_clone);
 
 // ============================================================================
 // CPU Topology + thread affinity (rayzor.concurrent.CpuTopology)
@@ -1939,7 +1949,10 @@ register_symbol!(
     "rayzor_topology_bind_to_node",
     crate::topology::rayzor_topology_bind_to_node
 );
-register_symbol!("rayzor_topology_unbind", crate::topology::rayzor_topology_unbind);
+register_symbol!(
+    "rayzor_topology_unbind",
+    crate::topology::rayzor_topology_unbind
+);
 
 // ============================================================================
 // Exception Handling (setjmp/longjmp)

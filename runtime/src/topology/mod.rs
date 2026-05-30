@@ -67,11 +67,7 @@ pub extern "C" fn rayzor_topology_cpu_to_node(cpu: i32) -> i32 {
 /// `out_buf` must point to writable memory for at least `max` `i32` slots,
 /// or be null when `max == 0`.
 #[no_mangle]
-pub unsafe extern "C" fn rayzor_topology_node_cpus(
-    node: i32,
-    out_buf: *mut i32,
-    max: i32,
-) -> i32 {
+pub unsafe extern "C" fn rayzor_topology_node_cpus(node: i32, out_buf: *mut i32, max: i32) -> i32 {
     if max < 0 {
         return -1;
     }
