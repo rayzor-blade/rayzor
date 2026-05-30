@@ -827,6 +827,15 @@ impl CompilationUnit {
             (crate::tast::SymbolId, crate::tast::SymbolId),
             Vec<crate::tast::SymbolId>,
         >,
+        interface_method_names: &BTreeMap<
+            crate::tast::SymbolId,
+            Vec<crate::tast::InternedString>,
+        >,
+        interface_method_return_types: &BTreeMap<
+            (crate::tast::SymbolId, crate::tast::InternedString),
+            crate::tast::TypeId,
+        >,
+        interface_extends: &BTreeMap<crate::tast::SymbolId, Vec<crate::tast::SymbolId>>,
     ) -> BladeCachedMaps {
         let mut functions = Vec::new();
         let mut fields = Vec::new();
@@ -1020,6 +1029,93 @@ impl CompilationUnit {
             });
         }
 
+        // Convert interface_method_names: iface_sym → Vec<InternedString>
+        // into qname-keyed entries. `qname_of` from the iface_vtables
+        // block above is closed over here too.
+        //
+        // Slot-alignment discipline: `maybe_materialize_for_call`'s
+        // vtable-slot math indexes by position into this Vec. A silently
+        // empty string from a failed interner lookup would shift every
+        // following slot index by one and misroute dispatch. Mirror
+        // c7a170d's all-or-nothing skip — drop the whole entry if ANY
+        // method name fails to intern, rather than ship a slot-misaligned
+        // Vec. Same discipline as `interface_extends` below.
+        let mut iface_method_names_entries: Vec<
+            crate::ir::blade::BladeInterfaceMethodNamesEntry,
+        > = Vec::new();
+        for (iface_sym, method_names) in interface_method_names {
+            let Some(iface_name) = qname_of(*iface_sym) else {
+                continue;
+            };
+            let method_names_str: Vec<String> = method_names
+                .iter()
+                .filter_map(|n| {
+                    self.string_interner.get(*n).map(|s| s.to_string())
+                })
+                .collect();
+            if method_names_str.len() != method_names.len() {
+                continue;
+            }
+            iface_method_names_entries.push(
+                crate::ir::blade::BladeInterfaceMethodNamesEntry {
+                    iface_name,
+                    method_names: method_names_str,
+                },
+            );
+        }
+
+        // Convert interface_method_return_types: (iface_sym,
+        // method_name) → TypeId into qname-keyed entries. Drop entries
+        // whose return type isn't a Class/Interface (those are
+        // recoverable from MIR signature on the consumer side).
+        let mut iface_method_return_type_entries: Vec<
+            crate::ir::blade::BladeInterfaceMethodReturnTypeEntry,
+        > = Vec::new();
+        for ((iface_sym, method_name), ty) in interface_method_return_types {
+            let Some(iface_name) = qname_of(*iface_sym) else {
+                continue;
+            };
+            let Some(return_type_name) = resolve_hir_type_name(*ty) else {
+                continue;
+            };
+            let method_name_str = self
+                .string_interner
+                .get(*method_name)
+                .unwrap_or("")
+                .to_string();
+            if method_name_str.is_empty() {
+                continue;
+            }
+            iface_method_return_type_entries.push(
+                crate::ir::blade::BladeInterfaceMethodReturnTypeEntry {
+                    iface_name,
+                    method_name: method_name_str,
+                    return_type_name,
+                },
+            );
+        }
+
+        // Convert interface_extends: iface_sym → Vec<parent_sym> into
+        // qname-keyed entries. Skip entries where any parent qname
+        // fails to resolve so partial-restore doesn't silently lose
+        // the rest of the chain.
+        let mut iface_extends_entries: Vec<crate::ir::blade::BladeInterfaceExtendsEntry> =
+            Vec::new();
+        for (iface_sym, parents) in interface_extends {
+            let Some(iface_name) = qname_of(*iface_sym) else {
+                continue;
+            };
+            let parent_names: Vec<String> =
+                parents.iter().filter_map(|p| qname_of(*p)).collect();
+            if parent_names.len() != parents.len() {
+                continue;
+            }
+            iface_extends_entries.push(crate::ir::blade::BladeInterfaceExtendsEntry {
+                iface_name,
+                parent_names,
+            });
+        }
+
         BladeCachedMaps {
             functions,
             fields,
@@ -1027,6 +1123,9 @@ impl CompilationUnit {
             properties,
             inline_vars: Vec::new(), // populated separately in try_compile_import
             interface_vtables: iface_vtable_entries,
+            interface_method_names: iface_method_names_entries,
+            interface_method_return_types: iface_method_return_type_entries,
+            interface_extends: iface_extends_entries,
         }
     }
 
@@ -3319,6 +3418,68 @@ impl CompilationUnit {
                 .insert((*class_sym, *iface_sym), method_syms);
         }
 
+        // Restore interface_method_names: qname → ordered method
+        // names. Required so downstream files that pick up a BLADE
+        // cached import can still resolve `t.encode(...)` on an
+        // interface-typed local — `maybe_materialize_for_call`'s
+        // interface-dispatch path keys the vtable slot by method
+        // index from this map.
+        for entry in &cached_maps.interface_method_names {
+            let Some((iface_sym, _, _)) = registered.get(&entry.iface_name) else {
+                continue;
+            };
+            let method_syms: Vec<crate::tast::InternedString> = entry
+                .method_names
+                .iter()
+                .map(|n| self.string_interner.intern(n))
+                .collect();
+            self.import_interface_method_names
+                .insert(*iface_sym, method_syms);
+        }
+
+        // Restore interface_method_return_types: (iface, method_name)
+        // → return TypeId. Required for cross-context iface method
+        // return-type re-resolution (W0014/W0015) on cached imports.
+        for entry in &cached_maps.interface_method_return_types {
+            let Some((iface_sym, _, _)) = registered.get(&entry.iface_name) else {
+                continue;
+            };
+            let Some((_, return_type_id, _)) = registered.get(&entry.return_type_name)
+            else {
+                continue;
+            };
+            let method_name_interned = self.string_interner.intern(&entry.method_name);
+            self.import_interface_method_return_types
+                .insert((*iface_sym, method_name_interned), *return_type_id);
+        }
+
+        // Restore interface_extends: iface → parent ifaces. Required
+        // so iface-to-iface upcasts / dispatch through a parent
+        // interface resolves when both ifaces come from cached
+        // imports. All-or-nothing — drop the entry if any parent
+        // qname is unregistered in the consuming context.
+        for entry in &cached_maps.interface_extends {
+            let Some((iface_sym, _, _)) = registered.get(&entry.iface_name) else {
+                continue;
+            };
+            let mut parent_syms: Vec<crate::tast::SymbolId> =
+                Vec::with_capacity(entry.parent_names.len());
+            let mut all_found = true;
+            for parent_name in &entry.parent_names {
+                if let Some((parent_sym, _, _)) = registered.get(parent_name) {
+                    parent_syms.push(*parent_sym);
+                } else {
+                    all_found = false;
+                    break;
+                }
+            }
+            if !all_found {
+                continue;
+            }
+            self.import_interface_extends
+                .insert(*iface_sym, parent_syms);
+        }
+
         // Restore property access mappings
         for entry in &cached_maps.properties {
             if let Some((_class_sym, _class_type, class_scope)) = registered.get(&entry.class_name)
@@ -4834,6 +4995,9 @@ impl CompilationUnit {
                 &mir_result.property_access_map,
                 &mir_result.function_param_hir_types,
                 &mir_result.interface_vtables,
+                &mir_result.interface_method_names,
+                &mir_result.interface_method_return_types,
+                &mir_result.interface_extends,
             );
             self.last_compiled_cached_maps = Some(cached_maps);
         }
