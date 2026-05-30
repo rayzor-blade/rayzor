@@ -1007,7 +1007,21 @@ fn run_file(
     }
 
     // Check MIR cache: if source hash matches, skip compile+merge+shake entirely
-    // Hash main source + all files in class paths for cache invalidation
+    // Hash main source + all files in class paths for cache invalidation.
+    //
+    // Cache key components (folded into a single u64 via DefaultHasher):
+    //   1. Entry source bytes (covers entry-file own imports & body).
+    //   2. mtime of every `.hx` under manifest_dirs (depth-2 walk, legacy).
+    //   3. **Transitive import set hash** — qnames + bytes of every
+    //      `.hx` reachable from the entry file's imports. Without this,
+    //      changing an imported file's *own* imports (e.g. `Foo.hx` adds
+    //      `import nue.Bar;`) leaves the entry source unchanged and the
+    //      cache replays a stale MIR graph against today's `.blade`s.
+    //   4. **Compiler `BUILD_ID`** — matches the per-module `.blade`
+    //      cache guard in `compilation.rs`. Without this, rebuilding the
+    //      compiler (parser/lowerer/MIR shape changes) keeps the top-level
+    //      `.mir.cache` valid while every per-module `.blade` is correctly
+    //      invalidated, producing replay-vs-fresh-graph drift.
     let source_hash = {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
@@ -1042,6 +1056,10 @@ fn run_file(
                 }
             }
         }
+        // Fold in transitive import-set hash and compiler BUILD_ID.
+        let import_hash = compiler::ir::blade::compute_import_set_hash(&source, &manifest_dirs);
+        import_hash.hash(&mut h);
+        compiler::BUILD_ID.hash(&mut h);
         h.finish()
     };
     let mir_cache_path = {

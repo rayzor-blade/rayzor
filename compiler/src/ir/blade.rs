@@ -986,6 +986,113 @@ pub fn load_bundle_from_bytes(bytes: &[u8]) -> Result<RayzorBundle, BladeError> 
     Ok(bundle)
 }
 
+/// Compute a hash over the **transitive** import set of an entry source.
+///
+/// The top-level `.mir.cache` is keyed on the entry file's own source bytes
+/// (`source.hash()`) plus the mtimes of every `.hx` in the manifest dirs. That
+/// misses one important case: an imported file's *own* imports changing. If
+/// `Main.hx imports nue.Foo`, and `Foo.hx` later adds `import nue.Bar`, the
+/// Main source is unchanged but the MIR graph built today no longer matches a
+/// previously-cached one.
+///
+/// This helper walks transitive imports as a fast pre-cache-check step:
+/// for every `import x.y.Z;` line, it resolves `x/y/Z.hx` under each manifest
+/// dir, hashes the file bytes into the hasher, then recurses on that file's
+/// own imports. Uses a visited set keyed by qualified module name to bound
+/// the walk; caps total visits to keep it cheap.
+///
+/// Intentionally permissive: bad/missing imports just don't contribute to the
+/// hash — we never want to fail the build here, only to invalidate the cache
+/// when the import graph shifts.
+pub fn compute_import_set_hash(entry_source: &str, manifest_dirs: &[std::path::PathBuf]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::collections::HashSet;
+    use std::hash::{Hash, Hasher};
+
+    const MAX_VISITS: usize = 4096; // pathological-input guard
+    let mut hasher = DefaultHasher::new();
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: Vec<(String, String)> = Vec::new(); // (qname, source)
+
+    // Seed with entry file's own imports. The entry source itself is already
+    // hashed by the caller, so we only need its import list here.
+    for qname in extract_import_qnames(entry_source) {
+        queue.push((qname, String::new()));
+    }
+
+    while let Some((qname, _)) = queue.pop() {
+        if !visited.insert(qname.clone()) {
+            continue;
+        }
+        if visited.len() > MAX_VISITS {
+            break;
+        }
+        // Resolve qname → .hx path under manifest_dirs
+        let rel_path: std::path::PathBuf = qname
+            .split('.')
+            .collect::<std::path::PathBuf>()
+            .with_extension("hx");
+        let mut resolved: Option<std::path::PathBuf> = None;
+        for dir in manifest_dirs {
+            let candidate = dir.join(&rel_path);
+            if candidate.is_file() {
+                resolved = Some(candidate);
+                break;
+            }
+        }
+        let Some(path) = resolved else { continue };
+        // Hash qname + file contents. Using contents (not mtime) so a touch
+        // without edit doesn't invalidate; an edit with no mtime change still does.
+        qname.hash(&mut hasher);
+        if let Ok(bytes) = std::fs::read(&path) {
+            bytes.hash(&mut hasher);
+            // Sort-then-extend to make ordering deterministic across the BFS.
+            let mut deps: Vec<String> =
+                extract_import_qnames(std::str::from_utf8(&bytes).unwrap_or(""));
+            deps.sort();
+            for d in deps {
+                if !visited.contains(&d) {
+                    queue.push((d, String::new()));
+                }
+            }
+        }
+    }
+
+    hasher.finish()
+}
+
+/// Extract qualified import names from a Haxe source string. Looks for lines
+/// shaped `^\s*import\s+([\w.]+)\s*;` and `^\s*using\s+([\w.]+)\s*;`. Tolerant
+/// of trailing whitespace / comments / wildcard-asterisks (which we drop).
+fn extract_import_qnames(source: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        let rest = if let Some(r) = trimmed.strip_prefix("import ") {
+            r
+        } else if let Some(r) = trimmed.strip_prefix("using ") {
+            r
+        } else {
+            continue;
+        };
+        // Take up to ';' or whitespace
+        let end = rest
+            .find(|c: char| c == ';' || c.is_whitespace())
+            .unwrap_or(rest.len());
+        let qname = &rest[..end];
+        // Drop wildcard `.*` if present
+        let qname = qname.trim_end_matches(".*").trim_end_matches('.');
+        if !qname.is_empty()
+            && qname
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+        {
+            out.push(qname.to_string());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
