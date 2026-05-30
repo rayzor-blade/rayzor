@@ -57,17 +57,29 @@ class BertModel implements EncoderModel {
         var seq = tokenIds.length;
         var positions = [for (i in 0...seq) i];
 
-        var x = tokenEmbed.lookup(tokenIds);
-        x = x.add(positionEmbed.lookup(positions));
-        if (segmentEmbed != null) {
-            var zeros = [for (_ in 0...seq) 0];
-            x = x.add(segmentEmbed.lookup(zeros));
-        }
-        if (embedNorm != null) x = embedNorm.forward(x);
+        var h0 = tokenEmbed.lookup(tokenIds);
+        var h1 = h0.add(positionEmbed.lookup(positions));
+        // The strict E0382 analyzer linearises ternary/if branches, so a
+        // bare `h.clone()` else-branch races the call-arg consume in the
+        // then-branch. Use a clone for the call-arg path so both branches
+        // are pure receiver-uses of the original binding (no `Variable`
+        // node appears as a direct call arg).
+        var h2:Tensor = (segmentEmbed != null)
+            ? h1.clone().add(segmentEmbed.lookup([for (_ in 0...seq) 0]))
+            : h1.clone();
+        var h3:Tensor = (embedNorm != null)
+            ? embedNorm.forward(h2.clone())
+            : h2.clone();
 
-        for (block in blocks) x = block.forward(x);
-        if (encoderNorm != null) x = encoderNorm.forward(x);
-        return x;
+        var hBlocks = h3;
+        for (block in blocks) {
+            var nextH = hBlocks.clone();
+            hBlocks = block.forward(nextH);
+        }
+        var hFinal:Tensor = (encoderNorm != null)
+            ? encoderNorm.forward(hBlocks.clone())
+            : hBlocks.clone();
+        return hFinal;
     }
 
     /**

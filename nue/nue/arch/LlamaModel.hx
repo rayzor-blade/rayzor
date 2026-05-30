@@ -53,16 +53,27 @@ class LlamaModel implements CausalLanguageModel {
     }
 
     public function forwardIds(tokenIds:Array<Int>):Tensor {
-        var x = embedTokens.lookup(tokenIds);
+        // The reassign-then-pass-self pattern (`x = f(x)`) is
+        // semantically a move-and-rebind, but the cross-file strict
+        // @:move analyzer flags the call-arg read as a use-after-move.
+        // Pass the clone into the block forward so the binding `h` is
+        // only ever read as a method receiver — never as a direct
+        // `Variable` call argument — which the analyzer treats as a
+        // use rather than a move.
+        var h = embedTokens.lookup(tokenIds);
         for (block in blocks) {
-            x = block.forward(x);
+            var hIn = h.clone();
+            h = block.forward(hIn);
         }
-        x = outputNorm.forward(x);
-        return lmHead.forward(x);
+        var hNormIn = h.clone();
+        var normed = outputNorm.forward(hNormIn);
+        return lmHead.forward(normed);
     }
 
     public function forward(x:Tensor):Tensor {
-        var n = x.numel();
+        var shape = x.shape();
+        var n = shape[0];
+        for (i in 1...shape.length) n *= shape[i];
         var ids = [];
         for (i in 0...n) ids.push(Std.int(x.get([i])));
         return forwardIds(ids);

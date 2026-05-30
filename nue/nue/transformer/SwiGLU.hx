@@ -31,7 +31,10 @@ class SwiGLU implements Module {
     }
 
     public function forward(x:Tensor):Tensor {
-        var g = gate.forward(x).silu();
+        // SwiGLU shares the same input x across gate and up projections.
+        // The down projection then takes the elementwise product. Two
+        // independent consumers of x → clone the first one.
+        var g = gate.forward(x.clone()).silu();
         var u = up.forward(x);
         return down.forward(g.mul(u));
     }
