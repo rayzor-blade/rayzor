@@ -60,6 +60,21 @@ pub enum IrInstruction {
     /// Move value (transfer ownership)
     Move { dest: IrId, src: IrId },
 
+    /// Mark a value as moved without producing a destination.
+    /// Used by the ownership analysis to signal that `src` has been transferred
+    /// away. Backends may treat this as a hint / no-op, but later `CheckLive`
+    /// uses of the same id are expected to diagnose a use-after-move.
+    MarkMoved { src: IrId },
+
+    /// Assert that `src` is still live (not moved) at this program point.
+    /// Carries an `IrSourceLocation` so the borrow-checker / runtime can report
+    /// where the offending use occurred (mirrors how `DebugLoc` carries
+    /// location info).
+    CheckLive {
+        src: IrId,
+        location: IrSourceLocation,
+    },
+
     /// Create immutable borrow/reference
     BorrowImmutable {
         dest: IrId,
@@ -666,6 +681,8 @@ impl IrInstruction {
             IrInstruction::VectorMinMax { left, right, .. } => vec![*left, *right],
             // Move/borrow instructions
             IrInstruction::Move { src, .. } => vec![*src],
+            IrInstruction::MarkMoved { src } => vec![*src],
+            IrInstruction::CheckLive { src, .. } => vec![*src],
             IrInstruction::BorrowImmutable { src, .. } => vec![*src],
             IrInstruction::BorrowMutable { src, .. } => vec![*src],
             IrInstruction::Clone { src, .. } => vec![*src],

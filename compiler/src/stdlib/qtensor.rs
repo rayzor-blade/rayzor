@@ -167,6 +167,20 @@ fn declare_qtensor_externs(builder: &mut MirBuilder) {
         .calling_convention(CallingConvention::C)
         .build();
     builder.mark_as_extern(func_id);
+
+    // clone: (src) -> i64
+    // Deep-copy entrypoint for @:derive(Clone) on rayzor.ds.QTensor.
+    // Safety-net mapping: the synthetic `.clone()` call is normally
+    // intercepted in hir_to_mir.rs (lower_derived_clone) before this
+    // extern is ever materialised, but it must exist for Dynamic-receiver
+    // dispatch paths that route through runtime_mapping.rs.
+    let func_id = builder
+        .begin_function("rayzor_qtensor_clone")
+        .param("src", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
 }
 
 // ============================================================================

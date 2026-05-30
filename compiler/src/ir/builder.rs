@@ -703,6 +703,22 @@ impl IrBuilder {
         self.add_instruction(IrInstruction::Free { ptr })
     }
 
+    /// Emit a `MarkMoved` marker for `src` at the current insertion point.
+    /// Used by the move-ownership analysis to signal that the value held in
+    /// `src` has been transferred away (e.g. consumed by another binding
+    /// or passed by value into a callee that takes ownership).
+    pub fn build_mark_moved(&mut self, src: IrId) -> Option<()> {
+        self.add_instruction(IrInstruction::MarkMoved { src })
+    }
+
+    /// Emit a `CheckLive` guard for `src` at the current insertion point.
+    /// Used to assert that a `@:move`-tracked local has not been moved out
+    /// of before this read. Backends / analyses may turn this into a
+    /// diagnostic when the liveness check fails.
+    pub fn build_check_live(&mut self, src: IrId, location: IrSourceLocation) -> Option<()> {
+        self.add_instruction(IrInstruction::CheckLive { src, location })
+    }
+
     /// Build a heap free by calling the free function
     /// This is used for explicit deallocation of heap-allocated objects (Rust-style drop)
     pub fn build_heap_free(&mut self, ptr: IrId) -> Option<()> {

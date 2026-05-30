@@ -33,7 +33,7 @@ use crate::ir::{
     IrValue, UnaryOp,
 };
 // SmallVec disabled temporarily - reverting to Vec to debug Linux CI heap corruption
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 // ============================================================================
@@ -541,8 +541,11 @@ pub enum Opcode {
     // Global variable access
     LoadGlobal = 54,
     StoreGlobal = 55,
+    // Ownership analysis hints (no runtime effect)
+    MarkMoved = 56,
+    CheckLive = 57,
     // Sentinel for table size
-    _Count = 56,
+    _Count = 58,
 }
 
 impl Opcode {
@@ -608,6 +611,9 @@ impl Opcode {
             // Global variable access
             IrInstruction::LoadGlobal { .. } => Opcode::LoadGlobal,
             IrInstruction::StoreGlobal { .. } => Opcode::StoreGlobal,
+            // Ownership hints (no-op at runtime)
+            IrInstruction::MarkMoved { .. } => Opcode::MarkMoved,
+            IrInstruction::CheckLive { .. } => Opcode::CheckLive,
         }
     }
 }
@@ -1011,6 +1017,15 @@ pub struct MirInterpreter {
     /// Global variable store - maps global IDs to their values
     /// Used for static class fields and module-level variables
     global_store: BTreeMap<crate::ir::IrGlobalId, NanBoxedValue>,
+
+    /// Whether `MarkMoved` / `CheckLive` should be enforced at runtime.
+    /// Cached at construction by reading `RAYZOR_STRICT_MOVE_CHECK` exactly once.
+    /// When `false` (default), both instructions are no-ops.
+    strict_move_check_enabled: bool,
+
+    /// Set of IrIds that have been observed via `MarkMoved`.
+    /// Only populated when `strict_move_check_enabled` is true.
+    moved_ids: BTreeSet<IrId>,
 }
 
 // Safety: MirInterpreter can be sent across threads
@@ -1034,6 +1049,15 @@ impl MirInterpreter {
 
     /// Create a new interpreter
     pub fn new() -> Self {
+        // Read the env var exactly once at construction time.
+        // Any non-empty, non-"0", non-"false" value enables strict checking.
+        let strict_move_check_enabled = match std::env::var("RAYZOR_STRICT_MOVE_CHECK") {
+            Ok(v) => {
+                let v = v.trim();
+                !v.is_empty() && v != "0" && !v.eq_ignore_ascii_case("false")
+            }
+            Err(_) => false,
+        };
         Self {
             runtime_symbols: BTreeMap::new(),
             stack: Vec::new(),
@@ -1047,6 +1071,8 @@ impl MirInterpreter {
             iteration_count: 0,
             max_iterations: 10_000, // Trigger JIT bailout after 10k iterations
             global_store: BTreeMap::new(),
+            strict_move_check_enabled,
+            moved_ids: BTreeSet::new(),
         }
     }
 
@@ -1161,12 +1187,30 @@ impl MirInterpreter {
             }
         }
 
+        // Per-function isolation: `moved_ids` tracks IrIds marked via `MarkMoved`
+        // in the CURRENT frame's SSA namespace. Without snapshotting around the
+        // callee, an IrId marked moved inside the callee would persist into the
+        // caller's frame — and since IrIds are SSA-numbered per-function, the
+        // first cross-frame collision would cause a false-positive panic at
+        // `CheckLive`. Snapshot on entry, restore on exit (works for recursive
+        // calls too — each frame sees its own caller's view on return). When
+        // strict mode is disabled the set is never written, so `mem::take`
+        // returns an already-empty BTreeSet and is effectively free.
+        let saved_moved_ids: BTreeSet<IrId> = std::mem::take(&mut self.moved_ids);
+
         self.stack.push(frame);
 
-        // Execute blocks until return (uses NanBoxedValue internally)
-        let result = self.execute_function(module, function)?;
+        // Execute blocks until return (uses NanBoxedValue internally).
+        // Do NOT use `?` here — we must restore moved_ids on the error path too,
+        // otherwise the caller's per-frame view is permanently drained.
+        let exec_result = self.execute_function(module, function);
 
         self.stack.pop();
+
+        // Restore caller's moved_ids view regardless of success/failure.
+        self.moved_ids = saved_moved_ids;
+
+        let result = exec_result?;
 
         // Convert NanBoxedValue back to InterpValue at the boundary
         Ok(InterpValue::from_nan_boxed(result, &self.object_heap))
@@ -1881,6 +1925,23 @@ impl MirInterpreter {
 
             IrInstruction::EndBorrow { .. } => {
                 // No-op in interpreter
+            }
+
+            IrInstruction::MarkMoved { src } => {
+                // No-op by default. When RAYZOR_STRICT_MOVE_CHECK is set at
+                // interpreter construction, record the id so a later
+                // CheckLive can assert on use-after-move.
+                if self.strict_move_check_enabled {
+                    self.moved_ids.insert(*src);
+                }
+            }
+
+            IrInstruction::CheckLive { src, .. } => {
+                // No-op by default. Under strict mode, panic if the id was
+                // already marked moved (use-after-move bug).
+                if self.strict_move_check_enabled && self.moved_ids.contains(src) {
+                    panic!("use-after-move in interpreter: src={:?}", src);
+                }
             }
 
             // === Memory Operations (need conversion for ptr operations) ===

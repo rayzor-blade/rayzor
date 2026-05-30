@@ -610,6 +610,26 @@ impl<'a> TastToHirContext<'a> {
             })
         });
 
+        // Forward selected TAST memory annotations as HIR metadata attributes
+        // so downstream passes (notably MIR lowering for `@:move` strict-move
+        // tracking) can detect them via the HirAttribute list. `lower_metadata`
+        // remains a TODO; this is the minimal bridge for ownership semantics.
+        let mut class_metadata: Vec<HirAttribute> = Vec::new();
+        use crate::tast::node::MemoryAnnotation;
+        for ann in &class.memory_annotations {
+            let name_str = match ann {
+                MemoryAnnotation::Move => Some("move"),
+                MemoryAnnotation::Managed => Some("managed"),
+                _ => None,
+            };
+            if let Some(n) = name_str {
+                class_metadata.push(HirAttribute {
+                    name: self.string_interner.intern(n),
+                    args: Vec::new(),
+                });
+            }
+        }
+
         let hir_class = HirClass {
             symbol_id: class.symbol_id,
             name: class.name.clone(),
@@ -619,7 +639,7 @@ impl<'a> TastToHirContext<'a> {
             fields: hir_fields,
             methods: hir_methods,
             constructor: hir_constructor,
-            metadata: Vec::new(), // Convert from TypedMetadata when available
+            metadata: class_metadata,
             // Look up class hierarchy info from SymbolTable
             is_final: self.is_class_final(class.symbol_id),
             is_abstract: self.is_class_abstract(class.symbol_id),

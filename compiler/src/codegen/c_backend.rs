@@ -639,6 +639,10 @@ impl CBackend {
                 // No-op in C (lifetime tracking is compile-time only)
             }
 
+            IrInstruction::MarkMoved { .. } | IrInstruction::CheckLive { .. } => {
+                // No-op in C (ownership tracking is compile-time only)
+            }
+
             IrInstruction::Load { dest, ptr, ty } => {
                 let dest_c = function
                     .register_types

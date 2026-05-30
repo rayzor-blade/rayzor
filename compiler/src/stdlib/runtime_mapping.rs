@@ -3509,6 +3509,12 @@ impl StdlibMapping {
             // tensor.free(): Void
             map_method!(instance "rayzor_ds_Tensor", "free" => "Tensor_free", params: 0, mir_wrapper,
                 types: &[PtrVoid]),
+            // tensor.clone(): Tensor  — @:derive(Clone) safety-net mapping.
+            // hir_to_mir.rs (lower_derived_clone) normally intercepts this call
+            // before runtime_mapping is consulted; the entry here covers the
+            // Dynamic-receiver dispatch edge case where intercept misses.
+            map_method!(instance "rayzor_ds_Tensor", "clone" => "rayzor_tensor_clone", params: 0, mir_wrapper,
+                types: &[PtrVoid] => PtrVoid),
         ];
 
         self.register_from_tuples(mappings);
@@ -3567,6 +3573,12 @@ impl StdlibMapping {
             // --- Lifetime ---
             map_method!(instance "rayzor_ds_QTensor", "free" => "QTensor_free",
                 params: 0, mir_wrapper, types: &[PtrVoid]),
+            // qt.clone(): QTensor  — @:derive(Clone) safety-net mapping.
+            // hir_to_mir.rs (lower_derived_clone) normally intercepts this call
+            // before runtime_mapping is consulted; the entry here covers the
+            // Dynamic-receiver dispatch edge case where intercept misses.
+            map_method!(instance "rayzor_ds_QTensor", "clone" => "rayzor_qtensor_clone",
+                params: 0, mir_wrapper, types: &[PtrVoid] => PtrVoid),
         ];
 
         self.register_from_tuples(mappings);
