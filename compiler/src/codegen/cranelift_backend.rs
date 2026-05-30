@@ -2180,19 +2180,12 @@ impl CraneliftBackend {
     /// by `compile_function` *before* translation begins (see
     /// `collect_liveness_ids`). This is a pure lookup: if the slot is missing
     /// the pre-walk failed to find this IrId — which would be a compiler bug.
-    fn get_or_alloc_liveness_slot(
-        src: IrId,
-        liveness_slots: &mut BTreeMap<IrId, StackSlot>,
-        _builder: &mut FunctionBuilder,
-        _entry_block: Block,
-    ) -> StackSlot {
+    /// Any new ownership IR instruction that names an `IrId` as live-state
+    /// must be added to `collect_liveness_ids` or this will panic.
+    fn get_liveness_slot(src: IrId, liveness_slots: &BTreeMap<IrId, StackSlot>) -> StackSlot {
         if let Some(&slot) = liveness_slots.get(&src) {
             return slot;
         }
-        // Pre-walk in `compile_function` should have collected every IrId
-        // used by MarkMoved/CheckLive. Reaching this path means a new
-        // ownership instruction shape was added without updating the
-        // pre-walk. Panic loudly so the bug is impossible to miss.
         panic!(
             "liveness slot for IrId {:?} was not pre-allocated by collect_liveness_ids; \
              this indicates a MarkMoved/CheckLive site that the pre-walk missed",
@@ -2263,10 +2256,9 @@ impl CraneliftBackend {
 
             IrInstruction::MarkMoved { src } => {
                 // Ownership: mark the per-IrId liveness slot as 0 (moved).
-                // The slot is allocated on first use and initialized to 1 (live)
-                // at the function entry block.
-                let slot =
-                    Self::get_or_alloc_liveness_slot(*src, liveness_slots, builder, entry_block);
+                // The slot is pre-allocated and seeded to 1 (live) in the
+                // entry block by `compile_function` before translation.
+                let slot = Self::get_liveness_slot(*src, liveness_slots);
                 let zero = builder.ins().iconst(types::I8, 0);
                 builder.ins().stack_store(zero, slot, 0);
             }
@@ -2275,8 +2267,7 @@ impl CraneliftBackend {
                 // Ownership: assert the per-IrId liveness slot is non-zero.
                 // If zero, call rayzor_panic_use_after_move(name_ptr, name_len, line)
                 // and trap. Otherwise continue at `live_block`.
-                let slot =
-                    Self::get_or_alloc_liveness_slot(*src, liveness_slots, builder, entry_block);
+                let slot = Self::get_liveness_slot(*src, liveness_slots);
                 let live_byte = builder.ins().stack_load(types::I8, slot, 0);
 
                 let live_block = builder.create_block();
