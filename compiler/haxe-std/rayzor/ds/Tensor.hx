@@ -18,6 +18,8 @@ package rayzor.ds;
  * trace(c.sum());
  * ```
  */
+@:derive([Clone])
+@:move
 @:native("rayzor::ds::Tensor")
 extern class Tensor {
     // --- Construction ---
