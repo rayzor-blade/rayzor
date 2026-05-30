@@ -842,6 +842,30 @@ unsafe fn alloc_qtensor(
         _ => return std::ptr::null_mut(),
     };
 
+    // Pool fast path. Returns null on miss; on hit the wrapper carries the
+    // original data + meta allocations (meta f32 scales for INT8) which we
+    // zero before handing back so the caller sees a fresh-feeling tensor.
+    let popped = try_pop_qtensor(scheme, rows, cols, group_size);
+    if !popped.is_null() {
+        let qt = &mut *popped;
+        if !qt.data.is_null() && data_bytes > 0 {
+            std::ptr::write_bytes(qt.data, 0, data_bytes);
+        }
+        if scheme == QSCHEME_INT8 && !qt.meta.is_null() {
+            let n_groups = numel / group_size;
+            std::ptr::write_bytes(qt.meta, 0, n_groups * std::mem::size_of::<f32>());
+        }
+        qt.owns_data = true;
+        // numel / group_size / scheme / rows / cols already match the bucket
+        // key and shouldn't have drifted; refresh defensively.
+        qt.numel = numel;
+        qt.group_size = group_size;
+        qt.scheme = scheme;
+        qt.rows = rows;
+        qt.cols = cols;
+        return popped;
+    }
+
     let data = malloc(if data_bytes > 0 { data_bytes } else { 1 });
     if data.is_null() {
         return std::ptr::null_mut();
@@ -1862,20 +1886,144 @@ pub unsafe extern "C" fn rayzor_qtensor_clone(src: i64) -> i64 {
     qt as i64
 }
 
-/// Release a QTensor. The runtime frees `data` and `meta` if `owns_data`.
-#[no_mangle]
-pub unsafe extern "C" fn rayzor_qtensor_free(qt_ptr: i64) {
-    if qt_ptr == 0 {
+// ============================================================================
+// QTensor pool integration
+//
+// QTensor pool keys live in a namespace disjoint from plain tensors: we OR
+// 0x80 into the "dtype" byte and combine it with `scheme`, so plain f32
+// (dtype=0) and INT8 (scheme=0) never alias. The bucket key also folds
+// `group_size` into the shape hash because INT8 QTensors carry a separately-
+// allocated f32 scales array of length `numel/group_size`; recycling across
+// group_sizes would mismatch the meta length on revive.
+//
+// For Q4_K_M / Q6_K, `owns_data` is typically `false` (zero-copy wrap of an
+// mmap'd GGUF buffer). The pool push side enforces the `owns_data == true`
+// gate so zero-copy wrappers are never parked; they take the direct-free
+// path that releases only the wrapper struct.
+// ============================================================================
+
+use crate::tensor_pool::{self, PoolKey, PooledEntry, ShapeBuf};
+
+/// Construct a pool key for a QTensor's `(scheme, rows, cols, group_size)`
+/// class. Distinct from plain-tensor keys via the 0x80 high bit on `dtype`.
+fn qtensor_pool_key(scheme: u8, rows: usize, cols: usize, group_size: usize) -> PoolKey {
+    // Fold group_size into the shape so the hash mixes it; this keeps the
+    // bucket walk's `shape == ?` check precise too — we add a synthetic
+    // dimension carrying group_size so two otherwise-identical shapes with
+    // different group_sizes don't collide.
+    let shape = [rows, cols, group_size];
+    let mut key = PoolKey::from_shape(0x80 | scheme, &shape);
+    // Defence-in-depth: also fold scheme into the hash so two schemes that
+    // happen to share rows/cols/group_size still hash apart even though
+    // they already differ in the `dtype` byte.
+    key.shape_hash ^= scheme as u64;
+    key
+}
+
+/// Pool entry "shape" recording (rows, cols, group_size). Used by the
+/// bucket-walk `shape == ?` collision check.
+fn qtensor_pool_shape(rows: usize, cols: usize, group_size: usize) -> [usize; 3] {
+    [rows, cols, group_size]
+}
+
+/// Canonical free for pooled QTensor entries. Mirrors `rayzor_qtensor_free`
+/// without the pool-routing — used on eviction / drain.
+unsafe fn qtensor_pool_freer(entry: PooledEntry) {
+    if entry.ptr.is_null() {
         return;
     }
-    let qt = &*(qt_ptr as *const RayzorQTensor);
+    let qt = &*(entry.ptr as *const RayzorQTensor);
     if qt.owns_data && !qt.data.is_null() {
         free(qt.data);
     }
     if !qt.meta.is_null() {
         free(qt.meta as *mut u8);
     }
-    free(qt_ptr as *mut u8);
+    free(entry.ptr);
+}
+
+/// Release a QTensor. The runtime frees `data` and `meta` if `owns_data`.
+///
+/// Pool-routing: owning QTensors (INT8 or Q4_K_M-with-take-ownership) are
+/// parked in `tensor_pool::global()` keyed on
+/// `(scheme, rows, cols, group_size)`. The meta scales array (INT8) rides
+/// along on the `PooledEntry`, so an INT8 revive hands back the same
+/// allocations including scales. Zero-copy wrappers (`owns_data=false`,
+/// Q4_K_M / Q6_K mmap views) take the direct free path: their `data`
+/// belongs to a parent `HaxeBytes`, only the wrapper struct is released.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_qtensor_free(qt_ptr: i64) {
+    if qt_ptr == 0 {
+        return;
+    }
+    let qt = &*(qt_ptr as *const RayzorQTensor);
+
+    // Zero-copy wrappers: drop only the wrapper struct.
+    if !qt.owns_data {
+        if !qt.meta.is_null() {
+            // Defensive — wrap paths set meta to null, but if a future
+            // wrap variant adds a non-owned meta this still tracks correctly.
+            free(qt.meta as *mut u8);
+        }
+        free(qt_ptr as *mut u8);
+        return;
+    }
+
+    // Scheme gate: only INT8 owning QTensors are pool-routed. `alloc_qtensor`
+    // currently only revives INT8 via `try_pop_qtensor` (Q4_K_M and Q6_K both
+    // arrive through `wrap`/`from_bytes` constructors that go straight to
+    // `malloc` and never consult the pool), so parking a Q4_K_M / Q6_K
+    // entry just leaks bytes into a bucket that nothing will ever pop. Take
+    // the direct-free path for them instead — same physical release the
+    // pool freer would do, without the bookkeeping churn.
+    if qt.scheme != QSCHEME_INT8 {
+        if !qt.data.is_null() {
+            free(qt.data);
+        }
+        if !qt.meta.is_null() {
+            free(qt.meta as *mut u8);
+        }
+        free(qt_ptr as *mut u8);
+        return;
+    }
+
+    // Owning INT8 QTensor: park in the pool.
+    let key = qtensor_pool_key(qt.scheme, qt.rows, qt.cols, qt.group_size);
+    let shape = qtensor_pool_shape(qt.rows, qt.cols, qt.group_size);
+    let data_bytes = qt.data_bytes();
+    let meta_bytes = if qt.meta.is_null() {
+        0
+    } else {
+        // INT8 meta: one f32 scale per group.
+        (qt.numel / qt.group_size) * std::mem::size_of::<f32>()
+    };
+    let entry = PooledEntry {
+        ptr: qt_ptr as *mut u8,
+        shape: ShapeBuf::from_slice(&shape),
+        alloc_bytes: data_bytes,
+        qtensor_meta_ptr: qt.meta as *mut u8,
+        qtensor_meta_bytes: meta_bytes,
+    };
+    tensor_pool::global().push(key, entry, qtensor_pool_freer);
+}
+
+/// Try to recycle a QTensor wrapper for the requested
+/// `(scheme, rows, cols, group_size)` class. Returns the popped wrapper on
+/// hit (caller is responsible for resetting / refilling `data` and `meta`
+/// before use), or null on miss. Allocators that build a fresh QTensor
+/// from raw data should consult this BEFORE allocating new buffers.
+unsafe fn try_pop_qtensor(
+    scheme: u8,
+    rows: usize,
+    cols: usize,
+    group_size: usize,
+) -> *mut RayzorQTensor {
+    let key = qtensor_pool_key(scheme, rows, cols, group_size);
+    let shape = qtensor_pool_shape(rows, cols, group_size);
+    match tensor_pool::global().try_pop(key, &shape) {
+        Some(entry) => entry.ptr as *mut RayzorQTensor,
+        None => std::ptr::null_mut(),
+    }
 }
 
 #[cfg(test)]
@@ -2449,6 +2597,89 @@ mod tests {
 
             rayzor_qtensor_free(qt_a);
             rayzor_qtensor_free(qt_b);
+        }
+    }
+
+    // ----------------------------------------------------------------
+    // (C) Pool gate: Q4_K_M / Q6_K MUST NOT be pool-routed
+    // ----------------------------------------------------------------
+    //
+    // `alloc_qtensor` only consults `try_pop_qtensor` for INT8; Q4_K_M
+    // and Q6_K take the `from_bytes` / `wrap` path directly to malloc.
+    // Parking Q4_K_M / Q6_K entries would therefore leak bytes into a
+    // bucket nothing will ever pop. `rayzor_qtensor_free` now gates the
+    // pool push on `scheme == QSCHEME_INT8` and falls through to direct
+    // libc-`free()` for the other schemes.
+    //
+    // This test allocates 10 owning Q4_K_M wrappers (via `wrap` with
+    // `take_ownership=1` so the freer treats them as owning), frees
+    // each through the public FFI, and asserts:
+    //   - the Q4_K_M pool key holds zero entries
+    //   - the pool's `current_bytes` is unchanged across the free loop
+    //     (no Q4_K_M byte budget churn)
+    #[test]
+    fn q4_k_m_free_bypasses_pool() {
+        unsafe {
+            // Snapshot current bookkeeping so a parallel cargo test that
+            // parked some INT8 entries doesn't false-positive us.
+            let pool = crate::tensor_pool::global();
+            let bytes_before = pool
+                .stats
+                .current_bytes
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let pushes_before = pool.stats.pushes.load(std::sync::atomic::Ordering::Relaxed);
+
+            // Build a key matching what `rayzor_qtensor_free` would have
+            // used for our (Q4_K_M, 1, 256, 256) qtensors. After the gate
+            // no entries should ever appear under this key.
+            let q4_key = qtensor_pool_key(QSCHEME_Q4_K_M, 1, 256, Q4_K_M_BLOCK_SIZE);
+            let key_entries_before = pool.entries_in(q4_key);
+
+            // Allocate + free 10 owning Q4_K_M wrappers. Each block is
+            // 144 bytes; we malloc them so `take_ownership=1` transfers
+            // a real owning buffer into the wrapper (the freer will
+            // libc-free it directly under the new gate).
+            for _ in 0..10 {
+                let block = malloc(Q4_K_M_BLOCK_BYTES);
+                assert!(!block.is_null());
+                // Zero the block — content irrelevant for the gate test.
+                std::ptr::write_bytes(block, 0, Q4_K_M_BLOCK_BYTES);
+                let qt = rayzor_qtensor_wrap_q4_k_m(
+                    block as i64,
+                    1,
+                    Q4_K_M_BLOCK_SIZE as i64,
+                    1, /* take_ownership */
+                );
+                assert!(qt != 0);
+                // Hand it straight to free — this is the path the gate
+                // protects.
+                rayzor_qtensor_free(qt);
+            }
+
+            // Q4_K_M bucket must still hold zero entries — every free
+            // hit the direct-libc path, nothing was parked.
+            let key_entries_after = pool.entries_in(q4_key);
+            assert_eq!(
+                key_entries_after, key_entries_before,
+                "Q4_K_M frees must not park anything in the pool bucket"
+            );
+            // current_bytes must be unchanged — no bytes were added or
+            // removed by Q4_K_M frees.
+            let bytes_after = pool
+                .stats
+                .current_bytes
+                .load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                bytes_after, bytes_before,
+                "Q4_K_M free path must not touch pool current_bytes"
+            );
+            // pushes counter must be unchanged — the pool's `push` was
+            // never called.
+            let pushes_after = pool.stats.pushes.load(std::sync::atomic::Ordering::Relaxed);
+            assert_eq!(
+                pushes_after, pushes_before,
+                "Q4_K_M free path must not invoke pool.push at all"
+            );
         }
     }
 }

@@ -17,6 +17,62 @@ extern "C" {
     fn free(ptr: *mut u8);
 }
 
+// =============================================================================
+// Alloc histogram (env-gated): writes one CSV line per `alloc_tensor` call.
+// Enabled when `RAYZOR_TENSOR_ALLOC_HISTOGRAM=1`. Output file controlled by
+// `RAYZOR_TENSOR_ALLOC_HISTOGRAM_PATH`, defaults to /tmp/alloc_hist.csv.
+//
+// This is for the tensor-pool design audit. Each line:
+//   dtype,ndim,shape0,shape1,...
+// =============================================================================
+
+use std::io::Write as _;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+
+struct AllocHistogramSink {
+    file: Option<std::fs::File>,
+}
+
+fn alloc_histogram_sink() -> &'static Option<Mutex<AllocHistogramSink>> {
+    static SINK: OnceLock<Option<Mutex<AllocHistogramSink>>> = OnceLock::new();
+    SINK.get_or_init(|| {
+        match std::env::var("RAYZOR_TENSOR_ALLOC_HISTOGRAM") {
+            Ok(v) if v == "1" || v.eq_ignore_ascii_case("true") => {}
+            _ => return None,
+        }
+        let path = std::env::var("RAYZOR_TENSOR_ALLOC_HISTOGRAM_PATH")
+            .unwrap_or_else(|_| "/tmp/alloc_hist.csv".to_string());
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&path)
+            .ok();
+        Some(Mutex::new(AllocHistogramSink { file }))
+    })
+}
+
+fn record_alloc_histogram(shape: &[usize], dtype: u8) {
+    let Some(lock) = alloc_histogram_sink() else {
+        return;
+    };
+    let Ok(mut sink) = lock.lock() else { return };
+    let Some(file) = sink.file.as_mut() else {
+        return;
+    };
+    let mut line = String::with_capacity(64);
+    line.push_str(&dtype.to_string());
+    line.push(',');
+    line.push_str(&shape.len().to_string());
+    for &d in shape {
+        line.push(',');
+        line.push_str(&d.to_string());
+    }
+    line.push('\n');
+    let _ = file.write_all(line.as_bytes());
+}
+
 use half::{bf16, f16};
 
 // DType tags matching the Haxe enum order.
@@ -396,13 +452,15 @@ struct RayzorTensor {
     numel: usize,
     dtype: u8,
     // `owns_data` indicates this wrapper owns its `data` / `shape` / `strides`
-    // allocations and is responsible for freeing them. **It does NOT imply a
-    // contiguous stride pattern**: `rayzor_tensor_clone` of a permuted/sliced
-    // view produces `owns_data=true` with the parent's non-contiguous strides
-    // and a buffer sized `(Σ(shape[i]-1)·strides[i] + 1) · elem_size`, not
-    // `numel · elem_size`. Any fast-path that takes a stride-1 shortcut on
-    // owns_data must check strides explicitly. See memory
-    // bugs_clone_view_passthrough_invariant.md.
+    // allocations and is responsible for freeing them. As of the clone-compact
+    // fix (`rayzor_tensor_clone` always compacts to contiguous), `owns_data ==
+    // true` ALSO implies canonical row-major strides AND
+    // `data_bytes == numel * dtype_size(dtype)`. Every producer of an owning
+    // tensor (`alloc_tensor`, dequant constructors, `rayzor_tensor_clone`)
+    // upholds this invariant — view producers (`permute`, `slice`, `transpose*`,
+    // `reshape`-aliased) set `owns_data=false` and may carry arbitrary strides.
+    // A clone of a view compacts via a strided gather so the result is safe to
+    // pool-admit. See memory bugs_clone_view_passthrough_invariant.md (FIXED).
     owns_data: bool,
     // Device placement. `device` is the device tag (DEVICE_CPU/DEVICE_METAL/
     // DEVICE_CUDA/DEVICE_WEBGPU). `numa_node` is meaningful only when
@@ -439,10 +497,12 @@ impl RayzorTensor {
     }
 
     /// True iff this tensor's strides match the canonical row-major layout for
-    /// its shape (i.e. `strides[i] == prod(shape[i+1..])`). Per
-    /// bugs_clone_view_passthrough_invariant.md `owns_data` is NOT a contiguity
-    /// proxy after d2e6d27 — clone-of-view preserves the source strides — so
-    /// any fast-path that wants stride-1 element access must call this helper.
+    /// its shape (i.e. `strides[i] == prod(shape[i+1..])`). After the clone-
+    /// compact fix, `owns_data == true` does imply contiguity, but view
+    /// producers (`permute`, `slice`, `transpose*`) carry arbitrary strides
+    /// with `owns_data=false` — kernels that want a stride-1 fast path on a
+    /// possibly-view input must still call this helper rather than gating on
+    /// `owns_data`. See memory bugs_clone_view_passthrough_invariant.md.
     ///
     /// 0-D tensors are trivially contiguous. Length-1 axes are contiguous for
     /// any stride (no element is reached through them), matching numpy's
@@ -464,13 +524,130 @@ impl RayzorTensor {
     }
 }
 
-/// Allocate a new tensor struct on the heap, return as i64
+// ============================================================================
+// Tensor pool integration
+//
+// `alloc_tensor` first asks `tensor_pool` for a recycled wrapper of the same
+// `(dtype, shape)` class. On a hit the four mallocs (data, shape, strides,
+// wrapper) all collapse to zero — the popped wrapper still holds its original
+// buffers, and we just refill `data` per the `fill` arg. View producers
+// (`reshape`-contiguous, `permute`, `slice`, `transpose`, `transpose_last2`)
+// MUST bypass the pool: their wrappers carry `owns_data=false` and aliased
+// `data` belonging to a parent. `rayzor_tensor_free` enforces this on the
+// push side by routing only `owns_data=true` tensors through the pool.
+// ============================================================================
+
+use crate::tensor_pool::{self, PoolKey, PooledEntry, ShapeBuf};
+
+/// Canonical FreeFn that `tensor_pool` invokes on eviction or drain. The
+/// `PooledEntry::ptr` is the original `*mut RayzorTensor` (cast to `*mut u8`);
+/// the freer reconstructs the wrapper, releases its data/shape/strides if
+/// `owns_data`, then frees the wrapper itself. The `qtensor_meta_*` fields
+/// must be null for plain tensors (set by QTensor's parallel free path).
+unsafe fn tensor_pool_freer(entry: PooledEntry) {
+    if entry.ptr.is_null() {
+        return;
+    }
+    // Defensive: a plain-tensor pool entry should never carry qtensor meta.
+    // If it ever does (bug elsewhere) we still want to release it rather
+    // than leak.
+    if !entry.qtensor_meta_ptr.is_null() {
+        free(entry.qtensor_meta_ptr);
+    }
+    let t = &*(entry.ptr as *const RayzorTensor);
+    if t.owns_data && !t.data.is_null() {
+        free(t.data);
+    }
+    if !t.shape.is_null() {
+        free(t.shape as *mut u8);
+    }
+    if !t.strides.is_null() {
+        free(t.strides as *mut u8);
+    }
+    free(entry.ptr);
+}
+
+/// Compute the data-buffer byte count for a pooled tensor of `(dtype, shape)`.
+/// Matches the formula used by `alloc_tensor` (numel * dtype_size).
+#[inline]
+fn pool_alloc_bytes(shape: &[usize], dtype: u8) -> usize {
+    let numel: usize = shape.iter().product();
+    numel * dtype_size(dtype)
+}
+
+/// Allocate a new tensor struct on the heap, return as i64.
+///
+/// Pool-first: tries `tensor_pool::global().try_pop()` for the requested
+/// shape class; on a hit, the popped wrapper's data buffer is refilled
+/// per `fill` and the same wrapper handle is returned (zero mallocs).
+/// On a miss falls through to the canonical four-malloc path below.
 #[allow(clippy::manual_slice_size_calculation, clippy::needless_range_loop)]
 unsafe fn alloc_tensor(shape: &[usize], dtype: u8, fill: Option<f32>) -> i64 {
+    // Env-gated allocation histogram for tensor-pool design audit. One CSV
+    // line per call: dtype,ndim,shape0,shape1,...
+    record_alloc_histogram(shape, dtype);
     let ndim = shape.len();
     let numel: usize = shape.iter().product();
     let elem_size = dtype_size(dtype);
     let data_bytes = numel * elem_size;
+
+    // ---- Pool fast path ----
+    let key = PoolKey::from_shape(dtype, shape);
+    if let Some(entry) = tensor_pool::global().try_pop(key, shape) {
+        // The wrapper, data, shape, strides are all reused. The shape vec is
+        // already correct (matched in try_pop via the bucket-walk shape check)
+        // and the strides for a given shape are deterministic (row-major) —
+        // after `rayzor_tensor_clone`'s view-passthrough fix the pool never
+        // sees non-canonical strides on `owns_data=true` tensors. We still
+        // rewrite the strides here as defence-in-depth: the cost is `ndim`
+        // pointer-stores (≤ 10 for every shape Llama ever produces) which is
+        // negligible next to the data zero-fill below.
+        let tensor = entry.ptr as *mut RayzorTensor;
+        let t = &mut *tensor;
+        // Reset the data buffer per the requested fill semantics. The
+        // popped buffer is the original `numel * elem_size` block; either
+        // way the caller is about to overwrite it (for None we still
+        // zero — historical alloc_tensor zeros when fill=None — to keep
+        // semantics identical between pool-hit and pool-miss paths).
+        if !t.data.is_null() && data_bytes > 0 {
+            if let Some(val) = fill {
+                if val == 0.0 {
+                    std::ptr::write_bytes(t.data, 0, data_bytes);
+                } else {
+                    fill_dtype(t.data, numel, dtype, val);
+                }
+            } else {
+                std::ptr::write_bytes(t.data, 0, data_bytes);
+            }
+        }
+        // Defensive strides rewrite: compute canonical row-major strides
+        // from `shape` and stamp them into the popped wrapper. The previous
+        // owner's strides MUST already match this layout (the pool only
+        // accepts `owns_data=true` entries and clone-of-view returns a
+        // fresh malloc not pool-routed) — debug builds assert this.
+        let canonical_strides = RayzorTensor::compute_strides(shape);
+        if !t.strides.is_null() {
+            debug_assert_eq!(
+                std::slice::from_raw_parts(t.strides, ndim),
+                canonical_strides.as_slice(),
+                "pool-hit strides drifted from canonical row-major for shape {:?}",
+                shape
+            );
+            for i in 0..ndim {
+                *t.strides.add(i) = canonical_strides[i];
+            }
+        }
+        // Refresh device tagging — the wrapper inherits whatever the prior
+        // owner set; reset to the default so callers aren't surprised.
+        t.device = DEVICE_CPU;
+        t.numa_node = -1;
+        // owns_data MUST be true on the way out; this should already hold
+        // because we only push owning tensors into the pool.
+        t.owns_data = true;
+        return tensor as i64;
+    }
+
+    // ---- Slow path: 4 mallocs ----
 
     // Allocate data
     let data = malloc(if data_bytes > 0 { data_bytes } else { 1 });
@@ -2617,29 +2794,44 @@ pub unsafe extern "C" fn rayzor_tensor_data(tensor_ptr: i64) -> i64 {
 
 /// Tensor.clone(src: i64) -> i64
 ///
-/// Returns a fresh, fully-owning tensor sharing no storage with `src`.
+/// Returns a fresh, fully-owning, **contiguous** tensor sharing no storage
+/// with `src`.
 ///
 /// - `src == 0` → returns 0 (null pass-through).
-/// - Both owning tensors AND views are deep-copied. There is no
-///   pass-through for views: returning `src` for `!owns_data` aliased the
-///   parent's shape/strides/wrapper, and `rayzor_tensor_free` unconditionally
-///   frees those — so a clone-of-view followed by free-of-clone would leave
-///   the parent handle with dangling pointers (double-free / UAF on later
+/// - Both owning tensors AND views are deep-copied. There is no pass-through
+///   for views: returning `src` for `!owns_data` aliased the parent's
+///   shape/strides/wrapper, and `rayzor_tensor_free` unconditionally frees
+///   those — so a clone-of-view followed by free-of-clone would leave the
+///   parent handle with dangling pointers (double-free / UAF on later
 ///   access).
 ///
-/// Data-buffer extent semantics (chosen for safety + simplicity):
+/// Data-buffer + stride semantics: **always compact-to-contiguous**.
 ///
-/// - Owning tensor: copy exactly `numel * dtype_size(dtype)` bytes from
-///   `s.data` (the buffer is contiguous and we own the whole thing).
-/// - View: walk the strided extent from `s.data` and copy
-///   `(max_reachable_index + 1) * dtype_size(dtype)` bytes, where
-///   `max_reachable_index = Σᵢ (shape[i] - 1) * strides[i]` (in element
-///   units). This covers every element the view can address without
-///   reading past the largest stride * (dim-1) offset from `s.data`. It
-///   does NOT touch bytes the parent's view never exposes, so it is safe
-///   against partial-row sub-views (e.g. slice/permute).
+/// - The result owns `numel * dtype_size(dtype)` bytes of data, freshly
+///   malloc'd, with canonical row-major strides
+///   (`strides[i] = prod(shape[i+1..])`).
+/// - If `src` is already contiguous, the body is a single `memcpy` of
+///   `numel * elem_size` bytes from `s.data`.
+/// - If `src` is non-contiguous (a permuted/sliced/transposed view, or
+///   ever a non-contiguous owning tensor), we walk `s` via its strides and
+///   gather element-by-element (byte-block-by-byte-block, so the loop is
+///   dtype-agnostic across the plain dtypes F32/F16/BF16/I32/I64/U8) into
+///   the new row-major-contiguous buffer. Quantised tensors do NOT flow
+///   through this path — they live in `RayzorQTensor` with their own
+///   scheme byte; see `rayzor_qtensor_clone` in quant.rs.
 ///
-/// shape/strides/wrapper are always freshly malloc'd and deep-copied.
+/// Why compact-on-clone (rather than inheriting the view's stride pattern):
+/// the previous behaviour stamped `owns_data=true` on a wrapper that still
+/// carried parent-view strides and a buffer sized to the strided extent
+/// (`(Σ(shape[i]-1)·strides[i]+1) * elem_size`). That wrapper is what the
+/// tensor pool admits on free; the pool's `(dtype, shape)` key cannot
+/// distinguish it from a canonically-contiguous owning tensor of the same
+/// shape, so a later pop would hand a caller a contiguous-shaped wrapper
+/// backed by non-contiguous strides and the wrong byte count — silently
+/// corrupting any fast-path that takes the stride-1 shortcut on
+/// `owns_data`. Compacting at clone time makes `owns_data == true` a true
+/// contiguity invariant runtime-wide. See memory
+/// bugs_clone_view_passthrough_invariant.md.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_clone(src: i64) -> i64 {
     if src == 0 {
@@ -2648,60 +2840,83 @@ pub unsafe extern "C" fn rayzor_tensor_clone(src: i64) -> i64 {
     let s = &*(src as *const RayzorTensor);
 
     let elem_size = dtype_size(s.dtype);
+    let ndim = s.ndim;
 
-    // Compute the data buffer extent we need to copy.
-    //   - Owning tensor: contiguous numel-element block.
-    //   - View: cover every element addressable via the view's strides.
-    //     Max reachable element index from `s.data` is
-    //     Σᵢ (shape[i] - 1) * strides[i] (clamped to 0 for empty dims).
-    let data_bytes: usize = if s.owns_data {
-        s.numel * elem_size
-    } else if s.ndim == 0 || s.numel == 0 {
-        0
+    // Canonical row-major strides for the destination, computed from src.shape.
+    // We compute it directly (rather than calling RayzorTensor::compute_strides
+    // on a borrowed slice) so we can also size the destination buffer in the
+    // same pass and keep this function ABI-shape-only.
+    let src_shape_slice: &[usize] = if ndim == 0 {
+        &[]
     } else {
-        let shape = std::slice::from_raw_parts(s.shape, s.ndim);
-        let strides = std::slice::from_raw_parts(s.strides, s.ndim);
-        let mut max_idx: usize = 0;
-        for i in 0..s.ndim {
-            if shape[i] == 0 {
-                // Empty dim → no addressable element; numel was already 0.
-                max_idx = 0;
-                break;
-            }
-            max_idx += (shape[i] - 1) * strides[i];
-        }
-        (max_idx + 1) * elem_size
+        std::slice::from_raw_parts(s.shape, ndim)
     };
+    let canonical_strides: Vec<usize> = RayzorTensor::compute_strides(src_shape_slice);
 
-    // Allocate fresh data buffer and deep-copy.
+    let data_bytes: usize = s.numel * elem_size;
+
+    // Allocate fresh data buffer.
     let data = malloc(if data_bytes > 0 { data_bytes } else { 1 });
     if data.is_null() {
         return 0;
     }
+
+    // Copy body: contiguous fast-path = memcpy, otherwise strided gather.
     if data_bytes > 0 && !s.data.is_null() {
-        std::ptr::copy_nonoverlapping(s.data, data, data_bytes);
+        if s.is_contiguous() {
+            std::ptr::copy_nonoverlapping(s.data, data, data_bytes);
+        } else {
+            // Strided gather: walk src by its strides, write contiguously
+            // into the dest buffer. Dtype-agnostic byte copy across the
+            // plain RayzorTensor dtypes (F32/F16/BF16/I32/I64/U8); quantised
+            // tensors live in RayzorQTensor and never reach this path.
+            let src_strides = std::slice::from_raw_parts(s.strides, ndim);
+            let mut idx = vec![0usize; ndim];
+            for linear in 0..s.numel {
+                // Source byte offset = Σᵢ idx[i] * src_strides[i] * elem_size.
+                let mut src_elem_off: usize = 0;
+                for axis in 0..ndim {
+                    src_elem_off += idx[axis] * src_strides[axis];
+                }
+                std::ptr::copy_nonoverlapping(
+                    s.data.add(src_elem_off * elem_size),
+                    data.add(linear * elem_size),
+                    elem_size,
+                );
+                // Increment multi-index (rightmost-axis varies fastest, so
+                // dest writes stay sequential).
+                for axis in (0..ndim).rev() {
+                    idx[axis] += 1;
+                    if idx[axis] < src_shape_slice[axis] {
+                        break;
+                    }
+                    idx[axis] = 0;
+                }
+            }
+        }
     }
 
-    // Allocate fresh shape array and copy.
-    let shape_bytes = s.ndim * std::mem::size_of::<usize>();
+    // Allocate fresh shape array and copy from src.
+    let shape_bytes = ndim * std::mem::size_of::<usize>();
     let shape_ptr = malloc(if shape_bytes > 0 { shape_bytes } else { 1 }) as *mut usize;
     if shape_ptr.is_null() {
         free(data);
         return 0;
     }
-    if s.ndim > 0 && !s.shape.is_null() {
-        std::ptr::copy_nonoverlapping(s.shape, shape_ptr, s.ndim);
+    if ndim > 0 && !s.shape.is_null() {
+        std::ptr::copy_nonoverlapping(s.shape, shape_ptr, ndim);
     }
 
-    // Allocate fresh strides array and copy.
+    // Allocate fresh strides array seeded with the canonical row-major
+    // strides we computed above — NOT inherited from src.
     let strides_ptr = malloc(if shape_bytes > 0 { shape_bytes } else { 1 }) as *mut usize;
     if strides_ptr.is_null() {
         free(data);
         free(shape_ptr as *mut u8);
         return 0;
     }
-    if s.ndim > 0 && !s.strides.is_null() {
-        std::ptr::copy_nonoverlapping(s.strides, strides_ptr, s.ndim);
+    if ndim > 0 {
+        std::ptr::copy_nonoverlapping(canonical_strides.as_ptr(), strides_ptr, ndim);
     }
 
     // Allocate the wrapper struct itself.
@@ -2717,7 +2932,7 @@ pub unsafe extern "C" fn rayzor_tensor_clone(src: i64) -> i64 {
         data,
         shape: shape_ptr,
         strides: strides_ptr,
-        ndim: s.ndim,
+        ndim,
         numel: s.numel,
         dtype: s.dtype,
         owns_data: true,
@@ -2729,6 +2944,20 @@ pub unsafe extern "C" fn rayzor_tensor_clone(src: i64) -> i64 {
 }
 
 /// tensor.free() -> void
+///
+/// Pool-routing semantics:
+///
+/// - View wrappers (`owns_data == false`) — `reshape`-contiguous, `permute`,
+///   `slice`, `transpose`, `transpose_last2` — MUST bypass the pool because
+///   their `data` aliases a parent tensor. Pooling them would later hand
+///   that alias back as an owning allocation and corrupt the parent on
+///   first write. These take the direct free path below: shape/strides
+///   wrapper bytes get released, `data` is left alone (the parent owns
+///   it).
+/// - Owning wrappers (`owns_data == true`) are pushed into
+///   `tensor_pool::global()` keyed on `(dtype, shape)`. The pool decides
+///   pool-vs-evict; on eviction it invokes `tensor_pool_freer` which runs
+///   the same physical release this function would have run inline.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_free(tensor_ptr: i64) {
     if tensor_ptr == 0 {
@@ -2736,16 +2965,43 @@ pub unsafe extern "C" fn rayzor_tensor_free(tensor_ptr: i64) {
     }
     let t = &*(tensor_ptr as *const RayzorTensor);
 
-    if t.owns_data && !t.data.is_null() {
-        free(t.data);
+    // Views: never pool. Drop wrapper + shape/strides; leave data alone.
+    if !t.owns_data {
+        if !t.shape.is_null() {
+            free(t.shape as *mut u8);
+        }
+        if !t.strides.is_null() {
+            free(t.strides as *mut u8);
+        }
+        free(tensor_ptr as *mut u8);
+        return;
     }
-    if !t.shape.is_null() {
-        free(t.shape as *mut u8);
-    }
-    if !t.strides.is_null() {
-        free(t.strides as *mut u8);
-    }
-    free(tensor_ptr as *mut u8);
+
+    // Owning tensor: route through the pool. Build a PooledEntry and let
+    // `tensor_pool::global().push()` decide whether to park or free.
+    let shape_slice = std::slice::from_raw_parts(t.shape, t.ndim);
+    let key = PoolKey::from_shape(t.dtype, shape_slice);
+    let alloc_bytes = pool_alloc_bytes(shape_slice, t.dtype);
+    let entry = PooledEntry {
+        ptr: tensor_ptr as *mut u8,
+        shape: ShapeBuf::from_slice(shape_slice),
+        alloc_bytes,
+        qtensor_meta_ptr: std::ptr::null_mut(),
+        qtensor_meta_bytes: 0,
+    };
+    tensor_pool::global().push(key, entry, tensor_pool_freer);
+}
+
+/// Drain every parked tensor in the global pool. Exposed for end-of-test
+/// isolation and benchmark cleanup. Routes the pool's parked entries through
+/// the canonical `tensor_pool_freer` so the underlying mallocs are returned
+/// to the system allocator.
+///
+/// Safe to call from any context; no-op when the pool has not been
+/// initialised.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_pool_reset() {
+    tensor_pool::global().drain(tensor_pool_freer);
 }
 
 // ============================================================================
@@ -2985,6 +3241,115 @@ mod tests {
                 ),
                 0
             );
+        }
+    }
+
+    /// Clone of a permuted view must compact to canonical row-major strides,
+    /// own a `numel * elem_size` byte buffer, and preserve element values
+    /// under the permuted indexing. Regression for the clone-of-view memory-
+    /// safety footgun (bugs_clone_view_passthrough_invariant.md).
+    #[test]
+    fn tensor_clone_of_permuted_view_compacts_to_contiguous() {
+        unsafe {
+            // Build a 2x3 F32 tensor with values 0..6, laid out row-major.
+            let src_shape = [2usize, 3usize];
+            let src = alloc_tensor(&src_shape, DTYPE_F32, None);
+            assert!(src != 0);
+            let src_ref = &*(src as *const RayzorTensor);
+            let src_data = src_ref.data as *mut f32;
+            for i in 0..6 {
+                *src_data.add(i) = i as f32;
+            }
+
+            // Permute([1, 0]) → view with shape [3, 2] and non-contiguous
+            // strides [1, 3] (rows of the source become columns of the view).
+            let axes: [i64; 2] = [1, 0];
+            let view = rayzor_tensor_permute(src, axes.as_ptr() as i64, 2);
+            assert!(view != 0);
+            let view_ref = &*(view as *const RayzorTensor);
+            assert!(!view_ref.owns_data, "permute must produce a view");
+            assert!(
+                !view_ref.is_contiguous(),
+                "permuted view must NOT be contiguous"
+            );
+            let view_strides = std::slice::from_raw_parts(view_ref.strides, view_ref.ndim);
+            assert_eq!(view_strides, &[1usize, 3usize]);
+
+            // Clone the view. Result must be owning, contiguous, with canonical
+            // row-major strides for shape [3, 2] = [2, 1], and a data buffer of
+            // exactly `numel * sizeof(f32)` = 24 bytes.
+            let cloned = rayzor_tensor_clone(view);
+            assert!(cloned != 0);
+            let cloned_ref = &*(cloned as *const RayzorTensor);
+            assert!(cloned_ref.owns_data, "clone must own its data");
+            assert!(
+                cloned_ref.is_contiguous(),
+                "clone of a view must be contiguous"
+            );
+            assert_eq!(cloned_ref.ndim, 2);
+            assert_eq!(cloned_ref.numel, 6);
+            let cloned_shape = std::slice::from_raw_parts(cloned_ref.shape, 2);
+            let cloned_strides = std::slice::from_raw_parts(cloned_ref.strides, 2);
+            assert_eq!(cloned_shape, &[3usize, 2usize]);
+            assert_eq!(
+                cloned_strides,
+                &[2usize, 1usize],
+                "clone must seed canonical row-major strides, not inherit view strides"
+            );
+
+            // Element-by-element equality between view and clone under
+            // permuted indexing. View element [i, j] = src[j, i] = j*3 + i.
+            // Clone reads via canonical strides (i*2 + j).
+            let clone_data = cloned_ref.data as *const f32;
+            for i in 0..3 {
+                for j in 0..2 {
+                    let expected = (j * 3 + i) as f32;
+                    // Read via view's offset() helper (uses view strides).
+                    let view_off = view_ref.offset(&[i, j]);
+                    let view_val = *(view_ref.data as *const f32).add(view_off);
+                    assert_eq!(view_val, expected, "view[{},{}] wrong", i, j);
+                    // Read via clone's contiguous row-major layout.
+                    let clone_val = *clone_data.add(i * 2 + j);
+                    assert_eq!(clone_val, expected, "clone[{},{}] wrong", i, j);
+                }
+            }
+
+            // Independence: mutating the clone must not touch the source.
+            let clone_mut = cloned_ref.data as *mut f32;
+            *clone_mut = 999.0;
+            assert_eq!(*src_data, 0.0, "source aliased through clone");
+
+            rayzor_tensor_free(cloned);
+            rayzor_tensor_free(view);
+            rayzor_tensor_free(src);
+        }
+    }
+
+    /// Clone of an already-contiguous tensor must still produce a fresh owning
+    /// contiguous tensor (memcpy fast-path), independent from the source.
+    #[test]
+    fn tensor_clone_of_contiguous_is_independent() {
+        unsafe {
+            let shape = [4usize];
+            let src = alloc_tensor(&shape, DTYPE_F32, Some(7.5));
+            assert!(src != 0);
+            let cloned = rayzor_tensor_clone(src);
+            assert!(cloned != 0);
+            let cloned_ref = &*(cloned as *const RayzorTensor);
+            assert!(cloned_ref.owns_data);
+            assert!(cloned_ref.is_contiguous());
+            assert_eq!(cloned_ref.numel, 4);
+            let cd = cloned_ref.data as *mut f32;
+            for i in 0..4 {
+                assert_eq!(*cd.add(i), 7.5);
+            }
+            // Mutate clone; source untouched.
+            *cd = -1.0;
+            let src_ref = &*(src as *const RayzorTensor);
+            let sd = src_ref.data as *const f32;
+            assert_eq!(*sd, 7.5);
+            rayzor_tensor_free(cloned);
+            rayzor_tensor_free(src);
         }
     }
 }
