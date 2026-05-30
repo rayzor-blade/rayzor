@@ -437,6 +437,31 @@ impl RayzorTensor {
         }
         off
     }
+
+    /// True iff this tensor's strides match the canonical row-major layout for
+    /// its shape (i.e. `strides[i] == prod(shape[i+1..])`). Per
+    /// bugs_clone_view_passthrough_invariant.md `owns_data` is NOT a contiguity
+    /// proxy after d2e6d27 — clone-of-view preserves the source strides — so
+    /// any fast-path that wants stride-1 element access must call this helper.
+    ///
+    /// 0-D tensors are trivially contiguous. Length-1 axes are contiguous for
+    /// any stride (no element is reached through them), matching numpy's
+    /// `is_contiguous` semantics.
+    unsafe fn is_contiguous(&self) -> bool {
+        if self.ndim == 0 {
+            return true;
+        }
+        let shape = std::slice::from_raw_parts(self.shape, self.ndim);
+        let strides = std::slice::from_raw_parts(self.strides, self.ndim);
+        let mut expected: usize = 1;
+        for i in (0..self.ndim).rev() {
+            if shape[i] != 1 && strides[i] != expected {
+                return false;
+            }
+            expected *= shape[i];
+        }
+        true
+    }
 }
 
 /// Allocate a new tensor struct on the heap, return as i64
@@ -1319,6 +1344,172 @@ pub unsafe extern "C" fn rayzor_tensor_div(a: i64, b: i64) -> i64 {
             result
         }
         None => tensor_binop_scalar(a, b, |x, y| x / y),
+    }
+}
+
+/// In-place elementwise add: `dest[i] += src[i]`. Returns `dest` unchanged so
+/// the call site can rebind (`x = x.addInto(y)`) without allocating a fresh
+/// result tensor. Saves one [..., hidden] F32 alloc per residual add in the
+/// transformer hot loop (TransformerBlock attention + FFN residuals are the
+/// main consumers).
+///
+/// Safety invariants enforced (panics with a `eprintln!` + `std::process::abort`
+/// on violation — these are programmer errors, not recoverable conditions):
+///   (a) Both tensors non-null with matching `ndim`, `numel`, and shape.
+///   (b) Matching dtype.
+///   (c) `dest` is contiguous in its current shape. `src` strides are
+///       accommodated on the slow path; a non-contiguous `dest` would either
+///       silently skip elements (fast path) or accumulate into the wrong slot
+///       (strided path) so we reject it outright.
+///   (d) `dest.data != src.data` — aliasing would double-count on the SIMD
+///       path. Not a current call site but cheap insurance.
+///
+/// F32 fast path: when both tensors are contiguous F32, dispatches to
+/// `tensor_simd::add_slice(dst, dst, src)` (NEON vaddq_f32 4-lane on
+/// aarch64, SSE2 _mm_add_ps on x86_64, scalar elsewhere). `add_slice`
+/// computes `r[i] = a[i] + b[i]`, which is exactly the in-place form when
+/// the result and first-operand slices alias the same buffer — verified to
+/// be safe because both SIMD backends load a, load b, op, then store before
+/// advancing to the next chunk.
+///
+/// F16 / BF16: not currently exercised by the transformer residual paths
+/// (those tensors are F32 throughout in Llama / GPT-style models). Falls
+/// back to a strided scalar loop via `load_f32_at` / `store_f32_at` so the
+/// call doesn't silently no-op, but emits a one-line `eprintln!` on the
+/// first hit to flag the slow path. Other dtypes (I32, I8, U8, FP8) abort.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_add_into(dest: i64, src: i64) {
+    if dest == 0 || src == 0 {
+        eprintln!(
+            "rayzor_tensor_add_into: null tensor pointer (dest={:#x}, src={:#x})",
+            dest, src
+        );
+        std::process::abort();
+    }
+    let d = &*(dest as *const RayzorTensor);
+    let s = &*(src as *const RayzorTensor);
+
+    // (a) shape compatibility
+    if d.ndim != s.ndim || d.numel != s.numel {
+        eprintln!(
+            "rayzor_tensor_add_into: shape mismatch — dest.ndim={}, src.ndim={}, dest.numel={}, src.numel={}",
+            d.ndim, s.ndim, d.numel, s.numel
+        );
+        std::process::abort();
+    }
+    let d_shape = std::slice::from_raw_parts(d.shape, d.ndim);
+    let s_shape = std::slice::from_raw_parts(s.shape, s.ndim);
+    for i in 0..d.ndim {
+        if d_shape[i] != s_shape[i] {
+            eprintln!(
+                "rayzor_tensor_add_into: shape mismatch at dim {} — dest={:?}, src={:?}",
+                i, d_shape, s_shape
+            );
+            std::process::abort();
+        }
+    }
+
+    // (b) dtype compatibility
+    if d.dtype != s.dtype {
+        eprintln!(
+            "rayzor_tensor_add_into: dtype mismatch — dest.dtype={}, src.dtype={}",
+            d.dtype, s.dtype
+        );
+        std::process::abort();
+    }
+
+    // (c) dest contiguity
+    if !d.is_contiguous() {
+        let d_strides = std::slice::from_raw_parts(d.strides, d.ndim);
+        eprintln!(
+            "rayzor_tensor_add_into: dest must be contiguous — shape={:?}, strides={:?}",
+            d_shape, d_strides
+        );
+        std::process::abort();
+    }
+
+    // (d) aliasing — same backing buffer would double-count on SIMD
+    if d.data == s.data {
+        eprintln!(
+            "rayzor_tensor_add_into: dest and src share the same backing buffer ({:?}); aliasing would double-count",
+            d.data
+        );
+        std::process::abort();
+    }
+
+    // numel == 0 is a no-op; alloc_tensor allocates a 1-byte sentinel for
+    // empty tensors so the pointer is non-null but there's nothing to add.
+    if d.numel == 0 {
+        return;
+    }
+
+    match d.dtype {
+        DTYPE_F32 => {
+            let n = d.numel;
+            let dst_slice = std::slice::from_raw_parts_mut(d.data as *mut f32, n);
+            if s.is_contiguous() {
+                // Fast path: both contiguous F32. `add_assign_slice` takes a
+                // single `&mut [f32]` + `&[f32]` pair, so there is no aliased
+                // mutable+immutable reference to the dst memory — the SIMD
+                // intrinsics inside operate on raw pointers derived once from
+                // `dst_slice.as_mut_ptr()`.
+                let src_slice = std::slice::from_raw_parts(s.data as *const f32, n);
+                crate::tensor_simd::add_assign_slice(dst_slice, src_slice);
+            } else {
+                // Strided src gather: walk via src strides, accumulate into
+                // dest's contiguous slot. Recompute the multi-index from the
+                // linear contiguous counter using dest's shape (which equals
+                // src's shape — verified above).
+                let s_strides = std::slice::from_raw_parts(s.strides, s.ndim);
+                let s_data = s.data as *const f32;
+                let mut idx = vec![0usize; d.ndim];
+                for (flat, dst_elem) in dst_slice.iter_mut().enumerate() {
+                    // Compute multi-index in dest's row-major layout
+                    let mut rem = flat;
+                    for k in 0..d.ndim {
+                        let stride: usize = d_shape[k + 1..].iter().product();
+                        idx[k] = rem / stride;
+                        rem %= stride;
+                    }
+                    // Apply src strides
+                    let mut s_off: usize = 0;
+                    for k in 0..s.ndim {
+                        s_off += idx[k] * s_strides[k];
+                    }
+                    *dst_elem += *s_data.add(s_off);
+                }
+            }
+        }
+        DTYPE_F16 | DTYPE_BF16 => {
+            eprintln!("rayzor_tensor_add_into: F16/BF16 not yet supported, falling back to scalar");
+            // Scalar fallback: respects src strides via load_f32_at on the
+            // gathered offset. Dest is contiguous so the linear counter
+            // doubles as the dest offset.
+            let s_strides = std::slice::from_raw_parts(s.strides, s.ndim);
+            let mut idx = vec![0usize; d.ndim];
+            for flat in 0..d.numel {
+                let mut rem = flat;
+                for k in 0..d.ndim {
+                    let stride: usize = d_shape[k + 1..].iter().product();
+                    idx[k] = rem / stride;
+                    rem %= stride;
+                }
+                let mut s_off: usize = 0;
+                for k in 0..s.ndim {
+                    s_off += idx[k] * s_strides[k];
+                }
+                let dv = load_f32_at(d.data, flat, d.dtype);
+                let sv = load_f32_at(s.data, s_off, s.dtype);
+                store_f32_at(d.data, flat, d.dtype, dv + sv);
+            }
+        }
+        _ => {
+            eprintln!(
+                "rayzor_tensor_add_into: unsupported dtype {} (only F32, F16, BF16 currently handled)",
+                d.dtype
+            );
+            std::process::abort();
+        }
     }
 }
 
@@ -2702,6 +2893,80 @@ mod tests {
             assert!((*d.add(2) - 0.0).abs() < 1e-3);
             assert!((*d.add(3) - 2.0).abs() < 1e-3);
             rayzor_tensor_free(t);
+        }
+    }
+
+    #[test]
+    fn add_into_f32_contiguous_fast_path() {
+        unsafe {
+            let shape = [4usize];
+            let dest = alloc_tensor(&shape, DTYPE_F32, None);
+            let src = alloc_tensor(&shape, DTYPE_F32, None);
+            assert!(dest != 0 && src != 0);
+
+            let d = &*(dest as *const RayzorTensor);
+            let s = &*(src as *const RayzorTensor);
+            let d_data = d.data as *mut f32;
+            let s_data = s.data as *mut f32;
+            *d_data.add(0) = 1.0;
+            *d_data.add(1) = 2.0;
+            *d_data.add(2) = 3.0;
+            *d_data.add(3) = 4.0;
+            *s_data.add(0) = 10.0;
+            *s_data.add(1) = 20.0;
+            *s_data.add(2) = 30.0;
+            *s_data.add(3) = 40.0;
+
+            rayzor_tensor_add_into(dest, src);
+
+            // dest mutated to [11, 22, 33, 44]
+            assert!((*d_data.add(0) - 11.0).abs() < 1e-6);
+            assert!((*d_data.add(1) - 22.0).abs() < 1e-6);
+            assert!((*d_data.add(2) - 33.0).abs() < 1e-6);
+            assert!((*d_data.add(3) - 44.0).abs() < 1e-6);
+
+            // src untouched at [10, 20, 30, 40]
+            assert!((*s_data.add(0) - 10.0).abs() < 1e-6);
+            assert!((*s_data.add(1) - 20.0).abs() < 1e-6);
+            assert!((*s_data.add(2) - 30.0).abs() < 1e-6);
+            assert!((*s_data.add(3) - 40.0).abs() < 1e-6);
+
+            rayzor_tensor_free(dest);
+            rayzor_tensor_free(src);
+        }
+    }
+
+    #[test]
+    fn add_into_f32_tail_lanes_correct() {
+        // numel = 7 → not a multiple of 4-lane SIMD; verifies the
+        // tail-element scalar fallback in add_slice.
+        unsafe {
+            let shape = [7usize];
+            let dest = alloc_tensor(&shape, DTYPE_F32, Some(1.0));
+            let src = alloc_tensor(&shape, DTYPE_F32, Some(2.5));
+            rayzor_tensor_add_into(dest, src);
+            let d = &*(dest as *const RayzorTensor);
+            let d_data = d.data as *const f32;
+            for i in 0..7 {
+                assert!((*d_data.add(i) - 3.5).abs() < 1e-6, "elem {} wrong", i);
+            }
+            rayzor_tensor_free(dest);
+            rayzor_tensor_free(src);
+        }
+    }
+
+    #[test]
+    fn add_into_is_noop_when_numel_zero() {
+        // 0-numel shape is a no-op; the function must return cleanly
+        // without touching the (1-byte sentinel) backing buffer.
+        unsafe {
+            let shape = [0usize, 3];
+            let dest = alloc_tensor(&shape, DTYPE_F32, None);
+            let src = alloc_tensor(&shape, DTYPE_F32, None);
+            assert!(dest != 0 && src != 0);
+            rayzor_tensor_add_into(dest, src);
+            rayzor_tensor_free(dest);
+            rayzor_tensor_free(src);
         }
     }
 
