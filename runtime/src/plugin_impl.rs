@@ -1794,6 +1794,10 @@ register_symbol!("rayzor_tensor_slice", crate::tensor::rayzor_tensor_slice);
 
 // Arithmetic
 register_symbol!("rayzor_tensor_add", crate::tensor::rayzor_tensor_add);
+register_symbol!(
+    "rayzor_tensor_add_into",
+    crate::tensor::rayzor_tensor_add_into
+);
 register_symbol!("rayzor_tensor_sub", crate::tensor::rayzor_tensor_sub);
 register_symbol!("rayzor_tensor_mul", crate::tensor::rayzor_tensor_mul);
 register_symbol!("rayzor_tensor_div", crate::tensor::rayzor_tensor_div);

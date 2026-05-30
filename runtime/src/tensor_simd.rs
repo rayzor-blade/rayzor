@@ -66,6 +66,55 @@ pub fn add_slice(r: &mut [f32], a: &[f32], b: &[f32]) {
     }
 }
 
+/// In-place fused add: `dst[i] += src[i]`.
+///
+/// Equivalent to `add_slice(dst, dst, src)` but expressed with a single
+/// `&mut [f32]` and one `&[f32]`, so we never construct an aliased
+/// `&[f32]` / `&mut [f32]` pair on the same memory (which would violate
+/// Rust's reference aliasing model regardless of the SIMD's
+/// load-before-store ordering). The SIMD intrinsics operate on raw
+/// pointers derived once from `dst.as_mut_ptr()`.
+#[inline(always)]
+pub fn add_assign_slice(dst: &mut [f32], src: &[f32]) {
+    let n = dst.len();
+    debug_assert!(src.len() == n);
+    let chunks = n / LANES;
+    let dst_ptr = dst.as_mut_ptr();
+    let src_ptr = src.as_ptr();
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        for i in 0..chunks {
+            let off = i * LANES;
+            let vd = vld1q_f32(dst_ptr.add(off));
+            let vs = vld1q_f32(src_ptr.add(off));
+            vst1q_f32(dst_ptr.add(off), vaddq_f32(vd, vs));
+        }
+    }
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        for i in 0..chunks {
+            let off = i * LANES;
+            let vd = _mm_loadu_ps(dst_ptr.add(off));
+            let vs = _mm_loadu_ps(src_ptr.add(off));
+            _mm_storeu_ps(dst_ptr.add(off), _mm_add_ps(vd, vs));
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        for i in 0..chunks {
+            let off = i * LANES;
+            for k in 0..LANES {
+                dst[off + k] += src[off + k];
+            }
+        }
+    }
+
+    for i in (chunks * LANES)..n {
+        dst[i] += src[i];
+    }
+}
+
 #[inline(always)]
 pub fn sub_slice(r: &mut [f32], a: &[f32], b: &[f32]) {
     let n = r.len();
