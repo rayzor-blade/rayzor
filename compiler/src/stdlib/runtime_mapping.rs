@@ -3412,6 +3412,9 @@ impl StdlibMapping {
             // tensor.add(other: Tensor): Tensor
             map_method!(instance "rayzor_ds_Tensor", "add" => "Tensor_add", params: 1, mir_wrapper,
                 types: &[PtrVoid, PtrVoid] => PtrVoid),
+            // tensor.addInto(src: Tensor): Void — in-place accumulation; reuses dest's buffer
+            map_method!(instance "rayzor_ds_Tensor", "addInto" => "Tensor_addInto", params: 1, mir_wrapper,
+                types: &[PtrVoid, PtrVoid]),
             // tensor.sub(other: Tensor): Tensor
             map_method!(instance "rayzor_ds_Tensor", "sub" => "Tensor_sub", params: 1, mir_wrapper,
                 types: &[PtrVoid, PtrVoid] => PtrVoid),
