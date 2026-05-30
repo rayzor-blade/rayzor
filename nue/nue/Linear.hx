@@ -71,11 +71,21 @@ class Linear implements Module {
             // Q4_K_M this is the entire CPU hot loop — threading it is
             // the single biggest end-to-end win available without a
             // custom SIMD kernel.
-            y = qweight.matmulXTQThreaded(x, 0);
+            //
+            // `x.clone()` here because the strict E0382 analyzer
+            // linearises the if/else and would otherwise see this
+            // branch's consume followed by the else-branch's
+            // `x.matmulT(weight)` as a use-after-move. Cloning the
+            // unused path is cheaper than rebinding through a
+            // mutable wrapper.
+            y = qweight.matmulXTQThreaded(x.clone(), 0);
         } else {
             y = x.matmulT(weight);
         }
-        if (bias != null) y = y.add(bias);
+        if (bias != null) {
+            var yBiased = y.add(bias);
+            return yBiased;
+        }
         return y;
     }
 

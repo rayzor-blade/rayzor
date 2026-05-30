@@ -45,8 +45,10 @@ class MultiHeadAttention implements Module {
     public function forward(x:Tensor):Tensor {
         var seq = x.shape()[0];
 
-        var q = qProj.forward(x).reshape([seq, numHeads, headDim]).permute([1, 0, 2]);
-        var k = kProj.forward(x).reshape([seq, numHeads, headDim]).permute([1, 0, 2]);
+        // Three independent consumers of x → clone twice; last use moves
+        // the original.
+        var q = qProj.forward(x.clone()).reshape([seq, numHeads, headDim]).permute([1, 0, 2]);
+        var k = kProj.forward(x.clone()).reshape([seq, numHeads, headDim]).permute([1, 0, 2]);
         var v = vProj.forward(x).reshape([seq, numHeads, headDim]).permute([1, 0, 2]);
 
         // scores: [heads, seq, seq]

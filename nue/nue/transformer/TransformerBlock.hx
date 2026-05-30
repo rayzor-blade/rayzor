@@ -47,9 +47,15 @@ class TransformerBlock implements Module {
     }
 
     public function forward(x:Tensor):Tensor {
-        var attnOut = attn.forward(attnNorm.forward(x));
+        // Pre-norm residual: attnNorm consumes a copy of x; original x is
+        // used again by the `add` for the residual.
+        var t = attnNorm.forward(x.clone());
+        var attnOut = attn.forward(t);
         var h1 = x.add(attnOut);
-        var ffnOut = ffn.forward(ffnNorm.forward(h1));
+        // Same pattern for the FFN sub-layer: ffnNorm consumes a copy of
+        // h1, original h1 is the residual added to ffnOut.
+        var t2 = ffnNorm.forward(h1.clone());
+        var ffnOut = ffn.forward(t2);
         return h1.add(ffnOut);
     }
 

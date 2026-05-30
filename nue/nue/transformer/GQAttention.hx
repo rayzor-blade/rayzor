@@ -78,14 +78,16 @@ class GQAttention implements Module {
         // 1) Project to Q, K, V.
         //    hidden_size = numQHeads * headDim  (Q out)
         //                = numKvHeads * headDim (K, V out)
-        var q = qProj.forward(x).reshape([seqQ, numQHeads, headDim]);
-        var k = kProj.forward(x).reshape([seqQ, numKvHeads, headDim]);
+        //    Three independent consumers of x → clone twice; last use
+        //    moves the original.
+        var qRaw = qProj.forward(x.clone()).reshape([seqQ, numQHeads, headDim]);
+        var kRaw = kProj.forward(x.clone()).reshape([seqQ, numKvHeads, headDim]);
         var v = vProj.forward(x).reshape([seqQ, numKvHeads, headDim]);
 
         // 2) Rotary embedding — rotates the absolute positions starting
         //    at `positionOffset` (so the new tokens line up with cache).
-        q = rope.apply(q, positionOffset);
-        k = rope.apply(k, positionOffset);
+        var q = rope.apply(qRaw, positionOffset);
+        var k = rope.apply(kRaw, positionOffset);
 
         // 3) Push the new K/V into the cache. Subsequent reads use the
         //    full active slice (prior tokens + just-added).
@@ -104,16 +106,16 @@ class GQAttention implements Module {
         // kᵀ for matmul: swap the last two dims of the per-head 2-D matrix
         // so the inner product runs along headDim.
         var kT = kAllExpanded.transposeLast2(); // [numQHeads, headDim, cacheLen]
-        var scores = qByHead.bmm(kT);            // [numQHeads, seqQ, cacheLen]
-        scores = scores.scale(scale);
+        var scoresRaw = qByHead.bmm(kT);            // [numQHeads, seqQ, cacheLen]
+        var scoresScaled = scoresRaw.scale(scale);
 
         // 5) Causal mask. Each query row i can only see keys
         //    [0, i + positionOffset]. This shifts the mask diagonal by
         //    positionOffset.
-        scores = applyMask(scores, positionOffset);
+        var scoresMasked = applyMask(scoresScaled, positionOffset);
 
         // 6) Softmax along the last dim (the key axis).
-        var attn = scores.softmax();             // [numQHeads, seqQ, cacheLen]
+        var attn = scoresMasked.softmax();             // [numQHeads, seqQ, cacheLen]
 
         // 7) Context = attn @ V, per head.
         var context = attn.bmm(vAllExpanded);    // [numQHeads, seqQ, headDim]
