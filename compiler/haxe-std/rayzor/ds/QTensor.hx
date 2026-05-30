@@ -26,6 +26,8 @@ package rayzor.ds;
  * The runtime representation is an opaque pointer; lifetime is managed
  * via explicit `free()`. (Refcounted lifetime is a future refinement.)
  */
+@:derive([Clone])
+@:move
 @:native("rayzor::ds::QTensor")
 extern class QTensor {
     /**
