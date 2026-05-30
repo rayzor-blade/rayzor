@@ -83,8 +83,13 @@ class Linear implements Module {
             y = x.matmulT(weight);
         }
         if (bias != null) {
-            var yBiased = y.add(bias);
-            return yBiased;
+            // `y` is a fresh contiguous owning tensor from matmulT or
+            // matmulXTQThreaded. Add bias in place — saves one
+            // [seq, out_features] F32 alloc per Linear call. Cold for
+            // Llama (no bias on any linear) but warm for Qwen2 (bias on
+            // Q/K/V) and most encoder models.
+            y.addInto(bias);
+            return y;
         }
         return y;
     }
