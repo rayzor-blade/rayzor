@@ -60,6 +60,12 @@ class LlamaModel implements CausalLanguageModel {
         // only ever read as a method receiver — never as a direct
         // `Variable` call argument — which the analyzer treats as a
         // use rather than a move.
+        //
+        // Note: Even after the TransformerBlock addInto rewrite (which
+        // makes block.forward return the same buffer it received), the
+        // direct `h = block.forward(h)` rebind SIGSEGVs at runtime —
+        // drop analysis or IR scope cleanup tears the buffer down
+        // between call return and reassign. Keep the defensive clone.
         var h = embedTokens.lookup(tokenIds);
         for (block in blocks) {
             var hIn = h.clone();

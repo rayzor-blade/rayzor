@@ -30,7 +30,11 @@ class LayerNorm implements Module {
 
     public function forward(x:Tensor):Tensor {
         var y = x.layerNorm(eps).mul(weight);
-        if (bias != null) y = y.add(bias);
+        // `y` is a fresh contiguous owning tensor straight out of `.mul`.
+        // Accumulate bias in place — saves one [seq, hidden] F32 alloc on
+        // every LayerNorm call. Cold for Llama (RMSNorm has no bias) but
+        // warm for GPT-2 / BERT / RoBERTa families.
+        if (bias != null) y.addInto(bias);
         return y;
     }
 
