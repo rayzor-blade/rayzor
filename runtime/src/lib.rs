@@ -57,9 +57,9 @@ pub mod panic_guard; // Panic guard for safe FFI (catch_unwind → Haxe exceptio
 pub mod reflect; // Reflect + Type API for anonymous objects
 pub mod safety; // Safety validation and error reporting
 pub mod topology; // CPU topology + thread affinity (rayzor.concurrent.CpuTopology / WorkerPool)
-pub mod worker_pool; // Persistent CPU worker pool for ML kernels (fork-join via condvar queue)
 pub mod type_system; // Runtime type information for Dynamic values
-pub mod vec_plugin; // Pointer-based Vec API // Exception handling (setjmp/longjmp)
+pub mod vec_plugin;
+pub mod worker_pool; // Persistent CPU worker pool for ML kernels (fork-join via condvar queue) // Pointer-based Vec API // Exception handling (setjmp/longjmp)
 
 pub mod plugin_impl; // Plugin registration
 
@@ -200,6 +200,38 @@ pub unsafe extern "C" fn rayzor_free(ptr: *mut u8, size: u64) {
 
     // Deallocate
     dealloc(ptr, layout);
+}
+
+// ============================================================================
+// Runtime Panic Helpers
+// ============================================================================
+
+/// Trap used by the move-checker when a moved variable is read again.
+///
+/// Prints a diagnostic to stderr and aborts the process. Marked `-> !` so
+/// callers can rely on it never returning.
+///
+/// # Safety
+/// - `var_name` must be a valid pointer to `var_len` bytes of UTF-8, or null
+/// - `var_len` must be the byte length of `var_name`
+/// - `line` is the source line of the offending read (best-effort)
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_panic_use_after_move(
+    var_name: *const u8,
+    var_len: i64,
+    line: i64,
+) -> ! {
+    let name = if var_name.is_null() || var_len <= 0 {
+        "<unknown>"
+    } else {
+        let bytes = std::slice::from_raw_parts(var_name, var_len as usize);
+        std::str::from_utf8(bytes).unwrap_or("<invalid utf-8>")
+    };
+    eprintln!(
+        "[RAYZOR] use-after-move trap: {} was already moved (line {})",
+        name, line
+    );
+    std::process::abort();
 }
 
 // ============================================================================

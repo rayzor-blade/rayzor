@@ -460,10 +460,22 @@ unsafe fn quantize_x_block_q8(x: *const f32) -> Q8Block {
         let abs_mask = vreinterpretq_f32_u32(vdupq_n_u32(0x7FFF_FFFF));
         let mut i = 0;
         while i < 256 {
-            let v0 = vandq_u32(vreinterpretq_u32_f32(vld1q_f32(pa.add(i))), vreinterpretq_u32_f32(abs_mask));
-            let v1 = vandq_u32(vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 4))), vreinterpretq_u32_f32(abs_mask));
-            let v2 = vandq_u32(vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 8))), vreinterpretq_u32_f32(abs_mask));
-            let v3 = vandq_u32(vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 12))), vreinterpretq_u32_f32(abs_mask));
+            let v0 = vandq_u32(
+                vreinterpretq_u32_f32(vld1q_f32(pa.add(i))),
+                vreinterpretq_u32_f32(abs_mask),
+            );
+            let v1 = vandq_u32(
+                vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 4))),
+                vreinterpretq_u32_f32(abs_mask),
+            );
+            let v2 = vandq_u32(
+                vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 8))),
+                vreinterpretq_u32_f32(abs_mask),
+            );
+            let v3 = vandq_u32(
+                vreinterpretq_u32_f32(vld1q_f32(pa.add(i + 12))),
+                vreinterpretq_u32_f32(abs_mask),
+            );
             m0 = vmaxq_f32(m0, vreinterpretq_f32_u32(v0));
             m1 = vmaxq_f32(m1, vreinterpretq_f32_u32(v1));
             m2 = vmaxq_f32(m2, vreinterpretq_f32_u32(v2));
@@ -1462,13 +1474,7 @@ unsafe fn qmatmul_prep(
 /// for `n_idx in [n_start, n_end)`. Worker buffers live on the stack/
 /// thread-local heap; cross-thread state is just the `*y` write band,
 /// which workers split disjointly so this needs no synchronisation.
-unsafe fn qmatmul_chunk_impl(
-    x_tensor: i64,
-    qt_w: i64,
-    y_tensor: i64,
-    n_start: i64,
-    n_end: i64,
-) {
+unsafe fn qmatmul_chunk_impl(x_tensor: i64, qt_w: i64, y_tensor: i64, n_start: i64, n_end: i64) {
     let qt = &*(qt_w as *const RayzorQTensor);
     let (block_size, block_bytes) = match qt.scheme {
         QSCHEME_Q4_K_M => (Q4_K_M_BLOCK_SIZE, Q4_K_M_BLOCK_BYTES),
@@ -1567,10 +1573,8 @@ unsafe fn qmatmul_chunk_impl(
                         }
                         let block = decode_q4_k_block(bp);
                         dequant_q4_k_block(&block, &mut stage);
-                        let x_chunk = std::slice::from_raw_parts(
-                            x_data.add(b_idx * block_size),
-                            block_size,
-                        );
+                        let x_chunk =
+                            std::slice::from_raw_parts(x_data.add(b_idx * block_size), block_size);
                         sum += dot_f32_simd(x_chunk, &stage);
                     }
                     QSCHEME_Q6_K => {
@@ -1583,10 +1587,8 @@ unsafe fn qmatmul_chunk_impl(
                         // here until we have a 2x2 tile that processes
                         // multiple Q6_K blocks per X load.
                         dequant_q6_k_block(bp, &mut stage);
-                        let x_chunk = std::slice::from_raw_parts(
-                            x_data.add(b_idx * block_size),
-                            block_size,
-                        );
+                        let x_chunk =
+                            std::slice::from_raw_parts(x_data.add(b_idx * block_size), block_size);
                         sum += dot_f32_simd(x_chunk, &stage);
                     }
                     _ => unreachable!(),
@@ -1616,8 +1618,7 @@ unsafe fn qmatmul_chunk_impl(
             for b in 0..batch {
                 let x_off = b * x_strides[0] + b_idx * block_size;
                 if x_contig {
-                    let x_chunk =
-                        std::slice::from_raw_parts(x_data.add(x_off), block_size);
+                    let x_chunk = std::slice::from_raw_parts(x_data.add(x_off), block_size);
                     row_sums[b] += dot_f32_simd(x_chunk, &stage);
                 } else {
                     let stride = x_strides[1];
@@ -1767,6 +1768,98 @@ unsafe fn dot_f32_avx2_fma(a: &[f32], b: &[f32], n: usize) -> f32 {
         i += 1;
     }
     sum
+}
+
+/// QTensor.clone(src: i64) -> i64
+///
+/// Returns a fresh, fully-owning QTensor sharing no storage with `src`.
+///
+/// - `src == 0` → returns 0 (null pass-through).
+/// - Both owning tensors AND views are deep-copied. There is no
+///   pass-through for views: returning `src` for `!owns_data` aliased the
+///   parent's `meta` / wrapper, and `rayzor_qtensor_free` unconditionally
+///   frees `meta` (when non-null) and the wrapper allocation — so a
+///   clone-of-view followed by free-of-clone would dangle the parent.
+///
+/// Data buffer extent (chosen for safety + simplicity):
+///   - INT8:   `numel` bytes (1 byte per element).
+///   - Q4_K_M: `(numel / 256) * 144`.
+///   - Q6_K:   `(numel / 256) * 210`.
+///
+/// This is correct for both owning and view sources because every block-
+/// quantised tensor in this runtime is laid out as a contiguous run of
+/// scheme-sized super-blocks (whether the storage is malloc'd or
+/// borrowed from a `HaxeBytes` / mmap'd GGUF buffer).
+///
+/// INT8 also carries a per-group `meta` f32 scale array of
+/// `numel / group_size` entries; Q4_K_M / Q6_K embed scales inside each
+/// super-block so `meta` is null for those.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_qtensor_clone(src: i64) -> i64 {
+    if src == 0 {
+        return 0;
+    }
+    let s = &*(src as *const RayzorQTensor);
+
+    // Data buffer size by scheme — must match rayzor_qtensor_free's mental
+    // model (which frees the whole `data` block as one allocation when it
+    // owns it). For views the same byte extent is what the parent exposes,
+    // so a full copy of that range covers everything the new wrapper might
+    // dereference via `data`.
+    let data_bytes = match s.scheme {
+        QSCHEME_INT8 => s.numel,
+        QSCHEME_Q4_K_M => (s.numel / Q4_K_M_BLOCK_SIZE) * Q4_K_M_BLOCK_BYTES,
+        QSCHEME_Q6_K => (s.numel / Q6_K_BLOCK_SIZE) * Q6_K_BLOCK_BYTES,
+        _ => return 0,
+    };
+
+    let data = malloc(if data_bytes > 0 { data_bytes } else { 1 });
+    if data.is_null() {
+        return 0;
+    }
+    if data_bytes > 0 && !s.data.is_null() {
+        std::ptr::copy_nonoverlapping(s.data, data, data_bytes);
+    }
+
+    // INT8 carries a separate per-group f32 scale array; Q4_K_M / Q6_K
+    // embed scales in the data blocks (meta is null).
+    let meta: *mut f32 = if s.scheme == QSCHEME_INT8 && !s.meta.is_null() && s.group_size > 0 {
+        let n_groups = s.numel / s.group_size;
+        let scale_bytes = n_groups * std::mem::size_of::<f32>();
+        let m = malloc(scale_bytes.max(4)) as *mut f32;
+        if m.is_null() {
+            free(data);
+            return 0;
+        }
+        if n_groups > 0 {
+            std::ptr::copy_nonoverlapping(s.meta, m, n_groups);
+        }
+        m
+    } else {
+        std::ptr::null_mut()
+    };
+
+    let qt = malloc(std::mem::size_of::<RayzorQTensor>()) as *mut RayzorQTensor;
+    if qt.is_null() {
+        free(data);
+        if !meta.is_null() {
+            free(meta as *mut u8);
+        }
+        return 0;
+    }
+
+    *qt = RayzorQTensor {
+        data,
+        meta,
+        numel: s.numel,
+        group_size: s.group_size,
+        scheme: s.scheme,
+        owns_data: true,
+        rows: s.rows,
+        cols: s.cols,
+    };
+
+    qt as i64
 }
 
 /// Release a QTensor. The runtime frees `data` and `meta` if `owns_data`.

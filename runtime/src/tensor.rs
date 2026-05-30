@@ -2416,6 +2416,119 @@ pub unsafe extern "C" fn rayzor_tensor_data(tensor_ptr: i64) -> i64 {
     t.data as i64
 }
 
+/// Tensor.clone(src: i64) -> i64
+///
+/// Returns a fresh, fully-owning tensor sharing no storage with `src`.
+///
+/// - `src == 0` → returns 0 (null pass-through).
+/// - Both owning tensors AND views are deep-copied. There is no
+///   pass-through for views: returning `src` for `!owns_data` aliased the
+///   parent's shape/strides/wrapper, and `rayzor_tensor_free` unconditionally
+///   frees those — so a clone-of-view followed by free-of-clone would leave
+///   the parent handle with dangling pointers (double-free / UAF on later
+///   access).
+///
+/// Data-buffer extent semantics (chosen for safety + simplicity):
+///
+/// - Owning tensor: copy exactly `numel * dtype_size(dtype)` bytes from
+///   `s.data` (the buffer is contiguous and we own the whole thing).
+/// - View: walk the strided extent from `s.data` and copy
+///   `(max_reachable_index + 1) * dtype_size(dtype)` bytes, where
+///   `max_reachable_index = Σᵢ (shape[i] - 1) * strides[i]` (in element
+///   units). This covers every element the view can address without
+///   reading past the largest stride * (dim-1) offset from `s.data`. It
+///   does NOT touch bytes the parent's view never exposes, so it is safe
+///   against partial-row sub-views (e.g. slice/permute).
+///
+/// shape/strides/wrapper are always freshly malloc'd and deep-copied.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_clone(src: i64) -> i64 {
+    if src == 0 {
+        return 0;
+    }
+    let s = &*(src as *const RayzorTensor);
+
+    let elem_size = dtype_size(s.dtype);
+
+    // Compute the data buffer extent we need to copy.
+    //   - Owning tensor: contiguous numel-element block.
+    //   - View: cover every element addressable via the view's strides.
+    //     Max reachable element index from `s.data` is
+    //     Σᵢ (shape[i] - 1) * strides[i] (clamped to 0 for empty dims).
+    let data_bytes: usize = if s.owns_data {
+        s.numel * elem_size
+    } else if s.ndim == 0 || s.numel == 0 {
+        0
+    } else {
+        let shape = std::slice::from_raw_parts(s.shape, s.ndim);
+        let strides = std::slice::from_raw_parts(s.strides, s.ndim);
+        let mut max_idx: usize = 0;
+        for i in 0..s.ndim {
+            if shape[i] == 0 {
+                // Empty dim → no addressable element; numel was already 0.
+                max_idx = 0;
+                break;
+            }
+            max_idx += (shape[i] - 1) * strides[i];
+        }
+        (max_idx + 1) * elem_size
+    };
+
+    // Allocate fresh data buffer and deep-copy.
+    let data = malloc(if data_bytes > 0 { data_bytes } else { 1 });
+    if data.is_null() {
+        return 0;
+    }
+    if data_bytes > 0 && !s.data.is_null() {
+        std::ptr::copy_nonoverlapping(s.data, data, data_bytes);
+    }
+
+    // Allocate fresh shape array and copy.
+    let shape_bytes = s.ndim * std::mem::size_of::<usize>();
+    let shape_ptr = malloc(if shape_bytes > 0 { shape_bytes } else { 1 }) as *mut usize;
+    if shape_ptr.is_null() {
+        free(data);
+        return 0;
+    }
+    if s.ndim > 0 && !s.shape.is_null() {
+        std::ptr::copy_nonoverlapping(s.shape, shape_ptr, s.ndim);
+    }
+
+    // Allocate fresh strides array and copy.
+    let strides_ptr = malloc(if shape_bytes > 0 { shape_bytes } else { 1 }) as *mut usize;
+    if strides_ptr.is_null() {
+        free(data);
+        free(shape_ptr as *mut u8);
+        return 0;
+    }
+    if s.ndim > 0 && !s.strides.is_null() {
+        std::ptr::copy_nonoverlapping(s.strides, strides_ptr, s.ndim);
+    }
+
+    // Allocate the wrapper struct itself.
+    let tensor = malloc(std::mem::size_of::<RayzorTensor>()) as *mut RayzorTensor;
+    if tensor.is_null() {
+        free(data);
+        free(shape_ptr as *mut u8);
+        free(strides_ptr as *mut u8);
+        return 0;
+    }
+
+    *tensor = RayzorTensor {
+        data,
+        shape: shape_ptr,
+        strides: strides_ptr,
+        ndim: s.ndim,
+        numel: s.numel,
+        dtype: s.dtype,
+        owns_data: true,
+        device: s.device,
+        numa_node: s.numa_node,
+    };
+
+    tensor as i64
+}
+
 /// tensor.free() -> void
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_free(tensor_ptr: i64) {
