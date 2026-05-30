@@ -45,6 +45,7 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
 
     // Arithmetic (binary)
     build_tensor_add(builder);
+    build_tensor_add_into(builder);
     build_tensor_sub(builder);
     build_tensor_mul(builder);
     build_tensor_div(builder);
@@ -287,6 +288,17 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
             .build();
         builder.mark_as_extern(func_id);
     }
+
+    // In-place add: (dest, src) -> void
+    // Mutates dest in-place; returns void. dest must be contiguous.
+    let func_id = builder
+        .begin_function("rayzor_tensor_add_into")
+        .param("dest", i64_ty.clone())
+        .param("src", i64_ty.clone())
+        .returns(void_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
 
     // causal_mask_: (tensor, position_offset) -> i64 (returns same ptr)
     let func_id = builder
@@ -881,6 +893,34 @@ build_binop_i64!(
     "rayzor_tensor_matmul_t"
 );
 build_binop_i64!(build_tensor_bmm, "Tensor_bmm", "rayzor_tensor_bmm");
+
+/// Tensor_addInto(self: i64, other: i64) -> void
+/// In-place add: mutates self by accumulating other into it.
+/// self must be contiguous; debug-asserts in runtime guarantee shape/dtype match.
+fn build_tensor_add_into(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let void_ty = IrType::Void;
+
+    let func_id = builder
+        .begin_function("Tensor_addInto")
+        .param("self", i64_ty.clone())
+        .param("other", i64_ty)
+        .returns(void_ty)
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_val = builder.get_param(0);
+    let other = builder.get_param(1);
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_add_into")
+        .expect("rayzor_tensor_add_into not found");
+    builder.call(extern_id, vec![self_val, other]);
+    builder.ret(None);
+}
 
 /// Tensor_causal_mask_(self, position_offset) -> i64
 fn build_tensor_causal_mask(builder: &mut MirBuilder) {

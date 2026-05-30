@@ -143,6 +143,14 @@ extern class Tensor {
     @:op(A + B)
     public function add(other:Tensor):Tensor;
 
+    /**
+     * Adds src into this tensor in-place. Both tensors must be contiguous,
+     * same shape, same dtype. Does NOT consume src (src remains live).
+     * Use this in place of `var y = x.add(src);` to avoid the alloc+copy.
+     */
+    @:native("tensor_addInto")
+    public function addInto(src:Tensor):Void;
+
     /** Element-wise subtraction */
     @:native("tensor_sub")
     @:op(A - B)
