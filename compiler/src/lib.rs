@@ -113,6 +113,14 @@ pub mod workspace;
 // Re-export plugin system from separate crate (avoids cyclic dependency)
 pub use rayzor_plugin as plugin;
 
+/// Build ID of the compiler binary, set from `RAYZOR_BUILD_ID` env var at
+/// build time (see `compiler/build.rs` — UNIX-epoch second tick). Exposed so
+/// downstream binaries (e.g. `rayzor` top-level CLI) can fold it into their
+/// own cache keys without needing to thread `env!` through a separate
+/// `build.rs`. Matches the value used by `.blade` per-module caches in
+/// `compilation.rs`.
+pub const BUILD_ID: &str = env!("RAYZOR_BUILD_ID");
+
 // #[cfg(test)]
 // mod pipeline_test;
 
