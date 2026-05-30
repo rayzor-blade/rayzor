@@ -115,6 +115,26 @@ pub struct BladeCachedMaps {
     /// `IFACE_VTABLE_REGISTRY` lookup at the cast site returns null.
     #[serde(default)]
     pub interface_vtables: Vec<BladeIfaceVtableEntry>,
+    /// Interface method names in declaration order, keyed by
+    /// interface qualified name. Required so cross-file method
+    /// dispatch on an interface-typed receiver (e.g.
+    /// `var t:Tokenizer = ...; t.encode(...)`) can recover the
+    /// vtable slot index in a downstream file that consumes a BLADE
+    /// cached import. Without this `maybe_materialize_for_call`'s
+    /// interface-dispatch path silently misses.
+    #[serde(default)]
+    pub interface_method_names: Vec<BladeInterfaceMethodNamesEntry>,
+    /// Per `(iface_qname, method_local_name)` HIR return-type qname.
+    /// Required for late MIR re-resolve of cross-context iface method
+    /// return types (W0014/W0015) on cached imports.
+    #[serde(default)]
+    pub interface_method_return_types: Vec<BladeInterfaceMethodReturnTypeEntry>,
+    /// Interface `extends` parents keyed by interface qualified name.
+    /// Required so iface-to-iface upcast / dispatch through a parent
+    /// interface resolves correctly when the iface comes from a
+    /// cached import.
+    #[serde(default)]
+    pub interface_extends: Vec<BladeInterfaceExtendsEntry>,
 }
 
 /// One (class, iface) → method-list entry in the BLADE cache.
@@ -128,6 +148,44 @@ pub struct BladeIfaceVtableEntry {
     /// resolve each entry back to a `SymbolId` in the consuming
     /// context's symbol table.
     pub method_qnames: Vec<String>,
+}
+
+/// One iface_qname → ordered method-name list entry. Mirrors
+/// `interface_method_names: BTreeMap<SymbolId, Vec<InternedString>>`
+/// in the MIR result, qname-keyed so SymbolIds + InternedStrings can
+/// be re-resolved in the consuming context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BladeInterfaceMethodNamesEntry {
+    /// Qualified interface name (e.g. `nue.tokenizer.Tokenizer`).
+    pub iface_name: String,
+    /// Method local names in interface-declaration order.
+    pub method_names: Vec<String>,
+}
+
+/// One (iface_qname, method_local_name) → return type qname entry.
+/// Mirrors `interface_method_return_types: BTreeMap<(SymbolId,
+/// InternedString), TypeId>` in the MIR result. Return type stored
+/// as the qualified name of its Class/Interface symbol; non-nominal
+/// return types are dropped (consumer falls back to MIR signature).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BladeInterfaceMethodReturnTypeEntry {
+    /// Qualified interface name owning the method.
+    pub iface_name: String,
+    /// Method local name (last segment of qualified name).
+    pub method_name: String,
+    /// Qualified name of the return type's Class/Interface symbol.
+    pub return_type_name: String,
+}
+
+/// One iface_qname → parent-iface-qname-list entry. Mirrors
+/// `interface_extends: BTreeMap<SymbolId, Vec<SymbolId>>` in the
+/// MIR result, qname-keyed so SymbolIds can be re-resolved.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BladeInterfaceExtendsEntry {
+    /// Qualified interface name.
+    pub iface_name: String,
+    /// Qualified names of parent interfaces in declaration order.
+    pub parent_names: Vec<String>,
 }
 
 /// A static inline var constant stored in the cache
