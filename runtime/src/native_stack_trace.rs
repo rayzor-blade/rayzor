@@ -348,6 +348,28 @@ pub extern "C" fn rayzor_pop_call_frame() {
     });
 }
 
+/// Return the current shadow stack depth.
+/// Used by the exception runtime to snapshot depth on `push_handler`
+/// so it can be restored on `longjmp` (otherwise frames between the
+/// throw site and the catch landing pad leak permanently, since the
+/// compiler only emits `pop_call_frame` on `Return` terminators).
+pub fn shadow_stack_depth() -> usize {
+    SHADOW_STACK.with(|stack| stack.borrow().len())
+}
+
+/// Truncate the shadow stack to `depth` frames.
+/// Called by the exception runtime on the catch landing path immediately
+/// before `_longjmp` so leaked frames from bypassed `Return` blocks are
+/// dropped. Safe to call with `depth` >= current len (no-op).
+pub fn truncate_shadow_stack(depth: usize) {
+    SHADOW_STACK.with(|stack| {
+        let mut stack = stack.borrow_mut();
+        if depth < stack.len() {
+            stack.truncate(depth);
+        }
+    });
+}
+
 /// Update the top frame's source location to reflect the current statement.
 /// Emitted by the compiler before throw statements and call expressions so the
 /// snapshot captures the exact line rather than the function definition line.
