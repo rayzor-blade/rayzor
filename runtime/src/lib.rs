@@ -71,6 +71,7 @@ pub mod cstring_runtime;
 
 // Tensor runtime — N-dimensional array (rayzor.ds.Tensor)
 pub mod tensor;
+pub mod tensor_pool;
 pub mod tensor_simd;
 
 // Quantised tensor runtime — INT8 / Q4_K_M storage + dequant-fused matmul
