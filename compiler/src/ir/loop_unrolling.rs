@@ -425,6 +425,27 @@ fn fully_unroll_loop(
         None => return false,
     };
 
+    // Conservative correctness guard: this pass only knows how to lower a
+    // single induction-variable phi. If the header has additional phi nodes
+    // (e.g. a loop-carried accumulator like `sum += i`), unrolling here would
+    // leave the body's references to those phi dests dangling once the header
+    // block is deleted at the end of `fully_unroll_loop` — see the bail-out
+    // for multi-block bodies above for the same reasoning. Refuse to unroll
+    // in that case so downstream codegen does not encounter undefined SSA
+    // values (which the Cranelift backend would otherwise turn into a
+    // 4-byte `udf` trap stub).
+    if header_block.phi_nodes.len() > 1 {
+        return false;
+    }
+    // Body blocks must not introduce new phis either — same dangling-ref risk.
+    for &body_id in &body_blocks {
+        if let Some(body_block) = function.cfg.get_block(body_id) {
+            if !body_block.phi_nodes.is_empty() {
+                return false;
+            }
+        }
+    }
+
     // Find the exit target (block outside the loop from the header's condition)
     let exit_target = match &header_block.terminator {
         IrTerminator::CondBranch {
