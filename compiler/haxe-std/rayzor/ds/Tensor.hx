@@ -19,7 +19,7 @@ package rayzor.ds;
  * ```
  */
 @:derive([Clone])
-@:move
+@:shared
 @:native("rayzor::ds::Tensor")
 extern class Tensor {
     // --- Construction ---

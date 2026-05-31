@@ -27,7 +27,7 @@ package rayzor.ds;
  * via explicit `free()`. (Refcounted lifetime is a future refinement.)
  */
 @:derive([Clone])
-@:move
+@:shared
 @:native("rayzor::ds::QTensor")
 extern class QTensor {
     /**
