@@ -12,26 +12,59 @@ use source_map::{
 
 /// Bridge between source_map types and TAST types
 pub struct SpanConverter {
-    /// Source map for all files
+    /// Source map for all files (private to this converter; used for
+    /// byte-offset → line/column resolution against the file's bytes).
     source_map: SourceMap,
-    /// Current file being processed
+    /// Current file in the PRIVATE source_map. Always FileId(0) for
+    /// `with_file`-constructed converters; used only for line/column
+    /// lookup, NOT for the file_id emitted on SourceLocations.
     current_file_id: FileId,
+    /// External file_id supplied by the outer compilation pipeline.
+    /// THIS is the file_id stamped on every SourceLocation produced
+    /// by `convert_span`, so per-file lowerings end up with spans
+    /// that correctly identify the imported module they came from
+    /// (rather than every span carrying file_id=0 because the
+    /// private source_map starts fresh per converter).
+    external_file_id: u32,
 }
 
 impl SpanConverter {
-    /// Create a new span converter with an existing source map and current file
+    /// Create a new span converter with an existing source map and current file.
+    /// `external_file_id` defaults to the internal current_file_id's raw value.
     pub fn new(source_map: SourceMap, current_file_id: FileId) -> Self {
         Self {
             source_map,
             current_file_id,
+            external_file_id: current_file_id.as_usize() as u32,
         }
     }
 
-    /// Create a span converter with a new file
-    pub fn with_file(file_name: String, source_text: String) -> Self {
+    /// Create a span converter with a new file and a specific external file_id.
+    ///
+    /// The internal source_map gets file_id 0 (the file is the first one
+    /// added), but every SourceLocation emitted by `convert_span` carries
+    /// `external_file_id` instead — this is how cross-file lowerings end
+    /// up tagging their TypedExpression spans with the real compilation-
+    /// level file_id, not the always-0 of the private source_map.
+    pub fn with_file_and_id(
+        file_name: String,
+        source_text: String,
+        external_file_id: u32,
+    ) -> Self {
         let mut source_map = SourceMap::new();
         let file_id = source_map.add_file(file_name, source_text);
-        Self::new(source_map, file_id)
+        Self {
+            source_map,
+            current_file_id: file_id,
+            external_file_id,
+        }
+    }
+
+    /// Create a span converter with a new file (preserved for compatibility;
+    /// `external_file_id` is taken from the internal source_map and so will
+    /// always be 0 — prefer `with_file_and_id` from new call sites).
+    pub fn with_file(file_name: String, source_text: String) -> Self {
+        Self::with_file_and_id(file_name, source_text, 0)
     }
 
     /// Add a new file to the source map and return its FileId
@@ -39,19 +72,37 @@ impl SpanConverter {
         self.source_map.add_file(file_name, source_text)
     }
 
-    /// Set the current file being processed
+    /// Set the current file being processed.
+    /// Also resets `external_file_id` to the raw value of the new
+    /// FileId so subsequent `convert_span` calls tag SourceLocations
+    /// with the matching file_id. Callers that need to keep an
+    /// independent external_file_id can call `set_external_file_id`
+    /// after this.
     pub fn set_current_file(&mut self, file_id: FileId) {
         self.current_file_id = file_id;
+        self.external_file_id = file_id.as_usize() as u32;
     }
 
-    /// Convert a parser span to a TAST source location
+    /// Override just the external_file_id used when emitting
+    /// SourceLocations (without touching the internal source_map
+    /// lookup id). Used by callers that share a converter across
+    /// files of different compilation-level identities.
+    pub fn set_external_file_id(&mut self, external_file_id: u32) {
+        self.external_file_id = external_file_id;
+    }
+
+    /// Convert a parser span to a TAST source location.
+    ///
+    /// `file_id` on the returned SourceLocation is `external_file_id`
+    /// (the compilation-pipeline-level id), NOT the private source_map's
+    /// internal id (which is always 0 for `with_file`-style converters).
     pub fn convert_span(&self, span: Span) -> SourceLocation {
         let parser_span = ParserSpan::new(span.start, span.end);
         if let Some(source_span) =
             parser_span.to_source_span(self.current_file_id, &self.source_map)
         {
             SourceLocation {
-                file_id: source_span.file_id.as_usize() as u32,
+                file_id: self.external_file_id,
                 line: source_span.start.line as u32,
                 column: source_span.start.column as u32,
                 byte_offset: source_span.start.byte_offset as u32,

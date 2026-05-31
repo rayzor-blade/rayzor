@@ -579,17 +579,28 @@ impl<'a> LoweringContext<'a> {
         );
     }
 
-    /// Initialize the span converter with source text and specific filename
+    /// Initialize the span converter with source text and specific filename.
+    /// `file_id` is the COMPILATION-PIPELINE-LEVEL identifier (set by the
+    /// outer source loader); it is stamped on every SourceLocation the
+    /// converter produces so cross-file lowerings can be distinguished
+    /// downstream (ownership diagnostics, the RAYZOR_DEBUG_E0382 dump,
+    /// renderer attribution). The previous body silently dropped the
+    /// file_id, so every TypedExpression span ended up tagged file_id=0
+    /// regardless of the actual source file — see
+    /// bugs_diagnostic_span_file_id_always_zero.
     pub fn initialize_span_converter_with_filename(
         &mut self,
         file_id: u32,
         source_text: String,
         file_name: String,
     ) {
-        self.span_converter = Some(super::span_conversion::SpanConverter::with_file(
-            file_name,
-            source_text,
-        ));
+        self.span_converter = Some(
+            super::span_conversion::SpanConverter::with_file_and_id(
+                file_name,
+                source_text,
+                file_id,
+            ),
+        );
     }
 }
 
