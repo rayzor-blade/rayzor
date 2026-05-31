@@ -7,7 +7,7 @@
 /// The MIR wrappers handle allocation and forwarding.
 use crate::ir::instructions::CompareOp;
 use crate::ir::mir_builder::MirBuilder;
-use crate::ir::{CallingConvention, IrType};
+use crate::ir::{CallingConvention, InlineHint, IrType};
 
 /// HaxeArray runtime structure size in bytes
 /// struct HaxeArray { ptr: *mut u8, len: usize, cap: usize, elem_size: usize }
@@ -389,12 +389,15 @@ fn declare_array_externs(builder: &mut MirBuilder) {
 fn build_array_push(builder: &mut MirBuilder) {
     let ptr_void = IrType::Ptr(Box::new(IrType::Void));
     let i64_ty = IrType::I64;
+    // Trivial wrapper around haxe_array_push_i64; force-inline so the inner
+    // hot-loop array.push(x) collapses to the extern call at the call site.
     let func_id = builder
         .begin_function("array_push")
         .param("arr", ptr_void.clone())
         .param("value", i64_ty.clone())
         .returns(IrType::Void)
         .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
         .build();
 
     builder.set_current_function(func_id);
@@ -419,11 +422,13 @@ fn build_array_push(builder: &mut MirBuilder) {
 /// Removes and returns the last element from the array
 fn build_array_pop(builder: &mut MirBuilder) {
     let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    // Trivial: Any→Ptr cast + extern call + ret. Force-inline.
     let func_id = builder
         .begin_function("array_pop")
         .param("arr", IrType::Any)
         .returns(IrType::I64)
         .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
         .build();
 
     builder.set_current_function(func_id);
@@ -455,11 +460,14 @@ fn build_array_pop(builder: &mut MirBuilder) {
 /// Returns the length of the array (usize as i64)
 fn build_array_length(builder: &mut MirBuilder) {
     let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    // Trivial: Any→Ptr cast + extern call + ret. Force-inline; array.length
+    // is called from virtually every for-in loop and bounds check.
     let func_id = builder
         .begin_function("array_length")
         .param("arr", IrType::Any)
         .returns(IrType::I64)
         .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
         .build();
 
     builder.set_current_function(func_id);
