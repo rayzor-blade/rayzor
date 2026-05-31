@@ -337,8 +337,33 @@ impl ErrorFormatter {
             .map(|f| f.content.as_str())
             .unwrap_or("");
 
+        // ariadne uses CHARACTER offsets, not byte offsets — its line/
+        // column rendering counts char_indices through the source. Our
+        // diagnostic spans store BYTE offsets (computed from
+        // `source.char_indices().for_each(|i, _| ...)` byte positions
+        // via offset_to_line_col). Without a conversion the two diverge
+        // on any file containing multi-byte UTF-8 sequences (every Ġ
+        // in BPE tokenizer specials, every comment in a non-ASCII
+        // language, etc.) — the byte-offset gets fed to ariadne which
+        // then interprets it as `char N`, landing further into the file
+        // by (bytes - chars) characters. For BPETokenizer.hx that's
+        // typically ~24 chars off-by-line.
+        //
+        // Convert by counting chars in the prefix slice [0..byte_offset].
+        // Cost: O(n) per label per diagnostic; n is small (a few KB at
+        // most for a label span, the source is sliced not copied). For
+        // the bare `rayzor run Main.hx` case this fires ~20 times
+        // (warnings) — millisecond overhead total.
+        let byte_to_char = |byte_offset: usize| -> usize {
+            if byte_offset >= source_content.len() {
+                source_content.chars().count()
+            } else {
+                source_content[..byte_offset].chars().count()
+            }
+        };
+
         // Build the ariadne report
-        let offset = diagnostic.span.start.byte_offset;
+        let offset = byte_to_char(diagnostic.span.start.byte_offset);
         let mut builder = Report::<(&str, std::ops::Range<usize>)>::build(kind, file_name, offset)
             .with_config(Config::default().with_color(self.use_colors));
 
@@ -352,8 +377,9 @@ impl ErrorFormatter {
 
         // Add labels
         for label in &diagnostic.labels {
-            let start = label.span.start.byte_offset;
-            let end = label.span.end.byte_offset.max(start + 1);
+            let start = byte_to_char(label.span.start.byte_offset);
+            let end_byte = label.span.end.byte_offset.max(label.span.start.byte_offset + 1);
+            let end = byte_to_char(end_byte).max(start + 1);
             let color = match label.style {
                 LabelStyle::Primary => Color::Red,
                 LabelStyle::Secondary => Color::Blue,
