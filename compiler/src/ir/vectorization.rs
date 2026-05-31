@@ -336,7 +336,8 @@ impl LoopVectorizationPass {
         analysis.induction_var = induction_var;
 
         // Check 4: Analyze memory accesses
-        let memory_accesses = self.analyze_memory_accesses(function, loop_info);
+        let memory_accesses =
+            self.analyze_memory_accesses(function, loop_info, analysis.induction_var);
 
         // Filter for contiguous, vectorizable accesses
         let vectorizable: Vec<_> = memory_accesses
@@ -465,11 +466,28 @@ impl LoopVectorizationPass {
         false
     }
 
-    /// Analyze memory accesses in the loop
+    /// Analyze memory accesses in the loop.
+    ///
+    /// SSA hazard (d): the previous version hardcoded `stride: 1` for every
+    /// Load/Store and used `IrType::I64` as a placeholder element type for
+    /// Stores. The downstream filter keeps only stride==1 accesses, so any
+    /// non-unit-stride access (e.g. `arr[i*2]`) was silently classified as
+    /// vectorizable and the vector loop would read/write wrong addresses.
+    /// And the placeholder I64 element type for Stores made the cost model and
+    /// vector-type selection pick the wrong lane width on F32/F64/I32 stores.
+    ///
+    /// This version threads:
+    ///   - stride from the producing GEP's last index (1 if it's the IV
+    ///     directly, c if it's `iv * c` or `iv + iv + ... (c times)`,
+    ///     otherwise unknown == -1 so the filter rejects it),
+    ///   - element_type for Stores from the value's register type (which the
+    ///     IR builder already records), falling back to the explicit
+    ///     `store_ty` if available.
     fn analyze_memory_accesses(
         &self,
         function: &IrFunction,
         loop_info: &NaturalLoop,
+        induction_var: Option<IrId>,
     ) -> Vec<MemoryAccess> {
         let mut accesses = Vec::new();
         let mut inst_idx = 0;
@@ -479,22 +497,47 @@ impl LoopVectorizationPass {
                 for inst in &block.instructions {
                     match inst {
                         IrInstruction::Load { dest: _, ptr, ty } => {
+                            let stride = self.compute_access_stride(
+                                function,
+                                loop_info,
+                                *ptr,
+                                induction_var,
+                            );
                             accesses.push(MemoryAccess {
                                 instruction_id: inst_idx,
                                 base: *ptr,
-                                stride: 1, // Assume unit stride, could analyze further
+                                stride,
                                 is_load: true,
                                 element_type: ty.clone(),
                             });
                         }
-                        IrInstruction::Store { ptr, .. } => {
-                            // Need to determine the type from context
+                        IrInstruction::Store {
+                            ptr,
+                            value,
+                            store_ty,
+                        } => {
+                            let stride = self.compute_access_stride(
+                                function,
+                                loop_info,
+                                *ptr,
+                                induction_var,
+                            );
+                            // Element type comes from the explicit store_ty
+                            // annotation when present, otherwise from the value
+                            // register's recorded type.
+                            let element_type = store_ty.clone().unwrap_or_else(|| {
+                                function
+                                    .register_types
+                                    .get(value)
+                                    .cloned()
+                                    .unwrap_or(IrType::I64)
+                            });
                             accesses.push(MemoryAccess {
                                 instruction_id: inst_idx,
                                 base: *ptr,
-                                stride: 1,
+                                stride,
                                 is_load: false,
-                                element_type: IrType::I64, // Placeholder
+                                element_type,
                             });
                         }
                         _ => {}
@@ -505,6 +548,142 @@ impl LoopVectorizationPass {
         }
 
         accesses
+    }
+
+    /// Trace `ptr` back to its producing GEP within the loop, and infer the
+    /// stride relative to the induction variable.
+    ///
+    /// Stride values:
+    ///   - 1 — last index is the induction variable directly (contiguous).
+    ///   - c — last index is `iv * c` where c is a constant.
+    ///   - -1 — pattern not recognised; filter rejects.
+    ///
+    /// Falls back to 1 when the induction var is unknown (preserves prior
+    /// behaviour for callers that haven't yet plumbed the IV through).
+    fn compute_access_stride(
+        &self,
+        function: &IrFunction,
+        loop_info: &NaturalLoop,
+        ptr: IrId,
+        induction_var: Option<IrId>,
+    ) -> i64 {
+        let iv = match induction_var {
+            Some(v) => v,
+            None => return 1,
+        };
+
+        // Locate the GEP / PtrAdd that produces `ptr` within the loop.
+        let (gep_index, gep_ptr) = match self.find_gep_producing(function, loop_info, ptr) {
+            Some(pair) => pair,
+            None => return 1, // No GEP found — treat as contiguous-by-default.
+        };
+
+        // If the index IS the induction variable: stride 1.
+        if gep_index == iv {
+            return 1;
+        }
+
+        // If the index is `iv * const` (BinOp::Mul iv, c) or `const * iv`,
+        // pick up the constant as the stride.
+        for block_id in &loop_info.blocks {
+            if let Some(block) = function.cfg.blocks.get(block_id) {
+                for inst in &block.instructions {
+                    if let IrInstruction::BinOp {
+                        dest,
+                        op: BinaryOp::Mul,
+                        left,
+                        right,
+                    } = inst
+                    {
+                        if *dest == gep_index {
+                            // One operand must be the IV; the other should be a
+                            // constant register defined elsewhere in the function.
+                            let other = if *left == iv {
+                                Some(*right)
+                            } else if *right == iv {
+                                Some(*left)
+                            } else {
+                                None
+                            };
+                            if let Some(const_reg) = other {
+                                if let Some(c) =
+                                    self.find_const_value_i64(function, loop_info, const_reg)
+                                {
+                                    if c > 0 {
+                                        return c;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Unrecognised: signal non-unit-stride so the filter rejects it.
+        let _ = gep_ptr;
+        -1
+    }
+
+    /// Walk the loop blocks looking for a GEP/PtrAdd that produces `ptr`.
+    /// Returns (last_index_reg, base_ptr_reg).
+    fn find_gep_producing(
+        &self,
+        function: &IrFunction,
+        loop_info: &NaturalLoop,
+        ptr: IrId,
+    ) -> Option<(IrId, IrId)> {
+        for block_id in &loop_info.blocks {
+            let block = function.cfg.blocks.get(block_id)?;
+            for inst in &block.instructions {
+                match inst {
+                    IrInstruction::GetElementPtr {
+                        dest,
+                        ptr: base,
+                        indices,
+                        ..
+                    } if *dest == ptr => {
+                        return indices.last().copied().map(|i| (i, *base));
+                    }
+                    IrInstruction::PtrAdd {
+                        dest,
+                        ptr: base,
+                        offset,
+                        ..
+                    } if *dest == ptr => {
+                        return Some((*offset, *base));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        None
+    }
+
+    /// Look up a constant i64 value for `reg` within the loop or its preds.
+    fn find_const_value_i64(
+        &self,
+        function: &IrFunction,
+        loop_info: &NaturalLoop,
+        reg: IrId,
+    ) -> Option<i64> {
+        for block in function.cfg.blocks.values() {
+            for inst in &block.instructions {
+                if let IrInstruction::Const { dest, value } = inst {
+                    if *dest == reg {
+                        return match value {
+                            IrValue::I32(v) => Some(*v as i64),
+                            IrValue::I64(v) => Some(*v),
+                            IrValue::U32(v) => Some(*v as i64),
+                            IrValue::U64(v) => Some(*v as i64),
+                            _ => None,
+                        };
+                    }
+                }
+            }
+        }
+        let _ = loop_info;
+        None
     }
 
     /// Find reduction patterns in the loop
@@ -688,6 +867,16 @@ impl LoopVectorizationPass {
             None => return false,
         };
 
+        // SSA hazard (c) gate: only proceed if the loop's exit cmp has a shape
+        // update_loop_bound can rewrite (`iv (Lt|Le) bound`). Bail before
+        // mutating the body if we detect a Gt/Ge decrementing-IV shape.
+        if self
+            .find_loop_bound_cmp(function, loop_info, induction_var)
+            .is_none()
+        {
+            return false;
+        }
+
         // For constant trip counts, we can directly vectorize
         // For bounded/symbolic/unknown, we would need runtime checks which aren't implemented yet
         let trip_count = match &loop_info.trip_count {
@@ -799,8 +988,16 @@ impl LoopVectorizationPass {
 
     /// Update the induction variable's stride from 1 to VF.
     ///
-    /// Finds `iv_next = iv + 1` and rewrites to `iv_next = iv + VF` by inserting
-    /// a new constant register and updating the BinOp operand.
+    /// Finds every `iv_next = iv + 1` (or `1 + iv`) in the loop body and
+    /// rewrites the constant operand to VF by allocating one shared VF
+    /// constant register.
+    ///
+    /// SSA hazard (e): the previous version `break`'d after the first match
+    /// and `return`'d after inserting the constant. Multi-block latches or
+    /// chained IV updates (e.g. when LCSSA inserts auxiliary increments)
+    /// would leave subsequent `iv + 1` increments unpatched, causing the
+    /// vector loop to advance by 1 instead of VF on those paths and read
+    /// past the array end (or revisit the same lanes).
     fn update_induction_stride(
         &self,
         function: &mut IrFunction,
@@ -813,9 +1010,15 @@ impl LoopVectorizationPass {
         function.next_reg_id += 1;
         function.register_types.insert(vf_reg, IrType::I32);
 
+        let mut first_insert_site: Option<IrBlockId> = None;
+        let mut first_insert_idx: usize = 0;
+        let mut total_patched: usize = 0;
+
         for block_id in &loop_info.blocks {
             if let Some(block) = function.cfg.blocks.get_mut(block_id) {
-                let mut insert_const_before = None;
+                // Collect indices we patched in this block so we don't double-
+                // insert the const past them.
+                let mut first_patched_idx_in_block: Option<usize> = None;
 
                 for (idx, inst) in block.instructions.iter_mut().enumerate() {
                     if let IrInstruction::BinOp {
@@ -825,30 +1028,50 @@ impl LoopVectorizationPass {
                         ..
                     } = inst
                     {
-                        if *left == induction_var || *right == induction_var {
-                            // Replace the stride operand with VF
-                            if *left == induction_var {
-                                *right = vf_reg;
-                            } else {
-                                *left = vf_reg;
+                        if *left == induction_var && *right != induction_var {
+                            *right = vf_reg;
+                            total_patched += 1;
+                            if first_patched_idx_in_block.is_none() {
+                                first_patched_idx_in_block = Some(idx);
                             }
-                            insert_const_before = Some(idx);
-                            break;
+                        } else if *right == induction_var && *left != induction_var {
+                            *left = vf_reg;
+                            total_patched += 1;
+                            if first_patched_idx_in_block.is_none() {
+                                first_patched_idx_in_block = Some(idx);
+                            }
                         }
+                        // iv+iv is `iv*2` — not a stride+1 increment; skip.
                     }
                 }
 
-                // Insert the VF constant before the updated BinOp
-                if let Some(idx) = insert_const_before {
-                    block.instructions.insert(
-                        idx,
-                        IrInstruction::Const {
-                            dest: vf_reg,
-                            value: IrValue::I32(vf as i32),
-                        },
-                    );
-                    return; // Done — one IV increment per loop
+                if let Some(idx) = first_patched_idx_in_block {
+                    if first_insert_site.is_none() {
+                        first_insert_site = Some(*block_id);
+                        first_insert_idx = idx;
+                    }
                 }
+            }
+        }
+
+        if total_patched == 0 {
+            return;
+        }
+
+        // Insert the VF constant once, before the earliest patched BinOp.
+        // Subsequent blocks dominate / are dominated by this block within the
+        // loop body, so the constant is available by SSA construction (single
+        // header dominates the body; latches reach the constant via the back
+        // edge). Both single-block and multi-block-latch loops are covered.
+        if let Some(block_id) = first_insert_site {
+            if let Some(block) = function.cfg.blocks.get_mut(&block_id) {
+                block.instructions.insert(
+                    first_insert_idx,
+                    IrInstruction::Const {
+                        dest: vf_reg,
+                        value: IrValue::I32(vf as i32),
+                    },
+                );
             }
         }
     }
@@ -908,6 +1131,60 @@ impl LoopVectorizationPass {
                 }
             }
         }
+    }
+
+    /// Find the cmp instruction that drives the loop exit test, AND verify it
+    /// has the only shape `update_loop_bound` knows how to rewrite:
+    /// `iv (Lt|Le) bound`. Returns the block+inst idx on success.
+    ///
+    /// SSA hazard (c): the original `update_loop_bound` only matched
+    /// `Cmp { op: Lt|Le, .. }` and unconditionally wrote `*right = bound_reg`.
+    /// For decrementing IVs (`iv > 0`, op Gt/Ge) it silently no-ops and the
+    /// vector body runs with the original unadjusted bound → exits one VF too
+    /// late and reads past the array end. For `N > iv` (IV on the right) it
+    /// overwrites the IV with the new constant — catastrophic. This helper
+    /// returns None for both shapes so vectorize_loop bails before mutating.
+    fn find_loop_bound_cmp(
+        &self,
+        function: &IrFunction,
+        loop_info: &NaturalLoop,
+        induction_var: IrId,
+    ) -> Option<(IrBlockId, usize)> {
+        let header = loop_info.header;
+        let blocks_to_check: Vec<IrBlockId> = std::iter::once(header)
+            .chain(loop_info.blocks.iter().copied())
+            .collect();
+
+        for block_id in blocks_to_check {
+            let block = function.cfg.blocks.get(&block_id)?;
+            for (idx, inst) in block.instructions.iter().enumerate() {
+                if let IrInstruction::Cmp {
+                    op, left, right, ..
+                } = inst
+                {
+                    match op {
+                        // Supported: `iv < N` / `iv <= N` — IV must be on left
+                        // so `*right = bound_reg` rewrites the bound, not the IV.
+                        CompareOp::Lt | CompareOp::Le => {
+                            if *left == induction_var && *right != induction_var {
+                                return Some((block_id, idx));
+                            }
+                            // IV on the right (e.g. `N > iv` already lowered to
+                            // `iv < N`?) is unusual but treat conservatively:
+                            // we can't rewrite operand we don't recognise.
+                        }
+                        // Decrementing IV (`iv > 0`, `iv >= 1`) is a separate
+                        // shape — update_loop_bound doesn't handle it and the
+                        // remainder/epilogue math assumes ascending counts.
+                        CompareOp::Gt | CompareOp::Ge => {
+                            return None;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Create an epilogue for remainder iterations after the vector loop.
@@ -993,11 +1270,39 @@ impl LoopVectorizationPass {
             );
         }
 
-        // Update exit block predecessors
+        // Update exit block predecessors AND rewrite any LCSSA phi nodes /
+        // Phi instructions whose incoming source-block was the header (which no
+        // longer flows directly into exit) to use the epilogue block instead.
+        // Without this rewrite, phi.incoming references a predecessor that is
+        // not in `predecessors` anymore — SSA hazard (a).
         if let Some(exit_block) = function.cfg.blocks.get_mut(&exit_block_id) {
             for pred in &mut exit_block.predecessors {
                 if *pred == loop_info.header {
                     *pred = epilogue_block_id;
+                }
+            }
+
+            // Rewrite phi nodes stored in block.phi_nodes (LCSSA-style, source
+            // block stored as IrBlockId).
+            for phi in &mut exit_block.phi_nodes {
+                for (pred_block, _) in &mut phi.incoming {
+                    if *pred_block == loop_info.header {
+                        *pred_block = epilogue_block_id;
+                    }
+                }
+            }
+
+            // Rewrite Phi instructions inlined as IrInstruction::Phi (incoming
+            // stored as IrId of the predecessor block).
+            let header_as_id = IrId::new(loop_info.header.as_u32());
+            let epilogue_as_id = IrId::new(epilogue_block_id.as_u32());
+            for inst in &mut exit_block.instructions {
+                if let IrInstruction::Phi { incoming, .. } = inst {
+                    for (_, pred) in incoming.iter_mut() {
+                        if *pred == header_as_id {
+                            *pred = epilogue_as_id;
+                        }
+                    }
                 }
             }
         }
@@ -1110,6 +1415,100 @@ impl LoopVectorizationPass {
                 indices: indices.iter().map(|i| map_use(*i, reg_map)).collect(),
                 ty: ty.clone(),
                 struct_context: struct_context.clone(),
+            },
+
+            // SSA hazard (b): every instruction that defines a destination
+            // register MUST have its dest remapped to a fresh id when unrolled,
+            // otherwise the remainder iterations collide on the same ids.
+            // Every operand of an instruction whose producer was remapped must
+            // also be remapped via map_use. The default `other => other.clone()`
+            // path is now reserved for genuinely operand-less / dest-less
+            // instructions (DebugLoc, Panic, MarkMoved, etc.).
+            IrInstruction::Cmp {
+                dest,
+                op,
+                left,
+                right,
+            } => IrInstruction::Cmp {
+                dest: alloc_new(*dest, next_reg, reg_map, function),
+                op: *op,
+                left: map_use(*left, reg_map),
+                right: map_use(*right, reg_map),
+            },
+            IrInstruction::Select {
+                dest,
+                condition,
+                true_val,
+                false_val,
+            } => IrInstruction::Select {
+                dest: alloc_new(*dest, next_reg, reg_map, function),
+                condition: map_use(*condition, reg_map),
+                true_val: map_use(*true_val, reg_map),
+                false_val: map_use(*false_val, reg_map),
+            },
+            IrInstruction::Cast {
+                dest,
+                src,
+                from_ty,
+                to_ty,
+            } => IrInstruction::Cast {
+                dest: alloc_new(*dest, next_reg, reg_map, function),
+                src: map_use(*src, reg_map),
+                from_ty: from_ty.clone(),
+                to_ty: to_ty.clone(),
+            },
+            IrInstruction::BitCast { dest, src, ty } => IrInstruction::BitCast {
+                dest: alloc_new(*dest, next_reg, reg_map, function),
+                src: map_use(*src, reg_map),
+                ty: ty.clone(),
+            },
+            IrInstruction::UnOp { dest, op, operand } => IrInstruction::UnOp {
+                dest: alloc_new(*dest, next_reg, reg_map, function),
+                op: *op,
+                operand: map_use(*operand, reg_map),
+            },
+            IrInstruction::Phi { dest, incoming } => IrInstruction::Phi {
+                dest: alloc_new(*dest, next_reg, reg_map, function),
+                incoming: incoming
+                    .iter()
+                    .map(|(val, pred)| (map_use(*val, reg_map), *pred))
+                    .collect(),
+            },
+            IrInstruction::ExtractValue {
+                dest,
+                aggregate,
+                indices,
+            } => IrInstruction::ExtractValue {
+                dest: alloc_new(*dest, next_reg, reg_map, function),
+                aggregate: map_use(*aggregate, reg_map),
+                indices: indices.clone(),
+            },
+            IrInstruction::InsertValue {
+                dest,
+                aggregate,
+                value,
+                indices,
+            } => IrInstruction::InsertValue {
+                dest: alloc_new(*dest, next_reg, reg_map, function),
+                aggregate: map_use(*aggregate, reg_map),
+                value: map_use(*value, reg_map),
+                indices: indices.clone(),
+            },
+            IrInstruction::Alloc { dest, ty, count } => IrInstruction::Alloc {
+                dest: alloc_new(*dest, next_reg, reg_map, function),
+                ty: ty.clone(),
+                count: count.map(|c| map_use(c, reg_map)),
+            },
+            IrInstruction::PtrAdd {
+                dest,
+                ptr,
+                offset,
+                ty,
+            } => IrInstruction::PtrAdd {
+                dest: alloc_new(*dest, next_reg, reg_map, function),
+                ptr: map_use(*ptr, reg_map),
+                offset: map_use(*offset, reg_map),
+                ty: ty.clone(),
             },
             other => other.clone(),
         }
