@@ -116,6 +116,17 @@ pub struct CompilationUnit {
     /// filename string that was passed to compile_file_with_shared_state_ex.
     file_id_by_filename: BTreeMap<String, u32>,
 
+    /// Per-file source bytes captured at the moment the file entered
+    /// the lowering pipeline. The renderer in `build_full_source_map`
+    /// uses THIS exact bytes blob for ariadne so byte_offsets stored
+    /// on diagnostic spans (computed against the same bytes) resolve
+    /// to the right line/column. Falling back to a fresh disk read
+    /// can drift by a line or two on files whose on-disk version
+    /// changed between lowering and rendering, or whose in-memory
+    /// version diverged via macro expansion / line-ending
+    /// normalisation.
+    file_source_by_filename: BTreeMap<String, String>,
+
     /// Diagnostics collected during compilation (warnings, non-exhaustive switches, etc.)
     /// These are printed during compilation AND stored here for cache replay.
     pub collected_diagnostics: Vec<diagnostics::Diagnostic>,
@@ -506,6 +517,7 @@ impl CompilationUnit {
             loaded_import_haxe_files: Vec::new(),
             next_file_id: 0,
             file_id_by_filename: BTreeMap::new(),
+            file_source_by_filename: BTreeMap::new(),
             collected_diagnostics: Vec::new(),
             global_class_fields: BTreeMap::new(),
             stdlib_function_map: BTreeMap::new(),
@@ -3015,6 +3027,25 @@ impl CompilationUnit {
         };
 
         if cache_hit {
+            // BLADE cache hit means compile_file_with_shared_state_ex →
+            // compile_ast_with_shared_state was NOT called for this file,
+            // so file_id_by_filename / file_source_by_filename never got
+            // an entry. Allocate them now from the in-memory `source` so
+            // the renderer can still locate this file by file_id and
+            // resolve its byte_offsets against the same bytes the cached
+            // MIR's spans were computed against.
+            let file_id_u32 = *self
+                .file_id_by_filename
+                .entry(filename.to_string())
+                .or_insert_with(|| {
+                    let id = self.next_file_id;
+                    self.next_file_id += 1;
+                    id
+                });
+            let _ = file_id_u32;
+            self.file_source_by_filename
+                .entry(filename.to_string())
+                .or_insert_with(|| source.to_string());
             return true;
         }
 
@@ -4641,6 +4672,12 @@ impl CompilationUnit {
                 self.next_file_id += 1;
                 id
             });
+        // Capture the EXACT source bytes the span_converter sees so the
+        // renderer's source_map can use the same bytes for ariadne's
+        // byte_offset → line/column resolution.
+        self.file_source_by_filename
+            .entry(filename.to_string())
+            .or_insert_with(|| source.to_string());
         let file_id = diagnostics::FileId::new(file_id_u32 as usize);
 
         // Extract type info from AST for BLADE cache (before macros may modify it)
@@ -6441,8 +6478,13 @@ impl CompilationUnit {
         let mut source_map = diagnostics::SourceMap::new();
 
         // Collect every file source we know about, keyed by filename.
-        // Stored as Option<String> so we can distinguish "file known
-        // but content not in memory" (re-read from disk on demand).
+        // file_source_by_filename is AUTHORITATIVE — it holds the exact
+        // bytes the span_converter saw at lowering time, so byte_offset
+        // → line/column resolution at the renderer matches what was
+        // stored on diagnostic spans. The other lists are FALLBACKS
+        // for files that bypassed `compile_ast_with_shared_state`
+        // (e.g. parser-cache hits, stdlib pre-loads); their input
+        // fields are typically the same bytes anyway.
         let mut sources: BTreeMap<String, String> = BTreeMap::new();
         for user_file in &self.user_files {
             if let Some(ref source) = user_file.input {
@@ -6463,6 +6505,12 @@ impl CompilationUnit {
             if let Some(ref source) = import_haxe_file.input {
                 sources.insert(import_haxe_file.filename.clone(), source.clone());
             }
+        }
+        // Authoritative source: bytes captured at lowering entry. These
+        // OVERWRITE any input-field copy so the renderer ALWAYS sees
+        // the exact bytes the byte_offset was computed against.
+        for (filename, source) in &self.file_source_by_filename {
+            sources.insert(filename.clone(), source.clone());
         }
         for (filename, _) in &self.compiled_files {
             if !sources.contains_key(filename) {
