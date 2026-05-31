@@ -2921,6 +2921,7 @@ impl CompilationUnit {
         // is complete and we can resolve any remaining stale refs.
         self.fixup_stale_cross_module_refs();
         self.fixup_stale_constructor_ids();
+        self.fixup_stale_method_ids();
 
         Ok(())
     }
@@ -3661,6 +3662,65 @@ impl CompilationUnit {
             if let Some(&current_id) = map_snapshot.get(&qualified) {
                 if *func_id != current_id {
                     *func_id = current_id;
+                }
+            }
+        }
+    }
+
+    /// Post-load fixup: rewrite stale method func_ids in
+    /// `stdlib_function_map` (SymbolId → IrFunctionId) by reverse-mapping
+    /// each symbol back to its qualified name and re-resolving via
+    /// `stdlib_function_name_map`.
+    ///
+    /// Same hazard as `fixup_stale_constructor_ids` but for non-constructors:
+    /// `restore_cached_maps` seeds method-map values with the *cached*
+    /// (pre-renumber) func_id; `renumber_and_push_import_mir`'s id_map-keyed
+    /// rewrite only fires for entries whose ids live in the module currently
+    /// being renumbered. Cross-session id drift caused by changes in the
+    /// import-load order (e.g. adding/removing a top-level import shifts the
+    /// 10_000-block assignment for every subsequent module) leaves
+    /// stdlib_function_map pointing at a slot that no longer exists.
+    ///
+    /// `stdlib_function_name_map` carries the *current* ids of every merged
+    /// function keyed by qualified name (e.g. "LlamaModel.forwardIds"), so we
+    /// re-key each entry by its symbol's qualified name once all modules are
+    /// loaded. Entries whose qualified name can't be reconstructed, or whose
+    /// qualified name isn't present in the name map, are left untouched —
+    /// the existing `fixup_stale_cross_module_refs` MIR walk catches stale
+    /// CallDirect targets that survive here.
+    fn fixup_stale_method_ids(&mut self) {
+        let map_snapshot: std::collections::BTreeMap<String, crate::ir::IrFunctionId> =
+            self.stdlib_function_name_map.clone();
+        // Snapshot the (sym, id) pairs so we don't borrow self.symbol_table
+        // while mutating self.stdlib_function_map.
+        let entries: Vec<(crate::tast::SymbolId, crate::ir::IrFunctionId)> = self
+            .stdlib_function_map
+            .iter()
+            .map(|(s, f)| (*s, *f))
+            .collect();
+        for (sym_id, _) in entries {
+            // Resolve the symbol's qualified name. Symbols populated by
+            // `restore_cached_maps` set qualified_name to the interned form
+            // "Class.method"; freshly compiled methods do the same via
+            // ast_lowering. Symbols without a qualified_name are not
+            // safely re-resolvable by name and are skipped.
+            let qname = {
+                let Some(sym) = self.symbol_table.get_symbol(sym_id) else {
+                    continue;
+                };
+                let Some(qn_interned) = sym.qualified_name else {
+                    continue;
+                };
+                match self.string_interner.get(qn_interned) {
+                    Some(s) => s.to_string(),
+                    None => continue,
+                }
+            };
+            if let Some(&current_id) = map_snapshot.get(&qname) {
+                if let Some(slot) = self.stdlib_function_map.get_mut(&sym_id) {
+                    if *slot != current_id {
+                        *slot = current_id;
+                    }
                 }
             }
         }
