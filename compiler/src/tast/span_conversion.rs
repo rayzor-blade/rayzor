@@ -46,11 +46,7 @@ impl SpanConverter {
     /// `external_file_id` instead — this is how cross-file lowerings end
     /// up tagging their TypedExpression spans with the real compilation-
     /// level file_id, not the always-0 of the private source_map.
-    pub fn with_file_and_id(
-        file_name: String,
-        source_text: String,
-        external_file_id: u32,
-    ) -> Self {
+    pub fn with_file_and_id(file_name: String, source_text: String, external_file_id: u32) -> Self {
         let mut source_map = SourceMap::new();
         let file_id = source_map.add_file(file_name, source_text);
         Self {
