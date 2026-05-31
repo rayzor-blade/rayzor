@@ -469,6 +469,23 @@ struct RayzorTensor {
     // existing allocation tags itself CPU/-1.
     device: u8,
     numa_node: i32,
+    // Phase 1 ARC refcount. Every freshly-constructed wrapper starts at 1.
+    // `rayzor_tensor_arc_clone` does a Relaxed fetch_add and returns the same
+    // pointer (i64-ABI preserved). `rayzor_tensor_free` does AcqRel fetch_sub:
+    // only the decrement-to-zero actually releases shape/strides/data/wrapper
+    // (or pool-routes the owning slot). For views, `parent` is non-null and
+    // points at the wrapper whose `data` we alias; the dec-to-zero path also
+    // decrements the parent's refcount (recursively, in case of view-of-view).
+    //
+    // ABI note: the i64 handle is still a raw `*mut RayzorTensor`. Refcount
+    // bookkeeping is purely a runtime-side detail; no Arc-into-raw / from-raw
+    // round-tripping at FFI boundaries, so every `&*(t as *const RayzorTensor)`
+    // pattern in the rest of the file still works unchanged.
+    refcount: std::sync::atomic::AtomicUsize,
+    // Null for owning tensors. Non-null for views — points at the wrapper
+    // whose data buffer we alias. Held with one refcount bump on that parent;
+    // released (Acquire fence + dec) when this view's own refcount hits zero.
+    parent: *mut RayzorTensor,
 }
 
 impl RayzorTensor {
@@ -644,6 +661,11 @@ unsafe fn alloc_tensor(shape: &[usize], dtype: u8, fill: Option<f32>) -> i64 {
         // owns_data MUST be true on the way out; this should already hold
         // because we only push owning tensors into the pool.
         t.owns_data = true;
+        // Phase 1 refcount reset: the previous owner reached refcount=0 and
+        // pushed; the new owner starts at 1. `parent` is always null for
+        // pool-hits because the pool only admits owning (non-view) wrappers.
+        t.refcount.store(1, std::sync::atomic::Ordering::Relaxed);
+        t.parent = std::ptr::null_mut();
         return tensor as i64;
     }
 
@@ -703,6 +725,8 @@ unsafe fn alloc_tensor(shape: &[usize], dtype: u8, fill: Option<f32>) -> i64 {
         owns_data: true,
         device: DEVICE_CPU,
         numa_node: -1,
+        refcount: std::sync::atomic::AtomicUsize::new(1),
+        parent: std::ptr::null_mut(),
     };
 
     tensor as i64
@@ -1150,7 +1174,13 @@ pub unsafe extern "C" fn rayzor_tensor_reshape(tensor_ptr: i64, shape_ptr: i64, 
             owns_data: false, // view
             device: t.device,
             numa_node: t.numa_node,
+            refcount: std::sync::atomic::AtomicUsize::new(1),
+            parent: tensor_ptr as *mut RayzorTensor,
         };
+        // View bumps parent's refcount so the parent's data buffer stays
+        // alive until every view of it is also freed.
+        t.refcount
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         return new_t as i64;
     }
@@ -1246,7 +1276,11 @@ pub unsafe extern "C" fn rayzor_tensor_permute(
         owns_data: false,
         device: t.device,
         numa_node: t.numa_node,
+        refcount: std::sync::atomic::AtomicUsize::new(1),
+        parent: tensor_ptr as *mut RayzorTensor,
     };
+    t.refcount
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     new_t as i64
 }
 
@@ -1313,7 +1347,11 @@ pub unsafe extern "C" fn rayzor_tensor_slice(
         owns_data: false,
         device: t.device,
         numa_node: t.numa_node,
+        refcount: std::sync::atomic::AtomicUsize::new(1),
+        parent: tensor_ptr as *mut RayzorTensor,
     };
+    t.refcount
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     new_t as i64
 }
 
@@ -1358,7 +1396,11 @@ pub unsafe extern "C" fn rayzor_tensor_transpose(tensor_ptr: i64) -> i64 {
         owns_data: false,
         device: t.device,
         numa_node: t.numa_node,
+        refcount: std::sync::atomic::AtomicUsize::new(1),
+        parent: tensor_ptr as *mut RayzorTensor,
     };
+    t.refcount
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
     new_t as i64
 }
@@ -1565,6 +1607,21 @@ pub unsafe extern "C" fn rayzor_tensor_add_into(dest: i64, src: i64) {
     }
     let d = &*(dest as *const RayzorTensor);
     let s = &*(src as *const RayzorTensor);
+
+    // Under @:shared (Arc-backed Tensor), strict-move's compile-time
+    // single-owner guarantee is replaced by runtime refcounting. addInto
+    // mutates the receiver in place, so two aliased bindings to the
+    // same Arc would BOTH observe the mutation (silent UAF-class bug).
+    // Debug-builds trap on shared dest; release builds rely on caller
+    // discipline. Current nue/* call sites (TransformerBlock, LayerNorm,
+    // Linear) audit safe — receiver is always a freshly-produced kernel
+    // output with refcount==1. Trap exists to catch the next user-code
+    // call site that breaks the convention. Cost: one Acquire atomic
+    // load per addInto call (~5ns vs the kernel's microseconds).
+    debug_assert!(
+        d.refcount.load(std::sync::atomic::Ordering::Acquire) == 1,
+        "rayzor_tensor_add_into: dest has shared refcount > 1; in-place mutation would silently leak to aliased bindings. Use addInto only on uniquely-owned tensors (freshly produced or after deepClone)."
+    );
 
     // (a) shape compatibility
     if d.ndim != s.ndim || d.numel != s.numel {
@@ -2386,7 +2443,11 @@ pub unsafe extern "C" fn rayzor_tensor_transpose_last2(t_ptr: i64) -> i64 {
         owns_data: false,
         device: t.device,
         numa_node: t.numa_node,
+        refcount: std::sync::atomic::AtomicUsize::new(1),
+        parent: t_ptr as *mut RayzorTensor,
     };
+    t.refcount
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     new_t as i64
 }
 
@@ -2792,48 +2853,62 @@ pub unsafe extern "C" fn rayzor_tensor_data(tensor_ptr: i64) -> i64 {
     t.data as i64
 }
 
-/// Tensor.clone(src: i64) -> i64
+/// Atomic-refcount clone: bump `src`'s refcount and return the same pointer.
 ///
-/// Returns a fresh, fully-owning, **contiguous** tensor sharing no storage
-/// with `src`.
+/// Phase 1 ARC semantic. Every `@:derive([Clone])` Tensor call site on the
+/// Haxe side audited as an alias-after-move workaround (Linear / GQAttention /
+/// TransformerBlock all clone purely to satisfy the linearised use-of-moved
+/// analyzer — the matmul kernels never mutate their inputs), so flipping
+/// `.clone()` from deep-copy to refcount-bump is safe across the existing
+/// callsites and turns each clone from `4 mallocs + O(numel) memcpy` into a
+/// single Relaxed fetch_add.
+///
+/// Disjoint-storage callers should use `rayzor_tensor_deep_clone` instead
+/// (kept as the moral equivalent of the old `rayzor_tensor_clone` body,
+/// including compact-to-contiguous on views).
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_arc_clone(src: i64) -> i64 {
+    if src == 0 {
+        return 0;
+    }
+    let s = &*(src as *const RayzorTensor);
+    // Relaxed: matches Boost intrusive_ptr — the increment doesn't need to
+    // observe anything published before it; the AcqRel pairing only matters
+    // on the decrement-to-zero gate in `rayzor_tensor_free`.
+    s.refcount
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    src
+}
+
+/// `Tensor.clone(src)` Haxe entry point. Routes to the Arc-increment path
+/// (see `rayzor_tensor_arc_clone`). The original `rayzor_tensor_clone`
+/// extern name is preserved for ABI compatibility with the Tier B
+/// `@:derive([Clone])` lowering in hir_to_mir.rs.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_clone(src: i64) -> i64 {
+    rayzor_tensor_arc_clone(src)
+}
+
+/// Disjoint-storage deep clone. Materialises a fresh, fully-owning,
+/// **contiguous** tensor sharing no storage with `src`.
+///
+/// This is the historical body of `rayzor_tensor_clone`, kept as an escape
+/// hatch for the small number of future callers that genuinely need
+/// disjoint backing storage (e.g. saving a pre-`addInto` snapshot, or
+/// writing into the buffer across threads without lock contention).
 ///
 /// - `src == 0` → returns 0 (null pass-through).
 /// - Both owning tensors AND views are deep-copied. There is no pass-through
 ///   for views: returning `src` for `!owns_data` aliased the parent's
-///   shape/strides/wrapper, and `rayzor_tensor_free` unconditionally frees
-///   those — so a clone-of-view followed by free-of-clone would leave the
-///   parent handle with dangling pointers (double-free / UAF on later
-///   access).
-///
-/// Data-buffer + stride semantics: **always compact-to-contiguous**.
-///
+///   shape/strides/wrapper.
 /// - The result owns `numel * dtype_size(dtype)` bytes of data, freshly
-///   malloc'd, with canonical row-major strides
-///   (`strides[i] = prod(shape[i+1..])`).
-/// - If `src` is already contiguous, the body is a single `memcpy` of
-///   `numel * elem_size` bytes from `s.data`.
-/// - If `src` is non-contiguous (a permuted/sliced/transposed view, or
-///   ever a non-contiguous owning tensor), we walk `s` via its strides and
-///   gather element-by-element (byte-block-by-byte-block, so the loop is
-///   dtype-agnostic across the plain dtypes F32/F16/BF16/I32/I64/U8) into
-///   the new row-major-contiguous buffer. Quantised tensors do NOT flow
-///   through this path — they live in `RayzorQTensor` with their own
-///   scheme byte; see `rayzor_qtensor_clone` in quant.rs.
-///
-/// Why compact-on-clone (rather than inheriting the view's stride pattern):
-/// the previous behaviour stamped `owns_data=true` on a wrapper that still
-/// carried parent-view strides and a buffer sized to the strided extent
-/// (`(Σ(shape[i]-1)·strides[i]+1) * elem_size`). That wrapper is what the
-/// tensor pool admits on free; the pool's `(dtype, shape)` key cannot
-/// distinguish it from a canonically-contiguous owning tensor of the same
-/// shape, so a later pop would hand a caller a contiguous-shaped wrapper
-/// backed by non-contiguous strides and the wrong byte count — silently
-/// corrupting any fast-path that takes the stride-1 shortcut on
-/// `owns_data`. Compacting at clone time makes `owns_data == true` a true
-/// contiguity invariant runtime-wide. See memory
-/// bugs_clone_view_passthrough_invariant.md.
+///   malloc'd, with canonical row-major strides.
+/// - If `src` is already contiguous, the body is a single `memcpy`.
+/// - If `src` is non-contiguous (permute/slice/transpose view), we walk by
+///   strides and gather byte-block-by-byte-block into a fresh row-major
+///   contiguous buffer.
 #[no_mangle]
-pub unsafe extern "C" fn rayzor_tensor_clone(src: i64) -> i64 {
+pub unsafe extern "C" fn rayzor_tensor_deep_clone(src: i64) -> i64 {
     if src == 0 {
         return 0;
     }
@@ -2938,6 +3013,8 @@ pub unsafe extern "C" fn rayzor_tensor_clone(src: i64) -> i64 {
         owns_data: true,
         device: s.device,
         numa_node: s.numa_node,
+        refcount: std::sync::atomic::AtomicUsize::new(1),
+        parent: std::ptr::null_mut(),
     };
 
     tensor as i64
@@ -2965,8 +3042,29 @@ pub unsafe extern "C" fn rayzor_tensor_free(tensor_ptr: i64) {
     }
     let t = &*(tensor_ptr as *const RayzorTensor);
 
-    // Views: never pool. Drop wrapper + shape/strides; leave data alone.
-    if !t.owns_data {
+    // Phase 1 ARC: decrement first. Only the thread that drops the count
+    // from 1 → 0 proceeds to actually release storage. AcqRel pairs with
+    // the Relaxed increments in `rayzor_tensor_arc_clone` / view producers:
+    // the Release half of the final dec publishes all prior writes through
+    // this wrapper; the Acquire half (only observed by the dec-to-zero
+    // thread, which is the sole survivor) prevents reordering of the
+    // free below.
+    let prev = t.refcount.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    if prev != 1 {
+        // Other handles still alive. Nothing to do.
+        return;
+    }
+
+    // We are the sole owner. Snapshot the parent handle (if any) before
+    // we tear down our own wrapper — we'll decrement the parent's refcount
+    // AFTER releasing our own storage so a recursive view-of-view chain
+    // unwinds depth-first.
+    let parent = t.parent;
+    let owns_data = t.owns_data;
+
+    if !owns_data {
+        // Views: drop wrapper + shape/strides; leave data alone — the
+        // parent (whose refcount we hold) still owns it.
         if !t.shape.is_null() {
             free(t.shape as *mut u8);
         }
@@ -2974,6 +3072,11 @@ pub unsafe extern "C" fn rayzor_tensor_free(tensor_ptr: i64) {
             free(t.strides as *mut u8);
         }
         free(tensor_ptr as *mut u8);
+        // Drop our reference on the parent. May cascade-free if we were
+        // the last view.
+        if !parent.is_null() {
+            rayzor_tensor_free(parent as i64);
+        }
         return;
     }
 
@@ -2990,6 +3093,12 @@ pub unsafe extern "C" fn rayzor_tensor_free(tensor_ptr: i64) {
         qtensor_meta_bytes: 0,
     };
     tensor_pool::global().push(key, entry, tensor_pool_freer);
+    // Owning tensors have `parent == null` by construction, so no parent
+    // decrement is needed here. (Defensive sanity: if parent ever drifts
+    // non-null on an owning tensor, the dec below catches it.)
+    if !parent.is_null() {
+        rayzor_tensor_free(parent as i64);
+    }
 }
 
 /// Drain every parked tensor in the global pool. Exposed for end-of-test
@@ -3275,13 +3384,15 @@ mod tests {
             let view_strides = std::slice::from_raw_parts(view_ref.strides, view_ref.ndim);
             assert_eq!(view_strides, &[1usize, 3usize]);
 
-            // Clone the view. Result must be owning, contiguous, with canonical
-            // row-major strides for shape [3, 2] = [2, 1], and a data buffer of
-            // exactly `numel * sizeof(f32)` = 24 bytes.
-            let cloned = rayzor_tensor_clone(view);
+            // Deep-clone the view. Result must be owning, contiguous, with
+            // canonical row-major strides for shape [3, 2] = [2, 1], and a
+            // data buffer of exactly `numel * sizeof(f32)` = 24 bytes.
+            // (Phase 1: `rayzor_tensor_clone` is now Arc-increment; this
+            // compact-to-contiguous invariant lives on `rayzor_tensor_deep_clone`.)
+            let cloned = rayzor_tensor_deep_clone(view);
             assert!(cloned != 0);
             let cloned_ref = &*(cloned as *const RayzorTensor);
-            assert!(cloned_ref.owns_data, "clone must own its data");
+            assert!(cloned_ref.owns_data, "deep_clone must own its data");
             assert!(
                 cloned_ref.is_contiguous(),
                 "clone of a view must be contiguous"
@@ -3325,15 +3436,17 @@ mod tests {
         }
     }
 
-    /// Clone of an already-contiguous tensor must still produce a fresh owning
-    /// contiguous tensor (memcpy fast-path), independent from the source.
+    /// Deep-clone of an already-contiguous tensor must still produce a fresh
+    /// owning contiguous tensor (memcpy fast-path), independent from the source.
+    /// (Phase 1: the disjoint-storage path moved from `rayzor_tensor_clone` to
+    /// `rayzor_tensor_deep_clone`.)
     #[test]
-    fn tensor_clone_of_contiguous_is_independent() {
+    fn tensor_deep_clone_of_contiguous_is_independent() {
         unsafe {
             let shape = [4usize];
             let src = alloc_tensor(&shape, DTYPE_F32, Some(7.5));
             assert!(src != 0);
-            let cloned = rayzor_tensor_clone(src);
+            let cloned = rayzor_tensor_deep_clone(src);
             assert!(cloned != 0);
             let cloned_ref = &*(cloned as *const RayzorTensor);
             assert!(cloned_ref.owns_data);
@@ -3350,6 +3463,142 @@ mod tests {
             assert_eq!(*sd, 7.5);
             rayzor_tensor_free(cloned);
             rayzor_tensor_free(src);
+        }
+    }
+
+    // ========================================================================
+    // Phase 1 ARC refcount tests
+    // ========================================================================
+
+    /// `rayzor_tensor_arc_clone` returns the SAME pointer (i64-handle ABI
+    /// preservation), and the underlying buffer + wrapper stay alive after a
+    /// matching `rayzor_tensor_free` because the refcount only went 2→1.
+    #[test]
+    fn arc_clone_then_free_leaves_original_alive() {
+        unsafe {
+            let shape = [4usize];
+            let t = alloc_tensor(&shape, DTYPE_F32, Some(11.0));
+            assert!(t != 0);
+
+            let cloned = rayzor_tensor_arc_clone(t);
+            assert_eq!(cloned, t, "arc_clone must return the same handle");
+
+            // Refcount should be 2 (initial 1 + clone).
+            let tref = &*(t as *const RayzorTensor);
+            assert_eq!(tref.refcount.load(std::sync::atomic::Ordering::Relaxed), 2);
+
+            // First free: only decrements; storage must stay alive.
+            rayzor_tensor_free(cloned);
+
+            // Refcount should be 1 now, data still readable.
+            let tref2 = &*(t as *const RayzorTensor);
+            assert_eq!(tref2.refcount.load(std::sync::atomic::Ordering::Relaxed), 1);
+            let d = tref2.data as *const f32;
+            for i in 0..4 {
+                assert_eq!(*d.add(i), 11.0, "data corrupted after first free");
+            }
+
+            // Second free: dec-to-zero, real release.
+            rayzor_tensor_free(t);
+        }
+    }
+
+    /// Double arc_clone + double free should net to a single physical free
+    /// (refcount 1→2→3→2→1→0). The pool / direct-free path runs exactly once
+    /// on the final dec-to-zero; storage must NOT be released earlier.
+    #[test]
+    fn double_clone_then_double_free_deallocates_exactly_once() {
+        unsafe {
+            let shape = [3usize];
+            let t = alloc_tensor(&shape, DTYPE_F32, Some(5.0));
+            assert!(t != 0);
+
+            let a = rayzor_tensor_arc_clone(t);
+            let b = rayzor_tensor_arc_clone(t);
+            assert_eq!(a, t);
+            assert_eq!(b, t);
+
+            let tref = &*(t as *const RayzorTensor);
+            assert_eq!(tref.refcount.load(std::sync::atomic::Ordering::Relaxed), 3);
+
+            rayzor_tensor_free(a);
+            rayzor_tensor_free(b);
+
+            // Refcount should be 1; storage still alive.
+            let tref2 = &*(t as *const RayzorTensor);
+            assert_eq!(tref2.refcount.load(std::sync::atomic::Ordering::Relaxed), 1);
+            let d = tref2.data as *const f32;
+            for i in 0..3 {
+                assert_eq!(*d.add(i), 5.0);
+            }
+
+            // Final free actually releases.
+            rayzor_tensor_free(t);
+        }
+    }
+
+    /// Producing a view (permute) bumps the parent's refcount so the parent
+    /// data buffer stays alive across `parent.free()` until the view is also
+    /// freed. After both frees the buffer is reclaimed.
+    #[test]
+    fn view_clone_increments_parent_ref() {
+        unsafe {
+            let shape = [2usize, 3usize];
+            let src = alloc_tensor(&shape, DTYPE_F32, None);
+            assert!(src != 0);
+            let src_data = (&*(src as *const RayzorTensor)).data as *mut f32;
+            for i in 0..6 {
+                *src_data.add(i) = i as f32;
+            }
+
+            // Parent starts at refcount 1.
+            let src_ref0 = &*(src as *const RayzorTensor);
+            assert_eq!(
+                src_ref0.refcount.load(std::sync::atomic::Ordering::Relaxed),
+                1
+            );
+
+            // Make a permuted view. View should be a fresh wrapper, parent
+            // refcount bumped to 2.
+            let axes: [i64; 2] = [1, 0];
+            let view = rayzor_tensor_permute(src, axes.as_ptr() as i64, 2);
+            assert!(view != 0);
+            assert_ne!(view, src);
+
+            let src_ref1 = &*(src as *const RayzorTensor);
+            assert_eq!(
+                src_ref1.refcount.load(std::sync::atomic::Ordering::Relaxed),
+                2,
+                "view producer must bump parent refcount"
+            );
+            let view_ref = &*(view as *const RayzorTensor);
+            assert!(!view_ref.owns_data, "permute must be a view");
+            assert_eq!(view_ref.parent, src as *mut RayzorTensor);
+
+            // Free the parent handle first. Data must still be alive because
+            // the view holds a refcount.
+            rayzor_tensor_free(src);
+
+            // src wrapper should still be readable (parent refcount = 1).
+            let src_ref2 = &*(src as *const RayzorTensor);
+            assert_eq!(
+                src_ref2.refcount.load(std::sync::atomic::Ordering::Relaxed),
+                1
+            );
+            // View still points at live data — the test is that this read
+            // doesn't segfault, i.e. the parent's data buffer is still alive
+            // even though `src` has been freed. Read element 0 (always src[0]
+            // regardless of stride pattern); a UAF here would either segfault
+            // or return garbage instead of the seeded value 0.0.
+            let view_data = (&*(view as *const RayzorTensor)).data as *const f32;
+            assert_eq!(
+                *view_data.add(0),
+                0.0,
+                "view read after parent free returned wrong value (parent buffer freed early?)"
+            );
+
+            // Free the view. Should cascade-free the parent.
+            rayzor_tensor_free(view);
         }
     }
 }
