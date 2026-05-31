@@ -378,7 +378,11 @@ impl ErrorFormatter {
         // Add labels
         for label in &diagnostic.labels {
             let start = byte_to_char(label.span.start.byte_offset);
-            let end_byte = label.span.end.byte_offset.max(label.span.start.byte_offset + 1);
+            let end_byte = label
+                .span
+                .end
+                .byte_offset
+                .max(label.span.start.byte_offset + 1);
             let end = byte_to_char(end_byte).max(start + 1);
             let color = match label.style {
                 LabelStyle::Primary => Color::Red,

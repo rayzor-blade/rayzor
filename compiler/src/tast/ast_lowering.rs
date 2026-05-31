@@ -594,13 +594,11 @@ impl<'a> LoweringContext<'a> {
         source_text: String,
         file_name: String,
     ) {
-        self.span_converter = Some(
-            super::span_conversion::SpanConverter::with_file_and_id(
-                file_name,
-                source_text,
-                file_id,
-            ),
-        );
+        self.span_converter = Some(super::span_conversion::SpanConverter::with_file_and_id(
+            file_name,
+            source_text,
+            file_id,
+        ));
     }
 }
 
@@ -1361,8 +1359,7 @@ impl<'a> AstLowering<'a> {
             .next()
             .unwrap_or(&file.filename)
             .to_string();
-        typed_file.metadata.file_name =
-            Some(self.context.string_interner.intern(&file_name));
+        typed_file.metadata.file_name = Some(self.context.string_interner.intern(&file_name));
 
         // Process package declaration
         if let Some(package) = &file.package {

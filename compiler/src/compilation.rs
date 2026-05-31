@@ -6544,10 +6544,7 @@ impl CompilationUnit {
             // files land at their correct FileId. Gaps can occur when a
             // file_id was reserved but the file failed to compile.
             while next_expected < file_id {
-                source_map.add_file(
-                    format!("<unknown:{}>", next_expected),
-                    String::new(),
-                );
+                source_map.add_file(format!("<unknown:{}>", next_expected), String::new());
                 next_expected += 1;
             }
             let content = sources
