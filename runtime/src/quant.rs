@@ -117,6 +117,14 @@ struct RayzorQTensor {
     // tensors this is (1, numel).
     rows: usize,
     cols: usize,
+    // Phase 1 ARC refcount. Same semantic as `RayzorTensor::refcount`:
+    // Relaxed fetch_add on clone, AcqRel fetch_sub on free, only the
+    // dec-to-zero thread actually releases data + meta + wrapper (or
+    // pool-routes the owning INT8 slot).
+    refcount: std::sync::atomic::AtomicUsize,
+    // Null for owning QTensors. Reserved for a future view-of-QTensor
+    // primitive (none exists today). Symmetric with `RayzorTensor::parent`.
+    parent: *mut RayzorQTensor,
 }
 
 impl RayzorQTensor {
@@ -1266,6 +1274,10 @@ unsafe fn alloc_qtensor(
         qt.scheme = scheme;
         qt.rows = rows;
         qt.cols = cols;
+        // Phase 1 refcount reset on pool revive — see the parallel comment
+        // in `tensor.rs::alloc_tensor`.
+        qt.refcount.store(1, std::sync::atomic::Ordering::Relaxed);
+        qt.parent = std::ptr::null_mut();
         return popped;
     }
 
@@ -1308,6 +1320,8 @@ unsafe fn alloc_qtensor(
         owns_data: true,
         rows,
         cols,
+        refcount: std::sync::atomic::AtomicUsize::new(1),
+        parent: std::ptr::null_mut(),
     };
 
     qt
@@ -1377,6 +1391,8 @@ pub unsafe extern "C" fn rayzor_qtensor_wrap_q4_k_m(
         owns_data: take_ownership != 0,
         rows,
         cols,
+        refcount: std::sync::atomic::AtomicUsize::new(1),
+        parent: std::ptr::null_mut(),
     };
     qt as i64
 }
@@ -1430,6 +1446,8 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q4_k_m(
         owns_data: false,
         rows,
         cols,
+        refcount: std::sync::atomic::AtomicUsize::new(1),
+        parent: std::ptr::null_mut(),
     };
     qt as i64
 }
@@ -1473,6 +1491,8 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q6_k(
         owns_data: false,
         rows,
         cols,
+        refcount: std::sync::atomic::AtomicUsize::new(1),
+        parent: std::ptr::null_mut(),
     };
     qt as i64
 }
@@ -2423,32 +2443,39 @@ unsafe fn dot_f32_avx2_fma(a: &[f32], b: &[f32], n: usize) -> f32 {
     sum
 }
 
-/// QTensor.clone(src: i64) -> i64
-///
-/// Returns a fresh, fully-owning QTensor sharing no storage with `src`.
-///
-/// - `src == 0` → returns 0 (null pass-through).
-/// - Both owning tensors AND views are deep-copied. There is no
-///   pass-through for views: returning `src` for `!owns_data` aliased the
-///   parent's `meta` / wrapper, and `rayzor_qtensor_free` unconditionally
-///   frees `meta` (when non-null) and the wrapper allocation — so a
-///   clone-of-view followed by free-of-clone would dangle the parent.
+/// Atomic-refcount QTensor clone. Mirrors `rayzor_tensor_arc_clone`.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_qtensor_arc_clone(src: i64) -> i64 {
+    if src == 0 {
+        return 0;
+    }
+    let s = &*(src as *const RayzorQTensor);
+    s.refcount
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    src
+}
+
+/// `QTensor.clone(src)` Haxe entry point. Routes to the Arc-increment path.
+/// Preserves the `rayzor_qtensor_clone` extern symbol used by the Tier B
+/// `@:derive([Clone])` lowering.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_qtensor_clone(src: i64) -> i64 {
+    rayzor_qtensor_arc_clone(src)
+}
+
+/// Disjoint-storage deep QTensor clone (escape hatch). Returns a fresh,
+/// fully-owning QTensor sharing no storage with `src`.
 ///
 /// Data buffer extent (chosen for safety + simplicity):
-///   - INT8:   `numel` bytes (1 byte per element).
+///   - INT8:   `numel` bytes.
 ///   - Q4_K_M: `(numel / 256) * 144`.
 ///   - Q6_K:   `(numel / 256) * 210`.
-///
-/// This is correct for both owning and view sources because every block-
-/// quantised tensor in this runtime is laid out as a contiguous run of
-/// scheme-sized super-blocks (whether the storage is malloc'd or
-/// borrowed from a `HaxeBytes` / mmap'd GGUF buffer).
 ///
 /// INT8 also carries a per-group `meta` f32 scale array of
 /// `numel / group_size` entries; Q4_K_M / Q6_K embed scales inside each
 /// super-block so `meta` is null for those.
 #[no_mangle]
-pub unsafe extern "C" fn rayzor_qtensor_clone(src: i64) -> i64 {
+pub unsafe extern "C" fn rayzor_qtensor_deep_clone(src: i64) -> i64 {
     if src == 0 {
         return 0;
     }
@@ -2510,6 +2537,8 @@ pub unsafe extern "C" fn rayzor_qtensor_clone(src: i64) -> i64 {
         owns_data: true,
         rows: s.rows,
         cols: s.cols,
+        refcount: std::sync::atomic::AtomicUsize::new(1),
+        parent: std::ptr::null_mut(),
     };
 
     qt as i64
@@ -2587,6 +2616,19 @@ pub unsafe extern "C" fn rayzor_qtensor_free(qt_ptr: i64) {
     }
     let qt = &*(qt_ptr as *const RayzorQTensor);
 
+    // Phase 1 ARC: decrement first; only the dec-to-zero thread actually
+    // releases storage (or pool-routes the owning INT8 slot).
+    let prev = qt
+        .refcount
+        .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    if prev != 1 {
+        return;
+    }
+
+    // Sole owner. Snapshot parent before tearing down — we'll cascade-free
+    // it after our own storage is released, in case of view-of-qtensor.
+    let parent = qt.parent;
+
     // Zero-copy wrappers: drop only the wrapper struct.
     if !qt.owns_data {
         if !qt.meta.is_null() {
@@ -2595,6 +2637,9 @@ pub unsafe extern "C" fn rayzor_qtensor_free(qt_ptr: i64) {
             free(qt.meta as *mut u8);
         }
         free(qt_ptr as *mut u8);
+        if !parent.is_null() {
+            rayzor_qtensor_free(parent as i64);
+        }
         return;
     }
 
@@ -2613,6 +2658,9 @@ pub unsafe extern "C" fn rayzor_qtensor_free(qt_ptr: i64) {
             free(qt.meta as *mut u8);
         }
         free(qt_ptr as *mut u8);
+        if !parent.is_null() {
+            rayzor_qtensor_free(parent as i64);
+        }
         return;
     }
 
@@ -2634,6 +2682,9 @@ pub unsafe extern "C" fn rayzor_qtensor_free(qt_ptr: i64) {
         qtensor_meta_bytes: meta_bytes,
     };
     tensor_pool::global().push(key, entry, qtensor_pool_freer);
+    if !parent.is_null() {
+        rayzor_qtensor_free(parent as i64);
+    }
 }
 
 /// Try to recycle a QTensor wrapper for the requested

@@ -1879,6 +1879,14 @@ register_symbol!(
 register_symbol!("rayzor_tensor_data", crate::tensor::rayzor_tensor_data);
 register_symbol!("rayzor_tensor_free", crate::tensor::rayzor_tensor_free);
 register_symbol!("rayzor_tensor_clone", crate::tensor::rayzor_tensor_clone);
+register_symbol!(
+    "rayzor_tensor_arc_clone",
+    crate::tensor::rayzor_tensor_arc_clone
+);
+register_symbol!(
+    "rayzor_tensor_deep_clone",
+    crate::tensor::rayzor_tensor_deep_clone
+);
 
 // ============================================================================
 // Quantised Tensor (rayzor.ds.QTensor)
@@ -1925,6 +1933,14 @@ register_symbol!(
 );
 register_symbol!("rayzor_qtensor_free", crate::quant::rayzor_qtensor_free);
 register_symbol!("rayzor_qtensor_clone", crate::quant::rayzor_qtensor_clone);
+register_symbol!(
+    "rayzor_qtensor_arc_clone",
+    crate::quant::rayzor_qtensor_arc_clone
+);
+register_symbol!(
+    "rayzor_qtensor_deep_clone",
+    crate::quant::rayzor_qtensor_deep_clone
+);
 
 // ============================================================================
 // CPU Topology + thread affinity (rayzor.concurrent.CpuTopology)
