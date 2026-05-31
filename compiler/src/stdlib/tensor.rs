@@ -8,7 +8,7 @@
 /// HaxeArray layout: [ptr: *mut u8, len: usize, cap: usize, elem_size: usize]
 /// So: data_ptr = load(array_ptr + 0), len = load(array_ptr + 8)
 use crate::ir::mir_builder::MirBuilder;
-use crate::ir::{BinaryOp, CallingConvention, IrType};
+use crate::ir::{BinaryOp, CallingConvention, InlineHint, IrType};
 
 /// Build all tensor type functions
 pub fn build_tensor_types(builder: &mut MirBuilder) {
@@ -976,12 +976,14 @@ fn build_tensor_causal_mask(builder: &mut MirBuilder) {
 fn build_tensor_scale(builder: &mut MirBuilder) {
     let i64_ty = IrType::I64;
     let f64_ty = IrType::F64;
+    // Pure forwarder; force-inline.
     let func_id = builder
         .begin_function("Tensor_scale")
         .param("self", i64_ty.clone())
         .param("factor", f64_ty)
         .returns(i64_ty)
         .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
         .build();
     builder.set_current_function(func_id);
     let entry = builder.create_block("entry");
@@ -998,11 +1000,13 @@ fn build_tensor_scale(builder: &mut MirBuilder) {
 /// Tensor_transpose_last2(self) -> i64
 fn build_tensor_transpose_last2(builder: &mut MirBuilder) {
     let i64_ty = IrType::I64;
+    // Pure forwarder; force-inline.
     let func_id = builder
         .begin_function("Tensor_transpose_last2")
         .param("self", i64_ty.clone())
         .returns(i64_ty)
         .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
         .build();
     builder.set_current_function(func_id);
     let entry = builder.create_block("entry");
@@ -1079,12 +1083,15 @@ fn build_tensor_get(builder: &mut MirBuilder) {
     let i64_ty = IrType::I64;
     let f64_ty = IrType::F64;
 
+    // Tiny accessor (load+const+add+load+call+ret over a fixed-shape HaxeArray).
+    // Force-inline so hot tensor[i,j,k] sites avoid the cross-extern CallDirect.
     let func_id = builder
         .begin_function("Tensor_get")
         .param("self", i64_ty.clone())
         .param("indices_arr", i64_ty)
         .returns(f64_ty)
         .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
         .build();
 
     builder.set_current_function(func_id);
@@ -1110,6 +1117,8 @@ fn build_tensor_set(builder: &mut MirBuilder) {
     let f64_ty = IrType::F64;
     let void_ty = IrType::Void;
 
+    // Tiny accessor; mirror of Tensor_get. Force-inline to peel the
+    // CallDirect off hot tensor[i,j,k] = v sites in inner loops.
     let func_id = builder
         .begin_function("Tensor_set")
         .param("self", i64_ty.clone())
@@ -1117,6 +1126,7 @@ fn build_tensor_set(builder: &mut MirBuilder) {
         .param("value", f64_ty)
         .returns(void_ty)
         .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
         .build();
 
     builder.set_current_function(func_id);
@@ -1139,12 +1149,15 @@ fn build_tensor_set(builder: &mut MirBuilder) {
 fn build_tensor_permute(builder: &mut MirBuilder) {
     let i64_ty = IrType::I64;
 
+    // Pure HaxeArray-unpack + extern call; force-inline so the cross-extern
+    // boundary collapses at the call site (consistent across O0/O1/O2/O3).
     let func_id = builder
         .begin_function("Tensor_permute")
         .param("self", i64_ty.clone())
         .param("axes_arr", i64_ty.clone())
         .returns(i64_ty)
         .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
         .build();
 
     builder.set_current_function(func_id);
@@ -1168,6 +1181,7 @@ fn build_tensor_permute(builder: &mut MirBuilder) {
 fn build_tensor_slice(builder: &mut MirBuilder) {
     let i64_ty = IrType::I64;
 
+    // Pure forwarder (no array-unpack). Force-inline.
     let func_id = builder
         .begin_function("Tensor_slice")
         .param("self", i64_ty.clone())
@@ -1176,6 +1190,7 @@ fn build_tensor_slice(builder: &mut MirBuilder) {
         .param("end", i64_ty.clone())
         .returns(i64_ty)
         .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
         .build();
 
     builder.set_current_function(func_id);
@@ -1338,12 +1353,14 @@ fn build_rope_table(builder: &mut MirBuilder, wrapper: &str, extern_name: &str) 
 fn build_tensor_reshape(builder: &mut MirBuilder) {
     let i64_ty = IrType::I64;
 
+    // HaxeArray-unpack + extern call; force-inline.
     let func_id = builder
         .begin_function("Tensor_reshape")
         .param("self", i64_ty.clone())
         .param("shape_arr", i64_ty.clone())
         .returns(i64_ty)
         .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
         .build();
 
     builder.set_current_function(func_id);
