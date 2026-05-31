@@ -1,5 +1,8 @@
 import nue.loader.GGUFLoader;
-import nue.sampling.ArgmaxSampler;
+// nue.sampling.ArgmaxSampler import deliberately omitted — even an
+// unused import of certain nue.sampling.* classes triggers the
+// trap-stub-on-import cascade per bugs_trap_stub_cascade. Reintroduce
+// when the cascade root is fixed.
 import nue.sampling.Sampler;
 import nue.sampling.GenerationLoop;
 import nue.tokenizer.Tokenizer;
@@ -254,22 +257,21 @@ class Main {
         trace("");
 
         // Sampler choice:
-        //   temp = 0.0 → Argmax (deterministic, greedy).
-        //   temp > 0.0 → TemperatureSampler with softmax + multinomial
-        //     draw. O(n) per token over the full vocab — TopP/TopK
-        //     would add a sort over 128k tokens (Llama 3 vocab) which
-        //     burns minutes per token until a partial-sort variant
-        //     lands. Plain temperature scaling is the fast knob for
-        //     breaking greedy-loop repetitions while keeping per-token
-        //     cost in the same ballpark as argmax.
-        // Top-K=50 + temperature + 1.15 repetition penalty. Standard
-        // chat-quality recipe (Llama / GPT defaults). Sharper than
-        // pure temperature over the 128k vocab — the model only ever
-        // chooses from the 50 most-likely tokens — and stays O(n) per
-        // token thanks to the insertion-sort-into-50-slot scratch.
+        //   temp = 0.0 → effective-greedy via LocalTempSampler(epsilon=1e-4)
+        //     with NO repetition penalty. Routes around the trap-stub
+        //     cascade that ArgmaxSampler currently trips on import (see
+        //     bugs_trap_stub_cascade). Numerically equivalent to argmax
+        //     for the dominant case (top-1 probability gap >> epsilon).
+        //   temp > 0.0 → TemperatureSampler with topK=50 + rep-penalty=1.15
+        //     standard chat-quality recipe. O(n) per token.
+        //
+        // When ArgmaxSampler's import cascade is fixed, restore the
+        // direct dispatch: `(temp > 0) ? LocalTempSampler(...) : ArgmaxSampler()`.
+        // Until then the LocalTempSampler(1e-4, 1.0, 1, 42) form is
+        // deterministic-greedy without tripping the cascade.
         var sampler:Sampler = (temperature > 0.0)
             ? new LocalTempSampler(temperature, 1.15, 50, 42)
-            : new ArgmaxSampler();
+            : new LocalTempSampler(1e-4, 1.0, 1, 42);
 
         // Instruct models behave best when the prompt is wrapped in the
         // model's chat template. Llama-3 uses
