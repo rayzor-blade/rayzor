@@ -530,7 +530,22 @@ pub extern "C" fn haxe_string_split_array(
 // Memory Management
 // ============================================================================
 
-/// Free string memory
+/// Free string memory.
+///
+/// Every `*mut HaxeString` that flows through this sink is produced by a
+/// `Box::into_raw(Box::new(HaxeString { .. }))` constructor (native_stack_trace,
+/// haxe_sys, the `replace` / `split` substrings below, and the rest of the
+/// runtime). The 24-byte HaxeString header itself is therefore heap-owned and
+/// must be reclaimed via `Box::from_raw` to match Rust's GlobalAlloc Layout
+/// (size 24, align 8) — calling `dealloc` with the buffer Layout (align 1)
+/// would mis-deallocate the header, and skipping the reclaim leaks 24 B per
+/// string AND keeps a dangling `ptr` field alive in the struct (the UAF /
+/// double-free window the test_exception flake hit on ~25 % of runs).
+///
+/// We first capture the byte-buffer fields, zero them in place so any spurious
+/// second free short-circuits on the buffer path, and only then reclaim the
+/// header. The drop order matters: the `Box::from_raw` runs after the buffer
+/// dealloc so we never read through a freed header.
 #[no_mangle]
 pub extern "C" fn haxe_string_free(s: *mut HaxeString) {
     if s.is_null() {
@@ -538,11 +553,23 @@ pub extern "C" fn haxe_string_free(s: *mut HaxeString) {
     }
 
     unsafe {
-        let s_ref = &*s;
-        if !s_ref.ptr.is_null() && s_ref.cap > 0 {
-            let layout = Layout::from_size_align_unchecked(s_ref.cap, 1);
-            dealloc(s_ref.ptr, layout);
+        // Snapshot the buffer pointer/cap, then poison the header fields so a
+        // duplicate haxe_string_free on the same handle becomes a no-op
+        // instead of double-freeing the inner byte buffer.
+        let buf_ptr = (*s).ptr;
+        let buf_cap = (*s).cap;
+        (*s).ptr = std::ptr::null_mut();
+        (*s).len = 0;
+        (*s).cap = 0;
+
+        if !buf_ptr.is_null() && buf_cap > 0 {
+            let layout = Layout::from_size_align_unchecked(buf_cap, 1);
+            dealloc(buf_ptr, layout);
         }
+
+        // Reclaim the heap-allocated HaxeString header. Safe because every
+        // exported producer routes through `Box::into_raw(Box::new(..))`.
+        drop(Box::from_raw(s));
     }
 }
 
