@@ -2456,12 +2456,24 @@ impl CraneliftBackend {
                 left,
                 right,
             } => {
-                // Get type from register_types map first, then fall back to locals
+                // Get type from register_types, locals, or phi nodes. The phi_nodes
+                // fallback mirrors the Cmp arm below — when both operands are
+                // phi-defined (loop-carried induction variables), neither has a
+                // register_types entry, but the phi itself carries the type.
+                let phi_ty = function
+                    .cfg
+                    .blocks
+                    .values()
+                    .flat_map(|b| b.phi_nodes.iter())
+                    .find(|phi| phi.dest == *left || phi.dest == *right)
+                    .map(|phi| &phi.ty);
                 let ty = function
                     .register_types
                     .get(dest)
                     .or_else(|| function.register_types.get(left))
+                    .or_else(|| function.register_types.get(right))
                     .or_else(|| function.locals.get(dest).map(|local| &local.ty))
+                    .or(phi_ty)
                     .ok_or_else(|| format!("Type not found for BinOp dest {:?}", dest))?;
 
                 let value =
@@ -2470,12 +2482,20 @@ impl CraneliftBackend {
             }
 
             IrInstruction::UnOp { dest, op, operand } => {
-                // Get type from register_types map first, then fall back to locals
+                // Get type from register_types, locals, or phi nodes (see BinOp above).
+                let phi_ty = function
+                    .cfg
+                    .blocks
+                    .values()
+                    .flat_map(|b| b.phi_nodes.iter())
+                    .find(|phi| phi.dest == *operand)
+                    .map(|phi| &phi.ty);
                 let ty = function
                     .register_types
                     .get(dest)
                     .or_else(|| function.register_types.get(operand))
                     .or_else(|| function.locals.get(dest).map(|local| &local.ty))
+                    .or(phi_ty)
                     .ok_or_else(|| format!("Type not found for UnOp dest {:?}", dest))?;
 
                 let value = Self::lower_unary_op_static(value_map, builder, op, ty, *operand)?;

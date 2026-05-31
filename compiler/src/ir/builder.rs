@@ -121,7 +121,24 @@ impl IrBuilder {
     pub fn get_register_type(&self, reg: IrId) -> Option<IrType> {
         let func_id = self.current_function?;
         let func = self.module.functions.get(&func_id)?;
-        func.register_types.get(&reg).cloned()
+        if let Some(ty) = func.register_types.get(&reg).cloned() {
+            return Some(ty);
+        }
+        // Fallback: phi nodes carry their own type but don't always land in
+        // register_types. Without this, a BinOp/UnOp whose operands are both
+        // phi-defined (e.g. loop-carried induction variables) ends up with no
+        // register_types entry, which trips up Cranelift's lookup after
+        // InliningPass splices the body into a compiled function (see
+        // cranelift_backend.rs BinOp lowering). Mirrors the phi_nodes scan
+        // already used by the Cmp arm of the same backend.
+        for block in func.cfg.blocks.values() {
+            for phi in &block.phi_nodes {
+                if phi.dest == reg {
+                    return Some(phi.ty.clone());
+                }
+            }
+        }
+        None
     }
 
     /// Set the type of a register
