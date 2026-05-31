@@ -1140,14 +1140,18 @@ fn run_file(
             }
         }
 
-        // Run O0 pass manager to expand Haxe `inline` functions and apply SRA
+        // Run O2 pass manager to expand Haxe `inline` functions, apply SRA, and
+        // run mid-level MIR optimizations (DCE, const fold, copy prop, CSE,
+        // LICM, CFG simplify). Phase 2 closed the last two known O2 regressions
+        // (loop unrolling on multi-phi headers, InliningPass dropping a BinOp
+        // dest type via phi-fed operands), so O2 is now the run-default.
         if std::env::var("RAYZOR_RAW_MIR").is_err() {
             if let Some(ref h) = progress_handle {
                 h.begin_phase("optimize");
             }
             let t_opt = std::time::Instant::now();
             use compiler::ir::optimization::{OptimizationLevel, PassManager};
-            let mut pass_manager = PassManager::for_level(OptimizationLevel::O0);
+            let mut pass_manager = PassManager::for_level(OptimizationLevel::O2);
             let _ = pass_manager.run(&mut mir_module);
             if let Some(ref h) = progress_handle {
                 h.end_phase("optimize", t_opt.elapsed().as_secs_f64() * 1000.0);
