@@ -6190,6 +6190,13 @@ impl CompilationUnit {
                     );
                 }
                 let file_id = diagnostics::FileId::new(use_location.file_id as usize);
+                // Span the entire identifier — we know `var_name` so the
+                // end position is start + len-bytes. Previously this
+                // was start + 1, highlighting just the first character.
+                // var_name is the source identifier as the parser saw it
+                // (Haxe identifiers are ASCII-only so byte_len == char_len
+                // for column math).
+                let name_byte_len = var_name.len();
                 let use_start = diagnostics::SourcePosition::new(
                     use_location.line as usize,
                     use_location.column as usize,
@@ -6197,8 +6204,8 @@ impl CompilationUnit {
                 );
                 let use_end = diagnostics::SourcePosition::new(
                     use_location.line as usize,
-                    (use_location.column + 1) as usize,
-                    (use_location.byte_offset + 1) as usize,
+                    use_location.column as usize + name_byte_len,
+                    use_location.byte_offset as usize + name_byte_len,
                 );
                 let use_span = diagnostics::SourceSpan::new(use_start, use_end, file_id);
 
@@ -6209,8 +6216,8 @@ impl CompilationUnit {
                 );
                 let move_end = diagnostics::SourcePosition::new(
                     move_location.line as usize,
-                    (move_location.column + 1) as usize,
-                    (move_location.byte_offset + 1) as usize,
+                    move_location.column as usize + name_byte_len,
+                    move_location.byte_offset as usize + name_byte_len,
                 );
                 let move_span = diagnostics::SourceSpan::new(move_start, move_end, file_id);
 
