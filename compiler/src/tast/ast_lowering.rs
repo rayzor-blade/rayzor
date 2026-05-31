@@ -1337,6 +1337,22 @@ impl<'a> AstLowering<'a> {
         // Create TypedFile with the shared interner from the pipeline
         let mut typed_file = TypedFile::new(Rc::clone(&self.context.string_interner_rc));
 
+        // Populate file metadata from the input HaxeFile so downstream
+        // passes (ownership diagnostics, the RAYZOR_DEBUG_E0382 dump,
+        // cross-file warning attribution) can identify which file the
+        // typed_file came from. Without this the metadata stays at the
+        // FileMetadata::default() empty-string value and every E0382
+        // dump prints `typed_file=` blank.
+        typed_file.metadata.file_path = file.filename.clone();
+        let file_name = file
+            .filename
+            .rsplit('/')
+            .next()
+            .unwrap_or(&file.filename)
+            .to_string();
+        typed_file.metadata.file_name =
+            Some(self.context.string_interner.intern(&file_name));
+
         // Process package declaration
         if let Some(package) = &file.package {
             typed_file.metadata.package_name = Some(package.path.join("."));
