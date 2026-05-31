@@ -5983,40 +5983,12 @@ impl CompilationUnit {
     /// Print compilation errors with formatted diagnostics to stderr.
     /// Uses the diagnostics crate's ErrorFormatter for consistent formatting.
     pub fn print_compilation_errors(&self, errors: &[CompilationError]) {
-        use diagnostics::{ErrorFormatter, SourceMap};
+        use diagnostics::ErrorFormatter;
 
-        // Build source map — user files first (FileId 0) to match
-        // compiler's SourceLocation.file_id convention
-        let mut source_map = SourceMap::new();
-
-        // User files must be FileId 0 (matching compiler's SourceLocation convention)
-        for user_file in &self.user_files {
-            if let Some(ref source) = user_file.input {
-                source_map.add_file(user_file.filename.clone(), source.clone());
-            }
-        }
-
-        // Add stdlib files
-        for stdlib_file in &self.stdlib_files {
-            if let Some(ref source) = stdlib_file.input {
-                source_map.add_file(stdlib_file.filename.clone(), source.clone());
-            }
-        }
-
-        // Add import.hx files
-        for import_file in &self.import_hx_files {
-            if let Some(ref source) = import_file.input {
-                source_map.add_file(import_file.filename.clone(), source.clone());
-            }
-        }
-
-        // Add on-demand compiled files (user packages like sim/Particle.hx)
-        // These were compiled via load_imports_efficiently and have source on disk
-        for (filename, _) in &self.compiled_files {
-            if let Ok(source) = std::fs::read_to_string(filename) {
-                source_map.add_file(filename.clone(), source);
-            }
-        }
+        // Build the same full source_map the MIR-diagnostic path uses,
+        // so hard-error spans on cross-file types resolve to the right
+        // file. See `build_full_source_map` for the inclusion order.
+        let source_map = self.build_full_source_map();
 
         let formatter = ErrorFormatter::with_colors();
 
@@ -6393,26 +6365,76 @@ impl CompilationUnit {
     /// The source map is built with the user file at FileId 0 to match the
     /// compiler's SourceLocation.file_id convention (user file = 0).
     fn print_mir_diagnostics(&mut self, mir_diagnostics: &[diagnostics::Diagnostic]) {
-        use diagnostics::{ErrorFormatter, SourceMap};
+        use diagnostics::ErrorFormatter;
 
         // Store for cache replay
         self.collected_diagnostics
             .extend_from_slice(mir_diagnostics);
 
-        let mut source_map = SourceMap::new();
-
-        // User file must be FileId 0 (matching compiler's SourceLocation convention)
-        for user_file in &self.user_files {
-            if let Some(ref source) = user_file.input {
-                source_map.add_file(user_file.filename.clone(), source.clone());
-            }
-        }
+        // Build the full source_map covering user files + stdlib + imports +
+        // on-demand-compiled package files. Cross-file diagnostics (E0382 on
+        // a moved Tensor binding inside nue.sampling.LocalTempSampler, W0014
+        // on a cross-context iface return inside nue.transformer.*, etc.)
+        // carry the file_id of the ACTUAL source file. Without the imported
+        // files registered here, the formatter falls back to whichever
+        // file happens to occupy that file_id slot in the under-populated
+        // map — typically the entry Main.hx — and uses the diagnostic's
+        // line number as an offset INTO Main.hx, so the warning ends up
+        // cited against an unrelated comment or statement.
+        let source_map = self.build_full_source_map();
 
         let formatter = ErrorFormatter::with_colors();
         for diagnostic in mir_diagnostics {
             let formatted = formatter.format_diagnostic(diagnostic, &source_map);
             eprint!("{}", formatted);
         }
+    }
+
+    /// Construct a SourceMap covering every Haxe file the current
+    /// compilation knows about, in the same insertion order used by
+    /// the parsing/typing pipeline so `diagnostic.span.file_id` resolves
+    /// back to the correct file. Used by both `print_compilation_errors`
+    /// and `print_mir_diagnostics`; previously the two sites maintained
+    /// their own copies and drifted, causing cross-file diagnostics to
+    /// fall back to user_files[0] (always Main.hx).
+    fn build_full_source_map(&self) -> diagnostics::SourceMap {
+        let mut source_map = diagnostics::SourceMap::new();
+
+        // User files first (FileId 0 onwards, matching the lexer's
+        // file_id convention for the entry source).
+        for user_file in &self.user_files {
+            if let Some(ref source) = user_file.input {
+                source_map.add_file(user_file.filename.clone(), source.clone());
+            }
+        }
+
+        // Stdlib files (loaded by the bootstrap pass).
+        for stdlib_file in &self.stdlib_files {
+            if let Some(ref source) = stdlib_file.input {
+                source_map.add_file(stdlib_file.filename.clone(), source.clone());
+            }
+        }
+
+        // Project-level import.hx files.
+        for import_file in &self.import_hx_files {
+            if let Some(ref source) = import_file.input {
+                source_map.add_file(import_file.filename.clone(), source.clone());
+            }
+        }
+
+        // On-demand-compiled user-package files (e.g. nue/* imports
+        // pulled in via `import nue.sampling.LocalTempSampler` from
+        // Main.hx). These were compiled via `load_imports_efficiently`
+        // and only their disk paths survive on `compiled_files`; the
+        // source is re-read here so the formatter can render their
+        // spans correctly.
+        for (filename, _) in &self.compiled_files {
+            if let Ok(source) = std::fs::read_to_string(filename) {
+                source_map.add_file(filename.clone(), source);
+            }
+        }
+
+        source_map
     }
 
     /// Get cache statistics
