@@ -466,6 +466,12 @@ pub struct HirToMirContext<'a> {
     /// emit `MarkMoved` / `CheckLive` opcodes for use-after-move analysis.
     derive_move_classes: BTreeSet<SymbolId>,
 
+    /// Classes annotated with `@:shared` — `.clone()` lowers to an atomic
+    /// reference-count increment (runtime-safe aliasing) and move-tracking
+    /// is suppressed for bindings of these classes. Mutually exclusive with
+    /// `@:move`; see W0030 diagnostic for the conflict case.
+    derive_shared_classes: BTreeSet<SymbolId>,
+
     /// IrIds bound to `@:move`-class locals. Reads of these registers
     /// receive a `CheckLive` guard; consumes receive a `MarkMoved` marker.
     strict_move_locals: BTreeSet<IrId>,
@@ -721,6 +727,7 @@ impl<'a> HirToMirContext<'a> {
             derive_hash_classes: BTreeSet::new(),
             derive_clone_classes: BTreeSet::new(),
             derive_move_classes: BTreeSet::new(),
+            derive_shared_classes: BTreeSet::new(),
             strict_move_locals: BTreeSet::new(),
             derive_clone_extern_fns: BTreeMap::new(),
             derive_copy_classes: BTreeSet::new(),
@@ -35609,6 +35616,51 @@ impl<'a> HirToMirContext<'a> {
             }
         }
 
+        // Pre-scan class metadata for `@:move` / `@:shared` so the Clone
+        // derive branch below can pick the right Tier B extern (deep-copy
+        // vs atomic-refcount) and so the move-tracking branch later in
+        // this block can suppress `MarkMoved` / `CheckLive` emission for
+        // `@:shared` classes.
+        let mut has_move_attr = false;
+        let mut has_shared_attr = false;
+        for attr in &class.metadata {
+            if let Some(attr_name) = self.string_interner.get(attr.name) {
+                match attr_name {
+                    "move" => has_move_attr = true,
+                    "shared" => has_shared_attr = true,
+                    _ => {}
+                }
+            }
+        }
+
+        // Diagnose the `@:move` + `@:shared` conflict. The two annotations
+        // express opposite ownership models (compile-time linear move vs
+        // runtime atomic sharing) and must never co-occur on the same
+        // class. We continue compilation after the warning — `@:shared`
+        // wins (move-tracking suppressed, arc_clone used) because that's
+        // the safer fallback at runtime if the user really did mean to
+        // share aliased references.
+        if has_move_attr && has_shared_attr {
+            let span = diagnostics::SourceSpan::new(
+                diagnostics::SourcePosition::new(0, 0, 0),
+                diagnostics::SourcePosition::new(0, 1, 1),
+                diagnostics::FileId::new(0),
+            );
+            let class_name = self.string_interner.get(class.name).unwrap_or("?");
+            let diagnostic = diagnostics::DiagnosticBuilder::warning(
+                format!(
+                    "class `{}` carries both `@:move` and `@:shared` — these are mutually exclusive (move = compile-time linear ownership, shared = runtime atomic refcount). `@:shared` takes precedence; remove `@:move` to silence this warning.",
+                    class_name
+                ),
+                span.clone(),
+            )
+            .code("W0030")
+            .label(span, "conflicting memory annotations")
+            .help("remove one of `@:move` or `@:shared` from the class declaration")
+            .build();
+            self.diagnostics.push(diagnostic);
+        }
+
         // Populate derive trait sets from HirClass metadata
         {
             use crate::tast::DerivedTrait;
@@ -35655,9 +35707,27 @@ impl<'a> HirToMirContext<'a> {
                                     }
                                 }
                             }
+                            // Pick the deep-copy or atomic-refcount entry
+                            // point based on the class's `@:shared` flag.
+                            // Tensor/QTensor's runtime ABI exposes both:
+                            //   - `rayzor_{tensor,qtensor}_clone` — deep copy
+                            //     (compact-to-contiguous; legacy default)
+                            //   - `rayzor_{tensor,qtensor}_arc_clone` — atomic
+                            //     fetch_add on the wrapper's refcount; same
+                            //     pointer returned (Phase 1 runtime work).
+                            // With `@:shared` on the class, `.clone()` should
+                            // be cheap aliasing, not an allocator round-trip.
                             let extern_fn: Option<&'static str> = match fqn.as_deref() {
-                                Some("rayzor.ds.Tensor") => Some("rayzor_tensor_clone"),
-                                Some("rayzor.ds.QTensor") => Some("rayzor_qtensor_clone"),
+                                Some("rayzor.ds.Tensor") => Some(if has_shared_attr {
+                                    "rayzor_tensor_arc_clone"
+                                } else {
+                                    "rayzor_tensor_clone"
+                                }),
+                                Some("rayzor.ds.QTensor") => Some(if has_shared_attr {
+                                    "rayzor_qtensor_arc_clone"
+                                } else {
+                                    "rayzor_qtensor_clone"
+                                }),
                                 _ => None,
                             };
                             if let Some(fn_name) = extern_fn {
@@ -35692,15 +35762,21 @@ impl<'a> HirToMirContext<'a> {
             // `derive_clone_classes` set above so MIR lowering can emit
             // `MarkMoved` / `CheckLive` opcodes against bindings of these
             // classes. `TypedClass::has_move_annotation()` lives on TAST;
-            // HirClass carries the same info via metadata, so we scan the
-            // attribute list directly here.
-            for attr in &class.metadata {
-                if let Some(attr_name) = self.string_interner.get(attr.name) {
-                    if attr_name == "move" {
-                        self.derive_move_classes.insert(class.symbol_id);
-                        break;
-                    }
-                }
+            // HirClass carries the same info via metadata, so the pre-scan
+            // above already extracted both flags.
+            //
+            // `@:shared` wins over `@:move` when both are present: the W0030
+            // diagnostic above informs the user, and we deliberately skip
+            // the `derive_move_classes` insertion so MIR lowering won't emit
+            // `MarkMoved` / `CheckLive` opcodes against shared bindings.
+            // Runtime Arc refcount makes aliasing safe by construction, so
+            // compile-time move enforcement would be both spurious and
+            // incorrect (the class's `.clone()` returns the SAME pointer).
+            if has_move_attr && !has_shared_attr {
+                self.derive_move_classes.insert(class.symbol_id);
+            }
+            if has_shared_attr {
+                self.derive_shared_classes.insert(class.symbol_id);
             }
 
             // Check for @:manualDrop metadata

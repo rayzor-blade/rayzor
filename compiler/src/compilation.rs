@@ -827,10 +827,7 @@ impl CompilationUnit {
             (crate::tast::SymbolId, crate::tast::SymbolId),
             Vec<crate::tast::SymbolId>,
         >,
-        interface_method_names: &BTreeMap<
-            crate::tast::SymbolId,
-            Vec<crate::tast::InternedString>,
-        >,
+        interface_method_names: &BTreeMap<crate::tast::SymbolId, Vec<crate::tast::InternedString>>,
         interface_method_return_types: &BTreeMap<
             (crate::tast::SymbolId, crate::tast::InternedString),
             crate::tast::TypeId,
@@ -1040,28 +1037,23 @@ impl CompilationUnit {
         // c7a170d's all-or-nothing skip — drop the whole entry if ANY
         // method name fails to intern, rather than ship a slot-misaligned
         // Vec. Same discipline as `interface_extends` below.
-        let mut iface_method_names_entries: Vec<
-            crate::ir::blade::BladeInterfaceMethodNamesEntry,
-        > = Vec::new();
+        let mut iface_method_names_entries: Vec<crate::ir::blade::BladeInterfaceMethodNamesEntry> =
+            Vec::new();
         for (iface_sym, method_names) in interface_method_names {
             let Some(iface_name) = qname_of(*iface_sym) else {
                 continue;
             };
             let method_names_str: Vec<String> = method_names
                 .iter()
-                .filter_map(|n| {
-                    self.string_interner.get(*n).map(|s| s.to_string())
-                })
+                .filter_map(|n| self.string_interner.get(*n).map(|s| s.to_string()))
                 .collect();
             if method_names_str.len() != method_names.len() {
                 continue;
             }
-            iface_method_names_entries.push(
-                crate::ir::blade::BladeInterfaceMethodNamesEntry {
-                    iface_name,
-                    method_names: method_names_str,
-                },
-            );
+            iface_method_names_entries.push(crate::ir::blade::BladeInterfaceMethodNamesEntry {
+                iface_name,
+                method_names: method_names_str,
+            });
         }
 
         // Convert interface_method_return_types: (iface_sym,
@@ -1105,8 +1097,7 @@ impl CompilationUnit {
             let Some(iface_name) = qname_of(*iface_sym) else {
                 continue;
             };
-            let parent_names: Vec<String> =
-                parents.iter().filter_map(|p| qname_of(*p)).collect();
+            let parent_names: Vec<String> = parents.iter().filter_map(|p| qname_of(*p)).collect();
             if parent_names.len() != parents.len() {
                 continue;
             }
@@ -3444,8 +3435,7 @@ impl CompilationUnit {
             let Some((iface_sym, _, _)) = registered.get(&entry.iface_name) else {
                 continue;
             };
-            let Some((_, return_type_id, _)) = registered.get(&entry.return_type_name)
-            else {
+            let Some((_, return_type_id, _)) = registered.get(&entry.return_type_name) else {
                 continue;
             };
             let method_name_interned = self.string_interner.intern(&entry.method_name);
@@ -6059,6 +6049,17 @@ impl CompilationUnit {
                 let mut strict = false;
                 if let Some(node) = ownership_graph.variables.get(&variable) {
                     if node.variable_type.is_valid() {
+                        // `@:shared` short-circuits the entire diagnostic.
+                        // Bindings of shared classes (e.g. rayzor.ds.Tensor)
+                        // are reference-counted at runtime; aliasing them
+                        // after a `.clone()` (which is now an atomic
+                        // refcount increment) is not a use-after-move and
+                        // must not produce E0382 — neither error nor
+                        // warning. Skip ahead of the is_copy check so we
+                        // don't even traverse the per-callsite work.
+                        if trait_checker.requires_shared(node.variable_type) {
+                            continue;
+                        }
                         let strict_q = trait_checker.requires_strict_move(node.variable_type);
                         if !strict_q && trait_checker.is_copy(node.variable_type) {
                             continue;

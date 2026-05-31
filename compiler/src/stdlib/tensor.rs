@@ -458,6 +458,34 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
         .calling_convention(CallingConvention::C)
         .build();
     builder.mark_as_extern(func_id);
+
+    // arc_clone: (src) -> i64
+    // Atomic-refcount entrypoint for `@:shared` classes (Tensor today).
+    // Returns the SAME pointer with the wrapper's refcount fetch_add'd
+    // (Relaxed ordering). hir_to_mir.rs (lower_derived_clone) routes
+    // `.clone()` here when the class is marked `@:shared`; otherwise it
+    // falls back to `rayzor_tensor_clone` above (legacy deep copy).
+    let func_id = builder
+        .begin_function("rayzor_tensor_arc_clone")
+        .param("src", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // deep_clone: (src) -> i64
+    // Escape hatch for callers that genuinely need disjoint storage
+    // (e.g. cross-thread mutation patterns). Same body as the legacy
+    // `rayzor_tensor_clone`; exposed as a named `.deepClone()` extern on
+    // the Haxe side so the language gives users an explicit override of
+    // the @:shared default.
+    let func_id = builder
+        .begin_function("rayzor_tensor_deep_clone")
+        .param("src", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
 }
 
 // ============================================================================

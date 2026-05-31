@@ -3516,7 +3516,21 @@ impl StdlibMapping {
             // hir_to_mir.rs (lower_derived_clone) normally intercepts this call
             // before runtime_mapping is consulted; the entry here covers the
             // Dynamic-receiver dispatch edge case where intercept misses.
+            //
+            // Because Tensor is `@:shared`, the runtime symbol
+            // `rayzor_tensor_clone` itself now forwards to
+            // `rayzor_tensor_arc_clone` (atomic-refcount), so this entry
+            // gives the same semantic as the Tier B intercept. The Dynamic
+            // path can't read the `@:shared` flag (no static class info),
+            // so we route through the legacy name which is now an Arc
+            // forward under the hood.
             map_method!(instance "rayzor_ds_Tensor", "clone" => "rayzor_tensor_clone", params: 0, mir_wrapper,
+                types: &[PtrVoid] => PtrVoid),
+            // tensor.deepClone(): Tensor — escape hatch for callers that
+            // genuinely need disjoint storage (e.g. cross-thread mutation
+            // patterns). Routed directly to `rayzor_tensor_deep_clone`
+            // (legacy deep-copy body) regardless of @:shared.
+            map_method!(instance "rayzor_ds_Tensor", "deepClone" => "rayzor_tensor_deep_clone", params: 0, mir_wrapper,
                 types: &[PtrVoid] => PtrVoid),
         ];
 
@@ -3580,7 +3594,16 @@ impl StdlibMapping {
             // hir_to_mir.rs (lower_derived_clone) normally intercepts this call
             // before runtime_mapping is consulted; the entry here covers the
             // Dynamic-receiver dispatch edge case where intercept misses.
+            //
+            // QTensor is `@:shared`; the runtime `rayzor_qtensor_clone`
+            // symbol forwards to `rayzor_qtensor_arc_clone` (atomic refcount).
+            // See the matching note on `Tensor.clone` above for the
+            // Dynamic-dispatch rationale.
             map_method!(instance "rayzor_ds_QTensor", "clone" => "rayzor_qtensor_clone",
+                params: 0, mir_wrapper, types: &[PtrVoid] => PtrVoid),
+            // qt.deepClone(): QTensor — escape hatch routed to the
+            // legacy deep-copy body.
+            map_method!(instance "rayzor_ds_QTensor", "deepClone" => "rayzor_qtensor_deep_clone",
                 params: 0, mir_wrapper, types: &[PtrVoid] => PtrVoid),
         ];
 

@@ -333,6 +333,22 @@ pub enum MemoryAnnotation {
     /// Requires @:safety on the class
     Move,
 
+    /// @:shared - Type uses atomic reference-counted sharing on `.clone()`.
+    /// When applied to extern classes whose runtime ABI exposes both a
+    /// deep-copy and an atomic-increment entry point (e.g. `rayzor.ds.Tensor`,
+    /// `rayzor.ds.QTensor`), `.clone()` lowers to the atomic-increment path
+    /// (`rayzor_tensor_arc_clone` / `rayzor_qtensor_arc_clone`) instead of
+    /// the deep copy. Move-tracking (`MarkMoved`/`CheckLive`) is suppressed
+    /// for classes carrying this annotation — the runtime guarantees safety
+    /// via the Arc refcount, so the compiler doesn't need to enforce unique
+    /// ownership at the language level.
+    ///
+    /// `@:shared` and `@:move` are mutually exclusive: a class is either
+    /// strictly-moved (compile-time enforced) or atomically-shared (runtime
+    /// refcounted), never both. A class carrying both annotations is a hard
+    /// design conflict and triggers a W0030 diagnostic.
+    Shared,
+
     /// @:unique - Type must have unique ownership (no aliasing allowed)
     /// Requires @:safety on the class
     Unique,
@@ -382,6 +398,7 @@ impl MemoryAnnotation {
             "safety" => Some(MemoryAnnotation::SafetyWithMode(SafetyMode::NonStrict)),
             "managed" => Some(MemoryAnnotation::Managed),
             "move" => Some(MemoryAnnotation::Move),
+            "shared" => Some(MemoryAnnotation::Shared),
             "unique" => Some(MemoryAnnotation::Unique),
             "borrow" => Some(MemoryAnnotation::Borrow),
             "owned" => Some(MemoryAnnotation::Owned),
@@ -443,12 +460,18 @@ impl MemoryAnnotation {
 
     /// Returns true if this annotation implies shared ownership
     pub fn implies_shared_ownership(&self) -> bool {
-        matches!(self, MemoryAnnotation::Arc | MemoryAnnotation::Rc)
+        matches!(
+            self,
+            MemoryAnnotation::Arc | MemoryAnnotation::Rc | MemoryAnnotation::Shared
+        )
     }
 
     /// Returns true if this annotation requires atomic operations
     pub fn requires_atomic(&self) -> bool {
-        matches!(self, MemoryAnnotation::Arc | MemoryAnnotation::Atomic)
+        matches!(
+            self,
+            MemoryAnnotation::Arc | MemoryAnnotation::Atomic | MemoryAnnotation::Shared
+        )
     }
 }
 
@@ -1561,6 +1584,14 @@ impl TypedClass {
     /// (aliasing them after a move is a hard compile error, not a warning).
     pub fn has_move_annotation(&self) -> bool {
         self.memory_annotations.contains(&MemoryAnnotation::Move)
+    }
+
+    /// Check if this class is marked as @:shared — `.clone()` lowers to an
+    /// atomic-refcount increment (e.g. `rayzor_tensor_arc_clone`) rather than
+    /// the deep-copy `@:derive(Clone)` body, and move-tracking is suppressed
+    /// (the runtime Arc guarantees aliasing safety).
+    pub fn has_shared_annotation(&self) -> bool {
+        self.memory_annotations.contains(&MemoryAnnotation::Shared)
     }
 
     /// Check if this class uses manual memory management
