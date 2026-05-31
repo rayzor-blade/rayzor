@@ -181,6 +181,31 @@ fn declare_qtensor_externs(builder: &mut MirBuilder) {
         .calling_convention(CallingConvention::C)
         .build();
     builder.mark_as_extern(func_id);
+
+    // arc_clone: (src) -> i64
+    // Atomic-refcount entrypoint for `@:shared` classes (QTensor today).
+    // Mirrors `rayzor_tensor_arc_clone`: a Relaxed fetch_add on the
+    // wrapper refcount that returns the same pointer. Selected by
+    // hir_to_mir.rs (lower_derived_clone) when the class is `@:shared`.
+    let func_id = builder
+        .begin_function("rayzor_qtensor_arc_clone")
+        .param("src", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // deep_clone: (src) -> i64
+    // Escape hatch for disjoint storage on QTensor — same body as the
+    // legacy `rayzor_qtensor_clone`, kept addressable so `.deepClone()`
+    // on the Haxe side can route through runtime_mapping.
+    let func_id = builder
+        .begin_function("rayzor_qtensor_deep_clone")
+        .param("src", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
 }
 
 // ============================================================================

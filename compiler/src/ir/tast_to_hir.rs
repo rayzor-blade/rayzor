@@ -620,6 +620,7 @@ impl<'a> TastToHirContext<'a> {
             let name_str = match ann {
                 MemoryAnnotation::Move => Some("move"),
                 MemoryAnnotation::Managed => Some("managed"),
+                MemoryAnnotation::Shared => Some("shared"),
                 _ => None,
             };
             if let Some(n) = name_str {

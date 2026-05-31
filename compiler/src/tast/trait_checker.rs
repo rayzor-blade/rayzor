@@ -109,6 +109,28 @@ impl<'a> TraitChecker<'a> {
         }
     }
 
+    /// Check if a type is annotated with `@:shared` — meaning `.clone()` is
+    /// an atomic-refcount increment (runtime-safe aliasing) and the compiler
+    /// must NOT emit `MarkMoved` / `CheckLive` guards for bindings of this
+    /// class. Mirrors `requires_strict_move`'s shape.
+    pub fn requires_shared(&self, type_id: TypeId) -> bool {
+        let type_kind = {
+            let type_table = self.type_table.borrow();
+            match type_table.get(type_id) {
+                Some(info) => info.kind.clone(),
+                None => return false,
+            }
+        };
+
+        match &type_kind {
+            TypeKind::Class { symbol_id, .. } => self
+                .find_class(*symbol_id)
+                .map(|c| c.has_shared_annotation())
+                .unwrap_or(false),
+            _ => false,
+        }
+    }
+
     /// Generic trait checking
     pub fn implements_trait(&self, type_id: TypeId, trait_: DerivedTrait) -> bool {
         // Extract the kind from the type table, then drop the borrow
