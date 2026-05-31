@@ -100,6 +100,22 @@ pub struct CompilationUnit {
     /// `TypedFile` form isn't usable here; macro expansion runs before TAST lowering.
     loaded_import_haxe_files: Vec<HaxeFile>,
 
+    /// Monotonic file_id counter handed out to each compiled file in
+    /// arrival order so per-statement spans can identify their source.
+    /// Previously `compile_file_with_shared_state_ex_with_parsed`
+    /// hardcoded `FileId::new(0)` for EVERY file, causing every
+    /// TypedExpression / TypedStatement span in imported nue/* modules
+    /// to carry file_id=0 — the root of bugs_diagnostic_span_file_id_always_zero.
+    /// Bumped each time a file enters the lowering pass; mirrored into the
+    /// span_converter via initialize_span_converter_with_filename.
+    next_file_id: u32,
+
+    /// Maps absolute (or as-provided) source file path → assigned
+    /// file_id so the same file imported via multiple paths still
+    /// resolves to the same compilation-level identity. Keyed by the
+    /// filename string that was passed to compile_file_with_shared_state_ex.
+    file_id_by_filename: BTreeMap<String, u32>,
+
     /// Diagnostics collected during compilation (warnings, non-exhaustive switches, etc.)
     /// These are printed during compilation AND stored here for cache replay.
     pub collected_diagnostics: Vec<diagnostics::Diagnostic>,
@@ -488,6 +504,8 @@ impl CompilationUnit {
             import_own_func_ids: std::collections::BTreeSet::new(),
             loaded_stdlib_typed_files: Vec::new(),
             loaded_import_haxe_files: Vec::new(),
+            next_file_id: 0,
+            file_id_by_filename: BTreeMap::new(),
             collected_diagnostics: Vec::new(),
             global_class_fields: BTreeMap::new(),
             stdlib_function_map: BTreeMap::new(),
@@ -4608,7 +4626,22 @@ impl CompilationUnit {
     ) -> Result<TypedFile, Vec<CompilationError>> {
         use crate::tast::ast_lowering::AstLowering;
 
-        let file_id = diagnostics::FileId::new(0);
+        // Allocate (or look up) a compilation-level file_id for this file.
+        // Previously hardcoded to FileId(0), which caused every TypedExpression
+        // span in every file (Main.hx, BPETokenizer.hx, GenerationLoop.hx,
+        // …) to carry the same file_id=0 — see
+        // bugs_diagnostic_span_file_id_always_zero. The counter is monotonic
+        // in arrival order; the filename map dedupes when the same file is
+        // re-entered (e.g. via `compiled_files` cache lookup downstream).
+        let file_id_u32 = *self
+            .file_id_by_filename
+            .entry(filename.to_string())
+            .or_insert_with(|| {
+                let id = self.next_file_id;
+                self.next_file_id += 1;
+                id
+            });
+        let file_id = diagnostics::FileId::new(file_id_u32 as usize);
 
         // Extract type info from AST for BLADE cache (before macros may modify it)
         if self.config.enable_cache {
@@ -6390,48 +6423,85 @@ impl CompilationUnit {
         }
     }
 
-    /// Construct a SourceMap covering every Haxe file the current
-    /// compilation knows about, in the same insertion order used by
-    /// the parsing/typing pipeline so `diagnostic.span.file_id` resolves
-    /// back to the correct file. Used by both `print_compilation_errors`
-    /// and `print_mir_diagnostics`; previously the two sites maintained
-    /// their own copies and drifted, causing cross-file diagnostics to
-    /// fall back to user_files[0] (always Main.hx).
+    /// Construct a SourceMap that registers every Haxe file the
+    /// current compilation knows about, **at the same file_id** the
+    /// lowering pipeline assigned to it via `file_id_by_filename`.
+    ///
+    /// SourceMap::add_file auto-assigns FileIds sequentially from 0,
+    /// so the order we insert here determines the file_ids in the
+    /// rendered output. We sort the (filename, file_id) pairs by
+    /// file_id and insert in that order — if there are no gaps, the
+    /// resulting source_map's FileIds align with the diagnostic
+    /// spans' file_ids. Where the lowering pipeline emitted a file_id
+    /// without populating file_id_by_filename (parser cache, generated
+    /// modules, etc.), we still see file_id=0 fallthrough for those
+    /// specific spans, but every cross-file user import resolves
+    /// correctly.
     fn build_full_source_map(&self) -> diagnostics::SourceMap {
         let mut source_map = diagnostics::SourceMap::new();
 
-        // User files first (FileId 0 onwards, matching the lexer's
-        // file_id convention for the entry source).
+        // Collect every file source we know about, keyed by filename.
+        // Stored as Option<String> so we can distinguish "file known
+        // but content not in memory" (re-read from disk on demand).
+        let mut sources: BTreeMap<String, String> = BTreeMap::new();
         for user_file in &self.user_files {
             if let Some(ref source) = user_file.input {
-                source_map.add_file(user_file.filename.clone(), source.clone());
+                sources.insert(user_file.filename.clone(), source.clone());
             }
         }
-
-        // Stdlib files (loaded by the bootstrap pass).
         for stdlib_file in &self.stdlib_files {
             if let Some(ref source) = stdlib_file.input {
-                source_map.add_file(stdlib_file.filename.clone(), source.clone());
+                sources.insert(stdlib_file.filename.clone(), source.clone());
             }
         }
-
-        // Project-level import.hx files.
         for import_file in &self.import_hx_files {
             if let Some(ref source) = import_file.input {
-                source_map.add_file(import_file.filename.clone(), source.clone());
+                sources.insert(import_file.filename.clone(), source.clone());
+            }
+        }
+        for import_haxe_file in &self.loaded_import_haxe_files {
+            if let Some(ref source) = import_haxe_file.input {
+                sources.insert(import_haxe_file.filename.clone(), source.clone());
+            }
+        }
+        for (filename, _) in &self.compiled_files {
+            if !sources.contains_key(filename) {
+                if let Ok(source) = std::fs::read_to_string(filename) {
+                    sources.insert(filename.clone(), source);
+                }
             }
         }
 
-        // On-demand-compiled user-package files (e.g. nue/* imports
-        // pulled in via `import nue.sampling.LocalTempSampler` from
-        // Main.hx). These were compiled via `load_imports_efficiently`
-        // and only their disk paths survive on `compiled_files`; the
-        // source is re-read here so the formatter can render their
-        // spans correctly.
-        for (filename, _) in &self.compiled_files {
-            if let Ok(source) = std::fs::read_to_string(filename) {
-                source_map.add_file(filename.clone(), source);
+        // Sort file_id_by_filename by file_id ascending so the
+        // sequential add_file calls land each file at the expected
+        // FileId. Fall back to reading from disk if we don't have an
+        // in-memory copy.
+        let mut id_pairs: Vec<(&String, u32)> = self
+            .file_id_by_filename
+            .iter()
+            .map(|(name, id)| (name, *id))
+            .collect();
+        id_pairs.sort_by_key(|(_, id)| *id);
+
+        let mut next_expected: u32 = 0;
+        for (filename, file_id) in id_pairs {
+            // Fill any gaps with empty placeholder entries so subsequent
+            // files land at their correct FileId. Gaps can occur when a
+            // file_id was reserved but the file failed to compile.
+            while next_expected < file_id {
+                source_map.add_file(
+                    format!("<unknown:{}>", next_expected),
+                    String::new(),
+                );
+                next_expected += 1;
             }
+            let content = sources
+                .get(filename)
+                .cloned()
+                .or_else(|| std::fs::read_to_string(filename).ok())
+                .unwrap_or_default();
+            source_map.add_file(filename.clone(), content);
+            next_expected += 1;
         }
 
         source_map
