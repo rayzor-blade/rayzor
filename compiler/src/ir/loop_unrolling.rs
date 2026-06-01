@@ -52,7 +52,7 @@ impl OptimizationPass for LoopUnrollingPass {
 
 /// Analyze a loop to determine its induction variable and trip count.
 /// Returns (induction_var_phi, init_value, step, bound, compare_op) if analyzable.
-fn analyze_loop_trip_count(
+pub(crate) fn analyze_loop_trip_count(
     function: &IrFunction,
     header: IrBlockId,
     back_edge_source: IrBlockId,
@@ -108,14 +108,14 @@ fn analyze_loop_trip_count(
     None
 }
 
-struct LoopInductionInfo {
-    iv_phi: IrId,
-    init_val: IrId,
-    init_const: i64,
-    step_val: IrId,
-    step_amount: i64,
-    bound_const: i64,
-    trip_count: u64,
+pub(crate) struct LoopInductionInfo {
+    pub(crate) iv_phi: IrId,
+    pub(crate) init_val: IrId,
+    pub(crate) init_const: i64,
+    pub(crate) step_val: IrId,
+    pub(crate) step_amount: i64,
+    pub(crate) bound_const: i64,
+    pub(crate) trip_count: u64,
 }
 
 fn find_const_value(function: &IrFunction, reg: IrId) -> Option<i64> {

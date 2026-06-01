@@ -421,6 +421,19 @@ impl LoopNestInfo {
 
         let max_depth = loops.values().map(|l| l.nesting_depth).max().unwrap_or(0);
 
+        // Populate trip_count for each loop using the induction-variable analyzer.
+        // Today this only proves the constant-trip case; failure leaves `None`
+        // (which downstream consumers in vectorization.rs treat as "do not vectorize").
+        for natural_loop in loops.values_mut() {
+            natural_loop.trip_count = super::loop_unrolling::analyze_loop_trip_count(
+                function,
+                natural_loop.header,
+                natural_loop.back_edge_source,
+                &natural_loop.blocks,
+            )
+            .map(|info| TripCount::Constant(info.trip_count));
+        }
+
         // Build block-to-loop mapping (map each block to its innermost loop)
         let mut block_to_loop = BTreeMap::new();
         for (&header, loop_info) in &loops {
