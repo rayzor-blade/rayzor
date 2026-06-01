@@ -1151,7 +1151,13 @@ fn run_file(
             }
             let t_opt = std::time::Instant::now();
             use compiler::ir::optimization::{OptimizationLevel, PassManager};
-            let mut pass_manager = PassManager::for_level(OptimizationLevel::O2);
+            let level = match std::env::var("RAYZOR_OPT_LEVEL").as_deref() {
+                Ok("0") => OptimizationLevel::O0,
+                Ok("1") => OptimizationLevel::O1,
+                Ok("3") => OptimizationLevel::O3,
+                _ => OptimizationLevel::O2,
+            };
+            let mut pass_manager = PassManager::for_level(level);
             let _ = pass_manager.run(&mut mir_module);
             if let Some(ref h) = progress_handle {
                 h.end_phase("optimize", t_opt.elapsed().as_secs_f64() * 1000.0);
