@@ -432,7 +432,86 @@ impl LoopVectorizationPass {
             }
         }
 
+        // Haxe-generated MIR stores phis in the dedicated `phi_nodes` field
+        // rather than inline as `IrInstruction::Phi`. Scan that side too.
+        // Apply a stricter step check (literal Const, not any add/sub) here
+        // to keep reduction accumulators from being misidentified as IVs.
+        for phi in &header_block.phi_nodes {
+            let mut outside_val = None;
+            let mut inside_val = None;
+
+            for (pred_block, val) in &phi.incoming {
+                if loop_info.blocks.contains(pred_block) {
+                    inside_val = Some(*val);
+                } else {
+                    outside_val = Some(*val);
+                }
+            }
+
+            if outside_val.is_some()
+                && inside_val.is_some()
+                && self.is_const_step_increment(function, loop_info, phi.dest, inside_val.unwrap())
+            {
+                return Some(phi.dest);
+            }
+        }
+
         None
+    }
+
+    /// Like `is_simple_increment` but additionally requires the non-IV operand
+    /// to be a literal `Const` defined anywhere in the function. This keeps
+    /// reduction accumulators (`sum = sum + x`, where `x` is loop-variant)
+    /// from being misidentified as induction variables.
+    fn is_const_step_increment(
+        &self,
+        function: &IrFunction,
+        loop_info: &NaturalLoop,
+        original: IrId,
+        updated: IrId,
+    ) -> bool {
+        for block_id in &loop_info.blocks {
+            if let Some(block) = function.cfg.blocks.get(block_id) {
+                for inst in &block.instructions {
+                    if let IrInstruction::BinOp {
+                        dest,
+                        op: BinaryOp::Add | BinaryOp::Sub,
+                        left,
+                        right,
+                    } = inst
+                    {
+                        if *dest == updated {
+                            let other = if *left == original {
+                                Some(*right)
+                            } else if *right == original {
+                                Some(*left)
+                            } else {
+                                None
+                            };
+                            if let Some(other_id) = other {
+                                if Self::is_const_definition(function, other_id) {
+                                    return true;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    fn is_const_definition(function: &IrFunction, id: IrId) -> bool {
+        for block in function.cfg.blocks.values() {
+            for inst in &block.instructions {
+                if let IrInstruction::Const { dest, .. } = inst {
+                    if *dest == id {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
     }
 
     /// Check if `updated` is `original + constant` within the loop
