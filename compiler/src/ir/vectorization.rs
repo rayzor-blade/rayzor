@@ -1605,6 +1605,10 @@ impl OptimizationPass for LoopVectorizationPass {
     }
 
     fn run_on_function(&mut self, function: &mut IrFunction) -> OptimizationResult {
+        // Some upstream passes mutate terminators without keeping cached
+        // predecessor lists in sync; loop analysis depends on accurate
+        // predecessors so refresh before computing the loop nest.
+        function.cfg.recompute_predecessors();
         let domtree = DominatorTree::compute(function);
         let loop_nest = LoopNestInfo::analyze(function, &domtree);
 
