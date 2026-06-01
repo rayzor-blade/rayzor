@@ -273,6 +273,33 @@ impl IrControlFlowGraph {
         }
     }
 
+    /// Recompute all predecessor lists from scratch by walking every block's terminator.
+    ///
+    /// Some optimization passes mutate block terminators (e.g. branch redirection,
+    /// dead-code elimination, block splitting) without keeping the cached
+    /// IrBasicBlock::predecessors lists in sync. Loop analysis depends on
+    /// accurate predecessor information to identify loop bodies and exit edges;
+    /// stale predecessors cause find_loop_blocks to truncate the body and
+    /// find_exit_blocks to mis-flag in-body branches as exits.
+    pub fn recompute_predecessors(&mut self) {
+        for block in self.blocks.values_mut() {
+            block.predecessors.clear();
+        }
+        // Collect (from, to) edges first to avoid borrow conflicts.
+        let edges: Vec<(IrBlockId, IrBlockId)> = self
+            .blocks
+            .iter()
+            .flat_map(|(from, block)| block.successors().into_iter().map(move |to| (*from, to)))
+            .collect();
+        for (from, to) in edges {
+            if let Some(to_block) = self.blocks.get_mut(&to) {
+                if !to_block.predecessors.contains(&from) {
+                    to_block.predecessors.push(from);
+                }
+            }
+        }
+    }
+
     /// Verify CFG integrity
     pub fn verify(&self) -> Result<(), String> {
         // Check entry block exists
