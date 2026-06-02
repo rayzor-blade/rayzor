@@ -301,6 +301,66 @@ pub fn axpy_slice(r: &mut [f32], alpha: f32, b: &[f32]) {
     }
 }
 
+/// Horizontal dot product of two equal-length F32 slices.
+/// NEON path: 4-wide vfmaq_f32 accumulation, vaddvq_f32 horizontal reduce.
+/// Tail (len % 4 != 0) handled with scalar fallback.
+/// Single-rounding FMA matches scalar a*b+c order; expected byte-exact
+/// vs scalar reduction when len is a multiple of 4. For ragged lengths
+/// the partial-tail accumulation order is identical (rolling sum).
+#[inline]
+pub fn dot_slice_f32(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let len = a.len();
+
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        use std::arch::aarch64::*;
+        let mut acc = vdupq_n_f32(0.0);
+        let chunks = len / 4;
+        for i in 0..chunks {
+            let va = vld1q_f32(a.as_ptr().add(i * 4));
+            let vb = vld1q_f32(b.as_ptr().add(i * 4));
+            acc = vfmaq_f32(acc, va, vb);
+        }
+        let mut sum = vaddvq_f32(acc);
+        for i in (chunks * 4)..len {
+            sum += a[i] * b[i];
+        }
+        return sum;
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        use std::arch::x86_64::*;
+        let mut acc = _mm_setzero_ps();
+        let chunks = len / 4;
+        for i in 0..chunks {
+            let va = _mm_loadu_ps(a.as_ptr().add(i * 4));
+            let vb = _mm_loadu_ps(b.as_ptr().add(i * 4));
+            acc = _mm_add_ps(acc, _mm_mul_ps(va, vb));
+        }
+        // horizontal sum of acc
+        let acc_hi = _mm_movehl_ps(acc, acc);
+        let acc_sum = _mm_add_ps(acc, acc_hi);
+        let acc_lo = _mm_shuffle_ps(acc_sum, acc_sum, 1);
+        let scalar_lane = _mm_add_ss(acc_sum, acc_lo);
+        let mut sum = _mm_cvtss_f32(scalar_lane);
+        for i in (chunks * 4)..len {
+            sum += a[i] * b[i];
+        }
+        return sum;
+    }
+
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        let mut sum = 0.0f32;
+        for i in 0..len {
+            sum += a[i] * b[i];
+        }
+        sum
+    }
+}
+
 /// r[i] = a[i] - c (broadcast scalar subtract).
 #[inline(always)]
 pub fn sub_const_slice(r: &mut [f32], a: &[f32], c: f32) {

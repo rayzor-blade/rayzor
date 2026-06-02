@@ -3170,10 +3170,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_t(a_ptr: i64, b_ptr: i64) -> i64 {
             let a_row = std::slice::from_raw_parts(a_data.add(i * a_strides[0]), k);
             for j in 0..n {
                 let b_row = std::slice::from_raw_parts(b_data.add(j * b_strides[0]), k);
-                let mut sum = 0.0f32;
-                for p in 0..k {
-                    sum += a_row[p] * b_row[p];
-                }
+                let sum = crate::tensor_simd::dot_slice_f32(a_row, b_row);
                 *r_data.add(i * n + j) = sum;
             }
         }
@@ -3276,10 +3273,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_t_threaded(
                 let a_row = std::slice::from_raw_parts(a_data.add(i * a_row_stride), k);
                 for j in 0..n {
                     let b_row = std::slice::from_raw_parts(b_data.add(j * b_row_stride), k);
-                    let mut sum = 0.0f32;
-                    for p in 0..k {
-                        sum += a_row[p] * b_row[p];
-                    }
+                    let sum = crate::tensor_simd::dot_slice_f32(a_row, b_row);
                     *r_data.add(i * n + j) = sum;
                 }
             }
@@ -3323,10 +3317,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_t_threaded(
                     let a_row = std::slice::from_raw_parts(a_f.add(i * a_row_stride), k_dim);
                     for j in 0..n_dim {
                         let b_row = std::slice::from_raw_parts(b_f.add(j * b_row_stride), k_dim);
-                        let mut sum = 0.0f32;
-                        for p in 0..k_dim {
-                            sum += a_row[p] * b_row[p];
-                        }
+                        let sum = crate::tensor_simd::dot_slice_f32(a_row, b_row);
                         *c_f.add(i * n_dim + j) = sum;
                     }
                 }
