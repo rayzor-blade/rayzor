@@ -3199,6 +3199,161 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_t(a_ptr: i64, b_ptr: i64) -> i64 {
     result
 }
 
+/// Threaded variant of `rayzor_tensor_matmul_t`. Same `[M, K] @ [N, K] -> [M, N]`
+/// contract; same scalar dot-product kernel per `(i, j)` cell so the
+/// floating-point reduction order is byte-identical to the sequential symbol.
+/// Parallelism only fans out across the `M` (output-row) axis — each output
+/// row's `k` reduction stays on a single worker, so workers never share a
+/// partial sum.
+///
+/// `threads`: `0` selects the auto count (6, mirroring `bmm_threaded` /
+/// `matmulXTQThreaded` — the empirical sweet spot on M1 Pro), `1` short-circuits
+/// to the sequential fast path, otherwise clamped to `min(threads, 64)`. When
+/// `M` is below `MIN_PARALLEL_ROWS` we skip fork/join overhead and inline the
+/// sequential body.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_matmul_t_threaded(
+    a_ptr: i64,
+    b_ptr: i64,
+    threads: i64,
+) -> i64 {
+    if a_ptr == 0 || b_ptr == 0 {
+        return 0;
+    }
+    let a = &*(a_ptr as *const RayzorTensor);
+    let b = &*(b_ptr as *const RayzorTensor);
+
+    if a.ndim != 2 || b.ndim != 2 || a.dtype != b.dtype {
+        return 0;
+    }
+
+    let a_shape = std::slice::from_raw_parts(a.shape, 2);
+    let b_shape = std::slice::from_raw_parts(b.shape, 2);
+    let m = a_shape[0];
+    let k = a_shape[1];
+    let n = b_shape[0];
+
+    if k != b_shape[1] {
+        return 0;
+    }
+
+    let out_shape = [m, n];
+    let result = alloc_tensor(&out_shape, a.dtype, Some(0.0));
+    if result == 0 {
+        return 0;
+    }
+
+    let r = &*(result as *const RayzorTensor);
+    let a_strides = std::slice::from_raw_parts(a.strides, 2);
+    let b_strides = std::slice::from_raw_parts(b.strides, 2);
+    let dtype = a.dtype;
+    let a_row_stride = a_strides[0];
+    let a_col_stride = a_strides[1];
+    let b_row_stride = b_strides[0];
+    let b_col_stride = b_strides[1];
+    let f32_contig = dtype == DTYPE_F32 && a_col_stride == 1 && b_col_stride == 1;
+
+    let auto_threads: usize = 6;
+    let mut t = if threads > 0 {
+        (threads as usize).min(64)
+    } else {
+        auto_threads
+    };
+    if t > m {
+        t = m.max(1);
+    }
+
+    // Sequential fast path: skip fork/join when work is too small to amortize.
+    // ~64 rows is the empirical break-even on M1 Pro with parallel_rows spawn
+    // cost (mirrors `rayzor_tensor_bmm_threaded`).
+    const MIN_PARALLEL_ROWS: usize = 64;
+    if t <= 1 || m < MIN_PARALLEL_ROWS {
+        if f32_contig {
+            let a_data = a.data as *const f32;
+            let b_data = b.data as *const f32;
+            let r_data = r.data as *mut f32;
+            for i in 0..m {
+                let a_row = std::slice::from_raw_parts(a_data.add(i * a_row_stride), k);
+                for j in 0..n {
+                    let b_row = std::slice::from_raw_parts(b_data.add(j * b_row_stride), k);
+                    let mut sum = 0.0f32;
+                    for p in 0..k {
+                        sum += a_row[p] * b_row[p];
+                    }
+                    *r_data.add(i * n + j) = sum;
+                }
+            }
+        } else {
+            for i in 0..m {
+                for j in 0..n {
+                    let mut sum = 0.0f32;
+                    for p in 0..k {
+                        let a_off = i * a_row_stride + p * a_col_stride;
+                        let b_off = j * b_row_stride + p * b_col_stride;
+                        let a_val = load_f32_at(a.data, a_off, dtype);
+                        let b_val = load_f32_at(b.data, b_off, dtype);
+                        sum += a_val * b_val;
+                    }
+                    store_f32_at(r.data, i * n + j, dtype, sum);
+                }
+            }
+        }
+        return result;
+    }
+
+    let a_data = a.data as usize;
+    let b_data = b.data as usize;
+    let r_data = r.data as usize;
+    let m_dim = m;
+    let n_dim = n;
+    let k_dim = k;
+
+    crate::worker_pool::global().parallel_rows(m_dim, t, move |lo, hi| {
+        // SAFETY: each worker writes Y[i, 0..N] for the `i` rows in its band;
+        // bands are disjoint so there is no aliasing on the output. Inputs A
+        // and B are read-only. The scalar reduction per (i, j) stays inside a
+        // single worker, so the f32 accumulation order matches the sequential
+        // `rayzor_tensor_matmul_t` body byte-for-byte.
+        unsafe {
+            if f32_contig {
+                let a_f = a_data as *const f32;
+                let b_f = b_data as *const f32;
+                let c_f = r_data as *mut f32;
+                for i in lo..hi {
+                    let a_row = std::slice::from_raw_parts(a_f.add(i * a_row_stride), k_dim);
+                    for j in 0..n_dim {
+                        let b_row = std::slice::from_raw_parts(b_f.add(j * b_row_stride), k_dim);
+                        let mut sum = 0.0f32;
+                        for p in 0..k_dim {
+                            sum += a_row[p] * b_row[p];
+                        }
+                        *c_f.add(i * n_dim + j) = sum;
+                    }
+                }
+            } else {
+                let a_ptr = a_data as *const u8;
+                let b_ptr = b_data as *const u8;
+                let r_ptr = r_data as *mut u8;
+                for i in lo..hi {
+                    for j in 0..n_dim {
+                        let mut sum = 0.0f32;
+                        for p in 0..k_dim {
+                            let a_off = i * a_row_stride + p * a_col_stride;
+                            let b_off = j * b_row_stride + p * b_col_stride;
+                            let a_val = load_f32_at(a_ptr, a_off, dtype);
+                            let b_val = load_f32_at(b_ptr, b_off, dtype);
+                            sum += a_val * b_val;
+                        }
+                        store_f32_at(r_ptr, i * n_dim + j, dtype, sum);
+                    }
+                }
+            }
+        }
+    });
+
+    result
+}
+
 // ============================================================================
 // Interop
 // ============================================================================

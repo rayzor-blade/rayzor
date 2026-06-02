@@ -332,6 +332,20 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
         .build();
     builder.mark_as_extern(func_id);
 
+    // matmul_t_threaded: (a, b, threads) -> i64. Threaded 2-D matmul with
+    // transposed RHS. Drives the default `Tensor.matmulT` lowering — threads=0
+    // selects the auto worker count. Byte-exact f32 vs the sequential
+    // `rayzor_tensor_matmul_t` (reduction stays single-threaded per output row).
+    let func_id = builder
+        .begin_function("rayzor_tensor_matmul_t_threaded")
+        .param("a", i64_ty.clone())
+        .param("b", i64_ty.clone())
+        .param("threads", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
     // expand_kv_heads_axis1: (src, repeats) -> i64. GQA KV-head expand.
     let func_id = builder
         .begin_function("rayzor_tensor_expand_kv_heads_axis1_f32")
@@ -968,12 +982,39 @@ build_binop_i64!(build_tensor_sub, "Tensor_sub", "rayzor_tensor_sub");
 build_binop_i64!(build_tensor_mul, "Tensor_mul", "rayzor_tensor_mul");
 build_binop_i64!(build_tensor_div, "Tensor_div", "rayzor_tensor_div");
 build_binop_i64!(build_tensor_matmul, "Tensor_matmul", "rayzor_tensor_matmul");
-build_binop_i64!(
-    build_tensor_matmul_t,
-    "Tensor_matmulT",
-    "rayzor_tensor_matmul_t"
-);
 build_binop_i64!(build_tensor_bmm, "Tensor_bmm", "rayzor_tensor_bmm");
+
+/// Tensor_matmulT(self: i64, other: i64) -> i64
+/// Routes to the threaded backend (`rayzor_tensor_matmul_t_threaded`) with
+/// `threads=0` so the runtime picks the auto worker count. The sequential
+/// `rayzor_tensor_matmul_t` symbol stays available for external callers; this
+/// wrapper preserves the same 2-arg `matmulT` Haxe surface while enabling
+/// threading transparently. The threaded kernel is byte-exact vs the
+/// sequential one for F32 (per-row reduction stays single-threaded).
+fn build_tensor_matmul_t(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let func_id = builder
+        .begin_function("Tensor_matmulT")
+        .param("self", i64_ty.clone())
+        .param("other", i64_ty.clone())
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let self_val = builder.get_param(0);
+    let other = builder.get_param(1);
+    let threads = builder.const_i64(0);
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_matmul_t_threaded")
+        .expect("rayzor_tensor_matmul_t_threaded not found");
+    let result = builder
+        .call(extern_id, vec![self_val, other, threads])
+        .unwrap();
+    builder.ret(Some(result));
+}
 
 /// Tensor_expand_kv_heads_axis1(self: i64, repeats: i64) -> i64
 /// GQA KV-head expansion: src [seqK, num_kv_heads, head_dim] → out
