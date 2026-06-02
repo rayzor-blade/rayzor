@@ -209,6 +209,15 @@ extern class Tensor {
     public function bmm(other:Tensor):Tensor;
 
     /**
+     * Threaded batched matrix multiply. `threads = 0` picks auto fanout (6),
+     * `threads = 1` falls through to sequential bmm. Output is byte-exact
+     * with `bmm` (each row's dot product runs in a single thread; no
+     * cross-thread reduction).
+     */
+    @:native("tensor_bmm_threaded")
+    public function bmmThreaded(other:Tensor, threads:Int):Tensor;
+
+    /**
      * Fill the upper triangle of the last two dims with `-inf` so a
      * subsequent softmax row reads those positions as zero probability.
      * `positionOffset` shifts the diagonal — 0 for prefill, positive

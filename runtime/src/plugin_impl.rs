@@ -1874,6 +1874,10 @@ register_symbol!(
 // lives in nue so users can fork it (alibi, sliding window, MoE routing).
 register_symbol!("rayzor_tensor_bmm", crate::tensor::rayzor_tensor_bmm);
 register_symbol!(
+    "rayzor_tensor_bmm_threaded",
+    crate::tensor::rayzor_tensor_bmm_threaded
+);
+register_symbol!(
     "rayzor_tensor_causal_mask_",
     crate::tensor::rayzor_tensor_causal_mask_
 );
