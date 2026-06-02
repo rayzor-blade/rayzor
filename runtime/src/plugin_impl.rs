@@ -1878,6 +1878,10 @@ register_symbol!(
     crate::tensor::rayzor_tensor_bmm_threaded
 );
 register_symbol!(
+    "rayzor_tensor_expand_kv_heads_axis1_f32",
+    crate::tensor::rayzor_tensor_expand_kv_heads_axis1_f32
+);
+register_symbol!(
     "rayzor_tensor_causal_mask_",
     crate::tensor::rayzor_tensor_causal_mask_
 );

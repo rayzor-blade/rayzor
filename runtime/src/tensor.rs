@@ -1211,6 +1211,75 @@ pub unsafe extern "C" fn rayzor_tensor_broadcast_repeat_0_f32(
     0
 }
 
+/// GQA KV-head expansion. Source `src` has shape `[seqK, num_kv_heads, head_dim]`
+/// (KV-heads on axis 1, as produced by KVCache views). Output has shape
+/// `[num_kv_heads * repeats, seqK, head_dim]` with the axis-0/axis-1 swap
+/// baked in, such that `out[qh, j, d] = src[j, qh / repeats, d]`. Equivalent
+/// to `src.permute([1,0,2]).broadcastRepeat0(repeats)` but a single strided
+/// memcpy per `(qh, j)` pair instead of an O(qh * j * d) element-walk.
+///
+/// Allocates and returns a fresh F32 tensor; returns 0 on null pointer, dtype
+/// mismatch (F32 only), shape mismatch (ndim != 3), or `repeats <= 0`.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_expand_kv_heads_axis1_f32(
+    src_ptr: i64,
+    repeats: i64,
+) -> i64 {
+    if src_ptr == 0 || repeats <= 0 {
+        return 0;
+    }
+    let src = &*(src_ptr as *const RayzorTensor);
+    if src.dtype != DTYPE_F32 || src.ndim != 3 {
+        return 0;
+    }
+
+    let src_shape = std::slice::from_raw_parts(src.shape, 3);
+    let src_strides = std::slice::from_raw_parts(src.strides, 3);
+    let seq_k = src_shape[0];
+    let num_kv_heads = src_shape[1];
+    let head_dim = src_shape[2];
+    let repeats = repeats as usize;
+    let num_q_heads = num_kv_heads * repeats;
+
+    // Innermost dim must be contiguous so each (qh, j) write is a single
+    // memcpy. If src was produced by a non-contiguous view (permute /
+    // transposeLast2), fall through to the scalar Haxe path by returning 0.
+    if src_strides[2] != 1 {
+        return 0;
+    }
+
+    let out_shape = [num_q_heads, seq_k, head_dim];
+    let result = alloc_tensor(&out_shape, DTYPE_F32, Some(0.0));
+    if result == 0 {
+        return 0;
+    }
+    let dst = &*(result as *const RayzorTensor);
+
+    let src_stride_j = src_strides[0]; // elements between j and j+1
+    let src_stride_kvh = src_strides[1]; // elements between kvh and kvh+1
+                                         // Output is freshly allocated contiguous row-major:
+                                         //   dst[qh, j, d] at offset qh*seq_k*head_dim + j*head_dim + d
+    let row_bytes = head_dim * 4;
+    let dst_row_stride_elements = seq_k * head_dim;
+
+    for qh in 0..num_q_heads {
+        let kvh = qh / repeats;
+        let dst_head_off = qh * dst_row_stride_elements;
+        let src_head_off = kvh * src_stride_kvh;
+        for j in 0..seq_k {
+            let src_off = src_head_off + j * src_stride_j;
+            let dst_off = dst_head_off + j * head_dim;
+            std::ptr::copy_nonoverlapping(
+                src.data.add(src_off * 4),
+                dst.data.add(dst_off * 4),
+                row_bytes,
+            );
+        }
+    }
+
+    result
+}
+
 // ============================================================================
 // Reshape / Transpose
 // ============================================================================
