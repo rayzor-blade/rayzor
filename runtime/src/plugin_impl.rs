@@ -1955,6 +1955,10 @@ register_symbol!(
     "rayzor_tensor_matmul_qkv_qt_t_f32_threaded",
     crate::quant::rayzor_tensor_matmul_qkv_qt_t_f32_threaded
 );
+register_symbol!(
+    "rayzor_tensor_gather_rows_q6_k",
+    crate::quant::rayzor_tensor_gather_rows_q6_k
+);
 register_symbol!("rayzor_qtensor_free", crate::quant::rayzor_qtensor_free);
 register_symbol!("rayzor_qtensor_clone", crate::quant::rayzor_qtensor_clone);
 register_symbol!(

@@ -12,6 +12,7 @@ import nue.transformer.KVCache;
 import nue.transformer.GQAttention;
 import nue.transformer.TransformerBlock;
 import rayzor.ds.Tensor;
+import rayzor.ds.QTensor;
 import rayzor.ds.DType;
 
 /**
@@ -64,11 +65,25 @@ class LlamaArch implements ArchBuilder {
         var dtype = inferDType(weights, "token_embd.weight");
         var rope = new RoPE(meta.headDim, meta.maxSeqLen, meta.ropeBase);
 
-        // Embedding *must* be F32 — the gather kernel doesn't accept QTensors.
-        // GGUF Q4_K_M embeds are rare in practice; if encountered, dequant.
-        var embedTensor = takeWeightOrDequant(weights, "token_embd.weight");
-        var embed = new Embedding(embedTensor,
-            meta.vocabSize, meta.hiddenSize, "weight");
+        // Phase 4b: the embedding stays Q6_K-native — `Embedding.fromQuant`
+        // routes lookups through `QTensor.gatherRowsQ6K`, dequantising only
+        // the per-step token rows instead of the full `[vocab, hidden]`
+        // table. Byte-identical to the prior eager-dequant + F32 gather
+        // path because both share the Q6_K block decoder. Falls back to
+        // F32 when the GGUF stored `token_embd.weight` as F32 (older
+        // Llama-2 / Mistral checkpoints).
+        var embed:Embedding;
+        if (weights.isQuantised("token_embd.weight")) {
+            var qEmbed = weights.getQuant("token_embd.weight");
+            if (qEmbed == null) {
+                throw "nue.arch.Llama: missing quant weight 'token_embd.weight'";
+            }
+            embed = Embedding.fromQuant(qEmbed,
+                meta.vocabSize, meta.hiddenSize, "weight");
+        } else {
+            embed = new Embedding(takeWeight(weights, "token_embd.weight"),
+                meta.vocabSize, meta.hiddenSize, "weight");
+        }
 
         var blocks:Array<Module> = [];
         for (i in 0...meta.numLayers) {
@@ -83,11 +98,20 @@ class LlamaArch implements ArchBuilder {
         // LM head — tied with embed weight when the metadata says so OR
         // when no separate output weight exists (e.g. Llama 3.2 1B's GGUF
         // omits both the `tie_word_embeddings` flag and `output.weight`,
-        // implying tied embeddings).
-        var lmHead = if (meta.tieWordEmbeddings || !weights.exists("output.weight"))
-            new Linear(embed.embedTable(), null, "weight")
-        else
-            buildLinear(weights, "output.weight", null);
+        // implying tied embeddings). When the embed is Q6_K-backed we
+        // build the LM head via `Linear.fromQuant` so the same QTensor
+        // is shared (no F32 weight copy); when the embed is F32 we wrap
+        // via the standard `Linear` constructor.
+        var lmHead:Linear;
+        if (meta.tieWordEmbeddings || !weights.exists("output.weight")) {
+            if (embed.qweight != null) {
+                lmHead = Linear.fromQuant(embed.qweight, null, "weight");
+            } else {
+                lmHead = new Linear(embed.weight, null, "weight");
+            }
+        } else {
+            lmHead = buildLinear(weights, "output.weight", null);
+        }
 
         return new LlamaModel(meta, embed, blocks, outputNorm, lmHead, rope);
     }

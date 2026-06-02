@@ -8,7 +8,7 @@
 /// the Haxe-side type is automatically lowered to i64 by the existing
 /// argument plumbing.
 use crate::ir::mir_builder::MirBuilder;
-use crate::ir::{CallingConvention, IrType};
+use crate::ir::{CallingConvention, InlineHint, IrType};
 
 /// Build all QTensor type functions.
 pub fn build_qtensor_types(builder: &mut MirBuilder) {
@@ -30,6 +30,7 @@ pub fn build_qtensor_types(builder: &mut MirBuilder) {
     build_qtensor_matmul_xtq_chunk(builder);
     build_qtensor_matmul_xtq_threaded(builder);
     build_qtensor_fused_qkv_matmul(builder);
+    build_qtensor_gather_rows_q6_k(builder);
     build_qtensor_free(builder);
 }
 
@@ -179,6 +180,21 @@ fn declare_qtensor_externs(builder: &mut MirBuilder) {
         .param("out_q_tensor", i64_ty.clone())
         .param("out_k_tensor", i64_ty.clone())
         .param("out_v_tensor", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // gather_rows_q6_k: (qt, indices_ptr, n_indices) -> i64
+    // Row-wise dequant of a Q6_K weight matrix into a fresh f32 Tensor.
+    // Used by nue.Embedding to dequant only the rows for the active
+    // token IDs instead of materialising the whole `[vocab, hidden]`
+    // matrix every forward pass.
+    let func_id = builder
+        .begin_function("rayzor_tensor_gather_rows_q6_k")
+        .param("qt", i64_ty.clone())
+        .param("indices_ptr", i64_ty.clone())
+        .param("n_indices", i64_ty.clone())
         .returns(i64_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -684,6 +700,49 @@ fn build_qtensor_fused_qkv_matmul(builder: &mut MirBuilder) {
     let _ = builder.call(push_func, vec![arr_void, out_v_val]);
 
     builder.ret(Some(arr_void));
+}
+
+/// QTensor_gatherRowsQ6K(self, indices_arr) -> i64
+///
+/// Unpacks the `HaxeArray<Int>` `indices` into (data_ptr, len) and forwards
+/// to `rayzor_tensor_gather_rows_q6_k`. The runtime checks that `self`'s
+/// scheme is Q6_K and that `cols` is a whole number of 256-element super-
+/// blocks; returns 0 on mismatch.
+///
+/// Mirrors `Tensor_gather_rows` (tensor.rs) for the F32 case; the only
+/// difference is the receiver is a Q6_K QTensor.
+fn build_qtensor_gather_rows_q6_k(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let func_id = builder
+        .begin_function("QTensor_gatherRowsQ6K")
+        .param("self", i64_ty.clone())
+        .param("indices_arr", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_val = builder.get_param(0);
+    let indices_arr = builder.get_param(1);
+
+    // HaxeArray layout: { ptr (offset 0), len (offset 8), ... }
+    // Inline the same unpack used by tensor.rs::extract_array_ptr_len
+    // (that helper is private to tensor.rs).
+    let data_ptr = builder.load(indices_arr, i64_ty.clone());
+    let eight = builder.const_i64(8);
+    let len_addr = builder.bin_op(crate::ir::BinaryOp::Add, indices_arr, eight);
+    let len = builder.load(len_addr, i64_ty.clone());
+
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_gather_rows_q6_k")
+        .expect("rayzor_tensor_gather_rows_q6_k not found");
+    let result = builder
+        .call(extern_id, vec![self_val, data_ptr, len])
+        .unwrap();
+    builder.ret(Some(result));
 }
 
 fn build_qtensor_free(builder: &mut MirBuilder) {
