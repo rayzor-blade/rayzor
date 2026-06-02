@@ -1094,6 +1094,123 @@ pub unsafe extern "C" fn rayzor_tensor_set(
     store_f32_at(t.data, off, t.dtype, value as f32);
 }
 
+/// Bulk copy `src.shape[0]` contiguous rows from `src` into `dst` starting at
+/// row index `dst_row_offset` along axis 0. Both tensors must be F32 and must
+/// share the same trailing-axis sizes (`shape[1..]`). Returns 0 on success,
+/// -1 on null pointer, dtype mismatch, shape mismatch, or out-of-bounds.
+///
+/// This is the bulk-row sibling of `rayzor_tensor_set`, intended for code that
+/// concatenates / appends row-blocks (KV-cache appends, sequence-dim grows).
+/// Falls back to scalar set semantics conceptually but skips the index-walk
+/// and the per-element `store_f32_at` dispatch, so it's ~headroom faster on
+/// large blocks while still being a single memcpy.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_append_along_0_f32(
+    dst_ptr: i64,
+    src_ptr: i64,
+    dst_row_offset: i64,
+) -> i64 {
+    if dst_ptr == 0 || src_ptr == 0 {
+        return -1;
+    }
+    let dst = &*(dst_ptr as *const RayzorTensor);
+    let src = &*(src_ptr as *const RayzorTensor);
+
+    if dst.dtype != DTYPE_F32 || src.dtype != DTYPE_F32 {
+        return -1;
+    }
+    if dst.ndim == 0 || src.ndim == 0 || dst.ndim != src.ndim {
+        return -1;
+    }
+
+    let dst_shape = std::slice::from_raw_parts(dst.shape, dst.ndim);
+    let src_shape = std::slice::from_raw_parts(src.shape, src.ndim);
+
+    // Trailing axes must match (shape[1..]) so the row layout is identical.
+    for i in 1..dst.ndim {
+        if dst_shape[i] != src_shape[i] {
+            return -1;
+        }
+    }
+
+    // Row stride in elements = product of shape[1..]. Equals dst.strides[0]
+    // for contiguous f32, but compute from shape so this is safe regardless.
+    let row_stride_elements: usize = dst_shape[1..].iter().product();
+    let n_rows_to_copy = src_shape[0];
+
+    if dst_row_offset < 0 {
+        return -1;
+    }
+    let dst_row_off = dst_row_offset as usize;
+    if dst_row_off + n_rows_to_copy > dst_shape[0] {
+        return -1;
+    }
+
+    let byte_count = n_rows_to_copy * row_stride_elements * 4;
+    let dst_offset_bytes = dst_row_off * row_stride_elements * 4;
+
+    std::ptr::copy_nonoverlapping(src.data, dst.data.add(dst_offset_bytes), byte_count);
+    0
+}
+
+/// Broadcast `src` along axis 0 by repeating each row `repeats` times,
+/// writing into `dst`. Both tensors must be F32 and must share trailing-axis
+/// sizes (`shape[1..]`). `dst.shape[0]` must be at least
+/// `src.shape[0] * repeats`. Returns 0 on success, -1 on validation failure.
+///
+/// Layout: src row i is written to dst rows `i*repeats .. i*repeats+repeats`,
+/// which matches numpy's `np.repeat(x, repeats, axis=0)` (KV-head GQA expand
+/// convention), not `np.tile`.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_broadcast_repeat_0_f32(
+    dst_ptr: i64,
+    src_ptr: i64,
+    repeats: i64,
+) -> i64 {
+    if dst_ptr == 0 || src_ptr == 0 {
+        return -1;
+    }
+    let dst = &*(dst_ptr as *const RayzorTensor);
+    let src = &*(src_ptr as *const RayzorTensor);
+
+    if dst.dtype != DTYPE_F32 || src.dtype != DTYPE_F32 {
+        return -1;
+    }
+    if dst.ndim == 0 || src.ndim == 0 || dst.ndim != src.ndim {
+        return -1;
+    }
+    if repeats <= 0 {
+        return -1;
+    }
+
+    let dst_shape = std::slice::from_raw_parts(dst.shape, dst.ndim);
+    let src_shape = std::slice::from_raw_parts(src.shape, src.ndim);
+
+    for i in 1..dst.ndim {
+        if dst_shape[i] != src_shape[i] {
+            return -1;
+        }
+    }
+
+    let repeats = repeats as usize;
+    if src_shape[0].saturating_mul(repeats) > dst_shape[0] {
+        return -1;
+    }
+
+    let row_size_elements: usize = src_shape[1..].iter().product();
+    let row_size_bytes = row_size_elements * 4;
+
+    for i in 0..src_shape[0] {
+        let src_row = src.data.add(i * row_size_bytes);
+        for r in 0..repeats {
+            let dst_row_idx = i * repeats + r;
+            let dst_row = dst.data.add(dst_row_idx * row_size_bytes);
+            std::ptr::copy_nonoverlapping(src_row, dst_row, row_size_bytes);
+        }
+    }
+    0
+}
+
 // ============================================================================
 // Reshape / Transpose
 // ============================================================================

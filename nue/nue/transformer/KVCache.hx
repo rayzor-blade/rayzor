@@ -48,23 +48,27 @@ class KVCache {
      * are tensors of shape `[n, num_kv_heads, head_dim]`. Returns the new
      * currentLen.
      *
-     * Per-element copy into the pre-allocated slot. A future revision can
-     * specialise this to a single slice-write once Tensor exposes a strided
-     * in-place copy primitive.
+     * Uses `tensor.appendAlong0`, a single bulk-row memcpy primitive: this
+     * is bit-exact equivalent to the triple-loop `set/get` it replaces
+     * (the runtime's row-stride matches `numKvHeads * headDim` exactly for
+     * the contiguous F32 caches we allocate in `new()`, and `newKeys` /
+     * `newValues` come straight out of `RoPE.apply` which produces a fresh
+     * contiguous F32 tensor with matching trailing dims). On `-1` (the
+     * runtime's only failure signal — dtype/shape/out-of-bounds) we
+     * `throw` rather than silently mask the bug.
      */
     public function append(newKeys:Tensor, newValues:Tensor):Int {
         var n = newKeys.shape()[0];
         if (currentLen + n > maxSeqLen) {
             throw "KVCache overflow: " + (currentLen + n) + " > " + maxSeqLen;
         }
-        // Write rows currentLen..currentLen+n.
-        for (i in 0...n) {
-            for (h in 0...numKvHeads) {
-                for (d in 0...headDim) {
-                    keys.set([currentLen + i, h, d], newKeys.get([i, h, d]));
-                    values.set([currentLen + i, h, d], newValues.get([i, h, d]));
-                }
-            }
+        // Bulk-memcpy newKeys/newValues into rows currentLen..currentLen+n
+        // of the pre-allocated cache. Equivalent to the per-element
+        // set/get loop but ~headroom faster on long prefills.
+        var krc = keys.appendAlong0(newKeys, currentLen);
+        var vrc = values.appendAlong0(newValues, currentLen);
+        if (krc != 0 || vrc != 0) {
+            throw "KVCache.append failed (krc=" + krc + ", vrc=" + vrc + ")";
         }
         currentLen += n;
         return currentLen;
