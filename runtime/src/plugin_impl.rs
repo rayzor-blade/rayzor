@@ -1843,6 +1843,10 @@ register_symbol!(
     "rayzor_tensor_matmul_t",
     crate::tensor::rayzor_tensor_matmul_t
 );
+register_symbol!(
+    "rayzor_tensor_matmul_t_threaded",
+    crate::tensor::rayzor_tensor_matmul_t_threaded
+);
 
 // Rotary position embedding (RoPE) — transformer primitive (Phase 5)
 register_symbol!("rayzor_tensor_rope", crate::tensor::rayzor_tensor_rope);
