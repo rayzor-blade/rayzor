@@ -781,6 +781,22 @@ impl LoopVectorizationPass {
                     }
                 }
             }
+
+            // Same storage-form duality as find_induction_variable: Haxe-MIR
+            // stores phis in `phi_nodes`. Convert to the (val, pred_as_IrId)
+            // shape check_reduction_phi expects and run the same detection.
+            for phi in &header_block.phi_nodes {
+                let incoming: Vec<(IrId, IrId)> = phi
+                    .incoming
+                    .iter()
+                    .map(|(pred_block, val)| (*val, IrId::new(pred_block.as_u32())))
+                    .collect();
+                if let Some(reduction) =
+                    self.check_reduction_phi(function, loop_info, phi.dest, &incoming)
+                {
+                    reductions.push(reduction);
+                }
+            }
         }
 
         reductions
