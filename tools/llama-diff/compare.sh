@@ -94,7 +94,12 @@ RAYZOR_RAW="$OUT_DIR/rayzor.raw"
     cd "$LLAMA_CHAT_DIR"
     rm -rf .rayzor  # cold cache for deterministic JIT compile
     # Args: <gguf> [prompt] [max_tokens] [ctx] [temperature]
-    "$RAYZOR" run Main.hx -- "$GGUF" "$PROMPT" "$N" 4096 0.01
+    # RAYZOR_TIER=llvm opts into the LLVM Tier 3 backend (vs default Cranelift).
+    if [[ "${RAYZOR_TIER:-cranelift}" == "llvm" ]]; then
+        "$RAYZOR" run --llvm Main.hx -- "$GGUF" "$PROMPT" "$N" 4096 0.01
+    else
+        "$RAYZOR" run Main.hx -- "$GGUF" "$PROMPT" "$N" 4096 0.01
+    fi
 ) > "$RAYZOR_RAW" 2>&1
 sed -n '/^\[gen\] streaming/,/^\[done\]/{//!p;}' "$RAYZOR_RAW" \
     | sed '/^[[:space:]]*$/d' > "$RAYZOR_OUT"

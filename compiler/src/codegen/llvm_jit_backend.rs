@@ -4028,6 +4028,15 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                     .build_unreachable()
                     .map_err(|e| format!("Failed to build panic: {}", e))?;
             }
+
+            // Ownership diagnostics: hint-only on the LLVM backend.
+            // Cranelift lowers these to runtime liveness checks that panic
+            // on use-after-move (cranelift_backend.rs:2257-2287). The LLVM
+            // path treats them as no-ops per the variant comment at
+            // ir/instructions.rs:65 ("Backends may treat this as a hint /
+            // no-op"). The compile-time TAST ownership checker still
+            // catches the diagnostic-grade cases ahead of codegen.
+            IrInstruction::MarkMoved { .. } | IrInstruction::CheckLive { .. } => {}
         }
 
         Ok(())
