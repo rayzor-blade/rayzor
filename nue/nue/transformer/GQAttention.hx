@@ -106,7 +106,7 @@ class GQAttention implements Module {
         // kᵀ for matmul: swap the last two dims of the per-head 2-D matrix
         // so the inner product runs along headDim.
         var kT = kAllExpanded.transposeLast2(); // [numQHeads, headDim, cacheLen]
-        var scoresRaw = qByHead.bmm(kT);            // [numQHeads, seqQ, cacheLen]
+        var scoresRaw = qByHead.bmmThreaded(kT, 0);  // [numQHeads, seqQ, cacheLen]
         var scoresScaled = scoresRaw.scale(scale);
 
         // 5) Causal mask. Each query row i can only see keys
@@ -118,7 +118,7 @@ class GQAttention implements Module {
         var attn = scoresMasked.softmax();             // [numQHeads, seqQ, cacheLen]
 
         // 7) Context = attn @ V, per head.
-        var context = attn.bmm(vAllExpanded);    // [numQHeads, seqQ, headDim]
+        var context = attn.bmmThreaded(vAllExpanded, 0);  // [numQHeads, seqQ, headDim]
 
         // 8) Bring heads back to the row axis and flatten head/head_dim.
         var contextRowMajor = context.permute([1, 0, 2]); // [seqQ, numQHeads, headDim]

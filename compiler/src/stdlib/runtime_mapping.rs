@@ -3499,6 +3499,9 @@ impl StdlibMapping {
             // tensor.bmm(other: Tensor): Tensor   (batched 3-D matmul)
             map_method!(instance "rayzor_ds_Tensor", "bmm" => "Tensor_bmm", params: 1, mir_wrapper,
                 types: &[PtrVoid, PtrVoid] => PtrVoid),
+            // tensor.bmmThreaded(other: Tensor, threads: Int): Tensor
+            map_method!(instance "rayzor_ds_Tensor", "bmmThreaded" => "Tensor_bmm_threaded", params: 2, mir_wrapper,
+                types: &[PtrVoid, PtrVoid, I64] => PtrVoid),
             // tensor.causalMask_(positionOffset: Int): Tensor   (in-place; returns self)
             map_method!(instance "rayzor_ds_Tensor", "causalMask_" => "Tensor_causal_mask_", params: 1, mir_wrapper,
                 types: &[PtrVoid, I64] => PtrVoid),

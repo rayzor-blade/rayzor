@@ -2436,6 +2436,180 @@ pub unsafe extern "C" fn rayzor_tensor_bmm(a_ptr: i64, b_ptr: i64) -> i64 {
     result
 }
 
+/// Threaded variant of `rayzor_tensor_bmm`. Same `[batch, M, K] @ [batch, K, N]
+/// -> [batch, M, N]` contract; same stride-aware kernel for the
+/// `.permute` / `.transposeLast2` views the transformer attention path
+/// feeds in. Parallelises across the flattened `(batch, M)` row space so
+/// every worker writes a disjoint contiguous slab of the output.
+///
+/// `threads`: `0` selects the auto count (6, mirroring
+/// `matmulXTQThreaded` — empirically the sweet spot on M1 Pro), `1`
+/// short-circuits to the sequential fast path, otherwise clamped to
+/// `min(threads, 64)`. F32 only for now; other dtypes return `0`
+/// rather than silently falling through.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_bmm_threaded(a_ptr: i64, b_ptr: i64, threads: i64) -> i64 {
+    if a_ptr == 0 || b_ptr == 0 {
+        return 0;
+    }
+    let a = &*(a_ptr as *const RayzorTensor);
+    let b = &*(b_ptr as *const RayzorTensor);
+    if a.ndim != 3 || b.ndim != 3 || a.dtype != b.dtype {
+        return 0;
+    }
+    if a.dtype != DTYPE_F32 {
+        return 0;
+    }
+    let a_shape = std::slice::from_raw_parts(a.shape, 3);
+    let b_shape = std::slice::from_raw_parts(b.shape, 3);
+    let a_strides = std::slice::from_raw_parts(a.strides, 3);
+    let b_strides = std::slice::from_raw_parts(b.strides, 3);
+    let batch = a_shape[0];
+    let m = a_shape[1];
+    let k = a_shape[2];
+    let n = b_shape[2];
+    if b_shape[0] != batch || b_shape[1] != k {
+        return 0;
+    }
+    let out_shape = [batch, m, n];
+    let result = alloc_tensor(&out_shape, a.dtype, Some(0.0));
+    if result == 0 {
+        return 0;
+    }
+    let r = &*(result as *const RayzorTensor);
+    let dtype = a.dtype;
+
+    let a_b_stride = a_strides[0];
+    let a_m_stride = a_strides[1];
+    let a_k_stride = a_strides[2];
+    let b_b_stride = b_strides[0];
+    let b_k_stride = b_strides[1];
+    let b_n_stride = b_strides[2];
+
+    let auto_threads: usize = 6;
+    let total_rows = batch * m;
+    let mut t = if threads > 0 {
+        (threads as usize).min(64)
+    } else {
+        auto_threads
+    };
+    if t > total_rows {
+        t = total_rows.max(1);
+    }
+
+    // Sequential fast path: skip fork/join when work is too small to amortize.
+    // ~64 rows is the empirical break-even on M1 Pro with parallel_rows spawn
+    // cost (each worker needs >=~10 rows worth of FMA to dominate the join).
+    const MIN_PARALLEL_ROWS: usize = 64;
+    if t <= 1 || total_rows < MIN_PARALLEL_ROWS {
+        let a_contig_inner = a_k_stride == 1;
+        let b_contig_inner = b_n_stride == 1;
+        for batch_i in 0..batch {
+            let a_batch_off = batch_i * a_b_stride;
+            let b_batch_off = batch_i * b_b_stride;
+            let c_batch_off = batch_i * m * n;
+            if a_contig_inner && b_contig_inner {
+                let a_f = a.data as *const f32;
+                let b_f = b.data as *const f32;
+                let c_f = r.data as *mut f32;
+                for i in 0..m {
+                    let c_row_off = c_batch_off + i * n;
+                    let a_row_off = a_batch_off + i * a_m_stride;
+                    for p in 0..k {
+                        let a_ik = *a_f.add(a_row_off + p);
+                        let b_row_off = b_batch_off + p * b_k_stride;
+                        let c_slice = std::slice::from_raw_parts_mut(c_f.add(c_row_off), n);
+                        let b_slice = std::slice::from_raw_parts(b_f.add(b_row_off), n);
+                        crate::tensor_simd::axpy_slice(c_slice, a_ik, b_slice);
+                    }
+                }
+            } else {
+                for i in 0..m {
+                    for j in 0..n {
+                        let mut acc = 0.0f32;
+                        for p in 0..k {
+                            let av = load_f32_at(
+                                a.data,
+                                a_batch_off + i * a_m_stride + p * a_k_stride,
+                                dtype,
+                            );
+                            let bv = load_f32_at(
+                                b.data,
+                                b_batch_off + p * b_k_stride + j * b_n_stride,
+                                dtype,
+                            );
+                            acc += av * bv;
+                        }
+                        store_f32_at(r.data, c_batch_off + i * n + j, dtype, acc);
+                    }
+                }
+            }
+        }
+        return result;
+    }
+
+    let a_data = a.data as usize;
+    let b_data = b.data as usize;
+    let r_data = r.data as usize;
+    let m_dim = m;
+    let n_dim = n;
+    let k_dim = k;
+    let a_contig_inner = a_k_stride == 1;
+    let b_contig_inner = b_n_stride == 1;
+
+    crate::worker_pool::global().parallel_rows(total_rows, t, move |lo, hi| {
+        // SAFETY: each worker writes Y[batch_i, m_i, 0..N] for the (batch_i, m_i)
+        // pairs it owns; ranges are disjoint across workers so there is no
+        // aliasing on the output. Inputs A and B are read-only.
+        unsafe {
+            for flat in lo..hi {
+                let batch_i = flat / m_dim;
+                let m_i = flat % m_dim;
+                let a_batch_off = batch_i * a_b_stride;
+                let b_batch_off = batch_i * b_b_stride;
+                let c_batch_off = batch_i * m_dim * n_dim;
+                let c_row_off = c_batch_off + m_i * n_dim;
+                let a_row_off = a_batch_off + m_i * a_m_stride;
+                if a_contig_inner && b_contig_inner {
+                    let a_f = a_data as *const f32;
+                    let b_f = b_data as *const f32;
+                    let c_f = r_data as *mut f32;
+                    for p in 0..k_dim {
+                        let a_ik = *a_f.add(a_row_off + p);
+                        let b_row_off = b_batch_off + p * b_k_stride;
+                        let c_slice = std::slice::from_raw_parts_mut(c_f.add(c_row_off), n_dim);
+                        let b_slice = std::slice::from_raw_parts(b_f.add(b_row_off), n_dim);
+                        crate::tensor_simd::axpy_slice(c_slice, a_ik, b_slice);
+                    }
+                } else {
+                    let a_ptr = a_data as *const u8;
+                    let b_ptr = b_data as *const u8;
+                    let r_ptr = r_data as *mut u8;
+                    for j in 0..n_dim {
+                        let mut acc = 0.0f32;
+                        for p in 0..k_dim {
+                            let av = load_f32_at(
+                                a_ptr,
+                                a_batch_off + m_i * a_m_stride + p * a_k_stride,
+                                dtype,
+                            );
+                            let bv = load_f32_at(
+                                b_ptr,
+                                b_batch_off + p * b_k_stride + j * b_n_stride,
+                                dtype,
+                            );
+                            acc += av * bv;
+                        }
+                        store_f32_at(r_ptr, c_row_off + j, dtype, acc);
+                    }
+                }
+            }
+        }
+    });
+
+    result
+}
+
 /// In-place causal mask. Treats the last two dimensions of `t` as
 /// `[..., rows, cols]` and fills positions `(i, j)` with `-inf` whenever
 /// `j > i + position_offset`. Standard pattern: a softmax row reads the
