@@ -86,6 +86,7 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
     build_tensor_matmul_t(builder);
     build_tensor_bmm(builder);
     build_tensor_bmm_threaded(builder);
+    build_tensor_expand_kv_heads_axis1(builder);
 
     // Attention building blocks (composed by nue.transformer in Haxe)
     build_tensor_causal_mask(builder);
@@ -326,6 +327,16 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
         .param("a", i64_ty.clone())
         .param("b", i64_ty.clone())
         .param("threads", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // expand_kv_heads_axis1: (src, repeats) -> i64. GQA KV-head expand.
+    let func_id = builder
+        .begin_function("rayzor_tensor_expand_kv_heads_axis1_f32")
+        .param("src", i64_ty.clone())
+        .param("repeats", i64_ty.clone())
         .returns(i64_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -963,6 +974,31 @@ build_binop_i64!(
     "rayzor_tensor_matmul_t"
 );
 build_binop_i64!(build_tensor_bmm, "Tensor_bmm", "rayzor_tensor_bmm");
+
+/// Tensor_expand_kv_heads_axis1(self: i64, repeats: i64) -> i64
+/// GQA KV-head expansion: src [seqK, num_kv_heads, head_dim] → out
+/// [num_kv_heads*repeats, seqK, head_dim] with out[qh, j, d] = src[j, qh/repeats, d].
+fn build_tensor_expand_kv_heads_axis1(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let func_id = builder
+        .begin_function("Tensor_expand_kv_heads_axis1")
+        .param("self", i64_ty.clone())
+        .param("repeats", i64_ty.clone())
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let self_val = builder.get_param(0);
+    let repeats = builder.get_param(1);
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_expand_kv_heads_axis1_f32")
+        .expect("rayzor_tensor_expand_kv_heads_axis1_f32 not found");
+    let result = builder.call(extern_id, vec![self_val, repeats]).unwrap();
+    builder.ret(Some(result));
+}
 
 /// Tensor_bmm_threaded(self: i64, other: i64, threads: i64) -> i64
 /// Threaded batched 3-D matmul. Mirrors Tensor_get force-inline pattern.

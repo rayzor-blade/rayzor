@@ -218,6 +218,18 @@ extern class Tensor {
     public function bmmThreaded(other:Tensor, threads:Int):Tensor;
 
     /**
+     * GQA KV-head expansion. Self has shape `[seqK, num_kv_heads, head_dim]`
+     * (KV-heads on axis 1, as produced by KVCache views). Returns a fresh
+     * F32 tensor of shape `[num_kv_heads * repeats, seqK, head_dim]` with
+     * `out[qh, j, d] = self[j, qh / repeats, d]`. Replaces the per-element
+     * triple-loop expand pattern with a single strided memcpy per `(qh, j)`.
+     * Returns null on dtype mismatch (F32 only), non-3D source, or non-
+     * contiguous innermost dim.
+     */
+    @:native("tensor_expand_kv_heads_axis1")
+    public function expandKvHeadsAxis1(repeats:Int):Tensor;
+
+    /**
      * Fill the upper triangle of the last two dims with `-inf` so a
      * subsequent softmax row reads those positions as zero probability.
      * `positionOffset` shifts the diagonal — 0 for prefill, positive

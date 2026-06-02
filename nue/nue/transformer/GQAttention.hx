@@ -141,22 +141,31 @@ class GQAttention implements Module {
      * doesn't matter; revisit when profiling says otherwise.
      */
     public function expandKvHeads(t:Tensor):Tensor {
+        // Strided gather + memcpy per (qh, j). Replaces the per-element
+        // triple-loop that did ~2 * num_q_heads * seqK * head_dim extern
+        // calls per invocation (~40% of decode time at typical Llama 3.2
+        // 1B shapes). The runtime kernel is contiguous-innermost-only;
+        // KVCache's slice() views preserve contiguity along axis 2 so the
+        // fast path fires. Falls back to the original triple-loop if the
+        // primitive returns null (non-F32 / non-contiguous innermost).
+        var group = Std.int(numQHeads / numKvHeads);
+        var out = t.expandKvHeadsAxis1(group);
+        if (out != null) {
+            return out;
+        }
         var s = t.shape();
         var seqK = s[0];
         var headDimV = s[2];
-        var group = Std.int(numQHeads / numKvHeads);
-        // Bare `F32` — TAST enum-variant disambiguation picks DType.F32 because
-        // Tensor.zeros's dtype param is typed as DType.
-        var out = Tensor.zeros([numQHeads, seqK, headDimV], F32);
+        var fallback = Tensor.zeros([numQHeads, seqK, headDimV], F32);
         for (qh in 0...numQHeads) {
             var kvh = Std.int(qh / group);
             for (j in 0...seqK) {
                 for (d in 0...headDimV) {
-                    out.set([qh, j, d], t.get([j, kvh, d]));
+                    fallback.set([qh, j, d], t.get([j, kvh, d]));
                 }
             }
         }
-        return out;
+        return fallback;
     }
 
     /**
