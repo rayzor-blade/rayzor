@@ -3599,6 +3599,20 @@ impl StdlibMapping {
             // NumaPool-import cascade in nue.Linear is resolved.
             map_method!(instance "rayzor_ds_QTensor", "matmulXTQThreaded" => "QTensor_matmulXTQThreaded",
                 params: 2, mir_wrapper, types: &[PtrVoid, PtrVoid, I64] => PtrVoid),
+            // QTensor.fusedQkvMatmul(x: Tensor, qW: QTensor, kW: QTensor,
+            //   vW: QTensor, threads: Int): Array<Tensor>
+            //
+            // Static — bypasses the QTensor receiver because the operation
+            // consumes three weight matrices. Shares one X→Q8_K pre-quant
+            // and one `parallel_rows` fan-out across all three projections
+            // (Q/K/V). Returns a fresh 3-element `Array<Tensor>` of
+            // `[Q, K, V]` handles; on gate-miss (non-Q4_K_M, batch != 1,
+            // SDOT off, X non-contiguous) the array carries
+            // `[null, null, null]` and the Haxe caller falls back to three
+            // sequential `matmulXTQThreaded` calls.
+            map_method!(static "rayzor_ds_QTensor", "fusedQkvMatmul" => "QTensor_fusedQkvMatmul",
+                params: 5, mir_wrapper,
+                types: &[PtrVoid, PtrVoid, PtrVoid, PtrVoid, I64] => PtrVoid),
             // --- Lifetime ---
             map_method!(instance "rayzor_ds_QTensor", "free" => "QTensor_free",
                 params: 0, mir_wrapper, types: &[PtrVoid]),

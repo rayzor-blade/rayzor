@@ -29,6 +29,7 @@ pub fn build_qtensor_types(builder: &mut MirBuilder) {
     build_qtensor_matmul_xtq(builder);
     build_qtensor_matmul_xtq_chunk(builder);
     build_qtensor_matmul_xtq_threaded(builder);
+    build_qtensor_fused_qkv_matmul(builder);
     build_qtensor_free(builder);
 }
 
@@ -154,6 +155,30 @@ fn declare_qtensor_externs(builder: &mut MirBuilder) {
         .param("x_tensor", i64_ty.clone())
         .param("qt", i64_ty.clone())
         .param("threads", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // matmul_qkv_qt_t_f32_threaded: fused Q/K/V projection. One pre-
+    // quant of X to Q8_K is shared across all three Q4_K_M weights and a
+    // single parallel_rows fan-out covers the concatenated [0, q_n+k_n+v_n)
+    // row space — replaces 3 sequential matmulXTQThreaded fork-joins.
+    //
+    // Signature: (x_tensor, q_w, k_w, v_w, threads, out_q, out_k, out_v) -> i64
+    // The three `out_*` slots are written ONLY on success (return 0). On
+    // any non-zero return the MIR wrapper sees them at their pre-init
+    // sentinel (0) and the caller falls back to three sequential calls.
+    let func_id = builder
+        .begin_function("rayzor_tensor_matmul_qkv_qt_t_f32_threaded")
+        .param("x_tensor", i64_ty.clone())
+        .param("q_w", i64_ty.clone())
+        .param("k_w", i64_ty.clone())
+        .param("v_w", i64_ty.clone())
+        .param("threads", i64_ty.clone())
+        .param("out_q_tensor", i64_ty.clone())
+        .param("out_k_tensor", i64_ty.clone())
+        .param("out_v_tensor", i64_ty.clone())
         .returns(i64_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -525,6 +550,140 @@ fn build_qtensor_matmul_xtq_threaded(builder: &mut MirBuilder) {
     // Runtime order: (x_tensor, qt, threads). Swap from Haxe receiver order.
     let result = builder.call(extern_id, vec![x, qt, threads]).unwrap();
     builder.ret(Some(result));
+}
+
+/// HaxeArray struct size in bytes (ptr + len + cap + elem_size = 4 x 8).
+const HAXE_ARRAY_STRUCT_SIZE: i64 = 32;
+
+/// QTensor_fusedQkvMatmul(x, qW, kW, vW, threads) -> Array<Tensor>.
+///
+/// Static method: bypasses the QTensor receiver because the operation
+/// takes three distinct Q4_K_M weight matrices and one F32 activation.
+/// Forwards to `rayzor_tensor_matmul_qkv_qt_t_f32_threaded`, which
+/// shares a single X→Q8_K pre-quant across all three projections and
+/// fans one `parallel_rows` over the concatenated row space.
+///
+/// On success: returns a fresh heap-allocated 3-element `Array<Tensor>`
+/// holding `[Q, K, V]` tensor handles. On any non-zero runtime return
+/// (SDOT not available, batch != 1, not all-Q4_K_M, X non-contiguous):
+/// returns the same array but with all three slots set to `null` (0),
+/// so the Haxe caller can check `arr[0] == null` and fall back to three
+/// sequential `matmulXTQThreaded` calls.
+///
+/// The wrapper builds the array with `haxe_array_push_i64` (3x), which
+/// handles the zero-cap → first-grow path internally, so no separate
+/// `haxe_array_new` extern is needed.
+fn build_qtensor_fused_qkv_matmul(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let ptr_void = IrType::Ptr(Box::new(IrType::Void));
+    let ptr_i64 = IrType::Ptr(Box::new(IrType::I64));
+
+    let func_id = builder
+        .begin_function("QTensor_fusedQkvMatmul")
+        .param("x_tensor", i64_ty.clone())
+        .param("q_w", i64_ty.clone())
+        .param("k_w", i64_ty.clone())
+        .param("v_w", i64_ty.clone())
+        .param("threads", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let x = builder.get_param(0);
+    let q_w = builder.get_param(1);
+    let k_w = builder.get_param(2);
+    let v_w = builder.get_param(3);
+    let threads = builder.get_param(4);
+
+    // Stack-allocate 3 i64 slots for the runtime to write tensor handles
+    // into. Pre-init each to 0 so the success-then-load pattern reads a
+    // sentinel null on the non-zero (gate-miss) return path. The
+    // runtime promises NOT to write the slots on failure, so the zero
+    // init survives all the way to the array push.
+    let zero = builder.const_i64(0);
+    let out_q_slot = builder.alloc(IrType::I64, None);
+    builder.store(out_q_slot, zero);
+    let out_k_slot = builder.alloc(IrType::I64, None);
+    builder.store(out_k_slot, zero);
+    let out_v_slot = builder.alloc(IrType::I64, None);
+    builder.store(out_v_slot, zero);
+
+    // Extern declares the three out-pointer params as i64 (uniform with
+    // the rest of the signature), so cast each Ptr<I64> to i64 before
+    // the call. The Cranelift backend treats Ptr↔I64 as a 64-bit
+    // bitcast on 64-bit targets, so this is a no-op codegen-wise.
+    let out_q_i64 = builder.cast(out_q_slot, ptr_i64.clone(), i64_ty.clone());
+    let out_k_i64 = builder.cast(out_k_slot, ptr_i64.clone(), i64_ty.clone());
+    let out_v_i64 = builder.cast(out_v_slot, ptr_i64.clone(), i64_ty.clone());
+
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_matmul_qkv_qt_t_f32_threaded")
+        .expect("rayzor_tensor_matmul_qkv_qt_t_f32_threaded not found");
+    // Runtime order: (x, q_w, k_w, v_w, threads, out_q, out_k, out_v).
+    // The i64 return value (success=0, non-zero=gate-miss) is ignored
+    // here: gate-miss leaves the slots at their zero pre-init, so the
+    // resulting array carries (null, null, null) and the Haxe caller
+    // detects that via `arr[0] == null` to trigger the fallback path.
+    let _ = builder.call(
+        extern_id,
+        vec![x, q_w, k_w, v_w, threads, out_q_i64, out_k_i64, out_v_i64],
+    );
+
+    // Load the (possibly-written, possibly-zero) tensor handles back.
+    let out_q_val = builder.load(out_q_slot, i64_ty.clone());
+    let out_k_val = builder.load(out_k_slot, i64_ty.clone());
+    let out_v_val = builder.load(out_v_slot, i64_ty.clone());
+
+    // Allocate a fresh 32-byte HaxeArray struct on the heap. Zero-init
+    // the four fields (ptr=null, len=0, cap=0, elem_size=8); the
+    // matching `haxe_array_push_i64` calls below grow cap from 0 on
+    // first push, so no separate `haxe_array_new` is needed.
+    let malloc_func = builder
+        .get_function_by_name("malloc")
+        .expect("malloc extern not found");
+    let arr_size = builder.const_i64(HAXE_ARRAY_STRUCT_SIZE);
+    let arr_ptr = builder
+        .call(malloc_func, vec![arr_size])
+        .expect("malloc should return a pointer");
+
+    // Zero-init ptr/len/cap (offsets 0/8/16) and set elem_size=8 at
+    // offset 24. Each store uses ptr_add with byte offsets cast to
+    // a Ptr<I64> target so the 8-byte store is well-typed.
+    let off0 = builder.const_i64(0);
+    let off8 = builder.const_i64(8);
+    let off16 = builder.const_i64(16);
+    let off24 = builder.const_i64(24);
+    let eight = builder.const_i64(8);
+
+    let f_ptr = builder.ptr_add(arr_ptr, off0, ptr_i64.clone());
+    builder.store(f_ptr, zero);
+    let f_len = builder.ptr_add(arr_ptr, off8, ptr_i64.clone());
+    builder.store(f_len, zero);
+    let f_cap = builder.ptr_add(arr_ptr, off16, ptr_i64.clone());
+    builder.store(f_cap, zero);
+    let f_es = builder.ptr_add(arr_ptr, off24, ptr_i64.clone());
+    builder.store(f_es, eight);
+
+    // Push Q, K, V handles in order. `haxe_array_push_i64` allocates
+    // the underlying element buffer on the first push (cap goes 0 → 8)
+    // and copies the i64 by value. All three slots end up holding the
+    // raw Tensor* handle (or 0 on gate-miss).
+    let push_func = builder
+        .get_function_by_name("haxe_array_push_i64")
+        .expect("haxe_array_push_i64 extern not found");
+    // haxe_array_push_i64 takes (arr: Ptr<Void>, val: I64). Cast
+    // arr_ptr (raw Ptr<U8> from malloc) to Ptr<Void> to satisfy the
+    // declared signature.
+    let arr_void = builder.cast(arr_ptr, IrType::Ptr(Box::new(IrType::U8)), ptr_void.clone());
+    let _ = builder.call(push_func, vec![arr_void, out_q_val]);
+    let _ = builder.call(push_func, vec![arr_void, out_k_val]);
+    let _ = builder.call(push_func, vec![arr_void, out_v_val]);
+
+    builder.ret(Some(arr_void));
 }
 
 fn build_qtensor_free(builder: &mut MirBuilder) {

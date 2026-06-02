@@ -145,6 +145,29 @@ extern class QTensor {
     @:native("tensor_matmul_qt_t_f32_threaded")
     public function matmulXTQThreaded(x:Tensor, threads:Int):Tensor;
 
+    /**
+     * Fused Q/K/V projection: computes `y_q = x @ qW.T`, `y_k = x @ kW.T`,
+     * and `y_v = x @ vW.T` against three Q4_K_M weights in a single
+     * dispatch. The activation X is pre-quantised to Q8_K exactly once
+     * and the three projections share that view; a single
+     * `parallel_rows` fan-out covers the concatenated
+     * `[0, q_n + k_n + v_n)` row space, replacing three sequential
+     * fork-joins with one. Output rows are disjoint across workers and
+     * disjoint across the three result tensors.
+     *
+     * Returns a fresh 3-element `Array<Tensor>` of `[Q, K, V]` handles
+     * on success. On gate-miss (SDOT unavailable, batch != 1, not all
+     * three weights Q4_K_M, X non-contiguous) the array carries
+     * `[null, null, null]`; check `arr[0] == null` and fall back to
+     * three sequential `matmulXTQThreaded` calls.
+     *
+     * `threads = 0` picks the auto default (currently 6, sized for
+     * M1 Pro). Reduction order is byte-identical to three separate
+     * `matmulXTQThreaded` calls.
+     */
+    @:native("tensor_matmul_qkv_qt_t_f32_threaded")
+    public static function fusedQkvMatmul(x:Tensor, qW:QTensor, kW:QTensor, vW:QTensor, threads:Int):Array<Tensor>;
+
     /** Free the quantised storage. */
     @:native("qtensor_free")
     public function free():Void;
