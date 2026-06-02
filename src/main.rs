@@ -1244,8 +1244,22 @@ fn run_file(
 
     let symbols_ref: Vec<(&str, *const u8)> = symbols.iter().map(|(n, p)| (*n, *p)).collect();
 
-    // Set up tiered JIT backend using the selected preset
-    let mut config = TieredConfig::from_preset(preset.to_tier_preset());
+    // Set up tiered JIT backend.
+    //
+    // Config selection:
+    //   * If the manifest carries an explicit `[tier]` block (parsed into
+    //     `ProjectManifest::tier`), feed it through `TierPreset::Custom`
+    //     so every knob — bailout strategy, profile thresholds, tier
+    //     promotion gating, auto-LLVM-upgrade — wins over the named
+    //     preset's defaults.
+    //   * Otherwise fall back to the CLI-selected preset.
+    let manifest_tier_config: Option<TieredConfig> = manifest_project
+        .as_ref()
+        .and_then(|p| p.tier_config().cloned());
+    let mut config = match manifest_tier_config {
+        Some(custom) => TieredConfig::from_preset(compiler::codegen::TierPreset::Custom(custom)),
+        None => TieredConfig::from_preset(preset.to_tier_preset()),
+    };
     config.verbosity = if verbose { 2 } else { 0 };
     config.start_interpreted = false; // Start with JIT for immediate execution
                                       // In release mode, suppress stack-trace instrumentation overhead even if
@@ -1253,6 +1267,9 @@ fn run_file(
     if release {
         config.enable_stack_traces = false;
     }
+
+    // Snapshot the upgrade flag before moving `config` into the backend.
+    let auto_upgrade_to_llvm = config.auto_upgrade_to_llvm_after_main_entry;
 
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)?;
 
@@ -1282,6 +1299,31 @@ fn run_file(
         backend
             .execute_function(init_id, vec![])
             .map_err(|e| format!("module init failed: {}", e))?;
+    }
+
+    // Optional manifest-driven auto-upgrade: once module init has
+    // populated globals/vtables, force every reachable function up to
+    // LLVM (Maximum tier) before main runs. Failures here are
+    // non-fatal — we keep the Cranelift-tier function pointers and
+    // continue.
+    if auto_upgrade_to_llvm {
+        #[cfg(feature = "llvm-backend")]
+        {
+            if let Err(e) = backend.upgrade_to_llvm() {
+                eprintln!(
+                    "[tier] LLVM upgrade failed: {} (continuing on Cranelift)",
+                    e
+                );
+            } else if verbose {
+                eprintln!("[tier] Upgraded to LLVM");
+            }
+        }
+        #[cfg(not(feature = "llvm-backend"))]
+        {
+            eprintln!(
+                "[tier] manifest requested auto-upgrade to LLVM, but this build was compiled without the `llvm-backend` feature; continuing on Cranelift"
+            );
+        }
     }
 
     // Initialize Sys.args() before running Haxe code

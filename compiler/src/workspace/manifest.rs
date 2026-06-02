@@ -1,5 +1,6 @@
 //! TOML manifest parsing for `rayzor.toml`.
 
+use crate::codegen::tiered_backend::TieredConfig;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
@@ -20,6 +21,8 @@ struct RawManifest {
     bundle: Option<BundleConfig>,
     wasm: Option<WasmConfig>,
     dependencies: Option<BTreeMap<String, DependencySpec>>,
+    #[serde(default)]
+    tier: Option<TieredConfig>,
 }
 
 /// A single dependency specification in `[dependencies]`.
@@ -75,6 +78,9 @@ pub struct ProjectManifest {
     /// WASM target configuration
     #[serde(skip)]
     pub wasm: Option<WasmConfig>,
+    /// Tiered JIT configuration (from `[tier]`)
+    #[serde(skip)]
+    pub tier: Option<TieredConfig>,
 }
 
 /// Workspace manifest fields.
@@ -159,6 +165,7 @@ pub fn parse_manifest(content: &str) -> Result<RayzorManifest, String> {
         project.bundle = raw.bundle;
         project.dependencies = raw.dependencies;
         project.wasm = raw.wasm;
+        project.tier = raw.tier;
         return Ok(RayzorManifest::SingleProject(project));
     }
 

@@ -10,9 +10,40 @@
 //! - Per-function execution tracking
 
 use crate::ir::IrFunctionId;
+use serde::{Deserialize, Deserializer};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+
+/// Default for `ProfileConfig::blazing_threshold` — used by the
+/// `serde(default = "...")` attribute on the field so that a TOML
+/// document without `blazing_threshold` still parses, picking up the
+/// Application preset's value.
+fn default_blazing() -> u64 {
+    2000
+}
+
+/// Custom deserializer for `blazing_threshold` that accepts either a
+/// plain integer (e.g. `blazing_threshold = 2000`) or the sentinel
+/// string `"max"` / `"MAX"` (which means "never promote to LLVM /
+/// Maximum tier") and maps it to `u64::MAX`.
+fn de_blazing<'de, D: Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    use serde::de::Error;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum IntOrStr {
+        Int(u64),
+        Str(String),
+    }
+    match IntOrStr::deserialize(d)? {
+        IntOrStr::Int(n) => Ok(n),
+        IntOrStr::Str(s) if s == "max" || s == "MAX" => Ok(u64::MAX),
+        IntOrStr::Str(s) => Err(D::Error::custom(format!(
+            "invalid blazing_threshold: {}",
+            s
+        ))),
+    }
+}
 
 /// Runtime profiling data collector
 #[derive(Clone)]
@@ -25,7 +56,8 @@ pub struct ProfileData {
 }
 
 /// Configuration for profiling and hotness detection (5-tier system with interpreter)
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(default)]
 pub struct ProfileConfig {
     /// Number of executions before JIT compiling (Phase 0 -> Phase 1)
     /// When a function is called this many times in interpreter mode,
@@ -38,7 +70,10 @@ pub struct ProfileConfig {
     /// Number of executions before considering function "hot" (eligible for Phase 3)
     pub hot_threshold: u64,
 
-    /// Number of executions before considering function "blazing" (eligible for Phase 4/LLVM)
+    /// Number of executions before considering function "blazing" (eligible for Phase 4/LLVM).
+    /// Accepts either an integer or the sentinel string `"max"` / `"MAX"` in TOML
+    /// (mapped to [`u64::MAX`]) for "never promote".
+    #[serde(deserialize_with = "de_blazing", default = "default_blazing")]
     pub blazing_threshold: u64,
 
     /// Sample rate (1 = profile every call, 10 = every 10th call, etc.)

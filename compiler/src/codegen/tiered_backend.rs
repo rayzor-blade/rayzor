@@ -466,7 +466,7 @@ impl OptimizationTier {
 }
 
 /// Interpreter bailout strategy - determines how quickly to switch from interpreter to JIT
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 pub enum BailoutStrategy {
     /// Immediate bailout after ~10 block executions
     /// Best for: Hot compute-intensive code, benchmarks
@@ -527,7 +527,13 @@ impl Default for BailoutStrategy {
 /// | Benchmark   | Slowest  | Maximum   | Highest | Performance testing, profiling    |
 /// | Development | Instant  | Low       | Low     | Dev iteration, debugging          |
 /// | Embedded    | Instant  | Moderate  | Minimal | Resource-constrained environments |
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Note: `Copy` / `PartialEq` / `Eq` were dropped when the `Custom`
+/// variant was added — `TieredConfig` carries non-`Copy` /
+/// non-`PartialEq` fields, so the enum can't keep those auto-derives.
+/// Existing callers all consume the preset by value via
+/// [`TierPreset::to_config`], so the loss of `Copy` is benign.
+#[derive(Debug, Clone)]
 pub enum TierPreset {
     /// For short-running scripts and CLI tools
     /// - Instant startup via interpreter
@@ -570,6 +576,11 @@ pub enum TierPreset {
     /// - Predictable performance (no JIT spikes)
     /// - Suitable for embedded or WASM targets
     Embedded,
+
+    /// User-supplied [`TieredConfig`], typically deserialized from a
+    /// `[tier]` section in `rayzor.toml`. Bypasses all preset defaults
+    /// and uses the inner config verbatim.
+    Custom(TieredConfig),
 }
 
 impl TierPreset {
@@ -599,6 +610,7 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Quick,
                 enable_tier_promotion: true,
                 enable_stack_traces: true,
+                auto_upgrade_to_llvm_after_main_entry: false,
             },
 
             TierPreset::Application => TieredConfig {
@@ -614,6 +626,7 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Quick,
                 enable_tier_promotion: true,
                 enable_stack_traces: true,
+                auto_upgrade_to_llvm_after_main_entry: false,
             },
 
             TierPreset::Server => TieredConfig {
@@ -629,6 +642,7 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Immediate,
                 enable_tier_promotion: true,
                 enable_stack_traces: true,
+                auto_upgrade_to_llvm_after_main_entry: false,
             },
 
             TierPreset::Benchmark => TieredConfig {
@@ -644,6 +658,7 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Immediate,
                 enable_tier_promotion: true,
                 enable_stack_traces: false, // No instrumentation overhead in benchmarks
+                auto_upgrade_to_llvm_after_main_entry: false,
             },
 
             TierPreset::Development => TieredConfig {
@@ -653,6 +668,7 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Immediate,
                 enable_tier_promotion: true,
                 enable_stack_traces: true,
+                auto_upgrade_to_llvm_after_main_entry: false,
             },
 
             TierPreset::Embedded => TieredConfig {
@@ -668,7 +684,10 @@ impl TierPreset {
                 bailout_strategy: BailoutStrategy::Slow, // High threshold before bailout
                 enable_tier_promotion: false,
                 enable_stack_traces: false, // No stack traces for embedded
+                auto_upgrade_to_llvm_after_main_entry: false,
             },
+
+            TierPreset::Custom(cfg) => cfg.clone(),
         }
     }
 
@@ -681,6 +700,7 @@ impl TierPreset {
             TierPreset::Benchmark => "Benchmark - Immediate bailout, manual LLVM upgrade",
             TierPreset::Development => "Development - Verbose logging, fast iteration",
             TierPreset::Embedded => "Embedded - Interpreter only, minimal resources",
+            TierPreset::Custom(_) => "Custom - user-defined config (rayzor.toml [tier])",
         }
     }
 
@@ -717,6 +737,7 @@ impl TierPreset {
                 "Memory-constrained",
                 "Predictable latency",
             ],
+            TierPreset::Custom(_) => &[],
         }
     }
 }
@@ -728,7 +749,8 @@ impl std::fmt::Display for TierPreset {
 }
 
 /// Configuration for tiered compilation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(default)]
 pub struct TieredConfig {
     /// Profiling configuration
     pub profile_config: ProfileConfig,
@@ -760,6 +782,13 @@ pub struct TieredConfig {
     /// and captures Haxe-level stack traces on throw. Disabled in --release mode for
     /// zero overhead in production.
     pub enable_stack_traces: bool,
+
+    /// After main-entry completes its tier-up, force-promote everything
+    /// the tier scheduler reached at least once to the LLVM (Maximum)
+    /// tier. Default `false`. Lets benchmark and "AOT-after-warmup"
+    /// scenarios skip the per-call hot-threshold counter and jump
+    /// straight to the high-tier backend once main has returned.
+    pub auto_upgrade_to_llvm_after_main_entry: bool,
 }
 
 impl Default for TieredConfig {
@@ -771,6 +800,7 @@ impl Default for TieredConfig {
             bailout_strategy: BailoutStrategy::Quick, // Good balance for most apps
             enable_tier_promotion: true,
             enable_stack_traces: true, // Debug by default
+            auto_upgrade_to_llvm_after_main_entry: false,
         }
     }
 }
@@ -814,6 +844,7 @@ impl TieredConfig {
             bailout_strategy: BailoutStrategy::Immediate, // Quick bailout for testing
             enable_tier_promotion: true,
             enable_stack_traces: true,
+            auto_upgrade_to_llvm_after_main_entry: false,
         }
     }
 
@@ -826,6 +857,7 @@ impl TieredConfig {
             bailout_strategy: BailoutStrategy::Quick, // Quick bailout
             enable_tier_promotion: true,
             enable_stack_traces: false, // Production: no trace overhead
+            auto_upgrade_to_llvm_after_main_entry: false,
         }
     }
 
@@ -839,6 +871,7 @@ impl TieredConfig {
             bailout_strategy: BailoutStrategy::Quick, // Not used when start_interpreted=false
             enable_tier_promotion: true,
             enable_stack_traces: true,
+            auto_upgrade_to_llvm_after_main_entry: false,
         }
     }
 }
