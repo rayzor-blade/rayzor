@@ -168,6 +168,21 @@ extern class QTensor {
     @:native("tensor_matmul_qkv_qt_t_f32_threaded")
     public static function fusedQkvMatmul(x:Tensor, qW:QTensor, kW:QTensor, vW:QTensor, threads:Int):Array<Tensor>;
 
+    /**
+     * Q6_K-aware row gather: dequant just the rows named by `indices`
+     * out of this `[N, cols]` Q6_K matrix into a fresh f32
+     * `[indices.length, cols]` `Tensor`. The runtime requires this
+     * tensor's scheme to be Q6_K and `cols` to be a whole number of
+     * 256-element super-blocks; out-of-range indices leave the
+     * corresponding output row zero-filled.
+     *
+     * Used by `nue.Embedding` to turn token IDs into per-token
+     * embeddings against a Q6_K token-embedding weight, avoiding a
+     * full `[vocab, hidden]` dequant per forward pass.
+     */
+    @:native("qtensor_gather_rows_q6_k")
+    public function gatherRowsQ6K(indices:Array<Int>):Tensor;
+
     /** Free the quantised storage. */
     @:native("qtensor_free")
     public function free():Void;

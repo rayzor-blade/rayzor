@@ -3613,6 +3613,13 @@ impl StdlibMapping {
             map_method!(static "rayzor_ds_QTensor", "fusedQkvMatmul" => "QTensor_fusedQkvMatmul",
                 params: 5, mir_wrapper,
                 types: &[PtrVoid, PtrVoid, PtrVoid, PtrVoid, I64] => PtrVoid),
+            // qt.gatherRowsQ6K(indices: Array<Int>): Tensor
+            // Row-wise dequant of a Q6_K weight matrix into a fresh f32
+            // Tensor — used by nue.Embedding for token-table lookup
+            // against a Q6_K token-embedding weight (the F32 analogue
+            // is `Tensor.gatherRows`).
+            map_method!(instance "rayzor_ds_QTensor", "gatherRowsQ6K" => "QTensor_gatherRowsQ6K",
+                params: 1, mir_wrapper, types: &[PtrVoid, PtrVoid] => PtrVoid),
             // --- Lifetime ---
             map_method!(instance "rayzor_ds_QTensor", "free" => "QTensor_free",
                 params: 0, mir_wrapper, types: &[PtrVoid]),

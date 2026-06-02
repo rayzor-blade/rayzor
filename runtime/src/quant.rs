@@ -1611,6 +1611,90 @@ pub unsafe extern "C" fn rayzor_qtensor_dequant(qt_ptr: i64) -> i64 {
     out_tensor_ptr
 }
 
+/// Gather rows from a Q6_K quantised tensor, dequantising each selected row
+/// into a fresh f32 Tensor of shape `[n_indices, qt.cols]`.
+///
+/// Mirrors `rayzor_tensor_gather_rows` in `tensor.rs` but specialised for
+/// Q6_K storage. The hot path for embeddings (`token_embd.weight` is Q6_K
+/// in Q4_K_M variants of Llama-3 / 3.2): selecting `n_indices` token rows
+/// and dequantising only those rows is dramatically cheaper than calling
+/// `rayzor_qtensor_dequant` over the whole `[vocab, hidden]` weight.
+///
+/// Each Q6_K row is `qt.cols / 256` super-blocks of 210 bytes; for Llama
+/// 3.2's `hidden=2048` that's exactly 8 blocks per row × 210 = 1680 bytes
+/// of source data per gathered row, decoded into 2048 f32 = 8 KiB output.
+///
+/// Out-of-range indices leave the corresponding output row zero-filled,
+/// matching `rayzor_tensor_gather_rows`'s policy.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_gather_rows_q6_k(
+    qt_ptr: i64,
+    indices_ptr: i64,
+    n_indices: i64,
+) -> i64 {
+    if qt_ptr == 0 || indices_ptr == 0 || n_indices <= 0 {
+        return 0;
+    }
+    let qt = &*(qt_ptr as *const RayzorQTensor);
+    if qt.scheme != QSCHEME_Q6_K {
+        return 0;
+    }
+    // Q6_K rows must be a whole number of 256-element super-blocks.
+    if !qt.cols.is_multiple_of(Q6_K_BLOCK_SIZE) {
+        return 0;
+    }
+    let blocks_per_row = qt.cols / Q6_K_BLOCK_SIZE;
+    let row_bytes = blocks_per_row * Q6_K_BLOCK_BYTES;
+    let k = n_indices as usize;
+
+    // Allocate output via the shared tensor allocator (mirrors
+    // `rayzor_qtensor_dequant` above so we pick up the pool / histogram
+    // bookkeeping for free).
+    let shape = [k, qt.cols];
+    let out_tensor_ptr =
+        crate::tensor::rayzor_tensor_zeros(shape.as_ptr() as i64, 2, 0 /* DTYPE_F32 */);
+    if out_tensor_ptr == 0 {
+        return 0;
+    }
+    #[repr(C)]
+    struct TensorHead {
+        data: *mut u8,
+        shape: *mut usize,
+        strides: *mut usize,
+        ndim: usize,
+        numel: usize,
+        dtype: u8,
+        owns_data: bool,
+        device: u8,
+        numa_node: i32,
+    }
+    let head = &*(out_tensor_ptr as *const TensorHead);
+    let out = head.data as *mut f32;
+    let indices = indices_ptr as *const i64;
+
+    let mut stage = [0.0f32; Q6_K_BLOCK_SIZE];
+    for i in 0..k {
+        let idx_raw = *indices.add(i);
+        if idx_raw < 0 || (idx_raw as usize) >= qt.rows {
+            // Out-of-range index — leave the row zeroed (rayzor_tensor_zeros
+            // already zero-filled the entire output buffer).
+            continue;
+        }
+        let row_src = qt.data.add((idx_raw as usize) * row_bytes);
+        let row_dst = out.add(i * qt.cols);
+        for b in 0..blocks_per_row {
+            dequant_q6_k_block(row_src.add(b * Q6_K_BLOCK_BYTES), &mut stage);
+            std::ptr::copy_nonoverlapping(
+                stage.as_ptr(),
+                row_dst.add(b * Q6_K_BLOCK_SIZE),
+                Q6_K_BLOCK_SIZE,
+            );
+        }
+    }
+
+    out_tensor_ptr
+}
+
 /// Fused dequant-matmul: A is quantised `[M, K]`, B is f32 `[K, N]`, out is
 /// f32 `[M, N]`. Returns a fresh f32 Tensor; 0 on shape mismatch.
 #[no_mangle]
