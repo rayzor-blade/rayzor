@@ -37,6 +37,10 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
     build_tensor_get(builder);
     build_tensor_set(builder);
 
+    // Bulk row ops (KV-cache append, GQA broadcast)
+    build_tensor_append_along_0(builder);
+    build_tensor_broadcast_repeat_0(builder);
+
     // Reshape / transpose / permute / slice
     build_tensor_reshape(builder);
     build_tensor_transpose(builder);
@@ -222,6 +226,32 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
         .param("ndim", i64_ty.clone())
         .param("value", f64_ty.clone())
         .returns(void_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // append_along_0_f32: (dst, src, dst_row_offset) -> i64
+    // Bulk-copy `src.shape[0]` rows from src into dst starting at dst_row_offset
+    // along axis 0. Returns 0 on success, -1 on validation failure.
+    let func_id = builder
+        .begin_function("rayzor_tensor_append_along_0_f32")
+        .param("dst", i64_ty.clone())
+        .param("src", i64_ty.clone())
+        .param("dst_row_offset", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // broadcast_repeat_0_f32: (dst, src, repeats) -> i64
+    // Broadcast src along axis 0 by repeating each row `repeats` times into dst
+    // (numpy np.repeat axis=0 / GQA KV-head expand). Returns 0/-1.
+    let func_id = builder
+        .begin_function("rayzor_tensor_broadcast_repeat_0_f32")
+        .param("dst", i64_ty.clone())
+        .param("src", i64_ty.clone())
+        .param("repeats", i64_ty.clone())
+        .returns(i64_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
     builder.mark_as_extern(func_id);
@@ -1143,6 +1173,72 @@ fn build_tensor_set(builder: &mut MirBuilder) {
         .expect("rayzor_tensor_set not found");
     builder.call(extern_id, vec![self_val, indices_ptr, ndim, value]);
     builder.ret(None);
+}
+
+/// Tensor_append_along_0(dst: i64, src: i64, dst_row_offset: i64) -> i64
+///
+/// Pure forwarder to `rayzor_tensor_append_along_0_f32`. Force-inline so the
+/// hot KV-cache append site collapses to the extern call with no MIR-wrapper
+/// frame. Mirrors the Tensor_get / Tensor_set inline policy (commit 56e110f).
+fn build_tensor_append_along_0(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+
+    let func_id = builder
+        .begin_function("Tensor_append_along_0")
+        .param("dst", i64_ty.clone())
+        .param("src", i64_ty.clone())
+        .param("dst_row_offset", i64_ty.clone())
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let dst = builder.get_param(0);
+    let src = builder.get_param(1);
+    let off = builder.get_param(2);
+
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_append_along_0_f32")
+        .expect("rayzor_tensor_append_along_0_f32 not found");
+    let result = builder.call(extern_id, vec![dst, src, off]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// Tensor_broadcast_repeat_0(dst: i64, src: i64, repeats: i64) -> i64
+///
+/// Pure forwarder to `rayzor_tensor_broadcast_repeat_0_f32`. Force-inline:
+/// GQA expand sits inside per-token attention so the cross-extern boundary
+/// matters at O0/O1 the same way Tensor_get/Tensor_set do.
+fn build_tensor_broadcast_repeat_0(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+
+    let func_id = builder
+        .begin_function("Tensor_broadcast_repeat_0")
+        .param("dst", i64_ty.clone())
+        .param("src", i64_ty.clone())
+        .param("repeats", i64_ty.clone())
+        .returns(i64_ty)
+        .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let dst = builder.get_param(0);
+    let src = builder.get_param(1);
+    let reps = builder.get_param(2);
+
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_broadcast_repeat_0_f32")
+        .expect("rayzor_tensor_broadcast_repeat_0_f32 not found");
+    let result = builder.call(extern_id, vec![dst, src, reps]).unwrap();
+    builder.ret(Some(result));
 }
 
 /// Tensor_permute(self: i64, axes_arr: i64) -> i64

@@ -3395,6 +3395,12 @@ impl StdlibMapping {
             // tensor.set(indices: Array<Int>, value: Float): Void
             map_method!(instance "rayzor_ds_Tensor", "set" => "Tensor_set", params: 2, mir_wrapper,
                 types: &[PtrVoid, PtrVoid, F64]),
+            // tensor.appendAlong0(src: Tensor, dstRowOffset: Int): Int
+            map_method!(instance "rayzor_ds_Tensor", "appendAlong0" => "Tensor_append_along_0", params: 2, mir_wrapper,
+                types: &[PtrVoid, PtrVoid, I64] => I64),
+            // tensor.broadcastRepeat0(src: Tensor, repeats: Int): Int
+            map_method!(instance "rayzor_ds_Tensor", "broadcastRepeat0" => "Tensor_broadcast_repeat_0", params: 2, mir_wrapper,
+                types: &[PtrVoid, PtrVoid, I64] => I64),
             // --- Reshape / transpose ---
             // tensor.reshape(shape: Array<Int>): Tensor
             map_method!(instance "rayzor_ds_Tensor", "reshape" => "Tensor_reshape", params: 1, mir_wrapper,

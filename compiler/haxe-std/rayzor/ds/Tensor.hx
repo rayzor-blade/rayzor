@@ -118,6 +118,23 @@ extern class Tensor {
     @:native("tensor_set")
     public function set(indices:Array<Int>, value:Float):Void;
 
+    /**
+     * Append the rows of `src` into this tensor starting at row `dstRowOffset`
+     * along axis 0. Returns `0` on success, `-1` on failure (shape/dtype
+     * mismatch, out-of-bounds, etc.). Callers must treat `-1` as a hard
+     * failure — there is no scalar fallback.
+     */
+    @:native("tensor_append_along_0_f32")
+    public function appendAlong0(src:Tensor, dstRowOffset:Int):Int;
+
+    /**
+     * Broadcast-repeat `src` along axis 0 into this tensor `repeats` times.
+     * Returns `0` on success, `-1` on failure. Callers must treat `-1` as a
+     * hard failure — there is no scalar fallback.
+     */
+    @:native("tensor_broadcast_repeat_0_f32")
+    public function broadcastRepeat0(src:Tensor, repeats:Int):Int;
+
     // --- Reshape / view (no copy) ---
 
     /** Reshape to a new shape (same numel) */

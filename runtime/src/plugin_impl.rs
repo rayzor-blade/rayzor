@@ -1776,6 +1776,14 @@ register_symbol!(
 // Element access
 register_symbol!("rayzor_tensor_get", crate::tensor::rayzor_tensor_get);
 register_symbol!("rayzor_tensor_set", crate::tensor::rayzor_tensor_set);
+register_symbol!(
+    "rayzor_tensor_append_along_0_f32",
+    crate::tensor::rayzor_tensor_append_along_0_f32
+);
+register_symbol!(
+    "rayzor_tensor_broadcast_repeat_0_f32",
+    crate::tensor::rayzor_tensor_broadcast_repeat_0_f32
+);
 
 // Reshape / Transpose / Permute / Slice
 register_symbol!(
