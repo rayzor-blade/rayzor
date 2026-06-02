@@ -3,6 +3,7 @@ package nue.transformer;
 import nue.Module;
 import nue.Linear;
 import rayzor.ds.Tensor;
+import rayzor.ds.QTensor;
 import rayzor.ds.DType;
 
 /**
@@ -78,11 +79,45 @@ class GQAttention implements Module {
         // 1) Project to Q, K, V.
         //    hidden_size = numQHeads * headDim  (Q out)
         //                = numKvHeads * headDim (K, V out)
-        //    Three independent consumers of x → clone twice; last use
-        //    moves the original.
-        var qRaw = qProj.forward(x.clone()).reshape([seqQ, numQHeads, headDim]);
-        var kRaw = kProj.forward(x.clone()).reshape([seqQ, numKvHeads, headDim]);
-        var v = vProj.forward(x).reshape([seqQ, numKvHeads, headDim]);
+        //
+        //    Fast path: when all three projections are Q4_K_M (the typical
+        //    Llama-3 deployment) dispatch through `QTensor.matmulFusedQKV`,
+        //    which pre-quantises x to Q8_K exactly once and shares that
+        //    view across all three weight matrices in a single
+        //    `parallel_rows` fan-out — replacing three sequential
+        //    fork-joins (one per qProj/kProj/vProj.forward call) with one.
+        //    The runtime guarantees the reduction order is byte-identical
+        //    to three separate `matmulXTQThreaded` calls, so this preserves
+        //    the byte-exact llama.cpp match.
+        //
+        //    Fallback (F32 weight on any projection, or a runtime gate
+        //    miss leaving the fused result as nulls): three independent
+        //    consumers of x → clone twice; last use moves the original.
+        var qRaw:Tensor;
+        var kRaw:Tensor;
+        var v:Tensor;
+        var qWq = qProj.qweight;
+        var kWq = kProj.qweight;
+        var vWq = vProj.qweight;
+        if (qWq != null && kWq != null && vWq != null) {
+            var triple = QTensor.fusedQkvMatmul(x, qWq, kWq, vWq, 0);
+            if (triple != null && triple.length == 3
+                && triple[0] != null && triple[1] != null && triple[2] != null) {
+                qRaw = triple[0].reshape([seqQ, numQHeads, headDim]);
+                kRaw = triple[1].reshape([seqQ, numKvHeads, headDim]);
+                v    = triple[2].reshape([seqQ, numKvHeads, headDim]);
+            } else {
+                // Gate-miss inside the kernel (SDOT unavailable, batch != 1,
+                // x non-contiguous, …): fall back to the three-call path.
+                qRaw = qProj.forward(x.clone()).reshape([seqQ, numQHeads, headDim]);
+                kRaw = kProj.forward(x.clone()).reshape([seqQ, numKvHeads, headDim]);
+                v    = vProj.forward(x).reshape([seqQ, numKvHeads, headDim]);
+            }
+        } else {
+            qRaw = qProj.forward(x.clone()).reshape([seqQ, numQHeads, headDim]);
+            kRaw = kProj.forward(x.clone()).reshape([seqQ, numKvHeads, headDim]);
+            v    = vProj.forward(x).reshape([seqQ, numKvHeads, headDim]);
+        }
 
         // 2) Rotary embedding — rotates the absolute positions starting
         //    at `positionOffset` (so the new tokens line up with cache).

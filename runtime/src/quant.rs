@@ -1852,6 +1852,259 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
     out_tensor
 }
 
+/// Fused Q/K/V projection: three concurrent `Y = X @ Wq.T` matmuls
+/// against the same activation X but distinct weight tensors (Q, K, V).
+///
+/// Allocates three separate F32 output tensors up front (sized
+/// `[batch, q_n]`, `[batch, k_n]`, `[batch, v_n]`) and writes the
+/// resulting handles back through the three out-pointers. Returns 0 on
+/// success, non-zero on a guard miss (null inputs, shape/dtype/scheme
+/// mismatch). On a non-zero return the three out-pointers are NOT
+/// written; the Haxe caller falls back to three sequential
+/// `rayzor_tensor_matmul_qt_t_f32_threaded` calls.
+///
+/// Three separate outputs (vs one fused `[batch, q_n + k_n + v_n]`
+/// tensor) preserve the byte-exact RoPE/bmm chain: a sliced view of a
+/// fused tensor would have `elements_per_row = q_n + k_n + v_n` (e.g.
+/// 3072 for Llama 3.2 1B) instead of the per-projection 2048/512/512,
+/// which `rayzor_tensor_rope` reads as a flat
+/// `base + s*elements_per_row + h*head_dim + i` offset with no stride
+/// check — silently rotating across head boundaries. See
+/// `bugs_rope_interleaved_for_gguf` + the bmm-stride memory entries.
+///
+/// Threading: one `parallel_rows` fan-out over the concatenated row
+/// space `[0, q_n + k_n + v_n)`. Each worker receives `[lo, hi)`,
+/// splits it into the per-projection sub-ranges and dispatches up to
+/// three `qmatmul_chunk_impl_sdot_q4km` calls (one per weight whose
+/// row range the worker's slice intersects). This replaces 3
+/// sequential fork-joins with one and gives the scheduler 3072 rows
+/// to balance across 6 workers (512 rows/worker) instead of three
+/// disjoint joins of 512/128/128 rows.
+///
+/// SDOT sharing: the X→Q8_K pre-quantisation runs ONCE up front;
+/// the resulting `Vec<Q8KBlock>` is shared (via raw ptr+len, same
+/// `Send`-dodging pattern as the single-projection path) with all
+/// three weights inside every worker. All three projections see the
+/// same activation row, so the Q8_K view is bit-identical to what
+/// three independent per-projection calls would have built.
+///
+/// Reduction order: each output row's inner dot product still runs
+/// sequentially on one worker — workers write disjoint output rows,
+/// so there is no cross-thread reduction and the floating-point
+/// reduction order is byte-identical to three separate
+/// `matmul_qt_t_f32_threaded` calls.
+///
+/// Gate (single up-front evaluation): SDOT enabled AND batch == 1
+/// AND all three weights are Q4_K_M AND X is contiguous. If any of
+/// these fail the function returns non-zero so the caller falls back
+/// to three sequential calls (which already handle multi-batch /
+/// non-Q4_K_M shapes individually).
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_matmul_qkv_qt_t_f32_threaded(
+    x_tensor: i64,
+    q_w: i64,
+    k_w: i64,
+    v_w: i64,
+    threads: i64,
+    out_q_tensor: *mut i64,
+    out_k_tensor: *mut i64,
+    out_v_tensor: *mut i64,
+) -> i64 {
+    // Null guards. `out_*_tensor` are written only on success, so we
+    // refuse to run if any of them is null (otherwise the caller would
+    // silently lose the output handles).
+    if x_tensor == 0
+        || q_w == 0
+        || k_w == 0
+        || v_w == 0
+        || out_q_tensor.is_null()
+        || out_k_tensor.is_null()
+        || out_v_tensor.is_null()
+    {
+        return 1;
+    }
+
+    let qt_q = &*(q_w as *const RayzorQTensor);
+    let qt_k = &*(k_w as *const RayzorQTensor);
+    let qt_v = &*(v_w as *const RayzorQTensor);
+
+    // Per-weight prep validates X-vs-Wq shape/dtype individually.
+    // Each returns `(batch, n, k, _, _)`; we then enforce that
+    // (batch, k) match across all three weights (they must, since
+    // they all read the same activation).
+    let (batch_q, q_n, k_q, _, _) = match qmatmul_prep(x_tensor, qt_q) {
+        Some(p) => p,
+        None => return 2,
+    };
+    let (batch_k, k_n, k_k, _, _) = match qmatmul_prep(x_tensor, qt_k) {
+        Some(p) => p,
+        None => return 2,
+    };
+    let (batch_v, v_n, k_v, _, _) = match qmatmul_prep(x_tensor, qt_v) {
+        Some(p) => p,
+        None => return 2,
+    };
+    if batch_q != batch_k || batch_q != batch_v || k_q != k_k || k_q != k_v {
+        return 3;
+    }
+    let batch = batch_q;
+    let k = k_q;
+
+    // Up-front fast-path gate. All three weights must satisfy the
+    // SDOT preconditions; if any one of them doesn't, we bail and let
+    // the Haxe caller fall back to three sequential
+    // `rayzor_tensor_matmul_qt_t_f32_threaded` invocations (which
+    // each independently route the non-Q4_K_M / multi-batch shapes
+    // through their existing fallback code).
+    let fast_path = sdot_enabled_runtime()
+        && batch == 1
+        && qt_q.scheme == QSCHEME_Q4_K_M
+        && qt_k.scheme == QSCHEME_Q4_K_M
+        && qt_v.scheme == QSCHEME_Q4_K_M
+        && x_is_contiguous(x_tensor);
+    if !fast_path {
+        return 4;
+    }
+
+    // Allocate the three F32 output tensors. If any one fails, free
+    // the earlier ones via the standard tensor free path to avoid a
+    // leak on the rare allocation-failure case.
+    let q_shape = [batch, q_n];
+    let k_shape = [batch, k_n];
+    let v_shape = [batch, v_n];
+    let out_q = crate::tensor::rayzor_tensor_zeros(q_shape.as_ptr() as i64, 2, 0);
+    if out_q == 0 {
+        return 5;
+    }
+    let out_k = crate::tensor::rayzor_tensor_zeros(k_shape.as_ptr() as i64, 2, 0);
+    if out_k == 0 {
+        crate::tensor::rayzor_tensor_free(out_q);
+        return 5;
+    }
+    let out_v = crate::tensor::rayzor_tensor_zeros(v_shape.as_ptr() as i64, 2, 0);
+    if out_v == 0 {
+        crate::tensor::rayzor_tensor_free(out_q);
+        crate::tensor::rayzor_tensor_free(out_k);
+        return 5;
+    }
+
+    // Pick worker count from the same auto/explicit rule the
+    // single-projection threaded path uses. Cap at the total row
+    // count so we don't spawn idle workers when the row space is
+    // tiny.
+    let total_rows = q_n + k_n + v_n;
+    let auto_threads: usize = 6;
+    let mut t = if threads > 0 {
+        (threads as usize).min(64)
+    } else {
+        auto_threads
+    };
+    if t > total_rows {
+        t = total_rows.max(1);
+    }
+
+    // Pre-quantise X to Q8_K ONCE. All three weights share this
+    // view (same activation row, same K). The owning `Vec` lives in
+    // the outer scope until after the `parallel_rows` join.
+    let x_data = x_tensor_data_ptr(x_tensor);
+    let x_q8k = prepare_x_q8k_blocks(x_data, k);
+
+    // Single-threaded shortcut — keeps the inner kernel exactly the
+    // same as the threaded path so the byte-exact reduction order
+    // holds across `threads == 1` vs `threads > 1`.
+    if t <= 1 {
+        qmatmul_chunk_impl_sdot_q4km(q_w, out_q, 0, q_n as i64, &x_q8k);
+        qmatmul_chunk_impl_sdot_q4km(k_w, out_k, 0, k_n as i64, &x_q8k);
+        qmatmul_chunk_impl_sdot_q4km(v_w, out_v, 0, v_n as i64, &x_q8k);
+        drop(x_q8k);
+        *out_q_tensor = out_q;
+        *out_k_tensor = out_k;
+        *out_v_tensor = out_v;
+        return 0;
+    }
+
+    // Multi-threaded fan-out over the concatenated row space.
+    //
+    // Concatenated layout: [0, q_n) → Q, [q_n, q_n+k_n) → K,
+    // [q_n+k_n, total_rows) → V.
+    //
+    // Each worker receives `[lo, hi) ⊆ [0, total_rows)`, clips that
+    // window against each per-weight band, and dispatches one chunk
+    // call per non-empty intersection. Output rows are disjoint
+    // across workers (the pool guarantees that for a single
+    // parallel_rows invocation) AND disjoint across the three
+    // output tensors (different allocations), so no aliasing on
+    // any of Q/K/V outputs.
+    //
+    // SAFETY: `q8k_ptr` outlives every worker because
+    // `parallel_rows` blocks until all jobs complete; the `drop`
+    // happens after the join. Same Send-dodging pattern as the
+    // single-projection SDOT path.
+    let q8k_ptr = x_q8k.as_ptr() as usize;
+    let q8k_len = x_q8k.len();
+    let q_split = q_n;
+    let k_split = q_n + k_n;
+    let q_handle = q_w;
+    let k_handle = k_w;
+    let v_handle = v_w;
+    let out_q_handle = out_q;
+    let out_k_handle = out_k;
+    let out_v_handle = out_v;
+    crate::worker_pool::global().parallel_rows(total_rows, t, move |lo, hi| unsafe {
+        let q8k_slice = std::slice::from_raw_parts(q8k_ptr as *const Q8KBlock, q8k_len);
+
+        // Q sub-range: [lo, hi) ∩ [0, q_split)
+        let q_lo = lo;
+        let q_hi = hi.min(q_split);
+        if q_lo < q_hi {
+            qmatmul_chunk_impl_sdot_q4km(
+                q_handle,
+                out_q_handle,
+                q_lo as i64,
+                q_hi as i64,
+                q8k_slice,
+            );
+        }
+
+        // K sub-range: [lo, hi) ∩ [q_split, k_split), translated
+        // into the K output's local row index space by subtracting
+        // `q_split`.
+        let k_lo = lo.max(q_split);
+        let k_hi = hi.min(k_split);
+        if k_lo < k_hi {
+            qmatmul_chunk_impl_sdot_q4km(
+                k_handle,
+                out_k_handle,
+                (k_lo - q_split) as i64,
+                (k_hi - q_split) as i64,
+                q8k_slice,
+            );
+        }
+
+        // V sub-range: [lo, hi) ∩ [k_split, total_rows), translated
+        // into the V output's local row index space.
+        let v_lo = lo.max(k_split);
+        let v_hi = hi;
+        if v_lo < v_hi {
+            qmatmul_chunk_impl_sdot_q4km(
+                v_handle,
+                out_v_handle,
+                (v_lo - k_split) as i64,
+                (v_hi - k_split) as i64,
+                q8k_slice,
+            );
+        }
+    });
+
+    // Keep the Q8_K Vec alive until after the join.
+    drop(x_q8k);
+
+    *out_q_tensor = out_q;
+    *out_k_tensor = out_k;
+    *out_v_tensor = out_v;
+    0
+}
+
 /// Bias the calling thread toward the performance cores on macOS.
 ///
 /// Without this hint macOS's scheduler is free to land workers on the
