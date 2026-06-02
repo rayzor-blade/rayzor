@@ -10,6 +10,7 @@ pub mod manifest;
 
 use std::path::{Path, PathBuf};
 
+pub use crate::codegen::tiered_backend::TieredConfig;
 pub use deps::resolve_dependencies;
 pub use manifest::{
     BuildConfig, BundleConfig as ManifestBundleConfig, CacheConfig, ProjectManifest,
@@ -110,6 +111,11 @@ impl Project {
             .as_ref()
             .and_then(|b| b.preset.as_deref())
             .unwrap_or("application")
+    }
+
+    /// Get the tiered JIT configuration from `[tier]`, if present.
+    pub fn tier_config(&self) -> Option<&TieredConfig> {
+        self.manifest.tier.as_ref()
     }
 
     /// Get defines as (key, optional value) pairs.
