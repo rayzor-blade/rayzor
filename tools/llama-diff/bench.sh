@@ -171,8 +171,14 @@ run_one() {
 # Rayzor
 # ----------------------------------------------------------------------
 if [[ "$ONLY" != "llama" ]]; then
-    run_one "rayzor" "$LLAMA_CHAT_DIR" \
-        "$RAYZOR" run Main.hx -- "$GGUF" "$PROMPT" "$N" 4096 0.01
+    # RAYZOR_TIER=llvm opts into the LLVM Tier 3 backend (vs default Cranelift).
+    if [[ "${RAYZOR_TIER:-cranelift}" == "llvm" ]]; then
+        run_one "rayzor" "$LLAMA_CHAT_DIR" \
+            "$RAYZOR" run --llvm Main.hx -- "$GGUF" "$PROMPT" "$N" 4096 0.01
+    else
+        run_one "rayzor" "$LLAMA_CHAT_DIR" \
+            "$RAYZOR" run Main.hx -- "$GGUF" "$PROMPT" "$N" 4096 0.01
+    fi
 fi
 
 # ----------------------------------------------------------------------
