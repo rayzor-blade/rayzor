@@ -3573,9 +3573,22 @@ impl CompilationUnit {
         use crate::ir::{IrInstruction, IrTerminator};
 
         // Build a set of all valid function IDs across all import modules
+        // PLUS the main user file (`mir_modules`).
+        //
+        // We deliberately exclude `cached_stdlib_mir` here. That cache holds
+        // the pre-merge / pre-renumber stdlib MIR — its ids do not exist in
+        // the final merged module the codegen will see, and folding them
+        // into `all_func_ids` artificially "retains" stale CallDirect
+        // targets in the Sweep 1 retain step, which then bypass the
+        // name-fallback resolution and surface as missing-function errors
+        // at codegen.
         let mut all_func_ids: std::collections::BTreeSet<crate::ir::IrFunctionId> =
             std::collections::BTreeSet::new();
         for m in &self.import_mir_modules {
+            all_func_ids.extend(m.functions.keys().copied());
+            all_func_ids.extend(m.extern_functions.keys().copied());
+        }
+        for m in &self.mir_modules {
             all_func_ids.extend(m.functions.keys().copied());
             all_func_ids.extend(m.extern_functions.keys().copied());
         }
@@ -5514,6 +5527,30 @@ impl CompilationUnit {
                                 _ => {}
                             }
                         }
+                    }
+                }
+
+                // Refresh the global name map after the merge.
+                //
+                // When the user file lowered its own MIR, every pre-merge
+                // function (including MirWrapper stubs like `array_length`,
+                // `Tensor_mul`, `rayzor_anon_set_field_by_index`, …) was
+                // seeded into `stdlib_function_name_map` at this file's
+                // pre-merge id (e.g. fn12). The stdlib merge above just
+                // deleted those stub IrFunctions and replaced them with
+                // renumbered real bodies (e.g. fn640115), updating every
+                // CallDirect / FunctionRef / MakeClosure in the module via
+                // `id_replacements`. But the name map still points at the
+                // dead pre-merge ids — so the later
+                // `fixup_stale_cross_module_refs` pass, when it looks up a
+                // cross-module CallDirect by external-function name, gets
+                // back the dead id and writes it over a valid renumbered
+                // target, surfacing as a codegen "undefined function fnN"
+                // error. Apply the same renumber to the name map so it
+                // tracks the merged module.
+                for id in self.stdlib_function_name_map.values_mut() {
+                    if let Some(&new_id) = id_replacements.get(id) {
+                        *id = new_id;
                     }
                 }
             }

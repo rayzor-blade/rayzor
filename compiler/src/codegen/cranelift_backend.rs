@@ -2793,6 +2793,14 @@ impl CraneliftBackend {
                         }
                     }
                 } else {
+                    // Post path-A+E this lookup should never miss: the fixup
+                    // pass rewrites stale ids and the strict assert flags any
+                    // surviving unresolvable refs as E0420 before codegen.
+                    debug_assert!(
+                        mir_module.functions.contains_key(func_id),
+                        "Called function {:?} not found in module — stale call target leaked past fixup_stale_cross_module_refs",
+                        func_id
+                    );
                     // Check if this is a call to malloc/realloc/free
                     let called_func = mir_module.functions.get(func_id).ok_or_else(|| {
                         format!("Called function {:?} not found in module", func_id)
