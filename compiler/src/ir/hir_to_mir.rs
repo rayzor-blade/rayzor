@@ -6722,7 +6722,18 @@ impl<'a> HirToMirContext<'a> {
             id: func_id,
             symbol_id: SymbolId::from_raw(0),
             name: name.to_string(),
-            qualified_name: None,
+            // Mirror the bare extern name into `qualified_name` so the stub
+            // joins both `func_id_to_qualified_name` and
+            // `bare_name_to_id_set` keyed by the same string used in
+            // `stdlib_function_name_map`. Without this, stubs registered
+            // by this helper are silently absent from the qname reverse
+            // index (see compilation.rs:3682) and the per-CallDirect
+            // rewrite cannot redirect a stale stub id to the real body.
+            // Downstream code that treats `qualified_name.is_some()` as
+            // "real body" already gates on `!cfg.blocks.is_empty()` too,
+            // so empty stubs remain safely skipped for serialization and
+            // early-rename paths.
+            qualified_name: Some(name.to_string()),
             signature,
             cfg: IrControlFlowGraph::new(), // Empty - will be replaced during merge
             locals: BTreeMap::new(),
