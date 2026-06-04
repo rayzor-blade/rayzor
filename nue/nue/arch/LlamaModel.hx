@@ -66,14 +66,29 @@ class LlamaModel implements CausalLanguageModel {
         // direct `h = block.forward(h)` rebind SIGSEGVs at runtime —
         // drop analysis or IR scope cleanup tears the buffer down
         // between call return and reassign. Keep the defensive clone.
+        //
+        // Tensor frees: extern tensor allocs are runtime-managed via
+        // the pool's ARC, but InsertFreePass doesn't track tensor
+        // returns, so each `h.clone()` leaks one refcount bump per
+        // layer. 16 layers × 500 tokens = 8000 leaked bumps if we
+        // don't release them inline.
         var h = embedTokens.lookup(tokenIds);
         for (block in blocks) {
             var hIn = h.clone();
             h = block.forward(hIn);
+            // block.forward returns the same storage hIn pointed at
+            // (with addInto mutations applied) — `h` and `hIn` alias.
+            // Drop the clone bump so the refcount returns to 1 for the
+            // next iteration's clone.
+            hIn.free();
         }
         var hNormIn = h.clone();
         var normed = outputNorm.forward(hNormIn);
-        return lmHead.forward(normed);
+        hNormIn.free();
+        var result = lmHead.forward(normed);
+        normed.free();
+        h.free();
+        return result;
     }
 
     public function forward(x:Tensor):Tensor {
