@@ -19,6 +19,19 @@ set -u -o pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# Safety: refuse to run if REPO_ROOT didn't resolve to an actual rayzor
+# checkout. Without this guard, running the script from /tmp or any other
+# location outside the repo computes REPO_ROOT=/, and the cache-scrub
+# `find "$REPO_ROOT" -name .rayzor -exec rm -rf {} +` line below sweeps
+# the entire filesystem. Anchor to a file every rayzor checkout has.
+if [[ ! -f "$REPO_ROOT/Cargo.toml" || ! -d "$REPO_ROOT/nue/examples/llama-chat" ]]; then
+    echo "error: REPO_ROOT ($REPO_ROOT) doesn't look like a rayzor checkout" >&2
+    echo "  expected $REPO_ROOT/Cargo.toml and $REPO_ROOT/nue/examples/llama-chat to exist" >&2
+    echo "  refusing to run — would otherwise scan/scrub the filesystem from /" >&2
+    exit 3
+fi
+
 LLAMA_CHAT_DIR="$REPO_ROOT/nue/examples/llama-chat"
 
 RAYZOR="${RAYZOR:-$REPO_ROOT/target/release/rayzor}"
