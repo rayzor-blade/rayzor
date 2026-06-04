@@ -22,9 +22,9 @@ class ArgmaxSampler implements Sampler {
         var shape = logits.shape();
         var n = shape[shape.length - 1];
         var bestId = 0;
-        var bestLogit = logits.get([0]);
+        var bestLogit = logits.getFlat(0);
         for (i in 1...n) {
-            var v = logits.get([i]);
+            var v = logits.getFlat(i);
             if (v > bestLogit) {
                 bestLogit = v;
                 bestId = i;

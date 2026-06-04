@@ -38,16 +38,16 @@ class TemperatureSampler implements Sampler {
         var n = shape[shape.length - 1];
 
         var t = (temperature <= 0.0) ? 0.00000001 : temperature;
-        var maxLogit = logits.get([0]);
+        var maxLogit = logits.getFlat(0);
         for (i in 1...n) {
-            var v = logits.get([i]);
+            var v = logits.getFlat(i);
             if (v > maxLogit) maxLogit = v;
         }
 
         var probs:Array<Float> = [for (_ in 0...n) 0.0];
         var total = 0.0;
         for (i in 0...n) {
-            var v = (logits.get([i]) - maxLogit) / t;
+            var v = (logits.getFlat(i) - maxLogit) / t;
             var ev = Math.exp(v);
             probs[i] = ev;
             total += ev;
