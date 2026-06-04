@@ -119,25 +119,8 @@ pub extern "C" fn rayzor_dump_alloc_graph() {
     // mid-dump and either spin on `try_lock` (cheap) or interleave
     // async-signal-unsafe work like backtrace symbol resolution.
     if CPU_PROFILE_ACTIVE.load(MemOrdering::Relaxed) == 1 {
-        #[repr(C)]
-        struct Timeval {
-            tv_sec: i64,
-            tv_usec: i32,
-        }
-        #[repr(C)]
-        struct Itimerval {
-            it_interval: Timeval,
-            it_value: Timeval,
-        }
-        extern "C" {
-            fn setitimer(which: i32, new_value: *const Itimerval, old_value: *mut Itimerval)
-                -> i32;
-        }
-        let zero = Itimerval {
-            it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
-            it_value: Timeval { tv_sec: 0, tv_usec: 0 },
-        };
-        unsafe { setitimer(2, &zero, std::ptr::null_mut()) };
+        let zero: libc::itimerval = unsafe { std::mem::zeroed() };
+        unsafe { libc::setitimer(libc::ITIMER_PROF, &zero, std::ptr::null_mut()) };
         CPU_PROFILE_ACTIVE.store(0, MemOrdering::Relaxed);
     }
 
@@ -188,7 +171,94 @@ pub extern "C" fn rayzor_dump_alloc_graph() {
     IN_GRAPH.with(|g| g.set(false));
 }
 
-extern "C" fn sigprof_handler(_sig: i32) {
+/// Walks frame-pointer chain from `start_fp`, recording up to 6 PCs into
+/// `out`. macOS arm64 ABI: each frame stores `[saved_fp, saved_lr]` at
+/// the address pointed to by x29. Stops when fp becomes 0, unaligned,
+/// or outside the conservative stack range (1 MB above where we
+/// started). Returns the number of frames filled.
+///
+/// This bypasses libunwind: it works regardless of `.eh_frame` /
+/// compact-unwind coverage, AS LONG AS the JIT code preserves frame
+/// pointers (Cranelift's `preserve_frame_pointers = true` setting).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn walk_fp_chain(initial_pc: u64, start_fp: u64, out: &mut [u64; 6]) -> usize {
+    out[0] = initial_pc;
+    let mut fp = start_fp;
+    let stack_top_guess = fp.saturating_add(16 * 1024 * 1024); // 16 MB upper
+    let mut i = 1usize;
+    while i < out.len() {
+        if fp == 0 || fp & 0xf != 0 || fp > stack_top_guess || fp < 0x1000 {
+            break;
+        }
+        let saved_fp = *(fp as *const u64);
+        let saved_lr = *((fp + 8) as *const u64);
+        if saved_lr == 0 {
+            break;
+        }
+        // LR holds the address to RETURN to (next instruction). For a
+        // sample PC we want the address of the CALL instruction, which
+        // is lr - 4 on arm64 (4-byte instructions).
+        out[i] = saved_lr.saturating_sub(4);
+        i += 1;
+        // Frame pointers should grow upward (toward stack top). If the
+        // next FP is below the current one, the chain is bogus.
+        if saved_fp <= fp {
+            break;
+        }
+        fp = saved_fp;
+    }
+    i
+}
+
+#[cfg(target_arch = "aarch64")]
+extern "C" fn sigprof_handler(_sig: libc::c_int, _info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
+    if IN_GRAPH.with(|g| g.get()) {
+        return;
+    }
+    IN_GRAPH.with(|g| g.set(true));
+    let mut pcs64 = [0u64; 6];
+    let n = unsafe {
+        // ctx is *mut libc::ucontext_t. On macOS arm64 the libc crate
+        // models it with uc_mcontext as an embedded struct; the PC + FP
+        // live at __ss.__pc and __ss.__fp.
+        let uc = ctx as *const libc::ucontext_t;
+        if uc.is_null() {
+            IN_GRAPH.with(|g| g.set(false));
+            return;
+        }
+        let mc = &(*uc).uc_mcontext;
+        // uc_mcontext is `*mut __darwin_mcontext64` per libc; deref it.
+        if mc.is_null() {
+            IN_GRAPH.with(|g| g.set(false));
+            return;
+        }
+        let ss = &(**mc).__ss;
+        walk_fp_chain(ss.__pc, ss.__fp, &mut pcs64)
+    };
+    let mut top = [0usize; 6];
+    for i in 0..n.min(6) {
+        top[i] = pcs64[i] as usize;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    top.hash(&mut h);
+    if let Ok(mut g) = GRAPH_SITES.try_lock() {
+        if let Some(map) = g.as_mut() {
+            let e = map
+                .entry(h.finish())
+                .or_insert(SiteStat { sampled_count: 0, pcs: top });
+            e.sampled_count += 1;
+        }
+    }
+    IN_GRAPH.with(|g| g.set(false));
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+extern "C" fn sigprof_handler(_sig: libc::c_int, _info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
+    // Fallback for non-aarch64: use backtrace::trace. Won't walk through
+    // JIT frames without `.eh_frame` registration but at least captures
+    // Rust frames.
     if IN_GRAPH.with(|g| g.get()) {
         return;
     }
@@ -211,9 +281,6 @@ extern "C" fn sigprof_handler(_sig: i32) {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     top.hash(&mut h);
-    // try_lock — Mutex isn't reentrant and signal handlers run on the
-    // interrupted thread; calling lock() here on a thread that holds
-    // GRAPH_SITES deadlocks.
     if let Ok(mut g) = GRAPH_SITES.try_lock() {
         if let Some(map) = g.as_mut() {
             let e = map
@@ -226,31 +293,22 @@ extern "C" fn sigprof_handler(_sig: i32) {
 }
 
 unsafe fn install_cpu_profiler(period_us: u64) {
-    extern "C" {
-        fn signal(sig: i32, h: extern "C" fn(i32)) -> *mut std::ffi::c_void;
-    }
-    signal(27, sigprof_handler); // SIGPROF = 27 on macOS + Linux
+    // SA_SIGINFO gives our handler the 3-arg signature
+    // `(int, siginfo_t*, ucontext_t*)` instead of the legacy 1-arg one.
+    // We need the ucontext to read the interrupted thread's PC + FP
+    // (so our manual frame-pointer walker can start from the right
+    // place; libunwind doesn't help in JIT frames).
+    let mut sa: libc::sigaction = std::mem::zeroed();
+    sa.sa_sigaction = sigprof_handler as usize;
+    sa.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
+    libc::sigemptyset(&mut sa.sa_mask);
+    libc::sigaction(libc::SIGPROF, &sa, std::ptr::null_mut());
 
-    #[repr(C)]
-    struct Timeval {
-        tv_sec: i64,
-        tv_usec: i32,
-    }
-    #[repr(C)]
-    struct Itimerval {
-        it_interval: Timeval,
-        it_value: Timeval,
-    }
-    extern "C" {
-        fn setitimer(which: i32, new_value: *const Itimerval, old_value: *mut Itimerval) -> i32;
-    }
-    let sec = (period_us / 1_000_000) as i64;
-    let usec = (period_us % 1_000_000) as i32;
-    let tv = Itimerval {
-        it_interval: Timeval { tv_sec: sec, tv_usec: usec },
-        it_value: Timeval { tv_sec: sec, tv_usec: usec },
-    };
-    setitimer(2, &tv, std::ptr::null_mut()); // ITIMER_PROF
+    let mut tv: libc::itimerval = std::mem::zeroed();
+    tv.it_interval.tv_sec = (period_us / 1_000_000) as libc::time_t;
+    tv.it_interval.tv_usec = (period_us % 1_000_000) as libc::suseconds_t;
+    tv.it_value = tv.it_interval;
+    libc::setitimer(libc::ITIMER_PROF, &tv, std::ptr::null_mut());
     CPU_PROFILE_ACTIVE.store(1, MemOrdering::Relaxed);
 }
 

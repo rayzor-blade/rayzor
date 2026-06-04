@@ -189,6 +189,18 @@ impl CraneliftBackend {
             .set("opt_level", opt_level)
             .map_err(|e| format!("Failed to set opt_level: {}", e))?;
 
+        // Preserve frame pointers in JIT code. Cranelift defaults to
+        // OFF (omits FP prologue in leaf / simple functions); we force
+        // it ON so SIGPROF samplers can walk through JIT frames via
+        // x29 — Cranelift doesn't emit `.eh_frame` records registered
+        // with the system unwinder, so libunwind hits a wall inside
+        // JIT code without this flag. Cost is one push + one pop per
+        // function entry (~1-2% wall in heavily-inlined kernels);
+        // acceptable for the profile attribution value.
+        flag_builder
+            .set("preserve_frame_pointers", "true")
+            .map_err(|e| format!("Failed to set preserve_frame_pointers: {}", e))?;
+
         // Enable tier-specific optimizations
         // Note: SIMD vectorization is automatically enabled through cranelift_native::builder()
         // which detects CPU features (AVX2, NEON, etc.) at runtime
