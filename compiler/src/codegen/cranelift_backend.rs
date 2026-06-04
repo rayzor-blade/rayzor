@@ -229,10 +229,11 @@ impl CraneliftBackend {
                     .set("enable_verifier", "false")
                     .map_err(|e| format!("Failed to set enable_verifier: {}", e))?;
 
-                // Disable frame pointers for slightly smaller/faster code
-                flag_builder
-                    .set("preserve_frame_pointers", "false")
-                    .map_err(|e| format!("Failed to set preserve_frame_pointers: {}", e))?;
+                // Frame pointers stay on (per the global `true` above):
+                // this overrides used to set them to `false` which broke
+                // SIGPROF JIT-frame walking. The 1-2% kernel win wasn't
+                // worth losing CPU profile attribution; with `false`
+                // here only ~7% of samples land in JIT.
             }
             "speed_and_size" => {
                 // Optimized tier: aggressive optimization
@@ -241,10 +242,9 @@ impl CraneliftBackend {
                     .set("enable_verifier", "false")
                     .map_err(|e| format!("Failed to set enable_verifier: {}", e))?;
 
-                // Disable frame pointers for smaller/faster code
-                flag_builder
-                    .set("preserve_frame_pointers", "false")
-                    .map_err(|e| format!("Failed to set preserve_frame_pointers: {}", e))?;
+                // See `speed` arm: frame pointers stay on. Per the
+                // c78f34c-introduced rationale we accept ~1-2% kernel
+                // overhead for working profile attribution.
 
                 // Enable probestack for large stack allocations (prevents stack overflow)
                 flag_builder
