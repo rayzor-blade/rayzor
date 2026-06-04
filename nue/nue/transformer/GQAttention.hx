@@ -99,24 +99,47 @@ class GQAttention implements Module {
         var qWq = qProj.qweight;
         var kWq = kProj.qweight;
         var vWq = vProj.qweight;
+        // Each projection is `matmul → reshape`. The matmul produces a
+        // fresh tensor; `.reshape` then returns a VIEW of it whose refcount
+        // is independent from the matmul's own ref. Without explicit free
+        // the matmul output's storage leaks (the reshape view eventually
+        // freed releases one ref, but the original ref to the underlying
+        // buffer is never decremented). Capture the matmul into a local,
+        // reshape, then drop the local — leaves only the view refcount on
+        // the storage.
         if (qWq != null && kWq != null && vWq != null) {
             var triple = QTensor.fusedQkvMatmul(x, qWq, kWq, vWq, 0);
             if (triple != null && triple.length == 3
                 && triple[0] != null && triple[1] != null && triple[2] != null) {
                 qRaw = triple[0].reshape([seqQ, numQHeads, headDim]);
+                triple[0].free();
                 kRaw = triple[1].reshape([seqQ, numKvHeads, headDim]);
+                triple[1].free();
                 v    = triple[2].reshape([seqQ, numKvHeads, headDim]);
+                triple[2].free();
             } else {
                 // Gate-miss inside the kernel (SDOT unavailable, batch != 1,
                 // x non-contiguous, …): fall back to the three-call path.
-                qRaw = qProj.forward(x.clone()).reshape([seqQ, numQHeads, headDim]);
-                kRaw = kProj.forward(x.clone()).reshape([seqQ, numKvHeads, headDim]);
-                v    = vProj.forward(x).reshape([seqQ, numKvHeads, headDim]);
+                var qProjOut = qProj.forward(x.clone());
+                qRaw = qProjOut.reshape([seqQ, numQHeads, headDim]);
+                qProjOut.free();
+                var kProjOut = kProj.forward(x.clone());
+                kRaw = kProjOut.reshape([seqQ, numKvHeads, headDim]);
+                kProjOut.free();
+                var vProjOut = vProj.forward(x);
+                v    = vProjOut.reshape([seqQ, numKvHeads, headDim]);
+                vProjOut.free();
             }
         } else {
-            qRaw = qProj.forward(x.clone()).reshape([seqQ, numQHeads, headDim]);
-            kRaw = kProj.forward(x.clone()).reshape([seqQ, numKvHeads, headDim]);
-            v    = vProj.forward(x).reshape([seqQ, numKvHeads, headDim]);
+            var qProjOut = qProj.forward(x.clone());
+            qRaw = qProjOut.reshape([seqQ, numQHeads, headDim]);
+            qProjOut.free();
+            var kProjOut = kProj.forward(x.clone());
+            kRaw = kProjOut.reshape([seqQ, numKvHeads, headDim]);
+            kProjOut.free();
+            var vProjOut = vProj.forward(x);
+            v    = vProjOut.reshape([seqQ, numKvHeads, headDim]);
+            vProjOut.free();
         }
 
         // 2) Rotary embedding — rotates the absolute positions starting
