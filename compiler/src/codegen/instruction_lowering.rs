@@ -198,8 +198,26 @@ impl CraneliftBackend {
             }
             BinaryOp::Ushr => builder.ins().ushr(lhs, rhs),
             // Floating point operations
-            BinaryOp::FAdd => builder.ins().fadd(lhs, rhs),
-            BinaryOp::FSub => builder.ins().fsub(lhs, rhs),
+            BinaryOp::FAdd => {
+                if let Some((a, b)) = Self::try_extract_fmul(builder, lhs) {
+                    builder.ins().fma(a, b, rhs)
+                } else if let Some((a, b)) = Self::try_extract_fmul(builder, rhs) {
+                    builder.ins().fma(a, b, lhs)
+                } else {
+                    builder.ins().fadd(lhs, rhs)
+                }
+            }
+            BinaryOp::FSub => {
+                if let Some((a, b)) = Self::try_extract_fmul(builder, lhs) {
+                    let neg_rhs = builder.ins().fneg(rhs);
+                    builder.ins().fma(a, b, neg_rhs)
+                } else if let Some((a, b)) = Self::try_extract_fmul(builder, rhs) {
+                    let neg_a = builder.ins().fneg(a);
+                    builder.ins().fma(neg_a, b, lhs)
+                } else {
+                    builder.ins().fsub(lhs, rhs)
+                }
+            }
             BinaryOp::FMul => builder.ins().fmul(lhs, rhs),
             BinaryOp::FDiv => builder.ins().fdiv(lhs, rhs),
             BinaryOp::FRem => {
@@ -620,8 +638,26 @@ impl CraneliftBackend {
                 }
             }
             BinaryOp::Ushr => builder.ins().ushr(lhs, rhs),
-            BinaryOp::FAdd => builder.ins().fadd(lhs, rhs),
-            BinaryOp::FSub => builder.ins().fsub(lhs, rhs),
+            BinaryOp::FAdd => {
+                if let Some((a, b)) = Self::try_extract_fmul(builder, lhs) {
+                    builder.ins().fma(a, b, rhs)
+                } else if let Some((a, b)) = Self::try_extract_fmul(builder, rhs) {
+                    builder.ins().fma(a, b, lhs)
+                } else {
+                    builder.ins().fadd(lhs, rhs)
+                }
+            }
+            BinaryOp::FSub => {
+                if let Some((a, b)) = Self::try_extract_fmul(builder, lhs) {
+                    let neg_rhs = builder.ins().fneg(rhs);
+                    builder.ins().fma(a, b, neg_rhs)
+                } else if let Some((a, b)) = Self::try_extract_fmul(builder, rhs) {
+                    let neg_a = builder.ins().fneg(a);
+                    builder.ins().fma(neg_a, b, lhs)
+                } else {
+                    builder.ins().fsub(lhs, rhs)
+                }
+            }
             BinaryOp::FMul => builder.ins().fmul(lhs, rhs),
             BinaryOp::FDiv => builder.ins().fdiv(lhs, rhs),
             BinaryOp::FRem => {

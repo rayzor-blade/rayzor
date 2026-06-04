@@ -5887,9 +5887,7 @@ impl CompilationUnit {
     /// references rows in this table) so off-line resolvers can map a
     /// PC → `IrFunction` → `Haxe file:line`.
     pub fn maybe_dump_file_table(&self) {
-        if std::env::var_os("RAYZOR_DUMP_JIT_MAP").as_deref()
-            != Some(std::ffi::OsStr::new("1"))
-        {
+        if std::env::var_os("RAYZOR_DUMP_JIT_MAP").as_deref() != Some(std::ffi::OsStr::new("1")) {
             return;
         }
         let path = "/tmp/rayzor_file_table.csv";
