@@ -1069,14 +1069,23 @@ impl CraneliftBackend {
             return;
         }
         rows.sort_by_key(|r| r.0);
+        // Per-PID dump so PCs resolve cleanly against a single session.
+        // Sibling /tmp/rayzor_jit_symbols.csv is kept for backward
+        // compatibility with the original (append-only) resolver path.
+        let path_pid =
+            format!("/tmp/rayzor_jit_symbols.{}.csv", std::process::id());
         let path = "/tmp/rayzor_jit_symbols.csv";
         use std::io::Write;
         let need_header = !std::path::Path::new(path).exists();
+        let need_header_pid = !std::path::Path::new(&path_pid).exists();
+        let header = "backend_id,start_hex,end_hex,size_bytes,func_id,file_id,line,column,qname\n";
         let mut out = String::new();
         if need_header {
-            out.push_str(
-                "backend_id,start_hex,end_hex,size_bytes,func_id,file_id,line,column,qname\n",
-            );
+            out.push_str(header);
+        }
+        let mut out_pid = String::new();
+        if need_header_pid {
+            out_pid.push_str(header);
         }
         for i in 0..rows.len() {
             let (start, fid, qname) = &rows[i];
@@ -1092,26 +1101,36 @@ impl CraneliftBackend {
                 .get(fid)
                 .copied()
                 .unwrap_or((0, 0, 0));
-            out.push_str(&format!(
+            let line_csv = format!(
                 "{},0x{:x},0x{:x},{},{:?},{},{},{},\"{}\"\n",
                 self.backend_id, start, end, size, fid, file_id, line, column, safe
-            ));
+            );
+            out.push_str(&line_csv);
+            out_pid.push_str(&line_csv);
         }
         let n = rows.len();
         for (start, fid, _) in &rows {
             self.dumped_funcids.insert(*fid, *start);
         }
-        match std::fs::OpenOptions::new()
+        let res = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
-            .and_then(|mut f| f.write_all(out.as_bytes()))
-        {
-            Ok(_) => eprintln!(
-                "[jit-map] backend {} appended {} new finalised functions to {} (total this backend: {})",
-                self.backend_id, n, path, self.dumped_funcids.len()
+            .and_then(|mut f| f.write_all(out.as_bytes()));
+        let res_pid = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path_pid)
+            .and_then(|mut f| f.write_all(out_pid.as_bytes()));
+        match (res, res_pid) {
+            (Ok(_), Ok(_)) => eprintln!(
+                "[jit-map] backend {} appended {} new finalised functions to {} + {} (total this backend: {})",
+                self.backend_id, n, path, path_pid, self.dumped_funcids.len()
             ),
-            Err(e) => eprintln!("[jit-map] backend {} failed to append: {}", self.backend_id, e),
+            (e1, e2) => eprintln!(
+                "[jit-map] backend {} failed to append: shared={:?} pid={:?}",
+                self.backend_id, e1.err(), e2.err()
+            ),
         }
     }
 
