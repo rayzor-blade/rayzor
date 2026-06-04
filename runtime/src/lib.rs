@@ -260,6 +260,11 @@ const TRACKED_ALIGNMENT: usize = 16;
 /// Maximum sane allocation size (1 TB) — anything larger is treated as corrupt.
 const TRACKED_MAX_SIZE: usize = 1 << 40;
 
+#[cfg(feature = "profile")]
+pub mod profile;
+#[cfg(feature = "profile")]
+pub use profile::{ensure_alloc_dump_hooks, TrackingAllocator};
+
 /// Allocate tracked heap memory using Rust's global allocator.
 ///
 /// Compatible with libc malloc signature: fn(size) -> *mut u8

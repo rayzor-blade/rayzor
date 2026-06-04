@@ -24,6 +24,10 @@ edition = "2021"
 
 [features]
 llvm-backend = ["compiler/llvm-backend"]
+# Heap + CPU profiler. Off by default; see rayzor-runtime's `profile`
+# feature for details. Activate with `cargo build --release --features profile`
+# then use RAYZOR_DUMP_ALLOC_AT_EXIT / RAYZOR_ALLOC_GRAPH / RAYZOR_CPU_PROFILE.
+profile = ["rayzor-runtime/profile"]
 
 [dependencies]
 parser = { path = "parser" }
