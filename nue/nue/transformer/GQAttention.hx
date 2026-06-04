@@ -143,25 +143,50 @@ class GQAttention implements Module {
         var kT = kAllExpanded.transposeLast2(); // [numQHeads, headDim, cacheLen]
         var scoresRaw = qByHead.bmmThreaded(kT, 0);  // [numQHeads, seqQ, cacheLen]
         var scoresScaled = scoresRaw.scale(scale);
+        scoresRaw.free();
 
         // 5) Causal mask. Each query row i can only see keys
         //    [0, i + positionOffset]. This shifts the mask diagonal by
-        //    positionOffset.
+        //    positionOffset. NB: `applyMask` (causalMask_) is IN-PLACE
+        //    and returns the same handle — scoresMasked == scoresScaled.
         var scoresMasked = applyMask(scoresScaled, positionOffset);
 
-        // 6) Softmax along the last dim (the key axis).
+        // 6) Softmax along the last dim (the key axis). Allocates fresh;
+        //    scoresMasked (== scoresScaled) is dead.
         var attn = scoresMasked.softmax();             // [numQHeads, seqQ, cacheLen]
+        scoresMasked.free();
 
         // 7) Context = attn @ V, per head.
         var context = attn.bmmThreaded(vAllExpanded, 0);  // [numQHeads, seqQ, headDim]
+        attn.free();
 
         // 8) Bring heads back to the row axis and flatten head/head_dim.
+        //    `reshape` after `permute` materialises a fresh contiguous
+        //    tensor (non-contiguous source path), so contextFlat is a
+        //    new allocation and contextRowMajor can be released alongside
+        //    the underlying context.
         var contextRowMajor = context.permute([1, 0, 2]); // [seqQ, numQHeads, headDim]
         var hiddenSize = numQHeads * headDim;
         var contextFlat = contextRowMajor.reshape([seqQ, hiddenSize]);
 
         // 9) Output projection back to hidden_size.
-        return oProj.forward(contextFlat);
+        var out = oProj.forward(contextFlat);
+
+        // Manual free of the per-layer transients. The compiler's
+        // InsertFreePass doesn't know about `rayzor_tensor_free`, so
+        // the tensor refcount machinery only fires for explicit `.free()`
+        // calls inserted here. Without these every decoded token leaks
+        // ~17 MB of attention scratch × 16 layers, climbing to ~28 GB
+        // resident at 500 tokens before macOS swap pressure makes the
+        // system feel frozen. Frees run AFTER `oProj.forward` so any
+        // worker threads spawned for the threaded path have rejoined.
+        kAllExpanded.free();
+        vAllExpanded.free();
+        contextFlat.free();
+        contextRowMajor.free();
+        context.free();
+
+        return out;
     }
 
     /**
