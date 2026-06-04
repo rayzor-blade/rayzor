@@ -78,7 +78,17 @@ class Linear implements Module {
             // `x.matmulT(weight)` as a use-after-move. Cloning the
             // unused path is cheaper than rebinding through a
             // mutable wrapper.
-            y = qweight.matmulXTQThreaded(x.clone(), 0);
+            //
+            // Bind the clone to a local so we can drop the bumped
+            // refcount explicitly after the kernel consumes it. The
+            // compiler's InsertFreePass doesn't recognise tensor
+            // returns (extern allocs are runtime-managed via the
+            // tensor pool's ARC), so leaving the bumped clone bare
+            // would leak one ref per Linear call (7+ per block, 16
+            // blocks → 100+ leaked refs per generated token).
+            var xClone = x.clone();
+            y = qweight.matmulXTQThreaded(xClone, 0);
+            xClone.free();
         } else {
             y = x.matmulT(weight);
         }
