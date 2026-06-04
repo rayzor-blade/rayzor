@@ -5876,7 +5876,39 @@ impl CompilationUnit {
             all_typed_files.push(stdlib_file);
         }
 
+        self.maybe_dump_file_table();
+
         Ok(all_typed_files)
+    }
+
+    /// When `RAYZOR_DUMP_JIT_MAP=1`, write `/tmp/rayzor_file_table.csv`
+    /// containing `file_id,path` rows for every file seen by the compiler.
+    /// Pairs with `/tmp/rayzor_jit_symbols.csv` (whose `file_id` column
+    /// references rows in this table) so off-line resolvers can map a
+    /// PC → `IrFunction` → `Haxe file:line`.
+    pub fn maybe_dump_file_table(&self) {
+        if std::env::var_os("RAYZOR_DUMP_JIT_MAP").as_deref()
+            != Some(std::ffi::OsStr::new("1"))
+        {
+            return;
+        }
+        let path = "/tmp/rayzor_file_table.csv";
+        let mut out = String::from("file_id,path\n");
+        let mut rows: Vec<(&String, u32)> = self
+            .file_id_by_filename
+            .iter()
+            .map(|(name, id)| (name, *id))
+            .collect();
+        rows.sort_by_key(|r| r.1);
+        for (name, id) in rows {
+            let safe = name.replace('"', "''");
+            out.push_str(&format!("{},\"{}\"\n", id, safe));
+        }
+        let n_files = self.file_id_by_filename.len();
+        match std::fs::write(path, out) {
+            Ok(_) => eprintln!("[jit-map] wrote {} file paths to {}", n_files, path),
+            Err(e) => eprintln!("[jit-map] failed to write {}: {}", path, e),
+        }
     }
 
     /// Extract the type name from an unresolved type error message

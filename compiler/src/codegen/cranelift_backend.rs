@@ -35,6 +35,26 @@ pub struct CraneliftBackend {
     /// Map from MIR function IDs to Cranelift function IDs
     function_map: BTreeMap<IrFunctionId, FuncId>,
 
+    /// Display name per Cranelift FuncId, captured at declare_function time
+    /// for the JIT-symbol-map dump (RAYZOR_DUMP_JIT_MAP=1). Prefers
+    /// `IrFunction.qualified_name` and falls back to `IrFunction.name`.
+    funcid_display_name: BTreeMap<FuncId, String>,
+
+    /// (file_id, line, column) per Cranelift FuncId — sourced from
+    /// `IrFunction.source_location` at declare time. Dumped alongside
+    /// the qname so off-line resolvers can map a PC to a Haxe source
+    /// position.
+    funcid_source_loc: BTreeMap<FuncId, (u32, u32, u32)>,
+
+    /// Process-unique backend instance id (assigned at construction). Tags
+    /// each row in the JIT symbol map so the off-line resolver can tell
+    /// which backend a PC belongs to.
+    backend_id: u64,
+
+    /// Snapshot of (FuncId → last_dumped_address) for this backend. We
+    /// only emit a new row when the address changes (tier-up moves code).
+    dumped_funcids: BTreeMap<FuncId, usize>,
+
     /// Map from MIR value IDs to Cranelift values (per function)
     pub(super) value_map: BTreeMap<IrId, Value>,
 
@@ -263,10 +283,18 @@ impl CraneliftBackend {
         // Get target pointer type from ISA
         let pointer_type = module.target_config().pointer_type();
 
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static BACKEND_ID_CTR: AtomicU64 = AtomicU64::new(0);
+        let backend_id = BACKEND_ID_CTR.fetch_add(1, Ordering::Relaxed);
+
         Ok(Self {
             module,
             ctx,
             function_map: BTreeMap::new(),
+            funcid_display_name: BTreeMap::new(),
+            funcid_source_loc: BTreeMap::new(),
+            backend_id,
+            dumped_funcids: BTreeMap::new(),
             value_map: BTreeMap::new(),
             closure_environments: BTreeMap::new(),
             runtime_functions: BTreeMap::new(),
@@ -721,6 +749,7 @@ impl CraneliftBackend {
         self.module
             .finalize_definitions()
             .map_err(|e| format!("Failed to finalize definitions: {}", e))?;
+        self.maybe_dump_jit_symbols();
 
         Ok(())
     }
@@ -970,7 +999,94 @@ impl CraneliftBackend {
     pub fn finalize(&mut self) -> Result<(), String> {
         self.module
             .finalize_definitions()
-            .map_err(|e| format!("Failed to finalize definitions: {}", e))
+            .map_err(|e| format!("Failed to finalize definitions: {}", e))?;
+        self.maybe_dump_jit_symbols();
+        Ok(())
+    }
+
+    /// When `RAYZOR_DUMP_JIT_MAP=1`, APPEND new finalised-function rows to
+    /// `/tmp/rayzor_jit_symbols.csv`. Format:
+    ///   `backend_id,start_hex,end_hex,size_bytes,func_id,qname`
+    /// Each row identifies the backend instance (so off-line resolvers can
+    /// binary-search the correct address-range subset) and the user-visible
+    /// qualified name from the MIR (`IrFunction.qualified_name` preferred,
+    /// `IrFunction.name` fallback). Tracks dumped FuncIds per backend so
+    /// repeated calls (tier-up's per-function finalise path) only emit new
+    /// rows.
+    fn maybe_dump_jit_symbols(&mut self) {
+        if std::env::var_os("RAYZOR_DUMP_JIT_MAP").as_deref()
+            != Some(std::ffi::OsStr::new("1"))
+        {
+            return;
+        }
+        let mut funcid_to_mirid: BTreeMap<FuncId, crate::ir::IrFunctionId> = BTreeMap::new();
+        for (mir_id, fid) in &self.function_map {
+            funcid_to_mirid.insert(*fid, *mir_id);
+        }
+        let mut rows: Vec<(usize, FuncId, String)> = Vec::new();
+        for &fid in &self.defined_functions {
+            let addr = self.module.get_finalized_function(fid) as usize;
+            if addr == 0 {
+                continue;
+            }
+            // Skip if we've already emitted this FuncId at this exact
+            // address. tier-up recompilation moves code to a fresh address
+            // (same FuncId, new addr) — we DO want to emit those.
+            if self.dumped_funcids.get(&fid) == Some(&addr) {
+                continue;
+            }
+            let name = self
+                .funcid_display_name
+                .get(&fid)
+                .cloned()
+                .unwrap_or_else(|| match funcid_to_mirid.get(&fid) {
+                    Some(mid) => format!("<unnamed IrFunctionId({})>", mid.0),
+                    None => format!("<unnamed FuncId({:?})>", fid),
+                });
+            rows.push((addr, fid, name));
+        }
+        if rows.is_empty() {
+            return;
+        }
+        rows.sort_by_key(|r| r.0);
+        let path = "/tmp/rayzor_jit_symbols.csv";
+        use std::io::Write;
+        let need_header = !std::path::Path::new(path).exists();
+        let mut out = String::new();
+        if need_header {
+            out.push_str("backend_id,start_hex,end_hex,size_bytes,func_id,file_id,line,column,qname\n");
+        }
+        for i in 0..rows.len() {
+            let (start, fid, qname) = &rows[i];
+            let end = if i + 1 < rows.len() { rows[i + 1].0 } else { *start };
+            let size = end.saturating_sub(*start);
+            let safe = qname.replace('"', "''");
+            let (file_id, line, column) = self
+                .funcid_source_loc
+                .get(fid)
+                .copied()
+                .unwrap_or((0, 0, 0));
+            out.push_str(&format!(
+                "{},0x{:x},0x{:x},{},{:?},{},{},{},\"{}\"\n",
+                self.backend_id, start, end, size, fid, file_id, line, column, safe
+            ));
+        }
+        let n = rows.len();
+        for (start, fid, _) in &rows {
+            self.dumped_funcids.insert(*fid, *start);
+        }
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut f| f.write_all(out.as_bytes()))
+        {
+            Ok(_) => eprintln!(
+                "[jit-map] backend {} appended {} new finalised functions to {} (total this backend: {})",
+                self.backend_id, n, path, self.dumped_funcids.len()
+            ),
+            Err(e) => eprintln!("[jit-map] backend {} failed to append: {}", self.backend_id, e),
+        }
     }
 
     /// Declare all functions from a module WITHOUT compiling their bodies.
@@ -1059,6 +1175,7 @@ impl CraneliftBackend {
         self.module
             .finalize_definitions()
             .map_err(|e| format!("Failed to finalize function: {}", e))?;
+        self.maybe_dump_jit_symbols();
 
         Ok(())
     }
@@ -1078,6 +1195,18 @@ impl CraneliftBackend {
         // We use runtime_functions to track all such functions (not just libc ones)
         if let Some(&existing_func_id) = self.runtime_functions.get(&function.name) {
             self.function_map.insert(mir_func_id, existing_func_id);
+            self.funcid_display_name
+                .entry(existing_func_id)
+                .or_insert_with(|| {
+                    function
+                        .qualified_name
+                        .clone()
+                        .unwrap_or_else(|| function.name.clone())
+                });
+            let s = function.source_location;
+            self.funcid_source_loc
+                .entry(existing_func_id)
+                .or_insert((s.file_id, s.line, s.column));
             return Ok(());
         }
 
@@ -1096,6 +1225,11 @@ impl CraneliftBackend {
                         function.name, qualified_name, mir_func_id, forward_ref_func_id
                     );
                     self.function_map.insert(mir_func_id, forward_ref_func_id);
+                    self.funcid_display_name
+                        .insert(forward_ref_func_id, qualified_name.clone());
+                    let s = function.source_location;
+                    self.funcid_source_loc
+                        .insert(forward_ref_func_id, (s.file_id, s.line, s.column));
                     // Also track by qualified name for future lookups
                     self.qualified_name_to_func
                         .insert(qualified_name.clone(), forward_ref_func_id);
@@ -1302,6 +1436,16 @@ impl CraneliftBackend {
             function.signature.parameters.len()
         );
         self.function_map.insert(mir_func_id, func_id);
+        self.funcid_display_name.insert(
+            func_id,
+            function
+                .qualified_name
+                .clone()
+                .unwrap_or_else(|| function.name.clone()),
+        );
+        let s = function.source_location;
+        self.funcid_source_loc
+            .insert(func_id, (s.file_id, s.line, s.column));
 
         // Track extern functions and stdlib wrapper functions in runtime_functions
         // so we don't declare them twice across MIR modules.
@@ -4768,6 +4912,18 @@ impl CraneliftBackend {
 impl Default for CraneliftBackend {
     fn default() -> Self {
         Self::new().expect("Failed to create Cranelift backend")
+    }
+}
+
+impl Drop for CraneliftBackend {
+    /// Catch-all JIT symbol dump on backend destruction. Most backends in
+    /// the tier-up + beadie_jit paths are `Box::leak`-ed and never drop
+    /// during normal execution, but those that DO drop (e.g. one-shot
+    /// `compile_module` paths whose backend is owned by the caller) should
+    /// still surface their symbols. Cheap when `RAYZOR_DUMP_JIT_MAP` is
+    /// unset (single env-var check, early return).
+    fn drop(&mut self) {
+        self.maybe_dump_jit_symbols();
     }
 }
 
