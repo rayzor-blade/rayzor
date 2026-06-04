@@ -34,9 +34,24 @@ class SwiGLU implements Module {
         // SwiGLU shares the same input x across gate and up projections.
         // The down projection then takes the elementwise product. Two
         // independent consumers of x → clone the first one.
-        var g = gate.forward(x.clone()).silu();
+        //
+        // Manual frees: extern tensor allocs are runtime-managed via
+        // the tensor pool's ARC, but the JIT's InsertFreePass doesn't
+        // know about rayzor_tensor_free, so every intermediate here
+        // leaks unless we release it inline. Five frees per FFN call
+        // × 16 layers per token compounds fast on long generations.
+        var xClone = x.clone();
+        var gLin = gate.forward(xClone);
+        xClone.free();
+        var g = gLin.silu();
+        gLin.free();
         var u = up.forward(x);
-        return down.forward(g.mul(u));
+        var gu = g.mul(u);
+        g.free();
+        u.free();
+        var result = down.forward(gu);
+        gu.free();
+        return result;
     }
 
     public function parameters():Array<NamedTensor> {
