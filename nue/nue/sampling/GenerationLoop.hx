@@ -68,7 +68,9 @@ class GenerationLoop {
         // Prefill: feed the entire prompt; take the last row of logits
         // as the prediction for "what comes after the prompt".
         var logits = model.forwardIds(ids);
-        var nextId = sampler.sample(lastRow(logits));
+        var lr0 = lastRow(logits);
+        var nextId = sampler.sample(lr0);
+        if (lr0 != logits) lr0.free();
 
         var generated:Array<Int> = [];
         var step = 0;
@@ -100,10 +102,21 @@ class GenerationLoop {
             // the Array's underlying buffer across iterations.
             // Investigate compiler/runtime escape semantics before
             // trying again.
+            //
+            // Tensor frees: the previous `logits` (vocab=128k × 4 B
+            // = 512 KB) and its lastRow view would otherwise pile up
+            // — one per generated token, 300+ MB over a 600-token run.
+            // InsertFreePass doesn't recognise tensor returns so we
+            // release them inline. The lastRow view sometimes IS the
+            // input (1-D logits at prefill seq_len=1), guard the free.
+            logits.free();
             logits = model.forwardIds([nextId]);
-            nextId = sampler.sample(lastRow(logits));
+            var lrN = lastRow(logits);
+            nextId = sampler.sample(lrN);
+            if (lrN != logits) lrN.free();
         }
 
+        logits.free();
         return prompt + tokenizer.decode(generated);
     }
 
@@ -128,8 +141,14 @@ class GenerationLoop {
         // `slice` keeps the sliced axis (`[lastIdx, lastIdx+1)`),
         // returning shape `[1, vocab_size]`. Samplers index logits
         // with a single coordinate (`logits.get([i])`), so collapse
-        // to `[vocab_size]` before handing off.
+        // to `[vocab_size]` before handing off. Free the intermediate
+        // slice view — reshape on a contiguous source returns a fresh
+        // view of the same storage with its own refcount, so the
+        // slice's refcount is independently dropped here.
         var vocab = shape[shape.length - 1];
-        return logits.slice(0, lastIdx, lastIdx + 1).reshape([vocab]);
+        var sliced = logits.slice(0, lastIdx, lastIdx + 1);
+        var reshaped = sliced.reshape([vocab]);
+        sliced.free();
+        return reshaped;
     }
 }
