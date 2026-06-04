@@ -34,6 +34,14 @@ default = []
 runtime-safety-checks = []
 panic-on-safety-violation = []
 tcc-runtime = ["cc"]
+# Enables the TrackingAllocator + SIGPROF CPU profiler in
+# runtime/src/lib.rs. Off by default — it adds ~5 atomic ops per alloc
+# and an extra signal handler. The binary crate must wire
+# `#[global_allocator] static GLOBAL: TrackingAllocator = ...` and call
+# `ensure_alloc_dump_hooks()` from main. Activate via env vars at
+# runtime: RAYZOR_DUMP_ALLOC_AT_EXIT / RAYZOR_ALLOC_GRAPH /
+# RAYZOR_CPU_PROFILE. See memory/project_debugger_feasibility.md.
+profile = []
 
 [profile.release]
 opt-level = 3

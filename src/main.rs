@@ -24,6 +24,13 @@ mod rpkg_cmd;
 mod tui;
 mod wasm_cmd;
 
+// `--features profile` activates the runtime's TrackingAllocator +
+// SIGPROF profiler. Off by default — adds ~5 atomic ops per alloc and
+// a signal handler. See memory/project_debugger_feasibility.md.
+#[cfg(feature = "profile")]
+#[global_allocator]
+static GLOBAL: rayzor_runtime::TrackingAllocator = rayzor_runtime::TrackingAllocator;
+
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
 use std::process;
@@ -570,6 +577,10 @@ impl Preset {
 }
 
 fn main() {
+    #[cfg(feature = "profile")]
+    unsafe {
+        rayzor_runtime::ensure_alloc_dump_hooks();
+    }
     let cli = Cli::parse();
 
     let result = match cli.command {
