@@ -1026,9 +1026,7 @@ impl CraneliftBackend {
     /// repeated calls (tier-up's per-function finalise path) only emit new
     /// rows.
     fn maybe_dump_jit_symbols(&mut self) {
-        if std::env::var_os("RAYZOR_DUMP_JIT_MAP").as_deref()
-            != Some(std::ffi::OsStr::new("1"))
-        {
+        if std::env::var_os("RAYZOR_DUMP_JIT_MAP").as_deref() != Some(std::ffi::OsStr::new("1")) {
             return;
         }
         // Always print a one-liner so callers can audit which
@@ -1058,14 +1056,13 @@ impl CraneliftBackend {
             if self.dumped_funcids.get(&fid) == Some(&addr) {
                 continue;
             }
-            let name = self
-                .funcid_display_name
-                .get(&fid)
-                .cloned()
-                .unwrap_or_else(|| match funcid_to_mirid.get(&fid) {
-                    Some(mid) => format!("<unnamed IrFunctionId({})>", mid.0),
-                    None => format!("<unnamed FuncId({:?})>", fid),
-                });
+            let name =
+                self.funcid_display_name.get(&fid).cloned().unwrap_or_else(
+                    || match funcid_to_mirid.get(&fid) {
+                        Some(mid) => format!("<unnamed IrFunctionId({})>", mid.0),
+                        None => format!("<unnamed FuncId({:?})>", fid),
+                    },
+                );
             rows.push((addr, fid, name));
         }
         if rows.is_empty() {
@@ -1077,11 +1074,17 @@ impl CraneliftBackend {
         let need_header = !std::path::Path::new(path).exists();
         let mut out = String::new();
         if need_header {
-            out.push_str("backend_id,start_hex,end_hex,size_bytes,func_id,file_id,line,column,qname\n");
+            out.push_str(
+                "backend_id,start_hex,end_hex,size_bytes,func_id,file_id,line,column,qname\n",
+            );
         }
         for i in 0..rows.len() {
             let (start, fid, qname) = &rows[i];
-            let end = if i + 1 < rows.len() { rows[i + 1].0 } else { *start };
+            let end = if i + 1 < rows.len() {
+                rows[i + 1].0
+            } else {
+                *start
+            };
             let size = end.saturating_sub(*start);
             let safe = qname.replace('"', "''");
             let (file_id, line, column) = self
