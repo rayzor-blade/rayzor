@@ -33,14 +33,14 @@ class TopPSampler implements Sampler {
 
         var probs:Array<Float> = [for (_ in 0...n) 0.0];
         var ids:Array<Int> = [for (_ in 0...n) 0];
-        var maxLogit = logits.get([0]);
+        var maxLogit = logits.getFlat(0);
         for (i in 1...n) {
-            var v = logits.get([i]);
+            var v = logits.getFlat(i);
             if (v > maxLogit) maxLogit = v;
         }
         var total = 0.0;
         for (i in 0...n) {
-            var v = (logits.get([i]) - maxLogit) / t;
+            var v = (logits.getFlat(i) - maxLogit) / t;
             var ev = Math.exp(v);
             probs[i] = ev;
             ids[i] = i;

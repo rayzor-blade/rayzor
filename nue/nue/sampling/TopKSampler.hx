@@ -36,7 +36,7 @@ class TopKSampler implements Sampler {
         var logitsArr:Array<Float> = [for (_ in 0...n) 0.0];
         var ids:Array<Int> = [for (_ in 0...n) 0];
         for (i in 0...n) {
-            logitsArr[i] = logits.get([i]);
+            logitsArr[i] = logits.getFlat(i);
             ids[i] = i;
         }
         // Selection sort for K rounds — moves the K largest to the front.

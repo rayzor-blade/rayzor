@@ -90,7 +90,7 @@ class BertModel implements EncoderModel {
     public function forward(x:Tensor):Tensor {
         var n = x.numel();
         var ids = [];
-        for (i in 0...n) ids.push(Std.int(x.get([i])));
+        for (i in 0...n) ids.push(Std.int(x.getFlat(i)));
         return encode(ids);
     }
 

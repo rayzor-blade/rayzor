@@ -81,7 +81,7 @@ class LlamaModel implements CausalLanguageModel {
         var n = shape[0];
         for (i in 1...shape.length) n *= shape[i];
         var ids = [];
-        for (i in 0...n) ids.push(Std.int(x.get([i])));
+        for (i in 0...n) ids.push(Std.int(x.getFlat(i)));
         return forwardIds(ids);
     }
 
