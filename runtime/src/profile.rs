@@ -488,6 +488,28 @@ pub unsafe fn ensure_alloc_dump_hooks() {
                 rayzor_dump_alloc_stats();
                 rayzor_dump_alloc_graph();
                 crate::tensor::rayzor_dump_tensor_alloc_stats();
+                // Capture top-8 PCs at the trap point. Resolve offline
+                // by joining against /tmp/rayzor_jit_symbols.csv (the
+                // map dumped when RAYZOR_DUMP_JIT_MAP=1) using
+                // tools/resolve_alloc_graph.py — gives the Haxe
+                // function name + source line at the crash site
+                // instead of just the raw exit code.
+                let mut pcs = [0usize; 8];
+                let mut n = 0;
+                backtrace::trace(|f| {
+                    if n < pcs.len() {
+                        pcs[n] = f.ip() as usize;
+                        n += 1;
+                        true
+                    } else {
+                        false
+                    }
+                });
+                eprint!("[sig{}-backtrace]", sig);
+                for pc in &pcs[..n] {
+                    eprint!(" 0x{:x}", pc);
+                }
+                eprintln!();
                 unsafe {
                     extern "C" {
                         fn _exit(s: i32) -> !;
