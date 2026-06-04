@@ -290,6 +290,21 @@ unsafe fn decode_q4_k_block(block_ptr: *const u8) -> Q4KBlock {
 /// (0..63) with a -32 bias to make it signed.
 ///
 /// Mirrors `ggml_dequant_row_q6_K` in llama.cpp.
+///
+/// 2026-06-04 perf note — a hand-written aarch64 NEON port of this
+/// kernel (lane-loaded ql/qh bytes → vand/vshr unpack → widen i8 → i32
+/// → vcvtq_f32_s32 → vmulq_f32 by pre-broadcast `d * scale`) was tried
+/// and measured 13-17% SLOWER than this scalar version on M1 Pro
+/// nue/llama-chat 80-token warm cache (20.0 → 17.5 tok/s). LLVM's
+/// auto-vectorizer produces tighter code than the hand-rolled NEON,
+/// likely due to better register allocation across the strided stores
+/// at positions l, l+32, l+64, l+96 and amortising the 4×16 scale
+/// broadcasts across the whole half. A future NEON port that beats
+/// the scalar must also handle the FULL kernel including the dot
+/// product (i.e. fused dequant + dot with SIMD throughout) — see the
+/// failed scalar-fused attempt at commit 31c8a2d which captures why a
+/// half-measure loses. Real Tier 2 #4 work per
+/// [[project-optimization-roadmap]].
 #[inline]
 unsafe fn dequant_q6_k_block(block_ptr: *const u8, out: &mut [f32]) {
     debug_assert_eq!(out.len(), Q6_K_BLOCK_SIZE);
