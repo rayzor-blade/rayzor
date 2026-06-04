@@ -181,6 +181,33 @@ pub extern "C" fn rayzor_dump_alloc_graph() {
 /// This bypasses libunwind: it works regardless of `.eh_frame` /
 /// compact-unwind coverage, AS LONG AS the JIT code preserves frame
 /// pointers (Cranelift's `preserve_frame_pointers = true` setting).
+/// 8-slot variant for crash-handler use. Same algorithm.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn walk_fp_chain_8(initial_pc: u64, start_fp: u64, out: &mut [u64; 8]) -> usize {
+    out[0] = initial_pc;
+    let mut fp = start_fp;
+    let stack_top_guess = fp.saturating_add(16 * 1024 * 1024);
+    let mut i = 1usize;
+    while i < out.len() {
+        if fp == 0 || fp & 0xf != 0 || fp > stack_top_guess || fp < 0x1000 {
+            break;
+        }
+        let saved_fp = *(fp as *const u64);
+        let saved_lr = *((fp + 8) as *const u64);
+        if saved_lr == 0 {
+            break;
+        }
+        out[i] = saved_lr.saturating_sub(4);
+        i += 1;
+        if saved_fp <= fp {
+            break;
+        }
+        fp = saved_fp;
+    }
+    i
+}
+
 #[cfg(target_arch = "aarch64")]
 #[inline(always)]
 unsafe fn walk_fp_chain(initial_pc: u64, start_fp: u64, out: &mut [u64; 6]) -> usize {
@@ -484,42 +511,106 @@ pub unsafe fn ensure_alloc_dump_hooks() {
                 crate::tensor::rayzor_dump_tensor_alloc_stats();
             }
             atexit(dump_all);
-            extern "C" fn sig_dump(sig: i32) {
+            // SA_SIGINFO so the handler receives ucontext_t and we can
+            // read the trapping thread's PC + FP directly. The legacy
+            // signal(2) path only gives the signo, and `backtrace::trace`
+            // from inside a Mach signal handler stops at _sigtramp on
+            // macOS (no DWARF unwind info for the trampoline), so it
+            // never reaches the actual crash frame.
+            #[cfg(target_arch = "aarch64")]
+            extern "C" fn sig_dump_si(
+                sig: libc::c_int,
+                _info: *mut libc::siginfo_t,
+                ctx: *mut libc::c_void,
+            ) {
                 rayzor_dump_alloc_stats();
                 rayzor_dump_alloc_graph();
                 crate::tensor::rayzor_dump_tensor_alloc_stats();
-                // Capture top-8 PCs at the trap point. Resolve offline
-                // by joining against /tmp/rayzor_jit_symbols.csv (the
-                // map dumped when RAYZOR_DUMP_JIT_MAP=1) using
-                // tools/resolve_alloc_graph.py — gives the Haxe
-                // function name + source line at the crash site
-                // instead of just the raw exit code.
-                let mut pcs = [0usize; 8];
-                let mut n = 0;
-                backtrace::trace(|f| {
-                    if n < pcs.len() {
-                        pcs[n] = f.ip() as usize;
-                        n += 1;
-                        true
+
+                let mut pcs64 = [0u64; 8];
+                let n = unsafe {
+                    let uc = ctx as *const libc::ucontext_t;
+                    if uc.is_null() {
+                        0
                     } else {
-                        false
+                        let mc = &(*uc).uc_mcontext;
+                        if mc.is_null() {
+                            0
+                        } else {
+                            let ss = &(**mc).__ss;
+                            walk_fp_chain_8(ss.__pc, ss.__fp, &mut pcs64)
+                        }
                     }
-                });
-                eprint!("[sig{}-backtrace]", sig);
-                for pc in &pcs[..n] {
-                    eprint!(" 0x{:x}", pc);
+                };
+
+                #[repr(C)]
+                struct DlInfo {
+                    dli_fname: *const std::ffi::c_char,
+                    dli_fbase: *mut std::ffi::c_void,
+                    dli_sname: *const std::ffi::c_char,
+                    dli_saddr: *mut std::ffi::c_void,
                 }
-                eprintln!();
+                extern "C" {
+                    fn dladdr(addr: *const std::ffi::c_void, info: *mut DlInfo) -> i32;
+                }
                 unsafe {
+                    eprintln!("[sig{}-backtrace pid={}]", sig, std::process::id());
+                    for pc in &pcs64[..n] {
+                        let mut info: DlInfo = DlInfo {
+                            dli_fname: std::ptr::null(),
+                            dli_fbase: std::ptr::null_mut(),
+                            dli_sname: std::ptr::null(),
+                            dli_saddr: std::ptr::null_mut(),
+                        };
+                        let rc = dladdr(*pc as *const _, &mut info);
+                        if rc != 0 && !info.dli_sname.is_null() {
+                            let sname = std::ffi::CStr::from_ptr(info.dli_sname).to_string_lossy();
+                            let off = (*pc as usize).saturating_sub(info.dli_saddr as usize);
+                            let fname = if !info.dli_fname.is_null() {
+                                let fp = std::ffi::CStr::from_ptr(info.dli_fname).to_string_lossy();
+                                fp.rsplit('/').next().unwrap_or("?").to_string()
+                            } else {
+                                String::from("?")
+                            };
+                            eprintln!("  0x{:x}  {} +0x{:x}  ({})", pc, sname, off, fname);
+                        } else {
+                            eprintln!("  0x{:x}  (in JIT / unresolved)", pc);
+                        }
+                    }
                     extern "C" {
                         fn _exit(s: i32) -> !;
                     }
                     _exit(128 + sig);
                 }
             }
-            signal(5, sig_dump); // SIGTRAP
-            signal(11, sig_dump); // SIGSEGV
-            signal(6, sig_dump); // SIGABRT
+
+            #[cfg(target_arch = "aarch64")]
+            {
+                let mut sa: libc::sigaction = std::mem::zeroed();
+                sa.sa_sigaction = sig_dump_si as usize;
+                sa.sa_flags = libc::SA_SIGINFO;
+                libc::sigemptyset(&mut sa.sa_mask);
+                libc::sigaction(5, &sa, std::ptr::null_mut()); // SIGTRAP
+                libc::sigaction(11, &sa, std::ptr::null_mut()); // SIGSEGV
+                libc::sigaction(6, &sa, std::ptr::null_mut()); // SIGABRT
+            }
+            #[cfg(not(target_arch = "aarch64"))]
+            {
+                extern "C" fn sig_dump(sig: i32) {
+                    rayzor_dump_alloc_stats();
+                    rayzor_dump_alloc_graph();
+                    crate::tensor::rayzor_dump_tensor_alloc_stats();
+                    unsafe {
+                        extern "C" {
+                            fn _exit(s: i32) -> !;
+                        }
+                        _exit(128 + sig);
+                    }
+                }
+                signal(5, sig_dump);
+                signal(11, sig_dump);
+                signal(6, sig_dump);
+            }
         }
     });
 }
