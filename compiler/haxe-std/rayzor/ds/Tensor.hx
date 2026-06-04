@@ -114,6 +114,15 @@ extern class Tensor {
     @:native("tensor_get")
     public function get(indices:Array<Int>):Float;
 
+    /**
+     * Flat-indexed scalar read. Skips the `Array<Int>` allocation in
+     * `get()` — for a 128k-element logits vector this is ~100× cheaper
+     * per call. Use when scanning a contiguous tensor linearly (e.g.
+     * top-k selection over a logits row).
+     */
+    @:native("tensor_get_flat")
+    public function getFlat(i:Int):Float;
+
     /** Set element at indices */
     @:native("tensor_set")
     public function set(indices:Array<Int>, value:Float):Void;
