@@ -335,6 +335,51 @@ unsafe impl std::alloc::GlobalAlloc for TrackingAllocator {
     }
 }
 
+/// Arm the SIGPROF profiler explicitly. Callable from Haxe via the
+/// extern declaration `@:native("rayzor_profile_start")`. Bypasses the
+/// env-var path so users can place start/stop calls around a specific
+/// region (e.g. inside `GenerationLoop.generate`). Period defaults to
+/// 1000us; override via `RAYZOR_CPU_PROFILE_US` before calling.
+///
+/// Idempotent: calling twice has no extra effect, calling after env-var
+/// based init is a no-op (CPU_PROFILE_ACTIVE flag).
+#[no_mangle]
+pub extern "C" fn rayzor_profile_start() {
+    if CPU_PROFILE_ACTIVE.load(MemOrdering::Relaxed) == 1 {
+        return;
+    }
+    let period = std::env::var("RAYZOR_CPU_PROFILE_US")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(1000);
+    {
+        let mut g = GRAPH_SITES.lock().unwrap();
+        if g.is_none() {
+            *g = Some(std::collections::HashMap::new());
+        }
+    }
+    unsafe { install_cpu_profiler(period) };
+    eprintln!(
+        "[cpu-profile] rayzor_profile_start: SIGPROF armed (period={}us)",
+        period
+    );
+}
+
+/// Disarm the SIGPROF profiler. Pair with `rayzor_profile_start`.
+/// Subsequent calls to start re-arm with the same period; the
+/// accumulated GRAPH_SITES table persists across start/stop windows.
+#[no_mangle]
+pub extern "C" fn rayzor_profile_stop() {
+    if CPU_PROFILE_ACTIVE.load(MemOrdering::Relaxed) == 0 {
+        return;
+    }
+    let zero: libc::itimerval = unsafe { std::mem::zeroed() };
+    unsafe { libc::setitimer(libc::ITIMER_PROF, &zero, std::ptr::null_mut()) };
+    CPU_PROFILE_ACTIVE.store(0, MemOrdering::Relaxed);
+    eprintln!("[cpu-profile] rayzor_profile_stop: SIGPROF disarmed");
+}
+
 /// Install atexit + signal-driven dumpers and (when requested) arm the
 /// SIGPROF profiler. Idempotent — safe to call multiple times. Should
 /// be called from `fn main` early.
@@ -357,14 +402,63 @@ pub unsafe fn ensure_alloc_dump_hooks() {
                 .and_then(|s| s.parse::<u64>().ok())
                 .filter(|&n| n > 0)
                 .unwrap_or(1000);
+            // RAYZOR_CPU_PROFILE_DELAY_MS skips the first N ms of the run
+            // so the compile-phase doesn't dominate the sample stream.
+            // RAYZOR_CPU_PROFILE_DURATION_MS bounds how long sampling
+            // stays armed; 0 / unset = forever. The combination lets a
+            // user say "skip the first 2s of compile, then capture for
+            // 30s of decode" without touching their Haxe code.
+            let delay_ms = std::env::var("RAYZOR_CPU_PROFILE_DELAY_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
+            let duration_ms = std::env::var("RAYZOR_CPU_PROFILE_DURATION_MS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(0);
             {
                 let mut g = GRAPH_SITES.lock().unwrap();
                 if g.is_none() {
                     *g = Some(std::collections::HashMap::new());
                 }
             }
-            install_cpu_profiler(period);
-            eprintln!("[cpu-profile] SIGPROF profiler armed (period={}us)", period);
+            if delay_ms == 0 && duration_ms == 0 {
+                install_cpu_profiler(period);
+                eprintln!("[cpu-profile] SIGPROF profiler armed (period={}us)", period);
+            } else {
+                // Spawn a tiny scheduler thread. setitimer is per-thread on
+                // some platforms, but on macOS+Linux ITIMER_PROF is per-
+                // process and SIGPROF is delivered to whichever thread is
+                // running — so it doesn't matter that this thread spawned
+                // the timer.
+                std::thread::spawn(move || {
+                    if delay_ms > 0 {
+                        eprintln!(
+                            "[cpu-profile] arming SIGPROF in {}ms (period={}us{})",
+                            delay_ms,
+                            period,
+                            if duration_ms > 0 {
+                                format!(", duration={}ms", duration_ms)
+                            } else {
+                                String::new()
+                            }
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+                    }
+                    unsafe { install_cpu_profiler(period) };
+                    eprintln!("[cpu-profile] SIGPROF profiler armed (period={}us)", period);
+                    if duration_ms > 0 {
+                        std::thread::sleep(std::time::Duration::from_millis(duration_ms));
+                        let zero: libc::itimerval = unsafe { std::mem::zeroed() };
+                        unsafe { libc::setitimer(libc::ITIMER_PROF, &zero, std::ptr::null_mut()) };
+                        CPU_PROFILE_ACTIVE.store(0, MemOrdering::Relaxed);
+                        eprintln!(
+                            "[cpu-profile] SIGPROF disarmed after {}ms duration",
+                            duration_ms
+                        );
+                    }
+                });
+            }
         }
         if std::env::var_os("RAYZOR_DUMP_ALLOC_AT_EXIT").as_deref()
             == Some(std::ffi::OsStr::new("1"))
