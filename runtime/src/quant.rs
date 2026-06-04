@@ -2593,9 +2593,19 @@ unsafe fn qmatmul_chunk_impl(x_tensor: i64, qt_w: i64, y_tensor: i64, n_start: i
                         // wall-time improvement on M1 Pro — the per-block
                         // reconstruction overhead (4 shift/mask pairs per
                         // 16-weight span) eats the SDOT density win at
-                        // this batch size. Keeping the F32 dequant + dot
-                        // here until we have a 2x2 tile that processes
-                        // multiple Q6_K blocks per X load.
+                        // this batch size.
+                        //
+                        // SCALAR fused dequant+dot was also tried 2026-06-04:
+                        // saves the 1 KB stage write/read round-trip per
+                        // block but loses the 4-way NEON FMA in
+                        // `dot_f32_simd`. Net -56% tok/s on nue/llama-chat
+                        // (20.5 → 9.2). The fused path only wins once the
+                        // inner loop is itself vectorised — load 4×f32 x,
+                        // decode 4×Q6_K weights via NEON shuffles,
+                        // FMA-accumulate. Estimated ~150 LOC of NEON; see
+                        // [[project-optimization-roadmap]] Tier 2 #4.
+                        // Keeping the staged F32 + dot_f32_simd path until
+                        // that NEON port lands.
                         dequant_q6_k_block(bp, &mut stage);
                         let x_chunk =
                             std::slice::from_raw_parts(x_data.add(b_idx * block_size), block_size);
