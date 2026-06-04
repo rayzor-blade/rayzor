@@ -89,9 +89,10 @@ fn record_sample() {
     top.hash(&mut h);
     if let Ok(mut g) = GRAPH_SITES.lock() {
         if let Some(map) = g.as_mut() {
-            let e = map
-                .entry(h.finish())
-                .or_insert(SiteStat { sampled_count: 0, pcs: top });
+            let e = map.entry(h.finish()).or_insert(SiteStat {
+                sampled_count: 0,
+                pcs: top,
+            });
             e.sampled_count += 1;
         }
     }
@@ -212,7 +213,11 @@ unsafe fn walk_fp_chain(initial_pc: u64, start_fp: u64, out: &mut [u64; 6]) -> u
 }
 
 #[cfg(target_arch = "aarch64")]
-extern "C" fn sigprof_handler(_sig: libc::c_int, _info: *mut libc::siginfo_t, ctx: *mut libc::c_void) {
+extern "C" fn sigprof_handler(
+    _sig: libc::c_int,
+    _info: *mut libc::siginfo_t,
+    ctx: *mut libc::c_void,
+) {
     if IN_GRAPH.with(|g| g.get()) {
         return;
     }
@@ -245,9 +250,10 @@ extern "C" fn sigprof_handler(_sig: libc::c_int, _info: *mut libc::siginfo_t, ct
     top.hash(&mut h);
     if let Ok(mut g) = GRAPH_SITES.try_lock() {
         if let Some(map) = g.as_mut() {
-            let e = map
-                .entry(h.finish())
-                .or_insert(SiteStat { sampled_count: 0, pcs: top });
+            let e = map.entry(h.finish()).or_insert(SiteStat {
+                sampled_count: 0,
+                pcs: top,
+            });
             e.sampled_count += 1;
         }
     }
@@ -255,7 +261,11 @@ extern "C" fn sigprof_handler(_sig: libc::c_int, _info: *mut libc::siginfo_t, ct
 }
 
 #[cfg(not(target_arch = "aarch64"))]
-extern "C" fn sigprof_handler(_sig: libc::c_int, _info: *mut libc::siginfo_t, _ctx: *mut libc::c_void) {
+extern "C" fn sigprof_handler(
+    _sig: libc::c_int,
+    _info: *mut libc::siginfo_t,
+    _ctx: *mut libc::c_void,
+) {
     // Fallback for non-aarch64: use backtrace::trace. Won't walk through
     // JIT frames without `.eh_frame` registration but at least captures
     // Rust frames.
@@ -283,9 +293,10 @@ extern "C" fn sigprof_handler(_sig: libc::c_int, _info: *mut libc::siginfo_t, _c
     top.hash(&mut h);
     if let Ok(mut g) = GRAPH_SITES.try_lock() {
         if let Some(map) = g.as_mut() {
-            let e = map
-                .entry(h.finish())
-                .or_insert(SiteStat { sampled_count: 0, pcs: top });
+            let e = map.entry(h.finish()).or_insert(SiteStat {
+                sampled_count: 0,
+                pcs: top,
+            });
             e.sampled_count += 1;
         }
     }
@@ -470,11 +481,13 @@ pub unsafe fn ensure_alloc_dump_hooks() {
             extern "C" fn dump_all() {
                 rayzor_dump_alloc_stats();
                 rayzor_dump_alloc_graph();
+                crate::tensor::rayzor_dump_tensor_alloc_stats();
             }
             atexit(dump_all);
             extern "C" fn sig_dump(sig: i32) {
                 rayzor_dump_alloc_stats();
                 rayzor_dump_alloc_graph();
+                crate::tensor::rayzor_dump_tensor_alloc_stats();
                 unsafe {
                     extern "C" {
                         fn _exit(s: i32) -> !;
@@ -482,9 +495,9 @@ pub unsafe fn ensure_alloc_dump_hooks() {
                     _exit(128 + sig);
                 }
             }
-            signal(5, sig_dump);  // SIGTRAP
+            signal(5, sig_dump); // SIGTRAP
             signal(11, sig_dump); // SIGSEGV
-            signal(6, sig_dump);  // SIGABRT
+            signal(6, sig_dump); // SIGABRT
         }
     });
 }

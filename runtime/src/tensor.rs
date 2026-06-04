@@ -18,6 +18,93 @@ extern "C" {
 }
 
 // =============================================================================
+// Tensor-data alloc counters. The global TrackingAllocator (`#[global_allocator]`)
+// only sees Rust's GlobalAlloc traffic; tensor data buffers go through
+// `libc::malloc` directly (see `alloc_tensor` and friends), so they are
+// INVISIBLE to that path. These counters close the gap — they're the only
+// way to attribute the "Activity Monitor says 28 GB" mystery to a Haxe-side
+// kernel choice.
+//
+// Dumped at exit when RAYZOR_DUMP_TENSOR_ALLOC=1 by the profile crate's
+// atexit hook (which calls `rayzor_dump_tensor_alloc_stats` via FFI).
+// =============================================================================
+
+use std::sync::atomic::{AtomicU64, Ordering as MemOrdering};
+
+pub static TENSOR_DATA_ALLOC_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static TENSOR_DATA_FREE_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static TENSOR_DATA_ALLOC_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static TENSOR_DATA_FREE_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static TENSOR_DATA_LIVE_PEAK: AtomicU64 = AtomicU64::new(0);
+pub static TENSOR_POOL_HITS: AtomicU64 = AtomicU64::new(0);
+pub static TENSOR_POOL_MISSES: AtomicU64 = AtomicU64::new(0);
+pub static TENSOR_FREE_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
+pub static TENSOR_FREE_REFCOUNT_NONZERO: AtomicU64 = AtomicU64::new(0);
+pub static TENSOR_POOL_PARKED: AtomicU64 = AtomicU64::new(0);
+pub static TENSOR_POOL_EVICTED: AtomicU64 = AtomicU64::new(0);
+
+#[inline(always)]
+fn record_data_alloc(bytes: usize) {
+    let prev = TENSOR_DATA_ALLOC_BYTES.fetch_add(bytes as u64, MemOrdering::Relaxed);
+    TENSOR_DATA_ALLOC_COUNT.fetch_add(1, MemOrdering::Relaxed);
+    let live =
+        (prev + bytes as u64).saturating_sub(TENSOR_DATA_FREE_BYTES.load(MemOrdering::Relaxed));
+    TENSOR_DATA_LIVE_PEAK.fetch_max(live, MemOrdering::Relaxed);
+}
+
+#[inline(always)]
+fn record_data_free(bytes: usize) {
+    TENSOR_DATA_FREE_BYTES.fetch_add(bytes as u64, MemOrdering::Relaxed);
+    TENSOR_DATA_FREE_COUNT.fetch_add(1, MemOrdering::Relaxed);
+}
+
+/// Dumps live tensor-data stats to stderr. Callable from Haxe via the
+/// runtime mapping `rayzor_dump_tensor_alloc_stats` (no Haxe binding
+/// today; invoked via the SIGTRAP/atexit hook in `profile.rs`).
+#[no_mangle]
+pub extern "C" fn rayzor_dump_tensor_alloc_stats() {
+    let a = TENSOR_DATA_ALLOC_BYTES.load(MemOrdering::Relaxed);
+    let f = TENSOR_DATA_FREE_BYTES.load(MemOrdering::Relaxed);
+    let ac = TENSOR_DATA_ALLOC_COUNT.load(MemOrdering::Relaxed);
+    let fc = TENSOR_DATA_FREE_COUNT.load(MemOrdering::Relaxed);
+    let peak = TENSOR_DATA_LIVE_PEAK.load(MemOrdering::Relaxed);
+    let hits = TENSOR_POOL_HITS.load(MemOrdering::Relaxed);
+    let misses = TENSOR_POOL_MISSES.load(MemOrdering::Relaxed);
+    let free_inv = TENSOR_FREE_INVOCATIONS.load(MemOrdering::Relaxed);
+    let free_nz = TENSOR_FREE_REFCOUNT_NONZERO.load(MemOrdering::Relaxed);
+    let parked = TENSOR_POOL_PARKED.load(MemOrdering::Relaxed);
+    let evicted = TENSOR_POOL_EVICTED.load(MemOrdering::Relaxed);
+    let hit_rate = if hits + misses > 0 {
+        100.0 * hits as f64 / (hits + misses) as f64
+    } else {
+        0.0
+    };
+    eprintln!(
+        "[tensor-data] allocs={} frees={} alloc_bytes={} ({:.1} MB) \
+         free_bytes={} ({:.1} MB) live={} ({:.1} MB) peak={} ({:.1} MB) \
+         pool_hits={} pool_misses={} pool_hit_rate={:.1}% \
+         free_inv={} free_nonzero={} pool_parked={} pool_evicted={}",
+        ac,
+        fc,
+        a,
+        a as f64 / 1_048_576.0,
+        f,
+        f as f64 / 1_048_576.0,
+        a.saturating_sub(f),
+        a.saturating_sub(f) as f64 / 1_048_576.0,
+        peak,
+        peak as f64 / 1_048_576.0,
+        hits,
+        misses,
+        hit_rate,
+        free_inv,
+        free_nz,
+        parked,
+        evicted
+    );
+}
+
+// =============================================================================
 // Alloc histogram (env-gated): writes one CSV line per `alloc_tensor` call.
 // Enabled when `RAYZOR_TENSOR_ALLOC_HISTOGRAM=1`. Output file controlled by
 // `RAYZOR_TENSOR_ALLOC_HISTOGRAM_PATH`, defaults to /tmp/alloc_hist.csv.
@@ -573,7 +660,9 @@ unsafe fn tensor_pool_freer(entry: PooledEntry) {
     }
     let t = &*(entry.ptr as *const RayzorTensor);
     if t.owns_data && !t.data.is_null() {
+        let bytes = t.numel * dtype_size(t.dtype);
         free(t.data);
+        record_data_free(bytes);
     }
     if !t.shape.is_null() {
         free(t.shape as *mut u8);
@@ -611,6 +700,7 @@ unsafe fn alloc_tensor(shape: &[usize], dtype: u8, fill: Option<f32>) -> i64 {
     // ---- Pool fast path ----
     let key = PoolKey::from_shape(dtype, shape);
     if let Some(entry) = tensor_pool::global().try_pop(key, shape) {
+        TENSOR_POOL_HITS.fetch_add(1, MemOrdering::Relaxed);
         // The wrapper, data, shape, strides are all reused. The shape vec is
         // already correct (matched in try_pop via the bucket-walk shape check)
         // and the strides for a given shape are deterministic (row-major) —
@@ -671,11 +761,14 @@ unsafe fn alloc_tensor(shape: &[usize], dtype: u8, fill: Option<f32>) -> i64 {
 
     // ---- Slow path: 4 mallocs ----
 
+    TENSOR_POOL_MISSES.fetch_add(1, MemOrdering::Relaxed);
+
     // Allocate data
     let data = malloc(if data_bytes > 0 { data_bytes } else { 1 });
     if data.is_null() {
         return 0;
     }
+    record_data_alloc(data_bytes);
 
     // Fill data
     if let Some(val) = fill {
@@ -3584,6 +3677,7 @@ pub unsafe extern "C" fn rayzor_tensor_free(tensor_ptr: i64) {
     if tensor_ptr == 0 {
         return;
     }
+    TENSOR_FREE_INVOCATIONS.fetch_add(1, MemOrdering::Relaxed);
     let t = &*(tensor_ptr as *const RayzorTensor);
 
     // Phase 1 ARC: decrement first. Only the thread that drops the count
@@ -3595,6 +3689,7 @@ pub unsafe extern "C" fn rayzor_tensor_free(tensor_ptr: i64) {
     // free below.
     let prev = t.refcount.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
     if prev != 1 {
+        TENSOR_FREE_REFCOUNT_NONZERO.fetch_add(1, MemOrdering::Relaxed);
         // Other handles still alive. Nothing to do.
         return;
     }
