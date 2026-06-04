@@ -92,6 +92,14 @@ class GenerationLoop {
 
             // Decode step: only feed the latest token; KV cache
             // carries the rest of the context.
+            // NB: a fresh `[nextId]` array allocation per step is
+            // intentional — reusing a single mutable buffer here
+            // (`singleIdBuf[0] = nextId; forwardIds(singleIdBuf);`)
+            // triggered `KVCache.append failed (krc=-1, vrc=0)` mid
+            // generation, suggesting the model retains a reference to
+            // the Array's underlying buffer across iterations.
+            // Investigate compiler/runtime escape semantics before
+            // trying again.
             logits = model.forwardIds([nextId]);
             nextId = sampler.sample(lastRow(logits));
         }
