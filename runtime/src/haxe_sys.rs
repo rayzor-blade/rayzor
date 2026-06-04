@@ -2955,6 +2955,36 @@ pub fn haxe_bytes_mmap_file(path: &str) -> *mut HaxeBytes {
             libc::close(fd);
             return std::ptr::null_mut();
         }
+
+        // Force-fault every page so the file is fully resident before any
+        // hot path touches it. Without this, the matmul kernels randomly
+        // walk weight pages across the model — on a memory-constrained
+        // machine the kernel evicts cold pages under pressure, then the
+        // next forward pass re-faults them mid-decode, manifesting as
+        // sustained high-latency I/O-wait that feels like a frozen
+        // system. Touching every page up-front trades a one-time ~1s
+        // load cost for zero in-flight paging. Combined with
+        // MADV_RANDOM (below) to suppress wasted speculative read-ahead
+        // once these pages do get evicted later.
+        //
+        // Opt out via RAYZOR_NO_PRELOAD_MMAP=1 for benchmarks of the
+        // cold-page path.
+        let preload = std::env::var_os("RAYZOR_NO_PRELOAD_MMAP").is_none();
+        if preload {
+            let page_size = libc::sysconf(libc::_SC_PAGESIZE).max(4096) as usize;
+            let p = ptr as *const u8;
+            let mut sink: u64 = 0;
+            let mut off = 0usize;
+            while off < len {
+                sink = sink.wrapping_add(*p.add(off) as u64);
+                off += page_size;
+            }
+            // Defeat dead-code elimination — `sink` must escape so the
+            // touch loop isn't optimised away.
+            std::ptr::write_volatile(&mut sink as *mut u64, sink);
+            libc::madvise(ptr, len, libc::MADV_RANDOM);
+        }
+
         Box::into_raw(Box::new(HaxeBytes {
             ptr: ptr as *mut u8,
             len,
