@@ -2532,6 +2532,8 @@ unsafe fn qmatmul_chunk_impl(x_tensor: i64, qt_w: i64, y_tensor: i64, n_start: i
     // (8 for k=2048) blocks; each block is decoded, dotted against
     // the matching X chunk, sum accumulated, then discarded.
     let mut stage = [0.0f32; 256]; // Q4_K_M_BLOCK_SIZE == Q6_K_BLOCK_SIZE == 256
+                                   // Second stage buffer for the Q6_K 2-row tile path (batch=1 decode).
+    let mut stage_pair = [0.0f32; 256];
 
     // Per-row sums. Sized to `batch` so the general path can write
     // into it for any value of `batch`; the `batch == 1 && x_contig`
@@ -2567,7 +2569,39 @@ unsafe fn qmatmul_chunk_impl(x_tensor: i64, qt_w: i64, y_tensor: i64, n_start: i
         x_q8_init = vec![false; blocks_per_row];
     }
 
-    for n_idx in lo..hi {
+    // Q6_K 2-row tile (batch=1 decode fast path only). Shares one
+    // x-chunk load per block between two output rows, giving two
+    // independent FMA accumulator chains in the inner dot product.
+    // matmul_qt_threaded is ~72% of decode wall on Llama-3.2-1B-Q4_K_M
+    // (the lm_head is Q6_K), so even a small per-row saving compounds
+    // across vocab=128256 rows.
+    let mut row_start = lo;
+    if batch == 1 && x_contig && qt.scheme == QSCHEME_Q6_K {
+        let tiled_end = lo + ((hi - lo) & !1usize); // largest even <= (hi-lo) + lo
+        let mut r = lo;
+        while r < tiled_end {
+            let row0_ptr = qt.data.add(r * blocks_per_row * block_bytes);
+            let row1_ptr = qt.data.add((r + 1) * blocks_per_row * block_bytes);
+            let mut sum0 = 0.0f32;
+            let mut sum1 = 0.0f32;
+            for b_idx in 0..blocks_per_row {
+                let bp0 = row0_ptr.add(b_idx * block_bytes);
+                let bp1 = row1_ptr.add(b_idx * block_bytes);
+                dequant_q6_k_block(bp0, &mut stage);
+                dequant_q6_k_block(bp1, &mut stage_pair);
+                let x_chunk =
+                    std::slice::from_raw_parts(x_data.add(b_idx * block_size), block_size);
+                sum0 += dot_f32_simd(x_chunk, &stage);
+                sum1 += dot_f32_simd(x_chunk, &stage_pair);
+            }
+            *y_data.add(r) = sum0;
+            *y_data.add(r + 1) = sum1;
+            r += 2;
+        }
+        row_start = r;
+    }
+
+    for n_idx in row_start..hi {
         let row_ptr = qt.data.add(n_idx * blocks_per_row * block_bytes);
 
         if batch == 1 && x_contig {
