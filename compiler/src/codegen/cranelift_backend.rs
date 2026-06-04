@@ -1019,6 +1019,17 @@ impl CraneliftBackend {
         {
             return;
         }
+        // Always print a one-liner so callers can audit which
+        // CraneliftBackend instances are reaching the dump path. The
+        // append-only CSV writer below silently elides backends with
+        // no new functions, which makes coverage gaps invisible.
+        if self.defined_functions.is_empty() {
+            eprintln!(
+                "[jit-map] backend {} reached dump with 0 defined functions (skip)",
+                self.backend_id
+            );
+            return;
+        }
         let mut funcid_to_mirid: BTreeMap<FuncId, crate::ir::IrFunctionId> = BTreeMap::new();
         for (mir_id, fid) in &self.function_map {
             funcid_to_mirid.insert(*fid, *mir_id);
