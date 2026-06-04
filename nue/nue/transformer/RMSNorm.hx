@@ -37,7 +37,14 @@ class RMSNorm implements Module {
     }
 
     public function forward(x:Tensor):Tensor {
-        return x.rmsNorm(eps).mul(weight);
+        // `x.rmsNorm(eps)` allocates a fresh normalised tensor; .mul(weight)
+        // then allocates the gain-scaled output. Release the intermediate
+        // — InsertFreePass doesn't recognise tensor returns so the
+        // anonymous chain leaks.
+        var norm = x.rmsNorm(eps);
+        var result = norm.mul(weight);
+        norm.free();
+        return result;
     }
 
     public function parameters():Array<NamedTensor> {

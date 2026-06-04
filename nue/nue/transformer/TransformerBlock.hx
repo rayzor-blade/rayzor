@@ -54,15 +54,29 @@ class TransformerBlock implements Module {
         // contiguous owning tensor here (gatherRows on layer 0, previous
         // .add result on layer N>0), so addInto's contiguity invariant
         // holds.
-        var t = attnNorm.forward(x.clone());
+        //
+        // Every named tensor below (clone, norm output, sublayer output)
+        // is a fresh extern allocation. InsertFreePass doesn't recognise
+        // tensor returns, so each intermediate gets an inline .free()
+        // once its consumer is done — without these, every block leaks
+        // six tensor handles per token (96 handles/token at 16 layers).
+        var xClone1 = x.clone();
+        var t = attnNorm.forward(xClone1);
+        xClone1.free();
         var attnOut = attn.forward(t);
+        t.free();
         x.addInto(attnOut);
+        attnOut.free();
         var h1 = x;
         // Same pattern for the FFN sub-layer: ffnNorm consumes a copy of
         // h1, original h1 accumulates ffnOut in place.
-        var t2 = ffnNorm.forward(h1.clone());
+        var xClone2 = h1.clone();
+        var t2 = ffnNorm.forward(xClone2);
+        xClone2.free();
         var ffnOut = ffn.forward(t2);
+        t2.free();
         h1.addInto(ffnOut);
+        ffnOut.free();
         return h1;
     }
 
