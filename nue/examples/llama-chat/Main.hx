@@ -78,7 +78,10 @@ class LocalTempSampler implements Sampler {
         // shift to keep the array sorted.
         var sz = 0;
         for (i in 0...n) {
-            var lg = adjusted(logits.get([i]), i, penalize, rp);
+            // getFlat skips the Array<Int> allocation that logits.get([i])
+            // would do per iteration — at vocab=128k this is the dominant
+            // cost in sample(). See SIGPROF profile from 2026-06-04.
+            var lg = adjusted(logits.getFlat(i), i, penalize, rp);
             if (sz < k) {
                 var pos = sz;
                 while (pos > 0 && topKLogits[pos - 1] < lg) {

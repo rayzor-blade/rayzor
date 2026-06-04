@@ -1063,6 +1063,44 @@ pub unsafe extern "C" fn rayzor_tensor_shape_ndim(tensor_ptr: i64) -> i64 {
 // Element access
 // ============================================================================
 
+/// Flat-indexed scalar read — `tensor.getFlat(i)` reads element `i`
+/// of a contiguous tensor without going through the `Array<Int>`
+/// indexing path. Falls back to row-major + strides for non-contiguous
+/// tensors. Eliminates the per-call Haxe array allocation that was the
+/// dominant cost when looping over a 128k logits vector in
+/// LocalTempSampler.sample (see profile from session 2026-06-04).
+///
+/// Returns 0.0 if `i` is out of range or the tensor handle is null.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_get_flat(tensor_ptr: i64, i: i64) -> f64 {
+    if tensor_ptr == 0 {
+        return 0.0;
+    }
+    let t = &*(tensor_ptr as *const RayzorTensor);
+    if i < 0 || (i as usize) >= t.numel {
+        return 0.0;
+    }
+    let idx = i as usize;
+    // Contiguous fast path: just data[idx * elem_size]. This is the
+    // common case for the logits vector that comes out of the
+    // final matmul and stays contiguous through the sampler.
+    if t.owns_data {
+        return load_f32_at(t.data, idx, t.dtype) as f64;
+    }
+    // Strided fallback: walk the strides to convert flat -> N-D offset.
+    let shape_slice = std::slice::from_raw_parts(t.shape, t.ndim);
+    let strides_slice = std::slice::from_raw_parts(t.strides, t.ndim);
+    let mut remaining = idx;
+    let mut elem_offset: usize = 0;
+    for axis in (0..t.ndim).rev() {
+        let dim = shape_slice[axis];
+        let i_axis = remaining % dim;
+        remaining /= dim;
+        elem_offset += i_axis * strides_slice[axis];
+    }
+    load_f32_at(t.data, elem_offset, t.dtype) as f64
+}
+
 /// tensor.get(indices_ptr, ndim) -> f64
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_get(tensor_ptr: i64, indices_ptr: i64, ndim: i64) -> f64 {

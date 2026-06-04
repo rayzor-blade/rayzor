@@ -35,6 +35,7 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
 
     // Element access
     build_tensor_get(builder);
+    build_tensor_get_flat(builder);
     build_tensor_set(builder);
 
     // Bulk row ops (KV-cache append, GQA broadcast)
@@ -215,6 +216,16 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
         .param("tensor", i64_ty.clone())
         .param("indices_ptr", i64_ty.clone())
         .param("ndim", i64_ty.clone())
+        .returns(f64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // get_flat: (tensor, i) -> f64 — skips the Array<Int> indexing path
+    let func_id = builder
+        .begin_function("rayzor_tensor_get_flat")
+        .param("tensor", i64_ty.clone())
+        .param("i", i64_ty.clone())
         .returns(f64_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -1255,6 +1266,39 @@ fn build_tensor_get(builder: &mut MirBuilder) {
     let result = builder
         .call(extern_id, vec![self_val, indices_ptr, ndim])
         .unwrap();
+    builder.ret(Some(result));
+}
+
+/// Tensor_get_flat(tensor: i64, i: i64) -> f64
+///
+/// Direct flat-index scalar read — no Array<Int> indices required.
+/// Force-inline so hot logits-scan loops collapse to a single extern call
+/// with no MIR-wrapper frame. Replaces the `tensor.get([i])` pattern that
+/// allocates an Array<Int> per call.
+fn build_tensor_get_flat(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let f64_ty = IrType::F64;
+
+    let func_id = builder
+        .begin_function("Tensor_get_flat")
+        .param("self", i64_ty.clone())
+        .param("i", i64_ty)
+        .returns(f64_ty)
+        .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_val = builder.get_param(0);
+    let i_val = builder.get_param(1);
+
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_get_flat")
+        .expect("rayzor_tensor_get_flat not found");
+    let result = builder.call(extern_id, vec![self_val, i_val]).unwrap();
     builder.ret(Some(result));
 }
 

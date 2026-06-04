@@ -3392,6 +3392,11 @@ impl StdlibMapping {
             // tensor.get(indices: Array<Int>): Float
             map_method!(instance "rayzor_ds_Tensor", "get" => "Tensor_get", params: 1, mir_wrapper,
                 types: &[PtrVoid, PtrVoid] => F64),
+            // tensor.getFlat(i: Int): Float — flat-index scalar read,
+            // skips the Array<Int> indexing path. ~100x cheaper per call
+            // for tight scans over a contiguous tensor.
+            map_method!(instance "rayzor_ds_Tensor", "getFlat" => "Tensor_get_flat", params: 1, mir_wrapper,
+                types: &[PtrVoid, I64] => F64),
             // tensor.set(indices: Array<Int>, value: Float): Void
             map_method!(instance "rayzor_ds_Tensor", "set" => "Tensor_set", params: 2, mir_wrapper,
                 types: &[PtrVoid, PtrVoid, F64]),
