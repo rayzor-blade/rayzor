@@ -4,9 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [lib]
+# `cdylib` for the native host plugin loader (rayzor dlopens the
+# `.dylib`/`.so`/`.dll` declared via `[build] native-libs`). `rlib`
+# is reserved for an eventual wasm static-link path — same shape
+# wren_lift's wlift_sqlite uses.
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# Only the ABI crate. No `rayzor-runtime` dep — the host process
+# exports the `rayzor_plugin_*` symbols at link time and our calls
+# resolve against them at dlopen via `-Wl,-export_dynamic`. Keeping
+# this dep list to one crate prevents host internals (RayzorTensor
+# layout, alloc_tensor signature, etc.) from sneaking into plugin
+# space and silently breaking on host changes.
 rayzor-plugin = { path = "../plugin" }
-rayzor-runtime = { path = "../runtime" }
 half = "2"

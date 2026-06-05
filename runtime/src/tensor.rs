@@ -837,6 +837,88 @@ unsafe fn alloc_tensor(shape: &[usize], dtype: u8, fill: Option<f32>) -> i64 {
 // Construction
 // ============================================================================
 
+// ============================================================================
+// Plugin ABI accessors
+//
+// Stable cross-plugin surface for inspecting a `RayzorTensor` handle without
+// the plugin needing to know the struct layout. Mirrors the shape declared
+// in `rayzor_plugin::host_abi`. Bumping `rayzor_plugin::ABI_VERSION` is
+// required whenever any of these change shape.
+// ============================================================================
+
+/// Plugin ABI: read a tensor's data pointer. Returns null for the
+/// null handle (0) to keep plugin callers from segfaulting on a
+/// missed null check.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_plugin_tensor_data(t: i64) -> *mut u8 {
+    if t == 0 {
+        return std::ptr::null_mut();
+    }
+    (*(t as *const RayzorTensor)).data
+}
+
+/// Plugin ABI: read a tensor's dtype tag. Returns 255 (an unused
+/// dtype slot) for the null handle so plugins can sentinel-check
+/// without UB.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_plugin_tensor_dtype(t: i64) -> u8 {
+    if t == 0 {
+        return u8::MAX;
+    }
+    (*(t as *const RayzorTensor)).dtype
+}
+
+/// Plugin ABI: read a tensor's ndim. Returns 0 for the null handle.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_plugin_tensor_ndim(t: i64) -> u32 {
+    if t == 0 {
+        return 0;
+    }
+    (*(t as *const RayzorTensor)).ndim as u32
+}
+
+/// Plugin ABI: read a tensor's shape pointer. Returns null for the
+/// null handle.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_plugin_tensor_shape(t: i64) -> *const usize {
+    if t == 0 {
+        return std::ptr::null();
+    }
+    (*(t as *const RayzorTensor)).shape
+}
+
+/// Plugin ABI: 1 if the tensor's strides match row-major
+/// contiguous layout for its current shape, 0 otherwise. Returns 0
+/// for the null handle.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_plugin_tensor_is_contiguous(t: i64) -> u8 {
+    if t == 0 {
+        return 0;
+    }
+    if (*(t as *const RayzorTensor)).is_contiguous() {
+        1
+    } else {
+        0
+    }
+}
+
+/// Plugin ABI: allocate a zero-initialised tensor with the given
+/// shape + dtype. Mirror of `rayzor_tensor_zeros` but takes
+/// `*const usize` directly so plugin code can pass a Rust slice
+/// without an i64 cast. Returns 0 on shape rejection / OOM.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_plugin_tensor_alloc_zeros(
+    shape_ptr: *const usize,
+    ndim: usize,
+    dtype: u8,
+) -> i64 {
+    if shape_ptr.is_null() || ndim == 0 {
+        return 0;
+    }
+    let shape = std::slice::from_raw_parts(shape_ptr, ndim).to_vec();
+    alloc_tensor(&shape, dtype, Some(0.0))
+}
+
 /// Tensor.zeros(shape_ptr: i64, ndim: i64, dtype: i64) -> i64
 ///
 /// shape_ptr is a pointer to an array of i64 shape values (from Haxe Array<Int>).

@@ -824,14 +824,20 @@ fn load_manifest_native_lib(
     let lib = unsafe { libloading::Library::new(path) }
         .map_err(|e| format!("dlopen failed: {}", e))?;
 
-    // 1. Method descriptor table for compiler-side method registration.
-    type DescribeFn =
-        unsafe extern "C" fn(*mut usize) -> *const rayzor_plugin::NativeMethodDesc;
-    let describe_names: &[&[u8]] = &[b"plugin_describe", b"rayzor_plugin_describe"];
     let plugin_name = path
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("native_lib");
+
+    // 0. ABI handshake — check before binding any symbols. Reuses the
+    //    same check the rpkg loader uses, so the failure mode and error
+    //    text stays consistent across distribution channels.
+    compiler::rpkg::install::check_plugin_abi(&lib, plugin_name)?;
+
+    // 1. Method descriptor table for compiler-side method registration.
+    type DescribeFn =
+        unsafe extern "C" fn(*mut usize) -> *const rayzor_plugin::NativeMethodDesc;
+    let describe_names: &[&[u8]] = &[b"plugin_describe", b"rayzor_plugin_describe"];
     let mut plugin: Option<compiler::compiler_plugin::NativePlugin> = None;
     for name in describe_names {
         if let Ok(describe_fn) = unsafe { lib.get::<DescribeFn>(name) } {

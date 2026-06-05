@@ -4,6 +4,9 @@ entry = "Main.hx"
 
 [build]
 class-paths = [".", "../../"]
+# Loads nue-plugins (Q8_0 KV cache + flash kernel) at compile time
+# via the plugin ABI handshake. Path is relative to this manifest.
+native-libs = ["../../../target/release/libnue_plugins.dylib"]
 
 # nue-tuned tier config.
 #

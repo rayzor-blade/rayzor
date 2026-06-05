@@ -1,16 +1,25 @@
 # Export symbols from executables so LLVM AOT-compiled shared libraries
-# AND dlopen'd cdylibs (e.g. nue-plugins) can resolve runtime functions
-# (haxe_math_sqrt, malloc, rayzor_tensor_zeros, etc.) at load time from
-# the host process's dynamic symbol table.
+# AND dlopen'd cdylib plugins can resolve runtime functions
+# (`rayzor_tensor_zeros`, `rayzor_plugin_tensor_*`, etc.) at load time
+# from the host process's dynamic symbol table.
+#
+# Pattern mirrors wren_lift's plugin loader: by default neither macOS
+# nor Linux exports an executable's `#[no_mangle]` symbols to dyld's
+# global scope, so a plugin dlopen'd at runtime can't reach back into
+# the host. The `-Wl,-export_dynamic` (macOS) / `-Wl,--export-dynamic`
+# (Linux) flag flips that. It's a no-op for code paths that never get
+# dlsym'd — the main binary just picks up a slightly larger exported
+# symbol table with no runtime perf cost.
 
 [target.'cfg(target_os = "linux")']
-rustflags = ["-C", "link-args=-rdynamic"]
+rustflags = [
+    "-C", "link-args=-Wl,--export-dynamic",
+]
 
-# macOS: relies on the runtime crate's `#[no_mangle] extern "C"` symbols
-# being naturally exported through the executable's symbol table. The
-# `-Wl,-export_dynamic` flag broke decode somewhere; investigate later.
-# For now, the cdylib uses dynamic_lookup at link time and resolves to
-# whatever the host binary happens to export by default.
+[target.'cfg(target_os = "macos")']
+rustflags = [
+    "-C", "link-args=-Wl,-export_dynamic",
+]
 
 # Enable `dotprod` (ARMv8.2-A SDOT/UDOT) for the aarch64 ML kernels.
 # M1+, Cortex-A75+, A76+, X1+ and every modern Apple / ARM Server SKU
@@ -18,8 +27,17 @@ rustflags = ["-C", "link-args=-rdynamic"]
 # when the caller's target-feature set includes `dotprod` — wedging it
 # at the build level here keeps the Rust source clean and avoids
 # `#[target_feature]` annotations that disable inlining.
+# NB: per-target rustflags REPLACE the cfg-based entries above (Cargo
+# doesn't merge them), so we have to repeat `-Wl,-export_dynamic` here
+# on the targets that get dotprod-enabled.
 [target.aarch64-apple-darwin]
-rustflags = ["-C", "target-feature=+dotprod"]
+rustflags = [
+    "-C", "target-feature=+dotprod",
+    "-C", "link-args=-Wl,-export_dynamic",
+]
 
 [target.aarch64-unknown-linux-gnu]
-rustflags = ["-C", "target-feature=+dotprod"]
+rustflags = [
+    "-C", "target-feature=+dotprod",
+    "-C", "link-args=-Wl,--export-dynamic",
+]

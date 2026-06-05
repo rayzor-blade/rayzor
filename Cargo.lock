@@ -2411,7 +2411,6 @@ version = "0.1.0"
 dependencies = [
  "half",
  "rayzor-plugin",
- "rayzor-runtime",
 ]
 
 [[package]]
