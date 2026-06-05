@@ -791,6 +791,92 @@ fn main() {
     }
 }
 
+/// Load a loose `.dylib`/`.so`/`.dll` referenced via `[build] native-libs`
+/// in a project manifest. Mirrors the rpkg native-lib path:
+/// 1. dlopen the file
+/// 2. Locate `plugin_describe` (or `rayzor_plugin_describe`) → method table
+/// 3. Locate `plugin_init` (or `rayzor_plugin_init`) → runtime symbol table
+///
+/// Returns the library handle, the constructed `NativePlugin`, and the
+/// runtime symbols. Library must stay alive for the duration of the
+/// compilation. Runtime symbols are registered with the JIT so call
+/// sites in the dispatched methods can resolve to actual function ptrs.
+#[repr(C)]
+struct SymbolEntry {
+    name_ptr: *const u8,
+    name_len: usize,
+    fn_ptr: *const std::ffi::c_void,
+}
+
+fn load_manifest_native_lib(
+    path: &Path,
+) -> Result<
+    (
+        libloading::Library,
+        compiler::compiler_plugin::NativePlugin,
+        Vec<(String, *const u8)>,
+    ),
+    String,
+> {
+    if !path.exists() {
+        return Err(format!("file not found: {}", path.display()));
+    }
+    let lib = unsafe { libloading::Library::new(path) }
+        .map_err(|e| format!("dlopen failed: {}", e))?;
+
+    // 1. Method descriptor table for compiler-side method registration.
+    type DescribeFn =
+        unsafe extern "C" fn(*mut usize) -> *const rayzor_plugin::NativeMethodDesc;
+    let describe_names: &[&[u8]] = &[b"plugin_describe", b"rayzor_plugin_describe"];
+    let plugin_name = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("native_lib");
+    let mut plugin: Option<compiler::compiler_plugin::NativePlugin> = None;
+    for name in describe_names {
+        if let Ok(describe_fn) = unsafe { lib.get::<DescribeFn>(name) } {
+            let mut count: usize = 0;
+            let descs = unsafe { describe_fn(&mut count) };
+            if !descs.is_null() && count > 0 {
+                plugin = Some(unsafe {
+                    compiler::compiler_plugin::NativePlugin::from_descriptors(
+                        plugin_name,
+                        descs,
+                        count,
+                    )
+                });
+            }
+            break;
+        }
+    }
+    let plugin = plugin
+        .ok_or_else(|| "no `plugin_describe` export with a non-empty table".to_string())?;
+
+    // 2. Runtime symbol table for JIT linkage.
+    type InitFn = unsafe extern "C" fn(*mut usize) -> *const SymbolEntry;
+    let init_names: &[&[u8]] = &[b"plugin_init", b"rayzor_plugin_init"];
+    let mut runtime_symbols: Vec<(String, *const u8)> = Vec::new();
+    for name in init_names {
+        if let Ok(init_fn) = unsafe { lib.get::<InitFn>(name) } {
+            let mut count: usize = 0;
+            let ptr = unsafe { init_fn(&mut count) };
+            if !ptr.is_null() && count > 0 {
+                let entries = unsafe { std::slice::from_raw_parts(ptr, count) };
+                for e in entries {
+                    let name_bytes = unsafe {
+                        std::slice::from_raw_parts(e.name_ptr, e.name_len)
+                    };
+                    let name = String::from_utf8_lossy(name_bytes).into_owned();
+                    runtime_symbols.push((name, e.fn_ptr as *const u8));
+                }
+            }
+            break;
+        }
+    }
+
+    Ok((lib, plugin, runtime_symbols))
+}
+
 fn run_bundle(file: &Path, verbose: bool, stats: bool, preset: Preset) -> Result<(), String> {
     use compiler::codegen::tiered_backend::{TieredBackend, TieredConfig};
     use compiler::ir::load_bundle;
@@ -1019,6 +1105,38 @@ fn run_file(
             }
         }
     }
+
+    // Load native libs declared via `[build] native-libs = [...]` in
+    // the manifest. Same shape as the rpkg native-lib path: dlopen the
+    // dylib, call its `plugin_describe()` to get the method table, then
+    // build a `NativePlugin`. The library handles are kept alive in
+    // `loaded_native_libs` for the duration of compilation.
+    //
+    // Use case: in-tree native plugins (like nue-plugins/) that ship
+    // with the source tree and don't need to go through pack/install.
+    // The cdylib path is `[build] native-libs = [...]` in the project's
+    // own rayzor.toml; resolution is relative to the manifest's root.
+    let mut loaded_native_libs: Vec<libloading::Library> = Vec::new();
+    let mut manifest_native_symbols: Vec<(String, *const u8)> = Vec::new();
+    if let Some(project) = manifest_project.as_ref() {
+        for lib_path in project.resolved_native_libs() {
+            match load_manifest_native_lib(&lib_path) {
+                Ok((lib, plugin, runtime_symbols)) => {
+                    loaded_native_libs.push(lib);
+                    compiler_plugins.push(Box::new(plugin));
+                    manifest_native_symbols.extend(runtime_symbols);
+                }
+                Err(e) => {
+                    eprintln!(
+                        "warning: failed to load native lib {}: {}",
+                        lib_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+    let _loaded_native_libs = loaded_native_libs; // keep alive past compile
 
     // Extract compiler plugins from rpkg packages
     for rpkg in &mut loaded_rpkgs {
@@ -1256,6 +1374,12 @@ fn run_file(
         .collect();
     for (name, ptr) in &rpkg_owned_symbols {
         // Leak the string to get 'static lifetime (same pattern as GPU plugin)
+        let name: &'static str = Box::leak(name.clone().into_boxed_str());
+        symbols.push((name, *ptr));
+    }
+    // Merge runtime symbols from manifest-declared native libs (the
+    // `[build] native-libs` entries that were dlopen'd earlier).
+    for (name, ptr) in &manifest_native_symbols {
         let name: &'static str = Box::leak(name.clone().into_boxed_str());
         symbols.push((name, *ptr));
     }

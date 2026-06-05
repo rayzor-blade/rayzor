@@ -2406,6 +2406,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "nue-plugins"
+version = "0.1.0"
+dependencies = [
+ "half",
+ "rayzor-plugin",
+ "rayzor-runtime",
+]
+
+[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2836,6 +2845,7 @@ dependencies = [
  "postcard",
  "ratatui",
  "rayzor-lsp",
+ "rayzor-plugin",
  "rayzor-runtime",
  "walkdir",
 ]
