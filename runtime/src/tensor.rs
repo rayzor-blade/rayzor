@@ -2740,20 +2740,29 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode(
     // accumulate against V[l, kv_head]. GQA broadcast is implicit — kv_head
     // = q_head / group; multiple Q-heads share the same K/V rows but read
     // them independently from the un-expanded cache (no materialised copy).
+    //
+    // The Q·K dot and weighted V sum (axpy) inner loops route through
+    // `tensor_simd::dot_slice_f32` and `tensor_simd::axpy_slice`, which
+    // carry NEON (aarch64), SSE (x86_64), and autovectorised scalar
+    // implementations — the kernel stays portable to wasm, x86, and any
+    // other tier without extra cfg gates here. Each per-q_head iteration
+    // saves head_dim × cache_len f32 FMAs from the scalar path; for
+    // Llama-3.2-1B (head_dim=64) the dot is a 4-wide SIMD chunk count
+    // of 16 per K row and the axpy is the same density across V rows.
     for q_head in 0..num_q_heads {
         let kv_head = q_head / group;
-        // Q row pointer: q_data[0, q_head, :]. seq_q=1 collapses the outer.
-        let q_row_ptr = q_data.add(q_head * head_dim);
+        // Q row: contiguous head_dim slice. seq_q=1 collapses the outer
+        // axis so Q[0, q_head, :] is a flat head_dim run.
+        let q_row = std::slice::from_raw_parts(q_data.add(q_head * head_dim), head_dim);
 
         // First pass: scores[l] = (Q[h] · K[l, kv_head, :]) * scale.
         let mut max_score = f32::NEG_INFINITY;
         for l in 0..cache_len {
-            let k_row_ptr = k_data.add(l * kv_row_stride + kv_head * head_dim);
-            let mut s = 0.0f32;
-            for d in 0..head_dim {
-                s += *q_row_ptr.add(d) * *k_row_ptr.add(d);
-            }
-            s *= scale_f32;
+            let k_row = std::slice::from_raw_parts(
+                k_data.add(l * kv_row_stride + kv_head * head_dim),
+                head_dim,
+            );
+            let s = crate::tensor_simd::dot_slice_f32(q_row, k_row) * scale_f32;
             scores[l] = s;
             if s > max_score {
                 max_score = s;
@@ -2771,17 +2780,18 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode(
         let inv_denom = 1.0 / denom;
 
         // Third pass: context[q_head, :] = Σ_l (softmax[l] * V[l, kv_head, :]).
-        // Zero the output slot then accumulate.
-        let out_row_ptr = out_data.add(q_head * head_dim);
-        for d in 0..head_dim {
-            *out_row_ptr.add(d) = 0.0;
-        }
+        // Zero the output slot via slice fill then route the accumulate
+        // through `axpy_slice` so each V row's contribution lands as a
+        // single SIMD-vectorised pass over head_dim.
+        let out_row = std::slice::from_raw_parts_mut(out_data.add(q_head * head_dim), head_dim);
+        out_row.fill(0.0);
         for l in 0..cache_len {
             let w = scores[l] * inv_denom;
-            let v_row_ptr = v_data.add(l * kv_row_stride + kv_head * head_dim);
-            for d in 0..head_dim {
-                *out_row_ptr.add(d) += w * *v_row_ptr.add(d);
-            }
+            let v_row = std::slice::from_raw_parts(
+                v_data.add(l * kv_row_stride + kv_head * head_dim),
+                head_dim,
+            );
+            crate::tensor_simd::axpy_slice(out_row, w, v_row);
         }
     }
 
