@@ -18,6 +18,7 @@ pub fn build_qtensor_types(builder: &mut MirBuilder) {
     build_qtensor_wrap_q4_k_m(builder);
     build_qtensor_from_bytes_q4_k_m(builder);
     build_qtensor_from_bytes_q6_k(builder);
+    build_qtensor_requant_q6k_to_q4km(builder);
 
     build_qtensor_rows(builder);
     build_qtensor_cols(builder);
@@ -82,6 +83,15 @@ fn declare_qtensor_externs(builder: &mut MirBuilder) {
         .param("bytes_handle", i64_ty.clone())
         .param("rows", i64_ty.clone())
         .param("cols", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // requant_q6k_to_q4km: (src_qt: i64) -> i64 (new owning Q4_K_M qt)
+    let func_id = builder
+        .begin_function("rayzor_qtensor_requant_q6k_to_q4km")
+        .param("src", i64_ty.clone())
         .returns(i64_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -369,6 +379,30 @@ fn build_qtensor_from_bytes_q6_k(builder: &mut MirBuilder) {
         .get_function_by_name("rayzor_qtensor_from_bytes_q6_k")
         .expect("rayzor_qtensor_from_bytes_q6_k not found");
     let result = builder.call(extern_id, vec![bytes, rows, cols]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// QTensor_requantQ6KToQ4KM(src: QTensor) -> QTensor
+///
+/// Re-quantises a Q6_K source as Q4_K_M (naive encoder; loses ~3-5%
+/// per-block round-trip RMS). Returns 0/null on gate violation
+/// (non-Q6_K source, shape not divisible by 256, allocation failure).
+fn build_qtensor_requant_q6k_to_q4km(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let func_id = builder
+        .begin_function("QTensor_requantQ6KToQ4KM")
+        .param("src", i64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let src = builder.get_param(0);
+    let extern_id = builder
+        .get_function_by_name("rayzor_qtensor_requant_q6k_to_q4km")
+        .expect("rayzor_qtensor_requant_q6k_to_q4km not found");
+    let result = builder.call(extern_id, vec![src]).unwrap();
     builder.ret(Some(result));
 }
 

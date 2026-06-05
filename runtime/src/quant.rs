@@ -1205,6 +1205,189 @@ pub fn vec_dot_q4_K_q8_K(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
     }
 }
 
+/// Pack 8 (sc6, mn6) pairs into the 12-byte llama.cpp-canonical scales
+/// header. Inverse of `q4_k_get_scale_min`. Used by the F32 → Q4_K_M
+/// encoder + verified by the round-trip unit test.
+#[inline]
+fn pack_q4_k_scales(sc6: &[u8; 8], mn6: &[u8; 8]) -> [u8; 12] {
+    let mut h = [0u8; 12];
+    // Indices 0..4: low 6 bits hold sc6 / mn6 directly.
+    for j in 0..4 {
+        h[j] = sc6[j] & 63;
+        h[j + 4] = mn6[j] & 63;
+    }
+    // Indices 4..8: 6 bits split — low 4 bits in bytes 8..12, upper 2
+    // bits stuffed into the upper 2 bits of bytes 0..4 (sc) / 4..8 (mn).
+    for j in 4..8 {
+        h[j + 4] = (sc6[j] & 0x0F) | ((mn6[j] & 0x0F) << 4);
+        h[j - 4] |= ((sc6[j] >> 4) & 0x03) << 6;
+        h[j] |= ((mn6[j] >> 4) & 0x03) << 6;
+    }
+    h
+}
+
+/// Encode 256 f32 weights into a single Q4_K_M super-block.
+///
+/// Naive quantisation strategy — per sub-block (8 sub-blocks of 32),
+/// pick scale + min directly from `(max - min)` and `-min`, then quantise
+/// those 8 (scale, min) pairs to 6-bit each via the super-block d / dmin
+/// scalars. No iterative refinement like llama.cpp's `make_qkx2_quants`.
+///
+/// This is intentionally simpler than the canonical encoder — we lose a
+/// few percent of quantisation quality vs llama.cpp's iterative scheme.
+/// Acceptable for the lm_head re-quant use case where:
+///   1. The original tensor was already quantised once (Q6_K) with the
+///      careful encoder, so we're re-quantising a near-Q6_K-precise
+///      target; small encoder loss compounds on a low-noise source.
+///   2. Greedy / low-temp decode is robust to small per-logit ULPs —
+///      argmax over a 128k vocab doesn't shift on 1-2 ULP perturbations
+///      to most entries.
+/// MATCH-on-canonical is the empirical check; commit only if it holds.
+///
+/// Encoding model (mirrors `dequant_q4_k_block`):
+///   value = effective_sc[s] * q[s, i] - effective_mn[s]
+///   where effective_sc[s] = d * sc6[s], effective_mn[s] = dmin * mn6[s].
+pub fn quantize_block_q4_k_m(x: &[f32; 256]) -> Q4KMBlock {
+    // 1. Per-sub-block (sc, mn). 8 sub-blocks of 32 elements each.
+    let mut sub_sc = [0.0f32; 8];
+    let mut sub_mn = [0.0f32; 8];
+    for s in 0..8 {
+        let mut lo = f32::INFINITY;
+        let mut hi = f32::NEG_INFINITY;
+        for i in 0..32 {
+            let v = x[s * 32 + i];
+            if v < lo {
+                lo = v;
+            }
+            if v > hi {
+                hi = v;
+            }
+        }
+        if hi == lo {
+            // Constant sub-block — quants all 0, encode the value as -mn.
+            sub_sc[s] = 0.0;
+            sub_mn[s] = -lo;
+        } else {
+            sub_sc[s] = (hi - lo) / 15.0;
+            sub_mn[s] = -lo;
+        }
+    }
+
+    // 2. Super-block d, dmin chosen so the largest sub-block sc / mn
+    // round to the max 6-bit value (63). All other sub-blocks scale
+    // proportionally.
+    let max_sc = sub_sc.iter().fold(0.0f32, |a, &b| a.max(b));
+    let mut max_abs_mn = 0.0f32;
+    let mut any_pos_mn = false;
+    let mut any_neg_mn = false;
+    for &m in &sub_mn {
+        let am = m.abs();
+        if am > max_abs_mn {
+            max_abs_mn = am;
+        }
+        if m > 0.0 {
+            any_pos_mn = true;
+        }
+        if m < 0.0 {
+            any_neg_mn = true;
+        }
+    }
+
+    let d_f32 = if max_sc == 0.0 { 0.0 } else { max_sc / 63.0 };
+    // Pick dmin sign matching the majority. Mixed-sign case clips the
+    // wrong-sign sub-blocks to mn6 = 0 below (some local error, but
+    // model weights are typically symmetric so this is rare).
+    let dmin_sign = if any_pos_mn && !any_neg_mn {
+        1.0
+    } else if any_neg_mn && !any_pos_mn {
+        -1.0
+    } else {
+        // Mixed signs — pick the sign of the larger-magnitude side.
+        let pos_mag = sub_mn
+            .iter()
+            .filter(|&&m| m > 0.0)
+            .fold(0.0f32, |a, &b| a + b);
+        let neg_mag: f32 = sub_mn.iter().filter(|&&m| m < 0.0).map(|&m| -m).sum();
+        if pos_mag >= neg_mag {
+            1.0
+        } else {
+            -1.0
+        }
+    };
+    let dmin_f32 = if max_abs_mn == 0.0 {
+        0.0
+    } else {
+        dmin_sign * max_abs_mn / 63.0
+    };
+
+    // 3. Quantise per-sub-block sc/mn to 6 bits each.
+    let mut sc6 = [0u8; 8];
+    let mut mn6 = [0u8; 8];
+    if d_f32 != 0.0 {
+        for s in 0..8 {
+            sc6[s] = ((sub_sc[s] / d_f32).round() as i32).clamp(0, 63) as u8;
+        }
+    }
+    if dmin_f32 != 0.0 {
+        for s in 0..8 {
+            let target = sub_mn[s] / dmin_f32;
+            // Negative targets (sub-block disagrees with dmin's sign) clip
+            // to mn6 = 0 — sub-block decodes as `eff_sc * q` with no min
+            // offset, which is the closest representable approximation.
+            mn6[s] = if target < 0.0 {
+                0
+            } else {
+                (target.round() as i32).clamp(0, 63) as u8
+            };
+        }
+    }
+
+    // 4. Recompute the EFFECTIVE per-sub-block (sc, mn) the decoder will
+    // see. Quantising values through these (not the raw sub_sc/sub_mn)
+    // produces lower error because the quant step uses the same (sc, mn)
+    // the dequant will use.
+    let mut eff_sc = [0.0f32; 8];
+    let mut eff_mn = [0.0f32; 8];
+    for s in 0..8 {
+        eff_sc[s] = d_f32 * (sc6[s] as f32);
+        eff_mn[s] = dmin_f32 * (mn6[s] as f32);
+    }
+
+    // 5. Quantise each value: q = round((x + eff_mn) / eff_sc), clamp [0, 15].
+    // Pack two 4-bit quants per output byte. Layout mirrors
+    // `dequant_q4_k_block`: bytes[p*32..p*32+32] hold sub-blocks 2p
+    // (low nibble) and 2p+1 (high nibble).
+    let mut qs = [0u8; 128];
+    for p in 0..4 {
+        let sc_lo = eff_sc[2 * p];
+        let mn_lo = eff_mn[2 * p];
+        let sc_hi = eff_sc[2 * p + 1];
+        let mn_hi = eff_mn[2 * p + 1];
+        for i in 0..32 {
+            let v_lo = x[(2 * p) * 32 + i];
+            let v_hi = x[(2 * p + 1) * 32 + i];
+            let q_lo = if sc_lo == 0.0 {
+                0
+            } else {
+                ((v_lo + mn_lo) / sc_lo).round().clamp(0.0, 15.0) as u8
+            };
+            let q_hi = if sc_hi == 0.0 {
+                0
+            } else {
+                ((v_hi + mn_hi) / sc_hi).round().clamp(0.0, 15.0) as u8
+            };
+            qs[p * 32 + i] = (q_lo & 0x0F) | ((q_hi & 0x0F) << 4);
+        }
+    }
+
+    Q4KMBlock {
+        d: f16::from_f32(d_f32).to_bits(),
+        dmin: f16::from_f32(dmin_f32).to_bits(),
+        scales: pack_q4_k_scales(&sc6, &mn6),
+        qs,
+    }
+}
+
 /// Q4_K_M × f32 matmul. A is `[M, K]` quantised; B is `[K, N]` f32; C is
 /// `[M, N]` f32. Dequant happens one block at a time into a small f32
 /// stage buffer, then reuses the existing SIMD axpy kernel for the
@@ -1510,6 +1693,68 @@ pub unsafe extern "C" fn rayzor_qtensor_from_bytes_q6_k(
         parent: std::ptr::null_mut(),
     };
     qt as i64
+}
+
+/// Re-quantise a Q6_K QTensor as Q4_K_M, returning a fresh QTensor handle.
+///
+/// Walks every block of the source row-by-row, dequants Q6_K → f32 into a
+/// stage buffer, then re-encodes the same 256 floats via the naive
+/// `quantize_block_q4_k_m` encoder into the destination. The destination
+/// is freshly allocated and owns its data — caller is responsible for
+/// freeing.
+///
+/// Use case: the lm_head matmul on Llama-3.2-1B-Q4_K_M is the dominant
+/// single decode-time op (one 128k×2048 call per token). Q6_K SDOT
+/// landed at 5f23311 but the per-block 6-bit reconstruction overhead
+/// still leaves headroom vs the Q4_K_M SDOT path (no reconstruction
+/// needed — the 4-bit nibbles are already in the SDOT operand format).
+/// Re-quantising the lm_head to Q4_K_M at load lets it join that
+/// faster path.
+///
+/// Trade-off: naive encoder quality (per-block round-trip RMS ~3-5%
+/// per the unit test). For greedy / low-temp decode on a 128k vocab
+/// the per-logit error averages out before argmax. MATCH-on-canonical
+/// is the empirical gate.
+///
+/// Returns 0 on:
+///   - null source
+///   - source scheme != Q6_K
+///   - rows × cols not divisible by 256
+///   - allocation failure
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_qtensor_requant_q6k_to_q4km(src_ptr: i64) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_qtensor_requant_q6k_to_q4km");
+    if src_ptr == 0 {
+        return 0;
+    }
+    let src = &*(src_ptr as *const RayzorQTensor);
+    if src.scheme != QSCHEME_Q6_K {
+        return 0;
+    }
+    let rows = src.rows;
+    let cols = src.cols;
+    if !(rows * cols).is_multiple_of(Q6_K_BLOCK_SIZE) {
+        return 0;
+    }
+
+    let dst = alloc_qtensor(QSCHEME_Q4_K_M, rows, cols, Q4_K_M_BLOCK_SIZE);
+    if dst.is_null() {
+        return 0;
+    }
+    let dst_ref = &*dst;
+
+    let blocks_per_row = cols / Q6_K_BLOCK_SIZE;
+    let mut stage = [0.0f32; 256];
+    for r in 0..rows {
+        let src_row_ptr = src.data.add(r * blocks_per_row * Q6_K_BLOCK_BYTES);
+        let dst_row_ptr = (dst_ref.data as *mut Q4KMBlock).add(r * blocks_per_row);
+        for b in 0..blocks_per_row {
+            dequant_q6_k_block(src_row_ptr.add(b * Q6_K_BLOCK_BYTES), &mut stage);
+            *dst_row_ptr.add(b) = quantize_block_q4_k_m(&stage);
+        }
+    }
+
+    dst as i64
 }
 
 /// `qt.rows() -> i64`
@@ -4055,6 +4300,90 @@ mod tests {
             dot, 0.0,
             "dot against zero X must be exactly 0, got {}",
             dot
+        );
+    }
+
+    /// Round-trip: encode an f32 block to Q4_K_M then decode and check
+    /// per-element error stays below a coarse bound. Q4_K_M's 4-bit
+    /// payload + 6-bit sub-scale gives ~1/240 relative resolution per
+    /// sub-block; we allow 5% RMS for the naive encoder (llama.cpp's
+    /// iterative encoder gets ~2%). What matters here is that the
+    /// encoder runs at all + produces decodable output the existing
+    /// SDOT path can consume — exact numerical fidelity beyond that
+    /// is a follow-up.
+    #[test]
+    fn quantize_block_q4_k_m_round_trip_below_bound() {
+        // A weight-like pattern: zero-centred, ~unit standard deviation,
+        // some skew + larger tails so the per-sub-block (min, max) varies.
+        let mut x = [0.0f32; 256];
+        for (i, slot) in x.iter_mut().enumerate() {
+            let t = i as f32;
+            *slot = (t * 0.11).sin() * 0.8 + (t * 0.037).cos() * 0.3 + (t * 0.003).sin() * 0.15;
+        }
+
+        let block = quantize_block_q4_k_m(&x);
+
+        // Decode through the existing reader.
+        let raw_ptr = &block as *const Q4KMBlock as *const u8;
+        let decoded = unsafe { decode_q4_k_block(raw_ptr) };
+        let mut dq = [0.0f32; 256];
+        dequant_q4_k_block(&decoded, &mut dq);
+
+        // RMS of (x - dq) relative to RMS of x must stay below 5%.
+        let mut num = 0.0f64;
+        let mut den = 0.0f64;
+        for i in 0..256 {
+            let d = (x[i] - dq[i]) as f64;
+            num += d * d;
+            den += (x[i] as f64) * (x[i] as f64);
+        }
+        let rrms = (num / den.max(1e-12)).sqrt();
+        assert!(
+            rrms < 0.05,
+            "round-trip relative RMS {} >= 0.05; encoder is broken",
+            rrms
+        );
+    }
+
+    /// Encoder + SDOT dot-product cross-check: encoding f32 weights and
+    /// then dotting through `vec_dot_q4_K_q8_K` should give a result
+    /// close to the raw `Σ w_i * x_i` reference. The numerical drift is
+    /// dominated by the Q4_K_M encode loss tested above, so we allow a
+    /// matching relative-error budget.
+    #[test]
+    fn quantize_block_q4_k_m_dot_matches_reference() {
+        let mut w = [0.0f32; 256];
+        let mut x = [0.0f32; 256];
+        for i in 0..256 {
+            let t = i as f32;
+            w[i] = (t * 0.08).sin() * 0.7 + (t * 0.013).cos() * 0.2;
+            x[i] = (t * 0.05).cos() * 0.5 - (t * 0.021).sin() * 0.3;
+        }
+
+        let block = quantize_block_q4_k_m(&w);
+        let mut q8 = [Q8KBlock {
+            d: 0.0,
+            qs: [0i8; 256],
+            bsums: [0i16; 16],
+        }; 1];
+        quantize_row_q8_K(&x, &mut q8);
+
+        let dot_encoded = vec_dot_q4_K_q8_K(&block, &q8[0]);
+        let dot_ref: f32 = w.iter().zip(x.iter()).map(|(a, b)| a * b).sum();
+
+        let rel = ((dot_encoded - dot_ref) / dot_ref.abs().max(1e-6)).abs();
+        // 20% per-block dot error reflects the naive encoder's quality
+        // ceiling — llama.cpp's `make_qkx2_quants` iterative search gets
+        // closer to 5%. For the lm_head re-quant use case the per-block
+        // error averages out across the 8 blocks per row + 128k vocab
+        // entries, so the post-matmul argmax stays stable. The MATCH
+        // check on the canonical prompt is the true gate.
+        assert!(
+            rel < 0.20,
+            "encoded dot vs reference relative error {} >= 0.20 (dot_encoded={}, dot_ref={})",
+            rel,
+            dot_encoded,
+            dot_ref
         );
     }
 }

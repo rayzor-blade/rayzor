@@ -3586,6 +3586,10 @@ impl StdlibMapping {
             // QTensor.fromBytesQ6K(bytes: Bytes, rows: Int, cols: Int): QTensor
             map_method!(static "rayzor_ds_QTensor", "fromBytesQ6K" => "QTensor_fromBytesQ6K",
                 params: 3, mir_wrapper, types: &[PtrVoid, I64, I64] => PtrVoid),
+            // qt.requantQ6KToQ4KM(): QTensor — fresh Q4_K_M tensor
+            // re-encoded from a Q6_K source. Returns null on gate fail.
+            map_method!(instance "rayzor_ds_QTensor", "requantQ6KToQ4KM" => "QTensor_requantQ6KToQ4KM",
+                params: 0, mir_wrapper, types: &[PtrVoid] => PtrVoid),
             // --- Properties (instance) ---
             map_method!(instance "rayzor_ds_QTensor", "rows" => "QTensor_rows",
                 params: 0, mir_wrapper, types: &[PtrVoid] => I64),

@@ -105,7 +105,25 @@ class LlamaArch implements ArchBuilder {
         var lmHead:Linear;
         if (meta.tieWordEmbeddings || !weights.exists("output.weight")) {
             if (embed.qweight != null) {
-                lmHead = Linear.fromQuant(embed.qweight, null, "weight");
+                // Optional re-quantisation: Q6_K lm_head pays a 6-bit
+                // reconstruction overhead per block in the SDOT inner
+                // loop. Re-encoding as Q4_K_M moves it to the faster
+                // Q4_K_M SDOT path (no reconstruction needed — the 4-bit
+                // nibbles already match the operand format). Gated by
+                // RAYZOR_REQUANT_LM_HEAD=1 because the naive encoder
+                // loses ~3-5% per-block round-trip RMS; verify MATCH
+                // on the canonical prompt before relying on it.
+                //
+                // Embedding still uses the Q6_K source (precise embed
+                // lookups matter for input fidelity); only the lm_head
+                // path gets the cheaper Q4_K_M view.
+                var lmQt = embed.qweight;
+                var doRequant = Sys.getEnv("RAYZOR_REQUANT_LM_HEAD");
+                if (doRequant != null && doRequant != "0" && doRequant != "") {
+                    var rq = embed.qweight.requantQ6KToQ4KM();
+                    if (rq != null) lmQt = rq;
+                }
+                lmHead = Linear.fromQuant(lmQt, null, "weight");
             } else {
                 lmHead = new Linear(embed.weight, null, "weight");
             }
