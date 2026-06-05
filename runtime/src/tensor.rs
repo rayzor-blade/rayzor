@@ -102,6 +102,14 @@ pub extern "C" fn rayzor_dump_tensor_alloc_stats() {
         parked,
         evicted
     );
+    // Also mirror to /tmp/rayzor-metrics-tensor.kv so `rayzor debug server`
+    // can read the latest snapshot. Same key names the dashboard expects.
+    let kv = format!(
+        "allocs={ac}\nfrees={fc}\nalloc_bytes={a}\nfree_bytes={f}\npeak={peak}\n\
+         pool_hits={hits}\npool_misses={misses}\nfree_inv={free_inv}\n\
+         free_nonzero={free_nz}\npool_parked={parked}\npool_evicted={evicted}\n"
+    );
+    let _ = std::fs::write("/tmp/rayzor-metrics-tensor.kv", kv);
 }
 
 // =============================================================================

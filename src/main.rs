@@ -20,6 +20,7 @@
 //! ```
 
 mod compile_helpers;
+mod debug;
 mod rpkg_cmd;
 mod tui;
 mod wasm_cmd;
@@ -405,6 +406,14 @@ enum Commands {
 
     /// Start the Language Server Protocol server (for IDE integration)
     Lsp,
+
+    /// Investigative debugging toolkit: forensic run, multi-run bench, A/B
+    /// compare across git refs, PC → Haxe function resolution, lldb wrapper,
+    /// and a live metrics HTTP server with embedded browser dashboard.
+    Debug {
+        #[command(subcommand)]
+        action: debug::DebugCommands,
+    },
 }
 
 #[derive(Subcommand)]
@@ -773,6 +782,7 @@ fn main() {
             } => rpkg_cmd::cmd_rpkg_strip(input, os, arch, output),
         },
         Commands::Lsp => rayzor_lsp::run_lsp(),
+        Commands::Debug { action } => action.execute().map_err(|e| e.to_string()),
     };
 
     if let Err(e) = result {
