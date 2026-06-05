@@ -2556,10 +2556,23 @@ unsafe fn qmatmul_chunk_impl(x_tensor: i64, qt_w: i64, y_tensor: i64, n_start: i
     // so the runtime gate stays consistent across builds.
     #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
     let use_sdot = sdot_enabled() && batch == 1 && x_contig && qt.scheme == QSCHEME_Q4_K_M;
+    // Q6_K SDOT path: same x-q8 cache shape, but uses `dot_q6_k_q8` which
+    // reads `Q8Block::bsums_16` for the -32 bias correction (Q4_K_M uses
+    // `bsums` for its 32-elem sub-block min). Sharing the cache between
+    // both schemes means a single allocation per chunk regardless of which
+    // scheme each call uses. Earlier attempts (per
+    // bugs_q6k_sdot_no_win.md) showed -4.7% in isolated per-row testing
+    // because per-block 6-bit reconstruction eats the SDOT density win at
+    // single-row granularity — combining with the 2-row tile that landed
+    // at 6285c22 amortises the x→Q8 reconstruction across two output rows
+    // per block, which is where the win is expected to come from. Try it,
+    // bench, document failure if not.
+    #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+    let use_sdot_q6k = sdot_enabled() && batch == 1 && x_contig && qt.scheme == QSCHEME_Q6_K;
     let mut x_q8_cache: Vec<Q8Block> = Vec::new();
     let mut x_q8_init: Vec<bool> = Vec::new();
     #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
-    if use_sdot {
+    if use_sdot || use_sdot_q6k {
         x_q8_cache.reserve_exact(blocks_per_row);
         for _ in 0..blocks_per_row {
             x_q8_cache.push(Q8Block {
@@ -2575,13 +2588,46 @@ unsafe fn qmatmul_chunk_impl(x_tensor: i64, qt_w: i64, y_tensor: i64, n_start: i
     // Q6_K 2-row tile (batch=1 decode fast path only). Shares one
     // x-chunk load per block between two output rows, giving two
     // independent FMA accumulator chains in the inner dot product.
-    // matmul_qt_threaded is ~72% of decode wall on Llama-3.2-1B-Q4_K_M
-    // (the lm_head is Q6_K), so even a small per-row saving compounds
-    // across vocab=128256 rows.
+    // matmul_qt_threaded is the dominant remaining decode-wall share
+    // post-flash-attention on Llama-3.2-1B-Q4_K_M (lm_head is Q6_K),
+    // so even a small per-row saving compounds across vocab=128256 rows.
+    //
+    // SDOT path (use_sdot_q6k): pre-quantise X to Q8 once per block,
+    // reuse across both rows in the tile. Falls back to dequant+f32-dot
+    // when SDOT isn't available (non-aarch64, !+dotprod, or
+    // RAYZOR_USE_SDOT=0).
     let mut row_start = lo;
     if batch == 1 && x_contig && qt.scheme == QSCHEME_Q6_K {
         let tiled_end = lo + ((hi - lo) & !1usize); // largest even <= (hi-lo) + lo
         let mut r = lo;
+        #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+        if use_sdot_q6k {
+            while r < tiled_end {
+                let row0_ptr = qt.data.add(r * blocks_per_row * block_bytes);
+                let row1_ptr = qt.data.add((r + 1) * blocks_per_row * block_bytes);
+                let mut sum0 = 0.0f32;
+                let mut sum1 = 0.0f32;
+                for b_idx in 0..blocks_per_row {
+                    let bp0 = row0_ptr.add(b_idx * block_bytes);
+                    let bp1 = row1_ptr.add(b_idx * block_bytes);
+                    let x_q8 = x_q8_cache_get(
+                        &mut x_q8_cache,
+                        &mut x_q8_init,
+                        b_idx,
+                        x_data.add(b_idx * block_size),
+                    );
+                    sum0 += dot_q6_k_q8(bp0, x_q8);
+                    sum1 += dot_q6_k_q8(bp1, x_q8);
+                }
+                *y_data.add(r) = sum0;
+                *y_data.add(r + 1) = sum1;
+                r += 2;
+            }
+            row_start = r;
+        }
+        // Non-SDOT fallback: dequant + f32-dot 2-row tile (the original
+        // 6285c22 implementation). Runs when the SDOT gate is off or the
+        // SDOT path above didn't advance r.
         while r < tiled_end {
             let row0_ptr = qt.data.add(r * blocks_per_row * block_bytes);
             let row1_ptr = qt.data.add((r + 1) * blocks_per_row * block_bytes);
