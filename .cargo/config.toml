@@ -1,10 +1,16 @@
 # Export symbols from executables so LLVM AOT-compiled shared libraries
-# can resolve runtime functions (haxe_math_sqrt, malloc, etc.) at load time.
-# This is only needed on Linux where dlopen'd .so files resolve symbols
-# from the host process's dynamic symbol table.
+# AND dlopen'd cdylibs (e.g. nue-plugins) can resolve runtime functions
+# (haxe_math_sqrt, malloc, rayzor_tensor_zeros, etc.) at load time from
+# the host process's dynamic symbol table.
 
 [target.'cfg(target_os = "linux")']
 rustflags = ["-C", "link-args=-rdynamic"]
+
+# macOS: relies on the runtime crate's `#[no_mangle] extern "C"` symbols
+# being naturally exported through the executable's symbol table. The
+# `-Wl,-export_dynamic` flag broke decode somewhere; investigate later.
+# For now, the cdylib uses dynamic_lookup at link time and resolves to
+# whatever the host binary happens to export by default.
 
 # Enable `dotprod` (ARMv8.2-A SDOT/UDOT) for the aarch64 ML kernels.
 # M1+, Cortex-A75+, A76+, X1+ and every modern Apple / ARM Server SKU

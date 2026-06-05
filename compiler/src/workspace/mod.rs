@@ -52,6 +52,16 @@ impl Project {
             .unwrap_or_default()
     }
 
+    /// Resolve native lib paths declared via `[build] native-libs`,
+    /// relative to project root.
+    pub fn resolved_native_libs(&self) -> Vec<PathBuf> {
+        self.manifest
+            .build
+            .as_ref()
+            .map(|b| b.native_libs.iter().map(|p| self.root.join(p)).collect())
+            .unwrap_or_default()
+    }
+
     /// Resolve output path relative to project root.
     pub fn output_path(&self) -> Option<PathBuf> {
         self.manifest

@@ -118,6 +118,21 @@ pub struct BuildConfig {
     pub output: Option<String>,
     /// Defines (-D equivalent)
     pub defines: Option<BTreeMap<String, toml::Value>>,
+    /// Native dylibs to dlopen at compile / run time.
+    ///
+    /// Paths are relative to the manifest's directory. Each dylib must
+    /// export `plugin_describe` (or `rayzor_plugin_describe`) returning
+    /// a `NativeMethodDesc` table — same shape `rayzor rpkg pack`
+    /// expects. Symbols declared in the descriptors are dlsym'd from
+    /// the loaded dylib for JIT linkage.
+    ///
+    /// This lets a project ship a Haxe library + its own cdylib with
+    /// extern classes without going through the rpkg pack/install cycle
+    /// — useful for local development of native-plugin packages and for
+    /// projects whose plugin lives in the same source tree (e.g. nue's
+    /// Q8_0 KV cache lives in `nue-plugins/` alongside the Haxe code).
+    #[serde(default)]
+    pub native_libs: Vec<String>,
 }
 
 /// `[cache]` section.

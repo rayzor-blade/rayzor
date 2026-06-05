@@ -8,7 +8,8 @@ members = [
     "gpu",
     "window",
     "lsp",
-    "plugin"
+    "plugin",
+    "nue-plugins"
 ]
 # runtime-wasm is excluded from workspace — built separately for wasm32-wasip1
 exclude = [
@@ -36,6 +37,7 @@ diagnostics = { path = "diagnostics" }
 rayzor-runtime = { path = "runtime" }
 clap = { version = "4.5", features = ["derive"] }
 libloading = "0.8"
+rayzor-plugin = { path = "plugin" }
 ratatui = "0.29"
 crossterm = "0.28"
 postcard = { version = "1.0", features = ["alloc"] }
