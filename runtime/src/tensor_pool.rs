@@ -370,6 +370,17 @@ impl TensorPool {
         }
     }
 
+    /// Whether the pool is in its short-circuit state. When `true`,
+    /// `try_pop` returns `None` without taking the mutex and `push`
+    /// frees the entry directly. Surfaced for the diagnostics dump so
+    /// readers can distinguish "pool is genuinely missing" from
+    /// "pool is disabled by default" — the two look identical from
+    /// `hits=0 misses=N` alone.
+    #[inline]
+    pub fn is_disabled(&self) -> bool {
+        self.disabled.load(Ordering::Relaxed)
+    }
+
     /// Attempt to recycle an entry for the requested shape. Returns the
     /// raw `*mut RayzorTensor` (cast to `*mut u8`) on hit, `None` on miss.
     ///

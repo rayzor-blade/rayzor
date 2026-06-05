@@ -40,8 +40,9 @@ pub static TENSOR_POOL_HITS: AtomicU64 = AtomicU64::new(0);
 pub static TENSOR_POOL_MISSES: AtomicU64 = AtomicU64::new(0);
 pub static TENSOR_FREE_INVOCATIONS: AtomicU64 = AtomicU64::new(0);
 pub static TENSOR_FREE_REFCOUNT_NONZERO: AtomicU64 = AtomicU64::new(0);
-pub static TENSOR_POOL_PARKED: AtomicU64 = AtomicU64::new(0);
-pub static TENSOR_POOL_EVICTED: AtomicU64 = AtomicU64::new(0);
+// Note: pool push/eviction/byte counters live on
+// `tensor_pool::PoolStats` (read via `tensor_pool::global().stats.snapshot()`)
+// — not as standalone atomics here. The dump below surfaces them.
 
 #[inline(always)]
 fn record_data_alloc(bytes: usize) {
@@ -72,42 +73,49 @@ pub extern "C" fn rayzor_dump_tensor_alloc_stats() {
     let misses = TENSOR_POOL_MISSES.load(MemOrdering::Relaxed);
     let free_inv = TENSOR_FREE_INVOCATIONS.load(MemOrdering::Relaxed);
     let free_nz = TENSOR_FREE_REFCOUNT_NONZERO.load(MemOrdering::Relaxed);
-    let parked = TENSOR_POOL_PARKED.load(MemOrdering::Relaxed);
-    let evicted = TENSOR_POOL_EVICTED.load(MemOrdering::Relaxed);
+    // Pool push/eviction/byte counters: read the LIVE counters from the
+    // pool's own PoolStats (the previous standalone `TENSOR_POOL_PARKED`
+    // / `TENSOR_POOL_EVICTED` atomics were declared but never
+    // incremented — they always printed 0 regardless of pool activity,
+    // which masked the fact that the pool defaults to OFF without
+    // RAYZOR_POOL=1).
+    let pool = crate::tensor_pool::global();
+    let pool_disabled = pool.is_disabled();
+    let pool_snap = pool.stats.snapshot();
+    let pushes = pool_snap.pushes;
+    let evictions = pool_snap.evictions;
+    let pool_cur_b = pool_snap.current_bytes as u64;
+    let pool_peak_b = pool_snap.peak_bytes as u64;
     let hit_rate = if hits + misses > 0 {
         100.0 * hits as f64 / (hits + misses) as f64
     } else {
         0.0
     };
+    let pool_state = if pool_disabled { "DISABLED" } else { "enabled" };
     eprintln!(
-        "[tensor-data] allocs={} frees={} alloc_bytes={} ({:.1} MB) \
-         free_bytes={} ({:.1} MB) live={} ({:.1} MB) peak={} ({:.1} MB) \
-         pool_hits={} pool_misses={} pool_hit_rate={:.1}% \
-         free_inv={} free_nonzero={} pool_parked={} pool_evicted={}",
-        ac,
-        fc,
-        a,
-        a as f64 / 1_048_576.0,
-        f,
-        f as f64 / 1_048_576.0,
-        a.saturating_sub(f),
-        a.saturating_sub(f) as f64 / 1_048_576.0,
-        peak,
-        peak as f64 / 1_048_576.0,
-        hits,
-        misses,
-        hit_rate,
-        free_inv,
-        free_nz,
-        parked,
-        evicted
+        "[tensor-data] pool={pool_state} allocs={ac} frees={fc} \
+         alloc_bytes={a} ({a_mb:.1} MB) free_bytes={f} ({f_mb:.1} MB) \
+         live={live} ({live_mb:.1} MB) peak={peak} ({peak_mb:.1} MB) \
+         pool_hits={hits} pool_misses={misses} pool_hit_rate={hit_rate:.1}% \
+         free_inv={free_inv} free_nonzero={free_nz} \
+         pool_pushes={pushes} pool_evictions={evictions} \
+         pool_current_bytes={pool_cur_b} pool_peak_bytes={pool_peak_b}",
+        a_mb = a as f64 / 1_048_576.0,
+        f_mb = f as f64 / 1_048_576.0,
+        live = a.saturating_sub(f),
+        live_mb = a.saturating_sub(f) as f64 / 1_048_576.0,
+        peak_mb = peak as f64 / 1_048_576.0,
     );
-    // Also mirror to /tmp/rayzor-metrics-tensor.kv so `rayzor debug server`
-    // can read the latest snapshot. Same key names the dashboard expects.
+    // Mirror to /tmp/rayzor-metrics-tensor.kv. The KV consumer in
+    // `rayzor debug server` (src/debug/server.rs) reads `pool_hits`
+    // and `pool_misses` only — the new `pool_pushes` / `pool_evictions`
+    // / `pool_disabled` keys are additive and ignored by older readers.
     let kv = format!(
-        "allocs={ac}\nfrees={fc}\nalloc_bytes={a}\nfree_bytes={f}\npeak={peak}\n\
+        "pool_disabled={pool_disabled}\nallocs={ac}\nfrees={fc}\n\
+         alloc_bytes={a}\nfree_bytes={f}\npeak={peak}\n\
          pool_hits={hits}\npool_misses={misses}\nfree_inv={free_inv}\n\
-         free_nonzero={free_nz}\npool_parked={parked}\npool_evicted={evicted}\n"
+         free_nonzero={free_nz}\npool_pushes={pushes}\npool_evictions={evictions}\n\
+         pool_current_bytes={pool_cur_b}\npool_peak_bytes={pool_peak_b}\n"
     );
     let _ = std::fs::write("/tmp/rayzor-metrics-tensor.kv", kv);
 }
