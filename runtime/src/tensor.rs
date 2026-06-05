@@ -1241,6 +1241,7 @@ pub unsafe extern "C" fn rayzor_tensor_append_along_0_f32(
     src_ptr: i64,
     dst_row_offset: i64,
 ) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_append_along_0_f32");
     if dst_ptr == 0 || src_ptr == 0 {
         return -1;
     }
@@ -1356,6 +1357,7 @@ pub unsafe extern "C" fn rayzor_tensor_expand_kv_heads_axis1_f32(
     src_ptr: i64,
     repeats: i64,
 ) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_expand_kv_heads_axis1_f32");
     if src_ptr == 0 || repeats <= 0 {
         return 0;
     }
@@ -1419,6 +1421,7 @@ pub unsafe extern "C" fn rayzor_tensor_expand_kv_heads_axis1_f32(
 #[no_mangle]
 #[allow(clippy::manual_slice_size_calculation, clippy::needless_range_loop)]
 pub unsafe extern "C" fn rayzor_tensor_reshape(tensor_ptr: i64, shape_ptr: i64, ndim: i64) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_reshape");
     if tensor_ptr == 0 {
         return 0;
     }
@@ -1545,6 +1548,7 @@ pub unsafe extern "C" fn rayzor_tensor_permute(
     axes_ptr: i64,
     axes_len: i64,
 ) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_permute");
     if tensor_ptr == 0 {
         return 0;
     }
@@ -1610,6 +1614,7 @@ pub unsafe extern "C" fn rayzor_tensor_slice(
     start: i64,
     end: i64,
 ) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_slice");
     if tensor_ptr == 0 {
         return 0;
     }
@@ -1861,6 +1866,7 @@ pub unsafe extern "C" fn rayzor_tensor_sub(a: i64, b: i64) -> i64 {
 
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_mul(a: i64, b: i64) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_mul");
     if let Some((a_s, b_s, r_s, result)) = prepare_binop(a, b) {
         crate::tensor_simd::mul_slice(r_s, a_s, b_s);
         return result;
@@ -1915,6 +1921,7 @@ pub unsafe extern "C" fn rayzor_tensor_div(a: i64, b: i64) -> i64 {
 /// first hit to flag the slow path. Other dtypes (I32, I8, U8, FP8) abort.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_add_into(dest: i64, src: i64) {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_add_into");
     if dest == 0 || src == 0 {
         eprintln!(
             "rayzor_tensor_add_into: null tensor pointer (dest={:#x}, src={:#x})",
@@ -2158,12 +2165,14 @@ pub unsafe extern "C" fn rayzor_tensor_gelu(a: i64) -> i64 {
 /// SiLU / swish: x * sigmoid(x).
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_silu(a: i64) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_silu");
     tensor_unary(a, |x| x / (1.0 + (-x).exp()))
 }
 
 /// Softmax over the last dimension.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_softmax(a_ptr: i64) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_softmax");
     if a_ptr == 0 {
         return 0;
     }
@@ -2298,6 +2307,7 @@ pub unsafe extern "C" fn rayzor_tensor_layer_norm(a_ptr: i64, eps: f64) -> i64 {
 /// RMS normalization over the last dimension. x / sqrt(mean(x^2) + eps).
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_rms_norm(a_ptr: i64, eps: f64) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_rms_norm");
     if a_ptr == 0 {
         return 0;
     }
@@ -2373,6 +2383,7 @@ pub unsafe extern "C" fn rayzor_tensor_rope(
     sin_ptr: i64,
     position_offset: i64,
 ) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_rope");
     if x_ptr == 0 || cos_ptr == 0 || sin_ptr == 0 {
         return 0;
     }
@@ -2649,6 +2660,7 @@ pub unsafe extern "C" fn rayzor_tensor_bmm(a_ptr: i64, b_ptr: i64) -> i64 {
 /// rather than silently falling through.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_bmm_threaded(a_ptr: i64, b_ptr: i64, threads: i64) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_bmm_threaded");
     if a_ptr == 0 || b_ptr == 0 {
         return 0;
     }
@@ -2822,6 +2834,7 @@ pub unsafe extern "C" fn rayzor_tensor_bmm_threaded(a_ptr: i64, b_ptr: i64, thre
 /// Returns the same tensor pointer (mutates in place) for convenience.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_causal_mask_(t_ptr: i64, position_offset: i64) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_causal_mask_");
     if t_ptr == 0 {
         return 0;
     }
@@ -2856,6 +2869,7 @@ pub unsafe extern "C" fn rayzor_tensor_causal_mask_(t_ptr: i64, position_offset:
 /// after the new allocation.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_scale(t_ptr: i64, factor: f64) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_scale");
     if t_ptr == 0 {
         return 0;
     }

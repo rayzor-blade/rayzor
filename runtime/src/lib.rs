@@ -70,6 +70,7 @@ pub mod box_runtime;
 pub mod cstring_runtime;
 
 // Tensor runtime — N-dimensional array (rayzor.ds.Tensor)
+pub mod heap_check;
 pub mod tensor;
 pub mod tensor_pool;
 pub mod tensor_simd;
