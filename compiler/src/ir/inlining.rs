@@ -660,6 +660,22 @@ impl InliningPass {
             }
         }
 
+        // CRITICAL: Sync the caller's per-function `next_reg_id` with the
+        // global counter that `inline_call_site` has been advancing for
+        // its new register allocations. Without this, subsequent
+        // optimization passes (BCE in particular) call
+        // `caller.alloc_reg()` and get back IrIds that were ALREADY used
+        // by the inlined body — producing duplicate SSA defs. GVN then
+        // correctly aliases them via value-numbering, which silently
+        // substitutes unrelated values across loop bodies and triggers
+        // W0020 trap-stub installs at codegen time. The bug shape was
+        // sporadic and shape-dependent (number of fields, number of
+        // for-loops in a function) because IrId collisions only matter
+        // when two unrelated values happen to hash to the same key in
+        // GVN's value-number table. See
+        // bugs_w0020_value_map_miss_cross_loop.md for the full trace.
+        caller.next_reg_id = caller.next_reg_id.max(*next_reg_id);
+
         Ok(())
     }
 
