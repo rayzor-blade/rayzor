@@ -666,22 +666,36 @@ fn build_qtensor_fused_qkv_matmul(builder: &mut MirBuilder) {
         .call(malloc_func, vec![arr_size])
         .expect("malloc should return a pointer");
 
-    // Zero-init ptr/len/cap (offsets 0/8/16) and set elem_size=8 at
-    // offset 24. Each store uses ptr_add with byte offsets cast to
-    // a Ptr<I64> target so the 8-byte store is well-typed.
-    let off0 = builder.const_i64(0);
-    let off8 = builder.const_i64(8);
-    let off16 = builder.const_i64(16);
-    let off24 = builder.const_i64(24);
+    // Zero-init ptr/len/cap (struct slots 0/1/2) and set elem_size=8 at
+    // slot 3. CRITICAL: `ptr_add(ptr, offset, ty)` treats `offset` as an
+    // ELEMENT INDEX scaled by `sizeof(ty.pointee)` (LLVM-style GEP), not
+    // a raw byte offset. With ptr_i64 = Ptr<I64> the scale is 8 bytes,
+    // so we pass slot indices 0/1/2/3 — not 0/8/16/24, which would write
+    // 192 bytes past the array struct's base and leave elem_size
+    // uninitialized (= 0 from the freshly-malloc'd page).
+    //
+    // When elem_size landed at 0, `haxe_array_push` computed
+    // `new_cap * 0 = 0`, called `alloc(0)` which returned the macOS
+    // zero-size sentinel (0x2000000000000000), stored it as the
+    // backing-buffer pointer, then `triple[0]` deref'd that sentinel
+    // — appearing under MallocStackLogging as an EXC_BAD_ACCESS at
+    // `rayzor_tensor_reshape +0x1c0`, and as a malloc-freelist trap
+    // (brk #0x1 inside `_xzm_xzone_malloc_freelist_outlined`) without
+    // it. The content-dependent SIGTRAP at
+    // `bugs_llama_chat_heap_corruption_confirmed` was this one bug.
+    let slot0 = builder.const_i64(0);
+    let slot1 = builder.const_i64(1);
+    let slot2 = builder.const_i64(2);
+    let slot3 = builder.const_i64(3);
     let eight = builder.const_i64(8);
 
-    let f_ptr = builder.ptr_add(arr_ptr, off0, ptr_i64.clone());
+    let f_ptr = builder.ptr_add(arr_ptr, slot0, ptr_i64.clone());
     builder.store(f_ptr, zero);
-    let f_len = builder.ptr_add(arr_ptr, off8, ptr_i64.clone());
+    let f_len = builder.ptr_add(arr_ptr, slot1, ptr_i64.clone());
     builder.store(f_len, zero);
-    let f_cap = builder.ptr_add(arr_ptr, off16, ptr_i64.clone());
+    let f_cap = builder.ptr_add(arr_ptr, slot2, ptr_i64.clone());
     builder.store(f_cap, zero);
-    let f_es = builder.ptr_add(arr_ptr, off24, ptr_i64.clone());
+    let f_es = builder.ptr_add(arr_ptr, slot3, ptr_i64.clone());
     builder.store(f_es, eight);
 
     // Push Q, K, V handles in order. `haxe_array_push_i64` allocates
