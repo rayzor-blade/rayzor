@@ -70,6 +70,20 @@ extern class QTensor {
     @:native("qtensor_from_bytes_q6_k")
     public static function fromBytesQ6K(bytes:haxe.io.Bytes, rows:Int, cols:Int):QTensor;
 
+    /**
+     * Re-quantise a Q6_K tensor as Q4_K_M. Returns a fresh owning QTensor;
+     * the source is unchanged. Use case: moving the lm_head off the Q6_K
+     * SDOT path (which still pays the 6-bit reconstruction overhead per
+     * block) onto the faster Q4_K_M SDOT path, at a small per-element
+     * quantisation loss.
+     *
+     * Returns null on gate violation: source must be Q6_K, rows × cols
+     * must be a multiple of 256, and allocation must succeed. Caller
+     * should fall back to the original tensor in that case.
+     */
+    @:native("qtensor_requant_q6k_to_q4km")
+    public function requantQ6KToQ4KM():QTensor;
+
     /** Number of rows in this 2-D matrix. */
     @:native("qtensor_rows")
     public function rows():Int;

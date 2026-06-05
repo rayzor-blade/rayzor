@@ -1939,6 +1939,10 @@ register_symbol!(
     "rayzor_qtensor_from_bytes_q6_k",
     crate::quant::rayzor_qtensor_from_bytes_q6_k
 );
+register_symbol!(
+    "rayzor_qtensor_requant_q6k_to_q4km",
+    crate::quant::rayzor_qtensor_requant_q6k_to_q4km
+);
 register_symbol!("rayzor_qtensor_rows", crate::quant::rayzor_qtensor_rows);
 register_symbol!("rayzor_qtensor_cols", crate::quant::rayzor_qtensor_cols);
 register_symbol!("rayzor_qtensor_numel", crate::quant::rayzor_qtensor_numel);
