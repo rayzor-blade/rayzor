@@ -1202,6 +1202,136 @@ pub unsafe extern "C" fn rayzor_tensor_get_flat(tensor_ptr: i64, i: i64) -> f64 
     load_f32_at(t.data, elem_offset, t.dtype) as f64
 }
 
+/// Top-K + repetition-penalty scan in a single FFI call.
+///
+/// Replaces the per-element `tensor.getFlat(i)` + `adjusted(...)` loop that
+/// LocalTempSampler.sample runs over a 128k-entry logits vector. The per-call
+/// overhead of the extern dispatch (call instruction, parameter shuffle,
+/// return) was a measurable floor on the sampler's wall — roughly 5–10 ns
+/// per element × 128k elements per token = 0.6–1.3 ms/token of pure FFI
+/// noise on Llama-3.2-1B. After this primitive the sampler does ONE FFI
+/// call and the inner scan runs as a tight Rust loop with no boundary
+/// crossings.
+///
+/// Semantics (byte-identical to the Haxe `LocalTempSampler.sample` scan):
+/// - Walk every element `i` in the logits tensor.
+/// - If `recent_ids` contains `i` AND `repetition_penalty > 1.0`:
+///   `lg = (lg > 0.0) ? lg / penalty : lg * penalty`
+/// - Insertion-sort the running result into `out_logits` / `out_ids`
+///   descending; cutoff at `k` survivors.
+/// - Returns the number of survivors actually written (≤ `k`).
+///
+/// Inputs:
+///   - `logits_ptr` — `Tensor*` (must be F32 + owns_data; strided/non-F32
+///     fall back to caller's old scan via the `-1` failure return)
+///   - `out_logits_ptr` — `*mut f64` sized to at least `k`
+///   - `out_ids_ptr`    — `*mut i64` sized to at least `k`
+///   - `k`              — clamped to `[0, numel]`
+///   - `recent_ids_ptr` — `*const i64` (may be 0/null to disable penalty)
+///   - `recent_len`     — number of entries in `recent_ids_ptr`
+///   - `repetition_penalty` — > 1.0 enables penalty; ≤ 1.0 is a no-op
+///
+/// Returns:
+///   - `>= 0` — number of survivors written
+///   - `-1`   — error (null tensor, non-F32 dtype, non-contiguous, ...)
+///
+/// SAFETY: all pointers must point to valid, sized buffers for the
+/// duration of the call. The output buffers are written sequentially;
+/// the caller is responsible for not aliasing them with the input.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_topk_scan(
+    logits_ptr: i64,
+    out_logits_ptr: i64,
+    out_ids_ptr: i64,
+    k: i64,
+    recent_ids_ptr: i64,
+    recent_len: i64,
+    repetition_penalty: f64,
+) -> i64 {
+    if logits_ptr == 0 || out_logits_ptr == 0 || out_ids_ptr == 0 {
+        return -1;
+    }
+    let t = &*(logits_ptr as *const RayzorTensor);
+    // Conservative gate: only the contiguous F32 fast path. The sampler's
+    // input is the final-row logits view of the lm_head output, which is
+    // always F32 contiguous on Llama-3.2-1B. A non-match returns -1 so the
+    // caller can fall back to the per-element scan if they ever ship a
+    // non-F32 logits path.
+    if !t.owns_data || t.dtype != DTYPE_F32 {
+        return -1;
+    }
+
+    let n = t.numel;
+    let k = (k.max(0) as usize).min(n);
+    if k == 0 {
+        return 0;
+    }
+
+    let src = t.data as *const f32;
+    let out_logits = out_logits_ptr as *mut f64;
+    let out_ids = out_ids_ptr as *mut i64;
+
+    let penalize = repetition_penalty > 1.0 && recent_ids_ptr != 0 && recent_len > 0;
+    let rp = repetition_penalty;
+    let recent = if penalize {
+        Some(std::slice::from_raw_parts(
+            recent_ids_ptr as *const i64,
+            recent_len as usize,
+        ))
+    } else {
+        None
+    };
+
+    let mut sz: usize = 0;
+    for i in 0..n {
+        let mut lg = (*src.add(i)) as f64;
+        if let Some(recent) = recent {
+            // Linear scan of a 64-entry ring buffer. For typical decode
+            // patterns most candidates miss; branch predictor handles the
+            // hot "no-match" case cheaply. Keeps the per-iter cost matched
+            // to the Haxe path so the top-K survivors are byte-identical.
+            let mut hit = false;
+            let target = i as i64;
+            for &r in recent {
+                if r == target {
+                    hit = true;
+                    break;
+                }
+            }
+            if hit {
+                lg = if lg > 0.0 { lg / rp } else { lg * rp };
+            }
+        }
+
+        if sz < k {
+            // Filling the buffer — insertion sort up to current size.
+            let mut pos = sz;
+            while pos > 0 && *out_logits.add(pos - 1) < lg {
+                *out_logits.add(pos) = *out_logits.add(pos - 1);
+                *out_ids.add(pos) = *out_ids.add(pos - 1);
+                pos -= 1;
+            }
+            *out_logits.add(pos) = lg;
+            *out_ids.add(pos) = i as i64;
+            sz += 1;
+        } else if lg > *out_logits.add(k - 1) {
+            // Steady state — only insert if it beats the cutoff. The
+            // `<` (not `<=`) preserves the Haxe loop's tie-breaking, so
+            // identical logits keep their lower-index winner.
+            let mut pos = k - 1;
+            while pos > 0 && *out_logits.add(pos - 1) < lg {
+                *out_logits.add(pos) = *out_logits.add(pos - 1);
+                *out_ids.add(pos) = *out_ids.add(pos - 1);
+                pos -= 1;
+            }
+            *out_logits.add(pos) = lg;
+            *out_ids.add(pos) = i as i64;
+        }
+    }
+
+    sz as i64
+}
+
 /// tensor.get(indices_ptr, ndim) -> f64
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_get(tensor_ptr: i64, indices_ptr: i64, ndim: i64) -> f64 {
