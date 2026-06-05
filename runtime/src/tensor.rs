@@ -1252,12 +1252,16 @@ pub unsafe extern "C" fn rayzor_tensor_topk_scan(
         return -1;
     }
     let t = &*(logits_ptr as *const RayzorTensor);
-    // Conservative gate: only the contiguous F32 fast path. The sampler's
-    // input is the final-row logits view of the lm_head output, which is
-    // always F32 contiguous on Llama-3.2-1B. A non-match returns -1 so the
-    // caller can fall back to the per-element scan if they ever ship a
-    // non-F32 logits path.
-    if !t.owns_data || t.dtype != DTYPE_F32 {
+    // Gate the fast path on F32 + canonical row-major strides — NOT on
+    // `owns_data`. The sampler's input is `lastRow(logits)`, which goes
+    // through `slice` then `reshape`; both return contiguous VIEWS of the
+    // lm_head output's storage with `owns_data = false`. Checking
+    // `owns_data` here would bail out every time and route every sample
+    // through the per-element fallback (defeating the whole point of the
+    // primitive). The is_contiguous() check on strides catches the real
+    // failure case (a `permute` or strided slice in some future logits
+    // backend) without false-positiving on views of contiguous storage.
+    if t.dtype != DTYPE_F32 || !t.is_contiguous() {
         return -1;
     }
 
