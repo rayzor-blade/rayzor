@@ -103,15 +103,24 @@ fn record_sample() {
 pub extern "C" fn rayzor_dump_alloc_stats() {
     let a = ALLOC_BYTES_TOTAL.load(MemOrdering::Relaxed);
     let f = FREE_BYTES_TOTAL.load(MemOrdering::Relaxed);
+    let ac = ALLOC_COUNT.load(MemOrdering::Relaxed);
+    let fc = FREE_COUNT.load(MemOrdering::Relaxed);
+    let peak = LIVE_BYTES_PEAK.load(MemOrdering::Relaxed);
     eprintln!(
         "[alloc-stats] allocs={} frees={} alloc_bytes={} free_bytes={} live={} peak={}",
-        ALLOC_COUNT.load(MemOrdering::Relaxed),
-        FREE_COUNT.load(MemOrdering::Relaxed),
+        ac,
+        fc,
         a,
         f,
         a.saturating_sub(f),
-        LIVE_BYTES_PEAK.load(MemOrdering::Relaxed)
+        peak
     );
+    // Also mirror to /tmp/rayzor-metrics-alloc.kv so `rayzor debug server`
+    // can read the latest snapshot without parsing stderr.
+    let kv = format!(
+        "allocs={ac}\nfrees={fc}\nalloc_bytes={a}\nfree_bytes={f}\npeak={peak}\n"
+    );
+    let _ = std::fs::write("/tmp/rayzor-metrics-alloc.kv", kv);
 }
 
 #[no_mangle]

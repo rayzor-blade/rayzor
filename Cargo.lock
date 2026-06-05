@@ -2825,16 +2825,19 @@ dependencies = [
 name = "rayzor"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "clap",
  "compiler",
  "crossterm",
  "diagnostics",
+ "libc",
  "libloading",
  "parser",
  "postcard",
  "ratatui",
  "rayzor-lsp",
  "rayzor-runtime",
+ "walkdir",
 ]
 
 [[package]]

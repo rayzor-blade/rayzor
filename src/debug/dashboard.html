@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>rayzor debug dashboard</title>
+<style>
+:root {
+  color-scheme: dark;
+  --bg: #0f1115;
+  --panel: #161922;
+  --text: #d8dee9;
+  --dim: #6c7280;
+  --accent: #ffb86c;
+  --good: #50fa7b;
+  --bad: #ff5555;
+  --warn: #f1fa8c;
+  --border: #2a2f3a;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", monospace;
+}
+body { margin: 0; padding: 24px; background: var(--bg); color: var(--text); }
+h1 { font-size: 18px; margin: 0 0 4px 0; }
+.sub { color: var(--dim); font-size: 12px; margin-bottom: 24px; }
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 16px;
+}
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 16px;
+}
+.panel h2 {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+  margin: 0 0 12px 0;
+}
+.metric { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; }
+.metric .key { color: var(--dim); }
+.metric .val { font-variant-numeric: tabular-nums; }
+.big {
+  font-size: 24px;
+  font-variant-numeric: tabular-nums;
+  color: var(--accent);
+  margin: 8px 0 4px 0;
+}
+.spark { width: 100%; height: 48px; display: block; }
+.empty { color: var(--dim); font-size: 12px; padding: 8px 0; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+td, th { text-align: left; padding: 4px 8px; border-bottom: 1px solid var(--border); }
+th { color: var(--dim); font-weight: normal; }
+.crash-pre { font-family: ui-monospace, monospace; font-size: 11px; white-space: pre; overflow-x: auto; color: #f8f8f2; }
+.status-pill { display: inline-block; padding: 2px 8px; border-radius: 3px; font-size: 11px; }
+.live { background: rgba(80, 250, 123, 0.15); color: var(--good); }
+.stale { background: rgba(255, 85, 85, 0.15); color: var(--bad); }
+</style>
+</head>
+<body>
+<h1>rayzor debug dashboard</h1>
+<div class="sub">
+  Polling every 1s. Source data: <code>/api/metrics</code> · <code>/api/jit-map</code> · <code>/api/crashes</code>
+  <span id="status" class="status-pill stale">disconnected</span>
+</div>
+
+<div class="grid">
+
+  <div class="panel">
+    <h2>tensor data — live</h2>
+    <div class="big" id="tensor-live">—</div>
+    <div class="metric"><span class="key">peak</span><span class="val" id="tensor-peak">—</span></div>
+    <div class="metric"><span class="key">allocs</span><span class="val" id="tensor-allocs">—</span></div>
+    <div class="metric"><span class="key">frees</span><span class="val" id="tensor-frees">—</span></div>
+    <div class="metric"><span class="key">pool hit rate</span><span class="val" id="tensor-pool">—</span></div>
+    <svg class="spark" id="tensor-spark" viewBox="0 0 200 50" preserveAspectRatio="none"></svg>
+  </div>
+
+  <div class="panel">
+    <h2>system allocator</h2>
+    <div class="big" id="alloc-live">—</div>
+    <div class="metric"><span class="key">peak</span><span class="val" id="alloc-peak">—</span></div>
+    <div class="metric"><span class="key">allocs</span><span class="val" id="alloc-allocs">—</span></div>
+    <div class="metric"><span class="key">frees</span><span class="val" id="alloc-frees">—</span></div>
+    <svg class="spark" id="alloc-spark" viewBox="0 0 200 50" preserveAspectRatio="none"></svg>
+  </div>
+
+  <div class="panel" style="grid-column: 1 / -1;">
+    <h2>recent crashes</h2>
+    <div id="crashes-empty" class="empty">no /tmp/rayzor-crash-*.txt files yet.</div>
+    <div id="crashes-list"></div>
+  </div>
+
+  <div class="panel" style="grid-column: 1 / -1;">
+    <h2>JIT symbols — top by size</h2>
+    <table>
+      <thead><tr><th>function</th><th>size</th><th>file</th><th>line</th></tr></thead>
+      <tbody id="jit-tbody"></tbody>
+    </table>
+  </div>
+
+</div>
+
+<script>
+const sparks = { tensor: [], alloc: [] };
+const MAX_SAMPLES = 240; // ~4 minutes at 1Hz
+
+async function poll() {
+  let connected = false;
+  try {
+    const m = await (await fetch("/api/metrics")).json();
+    connected = true;
+    document.getElementById("tensor-live").textContent = fmtMB(m.tensor?.live);
+    document.getElementById("tensor-peak").textContent = fmtMB(m.tensor?.peak);
+    document.getElementById("tensor-allocs").textContent = fmtCount(m.tensor?.allocs);
+    document.getElementById("tensor-frees").textContent = fmtCount(m.tensor?.frees);
+    document.getElementById("tensor-pool").textContent = fmtPct(m.tensor?.pool_hit_rate);
+    document.getElementById("alloc-live").textContent = fmtMB(m.alloc?.live);
+    document.getElementById("alloc-peak").textContent = fmtMB(m.alloc?.peak);
+    document.getElementById("alloc-allocs").textContent = fmtCount(m.alloc?.allocs);
+    document.getElementById("alloc-frees").textContent = fmtCount(m.alloc?.frees);
+    pushSpark(sparks.tensor, m.tensor?.live);
+    pushSpark(sparks.alloc, m.alloc?.live);
+    drawSpark("tensor-spark", sparks.tensor);
+    drawSpark("alloc-spark", sparks.alloc);
+  } catch (e) { /* no fresh metrics */ }
+
+  try {
+    const c = await (await fetch("/api/crashes")).json();
+    const list = document.getElementById("crashes-list");
+    const empty = document.getElementById("crashes-empty");
+    if (!c.length) {
+      list.innerHTML = "";
+      empty.style.display = "";
+    } else {
+      empty.style.display = "none";
+      list.innerHTML = c.map(cr => `
+        <div style="margin-bottom: 12px;">
+          <div style="font-size: 11px; color: var(--dim); margin-bottom: 4px;">${cr.path}</div>
+          <pre class="crash-pre">${escapeHtml(cr.body)}</pre>
+        </div>`).join("");
+    }
+  } catch (e) {}
+
+  try {
+    const j = await (await fetch("/api/jit-map?limit=25")).json();
+    const tb = document.getElementById("jit-tbody");
+    tb.innerHTML = j.map(s => `<tr>
+      <td><code>${escapeHtml(s.qname)}</code></td>
+      <td>${s.size_bytes.toLocaleString()}</td>
+      <td>${s.file ? escapeHtml(s.file) : ""}</td>
+      <td>${s.line || ""}</td>
+    </tr>`).join("");
+  } catch (e) {}
+
+  const pill = document.getElementById("status");
+  if (connected) { pill.textContent = "live"; pill.className = "status-pill live"; }
+  else            { pill.textContent = "disconnected"; pill.className = "status-pill stale"; }
+}
+
+function pushSpark(arr, v) {
+  if (v == null) return;
+  arr.push(v);
+  if (arr.length > MAX_SAMPLES) arr.shift();
+}
+function drawSpark(id, arr) {
+  const el = document.getElementById(id);
+  if (!arr.length) { el.innerHTML = ""; return; }
+  const lo = Math.min(...arr);
+  const hi = Math.max(...arr);
+  const range = hi - lo || 1;
+  const step = 200 / Math.max(arr.length - 1, 1);
+  const pts = arr.map((v, i) => {
+    const x = (i * step).toFixed(2);
+    const y = (48 - ((v - lo) / range) * 46).toFixed(2);
+    return `${x},${y}`;
+  }).join(" ");
+  el.innerHTML = `<polyline points="${pts}" fill="none" stroke="var(--accent)" stroke-width="1.5" />`;
+}
+
+function fmtMB(bytes) {
+  if (bytes == null) return "—";
+  if (bytes > 1024 * 1024 * 1024) return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+  if (bytes > 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+  if (bytes > 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return bytes + " B";
+}
+function fmtCount(n) {
+  if (n == null) return "—";
+  return n.toLocaleString();
+}
+function fmtPct(v) {
+  if (v == null) return "—";
+  return v.toFixed(1) + "%";
+}
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;"}[c]));
+}
+
+poll();
+setInterval(poll, 1000);
+</script>
+</body>
+</html>
