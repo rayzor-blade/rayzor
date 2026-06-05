@@ -2610,6 +2610,184 @@ pub unsafe extern "C" fn rayzor_tensor_rope(
     result
 }
 
+/// Fused flash-style scaled dot-product attention for the **decode** case
+/// (seqQ == 1) with grouped-query attention (GQA) built in.
+///
+/// Replaces the chain
+///   `expandKvHeads(K)` + `expandKvHeads(V)` + `bmm(Q, K^T)` + `scale`
+///   + `causalMask` (no-op for decode) + `softmax` + `bmm(attn, V)`
+/// with one kernel that streams over the KV cache exactly once. The win
+/// comes from memory traffic: at cache_len=568 the chain reads K and V
+/// twice (once for the score bmm, once for the context bmm) AFTER
+/// materialising 4× expanded copies, ~220 MB/token at 16 layers. The
+/// fused kernel reads each KV entry once from the un-expanded cache and
+/// never materialises scores — ~40 MB/token.
+///
+/// Inputs:
+///   - `q_ptr` — Q tensor, shape `[1, num_q_heads, head_dim]`, F32,
+///     contiguous. The "after-RoPE, before-permute" shape from
+///     `GQAttention.forward`. seqQ must equal 1; the kernel is decode-
+///     only by design (prefill stays on the bmm chain).
+///   - `k_ptr`, `v_ptr` — KV cache **view**, shape
+///     `[cache_len, num_kv_heads, head_dim]`, F32. Cache backing is
+///     contiguous and the slice-along-axis-0 view preserves the inner
+///     two axes' contiguity, so `K[l, h, d] = data[l*num_kv*hd + h*hd + d]`.
+///   - `scale` — `1 / sqrt(head_dim)`, applied to each score before
+///     softmax. Matches the existing path's `scoresRaw.scale(scale)`.
+///
+/// Returns a fresh contiguous tensor of shape `[1, num_q_heads, head_dim]`,
+/// F32, owning. Returns 0 on any gate violation so the caller can fall
+/// back to the bmm chain.
+///
+/// Numerical match: the kernel uses the standard "max-shifted softmax"
+/// for each Q-head, computing scores into a stack array then
+/// softmax-weighted V-sum. The reduction order over `cache_len` matches
+/// the bmm path (sequential along axis 0), so MATCH-on-canonical
+/// should hold modulo a few f32 ULPs at the very tail — not enough to
+/// shift argmax on a 128k vocab.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode(
+    q_ptr: i64,
+    k_ptr: i64,
+    v_ptr: i64,
+    scale: f64,
+) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_flash_attn_decode");
+    if q_ptr == 0 || k_ptr == 0 || v_ptr == 0 {
+        return 0;
+    }
+    let q = &*(q_ptr as *const RayzorTensor);
+    let k = &*(k_ptr as *const RayzorTensor);
+    let v = &*(v_ptr as *const RayzorTensor);
+
+    // dtype gate: F32 only for now (the rest of GQAttention is F32).
+    if q.dtype != DTYPE_F32 || k.dtype != DTYPE_F32 || v.dtype != DTYPE_F32 {
+        return 0;
+    }
+    // shape gates
+    if q.ndim != 3 || k.ndim != 3 || v.ndim != 3 {
+        return 0;
+    }
+    let q_shape = std::slice::from_raw_parts(q.shape, 3);
+    let k_shape = std::slice::from_raw_parts(k.shape, 3);
+    let v_shape = std::slice::from_raw_parts(v.shape, 3);
+
+    let seq_q = q_shape[0];
+    let num_q_heads = q_shape[1];
+    let head_dim = q_shape[2];
+    let cache_len = k_shape[0];
+    let num_kv_heads = k_shape[1];
+
+    // Decode-only by design.
+    if seq_q != 1 {
+        return 0;
+    }
+    // Shapes must agree.
+    if v_shape[0] != cache_len || v_shape[1] != num_kv_heads || v_shape[2] != head_dim {
+        return 0;
+    }
+    if k_shape[2] != head_dim {
+        return 0;
+    }
+    // GQA group must divide.
+    if num_kv_heads == 0 || !num_q_heads.is_multiple_of(num_kv_heads) {
+        return 0;
+    }
+    let group = num_q_heads / num_kv_heads;
+
+    // Contiguity gate: Q must be contiguous (seq_q=1 makes its layout flat
+    // along the head_dim×num_q_heads axes), K/V along the inner two axes —
+    // the cache slice view is row-major along (head, dim) so just check that.
+    if !q.is_contiguous() {
+        return 0;
+    }
+    let k_strides = std::slice::from_raw_parts(k.strides, 3);
+    let v_strides = std::slice::from_raw_parts(v.strides, 3);
+    let kv_row_stride = (num_kv_heads * head_dim) as usize;
+    if k_strides[1] != head_dim || k_strides[2] != 1 {
+        return 0;
+    }
+    if v_strides[1] != head_dim || v_strides[2] != 1 {
+        return 0;
+    }
+    // The cache-slice view keeps stride[0] = num_kv_heads*head_dim (the
+    // original backing's row stride). If something else passes a strided
+    // view we bail to avoid scrambled reads.
+    if k_strides[0] != kv_row_stride || v_strides[0] != kv_row_stride {
+        return 0;
+    }
+
+    // Allocate output [1, num_q_heads, head_dim].
+    let out_shape = [1usize, num_q_heads, head_dim];
+    let result = alloc_tensor(&out_shape, DTYPE_F32, None);
+    if result == 0 {
+        return 0;
+    }
+    let r = &*(result as *const RayzorTensor);
+
+    let q_data = q.data as *const f32;
+    let k_data = k.data as *const f32;
+    let v_data = v.data as *const f32;
+    let out_data = r.data as *mut f32;
+    let scale_f32 = scale as f32;
+
+    // Scores scratch — stack-bounded by cache_len. For Llama-3.2-1B with
+    // ctx=4096 this caps at 16 KB of stack per call (4096 f32). Heap-
+    // promote if a model ever asks for more.
+    let mut scores: Vec<f32> = vec![0.0; cache_len];
+
+    // For each query head: dot Q[h] against every K[l, kv_head], softmax,
+    // accumulate against V[l, kv_head]. GQA broadcast is implicit — kv_head
+    // = q_head / group; multiple Q-heads share the same K/V rows but read
+    // them independently from the un-expanded cache (no materialised copy).
+    for q_head in 0..num_q_heads {
+        let kv_head = q_head / group;
+        // Q row pointer: q_data[0, q_head, :]. seq_q=1 collapses the outer.
+        let q_row_ptr = q_data.add(q_head * head_dim);
+
+        // First pass: scores[l] = (Q[h] · K[l, kv_head, :]) * scale.
+        let mut max_score = f32::NEG_INFINITY;
+        for l in 0..cache_len {
+            let k_row_ptr = k_data.add(l * kv_row_stride + kv_head * head_dim);
+            let mut s = 0.0f32;
+            for d in 0..head_dim {
+                s += *q_row_ptr.add(d) * *k_row_ptr.add(d);
+            }
+            s *= scale_f32;
+            scores[l] = s;
+            if s > max_score {
+                max_score = s;
+            }
+        }
+
+        // Second pass: softmax denominator, in the standard max-shifted
+        // form (matches `Tensor.softmax`'s reduction order).
+        let mut denom = 0.0f32;
+        for l in 0..cache_len {
+            let e = (scores[l] - max_score).exp();
+            scores[l] = e;
+            denom += e;
+        }
+        let inv_denom = 1.0 / denom;
+
+        // Third pass: context[q_head, :] = Σ_l (softmax[l] * V[l, kv_head, :]).
+        // Zero the output slot then accumulate.
+        let out_row_ptr = out_data.add(q_head * head_dim);
+        for d in 0..head_dim {
+            *out_row_ptr.add(d) = 0.0;
+        }
+        for l in 0..cache_len {
+            let w = scores[l] * inv_denom;
+            let v_row_ptr = v_data.add(l * kv_row_stride + kv_head * head_dim);
+            for d in 0..head_dim {
+                *out_row_ptr.add(d) += w * *v_row_ptr.add(d);
+            }
+        }
+    }
+
+    result
+}
+
 /// Generate the RoPE cos/sin tables for a given head dimension and maximum
 /// sequence length. Returns the cos table; the sin table is generated by
 /// the sibling `rayzor_tensor_rope_sin_table`. Both share the same shape

@@ -89,6 +89,7 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
     build_tensor_bmm(builder);
     build_tensor_bmm_threaded(builder);
     build_tensor_expand_kv_heads_axis1(builder);
+    build_tensor_flash_attn_decode(builder);
 
     // Attention building blocks (composed by nue.transformer in Haxe)
     build_tensor_causal_mask(builder);
@@ -245,6 +246,21 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
         .param("recent_ids_ptr", i64_ty.clone())
         .param("recent_len", i64_ty.clone())
         .param("penalty", f64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // flash_attn_decode: (q, k, v, scale) -> tensor
+    // Fused decode-step attention kernel — replaces the bmm+softmax+bmm
+    // chain in GQAttention.forward for seqQ=1. Returns 0 on gate violation
+    // so the caller can fall back to the unfused path.
+    let func_id = builder
+        .begin_function("rayzor_tensor_flash_attn_decode")
+        .param("q", i64_ty.clone())
+        .param("k", i64_ty.clone())
+        .param("v", i64_ty.clone())
+        .param("scale", f64_ty.clone())
         .returns(i64_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
@@ -1068,6 +1084,40 @@ fn build_tensor_expand_kv_heads_axis1(builder: &mut MirBuilder) {
         .get_function_by_name("rayzor_tensor_expand_kv_heads_axis1_f32")
         .expect("rayzor_tensor_expand_kv_heads_axis1_f32 not found");
     let result = builder.call(extern_id, vec![self_val, repeats]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// Tensor_flash_attn_decode(self: i64, k: i64, v: i64, scale: f64) -> i64
+/// Fused single-step attention. Caller (`GQAttention.forward`) supplies Q
+/// after RoPE in the pre-permute `[1, num_q_heads, head_dim]` layout, plus
+/// the un-expanded K/V cache views. Returns the new context tensor of
+/// shape `[1, num_q_heads, head_dim]`, or 0 on gate violation.
+fn build_tensor_flash_attn_decode(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let f64_ty = IrType::F64;
+    let func_id = builder
+        .begin_function("Tensor_flash_attn_decode")
+        .param("self", i64_ty.clone())
+        .param("k", i64_ty.clone())
+        .param("v", i64_ty.clone())
+        .param("scale", f64_ty)
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .inline(InlineHint::Always)
+        .build();
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+    let q_val = builder.get_param(0);
+    let k_val = builder.get_param(1);
+    let v_val = builder.get_param(2);
+    let scale_val = builder.get_param(3);
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_flash_attn_decode")
+        .expect("rayzor_tensor_flash_attn_decode not found");
+    let result = builder
+        .call(extern_id, vec![q_val, k_val, v_val, scale_val])
+        .unwrap();
     builder.ret(Some(result));
 }
 

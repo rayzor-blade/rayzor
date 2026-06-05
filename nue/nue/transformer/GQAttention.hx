@@ -153,6 +153,35 @@ class GQAttention implements Module {
         var kAll = cache.keysView();   // [cache.currentLen, numKvHeads, headDim]
         var vAll = cache.valuesView(); // same shape
 
+        // 4-7) Decode-step fast path: fused attention kernel.
+        //
+        // The bmm + scale + mask + softmax + bmm chain below materialises
+        // `expandKvHeads(kAll)` + `expandKvHeads(vAll)` (~147 MB/token at
+        // 16 layers, cacheLen=568) plus three score tensors. For the
+        // single-query decode case (`seqQ == 1`) every causal-mask cell
+        // is visible (the cache only contains tokens up to the current
+        // position), so we can skip the mask entirely and stream over the
+        // un-expanded KV cache once. `flashAttnDecode` returns the same
+        // [1, numQHeads, headDim] result as the unfused path; on any
+        // gate violation (non-F32, non-contig Q, GQA group mismatch,
+        // unexpected strides) it returns null and we fall through to the
+        // bmm chain.
+        if (seqQ == 1) {
+            var ctx = q.flashAttnDecode(kAll, vAll, scale);
+            if (ctx != null) {
+                // ctx is [1, numQHeads, headDim] contiguous owning.
+                // reshape collapses to [seqQ, hidden] (a view; the data
+                // layout already matches contiguous row-major).
+                var hiddenSize = numQHeads * headDim;
+                var ctxFlat = ctx.reshape([seqQ, hiddenSize]);
+                var out = oProj.forward(ctxFlat);
+                ctxFlat.free();
+                ctx.free();
+                return out;
+            }
+            // Fall-through to the unfused path on gate failure.
+        }
+
         // 4) Score = Q @ Kᵀ, scaled. Per-head, in a batched matmul.
         //    Q is [seqQ, numQHeads, headDim]; we transpose to put heads
         //    on the batch axis so bmm computes one (M,K)x(K,N) per head.

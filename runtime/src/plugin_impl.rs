@@ -1783,6 +1783,10 @@ register_symbol!(
     "rayzor_tensor_topk_scan",
     crate::tensor::rayzor_tensor_topk_scan
 );
+register_symbol!(
+    "rayzor_tensor_flash_attn_decode",
+    crate::tensor::rayzor_tensor_flash_attn_decode
+);
 register_symbol!("rayzor_tensor_set", crate::tensor::rayzor_tensor_set);
 register_symbol!(
     "rayzor_tensor_append_along_0_f32",

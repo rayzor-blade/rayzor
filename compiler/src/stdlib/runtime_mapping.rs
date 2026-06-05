@@ -3513,6 +3513,11 @@ impl StdlibMapping {
             // tensor.bmmThreaded(other: Tensor, threads: Int): Tensor
             map_method!(instance "rayzor_ds_Tensor", "bmmThreaded" => "Tensor_bmm_threaded", params: 2, mir_wrapper,
                 types: &[PtrVoid, PtrVoid, I64] => PtrVoid),
+            // tensor.flashAttnDecode(k, v, scale): Tensor — fused decode
+            // attention. Returns 0/null on gate violation (caller must
+            // fall back to the unfused bmm chain).
+            map_method!(instance "rayzor_ds_Tensor", "flashAttnDecode" => "Tensor_flash_attn_decode", params: 3, mir_wrapper,
+                types: &[PtrVoid, PtrVoid, PtrVoid, F64] => PtrVoid),
             // tensor.expandKvHeadsAxis1(repeats: Int): Tensor
             map_method!(instance "rayzor_ds_Tensor", "expandKvHeadsAxis1" => "Tensor_expand_kv_heads_axis1", params: 1, mir_wrapper,
                 types: &[PtrVoid, I64] => PtrVoid),
