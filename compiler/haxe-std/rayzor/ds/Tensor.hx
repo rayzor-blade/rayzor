@@ -123,6 +123,39 @@ extern class Tensor {
     @:native("tensor_get_flat")
     public function getFlat(i:Int):Float;
 
+    /**
+     * Single-FFI top-K + repetition-penalty scan over the tensor.
+     *
+     * Walks every element of `this`, applies a repetition penalty when
+     * the element index appears in `recentIds`, and insertion-sorts the
+     * top `k` (logit, id) pairs into the pre-allocated `outLogits` /
+     * `outIds` buffers (descending by logit). Returns the number of
+     * survivors actually written (≤ `k`).
+     *
+     * Replaces the per-element `tensor.getFlat(i)` loop in samplers
+     * that scan a 128k-vocab logits vector — eliminates 128k FFI
+     * boundary crossings per token in exchange for one bulk-scan call
+     * whose inner loop is a tight Rust function.
+     *
+     * Constraints (`-1` returned on violation; caller should fall back
+     * to the per-element scan):
+     *   - tensor dtype must be `F32`
+     *   - tensor data must be contiguous (owns_data)
+     *   - `outLogits.length >= k`, `outIds.length >= k`
+     *
+     * `recentIds` may be `[]` and `penalty <= 1.0` to disable the
+     * repetition-penalty step entirely — the scan still runs and the
+     * top-K is returned untouched.
+     */
+    @:native("tensor_topk_scan")
+    public function topkScan(
+        outLogits:Array<Float>,
+        outIds:Array<Int>,
+        k:Int,
+        recentIds:Array<Int>,
+        penalty:Float
+    ):Int;
+
     /** Set element at indices */
     @:native("tensor_set")
     public function set(indices:Array<Int>, value:Float):Void;

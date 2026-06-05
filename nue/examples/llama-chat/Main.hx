@@ -72,15 +72,53 @@ class LocalTempSampler implements Sampler {
         var k = (topK > 0 && topK < n) ? topK : n;
 
         // -------- Top-K selection ----------
-        // Maintain `topKLogits` sorted DESCENDING so [0] is largest,
-        // [k-1] is the cutoff. For each new logit larger than the
-        // cutoff (or until we've filled k slots), do an insertion
-        // shift to keep the array sorted.
+        // Single FFI call replaces the 128k-iter per-token scan + insertion
+        // sort + repetition-penalty loop. The runtime walks the contiguous
+        // F32 logits buffer in a tight Rust function and writes the top-K
+        // (logit, id) pairs straight into our pre-allocated arrays.
+        //
+        // Falls back to the per-element scan when topkScan reports `-1`
+        // (non-F32 / non-contiguous logits) — preserves correctness for any
+        // future logits backend that doesn't hit the fast path.
+        var penaltyArg = penalize ? rp : 1.0;
+        var sz = logits.topkScan(topKLogits, topKIds, k, recent, penaltyArg);
+        if (sz < 0) {
+            sz = topKScanFallback(logits, n, k, penalize, rp);
+        }
+
+        // -------- Temperature softmax over the k survivors ----------
+        var maxLogit = topKLogits[0];
+        var total = 0.0;
+        for (i in 0...sz) {
+            total += Math.exp((topKLogits[i] - maxLogit) / t);
+        }
+
+        var r = nextFloat() * total;
+        var acc = 0.0;
+        for (i in 0...sz) {
+            acc += Math.exp((topKLogits[i] - maxLogit) / t);
+            if (r <= acc) {
+                var id = topKIds[i];
+                pushRecent(id);
+                return id;
+            }
+        }
+        var id = topKIds[sz - 1];
+        pushRecent(id);
+        return id;
+    }
+
+    /**
+     * Per-element fallback scan — invoked only when the runtime's bulk
+     * `topkScan` reports `-1` (logits not F32-contiguous). Mirrors the
+     * original Haxe loop exactly so tie-breaking + top-K output stays
+     * byte-identical to the fast path.
+     */
+    private function topKScanFallback(
+        logits:Tensor, n:Int, k:Int, penalize:Bool, rp:Float
+    ):Int {
         var sz = 0;
         for (i in 0...n) {
-            // getFlat skips the Array<Int> allocation that logits.get([i])
-            // would do per iteration — at vocab=128k this is the dominant
-            // cost in sample(). See SIGPROF profile from 2026-06-04.
             var lg = adjusted(logits.getFlat(i), i, penalize, rp);
             if (sz < k) {
                 var pos = sz;
@@ -103,27 +141,7 @@ class LocalTempSampler implements Sampler {
                 topKIds[pos] = i;
             }
         }
-
-        // -------- Temperature softmax over the k survivors ----------
-        var maxLogit = topKLogits[0];
-        var total = 0.0;
-        for (i in 0...k) {
-            total += Math.exp((topKLogits[i] - maxLogit) / t);
-        }
-
-        var r = nextFloat() * total;
-        var acc = 0.0;
-        for (i in 0...k) {
-            acc += Math.exp((topKLogits[i] - maxLogit) / t);
-            if (r <= acc) {
-                var id = topKIds[i];
-                pushRecent(id);
-                return id;
-            }
-        }
-        var id = topKIds[k - 1];
-        pushRecent(id);
-        return id;
+        return sz;
     }
 
     /** Apply repetition penalty if `id` is in the recent window. */

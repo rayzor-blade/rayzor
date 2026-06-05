@@ -36,6 +36,7 @@ pub fn build_tensor_types(builder: &mut MirBuilder) {
     // Element access
     build_tensor_get(builder);
     build_tensor_get_flat(builder);
+    build_tensor_topk_scan(builder);
     build_tensor_set(builder);
 
     // Bulk row ops (KV-cache append, GQA broadcast)
@@ -227,6 +228,24 @@ fn declare_tensor_externs(builder: &mut MirBuilder) {
         .param("tensor", i64_ty.clone())
         .param("i", i64_ty.clone())
         .returns(f64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+    builder.mark_as_extern(func_id);
+
+    // topk_scan: (tensor, out_logits_ptr, out_ids_ptr, k, recent_ids_ptr,
+    //             recent_len, penalty) -> i64
+    // Single FFI call that replaces the 128k per-element scan + insertion
+    // sort + repetition-penalty loop in LocalTempSampler.sample.
+    let func_id = builder
+        .begin_function("rayzor_tensor_topk_scan")
+        .param("tensor", i64_ty.clone())
+        .param("out_logits_ptr", i64_ty.clone())
+        .param("out_ids_ptr", i64_ty.clone())
+        .param("k", i64_ty.clone())
+        .param("recent_ids_ptr", i64_ty.clone())
+        .param("recent_len", i64_ty.clone())
+        .param("penalty", f64_ty.clone())
+        .returns(i64_ty.clone())
         .calling_convention(CallingConvention::C)
         .build();
     builder.mark_as_extern(func_id);
@@ -1299,6 +1318,73 @@ fn build_tensor_get_flat(builder: &mut MirBuilder) {
         .get_function_by_name("rayzor_tensor_get_flat")
         .expect("rayzor_tensor_get_flat not found");
     let result = builder.call(extern_id, vec![self_val, i_val]).unwrap();
+    builder.ret(Some(result));
+}
+
+/// Tensor_topk_scan(
+///   self,
+///   outLogitsArr: Array<Float>,
+///   outIdsArr: Array<Int>,
+///   k: i64,
+///   recentIdsArr: Array<Int>,
+///   penalty: f64,
+/// ) -> i64
+///
+/// Unpacks the three Haxe arrays into their underlying data pointers
+/// (offset 0 of the HaxeArray struct) and the recent_ids length (offset 8),
+/// then delegates to the runtime kernel. The output arrays must be
+/// pre-allocated to at least `k` slots — the runtime writes into them
+/// directly without growing.
+fn build_tensor_topk_scan(builder: &mut MirBuilder) {
+    let i64_ty = IrType::I64;
+    let f64_ty = IrType::F64;
+
+    let func_id = builder
+        .begin_function("Tensor_topk_scan")
+        .param("self", i64_ty.clone())
+        .param("out_logits_arr", i64_ty.clone())
+        .param("out_ids_arr", i64_ty.clone())
+        .param("k", i64_ty.clone())
+        .param("recent_ids_arr", i64_ty.clone())
+        .param("penalty", f64_ty.clone())
+        .returns(i64_ty.clone())
+        .calling_convention(CallingConvention::C)
+        .build();
+
+    builder.set_current_function(func_id);
+    let entry = builder.create_block("entry");
+    builder.set_insert_point(entry);
+
+    let self_val = builder.get_param(0);
+    let out_logits_arr = builder.get_param(1);
+    let out_ids_arr = builder.get_param(2);
+    let k_val = builder.get_param(3);
+    let recent_arr = builder.get_param(4);
+    let penalty_val = builder.get_param(5);
+
+    // Unpack each Haxe array via the standard {ptr, len, cap, elem_size}
+    // layout: ptr is at offset 0 (load i64), len is at offset 8.
+    let (out_logits_ptr, _ol_len) = extract_array_ptr_len(builder, out_logits_arr);
+    let (out_ids_ptr, _oi_len) = extract_array_ptr_len(builder, out_ids_arr);
+    let (recent_ptr, recent_len) = extract_array_ptr_len(builder, recent_arr);
+
+    let extern_id = builder
+        .get_function_by_name("rayzor_tensor_topk_scan")
+        .expect("rayzor_tensor_topk_scan not found");
+    let result = builder
+        .call(
+            extern_id,
+            vec![
+                self_val,
+                out_logits_ptr,
+                out_ids_ptr,
+                k_val,
+                recent_ptr,
+                recent_len,
+                penalty_val,
+            ],
+        )
+        .unwrap();
     builder.ret(Some(result));
 }
 
