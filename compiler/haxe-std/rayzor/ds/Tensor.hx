@@ -260,6 +260,29 @@ extern class Tensor {
     public function bmmThreaded(other:Tensor, threads:Int):Tensor;
 
     /**
+     * Fused decode-step attention (single new query token, GQA-aware).
+     *
+     * `self` is the post-RoPE Q tensor of shape `[1, num_q_heads, head_dim]`,
+     * F32, contiguous. `k` and `v` are the un-expanded KV cache **views** of
+     * shape `[cache_len, num_kv_heads, head_dim]`, F32, with the inner two
+     * axes contiguous (the standard `KVCache.slice(0, 0, currentLen)`
+     * layout). `scale` is `1 / sqrt(head_dim)`.
+     *
+     * Returns a fresh `[1, num_q_heads, head_dim]` F32 owning tensor with
+     * the attention output — same shape as `bmm(Q, K^T).softmax().bmm(V)`
+     * but without materialising the expanded KV copies or the scores
+     * tensor. Use this in place of the bmm+scale+softmax+bmm chain in
+     * `GQAttention.forward` when `seqQ == 1` (decode step).
+     *
+     * Returns `null` if any gate fails (non-F32, non-contiguous Q,
+     * seqQ != 1, K/V shapes inconsistent, GQA group doesn't divide).
+     * Caller MUST handle null by falling back to the unfused path —
+     * prefill (seqQ > 1) is intentionally not supported here.
+     */
+    @:native("tensor_flash_attn_decode")
+    public function flashAttnDecode(k:Tensor, v:Tensor, scale:Float):Tensor;
+
+    /**
      * GQA KV-head expansion. Self has shape `[seqK, num_kv_heads, head_dim]`
      * (KV-heads on axis 1, as produced by KVCache views). Returns a fresh
      * F32 tensor of shape `[num_kv_heads * repeats, seqK, head_dim]` with
