@@ -1732,6 +1732,32 @@ register_symbol!(
 // Tensor Runtime (rayzor.ds.Tensor)
 // ============================================================================
 
+// Plugin ABI (rayzor-plugin host surface — see plugin/src/lib.rs)
+register_symbol!(
+    "rayzor_plugin_tensor_data",
+    crate::tensor::rayzor_plugin_tensor_data
+);
+register_symbol!(
+    "rayzor_plugin_tensor_dtype",
+    crate::tensor::rayzor_plugin_tensor_dtype
+);
+register_symbol!(
+    "rayzor_plugin_tensor_ndim",
+    crate::tensor::rayzor_plugin_tensor_ndim
+);
+register_symbol!(
+    "rayzor_plugin_tensor_shape",
+    crate::tensor::rayzor_plugin_tensor_shape
+);
+register_symbol!(
+    "rayzor_plugin_tensor_is_contiguous",
+    crate::tensor::rayzor_plugin_tensor_is_contiguous
+);
+register_symbol!(
+    "rayzor_plugin_tensor_alloc_zeros",
+    crate::tensor::rayzor_plugin_tensor_alloc_zeros
+);
+
 // Construction
 register_symbol!("rayzor_tensor_zeros", crate::tensor::rayzor_tensor_zeros);
 register_symbol!("rayzor_tensor_ones", crate::tensor::rayzor_tensor_ones);

@@ -87,6 +87,11 @@ impl RpkgPlugin {
             let library = unsafe { libloading::Library::new(&temp_path) }
                 .map_err(|e| format!("failed to load native lib: {}", e))?;
 
+            // ABI handshake — check before binding any symbols. A
+            // mismatch / missing version aborts cleanly instead of
+            // letting downstream signature drift SIGSEGV at random.
+            check_plugin_abi(&library, &loaded.package_name)?;
+
             // Load runtime symbols via plugin_init()
             runtime_symbols = load_runtime_symbols(&library, &loaded.package_name);
 
@@ -128,6 +133,44 @@ impl RpkgPlugin {
 ///
 /// First tries the universal `rayzor_rpkg_entry` export (preferred).
 /// Falls back to legacy `plugin_init` names for backward compatibility.
+/// ABI handshake check. Looks up `rayzor_plugin_abi_version` in the
+/// loaded library and compares against the host's compiled-in
+/// [`rayzor_plugin::ABI_VERSION`]. A mismatch returns a descriptive
+/// error so the caller can abort the load before any symbol gets
+/// bound — strictly better than the silent SIGSEGV that signature
+/// drift produced previously.
+///
+/// A missing `rayzor_plugin_abi_version` export is treated as version 0
+/// (i.e. "pre-handshake plugin"), which also fails the check against
+/// any modern host. Older rpkgs built before the handshake existed
+/// will fail-fast here with a clear "rebuild against rayzor ≥ X"
+/// message rather than load and crash later.
+pub fn check_plugin_abi(
+    lib: &libloading::Library,
+    package_name: &str,
+) -> Result<(), String> {
+    type AbiFn = unsafe extern "C" fn() -> u32;
+    let symbol_name = rayzor_plugin::ABI_VERSION_SYMBOL;
+    let abi_fn = unsafe { lib.get::<AbiFn>(symbol_name.as_bytes()) }
+        .map_err(|_| {
+            format!(
+                "plugin '{}' has no `{}` export (built before ABI handshake; rebuild against rayzor ≥ ABI v{})",
+                package_name,
+                symbol_name,
+                rayzor_plugin::ABI_VERSION,
+            )
+        })?;
+    let found = unsafe { abi_fn() };
+    let expected = rayzor_plugin::ABI_VERSION;
+    if found != expected {
+        return Err(format!(
+            "plugin '{}' was built against rayzor plugin ABI v{} but this host expects v{} (rebuild the plugin to match)",
+            package_name, found, expected
+        ));
+    }
+    Ok(())
+}
+
 fn load_runtime_symbols(
     lib: &libloading::Library,
     _package_name: &str,
