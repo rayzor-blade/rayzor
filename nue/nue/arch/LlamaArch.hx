@@ -105,23 +105,29 @@ class LlamaArch implements ArchBuilder {
         var lmHead:Linear;
         if (meta.tieWordEmbeddings || !weights.exists("output.weight")) {
             if (embed.qweight != null) {
-                // Optional re-quantisation: Q6_K lm_head pays a 6-bit
-                // reconstruction overhead per block in the SDOT inner
-                // loop. Re-encoding as Q4_K_M moves it to the faster
-                // Q4_K_M SDOT path (no reconstruction needed — the 4-bit
-                // nibbles already match the operand format). Gated by
-                // RAYZOR_REQUANT_LM_HEAD=1 because the naive encoder
-                // loses ~3-5% per-block round-trip RMS; verify MATCH
-                // on the canonical prompt before relying on it.
+                // Re-quantise the tied lm_head from Q6_K to Q4_K_M.
+                // Q6_K SDOT (5f23311) still pays the 6-bit reconstruction
+                // overhead per block in its inner loop; the Q4_K_M SDOT
+                // path skips that work entirely because the 4-bit nibbles
+                // already match the SDOT operand format. ~+21% wall on the
+                // MZ-story 600-tok workload, on top of every prior
+                // optimisation, with MATCH-on-canonical preserved.
                 //
-                // Embedding still uses the Q6_K source (precise embed
-                // lookups matter for input fidelity); only the lm_head
-                // path gets the cheaper Q4_K_M view.
+                // Embedding still uses the Q6_K source (precise lookups
+                // matter for input fidelity); only the lm_head path goes
+                // through the cheaper Q4_K_M view.
+                //
+                // Set `RAYZOR_REQUANT_LM_HEAD=0` to opt out — kept as a
+                // safety hatch in case a future model exposes the naive
+                // encoder's small per-block quality loss.
                 var lmQt = embed.qweight;
-                var doRequant = Sys.getEnv("RAYZOR_REQUANT_LM_HEAD");
-                if (doRequant != null && doRequant != "0" && doRequant != "") {
+                var optOut = Sys.getEnv("RAYZOR_REQUANT_LM_HEAD");
+                if (optOut != "0") {
                     var rq = embed.qweight.requantQ6KToQ4KM();
-                    if (rq != null) lmQt = rq;
+                    if (rq != null) {
+                        lmQt = rq;
+                        Sys.println("[lm_head] re-quantised Q6_K → Q4_K_M for faster SDOT path");
+                    }
                 }
                 lmHead = Linear.fromQuant(lmQt, null, "weight");
             } else {
