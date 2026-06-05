@@ -35718,32 +35718,49 @@ impl<'a> HirToMirContext<'a> {
                                     }
                                 }
                             }
-                            // Pick the deep-copy or atomic-refcount entry
-                            // point based on the class's `@:shared` flag.
-                            // Tensor/QTensor's runtime ABI exposes both:
-                            //   - `rayzor_{tensor,qtensor}_clone` — deep copy
-                            //     (compact-to-contiguous; legacy default)
-                            //   - `rayzor_{tensor,qtensor}_arc_clone` — atomic
-                            //     fetch_add on the wrapper's refcount; same
-                            //     pointer returned (Phase 1 runtime work).
-                            // With `@:shared` on the class, `.clone()` should
-                            // be cheap aliasing, not an allocator round-trip.
-                            let extern_fn: Option<&'static str> = match fqn.as_deref() {
-                                Some("rayzor.ds.Tensor") => Some(if has_shared_attr {
-                                    "rayzor_tensor_arc_clone"
-                                } else {
-                                    "rayzor_tensor_clone"
-                                }),
-                                Some("rayzor.ds.QTensor") => Some(if has_shared_attr {
-                                    "rayzor_qtensor_arc_clone"
-                                } else {
-                                    "rayzor_qtensor_clone"
-                                }),
-                                _ => None,
-                            };
-                            if let Some(fn_name) = extern_fn {
+                            // Derive the runtime clone extern name from the
+                            // FQN by convention so any future
+                            // `@:native("rayzor::ds::X")` extern class with
+                            // `@:derive([Clone])` works without a code
+                            // change here. The convention:
+                            //   - take the last FQN component
+                            //     (`rayzor.ds.Tensor` → `Tensor`),
+                            //   - lowercase it,
+                            //   - prepend `rayzor_`, append `_clone` (or
+                            //     `_arc_clone` when `@:shared` is also set).
+                            //
+                            // Examples:
+                            //   rayzor.ds.Tensor  → rayzor_tensor_clone /
+                            //                       rayzor_tensor_arc_clone
+                            //   rayzor.ds.QTensor → rayzor_qtensor_clone /
+                            //                       rayzor_qtensor_arc_clone
+                            //
+                            // If the convention name doesn't exist as a
+                            // runtime symbol, the JIT surfaces a clear link
+                            // error at call time — vastly preferable to the
+                            // silent decode hangs we saw when the prior
+                            // hardcoded match arm fell through to `None`
+                            // and downstream code assumed a clone fn was
+                            // registered.
+                            //
+                            // The string is owned (interned in
+                            // `derive_clone_extern_names`) because it's
+                            // synthesised per-class rather than a `&'static
+                            // str` literal.
+                            let derived = fqn.as_deref().and_then(|s| {
+                                s.rsplit('.').next().map(|tail| {
+                                    let lower = tail.to_ascii_lowercase();
+                                    if has_shared_attr {
+                                        format!("rayzor_{}_arc_clone", lower)
+                                    } else {
+                                        format!("rayzor_{}_clone", lower)
+                                    }
+                                })
+                            });
+                            if let Some(name) = derived {
+                                let leaked: &'static str = Box::leak(name.into_boxed_str());
                                 self.derive_clone_extern_fns
-                                    .insert(class.symbol_id, fn_name);
+                                    .insert(class.symbol_id, leaked);
                             }
                         }
                     }
