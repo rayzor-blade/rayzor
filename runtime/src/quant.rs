@@ -1647,6 +1647,7 @@ pub unsafe extern "C" fn rayzor_tensor_gather_rows_q6_k(
     indices_ptr: i64,
     n_indices: i64,
 ) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_gather_rows_q6_k");
     if qt_ptr == 0 || indices_ptr == 0 || n_indices <= 0 {
         return 0;
     }
@@ -1849,6 +1850,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
     qt_w: i64,
     threads: i64,
 ) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_matmul_qt_t_f32_threaded");
     if x_tensor == 0 || qt_w == 0 {
         return 0;
     }
@@ -2009,6 +2011,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qkv_qt_t_f32_threaded(
     out_k_tensor: *mut i64,
     out_v_tensor: *mut i64,
 ) -> i64 {
+    let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_matmul_qkv_qt_t_f32_threaded");
     // Null guards. `out_*_tensor` are written only on success, so we
     // refuse to run if any of them is null (otherwise the caller would
     // silently lose the output handles).
