@@ -861,6 +861,157 @@ unsafe fn dot_q4_k_q8_kblock(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
     x.d * (s1 - s2)
 }
 
+/// Two-block paired Q4_K_M × Q8_K dot product. Returns the per-block
+/// dot results for `(weight_a, x_a)` and `(weight_b, x_b)` in one
+/// call, processed with their inner loops interleaved.
+///
+/// Pairing pattern (mirror of llama.cpp's q4_K NEON two-block-per-iter
+/// kernel that the candle research called out as a gap vs candle's
+/// one-block-per-iter approach):
+///   1. Load both 12-byte scale headers up front.
+///   2. Per p-iter, fetch BOTH blocks' weight nibbles, BOTH X chunks,
+///      and emit SDOTs for both before moving on. This doubles the
+///      independent FMA chains visible to M1's OoO scheduler from 4
+///      to 8, which is the practical limit before register pressure
+///      starts spilling the partial accumulators.
+///   3. Per-block partial reduction at the end is bit-identical to
+///      the single-block kernel — each block's result is computed
+///      from its own four partials in the same reduction order. So
+///      `(dot_q4_k_q8_kblock(a, x_a), dot_q4_k_q8_kblock(b, x_b))`
+///      and `dot_q4_k_q8_kblock_2(a, b, x_a, x_b)` produce
+///      byte-identical pairs of f32s — verified by the
+///      `dot_q4_k_q8_kblock_2_matches_single` unit test.
+///
+/// Compile gate matches the single-block kernel: AArch64 + `dotprod`,
+/// `target_feature(enable = "dotprod")` so the inner `vdotq_s32` is
+/// inlined at the SDOT instruction (not the software fallback).
+#[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+#[inline]
+#[target_feature(enable = "dotprod")]
+unsafe fn dot_q4_k_q8_kblock_2(
+    weight_a: &Q4KMBlock,
+    weight_b: &Q4KMBlock,
+    x_a: &Q8KBlock,
+    x_b: &Q8KBlock,
+) -> (f32, f32) {
+    use std::arch::aarch64::*;
+
+    let ptr_a = weight_a as *const Q4KMBlock as *const u8;
+    let ptr_b = weight_b as *const Q4KMBlock as *const u8;
+
+    let d_a = half::f16::from_bits(std::ptr::read_unaligned(ptr_a as *const u16)).to_f32();
+    let dmin_a =
+        half::f16::from_bits(std::ptr::read_unaligned(ptr_a.add(2) as *const u16)).to_f32();
+    let d_b = half::f16::from_bits(std::ptr::read_unaligned(ptr_b as *const u16)).to_f32();
+    let dmin_b =
+        half::f16::from_bits(std::ptr::read_unaligned(ptr_b.add(2) as *const u16)).to_f32();
+
+    let mut header_a = [0u8; 12];
+    let mut header_b = [0u8; 12];
+    for i in 0..12 {
+        header_a[i] = *ptr_a.add(4 + i);
+        header_b[i] = *ptr_b.add(4 + i);
+    }
+
+    let quants_a = ptr_a.add(16);
+    let quants_b = ptr_b.add(16);
+
+    let mut p1_a = [0.0f32; 4];
+    let mut p2_a = [0.0f32; 4];
+    let mut p1_b = [0.0f32; 4];
+    let mut p2_b = [0.0f32; 4];
+
+    let mask_nibble = vdupq_n_u8(0x0F);
+
+    let x_qs_a = x_a.qs.as_ptr();
+    let x_qs_b = x_b.qs.as_ptr();
+
+    for p in 0..4 {
+        let (sc_lo6_a, mn_lo6_a) = q4_k_get_scale_min(2 * p, &header_a);
+        let (sc_hi6_a, mn_hi6_a) = q4_k_get_scale_min(2 * p + 1, &header_a);
+        let (sc_lo6_b, mn_lo6_b) = q4_k_get_scale_min(2 * p, &header_b);
+        let (sc_hi6_b, mn_hi6_b) = q4_k_get_scale_min(2 * p + 1, &header_b);
+
+        let sub_scale_lo_a = d_a * sc_lo6_a as f32;
+        let sub_min_lo_a = dmin_a * mn_lo6_a as f32;
+        let sub_scale_hi_a = d_a * sc_hi6_a as f32;
+        let sub_min_hi_a = dmin_a * mn_hi6_a as f32;
+        let sub_scale_lo_b = d_b * sc_lo6_b as f32;
+        let sub_min_lo_b = dmin_b * mn_lo6_b as f32;
+        let sub_scale_hi_b = d_b * sc_hi6_b as f32;
+        let sub_min_hi_b = dmin_b * mn_hi6_b as f32;
+
+        // Interleaved weight loads — both blocks' 32-byte quant
+        // chunks for sub-block pair `p`.
+        let q1_a = vld1q_u8(quants_a.add(p * 32));
+        let q2_a = vld1q_u8(quants_a.add(p * 32 + 16));
+        let q1_b = vld1q_u8(quants_b.add(p * 32));
+        let q2_b = vld1q_u8(quants_b.add(p * 32 + 16));
+
+        let lo1_a = vreinterpretq_s8_u8(vandq_u8(q1_a, mask_nibble));
+        let lo2_a = vreinterpretq_s8_u8(vandq_u8(q2_a, mask_nibble));
+        let hi1_a = vreinterpretq_s8_u8(vshrq_n_u8::<4>(q1_a));
+        let hi2_a = vreinterpretq_s8_u8(vshrq_n_u8::<4>(q2_a));
+        let lo1_b = vreinterpretq_s8_u8(vandq_u8(q1_b, mask_nibble));
+        let lo2_b = vreinterpretq_s8_u8(vandq_u8(q2_b, mask_nibble));
+        let hi1_b = vreinterpretq_s8_u8(vshrq_n_u8::<4>(q1_b));
+        let hi2_b = vreinterpretq_s8_u8(vshrq_n_u8::<4>(q2_b));
+
+        // Interleaved X int8 loads.
+        let x_lo_a = x_qs_a.add(2 * p * 32);
+        let x_hi_a = x_qs_a.add((2 * p + 1) * 32);
+        let x_lo_b = x_qs_b.add(2 * p * 32);
+        let x_hi_b = x_qs_b.add((2 * p + 1) * 32);
+
+        let xlo1_a = vld1q_s8(x_lo_a);
+        let xlo2_a = vld1q_s8(x_lo_a.add(16));
+        let xhi1_a = vld1q_s8(x_hi_a);
+        let xhi2_a = vld1q_s8(x_hi_a.add(16));
+        let xlo1_b = vld1q_s8(x_lo_b);
+        let xlo2_b = vld1q_s8(x_lo_b.add(16));
+        let xhi1_b = vld1q_s8(x_hi_b);
+        let xhi2_b = vld1q_s8(x_hi_b.add(16));
+
+        // Eight independent SDOT chains (4 per block) — the OoO
+        // scheduler sees all of them issuable in parallel.
+        let mut acc_lo_a = vdupq_n_s32(0);
+        acc_lo_a = vdotq_s32(acc_lo_a, xlo1_a, lo1_a);
+        acc_lo_a = vdotq_s32(acc_lo_a, xlo2_a, lo2_a);
+        let mut acc_hi_a = vdupq_n_s32(0);
+        acc_hi_a = vdotq_s32(acc_hi_a, xhi1_a, hi1_a);
+        acc_hi_a = vdotq_s32(acc_hi_a, xhi2_a, hi2_a);
+
+        let mut acc_lo_b = vdupq_n_s32(0);
+        acc_lo_b = vdotq_s32(acc_lo_b, xlo1_b, lo1_b);
+        acc_lo_b = vdotq_s32(acc_lo_b, xlo2_b, lo2_b);
+        let mut acc_hi_b = vdupq_n_s32(0);
+        acc_hi_b = vdotq_s32(acc_hi_b, xhi1_b, hi1_b);
+        acc_hi_b = vdotq_s32(acc_hi_b, xhi2_b, hi2_b);
+
+        let lo_sdot_a = vaddvq_s32(acc_lo_a) as f32;
+        let hi_sdot_a = vaddvq_s32(acc_hi_a) as f32;
+        let lo_sdot_b = vaddvq_s32(acc_lo_b) as f32;
+        let hi_sdot_b = vaddvq_s32(acc_hi_b) as f32;
+
+        let bsum_lo32_a = x_a.bsums[4 * p] as i32 + x_a.bsums[4 * p + 1] as i32;
+        let bsum_hi32_a = x_a.bsums[4 * p + 2] as i32 + x_a.bsums[4 * p + 3] as i32;
+        let bsum_lo32_b = x_b.bsums[4 * p] as i32 + x_b.bsums[4 * p + 1] as i32;
+        let bsum_hi32_b = x_b.bsums[4 * p + 2] as i32 + x_b.bsums[4 * p + 3] as i32;
+
+        p1_a[p] = sub_scale_lo_a * lo_sdot_a + sub_scale_hi_a * hi_sdot_a;
+        p2_a[p] = sub_min_lo_a * bsum_lo32_a as f32 + sub_min_hi_a * bsum_hi32_a as f32;
+        p1_b[p] = sub_scale_lo_b * lo_sdot_b + sub_scale_hi_b * hi_sdot_b;
+        p2_b[p] = sub_min_lo_b * bsum_lo32_b as f32 + sub_min_hi_b * bsum_hi32_b as f32;
+    }
+
+    let s1_a = (p1_a[0] + p1_a[1]) + (p1_a[2] + p1_a[3]);
+    let s2_a = (p2_a[0] + p2_a[1]) + (p2_a[2] + p2_a[3]);
+    let s1_b = (p1_b[0] + p1_b[1]) + (p1_b[2] + p1_b[3]);
+    let s2_b = (p2_b[0] + p2_b[1]) + (p2_b[2] + p2_b[3]);
+
+    (x_a.d * (s1_a - s2_a), x_b.d * (s1_b - s2_b))
+}
+
 /// Q6_K × Q8 dot product for one 256-element block.
 ///
 /// Q6_K layout (210 bytes / super-block, mirrors `dequant_q6_k_block`):
@@ -2791,16 +2942,54 @@ unsafe fn qmatmul_chunk_impl_sdot_q4km(
         return;
     }
 
+    // Two-block paired SDOT path: when blocks_per_row is even (the
+    // common case for k = 2048 → 8 blocks, k = 4096 → 16 blocks)
+    // process pairs of (b_idx, b_idx+1) with one
+    // `dot_q4_k_q8_kblock_2` call. Interleaves both blocks' inner
+    // SDOT chains so M1's OoO scheduler sees 8 independent
+    // accumulators per sub-block-pair iteration instead of 4.
+    //
+    // The per-block result is bit-identical to the single-block
+    // path — the partial reduction order within each block is the
+    // same, only the *order in which two consecutive blocks fire*
+    // changes. So the row sum `vec_dot(a) + vec_dot(b)` matches
+    // exactly when we call `dot_q4_k_q8_kblock_2(a, b)` and add the
+    // two returned f32s.
+    #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+    let use_pairs = sdot_enabled() && blocks_per_row >= 2 && blocks_per_row.is_multiple_of(2);
+    #[cfg(not(all(target_arch = "aarch64", target_feature = "dotprod")))]
+    let use_pairs = false;
+
     for n_idx in lo..hi {
         let row_ptr = qt.data.add(n_idx * blocks_per_row * block_bytes);
         let mut sum = 0.0f32;
-        for (b_idx, x_block) in x_q8k.iter().enumerate().take(blocks_per_row) {
-            // SAFETY: `row_ptr + b_idx*144` is the start of a 144-byte
-            // Q4_K_M block; reinterpret as `&Q4KMBlock` per the
-            // `repr(C, packed(1))` byte-identical layout guarantee.
-            let weight = &*(row_ptr.add(b_idx * block_bytes) as *const Q4KMBlock);
-            sum += vec_dot_q4_K_q8_K(weight, x_block);
+
+        if use_pairs {
+            // SAFETY: pairs of (b_idx, b_idx+1) walk evenly through
+            // blocks_per_row; the `use_pairs` gate guarantees even
+            // count so no tail handling is needed.
+            #[cfg(all(target_arch = "aarch64", target_feature = "dotprod"))]
+            {
+                let mut b_idx = 0;
+                while b_idx + 1 < blocks_per_row {
+                    let weight_a = &*(row_ptr.add(b_idx * block_bytes) as *const Q4KMBlock);
+                    let weight_b = &*(row_ptr.add((b_idx + 1) * block_bytes) as *const Q4KMBlock);
+                    let (sa, sb) =
+                        dot_q4_k_q8_kblock_2(weight_a, weight_b, &x_q8k[b_idx], &x_q8k[b_idx + 1]);
+                    sum += sa + sb;
+                    b_idx += 2;
+                }
+            }
+        } else {
+            for (b_idx, x_block) in x_q8k.iter().enumerate().take(blocks_per_row) {
+                // SAFETY: `row_ptr + b_idx*144` is the start of a 144-byte
+                // Q4_K_M block; reinterpret as `&Q4KMBlock` per the
+                // `repr(C, packed(1))` byte-identical layout guarantee.
+                let weight = &*(row_ptr.add(b_idx * block_bytes) as *const Q4KMBlock);
+                sum += vec_dot_q4_K_q8_K(weight, x_block);
+            }
         }
+
         *y_data.add(n_idx) = sum;
     }
 }
