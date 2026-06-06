@@ -3715,25 +3715,69 @@ impl<'a> HirToMirContext<'a> {
         self.builder.current_function = Some(func_id);
         self.builder.current_block = Some(func.entry_block());
 
-        // 'this' is parameter 0
-        let this_reg = IrId::new(0);
-
-        // Map 'this' to symbol map for field access
-        self.symbol_map.insert(SymbolId::from_raw(0), this_reg);
-
-        // Map constructor parameters to registers
-        for (i, param) in constructor.params.iter().enumerate() {
-            let reg = IrId::new((i + 1) as u32); // +1 because 'this' is parameter 0
-            self.symbol_map.insert(param.symbol_id, reg);
-        }
-
-        // Clear drop tracking state for this function
+        // Clear drop tracking state for this function. Order matters:
+        // these MUST be cleared before the DropPointAnalyzer runs below
+        // so the constructor body is analysed against a clean slate
+        // rather than inheriting whatever the previously-lowered
+        // function left behind (see bugs_sys_getenv_in_ctor_residual).
         self.owned_heap_values.clear();
         self.drop_scope_stack.clear();
         self.temp_heap_values.clear();
         self.reassigned_in_scope.clear();
 
-        // Enter function-level scope for tracking heap allocations
+        // Run drop-point analysis on the constructor body — same as
+        // `lower_function_body` (3326-3346). Without this, the
+        // constructor body lowers under the previously-lowered
+        // function's `current_drop_points` / `current_stmt_index`,
+        // misrouting `build_free` / `build_drop` calls for heap values
+        // returned by extern callees (e.g. the `HaxeString` from
+        // `haxe_sys_get_env`). The corruption typically surfaces well
+        // after the constructor returns — caller heap activity then
+        // SIGILLs in nue/llama-chat midway through model setup. Symbol
+        // standalone Haxe programs may not reproduce because the
+        // stale state happens to be compatible, but the structural
+        // delta is real and applies to every ctor lowered after any
+        // other function.
+        let mut analyzer = DropPointAnalyzer::new();
+        self.current_drop_points = Some(analyzer.analyze_function(&constructor.body));
+        self.current_stmt_index = 0;
+
+        // Set current_this_type so implicit field accesses inside the
+        // constructor body resolve against the class type rather than
+        // inheriting the previous function's this-type.
+        self.current_this_type = Some(type_id);
+
+        // Constructors at the HIR level don't have an explicit return
+        // type expression, but at the MIR level they return the
+        // allocated instance pointer. Using the class type_id mirrors
+        // the convention `lower_function_body` uses for
+        // `current_function_return_type`.
+        self.current_function_return_type = Some(type_id);
+
+        // Map 'this' and constructor parameters from the function
+        // signature's actual register IDs instead of fabricating them
+        // positionally as `IrId::new(i)`. The signature already has
+        // the right `reg` field on every parameter (set during Pass 1),
+        // and positionally-fabricated IrIds collide with whatever
+        // earlier passes (e.g. the inliner — fixed at 655d7ac) may
+        // have allocated.
+        let this_reg = func
+            .signature
+            .parameters
+            .first()
+            .map(|p| p.reg)
+            .unwrap_or_else(|| IrId::new(0));
+        self.symbol_map.insert(SymbolId::from_raw(0), this_reg);
+        for (i, param) in constructor.params.iter().enumerate() {
+            if let Some(sig_param) = func.signature.parameters.get(i + 1) {
+                self.symbol_map.insert(param.symbol_id, sig_param.reg);
+            }
+        }
+
+        // Enter function-level scope for tracking heap allocations.
+        // This must come AFTER the drop-points analysis so the analyzer
+        // sees the clean (post-clear) heap-tracking state and doesn't
+        // double-count escapes from an inherited scope.
         self.enter_drop_scope();
 
         // Execute pre-super statements (e.g., field assignments that come before
