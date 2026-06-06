@@ -4112,14 +4112,38 @@ impl CraneliftBackend {
                 let result = match op {
                     crate::ir::BinaryOp::Add | crate::ir::BinaryOp::FAdd => {
                         if is_float {
-                            builder.ins().fadd(lhs, rhs)
+                            // Vector FMA fusion: fadd(fmul(a, b), c) → fma(a, b, c).
+                            // Mirrors the scalar peephole in instruction_lowering.rs.
+                            // Cranelift's fma intrinsic lowers to vfmaq on NEON +
+                            // vfmaddXXXps on x86 AVX2/AVX-512 — single rounding,
+                            // half the issue count of a separate fmul + fadd.
+                            // Same-block restriction comes from try_extract_fmul.
+                            if let Some((a, b)) = Self::try_extract_vector_fmul(builder, lhs) {
+                                builder.ins().fma(a, b, rhs)
+                            } else if let Some((a, b)) = Self::try_extract_vector_fmul(builder, rhs)
+                            {
+                                builder.ins().fma(a, b, lhs)
+                            } else {
+                                builder.ins().fadd(lhs, rhs)
+                            }
                         } else {
                             builder.ins().iadd(lhs, rhs)
                         }
                     }
                     crate::ir::BinaryOp::Sub | crate::ir::BinaryOp::FSub => {
                         if is_float {
-                            builder.ins().fsub(lhs, rhs)
+                            // Vector FMS fusion: fsub(fmul(a,b), c) → fma(a,b,-c)
+                            // and c - fmul(a,b) → fma(-a,b,c).
+                            if let Some((a, b)) = Self::try_extract_vector_fmul(builder, lhs) {
+                                let neg_rhs = builder.ins().fneg(rhs);
+                                builder.ins().fma(a, b, neg_rhs)
+                            } else if let Some((a, b)) = Self::try_extract_vector_fmul(builder, rhs)
+                            {
+                                let neg_a = builder.ins().fneg(a);
+                                builder.ins().fma(neg_a, b, lhs)
+                            } else {
+                                builder.ins().fsub(lhs, rhs)
+                            }
                         } else {
                             builder.ins().isub(lhs, rhs)
                         }
@@ -4951,6 +4975,43 @@ impl CraneliftBackend {
         debug!("  ✅ Execution completed successfully!");
 
         Ok(())
+    }
+
+    /// Vector counterpart to `try_extract_fmul` in instruction_lowering.rs.
+    /// Checks if a Cranelift vector value was produced by a vector fmul
+    /// instruction in the same block; returns the two operands if so so
+    /// the caller can fuse to `fma(a, b, c)`.
+    ///
+    /// Same-block restriction: cross-block fusion would change FP
+    /// semantics for values that originally went through memory
+    /// (store/load), since SROA + CopyProp can expose fmul results
+    /// across block boundaries that were previously hidden by memory ops.
+    /// `RAYZOR_NO_FMA=1` disables fusion globally (escape hatch shared
+    /// with the scalar path).
+    fn try_extract_vector_fmul(
+        builder: &cranelift_frontend::FunctionBuilder,
+        value: cranelift_codegen::ir::Value,
+    ) -> Option<(cranelift_codegen::ir::Value, cranelift_codegen::ir::Value)> {
+        if std::env::var("RAYZOR_NO_FMA").is_ok() {
+            return None;
+        }
+        use cranelift_codegen::ir::{InstructionData, Opcode, ValueDef};
+        let current_block = builder.current_block()?;
+        match builder.func.dfg.value_def(value) {
+            ValueDef::Result(inst, 0) => {
+                let fmul_block = builder.func.layout.inst_block(inst)?;
+                if fmul_block != current_block {
+                    return None;
+                }
+                if let InstructionData::Binary { opcode, args } = builder.func.dfg.insts[inst] {
+                    if opcode == Opcode::Fmul {
+                        return Some((args[0], args[1]));
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
     }
 }
 
