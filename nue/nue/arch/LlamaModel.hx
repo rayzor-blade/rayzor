@@ -53,38 +53,11 @@ class LlamaModel implements CausalLanguageModel {
     }
 
     public function forwardIds(tokenIds:Array<Int>):Tensor {
-        // The reassign-then-pass-self pattern (`x = f(x)`) is
-        // semantically a move-and-rebind, but the cross-file strict
-        // @:move analyzer flags the call-arg read as a use-after-move.
-        // Pass the clone into the block forward so the binding `h` is
-        // only ever read as a method receiver — never as a direct
-        // `Variable` call argument — which the analyzer treats as a
-        // use rather than a move.
-        //
-        // Note: Even after the TransformerBlock addInto rewrite (which
-        // makes block.forward return the same buffer it received), the
-        // direct `h = block.forward(h)` rebind SIGSEGVs at runtime —
-        // drop analysis or IR scope cleanup tears the buffer down
-        // between call return and reassign. Keep the defensive clone.
-        //
-        // Tensor frees: extern tensor allocs are runtime-managed via
-        // the pool's ARC, but InsertFreePass doesn't track tensor
-        // returns, so each `h.clone()` leaks one refcount bump per
-        // layer. 16 layers × 500 tokens = 8000 leaked bumps if we
-        // don't release them inline.
         var h = embedTokens.lookup(tokenIds);
         for (block in blocks) {
-            var hIn = h.clone();
-            h = block.forward(hIn);
-            // block.forward returns the same storage hIn pointed at
-            // (with addInto mutations applied) — `h` and `hIn` alias.
-            // Drop the clone bump so the refcount returns to 1 for the
-            // next iteration's clone.
-            hIn.free();
+            h = block.forward(h);
         }
-        var hNormIn = h.clone();
-        var normed = outputNorm.forward(hNormIn);
-        hNormIn.free();
+        var normed = outputNorm.forward(h);
         var result = lmHead.forward(normed);
         normed.free();
         h.free();
