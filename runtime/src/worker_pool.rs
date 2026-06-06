@@ -173,10 +173,25 @@ fn worker_loop(inner: Arc<PoolInner>) {
 
 /// Apple-silicon scheduler hint: bias workers toward performance cores.
 /// No-op on other platforms.
+///
+/// Uses `QOS_CLASS_USER_INTERACTIVE` (0x21) — the highest user QoS
+/// class on macOS — instead of `QOS_CLASS_USER_INITIATED` (0x19).
+/// INTERACTIVE biases the scheduler to keep these threads on P-cores
+/// even under moderate thermal pressure; INITIATED can be demoted to
+/// E-cores once the system warms. For matmul fork-join workloads
+/// whose wall time is `max` across workers, even one E-core
+/// straggler caps the achievable speedup, so the higher priority
+/// pays for itself.
+///
+/// Set `RAYZOR_QOS=initiated` to fall back to USER_INITIATED — kept
+/// as an escape hatch in case INTERACTIVE causes priority inversion
+/// with other user-visible work (e.g. running rayzor alongside a
+/// foreground GUI app where it should yield).
 #[inline]
 fn bias_to_performance_core() {
     #[cfg(target_os = "macos")]
     {
+        const QOS_CLASS_USER_INTERACTIVE: std::ffi::c_uint = 0x21;
         const QOS_CLASS_USER_INITIATED: std::ffi::c_uint = 0x19;
         unsafe extern "C" {
             fn pthread_set_qos_class_self_np(
@@ -184,8 +199,12 @@ fn bias_to_performance_core() {
                 relative_priority: std::ffi::c_int,
             ) -> std::ffi::c_int;
         }
+        let qos = match std::env::var("RAYZOR_QOS").ok().as_deref() {
+            Some("initiated") => QOS_CLASS_USER_INITIATED,
+            _ => QOS_CLASS_USER_INTERACTIVE,
+        };
         unsafe {
-            let _ = pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0);
+            let _ = pthread_set_qos_class_self_np(qos, 0);
         }
     }
 }
