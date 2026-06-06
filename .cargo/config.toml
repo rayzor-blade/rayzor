@@ -41,3 +41,24 @@ rustflags = [
     "-C", "target-feature=+dotprod",
     "-C", "link-args=-Wl,--export-dynamic",
 ]
+
+# `llvm-backend` feature pulls in `inkwell = { features = ["llvm18-0"] }`
+# and `llvm-sys = "180"`, both compiled against the LLVM 18 C API.
+# llvm-sys finds its LLVM at build time by checking
+# `LLVM_SYS_180_PREFIX` first, then falling back to whatever
+# `llvm-config` is in `$PATH`. On a typical macOS dev box homebrew
+# installs the latest LLVM (21 at writing) as the default — which
+# removed several const-folding APIs (`LLVMConstFCmp`, `LLVMConstMul`,
+# …) and renamed the DIBuilder family. Without this hint the link
+# step fails with `_LLVMConstFCmp` / `_LLVMDIBuilderInsertDeclareBefore`
+# undefined-symbol errors.
+#
+# Homebrew ships LLVM 18 as the keg-only `llvm@18` formula
+# (`brew install llvm@18`). `force = false` means the env var only
+# applies if not already set — Linux / Windows contributors with
+# their own packaged LLVM 18 paths can override without editing
+# this file. macOS contributors without `llvm@18` installed will
+# hit a "directory not found" error on first build, which is the
+# clear-message-to-install path.
+[env]
+LLVM_SYS_180_PREFIX = { value = "/opt/homebrew/opt/llvm@18", force = false }
