@@ -1792,9 +1792,7 @@ impl<'a> FunctionLowerer<'a> {
 
         let mut f = Function::new(self.local_types.iter().map(|t| (1, *t)));
 
-        for inst in &block.instructions {
-            self.emit_instruction(&mut f, inst);
-        }
+        self.emit_block_instructions(&mut f, &block.instructions);
 
         self.emit_terminator_simple(&mut f, &block.terminator);
         f.instruction(&Instruction::End);
@@ -1857,10 +1855,8 @@ impl<'a> FunctionLowerer<'a> {
             let bid = self.block_order[i];
             let block = self.ir_func.cfg.blocks.get(&bid).unwrap();
 
-            // Emit instructions.
-            for inst in &block.instructions {
-                self.emit_instruction(&mut f, inst);
-            }
+            // Emit instructions (with vector FMA peephole).
+            self.emit_block_instructions(&mut f, &block.instructions);
 
             // Emit terminator (sets $blk, possibly returns).
             let returned = self.emit_terminator_dispatch(&mut f, block, blk_local);
@@ -2021,6 +2017,100 @@ impl<'a> FunctionLowerer<'a> {
                     }
                 }
             }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Block-level emission with FMA peephole
+    //
+    // Walks a basic block's instructions and emits each, with one
+    // optimisation: vector `fmul; fadd` (and `c - fmul(a,b)`) pairs
+    // fuse into `F32x4RelaxedMadd` / `F32x4RelaxedNmadd` from the
+    // relaxed-SIMD proposal. Same intent as the Cranelift FMA peephole
+    // at instruction_lowering.rs + cranelift_backend.rs (commits
+    // 8394d20 + the pre-existing scalar fusion).
+    //
+    // The peephole maintains a per-block map `vfmul_map: dest →
+    // (left, right)` populated by VectorBinOp::Mul/FMul on f32x4 and
+    // queried by VectorBinOp::Add/FAdd/Sub/FSub on the same type.
+    // When an add/sub's operand was produced by an fmul in this block
+    // we emit the fused instruction instead of the separate ops.
+    //
+    // Caveats:
+    // - Map is per-block (cleared at block boundary). Cross-block
+    //   fusion would have the same correctness concerns as Cranelift
+    //   (SROA + CopyProp can expose fmul results across blocks that
+    //   originally went through memory). Same-block keeps semantics
+    //   simple.
+    // - The original fmul's WASM bytecode IS still emitted (mul +
+    //   local.set). wasm-opt's DCE pass should eliminate it when the
+    //   local is dead. Single-use analysis at this layer would be a
+    //   nice-to-have but adds complexity for marginal binary size.
+    // - Relaxed-SIMD is gated on the runtime supporting the proposal.
+    //   wasmtime 12+, V8/SpiderMonkey current. If a target environment
+    //   doesn't support it, the bytecode won't load — same situation
+    //   as the rest of the SIMD lowering, which assumes SIMD128 is
+    //   available.
+    fn emit_block_instructions(&self, f: &mut Function, insts: &[IrInstruction]) {
+        let mut vfmul_map: std::collections::BTreeMap<IrId, (IrId, IrId)> =
+            std::collections::BTreeMap::new();
+        for inst in insts {
+            if let IrInstruction::VectorBinOp {
+                dest,
+                op,
+                left,
+                right,
+                vec_ty,
+            } = inst
+            {
+                if is_f32x4_vec(vec_ty) {
+                    match op {
+                        BinaryOp::Mul | BinaryOp::FMul => {
+                            // Record the fmul for a potential fuse on the
+                            // next f32x4 fadd/fsub that consumes `dest`.
+                            // Then fall through to emit the normal mul —
+                            // wasm-opt DCEs it if the local is unread.
+                            vfmul_map.insert(*dest, (*left, *right));
+                        }
+                        BinaryOp::Add | BinaryOp::FAdd => {
+                            // Fuse: fma(a, b, c) where c is the
+                            // non-fmul operand.
+                            if let Some(&(a, b)) = vfmul_map.get(left) {
+                                self.get_reg(f, a);
+                                self.get_reg(f, b);
+                                self.get_reg(f, *right);
+                                f.instruction(&Instruction::F32x4RelaxedMadd);
+                                self.set_reg(f, *dest);
+                                continue;
+                            }
+                            if let Some(&(a, b)) = vfmul_map.get(right) {
+                                self.get_reg(f, a);
+                                self.get_reg(f, b);
+                                self.get_reg(f, *left);
+                                f.instruction(&Instruction::F32x4RelaxedMadd);
+                                self.set_reg(f, *dest);
+                                continue;
+                            }
+                        }
+                        BinaryOp::Sub | BinaryOp::FSub => {
+                            // `c - fmul(a, b)` → `-(a*b) + c` →
+                            // RelaxedNmadd(a, b, c). Only this orientation
+                            // has a single-instruction form; `fmul - c`
+                            // would need fma(a, b, -c) which is two ops.
+                            if let Some(&(a, b)) = vfmul_map.get(right) {
+                                self.get_reg(f, a);
+                                self.get_reg(f, b);
+                                self.get_reg(f, *left);
+                                f.instruction(&Instruction::F32x4RelaxedNmadd);
+                                self.set_reg(f, *dest);
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            self.emit_instruction(f, inst);
         }
     }
 
@@ -3721,6 +3811,15 @@ fn emit_zero(f: &mut Function, vt: ValType) {
             f.instruction(&Instruction::I32Const(0));
         }
     }
+}
+
+/// Is this IR vector type the f32x4 shape that RelaxedMadd targets?
+/// Currently only f32x4 is wired through wasm_backend SIMD lowering
+/// (count == 4 elements, element type F32). The fused-multiply-add
+/// peephole gates on this so we don't try to emit RelaxedMadd against
+/// a hypothetical f64x2 or integer SIMD shape.
+fn is_f32x4_vec(ty: &IrType) -> bool {
+    matches!(ty, IrType::Vector { element, count } if **element == IrType::F32 && *count == 4)
 }
 
 /// Emit a bitcast between two WASM types.

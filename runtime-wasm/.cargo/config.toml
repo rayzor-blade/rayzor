@@ -12,7 +12,17 @@
 
 [target.wasm32-wasip1-threads]
 rustflags = [
-    "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals",
+    # +simd128: enables the f32x4/i32x4 lane intrinsics — the existing
+    #   `#[cfg(target_feature = "simd128")]` guarded paths in this
+    #   crate's SIMD primitives + tensor kernels were dormant without
+    #   this. Without it the SIMD demos and tensor primitives silently
+    #   fell through to scalar code.
+    # +relaxed-simd: enables f32x4.relaxed_madd / nmadd (fused
+    #   multiply-add). The wasm32 backend's vector FMA peephole + the
+    #   tensor dot/axpy kernels in this crate use them; runtimes that
+    #   don't yet support relaxed-simd will reject the module, same
+    #   trade-off as basic simd128.
+    "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128,+relaxed-simd",
     "-C", "link-arg=--shared-memory",
     "-C", "link-arg=--import-memory",
     "-C", "link-arg=--max-memory=1073741824",  # 1 GiB
