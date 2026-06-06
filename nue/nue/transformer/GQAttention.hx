@@ -150,8 +150,6 @@ class GQAttention implements Module {
         // 3) Push the new K/V into the cache. Subsequent reads use the
         //    full active slice (prior tokens + just-added).
         cache.append(k, v);
-        var kAll = cache.keysView();   // [cache.currentLen, numKvHeads, headDim]
-        var vAll = cache.valuesView(); // same shape
 
         // 4-7) Decode-step fast path: fused attention kernel.
         //
@@ -161,22 +159,42 @@ class GQAttention implements Module {
         // single-query decode case (`seqQ == 1`) every causal-mask cell
         // is visible (the cache only contains tokens up to the current
         // position), so we can skip the mask entirely and stream over the
-        // un-expanded KV cache once. `flashAttnDecode` returns the same
-        // [1, numQHeads, headDim] result as the unfused path; on any
-        // gate violation (non-F32, non-contig Q, GQA group mismatch,
-        // unexpected strides) it returns null and we fall through to the
-        // bmm chain.
-        if (seqQ == 1) {
-            var ctx = q.flashAttnDecode(kAll, vAll, scale);
+        // un-expanded KV cache once.
+        //
+        // Q8 path: dispatch directly to the Q8 fused kernel, skipping
+        // the F32 dequant view. The kernel streams over Q8 K/V blocks,
+        // dequantising into a 32-f32 stack buffer per block.
+        if (seqQ == 1 && cache.useQ8) {
+            var ctx = cache.keysQ8.flashAttnDecodeQ8(
+                q, cache.valuesQ8, cache.currentLen, numQHeads, scale
+            );
             if (ctx != null) {
-                // ctx is [1, numQHeads, headDim] contiguous owning.
-                // reshape collapses to [seqQ, hidden] (a view; the data
-                // layout already matches contiguous row-major).
                 var hiddenSize = numQHeads * headDim;
                 var ctxFlat = ctx.reshape([seqQ, hiddenSize]);
                 var out = oProj.forward(ctxFlat);
                 ctxFlat.free();
                 ctx.free();
+                return out;
+            }
+        }
+
+        var kAll = cache.keysView();   // [cache.currentLen, numKvHeads, headDim]
+        var vAll = cache.valuesView(); // same shape
+        if (seqQ == 1) {
+            // F32 cache fast path: same fused kernel against the live view.
+            // `flashAttnDecode` returns the same [1, numQHeads, headDim]
+            // result as the unfused path; on any gate violation (non-F32,
+            // non-contig Q, GQA group mismatch, unexpected strides) it
+            // returns null and we fall through to the bmm chain.
+            var ctx = q.flashAttnDecode(kAll, vAll, scale);
+            if (ctx != null) {
+                var hiddenSize = numQHeads * headDim;
+                var ctxFlat = ctx.reshape([seqQ, hiddenSize]);
+                var out = oProj.forward(ctxFlat);
+                ctxFlat.free();
+                ctx.free();
+                kAll.free();
+                vAll.free();
                 return out;
             }
             // Fall-through to the unfused path on gate failure.
@@ -237,6 +255,12 @@ class GQAttention implements Module {
         contextFlat.free();
         contextRowMajor.free();
         context.free();
+        // kAll/vAll may be views (F32 cache) or fresh dequant tensors
+        // (Q8 cache). tensor.free() is refcount-aware: view free drops
+        // only the view's own ref so the underlying cache storage
+        // stays alive; owning free releases the dequant buffer.
+        kAll.free();
+        vAll.free();
 
         return out;
     }

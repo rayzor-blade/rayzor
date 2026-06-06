@@ -1,8 +1,8 @@
 //! nue compiler plugin (cdylib).
 //!
 //! Domain-specific extern classes for the nue ML framework. Currently
-//! a Q8_0 KV cache (`rayzor.ds.KvCacheQ8`) — others land here as nue
-//! grows. Loaded by the rayzor compiler via the `[build] native-libs`
+//! a Q8_0 KV cache (`nue.transformer.KvCacheQ8`) — others land here
+//! as nue grows. Loaded by the rayzor compiler via the `[build] native-libs`
 //! manifest entry; the host process exports the `rayzor_plugin_*`
 //! symbols via `-Wl,-export_dynamic` and our calls resolve against
 //! them at dlopen time.
@@ -32,15 +32,15 @@ rayzor_plugin::export_abi_version!();
 
 declare_native_methods! {
     NUE_METHODS;
-    "rayzor_ds_KvCacheQ8", "alloc",             static,   "rayzor_kv_cache_q8_alloc",
+    "nue_transformer_KvCacheQ8", "alloc",             static,   "rayzor_kv_cache_q8_alloc",
         [I64, I64, I64]                                                       => Ptr;
-    "rayzor_ds_KvCacheQ8", "free",              instance, "rayzor_kv_cache_q8_free",
+    "nue_transformer_KvCacheQ8", "free",              instance, "rayzor_kv_cache_q8_free",
         [Ptr]                                                                 => Void;
-    "rayzor_ds_KvCacheQ8", "append",            instance, "rayzor_kv_cache_q8_append",
+    "nue_transformer_KvCacheQ8", "append",            instance, "rayzor_kv_cache_q8_append",
         [Ptr, I64, Ptr]                                                       => I64;
-    "rayzor_ds_KvCacheQ8", "dequantView",       instance, "rayzor_kv_cache_q8_dequant_view",
+    "nue_transformer_KvCacheQ8", "dequantView",       instance, "rayzor_kv_cache_q8_dequant_view",
         [Ptr, I64]                                                            => Ptr;
-    "rayzor_ds_KvCacheQ8", "flashAttnDecodeQ8", instance, "rayzor_tensor_flash_attn_decode_q8",
+    "nue_transformer_KvCacheQ8", "flashAttnDecodeQ8", instance, "rayzor_tensor_flash_attn_decode_q8",
         [Ptr, Ptr, Ptr, I64, I64, F64]                                        => Ptr;
 }
 
