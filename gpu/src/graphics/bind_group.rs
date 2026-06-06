@@ -1,6 +1,8 @@
 //! Bind groups for resource binding (uniforms, textures, samplers).
 
+#[cfg(feature = "native")]
 use super::texture::GraphicsSampler;
+#[cfg(feature = "native")]
 use super::GraphicsContext;
 
 pub struct GraphicsBindGroupLayout {

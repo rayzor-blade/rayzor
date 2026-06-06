@@ -1,6 +1,8 @@
 //! Texture and sampler creation.
 
+#[cfg(feature = "native")]
 use super::types::*;
+#[cfg(feature = "native")]
 use super::GraphicsContext;
 
 pub struct GraphicsTexture {

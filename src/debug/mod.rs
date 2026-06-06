@@ -9,14 +9,14 @@
 //!
 //! - `run`     — drop-in for `rayzor run` with forensic env vars wired up
 //! - `bench`   — run a Haxe file N times, capture per-run metrics, report
-//!               min/median/mean/max with success rate (filters SIGTRAPs)
+//!   min/median/mean/max with success rate (filters SIGTRAPs)
 //! - `compare` — A/B between two git refs on the same input; auto-restores
 //! - `resolve` — turn a list of hex PCs into Haxe function names + line
-//!               numbers by joining against the per-PID JIT symbol map
+//!   numbers by joining against the per-PID JIT symbol map
 //! - `lldb`    — launch the file under lldb with SIGTRAP/SIGSEGV pre-armed
-//!               and a ready-to-use auto-backtrace command (macOS only)
+//!   and a ready-to-use auto-backtrace command (macOS only)
 //! - `server`  — start a small HTTP server that exposes live metrics +
-//!               an embedded browser dashboard
+//!   an embedded browser dashboard
 //!
 //! All subcommands use the existing runtime infrastructure (sigaction
 //! crash handler in `runtime/src/profile.rs`, JIT map dump in

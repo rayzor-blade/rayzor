@@ -899,7 +899,7 @@ unsafe fn rms_norm_impl(ctx: i64, x: i64, weight: i64, row_len: usize, eps: f32)
     if w_buf.ensure_materialized(gpu_ctx).is_err() {
         return 0;
     }
-    if x_buf.numel == 0 || x_buf.numel % row_len != 0 {
+    if x_buf.numel == 0 || !x_buf.numel.is_multiple_of(row_len) {
         return 0;
     }
     let groups = x_buf.numel / row_len;
@@ -947,6 +947,7 @@ fn rms_norm_dispatch(
     // RMSNorm uniform — shared across every backend. Field order matches
     // the struct layout in the WGSL / MSL / CUDA shaders.
     #[repr(C)]
+    #[derive(Copy, Clone)]
     struct RmsParams {
         row_len: u32,
         eps: f32,
@@ -1143,6 +1144,7 @@ fn rope_dispatch(
     // Shared uniform layout — matches the RopeParams struct in every
     // backend's shader (wgsl_transformer / msl_transformer / cuda_transformer).
     #[repr(C)]
+    #[derive(Copy, Clone)]
     struct RopeParams {
         seq_len: u32,
         num_heads: u32,

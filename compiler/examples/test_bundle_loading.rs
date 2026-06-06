@@ -145,6 +145,7 @@ fn execute_bundle_interpreted(bundle: &RayzorBundle) -> Result<std::time::Durati
         bailout_strategy: compiler::codegen::BailoutStrategy::Quick,
         enable_stack_traces: false,
         enable_tier_promotion: false,
+        auto_upgrade_to_llvm_after_main_entry: false,
     };
 
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)
@@ -212,6 +213,7 @@ fn compile_and_run(source: &str) -> Result<(), String> {
         bailout_strategy: compiler::codegen::BailoutStrategy::Quick,
         enable_stack_traces: false,
         enable_tier_promotion: false,
+        auto_upgrade_to_llvm_after_main_entry: false,
     };
 
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)

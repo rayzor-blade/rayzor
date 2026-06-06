@@ -202,7 +202,7 @@ pub unsafe extern "C" fn rayzor_kv_cache_q8_alloc(
     let max_seq_len = max_seq_len as usize;
     let num_kv_heads = num_kv_heads as usize;
     let head_dim = head_dim as usize;
-    if head_dim % Q8_0_BLOCK_SIZE != 0 {
+    if !head_dim.is_multiple_of(Q8_0_BLOCK_SIZE) {
         return 0;
     }
     let head_dim_bytes = (head_dim / Q8_0_BLOCK_SIZE) * Q8_0_BLOCK_BYTES;

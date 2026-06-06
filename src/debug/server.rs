@@ -13,7 +13,7 @@
 use super::DebugCommands;
 use anyhow::{anyhow, Result};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -206,7 +206,7 @@ fn crashes_json() -> String {
             entries.push((mtime, p));
         }
     }
-    entries.sort_by(|a, b| b.0.cmp(&a.0));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.0));
     entries.truncate(20);
     let items: Vec<String> = entries
         .into_iter()
@@ -259,7 +259,7 @@ fn jit_map_json(limit: usize) -> String {
             ));
         }
     }
-    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.1));
     entries.truncate(limit);
     let file_map = load_file_table_inner();
     let items: Vec<String> = entries

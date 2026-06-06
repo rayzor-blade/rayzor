@@ -1072,8 +1072,7 @@ impl CraneliftBackend {
         // Per-PID dump so PCs resolve cleanly against a single session.
         // Sibling /tmp/rayzor_jit_symbols.csv is kept for backward
         // compatibility with the original (append-only) resolver path.
-        let path_pid =
-            format!("/tmp/rayzor_jit_symbols.{}.csv", std::process::id());
+        let path_pid = format!("/tmp/rayzor_jit_symbols.{}.csv", std::process::id());
         let path = "/tmp/rayzor_jit_symbols.csv";
         use std::io::Write;
         let need_header = !std::path::Path::new(path).exists();

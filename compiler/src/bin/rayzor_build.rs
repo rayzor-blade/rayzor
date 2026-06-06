@@ -4,7 +4,7 @@
 //! Prefer using `rayzor aot` instead.
 //!
 //! Usage:
-//!   rayzor-build [OPTIONS] <SOURCE_FILES...>
+//!   `rayzor-build [OPTIONS] <SOURCE_FILES...>`
 
 use compiler::codegen::aot_compiler::OutputFormat;
 use compiler::ir::optimization::OptimizationLevel;

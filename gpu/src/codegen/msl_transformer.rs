@@ -5,6 +5,7 @@
 //! reductions still accumulate in `float` to dodge half-precision
 //! overflow on `sum(x²)` for typical hidden_size values.
 
+#[cfg(test)]
 use crate::buffer;
 use crate::codegen::msl::dtype_to_msl;
 use crate::kernel_ir::KernelOp;

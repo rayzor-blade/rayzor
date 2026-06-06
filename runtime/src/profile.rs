@@ -44,7 +44,7 @@ std::thread_local! {
 }
 
 #[derive(Default)]
-struct SiteStat {
+pub struct SiteStat {
     sampled_count: u64,
     pcs: [usize; 6],
 }
@@ -65,7 +65,7 @@ fn record_sample() {
         t.set(v);
         v
     });
-    if tick % rate != 0 {
+    if !tick.is_multiple_of(rate) {
         return;
     }
     IN_GRAPH.with(|g| g.set(true));
@@ -152,7 +152,7 @@ pub extern "C" fn rayzor_dump_alloc_graph() {
         }
     };
     let mut rows = snapshot;
-    rows.sort_by(|a, b| b.0.cmp(&a.0));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.0));
     // In CPU-profile-only mode rate is 0; surface the raw sample count.
     let scale = if rate == 0 { 1 } else { rate };
     let mut out = String::from("rank,sampled_allocs,est_total_allocs,pc1,pc2,pc3,pc4,pc5,pc6\n");
@@ -344,7 +344,7 @@ unsafe fn install_cpu_profiler(period_us: u64) {
     // (so our manual frame-pointer walker can start from the right
     // place; libunwind doesn't help in JIT frames).
     let mut sa: libc::sigaction = std::mem::zeroed();
-    sa.sa_sigaction = sigprof_handler as usize;
+    sa.sa_sigaction = sigprof_handler as *const () as usize;
     sa.sa_flags = libc::SA_SIGINFO | libc::SA_RESTART;
     libc::sigemptyset(&mut sa.sa_mask);
     libc::sigaction(libc::SIGPROF, &sa, std::ptr::null_mut());
@@ -510,6 +510,7 @@ pub unsafe fn ensure_alloc_dump_hooks() {
         {
             extern "C" {
                 fn atexit(cb: extern "C" fn()) -> i32;
+                #[allow(dead_code)] // legacy fallback path retained for non-SA_SIGINFO targets
                 fn signal(sig: i32, h: extern "C" fn(i32)) -> *mut std::ffi::c_void;
             }
             extern "C" fn dump_all() {
@@ -594,7 +595,7 @@ pub unsafe fn ensure_alloc_dump_hooks() {
             #[cfg(target_arch = "aarch64")]
             {
                 let mut sa: libc::sigaction = std::mem::zeroed();
-                sa.sa_sigaction = sig_dump_si as usize;
+                sa.sa_sigaction = sig_dump_si as *const () as usize;
                 sa.sa_flags = libc::SA_SIGINFO;
                 libc::sigemptyset(&mut sa.sa_mask);
                 libc::sigaction(5, &sa, std::ptr::null_mut()); // SIGTRAP

@@ -1,8 +1,12 @@
 //! Command encoder and render pass recording.
 
+#[cfg(feature = "native")]
 use super::bind_group::GraphicsBindGroup;
+#[cfg(feature = "native")]
 use super::pipeline::GraphicsPipeline;
+#[cfg(feature = "native")]
 use super::GraphicsBuffer;
+#[cfg(feature = "native")]
 use super::GraphicsContext;
 
 /// Wrapper around wgpu CommandEncoder. Owns the encoder until finish+submit.

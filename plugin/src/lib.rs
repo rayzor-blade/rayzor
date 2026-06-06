@@ -49,7 +49,7 @@
 // ============================================================================
 
 /// Compiled-in ABI version. Plugins call
-/// [`rayzor_plugin_abi_version`] at load time and compare against
+/// `rayzor_plugin_abi_version` at load time and compare against
 /// this; mismatched versions abort with a "rebuild plugin against
 /// rayzor ≥ X" message rather than the silent SIGSEGV that
 /// signature drift used to produce.
@@ -381,68 +381,166 @@ macro_rules! declare_native_methods {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! _is_static {
-    (static) => { 1u8 };
-    (instance) => { 0u8 };
+    (static) => {
+        1u8
+    };
+    (instance) => {
+        0u8
+    };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! _nt {
-    (Void) => { 0u8 };
-    (I64) => { 1u8 };
-    (F64) => { 2u8 };
-    (Ptr) => { 3u8 };
-    (Bool) => { 4u8 };
+    (Void) => {
+        0u8
+    };
+    (I64) => {
+        1u8
+    };
+    (F64) => {
+        2u8
+    };
+    (Ptr) => {
+        3u8
+    };
+    (Bool) => {
+        4u8
+    };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! _count_params {
-    () => { 0u8 };
-    ($a:ident) => { 1u8 };
-    ($a:ident, $b:ident) => { 2u8 };
-    ($a:ident, $b:ident, $c:ident) => { 3u8 };
-    ($a:ident, $b:ident, $c:ident, $d:ident) => { 4u8 };
-    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident) => { 5u8 };
-    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident) => { 6u8 };
-    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident) => { 7u8 };
-    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident) => { 8u8 };
-    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $i:ident) => { 9u8 };
+    () => {
+        0u8
+    };
+    ($a:ident) => {
+        1u8
+    };
+    ($a:ident, $b:ident) => {
+        2u8
+    };
+    ($a:ident, $b:ident, $c:ident) => {
+        3u8
+    };
+    ($a:ident, $b:ident, $c:ident, $d:ident) => {
+        4u8
+    };
+    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident) => {
+        5u8
+    };
+    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident) => {
+        6u8
+    };
+    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident) => {
+        7u8
+    };
+    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident) => {
+        8u8
+    };
+    ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $i:ident) => {
+        9u8
+    };
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! _param_array {
-    () => { [0u8; 8] };
-    ($a:ident) => { [$crate::_nt!($a), 0, 0, 0, 0, 0, 0, 0] };
-    ($a:ident, $b:ident) => { [$crate::_nt!($a), $crate::_nt!($b), 0, 0, 0, 0, 0, 0] };
+    () => {
+        [0u8; 8]
+    };
+    ($a:ident) => {
+        [$crate::_nt!($a), 0, 0, 0, 0, 0, 0, 0]
+    };
+    ($a:ident, $b:ident) => {
+        [$crate::_nt!($a), $crate::_nt!($b), 0, 0, 0, 0, 0, 0]
+    };
     ($a:ident, $b:ident, $c:ident) => {
-        [$crate::_nt!($a), $crate::_nt!($b), $crate::_nt!($c), 0, 0, 0, 0, 0]
+        [
+            $crate::_nt!($a),
+            $crate::_nt!($b),
+            $crate::_nt!($c),
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]
     };
     ($a:ident, $b:ident, $c:ident, $d:ident) => {
-        [$crate::_nt!($a), $crate::_nt!($b), $crate::_nt!($c), $crate::_nt!($d), 0, 0, 0, 0]
+        [
+            $crate::_nt!($a),
+            $crate::_nt!($b),
+            $crate::_nt!($c),
+            $crate::_nt!($d),
+            0,
+            0,
+            0,
+            0,
+        ]
     };
     ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident) => {
-        [$crate::_nt!($a), $crate::_nt!($b), $crate::_nt!($c), $crate::_nt!($d),
-         $crate::_nt!($e), 0, 0, 0]
+        [
+            $crate::_nt!($a),
+            $crate::_nt!($b),
+            $crate::_nt!($c),
+            $crate::_nt!($d),
+            $crate::_nt!($e),
+            0,
+            0,
+            0,
+        ]
     };
     ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident) => {
-        [$crate::_nt!($a), $crate::_nt!($b), $crate::_nt!($c), $crate::_nt!($d),
-         $crate::_nt!($e), $crate::_nt!($f), 0, 0]
+        [
+            $crate::_nt!($a),
+            $crate::_nt!($b),
+            $crate::_nt!($c),
+            $crate::_nt!($d),
+            $crate::_nt!($e),
+            $crate::_nt!($f),
+            0,
+            0,
+        ]
     };
     ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident) => {
-        [$crate::_nt!($a), $crate::_nt!($b), $crate::_nt!($c), $crate::_nt!($d),
-         $crate::_nt!($e), $crate::_nt!($f), $crate::_nt!($g), 0]
+        [
+            $crate::_nt!($a),
+            $crate::_nt!($b),
+            $crate::_nt!($c),
+            $crate::_nt!($d),
+            $crate::_nt!($e),
+            $crate::_nt!($f),
+            $crate::_nt!($g),
+            0,
+        ]
     };
     ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident) => {
-        [$crate::_nt!($a), $crate::_nt!($b), $crate::_nt!($c), $crate::_nt!($d),
-         $crate::_nt!($e), $crate::_nt!($f), $crate::_nt!($g), $crate::_nt!($h)]
+        [
+            $crate::_nt!($a),
+            $crate::_nt!($b),
+            $crate::_nt!($c),
+            $crate::_nt!($d),
+            $crate::_nt!($e),
+            $crate::_nt!($f),
+            $crate::_nt!($g),
+            $crate::_nt!($h),
+        ]
     };
     // 9-arg signature: descriptor is fixed [u8; 8] so the 9th tag is
     // dropped; param_count still records 9 for the dispatcher.
     ($a:ident, $b:ident, $c:ident, $d:ident, $e:ident, $f:ident, $g:ident, $h:ident, $i:ident) => {
-        [$crate::_nt!($a), $crate::_nt!($b), $crate::_nt!($c), $crate::_nt!($d),
-         $crate::_nt!($e), $crate::_nt!($f), $crate::_nt!($g), $crate::_nt!($h)]
+        [
+            $crate::_nt!($a),
+            $crate::_nt!($b),
+            $crate::_nt!($c),
+            $crate::_nt!($d),
+            $crate::_nt!($e),
+            $crate::_nt!($f),
+            $crate::_nt!($g),
+            $crate::_nt!($h),
+        ]
     };
 }
 

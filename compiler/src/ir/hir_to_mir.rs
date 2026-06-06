@@ -36038,8 +36038,7 @@ impl<'a> HirToMirContext<'a> {
                             });
                             if let Some(name) = derived {
                                 let leaked: &'static str = Box::leak(name.into_boxed_str());
-                                self.derive_clone_extern_fns
-                                    .insert(class.symbol_id, leaked);
+                                self.derive_clone_extern_fns.insert(class.symbol_id, leaked);
                             }
                         }
                     }

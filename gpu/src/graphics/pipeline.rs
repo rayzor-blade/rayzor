@@ -3,7 +3,9 @@
 use super::bind_group::GraphicsBindGroupLayout;
 #[cfg(feature = "native")]
 use super::shader::GraphicsShader;
+#[cfg(feature = "native")]
 use super::types::*;
+#[cfg(feature = "native")]
 use super::GraphicsContext;
 
 pub struct GraphicsPipeline {
@@ -12,6 +14,7 @@ pub struct GraphicsPipeline {
 
 /// Builder for constructing a RenderPipeline incrementally.
 /// Supports multiple color targets for MRT (Multiple Render Targets).
+#[allow(dead_code)] // fields read inside `#[cfg(feature = "native")]` build path only
 pub struct PipelineBuilder {
     #[cfg(feature = "native")]
     pub(crate) shader: Option<*const GraphicsShader>,

@@ -115,6 +115,7 @@ pub fn kernel_fn_name(op: KernelOp, dtype: u8) -> String {
 }
 
 /// Number of buffer bindings a kernel needs (inputs + output + optional uniforms).
+#[allow(clippy::if_same_then_else)] // branches read as a distinct case table; intentional duplication
 pub fn kernel_num_buffers(op: KernelOp) -> usize {
     if op.is_reduction() {
         3 // input, output, numel uniform

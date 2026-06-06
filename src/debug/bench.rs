@@ -62,6 +62,7 @@ pub fn execute(cmd: DebugCommands) -> Result<()> {
 pub(crate) struct BenchSummary {
     pub successful: usize,
     pub failed: usize,
+    #[allow(dead_code)] // retained on the summary for future per-sample reporting
     pub samples: Vec<f64>,
     pub min: f64,
     pub max: f64,
