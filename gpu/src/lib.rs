@@ -12,6 +12,11 @@
 
 // All extern "C" functions in this crate are FFI entry points called by the JIT runtime.
 #![allow(clippy::missing_safety_doc)]
+// Doc comments use prose with shape-indexing (`[b,m,n]`) and Haxe-side
+// type shorthand (`Map<T>`) that rustdoc treats as broken links / unclosed
+// HTML; silence rather than reformat every prose mention.
+#![allow(rustdoc::broken_intra_doc_links)]
+#![allow(rustdoc::invalid_html_tags)]
 
 // Compute modules — core logic uses buffer/lazy/backend types (native-only)
 #[cfg(feature = "native")]

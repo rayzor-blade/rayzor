@@ -117,7 +117,7 @@ fn {fn_name}(
 /// Bindings:
 ///   - 0: x      `array<{T}>` (input)
 ///   - 1: cos    `array<f32>` (always f32 — LUT precision matters more
-///                              than memory for the rotation tables)
+///     than memory for the rotation tables)
 ///   - 2: sin    `array<f32>`
 ///   - 3: out    `array<{T}>`
 ///   - 4: uniform `{seq_len, num_heads, head_dim, position_offset, cos_max_seq}`

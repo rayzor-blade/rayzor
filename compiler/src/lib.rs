@@ -1,4 +1,10 @@
 // Crate-level lint allows for clippy compliance
+// Many doc comments describe ABI / IR types using ad-hoc shorthand
+// (`[2*half_idx]`, `Map<TypeId, Vec<X>>`, `T<U>`) that rustdoc would
+// otherwise misparse as intra-doc links or HTML tags.
+#![allow(rustdoc::invalid_html_tags)]
+#![allow(rustdoc::broken_intra_doc_links)]
+#![allow(rustdoc::invalid_rust_codeblocks)]
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 #![allow(unused_mut)]

@@ -1,6 +1,6 @@
 //! Haxe AST with full span tracking
 //!
-//! This AST covers 100% of Haxe language features as specified in https://haxe.org/manual
+//! This AST covers 100% of Haxe language features as specified in <https://haxe.org/manual>
 
 /// Source location information
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]

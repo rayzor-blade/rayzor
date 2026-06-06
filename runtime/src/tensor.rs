@@ -2704,8 +2704,12 @@ pub unsafe extern "C" fn rayzor_tensor_rope(
 /// (seqQ == 1) with grouped-query attention (GQA) built in.
 ///
 /// Replaces the chain
-///   `expandKvHeads(K)` + `expandKvHeads(V)` + `bmm(Q, K^T)` + `scale`
-///   + `causalMask` (no-op for decode) + `softmax` + `bmm(attn, V)`
+///
+/// ```text
+///   expandKvHeads(K) + expandKvHeads(V) + bmm(Q, K^T) + scale
+///   + causalMask (no-op for decode) + softmax + bmm(attn, V)
+/// ```
+///
 /// with one kernel that streams over the KV cache exactly once. The win
 /// comes from memory traffic: at cache_len=568 the chain reads K and V
 /// twice (once for the score bmm, once for the context bmm) AFTER
@@ -2916,6 +2920,8 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode(
 /// because each q_head's three passes are independent and write a
 /// disjoint output band.
 #[inline]
+#[allow(clippy::too_many_arguments)] // hot decode kernel; bundling into a struct would add a load on the inner loop
+#[allow(clippy::needless_range_loop)] // index drives three independent pointers (k, v, scores)
 unsafe fn flash_attn_decode_one_qhead(
     q_head: usize,
     group: usize,

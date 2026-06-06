@@ -72,6 +72,14 @@
 //! route through `dequant_q4_k_block` + the F32 SIMD axpy. AVX-VNNI
 //! (`vpdpbusd`) is the natural x86 analogue but is not wired here yet.
 
+// Quant kernels are heavy on indexed inner loops over Q4_K_M / Q6_K block
+// substructures where the same index drives several parallel pointers
+// (quants, scales, mins, output) — rewriting to .iter().enumerate() chains
+// hurts readability and frustrates auto-vectorisation. Same for the test
+// scaffolding that uses `vec.push(constant)` in setup helpers.
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::same_item_push)]
+
 extern "C" {
     fn malloc(size: usize) -> *mut u8;
     fn free(ptr: *mut u8);
@@ -536,6 +544,7 @@ unsafe fn quantize_x_block_q8(x: *const f32) -> Q8Block {
     // Pass 1: find the absolute max over 256 elements (NEON 4×4-lane
     // unrolled). Used to pick a symmetric scale so quants land in
     // [-127, 127].
+    #[allow(unused_assignments)] // overwritten in aarch64 path, read in fallback
     let mut max_abs = 0.0f32;
     #[cfg(target_arch = "aarch64")]
     {
@@ -726,8 +735,7 @@ unsafe fn dot_q4_k_q8(q4_block_ptr: *const u8, x_q8: &Q8Block) -> f32 {
         let hi_sdot = vaddvq_s32(acc_hi) as f32;
 
         p1[p] = sub_scale_lo * lo_sdot + sub_scale_hi * hi_sdot;
-        p2[p] = sub_min_lo * x_q8.bsums[2 * p] as f32
-            + sub_min_hi * x_q8.bsums[2 * p + 1] as f32;
+        p2[p] = sub_min_lo * x_q8.bsums[2 * p] as f32 + sub_min_hi * x_q8.bsums[2 * p + 1] as f32;
     }
 
     // Balanced reduction tree: pair-wise sum minimises rounding error
@@ -987,7 +995,7 @@ unsafe fn dot_q6_k_q8(q6_block_ptr: *const u8, x_q8: &Q8Block) -> f32 {
             // 2*j] (lo) and bsums_16[bsum_base + 2*j + 1] (hi). The
             // outer base offset is the first 16-block in this n-half:
             //   bsum_16 index = x_span_off / 16
-            let bsum_lo = x_q8.bsums_16[(x_span_off / 16)] as f32;
+            let bsum_lo = x_q8.bsums_16[x_span_off / 16] as f32;
             let bsum_hi = x_q8.bsums_16[(x_span_off / 16) + 1] as f32;
             // Suppress the warning even though bsum_base is the
             // sub-block-pair start — the index above already encodes it.
@@ -1264,6 +1272,7 @@ fn pack_q4_k_scales(sc6: &[u8; 8], mn6: &[u8; 8]) -> [u8; 12] {
 ///   2. Greedy / low-temp decode is robust to small per-logit ULPs —
 ///      argmax over a 128k vocab doesn't shift on 1-2 ULP perturbations
 ///      to most entries.
+///
 /// MATCH-on-canonical is the empirical check; commit only if it holds.
 ///
 /// Encoding model (mirrors `dequant_q4_k_block`):
@@ -2484,6 +2493,7 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qkv_qt_t_f32_threaded(
 ///
 /// Best-effort: failures are ignored. Other platforms get no-ops.
 #[inline]
+#[allow(dead_code)] // QoS-hint helper, kept for future wiring into the threaded matmul path
 fn bias_to_performance_core() {
     #[cfg(target_os = "macos")]
     {
@@ -2683,6 +2693,7 @@ unsafe fn x_tensor_data_ptr(x_tensor: i64) -> *const f32 {
 /// SAFETY: `x_data` must be a valid f32 cursor with `k` contiguous
 /// elements; `k` must be a multiple of 256.
 #[inline]
+#[allow(dead_code)] // allocating sibling of prepare_x_q8k_blocks_into; kept for one-shot callers
 unsafe fn prepare_x_q8k_blocks(x_data: *const f32, k: usize) -> Vec<Q8KBlock> {
     debug_assert!(k.is_multiple_of(Q4_K_M_BLOCK_SIZE));
     let nb = k / Q4_K_M_BLOCK_SIZE;
@@ -2932,7 +2943,10 @@ unsafe fn qmatmul_chunk_impl(x_tensor: i64, qt_w: i64, y_tensor: i64, n_start: i
                 *y_data.add(r + 1) = sum1;
                 r += 2;
             }
-            row_start = r;
+            #[allow(unused_assignments)] // overwritten at 2959 below when fallback also runs
+            {
+                row_start = r;
+            }
         }
         // Non-SDOT fallback: dequant + f32-dot 2-row tile (the original
         // 6285c22 implementation). Runs when the SDOT gate is off or the
@@ -3682,7 +3696,7 @@ mod tests {
     /// Header layout per `q4_k_get_scale_min`:
     ///   - sub-blocks 0..3: scale = block[4..8] & 63, min = block[8..12] & 63
     ///   - sub-blocks 4..7: scale = (block[12..16] & 0x0F) | ((block[4..8] >> 6) << 4),
-    ///                      min   = (block[12..16] >> 4)   | ((block[8..12] >> 6) << 4)
+    ///     min   = (block[12..16] >> 4)   | ((block[8..12] >> 6) << 4)
     fn build_constant_block(value: f32) -> [u8; Q4_K_M_BLOCK_BYTES] {
         let mut block = [0u8; Q4_K_M_BLOCK_BYTES];
         let d = f16::from_f32(value).to_bits();

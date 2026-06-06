@@ -223,6 +223,7 @@ fn compile_and_run_interpreted(source: &str, name: &str) -> Result<(), String> {
         bailout_strategy: compiler::codegen::BailoutStrategy::Quick,
         enable_stack_traces: false,
         enable_tier_promotion: false,
+        auto_upgrade_to_llvm_after_main_entry: false,
     };
 
     let mut backend = TieredBackend::with_symbols(config, &symbols_ref)

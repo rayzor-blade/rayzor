@@ -136,6 +136,7 @@ fn test_tiered_with_interpreter() {
         bailout_strategy: compiler::codegen::BailoutStrategy::Quick,
         enable_stack_traces: false,
         enable_tier_promotion: true,
+        auto_upgrade_to_llvm_after_main_entry: false,
     };
 
     // Create tiered backend

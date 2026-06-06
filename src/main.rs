@@ -1,3 +1,8 @@
+// Doc prose uses `<file>` and `Vec<T>`-style shorthand that rustdoc
+// would otherwise misparse.
+#![allow(rustdoc::invalid_html_tags)]
+#![allow(rustdoc::broken_intra_doc_links)]
+
 //! Rayzor - High-performance Haxe compiler with tiered JIT compilation
 //!
 //! # Usage
@@ -808,6 +813,7 @@ struct SymbolEntry {
     fn_ptr: *const std::ffi::c_void,
 }
 
+#[allow(clippy::type_complexity)] // one-shot loader return; factoring out a typedef obscures the call site
 fn load_manifest_native_lib(
     path: &Path,
 ) -> Result<
@@ -821,8 +827,8 @@ fn load_manifest_native_lib(
     if !path.exists() {
         return Err(format!("file not found: {}", path.display()));
     }
-    let lib = unsafe { libloading::Library::new(path) }
-        .map_err(|e| format!("dlopen failed: {}", e))?;
+    let lib =
+        unsafe { libloading::Library::new(path) }.map_err(|e| format!("dlopen failed: {}", e))?;
 
     let plugin_name = path
         .file_stem()
@@ -835,8 +841,7 @@ fn load_manifest_native_lib(
     compiler::rpkg::install::check_plugin_abi(&lib, plugin_name)?;
 
     // 1. Method descriptor table for compiler-side method registration.
-    type DescribeFn =
-        unsafe extern "C" fn(*mut usize) -> *const rayzor_plugin::NativeMethodDesc;
+    type DescribeFn = unsafe extern "C" fn(*mut usize) -> *const rayzor_plugin::NativeMethodDesc;
     let describe_names: &[&[u8]] = &[b"plugin_describe", b"rayzor_plugin_describe"];
     let mut plugin: Option<compiler::compiler_plugin::NativePlugin> = None;
     for name in describe_names {
@@ -855,8 +860,8 @@ fn load_manifest_native_lib(
             break;
         }
     }
-    let plugin = plugin
-        .ok_or_else(|| "no `plugin_describe` export with a non-empty table".to_string())?;
+    let plugin =
+        plugin.ok_or_else(|| "no `plugin_describe` export with a non-empty table".to_string())?;
 
     // 2. Runtime symbol table for JIT linkage.
     type InitFn = unsafe extern "C" fn(*mut usize) -> *const SymbolEntry;
@@ -869,9 +874,7 @@ fn load_manifest_native_lib(
             if !ptr.is_null() && count > 0 {
                 let entries = unsafe { std::slice::from_raw_parts(ptr, count) };
                 for e in entries {
-                    let name_bytes = unsafe {
-                        std::slice::from_raw_parts(e.name_ptr, e.name_len)
-                    };
+                    let name_bytes = unsafe { std::slice::from_raw_parts(e.name_ptr, e.name_len) };
                     let name = String::from_utf8_lossy(name_bytes).into_owned();
                     runtime_symbols.push((name, e.fn_ptr as *const u8));
                 }

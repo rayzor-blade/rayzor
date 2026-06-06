@@ -1,6 +1,6 @@
 //! Browser DOM backend for rayzor-window.
 //!
-//! Creates an HTML <canvas> element as the window surface,
+//! Creates an HTML `<canvas>` element as the window surface,
 //! hooks keyboard, mouse, wheel, resize, and focus events via web-sys.
 
 use crate::event::{EventQueue, WindowEvent};
@@ -53,7 +53,7 @@ fn map_modifiers(e: &KeyboardEvent) -> i32 {
         | (if e.meta_key() { 8 } else { 0 })
 }
 
-/// Browser window backed by an HTML <canvas> element.
+/// Browser window backed by an HTML `<canvas>` element.
 pub struct WebWindow {
     pub canvas: HtmlCanvasElement,
     pub width: i32,

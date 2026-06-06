@@ -145,10 +145,7 @@ impl RpkgPlugin {
 /// any modern host. Older rpkgs built before the handshake existed
 /// will fail-fast here with a clear "rebuild against rayzor ≥ X"
 /// message rather than load and crash later.
-pub fn check_plugin_abi(
-    lib: &libloading::Library,
-    package_name: &str,
-) -> Result<(), String> {
+pub fn check_plugin_abi(lib: &libloading::Library, package_name: &str) -> Result<(), String> {
     type AbiFn = unsafe extern "C" fn() -> u32;
     let symbol_name = rayzor_plugin::ABI_VERSION_SYMBOL;
     let abi_fn = unsafe { lib.get::<AbiFn>(symbol_name.as_bytes()) }

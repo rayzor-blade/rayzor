@@ -7,6 +7,7 @@
 use super::bind_group::GraphicsBindGroup;
 use super::pipeline::GraphicsPipeline;
 use super::GraphicsBuffer;
+#[cfg(feature = "native")]
 use super::GraphicsContext;
 
 /// A recorded render command.

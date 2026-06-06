@@ -4,6 +4,7 @@
 //! and creates a wgpu Surface for real-time frame presentation.
 //! On WASM, GPU surfaces are provided by the host via `rayzor:gpu` WIT interface.
 
+#[cfg(feature = "native")]
 use super::GraphicsContext;
 
 pub struct GraphicsSurface {

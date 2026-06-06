@@ -1,4 +1,11 @@
 #![cfg_attr(target_arch = "aarch64", feature(stdarch_neon_dotprod))]
+// Doc comments throughout describe Haxe-side types using shorthand like
+// `Vec<u8>`, `Array<T>`, `Map<String, Dynamic>` — rustdoc parses these as
+// HTML / intra-doc-links and complains. They're descriptive prose, not
+// rustdoc references; silencing the lints rather than rewriting every
+// type mention to backtick escaping or `[Type]` linkable form.
+#![allow(rustdoc::invalid_html_tags)]
+#![allow(rustdoc::broken_intra_doc_links)]
 //! Rayzor Runtime Library
 //!
 //! Provides memory management and runtime support for compiled Haxe code.
