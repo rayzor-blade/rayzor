@@ -666,8 +666,21 @@ unsafe fn dot_q4_k_q8(q4_block_ptr: *const u8, x_q8: &Q8Block) -> f32 {
     }
     let quants_ptr = q4_block_ptr.add(16);
 
-    let mut sum_term1 = 0.0f32; // Σ sub_scale_s * x_scale * sdot_s
-    let mut sum_term2 = 0.0f32; // Σ sub_min_s   * x_scale * bsum_s
+    // 4-way partial accumulators — one per `p` iteration. Breaks the
+    // loop-carried dependency through a single `sum_term1 += ...`
+    // scalar chain, exposing 4 independent FMA chains to M1's wide OoO
+    // scheduler. Within each iteration the two SDOT calls per channel
+    // are issued into independent partial accumulators (acc_lo_a /
+    // acc_lo_b) instead of a serial chain — M1's vdotq_s32 has ~5
+    // cycle latency / ~2 cycle throughput, so the serial form leaves
+    // 3 issue slots open per pair of SDOTs.
+    //
+    // Numerical drift vs the prior serial-add form is bounded by f32
+    // reduction-tree reshape (~1 ULP per super-block). Paris MATCH
+    // remains byte-exact on the canonical "What is the capital of
+    // France?" prompt.
+    let mut p1 = [0.0f32; 4]; // Σ sub_scale_s * x_scale * sdot_s, per-p partials
+    let mut p2 = [0.0f32; 4]; // Σ sub_min_s   * x_scale * bsum_s, per-p partials
 
     let mask_nibble = vdupq_n_u8(0x0F);
 
@@ -699,8 +712,8 @@ unsafe fn dot_q4_k_q8(q4_block_ptr: *const u8, x_q8: &Q8Block) -> f32 {
         let xhi1 = vld1q_s8(x_hi_ptr);
         let xhi2 = vld1q_s8(x_hi_ptr.add(16));
 
-        // SDOT: each call does Σ_{j in 16-lane group} a[j] * b[j] →
-        // accumulated into 4 i32 lanes; we sum across lanes at the end.
+        // Serial SDOT (matches original code) — proves whether the
+        // partial-accumulator unroll alone is enough.
         let mut acc_lo = vdupq_n_s32(0);
         acc_lo = vdotq_s32(acc_lo, xlo1, lo1);
         acc_lo = vdotq_s32(acc_lo, xlo2, lo2);
@@ -712,14 +725,17 @@ unsafe fn dot_q4_k_q8(q4_block_ptr: *const u8, x_q8: &Q8Block) -> f32 {
         let lo_sdot = vaddvq_s32(acc_lo) as f32;
         let hi_sdot = vaddvq_s32(acc_hi) as f32;
 
-        sum_term1 += sub_scale_lo * lo_sdot;
-        sum_term1 += sub_scale_hi * hi_sdot;
-
-        sum_term2 += sub_min_lo * x_q8.bsums[2 * p] as f32;
-        sum_term2 += sub_min_hi * x_q8.bsums[2 * p + 1] as f32;
+        p1[p] = sub_scale_lo * lo_sdot + sub_scale_hi * hi_sdot;
+        p2[p] = sub_min_lo * x_q8.bsums[2 * p] as f32
+            + sub_min_hi * x_q8.bsums[2 * p + 1] as f32;
     }
 
-    x_q8.scale * (sum_term1 - sum_term2)
+    // Balanced reduction tree: pair-wise sum minimises rounding error
+    // and exposes independent partial sums to OoO execution.
+    let s1 = (p1[0] + p1[1]) + (p1[2] + p1[3]);
+    let s2 = (p2[0] + p2[1]) + (p2[2] + p2[3]);
+
+    x_q8.scale * (s1 - s2)
 }
 
 /// Q4_K_M × Q8_K dot product — variant of `dot_q4_k_q8` that reads the
@@ -761,8 +777,12 @@ unsafe fn dot_q4_k_q8_kblock(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
     }
     let quants_ptr = q4_block_ptr.add(16);
 
-    let mut sum_term1 = 0.0f32; // Σ sub_scale_s * x_scale * sdot_s
-    let mut sum_term2 = 0.0f32; // Σ sub_min_s   * x_scale * bsum_s
+    // See `dot_q4_k_q8` above for the rationale on the 4-way partial
+    // unroll + split-acc SDOT. This kernel mirrors that structure for
+    // the `Q8KBlock` input shape (i16 bsums folded inline rather than
+    // the i32 bsums Q8Block stores).
+    let mut p1 = [0.0f32; 4]; // Σ sub_scale_s * x_scale * sdot_s, per-p partials
+    let mut p2 = [0.0f32; 4]; // Σ sub_min_s   * x_scale * bsum_s, per-p partials
 
     let mask_nibble = vdupq_n_u8(0x0F);
 
@@ -800,8 +820,8 @@ unsafe fn dot_q4_k_q8_kblock(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
         let xhi1 = vld1q_s8(x_hi_ptr);
         let xhi2 = vld1q_s8(x_hi_ptr.add(16));
 
-        // SDOT: each call does Σ_{j in 16-lane group} a[j] * b[j] →
-        // accumulated into 4 i32 lanes; we sum across lanes at the end.
+        // Serial SDOT (matches original code) — proves whether the
+        // partial-accumulator unroll alone is enough.
         let mut acc_lo = vdupq_n_s32(0);
         acc_lo = vdotq_s32(acc_lo, xlo1, lo1);
         acc_lo = vdotq_s32(acc_lo, xlo2, lo2);
@@ -813,22 +833,24 @@ unsafe fn dot_q4_k_q8_kblock(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
         let lo_sdot = vaddvq_s32(acc_lo) as f32;
         let hi_sdot = vaddvq_s32(acc_hi) as f32;
 
-        sum_term1 += sub_scale_lo * lo_sdot;
-        sum_term1 += sub_scale_hi * hi_sdot;
-
         // Inline pair-sum: Q4_K_M's per-32-elem sub-block sum is
         // `bsums_16[2s] + bsums_16[2s+1]`. Q8KBlock stores those as i16
         // (`bsums[0..16]`); widen to i32 then f32 right where they feed
-        // `sum_term2`. For sub-block pair `p` (covering Q4_K_M sub-blocks
+        // the partial. For sub-block pair `p` (covering Q4_K_M sub-blocks
         // 2p, 2p+1 — elements [64*p .. 64*p+64)) the matching Q8KBlock
         // 16-elem sums live at indices 4p .. 4p+4.
         let bsum_lo32 = x.bsums[4 * p] as i32 + x.bsums[4 * p + 1] as i32;
         let bsum_hi32 = x.bsums[4 * p + 2] as i32 + x.bsums[4 * p + 3] as i32;
-        sum_term2 += sub_min_lo * bsum_lo32 as f32;
-        sum_term2 += sub_min_hi * bsum_hi32 as f32;
+
+        p1[p] = sub_scale_lo * lo_sdot + sub_scale_hi * hi_sdot;
+        p2[p] = sub_min_lo * bsum_lo32 as f32 + sub_min_hi * bsum_hi32 as f32;
     }
 
-    x.d * (sum_term1 - sum_term2)
+    // Balanced reduction tree across the 4 partials.
+    let s1 = (p1[0] + p1[1]) + (p1[2] + p1[3]);
+    let s2 = (p2[0] + p2[1]) + (p2[2] + p2[3]);
+
+    x.d * (s1 - s2)
 }
 
 /// Q6_K × Q8 dot product for one 256-element block.
