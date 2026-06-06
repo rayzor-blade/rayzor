@@ -20429,11 +20429,127 @@ impl<'a> HirToMirContext<'a> {
 
         // Evaluate condition
         if let Some(cond_reg) = self.lower_expression(condition) {
+            // Branch-phi for effectful Call results — same fix as in
+            // lower_conditional_typed. See that fn for the rationale.
+            let cond_eval_block = match self.builder.current_block() {
+                Some(b) => b,
+                None => return,
+            };
+            let effectful_call_result_regs: BTreeSet<IrId> = {
+                let mut regs = BTreeSet::new();
+                if let Some(func) = self.builder.current_function() {
+                    if let Some(block) = func.cfg.blocks.get(&cond_eval_block) {
+                        for inst in &block.instructions {
+                            match inst {
+                                IrInstruction::CallDirect { dest: Some(d), .. }
+                                | IrInstruction::CallIndirect { dest: Some(d), .. } => {
+                                    regs.insert(*d);
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                regs
+            };
+
+            // (sym, then_phi, else_phi). For if-stmt, else_block may equal
+            // merge_block (no else branch case); in that case the value
+            // flows through unchanged so we don't emit an else_phi.
+            let mut branch_phi_rebind: Vec<(SymbolId, IrId, Option<IrId>)> = Vec::new();
+            if !effectful_call_result_regs.is_empty() {
+                let mut candidates: Vec<(SymbolId, IrId)> = self
+                    .symbol_map
+                    .iter()
+                    .filter(|(_, r)| effectful_call_result_regs.contains(r))
+                    .map(|(s, r)| (*s, *r))
+                    .collect();
+                candidates.sort_by_key(|(s, _)| *s);
+
+                for (sym, reg) in candidates {
+                    let var_ty = match self.builder.get_register_type(reg) {
+                        Some(t) => t,
+                        None => continue,
+                    };
+                    if !matches!(
+                        var_ty,
+                        IrType::I8
+                            | IrType::I16
+                            | IrType::I32
+                            | IrType::I64
+                            | IrType::U8
+                            | IrType::U16
+                            | IrType::U32
+                            | IrType::U64
+                            | IrType::F32
+                            | IrType::F64
+                            | IrType::Bool
+                            | IrType::Ptr(_)
+                    ) {
+                        continue;
+                    }
+                    let then_phi = match self.builder.build_phi(then_block, var_ty.clone()) {
+                        Some(p) => p,
+                        None => continue,
+                    };
+                    self.builder
+                        .add_phi_incoming(then_block, then_phi, cond_eval_block, reg);
+                    let else_phi_opt = if else_block != merge_block {
+                        let p = self.builder.build_phi(else_block, var_ty.clone());
+                        if let Some(p) = p {
+                            self.builder
+                                .add_phi_incoming(else_block, p, cond_eval_block, reg);
+                            Some(p)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(func) = self.builder.current_function_mut() {
+                        if let Some(local) = func.locals.get(&reg).cloned() {
+                            func.locals.insert(
+                                then_phi,
+                                super::IrLocal {
+                                    name: format!("{}_then_branchphi", local.name),
+                                    ty: var_ty.clone(),
+                                    mutable: local.mutable,
+                                    source_location: local.source_location,
+                                    allocation: super::AllocationHint::Register,
+                                },
+                            );
+                            if let Some(else_phi) = else_phi_opt {
+                                func.locals.insert(
+                                    else_phi,
+                                    super::IrLocal {
+                                        name: format!("{}_else_branchphi", local.name),
+                                        ty: var_ty.clone(),
+                                        mutable: local.mutable,
+                                        source_location: local.source_location,
+                                        allocation: super::AllocationHint::Register,
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    // Register the symbol in var_initial_values so the
+                    // existing merge-phi machinery wraps it back to a
+                    // dominating SSA value post-merge.
+                    var_initial_values
+                        .entry(sym)
+                        .or_insert_with(|| (reg, var_ty));
+                    branch_phi_rebind.push((sym, then_phi, else_phi_opt));
+                }
+            }
+
             self.builder
                 .build_cond_branch(cond_reg, then_block, else_block);
 
             // Lower then branch
             self.builder.switch_to_block(then_block);
+            for (sym, then_phi, _) in &branch_phi_rebind {
+                self.symbol_map.insert(*sym, *then_phi);
+            }
             self.lower_block(then_branch);
             let then_end_block = if !self.is_terminated() {
                 let current = self.builder.current_block();
@@ -20459,6 +20575,15 @@ impl<'a> HirToMirContext<'a> {
             let mut else_values: BTreeMap<SymbolId, IrId> = BTreeMap::new();
             let else_end_block = if let Some(else_branch) = else_branch {
                 self.builder.switch_to_block(else_block);
+                // Rebind effectful-call-bound symbols to the else-branch phi
+                // before lowering, so the else view sees the right SSA value.
+                for (sym, _, else_phi_opt) in &branch_phi_rebind {
+                    if let Some(else_phi) = else_phi_opt {
+                        self.symbol_map.insert(*sym, *else_phi);
+                    } else if let Some(&(orig_reg, _)) = var_initial_values.get(sym) {
+                        self.symbol_map.insert(*sym, orig_reg);
+                    }
+                }
                 self.lower_block(else_branch);
                 if !self.is_terminated() {
                     let current = self.builder.current_block();
@@ -28346,12 +28471,117 @@ impl<'a> HirToMirContext<'a> {
         //     self.builder.current_block()
         // );
 
+        // Branch-phi for effectful Call results.
+        //
+        // Cranelift's egraph elaboration panics when an effectful instruction's
+        // dest is referenced by another instruction in a different block (i.e.,
+        // a cross-block direct SSA reference). Classic trigger:
+        //
+        //     v = call @effectful_extern    (in cond_eval block)
+        //     brif cond, then, else
+        //     then: <use v>                 <-- cross-block use of v
+        //
+        // Route v through a phi/block-arg at branch entry to sidestep this.
+        let cond_eval_block = self.builder.current_block()?;
+        let effectful_call_result_regs: BTreeSet<IrId> = {
+            let mut regs = BTreeSet::new();
+            if let Some(func) = self.builder.current_function() {
+                if let Some(block) = func.cfg.blocks.get(&cond_eval_block) {
+                    for inst in &block.instructions {
+                        match inst {
+                            IrInstruction::CallDirect { dest: Some(d), .. }
+                            | IrInstruction::CallIndirect { dest: Some(d), .. } => {
+                                regs.insert(*d);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            regs
+        };
+
+        let mut branch_phi_rebind: Vec<(SymbolId, IrId, IrId)> = Vec::new();
+        if !effectful_call_result_regs.is_empty() {
+            let mut candidates: Vec<(SymbolId, IrId)> = symbol_map_before
+                .iter()
+                .filter(|(_, r)| effectful_call_result_regs.contains(r))
+                .map(|(s, r)| (*s, *r))
+                .collect();
+            candidates.sort_by_key(|(s, _)| *s);
+
+            for (sym, reg) in candidates {
+                let var_ty = match self.builder.get_register_type(reg) {
+                    Some(t) => t,
+                    None => continue,
+                };
+                if !matches!(
+                    var_ty,
+                    IrType::I8
+                        | IrType::I16
+                        | IrType::I32
+                        | IrType::I64
+                        | IrType::U8
+                        | IrType::U16
+                        | IrType::U32
+                        | IrType::U64
+                        | IrType::F32
+                        | IrType::F64
+                        | IrType::Bool
+                        | IrType::Ptr(_)
+                ) {
+                    continue;
+                }
+                let then_phi = match self.builder.build_phi(then_block, var_ty.clone()) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                self.builder
+                    .add_phi_incoming(then_block, then_phi, cond_eval_block, reg);
+                let else_phi = match self.builder.build_phi(else_block, var_ty.clone()) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                self.builder
+                    .add_phi_incoming(else_block, else_phi, cond_eval_block, reg);
+                if let Some(func) = self.builder.current_function_mut() {
+                    if let Some(local) = func.locals.get(&reg).cloned() {
+                        func.locals.insert(
+                            then_phi,
+                            super::IrLocal {
+                                name: format!("{}_then_branchphi", local.name),
+                                ty: var_ty.clone(),
+                                mutable: local.mutable,
+                                source_location: local.source_location,
+                                allocation: super::AllocationHint::Register,
+                            },
+                        );
+                        func.locals.insert(
+                            else_phi,
+                            super::IrLocal {
+                                name: format!("{}_else_branchphi", local.name),
+                                ty: var_ty,
+                                mutable: local.mutable,
+                                source_location: local.source_location,
+                                allocation: super::AllocationHint::Register,
+                            },
+                        );
+                    }
+                }
+                branch_phi_rebind.push((sym, then_phi, else_phi));
+            }
+        }
+
         // Branch based on condition
         self.builder
             .build_cond_branch(cond_val, then_block, else_block)?;
 
         // Then block
         self.builder.switch_to_block(then_block);
+        // Rebind effectful-call-bound symbols to the then-branch phi.
+        for (sym, then_phi, _) in &branch_phi_rebind {
+            self.symbol_map.insert(*sym, *then_phi);
+        }
         let mut then_val = self.lower_expression(then_expr);
         let then_terminated = self.is_terminated();
         // Box primitive values for Optional<primitive> result types
@@ -28367,7 +28597,12 @@ impl<'a> HirToMirContext<'a> {
         let symbol_map_after_then = self.symbol_map.clone();
 
         // Else block
-        self.symbol_map = symbol_map_before.clone(); // Reset to before-branch state
+        // Reset to before-branch state.
+        self.symbol_map = symbol_map_before.clone();
+        // Rebind effectful-call-bound symbols to the else-branch phi.
+        for (sym, _, else_phi) in &branch_phi_rebind {
+            self.symbol_map.insert(*sym, *else_phi);
+        }
         self.builder.switch_to_block(else_block);
         let mut else_val = self.lower_expression(else_expr);
         let else_terminated = self.is_terminated();

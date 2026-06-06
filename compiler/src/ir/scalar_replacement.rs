@@ -282,6 +282,15 @@ fn find_phi_sra_candidates(
                 continue;
             }
 
+            // Skip single-incoming "branch-bridge" phis. These are emitted by
+            // hir_to_mir to insulate effectful Call results from being
+            // referenced cross-block by direct SSA edge (which trips
+            // Cranelift's egraph elaboration). They're not multi-allocation
+            // merges and shouldn't be treated as such.
+            if phi.incoming.len() < 2 {
+                continue;
+            }
+
             // Check if all incoming values are either mallocs or the phi itself (back edge)
             let mut all_mallocs = true;
             let mut has_back_edge = false;
@@ -1706,7 +1715,8 @@ fn apply_sra(function: &mut IrFunction, candidate: &SraCandidate) -> usize {
     }
     function.next_reg_id = max_id;
 
-    // Allocate initial Undef registers for each field
+    // Allocate initial Undef registers for each field (live at the entry of
+    // the alloc's block).
     let mut field_regs: Vec<IrId> = Vec::with_capacity(candidate.num_fields);
     for _ in 0..candidate.num_fields {
         let id = IrId::new(function.next_reg_id);
@@ -1714,47 +1724,104 @@ fn apply_sra(function: &mut IrFunction, candidate: &SraCandidate) -> usize {
         field_regs.push(id);
     }
 
-    // Global field value tracker — initialized to the Undef registers
-    let mut field_current: Vec<IrId> = field_regs.clone();
     let mut eliminated = 0;
 
-    // Collect all locations to remove, grouped by block
+    // Per-block IN and OUT reaching definitions for each field index.
+    // field_in[block][f] = reg holding field f at block entry
+    // field_out[block][f] = reg holding field f after processing block
+    let mut field_in: BTreeMap<IrBlockId, Vec<IrId>> = BTreeMap::new();
+    let mut field_out: BTreeMap<IrBlockId, Vec<IrId>> = BTreeMap::new();
+
+    // Phi nodes to insert at each block: (field_idx, phi_dest, incoming(block, reg))
+    // We collect first, then materialise after the in/out fixed point.
+    let mut block_field_phis: BTreeMap<IrBlockId, Vec<(usize, IrId, Vec<(IrBlockId, IrId)>)>> =
+        BTreeMap::new();
+
+    // Replacement map and removal set.
+    let mut replacements: BTreeMap<(IrBlockId, usize), IrInstruction> = BTreeMap::new();
     let mut to_remove: BTreeMap<IrBlockId, BTreeSet<usize>> = BTreeMap::new();
 
-    // Mark alloc for removal
+    // Mark alloc for removal.
     to_remove
         .entry(candidate.alloc_location.0)
         .or_default()
         .insert(candidate.alloc_location.1);
 
-    // Mark frees for removal
+    // Mark frees for removal.
     for &(block_id, inst_idx) in &candidate.free_locations {
         to_remove.entry(block_id).or_default().insert(inst_idx);
     }
 
-    // Don't remove GEPs eagerly — they may be referenced by non-SRA'd code.
-    // DCE will clean them up if they become dead after the rewrite.
-
-    // Don't remove copy/cast of tracked ptrs — they may be used as values
-    // elsewhere. DCE will clean them up if they become dead.
-
-    // Build a simple block ordering: BFS from entry to process stores before loads
+    // Use a stable reverse-postorder block traversal so each block is
+    // analysed after its predecessors (modulo loops, which SRA candidates
+    // reject — the candidate filter in `try_build_candidate_function_wide`
+    // returns None on phi nodes involving tracked pointers, so loops over
+    // the allocation cannot reach this point).
     let block_order = bfs_block_order(&function.cfg);
 
-    // First pass: find all stores to determine field values per block
-    // We need to process in order so loads see the right field values.
-    // Build a map of (block_id, inst_idx) → replacement instruction
-    let mut replacements: BTreeMap<(IrBlockId, usize), IrInstruction> = BTreeMap::new();
+    // Block where the alloc lives — fields are "live" only from here on.
+    let alloc_block = candidate.alloc_location.0;
 
+    // For each block, compute predecessors (excluding back edges if any).
+    // BFS order gives us a topological walk for DAGs.
     for &block_id in &block_order {
+        let preds = predecessor_blocks(&function.cfg, block_id);
+
+        // Build field_in[block_id].
+        let mut block_in: Vec<IrId> = Vec::with_capacity(candidate.num_fields);
+
+        if block_id == alloc_block {
+            // The alloc's block sees the Undef field_regs at entry.
+            // (We still iterate the same way for uniformity.)
+            block_in.extend_from_slice(&field_regs);
+        } else if preds.is_empty() {
+            // Unreachable block: use the Undef baseline.
+            block_in.extend_from_slice(&field_regs);
+        } else {
+            // For each field, collect the OUT value from each predecessor.
+            // If all preds agree, use the shared value. Otherwise emit a phi.
+            for f in 0..candidate.num_fields {
+                let pred_vals: Vec<(IrBlockId, IrId)> = preds
+                    .iter()
+                    .map(|&p| {
+                        let v = field_out
+                            .get(&p)
+                            .and_then(|out| out.get(f).copied())
+                            .unwrap_or(field_regs[f]);
+                        (p, v)
+                    })
+                    .collect();
+
+                let first_val = pred_vals[0].1;
+                let all_same = pred_vals.iter().all(|&(_, v)| v == first_val);
+                if all_same {
+                    block_in.push(first_val);
+                } else {
+                    let phi_dest = IrId::new(function.next_reg_id);
+                    function.next_reg_id += 1;
+                    block_field_phis
+                        .entry(block_id)
+                        .or_default()
+                        .push((f, phi_dest, pred_vals));
+                    block_in.push(phi_dest);
+                }
+            }
+        }
+
+        // Walk block instructions, computing block_out and emitting replacements.
+        let mut field_state = block_in.clone();
+        field_in.insert(block_id, block_in);
+
         let block = match function.cfg.blocks.get(&block_id) {
             Some(b) => b,
-            None => continue,
+            None => {
+                field_out.insert(block_id, field_state);
+                continue;
+            }
         };
 
         for (inst_idx, inst) in block.instructions.iter().enumerate() {
             match inst {
-                // Replace Store via GEP → Copy to field register
                 IrInstruction::Store { ptr, value, .. } if candidate.gep_map.contains_key(ptr) => {
                     let field_idx = candidate.gep_map[ptr];
                     if field_idx < candidate.num_fields {
@@ -1767,12 +1834,11 @@ fn apply_sra(function: &mut IrFunction, candidate: &SraCandidate) -> usize {
                                 src: *value,
                             },
                         );
-                        field_current[field_idx] = new_reg;
+                        field_state[field_idx] = new_reg;
                     }
                     to_remove.entry(block_id).or_default().insert(inst_idx);
                 }
 
-                // Replace Load via GEP → Copy from current field register
                 IrInstruction::Load { dest, ptr, .. } if candidate.gep_map.contains_key(ptr) => {
                     let field_idx = candidate.gep_map[ptr];
                     if field_idx < candidate.num_fields {
@@ -1780,7 +1846,7 @@ fn apply_sra(function: &mut IrFunction, candidate: &SraCandidate) -> usize {
                             (block_id, inst_idx),
                             IrInstruction::Copy {
                                 dest: *dest,
-                                src: field_current[field_idx],
+                                src: field_state[field_idx],
                             },
                         );
                     }
@@ -1790,9 +1856,31 @@ fn apply_sra(function: &mut IrFunction, candidate: &SraCandidate) -> usize {
                 _ => {}
             }
         }
+
+        field_out.insert(block_id, field_state);
     }
 
-    // Second pass: rewrite each block
+    // Materialise the phi nodes for each field at the front of their block.
+    // We add them to `block.phi_nodes` (real MIR phi nodes; the existing pass
+    // codegen handles these).
+    for (block_id, phis) in &block_field_phis {
+        if let Some(block) = function.cfg.blocks.get_mut(block_id) {
+            for (field_idx, phi_dest, incoming) in phis {
+                let ty = candidate
+                    .field_types
+                    .get(field_idx)
+                    .cloned()
+                    .unwrap_or(IrType::I64);
+                block.phi_nodes.push(IrPhiNode {
+                    dest: *phi_dest,
+                    incoming: incoming.clone(),
+                    ty,
+                });
+            }
+        }
+    }
+
+    // Second pass: rewrite each block to apply removals and replacements.
     for &block_id in &block_order {
         let block_removes = to_remove.get(&block_id);
         let block = match function.cfg.blocks.get_mut(&block_id) {
@@ -1810,7 +1898,7 @@ fn apply_sra(function: &mut IrFunction, candidate: &SraCandidate) -> usize {
         let mut new_instructions = Vec::with_capacity(old_instructions.len());
 
         for (idx, inst) in old_instructions.into_iter().enumerate() {
-            // At alloc position, insert Undef for each field
+            // At alloc position, insert Undef for each field.
             if (block_id, idx) == candidate.alloc_location {
                 for (field_idx, reg) in field_regs.iter().enumerate() {
                     let ty = candidate
@@ -1828,7 +1916,6 @@ fn apply_sra(function: &mut IrFunction, candidate: &SraCandidate) -> usize {
                 if let Some(replacement) = replacements.remove(&(block_id, idx)) {
                     new_instructions.push(replacement);
                 }
-                // else: just remove (GEP, Free, Copy of ptr, etc.)
                 eliminated += 1;
                 continue;
             }
@@ -1840,6 +1927,28 @@ fn apply_sra(function: &mut IrFunction, candidate: &SraCandidate) -> usize {
     }
 
     eliminated
+}
+
+/// Return the predecessor blocks of `block_id` by scanning all blocks for
+/// terminators that target it.
+fn predecessor_blocks(
+    cfg: &super::blocks::IrControlFlowGraph,
+    block_id: IrBlockId,
+) -> Vec<IrBlockId> {
+    let mut preds = Vec::new();
+    for (&pred_id, pred_block) in &cfg.blocks {
+        if pred_id == block_id {
+            continue;
+        }
+        let mut targets = pred_block.successors();
+        targets.sort_unstable();
+        targets.dedup();
+        if targets.contains(&block_id) {
+            preds.push(pred_id);
+        }
+    }
+    preds.sort_unstable();
+    preds
 }
 
 /// BFS block ordering from entry block.
