@@ -366,47 +366,109 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_q8(
     let v_base = v_cache.data;
     let scale_f32 = scale as f32;
 
-    let mut scores: Vec<f32> = vec![0.0; cache_len];
+    // GQA-aware layout: iterate kv_head OUTER so the dequant of each
+    // K/V block fires once per (kv_head, cache_pos, block) and feeds
+    // ALL `group` query heads in the GQA group. The original
+    // q_head-outer layout re-dequanted the same block once per
+    // query head → 4× redundant dequant work for Llama-3 GQA where
+    // group = num_q_heads / num_kv_heads = 4.
+    //
+    // Per-group scratch sized once; `group * cache_len` floats holds
+    // (a) the pre-softmax scores, then (b) the normalised weights
+    // after softmax. For Llama-3.2-1B (group=4, cache_len=2048)
+    // that's 32 KB — well within L1.
+    let mut group_scores: Vec<f32> = vec![0.0; group * cache_len];
+    let mut group_max: Vec<f32> = vec![f32::NEG_INFINITY; group];
+    let mut group_denom: Vec<f32> = vec![0.0; group];
     let mut k_block = [0.0f32; Q8_0_BLOCK_SIZE];
     let mut v_block = [0.0f32; Q8_0_BLOCK_SIZE];
 
-    for q_head in 0..num_q_heads {
-        let kv_head = q_head / group;
-        let q_row_ptr = q_data.add(q_head * head_dim);
+    for kv_head in 0..num_kv_heads {
+        let group_start = kv_head * group;
 
-        let mut max_score = f32::NEG_INFINITY;
+        // Reset per-group state.
+        for s in &mut group_scores[..group * cache_len] {
+            *s = 0.0;
+        }
+        for m in &mut group_max[..group] {
+            *m = f32::NEG_INFINITY;
+        }
+        for d in &mut group_denom[..group] {
+            *d = 0.0;
+        }
+
+        // K step. Dequant each block once; dot against every group
+        // query head before moving on. Accumulation order per
+        // (gi, l) stays block-by-block — same as the original
+        // q_head-outer code, so the f32 reduction order (and Paris
+        // MATCH) is preserved.
         for l in 0..cache_len {
             let k_row_ptr = k_base.add(l * row_bytes + kv_head * head_dim_bytes);
-            let mut s = 0.0f32;
             for b in 0..blocks_per_head {
                 dequant_q8_0_block(k_row_ptr.add(b * Q8_0_BLOCK_BYTES), &mut k_block);
-                s += dot_block_f32(q_row_ptr.add(b * Q8_0_BLOCK_SIZE), &k_block);
+                for gi in 0..group {
+                    let q_head = group_start + gi;
+                    let q_row_ptr = q_data.add(q_head * head_dim);
+                    let partial = dot_block_f32(q_row_ptr.add(b * Q8_0_BLOCK_SIZE), &k_block);
+                    group_scores[gi * cache_len + l] += partial;
+                }
             }
-            let s = s * scale_f32;
-            scores[l] = s;
-            if s > max_score {
-                max_score = s;
+            // Apply scale + accumulate max per gi for this l.
+            for gi in 0..group {
+                let s = group_scores[gi * cache_len + l] * scale_f32;
+                group_scores[gi * cache_len + l] = s;
+                if s > group_max[gi] {
+                    group_max[gi] = s;
+                }
             }
         }
 
-        let mut denom = 0.0f32;
-        for l in 0..cache_len {
-            let e = (scores[l] - max_score).exp();
-            scores[l] = e;
-            denom += e;
+        // Softmax in-place: exp(x - max), accumulate denom, then
+        // normalise. Two passes per gi (one to build weights and
+        // denom, one to divide); the second pass turns scores into
+        // pre-multiplied weights so the V step's axpy can fold the
+        // 1/denom division out of the hot loop.
+        for gi in 0..group {
+            let max_g = group_max[gi];
+            let row = &mut group_scores[gi * cache_len..(gi + 1) * cache_len];
+            let mut denom = 0.0f32;
+            for s in row.iter_mut() {
+                let e = (*s - max_g).exp();
+                *s = e;
+                denom += e;
+            }
+            group_denom[gi] = denom;
+            let inv_denom = if denom > 0.0 { 1.0 / denom } else { 0.0 };
+            for s in row.iter_mut() {
+                *s *= inv_denom;
+            }
         }
-        let inv_denom = 1.0 / denom;
 
-        let out_row_ptr = out_data.add(q_head * head_dim);
-        for d in 0..head_dim {
-            *out_row_ptr.add(d) = 0.0;
+        // Zero output rows for the group's q_heads before the
+        // first axpy. q_heads in the same GQA group are stored at
+        // contiguous offsets, so the four zeroings stream cleanly.
+        for gi in 0..group {
+            let q_head = group_start + gi;
+            let out_row_ptr = out_data.add(q_head * head_dim);
+            for d in 0..head_dim {
+                *out_row_ptr.add(d) = 0.0;
+            }
         }
+
+        // V step. Dequant each block once; axpy into every group
+        // query head's output row before moving on. Same dequant
+        // savings as the K step (4× less work per cache block);
+        // axpy work is unchanged.
         for l in 0..cache_len {
-            let w = scores[l] * inv_denom;
             let v_row_ptr = v_base.add(l * row_bytes + kv_head * head_dim_bytes);
             for b in 0..blocks_per_head {
                 dequant_q8_0_block(v_row_ptr.add(b * Q8_0_BLOCK_BYTES), &mut v_block);
-                axpy_block_f32(out_row_ptr.add(b * Q8_0_BLOCK_SIZE), w, &v_block);
+                for gi in 0..group {
+                    let q_head = group_start + gi;
+                    let w = group_scores[gi * cache_len + l];
+                    let out_row_ptr = out_data.add(q_head * head_dim);
+                    axpy_block_f32(out_row_ptr.add(b * Q8_0_BLOCK_SIZE), w, &v_block);
+                }
             }
         }
     }
