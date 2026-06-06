@@ -2534,7 +2534,10 @@ pub extern "C" fn rayzor_tensor_simd_mul_f32(dst: i32, a: i32, b: i32, n: i32) {
     }
 }
 
-/// Vectorized f32 dot product
+/// Vectorized f32 dot product. Uses the relaxed-SIMD `f32x4.relaxed_madd`
+/// fused multiply-add when available — single rounding per pair, half
+/// the instruction count of separate fmul + fadd, and lets the runtime
+/// pick the hardware FMA on host CPUs that have it (M-series, AVX2+).
 #[no_mangle]
 pub extern "C" fn rayzor_tensor_simd_dot_f32(a: i32, b: i32, n: i32) -> f32 {
     unsafe {
@@ -2549,7 +2552,14 @@ pub extern "C" fn rayzor_tensor_simd_dot_f32(a: i32, b: i32, n: i32) -> f32 {
             while i + 4 <= count {
                 let va = v128_load(pa.add(i) as *const v128);
                 let vb = v128_load(pb.add(i) as *const v128);
-                acc = f32x4_add(acc, f32x4_mul(va, vb));
+                #[cfg(target_feature = "relaxed-simd")]
+                {
+                    acc = f32x4_relaxed_madd(va, vb, acc);
+                }
+                #[cfg(not(target_feature = "relaxed-simd"))]
+                {
+                    acc = f32x4_add(acc, f32x4_mul(va, vb));
+                }
                 i += 4;
             }
             sum = f32x4_extract_lane::<0>(acc) + f32x4_extract_lane::<1>(acc) +
@@ -2557,6 +2567,38 @@ pub extern "C" fn rayzor_tensor_simd_dot_f32(a: i32, b: i32, n: i32) -> f32 {
         }
         while i < count { sum += *pa.add(i) * *pb.add(i); i += 1; }
         sum
+    }
+}
+
+/// Vectorized f32 axpy: `dst[i] += w * src[i]`. The native runtime's
+/// flash_attn_decode + matmul accumulators use this exact shape — the
+/// fused multiply-add and the in-place destination make it cheap on
+/// hardware. relaxed_madd preserves the FMA when available.
+#[no_mangle]
+pub extern "C" fn rayzor_tensor_simd_axpy_f32(dst: i32, w: f32, src: i32, n: i32) {
+    unsafe {
+        let pd = dst as *mut f32;
+        let ps = src as *const f32;
+        let count = n as usize;
+        let mut i = 0;
+        #[cfg(target_feature = "simd128")]
+        {
+            let vw = f32x4_splat(w);
+            while i + 4 <= count {
+                let vs = v128_load(ps.add(i) as *const v128);
+                let vd = v128_load(pd.add(i) as *const v128);
+                #[cfg(target_feature = "relaxed-simd")]
+                let r = f32x4_relaxed_madd(vw, vs, vd);
+                #[cfg(not(target_feature = "relaxed-simd"))]
+                let r = f32x4_add(vd, f32x4_mul(vw, vs));
+                v128_store(pd.add(i) as *mut v128, r);
+                i += 4;
+            }
+        }
+        while i < count {
+            *pd.add(i) += w * *ps.add(i);
+            i += 1;
+        }
     }
 }
 
