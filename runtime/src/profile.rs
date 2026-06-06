@@ -117,9 +117,7 @@ pub extern "C" fn rayzor_dump_alloc_stats() {
     );
     // Also mirror to /tmp/rayzor-metrics-alloc.kv so `rayzor debug server`
     // can read the latest snapshot without parsing stderr.
-    let kv = format!(
-        "allocs={ac}\nfrees={fc}\nalloc_bytes={a}\nfree_bytes={f}\npeak={peak}\n"
-    );
+    let kv = format!("allocs={ac}\nfrees={fc}\nalloc_bytes={a}\nfree_bytes={f}\npeak={peak}\n");
     let _ = std::fs::write("/tmp/rayzor-metrics-alloc.kv", kv);
 }
 
