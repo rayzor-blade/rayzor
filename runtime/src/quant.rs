@@ -2171,29 +2171,37 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
         && x_is_contiguous(x_tensor);
     if use_sdot_threaded {
         let x_data = x_tensor_data_ptr(x_tensor);
-        let x_q8k = prepare_x_q8k_blocks(x_data, k);
 
-        if t <= 1 {
-            qmatmul_chunk_impl_sdot_q4km(qt_w, out_tensor, 0, n as i64, &x_q8k);
-            return out_tensor;
-        }
+        // Borrow the thread-local Q8K scratch for the duration of
+        // this call (held until the closure returns, AFTER the
+        // parallel_rows join — so workers' raw-ptr reads remain
+        // valid). The borrow stays on the caller thread; workers
+        // never touch the RefCell directly.
+        return X_Q8K_SCRATCH.with(|cell| {
+            let mut x_q8k = cell.borrow_mut();
+            prepare_x_q8k_blocks_into(x_data, k, &mut x_q8k);
+            let nb = k / Q4_K_M_BLOCK_SIZE;
 
-        // SAFETY: the pre-quantised slice outlives every worker
-        // because `parallel_rows` blocks the calling thread until
-        // all enqueued jobs complete. We hand workers a raw
-        // `(*const Q8KBlock, len)` to avoid the `Send`-ness gymnastics
-        // that would otherwise be required for the borrowed slice.
-        let q8k_ptr = x_q8k.as_ptr() as usize;
-        let q8k_len = x_q8k.len();
-        let qh = qt_w;
-        let yh = out_tensor;
-        crate::worker_pool::global().parallel_rows(n, t, move |lo, hi| unsafe {
-            let q8k_slice = std::slice::from_raw_parts(q8k_ptr as *const Q8KBlock, q8k_len);
-            qmatmul_chunk_impl_sdot_q4km(qh, yh, lo as i64, hi as i64, q8k_slice);
+            if t <= 1 {
+                qmatmul_chunk_impl_sdot_q4km(qt_w, out_tensor, 0, n as i64, &x_q8k[..nb]);
+                return out_tensor;
+            }
+
+            // SAFETY: the borrow on the thread-local Vec is held by
+            // this closure across the parallel_rows join; workers see
+            // only the raw `(*const Q8KBlock, len)` pair so no Send
+            // gymnastics, and the storage they read stays alive
+            // because the RefMut outlives the join.
+            let q8k_ptr = x_q8k.as_ptr() as usize;
+            let q8k_len = nb;
+            let qh = qt_w;
+            let yh = out_tensor;
+            crate::worker_pool::global().parallel_rows(n, t, move |lo, hi| unsafe {
+                let q8k_slice = std::slice::from_raw_parts(q8k_ptr as *const Q8KBlock, q8k_len);
+                qmatmul_chunk_impl_sdot_q4km(qh, yh, lo as i64, hi as i64, q8k_slice);
+            });
+            out_tensor
         });
-        // Keep the Vec alive until after the join.
-        drop(x_q8k);
-        return out_tensor;
     }
 
     if t <= 1 {
@@ -2372,105 +2380,96 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qkv_qt_t_f32_threaded(
         t = total_rows.max(1);
     }
 
-    // Pre-quantise X to Q8_K ONCE. All three weights share this
-    // view (same activation row, same K). The owning `Vec` lives in
-    // the outer scope until after the `parallel_rows` join.
+    // Pre-quantise X to Q8_K ONCE into the thread-local scratch.
+    // All three weights share this view (same activation row, same
+    // K). The borrow on the RefCell is held across the
+    // parallel_rows join so workers' raw-ptr reads of the scratch
+    // remain valid.
     let x_data = x_tensor_data_ptr(x_tensor);
-    let x_q8k = prepare_x_q8k_blocks(x_data, k);
+    X_Q8K_SCRATCH.with(|cell| {
+        let mut x_q8k = cell.borrow_mut();
+        prepare_x_q8k_blocks_into(x_data, k, &mut x_q8k);
+        let nb = k / Q4_K_M_BLOCK_SIZE;
 
-    // Single-threaded shortcut — keeps the inner kernel exactly the
-    // same as the threaded path so the byte-exact reduction order
-    // holds across `threads == 1` vs `threads > 1`.
-    if t <= 1 {
-        qmatmul_chunk_impl_sdot_q4km(q_w, out_q, 0, q_n as i64, &x_q8k);
-        qmatmul_chunk_impl_sdot_q4km(k_w, out_k, 0, k_n as i64, &x_q8k);
-        qmatmul_chunk_impl_sdot_q4km(v_w, out_v, 0, v_n as i64, &x_q8k);
-        drop(x_q8k);
+        // Single-threaded shortcut — keeps the inner kernel exactly
+        // the same as the threaded path so the byte-exact reduction
+        // order holds across `threads == 1` vs `threads > 1`.
+        if t <= 1 {
+            qmatmul_chunk_impl_sdot_q4km(q_w, out_q, 0, q_n as i64, &x_q8k[..nb]);
+            qmatmul_chunk_impl_sdot_q4km(k_w, out_k, 0, k_n as i64, &x_q8k[..nb]);
+            qmatmul_chunk_impl_sdot_q4km(v_w, out_v, 0, v_n as i64, &x_q8k[..nb]);
+            *out_q_tensor = out_q;
+            *out_k_tensor = out_k;
+            *out_v_tensor = out_v;
+            return;
+        }
+
+        // Multi-threaded fan-out over the concatenated row space.
+        // Concatenated layout: [0, q_n) → Q, [q_n, q_n+k_n) → K,
+        // [q_n+k_n, total_rows) → V. Each worker receives
+        // `[lo, hi) ⊆ [0, total_rows)`, clips that window against
+        // each per-weight band, and dispatches one chunk call per
+        // non-empty intersection. Output rows are disjoint across
+        // workers AND across the three output tensors, so no
+        // aliasing on any of Q/K/V outputs.
+        //
+        // SAFETY: the scratch borrow is held by this closure across
+        // the parallel_rows join, so the storage workers read via
+        // raw ptr stays alive throughout.
+        let q8k_ptr = x_q8k.as_ptr() as usize;
+        let q8k_len = nb;
+        let q_split = q_n;
+        let k_split = q_n + k_n;
+        let q_handle = q_w;
+        let k_handle = k_w;
+        let v_handle = v_w;
+        let out_q_handle = out_q;
+        let out_k_handle = out_k;
+        let out_v_handle = out_v;
+        crate::worker_pool::global().parallel_rows(total_rows, t, move |lo, hi| unsafe {
+            let q8k_slice = std::slice::from_raw_parts(q8k_ptr as *const Q8KBlock, q8k_len);
+
+            let q_lo = lo;
+            let q_hi = hi.min(q_split);
+            if q_lo < q_hi {
+                qmatmul_chunk_impl_sdot_q4km(
+                    q_handle,
+                    out_q_handle,
+                    q_lo as i64,
+                    q_hi as i64,
+                    q8k_slice,
+                );
+            }
+
+            let k_lo = lo.max(q_split);
+            let k_hi = hi.min(k_split);
+            if k_lo < k_hi {
+                qmatmul_chunk_impl_sdot_q4km(
+                    k_handle,
+                    out_k_handle,
+                    (k_lo - q_split) as i64,
+                    (k_hi - q_split) as i64,
+                    q8k_slice,
+                );
+            }
+
+            let v_lo = lo.max(k_split);
+            let v_hi = hi;
+            if v_lo < v_hi {
+                qmatmul_chunk_impl_sdot_q4km(
+                    v_handle,
+                    out_v_handle,
+                    (v_lo - k_split) as i64,
+                    (v_hi - k_split) as i64,
+                    q8k_slice,
+                );
+            }
+        });
+
         *out_q_tensor = out_q;
         *out_k_tensor = out_k;
         *out_v_tensor = out_v;
-        return 0;
-    }
-
-    // Multi-threaded fan-out over the concatenated row space.
-    //
-    // Concatenated layout: [0, q_n) → Q, [q_n, q_n+k_n) → K,
-    // [q_n+k_n, total_rows) → V.
-    //
-    // Each worker receives `[lo, hi) ⊆ [0, total_rows)`, clips that
-    // window against each per-weight band, and dispatches one chunk
-    // call per non-empty intersection. Output rows are disjoint
-    // across workers (the pool guarantees that for a single
-    // parallel_rows invocation) AND disjoint across the three
-    // output tensors (different allocations), so no aliasing on
-    // any of Q/K/V outputs.
-    //
-    // SAFETY: `q8k_ptr` outlives every worker because
-    // `parallel_rows` blocks until all jobs complete; the `drop`
-    // happens after the join. Same Send-dodging pattern as the
-    // single-projection SDOT path.
-    let q8k_ptr = x_q8k.as_ptr() as usize;
-    let q8k_len = x_q8k.len();
-    let q_split = q_n;
-    let k_split = q_n + k_n;
-    let q_handle = q_w;
-    let k_handle = k_w;
-    let v_handle = v_w;
-    let out_q_handle = out_q;
-    let out_k_handle = out_k;
-    let out_v_handle = out_v;
-    crate::worker_pool::global().parallel_rows(total_rows, t, move |lo, hi| unsafe {
-        let q8k_slice = std::slice::from_raw_parts(q8k_ptr as *const Q8KBlock, q8k_len);
-
-        // Q sub-range: [lo, hi) ∩ [0, q_split)
-        let q_lo = lo;
-        let q_hi = hi.min(q_split);
-        if q_lo < q_hi {
-            qmatmul_chunk_impl_sdot_q4km(
-                q_handle,
-                out_q_handle,
-                q_lo as i64,
-                q_hi as i64,
-                q8k_slice,
-            );
-        }
-
-        // K sub-range: [lo, hi) ∩ [q_split, k_split), translated
-        // into the K output's local row index space by subtracting
-        // `q_split`.
-        let k_lo = lo.max(q_split);
-        let k_hi = hi.min(k_split);
-        if k_lo < k_hi {
-            qmatmul_chunk_impl_sdot_q4km(
-                k_handle,
-                out_k_handle,
-                (k_lo - q_split) as i64,
-                (k_hi - q_split) as i64,
-                q8k_slice,
-            );
-        }
-
-        // V sub-range: [lo, hi) ∩ [k_split, total_rows), translated
-        // into the V output's local row index space.
-        let v_lo = lo.max(k_split);
-        let v_hi = hi;
-        if v_lo < v_hi {
-            qmatmul_chunk_impl_sdot_q4km(
-                v_handle,
-                out_v_handle,
-                (v_lo - k_split) as i64,
-                (v_hi - k_split) as i64,
-                q8k_slice,
-            );
-        }
     });
-
-    // Keep the Q8_K Vec alive until after the join.
-    drop(x_q8k);
-
-    *out_q_tensor = out_q;
-    *out_k_tensor = out_k;
-    *out_v_tensor = out_v;
     0
 }
 
@@ -2548,8 +2547,12 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_chunk(
         && x_is_contiguous(x_tensor)
     {
         let x_data = x_tensor_data_ptr(x_tensor);
-        let x_q8k = prepare_x_q8k_blocks(x_data, k);
-        qmatmul_chunk_impl_sdot_q4km(qt_w, y_tensor, n_start, n_end, &x_q8k);
+        X_Q8K_SCRATCH.with(|cell| {
+            let mut x_q8k = cell.borrow_mut();
+            prepare_x_q8k_blocks_into(x_data, k, &mut x_q8k);
+            let nb = k / Q4_K_M_BLOCK_SIZE;
+            qmatmul_chunk_impl_sdot_q4km(qt_w, y_tensor, n_start, n_end, &x_q8k[..nb]);
+        });
         return 1;
     }
 
@@ -2694,6 +2697,45 @@ unsafe fn prepare_x_q8k_blocks(x_data: *const f32, k: usize) -> Vec<Q8KBlock> {
     ];
     quantize_row_q8_K(x_slice, &mut dest);
     dest
+}
+
+/// Same as `prepare_x_q8k_blocks` but writes into a caller-provided
+/// `Vec<Q8KBlock>`, growing it in place if too small. Used by the
+/// threaded matmul entry points to reuse a thread-local scratch
+/// buffer across calls — for Llama-3.2-1B the per-call Vec is 8 ×
+/// 292 = 2.3 KB, allocated 5+ times per layer × 16 layers per token.
+/// Hoisting to the per-thread scratch saves ~80 allocations/token
+/// in steady-state decode and the zero-init pass on the freshly
+/// allocated Vec (`quantize_row_q8_K` overwrites every byte, so the
+/// `vec![]` macro's zero-init is pure waste).
+unsafe fn prepare_x_q8k_blocks_into(x_data: *const f32, k: usize, dest: &mut Vec<Q8KBlock>) {
+    debug_assert!(k.is_multiple_of(Q4_K_M_BLOCK_SIZE));
+    let nb = k / Q4_K_M_BLOCK_SIZE;
+    let x_slice = std::slice::from_raw_parts(x_data, k);
+    if dest.len() < nb {
+        dest.resize(
+            nb,
+            Q8KBlock {
+                d: 0.0,
+                qs: [0i8; 256],
+                bsums: [0i16; 16],
+            },
+        );
+    }
+    quantize_row_q8_K(x_slice, &mut dest[..nb]);
+}
+
+thread_local! {
+    /// Per-thread scratch buffer reused across `prepare_x_q8k_blocks`
+    /// calls on the calling thread. Sized to whatever the largest
+    /// `k / Q4_K_M_BLOCK_SIZE` value seen so far is — for Llama-3.2-1B
+    /// (k=2048) that's a single 2.3 KB buffer; for k=8192 (max ctx
+    /// hidden size used by some larger models) ~9 KB. Trivial RAM
+    /// cost per thread, and `quantize_row_q8_K` is called frequently
+    /// enough on the hot path that the saved allocator pressure
+    /// matters.
+    static X_Q8K_SCRATCH: std::cell::RefCell<Vec<Q8KBlock>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// SDOT-specialised chunk impl. Computes `y[0, n_idx] = X · Wq[n_idx, :]`
