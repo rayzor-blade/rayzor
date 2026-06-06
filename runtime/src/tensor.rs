@@ -2819,73 +2819,154 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode(
     let k_data = k.data as *const f32;
     let v_data = v.data as *const f32;
     let out_data = r.data as *mut f32;
-    let scale_f32 = scale as f32;
 
-    // Scores scratch — stack-bounded by cache_len. For Llama-3.2-1B with
-    // ctx=4096 this caps at 16 KB of stack per call (4096 f32). Heap-
-    // promote if a model ever asks for more.
-    let mut scores: Vec<f32> = vec![0.0; cache_len];
-
-    // For each query head: dot Q[h] against every K[l, kv_head], softmax,
-    // accumulate against V[l, kv_head]. GQA broadcast is implicit — kv_head
-    // = q_head / group; multiple Q-heads share the same K/V rows but read
-    // them independently from the un-expanded cache (no materialised copy).
+    // Each q_head writes a disjoint head_dim slice of `out_data`
+    // (`out_data[q_head * head_dim .. q_head * head_dim + head_dim]`)
+    // and reads only Q[q_head] + K[*, kv_head] + V[*, kv_head] — no
+    // cross-q_head reduction. So workers can fan out over the q_head
+    // axis without synchronisation.
     //
-    // The Q·K dot and weighted V sum (axpy) inner loops route through
-    // `tensor_simd::dot_slice_f32` and `tensor_simd::axpy_slice`, which
-    // carry NEON (aarch64), SSE (x86_64), and autovectorised scalar
-    // implementations — the kernel stays portable to wasm, x86, and any
-    // other tier without extra cfg gates here. Each per-q_head iteration
-    // saves head_dim × cache_len f32 FMAs from the scalar path; for
-    // Llama-3.2-1B (head_dim=64) the dot is a 4-wide SIMD chunk count
-    // of 16 per K row and the axpy is the same density across V rows.
-    for q_head in 0..num_q_heads {
-        let kv_head = q_head / group;
-        // Q row: contiguous head_dim slice. seq_q=1 collapses the outer
-        // axis so Q[0, q_head, :] is a flat head_dim run.
-        let q_row = std::slice::from_raw_parts(q_data.add(q_head * head_dim), head_dim);
-
-        // First pass: scores[l] = (Q[h] · K[l, kv_head, :]) * scale.
-        let mut max_score = f32::NEG_INFINITY;
-        for l in 0..cache_len {
-            let k_row = std::slice::from_raw_parts(
-                k_data.add(l * kv_row_stride + kv_head * head_dim),
+    // Parallelisation gate: short cache_len pays the worker_pool
+    // wake/join cost more than the kernel saves. Empirical A/B on
+    // M1 Pro (Voronoi long-form, parallel vs single-thread flash):
+    //
+    //   N=300 (cache ~316):  median +0.4% (sub-noise), thermal
+    //                        pairs lose 8% — workers compete with
+    //                        throttled matmul for cores
+    //   N=600 (cache ~616):  median +12.1%, two paired wins at +14%
+    //
+    // Crossover is around cache_len 400-500. Gate at cache_len ≥ 256
+    // so the per-q_head work (2 × cache_len × head_dim FMAs ≈ 32k
+    // for head_dim=64) is large enough to amortise the fork-join
+    // and stays out of the thermally-fragile short-cache regime.
+    // Below the gate, single-thread is both faster on cool runs
+    // AND more thermally stable.
+    let auto_threads: usize = 6;
+    let mut t = auto_threads.min(num_q_heads);
+    if cache_len < 256 || num_q_heads < 4 {
+        t = 1;
+    }
+    let scale_f32 = scale as f32;
+    if t <= 1 {
+        // Sequential fallback. Single scores scratch shared across q_heads.
+        let mut scores: Vec<f32> = vec![0.0; cache_len];
+        for q_head in 0..num_q_heads {
+            flash_attn_decode_one_qhead(
+                q_head,
+                group,
                 head_dim,
+                cache_len,
+                kv_row_stride,
+                scale_f32,
+                q_data,
+                k_data,
+                v_data,
+                out_data,
+                &mut scores,
             );
-            let s = crate::tensor_simd::dot_slice_f32(q_row, k_row) * scale_f32;
-            scores[l] = s;
-            if s > max_score {
-                max_score = s;
-            }
         }
+        return result;
+    }
 
-        // Second pass: softmax denominator, in the standard max-shifted
-        // form (matches `Tensor.softmax`'s reduction order).
-        let mut denom = 0.0f32;
-        for l in 0..cache_len {
-            let e = (scores[l] - max_score).exp();
-            scores[l] = e;
-            denom += e;
-        }
-        let inv_denom = 1.0 / denom;
-
-        // Third pass: context[q_head, :] = Σ_l (softmax[l] * V[l, kv_head, :]).
-        // Zero the output slot via slice fill then route the accumulate
-        // through `axpy_slice` so each V row's contribution lands as a
-        // single SIMD-vectorised pass over head_dim.
-        let out_row = std::slice::from_raw_parts_mut(out_data.add(q_head * head_dim), head_dim);
-        out_row.fill(0.0);
-        for l in 0..cache_len {
-            let w = scores[l] * inv_denom;
-            let v_row = std::slice::from_raw_parts(
-                v_data.add(l * kv_row_stride + kv_head * head_dim),
+    // Parallel fan-out. SAFETY: the raw `*const f32` / `*mut f32`
+    // pointers don't implement `Send`, so capture as `usize` and
+    // reconstitute inside the worker closure. Disjoint writes on
+    // `out_data` are guaranteed by the q_head split (each q_head
+    // owns a unique `[q_head * head_dim, (q_head+1) * head_dim)`
+    // band). Worker_pool::parallel_rows blocks until all jobs
+    // finish, so the borrowed pointers stay valid throughout.
+    let q_data_us = q_data as usize;
+    let k_data_us = k_data as usize;
+    let v_data_us = v_data as usize;
+    let out_data_us = out_data as usize;
+    crate::worker_pool::global().parallel_rows(num_q_heads, t, move |lo, hi| unsafe {
+        let q_ptr = q_data_us as *const f32;
+        let k_ptr = k_data_us as *const f32;
+        let v_ptr = v_data_us as *const f32;
+        let out_ptr = out_data_us as *mut f32;
+        // Per-worker scratch — reused across the worker's q_head
+        // range. One alloc per worker per call (~4 allocs total at
+        // t=6 worker spawn instead of 1; the cost amortises against
+        // the saved single-thread serialization).
+        let mut scores: Vec<f32> = vec![0.0; cache_len];
+        for q_head in lo..hi {
+            flash_attn_decode_one_qhead(
+                q_head,
+                group,
                 head_dim,
+                cache_len,
+                kv_row_stride,
+                scale_f32,
+                q_ptr,
+                k_ptr,
+                v_ptr,
+                out_ptr,
+                &mut scores,
             );
-            crate::tensor_simd::axpy_slice(out_row, w, v_row);
+        }
+    });
+
+    result
+}
+
+/// Inner per-q_head body shared between the sequential and parallel
+/// dispatch paths of `rayzor_tensor_flash_attn_decode`. Pulls the
+/// existing three-pass kernel out so both paths run byte-identical
+/// arithmetic — sequential and parallel produce bit-equal outputs
+/// because each q_head's three passes are independent and write a
+/// disjoint output band.
+#[inline]
+unsafe fn flash_attn_decode_one_qhead(
+    q_head: usize,
+    group: usize,
+    head_dim: usize,
+    cache_len: usize,
+    kv_row_stride: usize,
+    scale_f32: f32,
+    q_data: *const f32,
+    k_data: *const f32,
+    v_data: *const f32,
+    out_data: *mut f32,
+    scores: &mut [f32],
+) {
+    let kv_head = q_head / group;
+    let q_row = std::slice::from_raw_parts(q_data.add(q_head * head_dim), head_dim);
+
+    // First pass: scores[l] = (Q[h] · K[l, kv_head, :]) * scale.
+    let mut max_score = f32::NEG_INFINITY;
+    for l in 0..cache_len {
+        let k_row = std::slice::from_raw_parts(
+            k_data.add(l * kv_row_stride + kv_head * head_dim),
+            head_dim,
+        );
+        let s = crate::tensor_simd::dot_slice_f32(q_row, k_row) * scale_f32;
+        scores[l] = s;
+        if s > max_score {
+            max_score = s;
         }
     }
 
-    result
+    // Second pass: softmax denominator, in the standard max-shifted
+    // form (matches `Tensor.softmax`'s reduction order).
+    let mut denom = 0.0f32;
+    for l in 0..cache_len {
+        let e = (scores[l] - max_score).exp();
+        scores[l] = e;
+        denom += e;
+    }
+    let inv_denom = 1.0 / denom;
+
+    // Third pass: context[q_head, :] = Σ_l (softmax[l] * V[l, kv_head, :]).
+    let out_row = std::slice::from_raw_parts_mut(out_data.add(q_head * head_dim), head_dim);
+    out_row.fill(0.0);
+    for l in 0..cache_len {
+        let w = scores[l] * inv_denom;
+        let v_row = std::slice::from_raw_parts(
+            v_data.add(l * kv_row_stride + kv_head * head_dim),
+            head_dim,
+        );
+        crate::tensor_simd::axpy_slice(out_row, w, v_row);
+    }
 }
 
 /// Generate the RoPE cos/sin tables for a given head dimension and maximum
