@@ -4,3 +4,4 @@ entry = "Main.hx"
 
 [build]
 class-paths = [".", "../../"]
+native-libs = ["../../../target/release/libnue_plugins.dylib"]

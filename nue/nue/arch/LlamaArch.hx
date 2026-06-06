@@ -65,6 +65,17 @@ class LlamaArch implements ArchBuilder {
         var dtype = inferDType(weights, "token_embd.weight");
         var rope = new RoPE(meta.headDim, meta.maxSeqLen, meta.ropeBase);
 
+        // Q8_0 KV cache opt-in. Default off until we have wider
+        // workload coverage; `RAYZOR_KV_Q8=1` enables. Storage drops
+        // from `[max_seq, kv_heads, head_dim, F32]` to ~3.76× smaller
+        // Q8_0 blocks; decode dispatches through the fused
+        // `flashAttnDecodeQ8` kernel (single-pass dequant-on-load).
+        // Read here (in a method, threaded through ctor) rather than
+        // inside KVCache.new so the per-layer construction is free of
+        // env-lookup overhead and the build chain stays self-contained.
+        var kvQ8Env = Sys.getEnv("RAYZOR_KV_Q8");
+        var useKvQ8 = (kvQ8Env != null && kvQ8Env != "0" && kvQ8Env != "");
+
         // Phase 4b: the embedding stays Q6_K-native — `Embedding.fromQuant`
         // routes lookups through `QTensor.gatherRowsQ6K`, dequantising only
         // the per-step token rows instead of the full `[vocab, hidden]`
@@ -87,7 +98,7 @@ class LlamaArch implements ArchBuilder {
 
         var blocks:Array<Module> = [];
         for (i in 0...meta.numLayers) {
-            blocks.push(buildBlock(meta, i, dtype, rope, weights));
+            blocks.push(buildBlock(meta, i, dtype, rope, weights, useKvQ8));
         }
 
         var outputNorm = new RMSNorm(
@@ -142,7 +153,7 @@ class LlamaArch implements ArchBuilder {
 
     static function buildBlock(
         meta:ModelMetadata, layerIndex:Int, dtype:DType,
-        rope:RoPE, weights:NamedTensorMap
+        rope:RoPE, weights:NamedTensorMap, useKvQ8:Bool
     ):TransformerBlock {
         var prefix = "blk." + layerIndex + ".";
         var attnNorm = new RMSNorm(
@@ -150,7 +161,15 @@ class LlamaArch implements ArchBuilder {
             meta.normEps, "weight"
         );
 
-        var cache = new KVCache(meta.maxSeqLen, meta.numKvHeads, meta.headDim, dtype);
+        var cache = new KVCache(meta.maxSeqLen, meta.numKvHeads, meta.headDim, dtype, useKvQ8);
+        if (useKvQ8 && layerIndex == 0) {
+            if (cache.useQ8) {
+                Sys.println("[kv-cache] Q8_0 mode enabled");
+            } else {
+                Sys.println("[kv-cache] Q8_0 requested but head_dim=" + meta.headDim
+                    + " is not a multiple of 32 — falling back to F32");
+            }
+        }
         var qProj = buildLinear(weights, prefix + "attn_q.weight", null);
         var kProj = buildLinear(weights, prefix + "attn_k.weight", null);
         var vProj = buildLinear(weights, prefix + "attn_v.weight", null);
