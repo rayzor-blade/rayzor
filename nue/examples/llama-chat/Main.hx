@@ -362,7 +362,14 @@ class Main {
         trace("");
         trace("[done] " + nTokens[0] + " tokens in " + fmt(elapsed) + "s ("
             + fmt(nTokens[0] / elapsed) + " tok/s)");
-        trace("[output] " + output);
+        // The streaming callback above already printed every token. Gate
+        // the full-text dump behind RAYZOR_LLAMA_DUMP_OUTPUT=1 for
+        // diagnostic runs (e.g. when comparing decoded text against
+        // llama.cpp byte-for-byte). Default off — users see the stream
+        // exactly once.
+        if (Sys.getEnv("RAYZOR_LLAMA_DUMP_OUTPUT") != null) {
+            trace("[output] " + output);
+        }
     }
 
     static inline function fmt(x:Float):String {
