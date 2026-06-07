@@ -71,6 +71,12 @@ const TIMERS: &[&KernelTimer] = &[
     &TENSOR_GATHER_ROWS,
     &TENSOR_RESHAPE,
     &TENSOR_GET_FLAT,
+    // Phase-3 (added post-c5ab136 to measure how the kernel port
+    // shifted per-call composition): split matmul_qt_t into setup /
+    // dispatch_wait / per-worker active.
+    &MATMUL_QT_T_SETUP,
+    &MATMUL_QT_T_DISPATCH_WAIT,
+    &MATMUL_QT_T_WORK_PER_WORKER,
 ];
 
 pub static MATMUL_QT_T_F32_THREADED: KernelTimer = KernelTimer::new("matmul_qt_t_f32_threaded");
@@ -93,6 +99,10 @@ pub static TENSOR_ROPE: KernelTimer = KernelTimer::new("tensor_rope");
 pub static TENSOR_GATHER_ROWS: KernelTimer = KernelTimer::new("tensor_gather_rows");
 pub static TENSOR_RESHAPE: KernelTimer = KernelTimer::new("tensor_reshape");
 pub static TENSOR_GET_FLAT: KernelTimer = KernelTimer::new("tensor_get_flat");
+pub static MATMUL_QT_T_SETUP: KernelTimer = KernelTimer::new("matmul_qt_t.setup");
+pub static MATMUL_QT_T_DISPATCH_WAIT: KernelTimer = KernelTimer::new("matmul_qt_t.dispatch_wait");
+pub static MATMUL_QT_T_WORK_PER_WORKER: KernelTimer =
+    KernelTimer::new("matmul_qt_t.work_per_worker");
 
 /// Idempotent init. Reads `RAYZOR_KERNEL_TIMING` once, sets `ENABLED`,
 /// registers an atexit dumper. Call from program start or lazily from
