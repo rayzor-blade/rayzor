@@ -60,6 +60,19 @@ class GenerationLoop {
      * returning `false` from it aborts before the EOS / token limit.
      */
     public function generate(prompt:String, onToken:Int->String->Bool):String {
+        // Per-phase decode timing, env-gated. When `RAYZOR_PROFILE_DECODE`
+        // is set we accumulate wall time on each Haxe-source-level phase
+        // (forward, lastRow, sample, decode_str, free_logits) and emit a
+        // single `[profile-decode]` line at exit. Cheap when off — just
+        // five constant 0.0 inits and a single getenv probe per call.
+        var _profileOn = Sys.getEnv("RAYZOR_PROFILE_DECODE") != null;
+        var _pForward = 0.0;
+        var _pLastRow = 0.0;
+        var _pSample = 0.0;
+        var _pDecodeStr = 0.0;
+        var _pFreeLogits = 0.0;
+        var _pCount = 0;
+
         model.resetCache();
 
         var ids = tokenizer.encode(prompt);
@@ -86,11 +99,14 @@ class GenerationLoop {
             // only — decoding the entire ids array per token would
             // be O(N²) over generation length.
             if (onToken != null) {
+                var _t0 = _profileOn ? Sys.time() : 0.0;
                 var partial = tokenizer.decode(generated);
+                if (_profileOn) _pDecodeStr += Sys.time() - _t0;
                 if (!onToken(nextId, partial)) break;
             }
 
             step++;
+            _pCount++;
 
             // Decode step: only feed the latest token; KV cache
             // carries the rest of the context.
@@ -109,11 +125,34 @@ class GenerationLoop {
             // InsertFreePass doesn't recognise tensor returns so we
             // release them inline. The lastRow view sometimes IS the
             // input (1-D logits at prefill seq_len=1), guard the free.
+            var _t1 = _profileOn ? Sys.time() : 0.0;
             logits.free();
+            if (_profileOn) _pFreeLogits += Sys.time() - _t1;
+
+            _t1 = _profileOn ? Sys.time() : 0.0;
             logits = model.forwardIds([nextId]);
+            if (_profileOn) _pForward += Sys.time() - _t1;
+
+            _t1 = _profileOn ? Sys.time() : 0.0;
             var lrN = lastRow(logits);
+            if (_profileOn) _pLastRow += Sys.time() - _t1;
+
+            _t1 = _profileOn ? Sys.time() : 0.0;
             nextId = sampler.sample(lrN);
+            if (_profileOn) _pSample += Sys.time() - _t1;
+
             if (lrN != logits) lrN.free();
+        }
+
+        if (_profileOn && _pCount > 0) {
+            var _wall = _pForward + _pLastRow + _pSample + _pDecodeStr + _pFreeLogits;
+            Sys.println("[profile-decode] tokens=" + _pCount
+                + " wall_s=" + _wall
+                + " fwd_s=" + _pForward
+                + " lastRow_s=" + _pLastRow
+                + " sample_s=" + _pSample
+                + " decodeStr_s=" + _pDecodeStr
+                + " free_s=" + _pFreeLogits);
         }
 
         logits.free();
