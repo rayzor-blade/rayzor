@@ -203,6 +203,31 @@ impl InliningCostModel {
             return false;
         }
 
+        // Never inline forward-reference stubs. These are placeholder
+        // MIR bodies (single block, no instructions, `Unreachable`
+        // terminator) emitted by `register_stdlib_mir_forward_ref` for
+        // names that get bound to the real impl during link-time fixup
+        // (`fixup_stale_cross_module_refs` at compilation.rs:3617-3621).
+        // The runtime CallDirect targets the fixed-up real function, but
+        // the inliner only sees the stub body — it would inline a single
+        // `Unreachable` terminator at the call site, which leaves the
+        // continuation block predecessor-less and silently causes
+        // `UnreachableBlockEliminationPass` to delete every block after
+        // the call. Symptom: caller's post-call code disappears, the
+        // backend lowers what's left to `trap user100`, and the program
+        // SIGTRAPs at runtime. See bugs_sys_getenv_in_ctor_residual
+        // (same family) and the trace at GenerationLoop.generate where
+        // `lastRow`, `array_push`, `Tensor_free`, `Tensor_shape` were
+        // all being inlined as stubs.
+        let is_forward_ref_stub = callee.cfg.blocks.len() == 1
+            && callee.cfg.blocks.values().all(|b| {
+                b.instructions.is_empty()
+                    && matches!(b.terminator, super::IrTerminator::Unreachable)
+            });
+        if is_forward_ref_stub {
+            return false;
+        }
+
         // Always inline functions marked with InlineHint::Always (Haxe `inline` keyword)
         if callee.attributes.inline == super::InlineHint::Always {
             return true;
