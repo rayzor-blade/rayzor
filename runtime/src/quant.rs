@@ -2142,6 +2142,8 @@ pub unsafe extern "C" fn rayzor_tensor_gather_rows_q6_k(
 /// f32 `[M, N]`. Returns a fresh f32 Tensor; 0 on shape mismatch.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_qtensor_matmul_f32(qt_a: i64, b_tensor: i64) -> i64 {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::QTENSOR_MATMUL_F32);
     if qt_a == 0 || b_tensor == 0 {
         return 0;
     }
@@ -2277,6 +2279,9 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
     qt_w: i64,
     threads: i64,
 ) -> i64 {
+    crate::kernel_timing::init();
+    let _kt =
+        crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_QT_T_F32_THREADED);
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_matmul_qt_t_f32_threaded");
     if x_tensor == 0 || qt_w == 0 {
         return 0;
@@ -2446,6 +2451,9 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qkv_qt_t_f32_threaded(
     out_k_tensor: *mut i64,
     out_v_tensor: *mut i64,
 ) -> i64 {
+    crate::kernel_timing::init();
+    let _kt =
+        crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_QKV_QT_T_F32_THREADED);
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_matmul_qkv_qt_t_f32_threaded");
     // Null guards. `out_*_tensor` are written only on success, so we
     // refuse to run if any of them is null (otherwise the caller would
@@ -2686,6 +2694,8 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_chunk(
     n_start: i64,
     n_end: i64,
 ) -> i64 {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_QT_T_F32_CHUNK);
     if x_tensor == 0 || qt_w == 0 || y_tensor == 0 {
         return 0;
     }

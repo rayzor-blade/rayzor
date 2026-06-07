@@ -273,6 +273,8 @@ pub mod profile;
 #[cfg(feature = "profile")]
 pub use profile::{ensure_alloc_dump_hooks, TrackingAllocator};
 
+pub mod kernel_timing;
+
 /// Allocate tracked heap memory using Rust's global allocator.
 ///
 /// Compatible with libc malloc signature: fn(size) -> *mut u8
