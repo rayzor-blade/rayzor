@@ -76,6 +76,16 @@ pub struct CraneliftBackend {
     /// Set of Cranelift FuncIds that have already been defined (had their bodies compiled)
     defined_functions: BTreeSet<FuncId>,
 
+    /// Forward-reference stubs (1 block / 0 instructions / Unreachable terminator)
+    /// that we skipped compiling in compile_module's second pass. After all
+    /// modules are compiled, the safety net at finalize() time installs a
+    /// `define_trap_stub` for any of these whose Cranelift FuncId still has no
+    /// body. The "real" stdlib impl that arrives in a later module compiles
+    /// normally into the shared FuncId; only orphan stubs (no real-impl
+    /// follow-up) get the trap fallback so finalize_definitions doesn't panic.
+    /// See bugs_sys_call_in_generation_method (verdict workflow ws30c54xm).
+    pending_stub_safety_net: Vec<(IrFunctionId, IrFunction)>,
+
     /// Functions that are used as FunctionRef/MakeClosure targets (vtable/closure).
     /// These MUST keep the env parameter. All other functions can skip it
     /// for faster direct calls (eliminates ~2 billion env=0 pushes in fibonacci).
@@ -313,6 +323,7 @@ impl CraneliftBackend {
             pointer_type,
             module_counter: 0,
             defined_functions: BTreeSet::new(),
+            pending_stub_safety_net: Vec::new(),
             indirect_target_functions: BTreeSet::new(),
             functions_with_env: BTreeSet::new(),
             current_env_param: None,
@@ -678,6 +689,27 @@ impl CraneliftBackend {
                 debug!("Skipping extern function: {}", function.name);
                 continue;
             }
+            // Skip forward-reference stubs (1 block, 0 instructions, Unreachable).
+            // fixup_stale_cross_module_refs has already rewritten CallDirect targets
+            // to point at the real impl by name; compiling the stub body here would
+            // emit `trap user(100)` under a FuncId that the later real-impl
+            // compile_function call would early-return on (see line ~1708's
+            // defined_functions.contains check), silently eliding the real body.
+            // See bugs_sys_call_in_generation_method (verdict ws30c54xm).
+            // Defer trap-stub install to the finalize() safety net so the real
+            // impl (when it arrives in a later module) can take the FuncId.
+            if Self::is_forward_ref_stub(function) {
+                debug!("Skipping forward-ref stub: {}", function.name);
+                if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
+                    eprintln!(
+                        "[skip-stub:fwdref] {:?} {} (qn={:?})",
+                        func_id, function.name, function.qualified_name
+                    );
+                }
+                self.pending_stub_safety_net
+                    .push((*func_id, function.clone()));
+                continue;
+            }
             // Skip unmonomorphized generic template functions
             if !function.signature.type_params.is_empty() {
                 debug!("Skipping generic template function: {}", function.name);
@@ -756,6 +788,12 @@ impl CraneliftBackend {
                 }
             }
         }
+
+        // Install trap stubs for any forward-ref stub whose Cranelift FuncId
+        // never received a body during this compile (i.e. no real impl
+        // followed). Real-impl follow-ups have already defined the FuncId
+        // and are skipped by the safety net's defined_functions check.
+        self.install_pending_stub_safety_net();
 
         // Finalize the module
         self.module
@@ -908,6 +946,19 @@ impl CraneliftBackend {
                 debug!("Skipping extern function: {}", function.name);
                 continue;
             }
+            // Forward-reference stub skip (see compile_module for the rationale).
+            if Self::is_forward_ref_stub(function) {
+                debug!("Skipping forward-ref stub: {}", function.name);
+                if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
+                    eprintln!(
+                        "[skip-stub:fwdref] {:?} {} (qn={:?})",
+                        func_id, function.name, function.qualified_name
+                    );
+                }
+                self.pending_stub_safety_net
+                    .push((*func_id, function.clone()));
+                continue;
+            }
             if !function.signature.type_params.is_empty() {
                 debug!("Skipping generic template function: {}", function.name);
                 if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
@@ -1004,11 +1055,57 @@ impl CraneliftBackend {
         Ok(())
     }
 
+    /// True iff this IrFunction looks like a forward-reference stub: exactly
+    /// one block, that block has no instructions, and its terminator is
+    /// `IrTerminator::Unreachable`. Mirrors the recognizer in
+    /// `compilation.rs:3617` (originally added for `d5f2b48`). Used by the
+    /// compile_module loop to skip lowering the stub into a trap body that
+    /// would later block the real impl from defining the same FuncId.
+    fn is_forward_ref_stub(function: &IrFunction) -> bool {
+        function.cfg.blocks.len() == 1
+            && function.cfg.blocks.values().all(|b| {
+                b.instructions.is_empty()
+                    && matches!(b.terminator, crate::ir::IrTerminator::Unreachable)
+            })
+    }
+
+    /// Safety net for forward-reference stubs that were skipped at
+    /// compile time. After all modules have been processed, any stub
+    /// whose Cranelift FuncId still has no body gets a `trap user(1)`
+    /// installed so `finalize_definitions` doesn't panic. Stubs whose
+    /// real impl arrived in a later module have already been defined
+    /// by that impl's `compile_function` call and are skipped here.
+    fn install_pending_stub_safety_net(&mut self) {
+        let pending: Vec<(IrFunctionId, IrFunction)> =
+            std::mem::take(&mut self.pending_stub_safety_net);
+        for (mir_func_id, function) in pending {
+            let Some(&func_id) = self.function_map.get(&mir_func_id) else {
+                continue;
+            };
+            if self.defined_functions.contains(&func_id) {
+                continue;
+            }
+            if std::env::var("RAYZOR_DUMP_FN_PTRS").is_ok() {
+                eprintln!(
+                    "[safety-net:fwdref-stub] {:?} {} (qn={:?})",
+                    mir_func_id, function.name, function.qualified_name
+                );
+            }
+            if let Err(e) = self.define_trap_stub(mir_func_id, &function) {
+                warn!(
+                    "[safety-net] Failed to install trap stub for skipped stub '{}': {}",
+                    function.name, e
+                );
+            }
+        }
+    }
+
     /// Finalize all compiled modules.
     ///
     /// This must be called after all `compile_module_without_finalize` calls are complete.
     /// After finalization, function pointers can be retrieved via `get_function_ptr`.
     pub fn finalize(&mut self) -> Result<(), String> {
+        self.install_pending_stub_safety_net();
         self.module
             .finalize_definitions()
             .map_err(|e| format!("Failed to finalize definitions: {}", e))?;
