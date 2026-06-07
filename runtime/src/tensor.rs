@@ -1378,54 +1378,158 @@ pub unsafe extern "C" fn rayzor_tensor_topk_scan(
         None
     };
 
+    // Insert a candidate (lg, idx) into the top-K buffer. Caller has
+    // already filtered against the cutoff in the steady-state branch.
+    #[inline(always)]
+    unsafe fn insert_candidate(
+        lg: f64,
+        idx: i64,
+        out_logits: *mut f64,
+        out_ids: *mut i64,
+        end: usize,
+    ) {
+        let mut pos = end;
+        while pos > 0 && *out_logits.add(pos - 1) < lg {
+            *out_logits.add(pos) = *out_logits.add(pos - 1);
+            *out_ids.add(pos) = *out_ids.add(pos - 1);
+            pos -= 1;
+        }
+        *out_logits.add(pos) = lg;
+        *out_ids.add(pos) = idx;
+    }
+
+    // Fill phase: insertion-sort the first k candidates so the cutoff
+    // (out_logits[k-1]) is well-defined before the steady-state loop.
     let mut sz: usize = 0;
-    for i in 0..n {
+    let fill_end = k.min(n);
+    for i in 0..fill_end {
         let mut lg = (*src.add(i)) as f64;
         if let Some(recent) = recent {
-            // Linear scan of a 64-entry ring buffer. For typical decode
-            // patterns most candidates miss; branch predictor handles the
-            // hot "no-match" case cheaply. Keeps the per-iter cost matched
-            // to the Haxe path so the top-K survivors are byte-identical.
-            let mut hit = false;
-            let target = i as i64;
-            for &r in recent {
-                if r == target {
-                    hit = true;
-                    break;
-                }
-            }
-            if hit {
+            if recent_contains(recent, i as i64) {
                 lg = if lg > 0.0 { lg / rp } else { lg * rp };
             }
         }
+        insert_candidate(lg, i as i64, out_logits, out_ids, sz);
+        sz += 1;
+    }
 
-        if sz < k {
-            // Filling the buffer — insertion sort up to current size.
-            let mut pos = sz;
-            while pos > 0 && *out_logits.add(pos - 1) < lg {
-                *out_logits.add(pos) = *out_logits.add(pos - 1);
-                *out_ids.add(pos) = *out_ids.add(pos - 1);
-                pos -= 1;
+    if sz < k {
+        // n < k: tiny logits buffer; nothing more to do.
+        return sz as i64;
+    }
+
+    // Steady-state loop. The cutoff = out_logits[k-1] is the lowest of
+    // the current top-K survivors. In typical decode (k=50, n=128k) about
+    // 0.5% of logits beat it; the rest are pure fast-reject and the
+    // NEON pre-filter discards them four at a time.
+    let mut i = fill_end;
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        use std::arch::aarch64::*;
+        while i + 4 <= n {
+            let cutoff = *out_logits.add(k - 1);
+            // Load 4 f32 logits, widen to 2× f64.
+            let lg32 = vld1q_f32(src.add(i));
+            let lg_lo = vcvt_f64_f32(vget_low_f32(lg32));
+            let lg_hi = vcvt_high_f64_f32(lg32);
+            // Apply repetition penalty when needed. The penalty branches
+            // on a per-lane `is in recent` lookup, which is hard to
+            // SIMD-fuse with the cutoff compare — fall back to scalar
+            // for the penalize path's pre-filter.
+            if penalize {
+                // Scalar fast path: still amortise the load by computing
+                // the four f64s in one vector pair and storing to a
+                // tiny stack buffer.
+                let mut buf = [0f64; 4];
+                vst1q_f64(buf.as_mut_ptr(), lg_lo);
+                vst1q_f64(buf.as_mut_ptr().add(2), lg_hi);
+                let recent = recent.unwrap_unchecked();
+                for (j, &raw) in buf.iter().enumerate() {
+                    let mut lg = raw;
+                    if recent_contains(recent, (i + j) as i64) {
+                        lg = if lg > 0.0 { lg / rp } else { lg * rp };
+                    }
+                    if lg > cutoff {
+                        insert_candidate(lg, (i + j) as i64, out_logits, out_ids, k - 1);
+                    }
+                }
+            } else {
+                // No penalty: SIMD pre-filter against the cutoff.
+                let cutoff_v = vdupq_n_f64(cutoff);
+                let mask_lo = vcgtq_f64(lg_lo, cutoff_v);
+                let mask_hi = vcgtq_f64(lg_hi, cutoff_v);
+                let any_passes =
+                    vmaxvq_u32(vreinterpretq_u32_u64(vorrq_u64(mask_lo, mask_hi))) != 0;
+                if any_passes {
+                    let mut buf = [0f64; 4];
+                    vst1q_f64(buf.as_mut_ptr(), lg_lo);
+                    vst1q_f64(buf.as_mut_ptr().add(2), lg_hi);
+                    for (j, &lg) in buf.iter().enumerate() {
+                        // Re-check against the latest cutoff — earlier
+                        // lanes in this same chunk may have raised it.
+                        if lg > *out_logits.add(k - 1) {
+                            insert_candidate(lg, (i + j) as i64, out_logits, out_ids, k - 1);
+                        }
+                    }
+                }
             }
-            *out_logits.add(pos) = lg;
-            *out_ids.add(pos) = i as i64;
-            sz += 1;
-        } else if lg > *out_logits.add(k - 1) {
-            // Steady state — only insert if it beats the cutoff. The
-            // `<` (not `<=`) preserves the Haxe loop's tie-breaking, so
-            // identical logits keep their lower-index winner.
-            let mut pos = k - 1;
-            while pos > 0 && *out_logits.add(pos - 1) < lg {
-                *out_logits.add(pos) = *out_logits.add(pos - 1);
-                *out_ids.add(pos) = *out_ids.add(pos - 1);
-                pos -= 1;
-            }
-            *out_logits.add(pos) = lg;
-            *out_ids.add(pos) = i as i64;
+            i += 4;
         }
+    }
+    // Scalar tail (and the path taken on non-aarch64).
+    while i < n {
+        let mut lg = (*src.add(i)) as f64;
+        if let Some(recent) = recent {
+            if recent_contains(recent, i as i64) {
+                lg = if lg > 0.0 { lg / rp } else { lg * rp };
+            }
+        }
+        if lg > *out_logits.add(k - 1) {
+            insert_candidate(lg, i as i64, out_logits, out_ids, k - 1);
+        }
+        i += 1;
     }
 
     sz as i64
+}
+
+/// Linear "is `target` in `recent`?" check. The Haxe-side window is a
+/// 64-element ring buffer; on aarch64 we walk it 8 elements at a time
+/// via vceqq_s64 + horizontal OR, then a scalar tail for the remainder.
+#[inline(always)]
+unsafe fn recent_contains(recent: &[i64], target: i64) -> bool {
+    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
+    {
+        use std::arch::aarch64::*;
+        let target_v = vdupq_n_s64(target);
+        let mut i = 0;
+        let n = recent.len();
+        let ptr = recent.as_ptr();
+        while i + 8 <= n {
+            let r0 = vld1q_s64(ptr.add(i));
+            let r1 = vld1q_s64(ptr.add(i + 2));
+            let r2 = vld1q_s64(ptr.add(i + 4));
+            let r3 = vld1q_s64(ptr.add(i + 6));
+            let m0 = vceqq_s64(r0, target_v);
+            let m1 = vceqq_s64(r1, target_v);
+            let m2 = vceqq_s64(r2, target_v);
+            let m3 = vceqq_s64(r3, target_v);
+            let combined = vorrq_u64(vorrq_u64(m0, m1), vorrq_u64(m2, m3));
+            if vmaxvq_u32(vreinterpretq_u32_u64(combined)) != 0 {
+                return true;
+            }
+            i += 8;
+        }
+        while i < n {
+            if *ptr.add(i) == target {
+                return true;
+            }
+            i += 1;
+        }
+        return false;
+    }
+    #[allow(unreachable_code)]
+    recent.contains(&target)
 }
 
 /// tensor.get(indices_ptr, ndim) -> f64
