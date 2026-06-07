@@ -1264,6 +1264,8 @@ pub unsafe extern "C" fn rayzor_tensor_shape_ndim(tensor_ptr: i64) -> i64 {
 /// Returns 0.0 if `i` is out of range or the tensor handle is null.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_get_flat(tensor_ptr: i64, i: i64) -> f64 {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_GET_FLAT);
     if tensor_ptr == 0 {
         return 0.0;
     }
@@ -1759,6 +1761,8 @@ pub unsafe extern "C" fn rayzor_tensor_expand_kv_heads_axis1_f32(
 #[no_mangle]
 #[allow(clippy::manual_slice_size_calculation, clippy::needless_range_loop)]
 pub unsafe extern "C" fn rayzor_tensor_reshape(tensor_ptr: i64, shape_ptr: i64, ndim: i64) -> i64 {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_RESHAPE);
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_reshape");
     if tensor_ptr == 0 {
         return 0;
@@ -2259,6 +2263,8 @@ pub unsafe extern "C" fn rayzor_tensor_div(a: i64, b: i64) -> i64 {
 /// first hit to flag the slow path. Other dtypes (I32, I8, U8, FP8) abort.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_add_into(dest: i64, src: i64) {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_ADD_INTO);
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_add_into");
     if dest == 0 || src == 0 {
         eprintln!(
@@ -2503,6 +2509,8 @@ pub unsafe extern "C" fn rayzor_tensor_gelu(a: i64) -> i64 {
 /// SiLU / swish: x * sigmoid(x).
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_silu(a: i64) -> i64 {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_SILU);
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_silu");
     tensor_unary(a, |x| x / (1.0 + (-x).exp()))
 }
@@ -2510,6 +2518,8 @@ pub unsafe extern "C" fn rayzor_tensor_silu(a: i64) -> i64 {
 /// Softmax over the last dimension.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_softmax(a_ptr: i64) -> i64 {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_SOFTMAX);
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_softmax");
     if a_ptr == 0 {
         return 0;
@@ -2645,6 +2655,8 @@ pub unsafe extern "C" fn rayzor_tensor_layer_norm(a_ptr: i64, eps: f64) -> i64 {
 /// RMS normalization over the last dimension. x / sqrt(mean(x^2) + eps).
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_rms_norm(a_ptr: i64, eps: f64) -> i64 {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_RMS_NORM);
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_rms_norm");
     if a_ptr == 0 {
         return 0;
@@ -2721,6 +2733,8 @@ pub unsafe extern "C" fn rayzor_tensor_rope(
     sin_ptr: i64,
     position_offset: i64,
 ) -> i64 {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_ROPE);
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_rope");
     if x_ptr == 0 || cos_ptr == 0 || sin_ptr == 0 {
         return 0;
@@ -3588,6 +3602,8 @@ pub unsafe extern "C" fn rayzor_tensor_gather_rows(
     indices_ptr: i64,
     indices_len: i64,
 ) -> i64 {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_GATHER_ROWS);
     if table_ptr == 0 || indices_ptr == 0 || indices_len <= 0 {
         return 0;
     }
@@ -4158,6 +4174,8 @@ pub unsafe extern "C" fn rayzor_tensor_arc_clone(src: i64) -> i64 {
 /// `@:derive([Clone])` lowering in hir_to_mir.rs.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_clone(src: i64) -> i64 {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_CLONE);
     rayzor_tensor_arc_clone(src)
 }
 
@@ -4312,6 +4330,8 @@ pub unsafe extern "C" fn rayzor_tensor_free(tensor_ptr: i64) {
     if tensor_ptr == 0 {
         return;
     }
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TENSOR_FREE);
     TENSOR_FREE_INVOCATIONS.fetch_add(1, MemOrdering::Relaxed);
     let t = &*(tensor_ptr as *const RayzorTensor);
 
