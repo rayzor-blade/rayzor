@@ -2465,33 +2465,44 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32_threaded(
         && qt.scheme == QSCHEME_Q4_K_M
         && x_is_contiguous(x_tensor);
     if use_sdot_threaded {
+        // Phase timer: SETUP spans entry → just-before parallel_rows
+        // dispatch. Records X pre-quantize + scratch borrow + closure
+        // construction overhead.
+        let setup_guard =
+            crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_QT_T_SETUP);
         let x_data = x_tensor_data_ptr(x_tensor);
 
-        // Borrow the thread-local Q8K scratch for the duration of
-        // this call (held until the closure returns, AFTER the
-        // parallel_rows join — so workers' raw-ptr reads remain
-        // valid). The borrow stays on the caller thread; workers
-        // never touch the RefCell directly.
         return X_Q8K_SCRATCH.with(|cell| {
             let mut x_q8k = cell.borrow_mut();
             prepare_x_q8k_blocks_into(x_data, k, &mut x_q8k);
             let nb = k / Q4_K_M_BLOCK_SIZE;
 
             if t <= 1 {
+                drop(setup_guard);
                 qmatmul_chunk_impl_sdot_q4km(qt_w, out_tensor, 0, n as i64, &x_q8k[..nb]);
                 return out_tensor;
             }
 
-            // SAFETY: the borrow on the thread-local Vec is held by
-            // this closure across the parallel_rows join; workers see
-            // only the raw `(*const Q8KBlock, len)` pair so no Send
-            // gymnastics, and the storage they read stays alive
-            // because the RefMut outlives the join.
             let q8k_ptr = x_q8k.as_ptr() as usize;
             let q8k_len = nb;
             let qh = qt_w;
             let yh = out_tensor;
+            // SETUP ends at parallel_rows entry. DISPATCH_WAIT wraps
+            // the entire parallel_rows call (fork + worker work +
+            // join). The per-worker chunk_impl invocation is timed
+            // SEPARATELY by each worker via WORK_PER_WORKER — its
+            // call count is `parallel_rows_invocations * n_workers`,
+            // so divide its ns by num_matmul_calls (NOT call count)
+            // for per-matmul total work, or by call count for per-
+            // worker average.
+            drop(setup_guard);
+            let _dispatch_guard = crate::kernel_timing::TimerGuard::new(
+                &crate::kernel_timing::MATMUL_QT_T_DISPATCH_WAIT,
+            );
             crate::worker_pool::global().parallel_rows(n, t, move |lo, hi| unsafe {
+                let _work_guard = crate::kernel_timing::TimerGuard::new(
+                    &crate::kernel_timing::MATMUL_QT_T_WORK_PER_WORKER,
+                );
                 let q8k_slice = std::slice::from_raw_parts(q8k_ptr as *const Q8KBlock, q8k_len);
                 qmatmul_chunk_impl_sdot_q4km(qh, yh, lo as i64, hi as i64, q8k_slice);
             });
