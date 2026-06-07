@@ -3610,10 +3610,27 @@ impl CompilationUnit {
         // Key: name carried by the stub IrFunction (the qualified name
         // passed to `register_stdlib_mir_forward_ref`, e.g.
         // `pkg.Holder.findMeta`). Value: the stub's renumbered func_id.
-        let mut stub_ids_by_name: std::collections::BTreeMap<String, crate::ir::IrFunctionId> =
+        // For every IrFunctionId in any loaded module, if the function
+        // is an empty forward-ref stub, record its qualified name. The
+        // earlier version of this map was keyed BY-NAME (one entry per
+        // name, first-found wins) — but when the same stub name was
+        // registered in multiple modules (e.g. `string_concat` in both
+        // an import module via cached MIR AND a user module via a
+        // fresh `register_stdlib_mir_forward_ref` call during user-file
+        // lowering), only the first stub's id was retained. Any
+        // CallDirect pointing at the OTHER stub's id missed the rewrite
+        // and remained pointed at the eventual safety-net trap stub.
+        //
+        // Keying by ID (every stub id → its name) and looking up the
+        // current CallDirect's func_id directly avoids the
+        // first-stub-wins miss. The id space is unique per
+        // post-renumber session so there's no key collision.
+        let mut stub_name_by_id: std::collections::BTreeMap<crate::ir::IrFunctionId, String> =
             std::collections::BTreeMap::new();
-        for m in &self.import_mir_modules {
-            for (id, func) in &m.functions {
+        let mut record_stub =
+            |id: &crate::ir::IrFunctionId,
+             func: &crate::ir::IrFunction,
+             out: &mut std::collections::BTreeMap<crate::ir::IrFunctionId, String>| {
                 let is_empty_stub = func.cfg.blocks.len() == 1
                     && func.cfg.blocks.values().all(|b| {
                         b.instructions.is_empty()
@@ -3624,8 +3641,17 @@ impl CompilationUnit {
                         .qualified_name
                         .clone()
                         .unwrap_or_else(|| func.name.clone());
-                    stub_ids_by_name.insert(name, *id);
+                    out.insert(*id, name);
                 }
+            };
+        for m in &self.import_mir_modules {
+            for (id, func) in &m.functions {
+                record_stub(id, func, &mut stub_name_by_id);
+            }
+        }
+        for m in &self.mir_modules {
+            for (id, func) in &m.functions {
+                record_stub(id, func, &mut stub_name_by_id);
             }
         }
 
@@ -3640,7 +3666,7 @@ impl CompilationUnit {
         // the real stdlib impl. The previous version rewrote only the
         // import side, leaving user CallDirects pointing at stubs that
         // would never get a body.
-        let stub_ids_by_name = &stub_ids_by_name;
+        let stub_name_by_id = &stub_name_by_id;
         let stdlib_map = &self.stdlib_function_name_map;
         let all_func_ids = &all_func_ids;
 
@@ -3683,16 +3709,8 @@ impl CompilationUnit {
                                 // missing-impl error rather than silently
                                 // dispatching to an unrelated function).
                                 if all_func_ids.contains(func_id) {
-                                    if let Some(stub_name) =
-                                        stub_ids_by_name.iter().find_map(|(n, sid)| {
-                                            if sid == func_id {
-                                                Some(n.as_str())
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                    {
-                                        if let Some(&real_id) = stdlib_map.get(stub_name) {
+                                    if let Some(stub_name) = stub_name_by_id.get(func_id) {
+                                        if let Some(&real_id) = stdlib_map.get(stub_name.as_str()) {
                                             if real_id != *func_id {
                                                 *func_id = real_id;
                                             }
