@@ -2166,22 +2166,36 @@ impl CraneliftBackend {
         // RAYZOR_DUMP_CLIF=<substr> — dump CLIF for any function whose
         // name contains <substr>. One-shot debug helper; remove or
         // gate behind a proper flag once `rayzor debug` exists.
-        if let Ok(pat) = std::env::var("RAYZOR_DUMP_CLIF") {
-            if function.name.contains(&pat)
+        //
+        // NOTE: this site is BEFORE `module.define_function()`, which
+        // is where egraph elaboration / GVN / DCE / regalloc run. The
+        // dump here shows the user-built CLIF; the post-elaboration
+        // CLIF (what actually executes) lands AFTER define_function
+        // and is also dumped — set RAYZOR_DUMP_CLIF_STAGE=pre|post|both
+        // to control which. Default `both` is what most investigators
+        // want; the 2026-06-07 sys-call-loop-body workflow burnt three
+        // agent-rounds analysing the pre-elaboration CLIF thinking it
+        // was post-elaboration. Two clearly-labelled dumps avoids the
+        // same trap.
+        let dump_pat = std::env::var("RAYZOR_DUMP_CLIF").ok();
+        let dump_stage =
+            std::env::var("RAYZOR_DUMP_CLIF_STAGE").unwrap_or_else(|_| "both".to_string());
+        let dump_matches = dump_pat.as_ref().is_some_and(|pat| {
+            function.name.contains(pat)
                 || function
                     .qualified_name
                     .as_deref()
-                    .map(|n| n.contains(&pat))
+                    .map(|n| n.contains(pat))
                     .unwrap_or(false)
-            {
-                eprintln!(
-                    "\n=== CLIF for {} (mir={:?}, cl={:?}) ===\n{}\n=== /CLIF ===\n",
-                    function.name,
-                    mir_func_id,
-                    func_id,
-                    self.ctx.func.display()
-                );
-            }
+        });
+        if dump_matches && (dump_stage == "pre" || dump_stage == "both") {
+            eprintln!(
+                "\n=== CLIF[pre-elaboration] for {} (mir={:?}, cl={:?}) ===\n{}\n=== /CLIF[pre] ===\n",
+                function.name,
+                mir_func_id,
+                func_id,
+                self.ctx.func.display()
+            );
         }
         // Verify the function before defining (debug builds only)
         // This catches IR errors early but adds compilation overhead
@@ -2194,6 +2208,21 @@ impl CraneliftBackend {
         self.module
             .define_function(func_id, &mut self.ctx)
             .map_err(|e| format!("Failed to define function '{}': {}", function.name, e))?;
+
+        // Post-elaboration CLIF dump — what actually runs after egraph
+        // elaboration / GVN / DCE / regalloc. Pair with the pre-
+        // elaboration dump above; default `both` shows both, matched
+        // by RAYZOR_DUMP_CLIF substring. See the rationale at the
+        // pre-dump site for why two dumps matter.
+        if dump_matches && (dump_stage == "post" || dump_stage == "both") {
+            eprintln!(
+                "\n=== CLIF[post-elaboration] for {} (mir={:?}, cl={:?}) ===\n{}\n=== /CLIF[post] ===\n",
+                function.name,
+                mir_func_id,
+                func_id,
+                self.ctx.func.display()
+            );
+        }
 
         // Track that this function has been defined to prevent duplicate definitions
         self.defined_functions.insert(func_id);
