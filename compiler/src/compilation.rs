@@ -3629,8 +3629,22 @@ impl CompilationUnit {
             }
         }
 
-        for module in &mut self.import_mir_modules {
-            // Collect the external_function_names before mutating
+        // Apply the rewrite to BOTH import_mir_modules and mir_modules
+        // (the user modules). A user-file CallDirect like `Sys.println(...
+        // + counter)` lowers to a CallDirect targeting the stub
+        // `string_concat` registered via `register_stdlib_mir_forward_ref`
+        // — when that stub's renumbered id lands on a value the codegen
+        // backend's safety net then traps (see
+        // bugs_sys_call_in_generation_method's continuation), the user-
+        // module CallDirect site needs name-based resolution to point at
+        // the real stdlib impl. The previous version rewrote only the
+        // import side, leaving user CallDirects pointing at stubs that
+        // would never get a body.
+        let stub_ids_by_name = &stub_ids_by_name;
+        let stdlib_map = &self.stdlib_function_name_map;
+        let all_func_ids = &all_func_ids;
+
+        let mut rewrite_module = |module: &mut crate::ir::IrModule| {
             let ext_names = module.external_function_names.clone();
             for func in module.functions.values_mut() {
                 for block in func.cfg.blocks.values_mut() {
@@ -3654,9 +3668,7 @@ impl CompilationUnit {
                                 // makes the fixup robust against any
                                 // import-order-dependent id assignment.
                                 if let Some(name) = ext_names.get(func_id) {
-                                    if let Some(&current_id) =
-                                        self.stdlib_function_name_map.get(name)
-                                    {
+                                    if let Some(&current_id) = stdlib_map.get(name) {
                                         *func_id = current_id;
                                     }
                                     continue;
@@ -3680,9 +3692,7 @@ impl CompilationUnit {
                                             }
                                         })
                                     {
-                                        if let Some(&real_id) =
-                                            self.stdlib_function_name_map.get(stub_name)
-                                        {
+                                        if let Some(&real_id) = stdlib_map.get(stub_name) {
                                             if real_id != *func_id {
                                                 *func_id = real_id;
                                             }
@@ -3695,6 +3705,17 @@ impl CompilationUnit {
                     }
                 }
             }
+        };
+
+        for module in &mut self.import_mir_modules {
+            rewrite_module(module);
+        }
+        // `mir_modules` is `Vec<Arc<IrModule>>` (sharable across the
+        // pipeline). `Arc::make_mut` clones the inner module on demand if
+        // anyone else holds a handle; in the codegen-prep window only the
+        // CompilationContext owns these handles, so this is in-place.
+        for module in self.mir_modules.iter_mut() {
+            rewrite_module(std::sync::Arc::make_mut(module));
         }
     }
 
