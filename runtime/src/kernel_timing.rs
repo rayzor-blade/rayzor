@@ -54,6 +54,23 @@ const TIMERS: &[&KernelTimer] = &[
     &QTENSOR_MATMUL_F32,
     &MATMUL_QT_T_F32_CHUNK,
     &TOPK_SCAN,
+    // Phase-2 (added 2026-06-07 per workflow wjxvc4laa adversarial verdict):
+    // these previously-uninstrumented externs are suspect for the "257 ms
+    // unattributed Haxe orchestration" bucket the per-phase profile
+    // surfaced. They live in the LlamaModel forward path and run real
+    // Rust kernel work (refcount atomics, vectorised norms, gather,
+    // RoPE, in-place add). Without coverage, the per-phase profile
+    // mis-attributes their wall to "pure Haxe overhead".
+    &TENSOR_CLONE,
+    &TENSOR_FREE,
+    &TENSOR_ADD_INTO,
+    &TENSOR_RMS_NORM,
+    &TENSOR_SILU,
+    &TENSOR_SOFTMAX,
+    &TENSOR_ROPE,
+    &TENSOR_GATHER_ROWS,
+    &TENSOR_RESHAPE,
+    &TENSOR_GET_FLAT,
 ];
 
 pub static MATMUL_QT_T_F32_THREADED: KernelTimer = KernelTimer::new("matmul_qt_t_f32_threaded");
@@ -66,6 +83,16 @@ pub static FLASH_ATTN_DECODE: KernelTimer = KernelTimer::new("flash_attn_decode"
 pub static QTENSOR_MATMUL_F32: KernelTimer = KernelTimer::new("qtensor_matmul_f32");
 pub static MATMUL_QT_T_F32_CHUNK: KernelTimer = KernelTimer::new("matmul_qt_t_f32_chunk");
 pub static TOPK_SCAN: KernelTimer = KernelTimer::new("topk_scan");
+pub static TENSOR_CLONE: KernelTimer = KernelTimer::new("tensor_clone");
+pub static TENSOR_FREE: KernelTimer = KernelTimer::new("tensor_free");
+pub static TENSOR_ADD_INTO: KernelTimer = KernelTimer::new("tensor_add_into");
+pub static TENSOR_RMS_NORM: KernelTimer = KernelTimer::new("tensor_rms_norm");
+pub static TENSOR_SILU: KernelTimer = KernelTimer::new("tensor_silu");
+pub static TENSOR_SOFTMAX: KernelTimer = KernelTimer::new("tensor_softmax");
+pub static TENSOR_ROPE: KernelTimer = KernelTimer::new("tensor_rope");
+pub static TENSOR_GATHER_ROWS: KernelTimer = KernelTimer::new("tensor_gather_rows");
+pub static TENSOR_RESHAPE: KernelTimer = KernelTimer::new("tensor_reshape");
+pub static TENSOR_GET_FLAT: KernelTimer = KernelTimer::new("tensor_get_flat");
 
 /// Idempotent init. Reads `RAYZOR_KERNEL_TIMING` once, sets `ENABLED`,
 /// registers an atexit dumper. Call from program start or lazily from
