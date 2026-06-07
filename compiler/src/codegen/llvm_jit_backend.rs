@@ -2122,6 +2122,17 @@ impl<'ctx> LLVMJitBackend<'ctx> {
                 self.value_map.insert(*dest, src_value);
             }
 
+            IrInstruction::SsaBarrier { dest, src, ty: _ } => {
+                // LLVM-tier passthrough: the egraph elaboration class
+                // SsaBarrier closes lives in the Cranelift backend; LLVM
+                // does not exhibit the same elaboration of effectful
+                // Call results. If a future LLVM-tier bug requires
+                // opacity, replace this with `freeze` + a no-op
+                // `llvm.assume` or `inline_asm("")` pattern.
+                let src_value = self.get_value(*src)?;
+                self.value_map.insert(*dest, src_value);
+            }
+
             IrInstruction::Load { dest, ptr, ty } => {
                 // Skip void loads - insert placeholder
                 if *ty == IrType::Void {
