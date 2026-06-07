@@ -1338,6 +1338,8 @@ pub unsafe extern "C" fn rayzor_tensor_topk_scan(
     recent_len: i64,
     repetition_penalty: f64,
 ) -> i64 {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::TOPK_SCAN);
     if logits_ptr == 0 || out_logits_ptr == 0 || out_ids_ptr == 0 {
         return -1;
     }
@@ -2746,6 +2748,8 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode(
     v_ptr: i64,
     scale: f64,
 ) -> i64 {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::FLASH_ATTN_DECODE);
     let _hc = crate::heap_check::HeapCheckGuard::new("rayzor_tensor_flash_attn_decode");
     if q_ptr == 0 || k_ptr == 0 || v_ptr == 0 {
         return 0;
@@ -3637,6 +3641,8 @@ pub unsafe extern "C" fn rayzor_tensor_dot(a_ptr: i64, b_ptr: i64) -> f64 {
 /// Naive O(n³) matmul for [M,K] × [K,N] -> [M,N]
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_matmul(a_ptr: i64, b_ptr: i64) -> i64 {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL);
     if a_ptr == 0 || b_ptr == 0 {
         return 0;
     }
@@ -3784,6 +3790,8 @@ pub unsafe extern "C" fn rayzor_tensor_matmul(a_ptr: i64, b_ptr: i64) -> i64 {
 /// avoids the strided B access entirely.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_matmul_t(a_ptr: i64, b_ptr: i64) -> i64 {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_T);
     if a_ptr == 0 || b_ptr == 0 {
         return 0;
     }
@@ -3866,6 +3874,8 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_t_threaded(
     b_ptr: i64,
     threads: i64,
 ) -> i64 {
+    crate::kernel_timing::init();
+    let _kt = crate::kernel_timing::TimerGuard::new(&crate::kernel_timing::MATMUL_T_THREADED);
     if a_ptr == 0 || b_ptr == 0 {
         return 0;
     }
