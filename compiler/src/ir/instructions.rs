@@ -57,6 +57,30 @@ pub enum IrInstruction {
     /// Copy value from one register to another (for Copy types)
     Copy { dest: IrId, src: IrId },
 
+    /// SSA barrier — value-flow identity that no MIR pass and no
+    /// Cranelift egraph step may look through. Lowers to a real
+    /// backend instruction (`select_spectre_guard` on Cranelift,
+    /// `llvm.assume(true) + asm("" :: "r"(src))` on LLVM, a plain
+    /// value-copy in the interpreter).
+    ///
+    /// Semantics: `dest = src` value-wise; the barrier itself has
+    /// NO side effect. It exists only as an opacity hint to
+    /// optimizers — Copy / Add-0 / store-load / branch-phi all got
+    /// folded by some pass in the past; this primitive is built to
+    /// survive.
+    ///
+    /// Used at effectful CallDirect result sites where the value is
+    /// consumed across a block boundary, to dodge the
+    /// "Cranelift egraph elaborates effectful instruction" class
+    /// of bugs (see bugs_sys_getenv_in_ctor_residual and
+    /// bugs_sys_call_in_generation_method) and the downstream
+    /// "block cascade to Unreachable" symptom that's same family.
+    ///
+    /// CopyPropagationPass MUST treat this as opaque (do not
+    /// substitute `dest` uses with `src`) — see scalar_replacement
+    /// and copy_propagation pass implementations.
+    SsaBarrier { dest: IrId, src: IrId, ty: IrType },
+
     /// Move value (transfer ownership)
     Move { dest: IrId, src: IrId },
 
@@ -522,6 +546,7 @@ impl IrInstruction {
         match self {
             IrInstruction::Const { dest, .. } |
             IrInstruction::Copy { dest, .. } |
+            IrInstruction::SsaBarrier { dest, .. } |
             IrInstruction::Move { dest, .. } |
             IrInstruction::BorrowImmutable { dest, .. } |
             IrInstruction::BorrowMutable { dest, .. } |
@@ -575,6 +600,7 @@ impl IrInstruction {
         match self {
             IrInstruction::Const { dest, .. }
             | IrInstruction::Copy { dest, .. }
+            | IrInstruction::SsaBarrier { dest, .. }
             | IrInstruction::Move { dest, .. }
             | IrInstruction::BorrowImmutable { dest, .. }
             | IrInstruction::BorrowMutable { dest, .. }
@@ -626,6 +652,7 @@ impl IrInstruction {
     pub fn uses(&self) -> Vec<IrId> {
         match self {
             IrInstruction::Copy { src, .. } => vec![*src],
+            IrInstruction::SsaBarrier { src, .. } => vec![*src],
             IrInstruction::Load { ptr, .. } => vec![*ptr],
             IrInstruction::Store { ptr, value, .. } => vec![*ptr, *value],
             IrInstruction::BinOp { left, right, .. } => vec![*left, *right],

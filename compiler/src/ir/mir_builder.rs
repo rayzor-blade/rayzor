@@ -327,27 +327,34 @@ impl MirBuilder {
     /// Call a function directly
     pub fn call(&mut self, func_id: IrFunctionId, args: Vec<IrId>) -> Option<IrId> {
         // Clone the function signature data we need before any mutable borrows
-        let (return_ty, is_c_extern, param_types) = {
+        let (return_ty, is_c_extern, _param_types, is_extern_linkage) = {
             let func = self
                 .module
                 .functions
                 .get(&func_id)
                 .expect("Function not found");
-            let is_extern = func.signature.calling_convention == CallingConvention::C
+            let is_c_extern = func.signature.calling_convention == CallingConvention::C
                 && func.attributes.linkage == Linkage::External
                 && !cfg!(target_os = "windows");
+            let is_extern_linkage = func.attributes.linkage == Linkage::External;
             let params: Vec<IrType> = func
                 .signature
                 .parameters
                 .iter()
                 .map(|p| p.ty.clone())
                 .collect();
-            (func.signature.return_type.clone(), is_extern, params)
+            (
+                func.signature.return_type.clone(),
+                is_c_extern,
+                params,
+                is_extern_linkage,
+            )
         };
+        let _ = is_c_extern; // kept for future ABI-extension policy decisions
 
         let has_return = !matches!(return_ty, IrType::Void);
-        let dest = if has_return {
-            Some(self.alloc_reg_typed(return_ty))
+        let call_dest = if has_return {
+            Some(self.alloc_reg_typed(return_ty.clone()))
         } else {
             None
         };
@@ -366,14 +373,26 @@ impl MirBuilder {
             .map(|_| crate::ir::instructions::OwnershipMode::Move)
             .collect();
         self.insert_inst(IrInstruction::CallDirect {
-            dest,
+            dest: call_dest,
             func_id,
             args: adjusted_args,
             arg_ownership,
             type_args: Vec::new(),
             is_tail_call: false,
         });
-        dest
+
+        // SSA barrier for extern-linkage call results is emitted by
+        // the Cranelift backend in-place after CallDirect, NOT here.
+        // Auto-inserting a new IrId in MIR causes downstream uses to
+        // query the MIR type of barrier_dest, but the call's actual
+        // Cranelift Value may have a different machine class (e.g.
+        // MIR says F64 but the runtime returns I32). The class
+        // mismatch trips aarch64 gen_move's assertion.
+        //
+        // See docs/design/ssa_barrier_instruction.md (revised Phase 3:
+        // emit opacity in Cranelift backend, not MIR).
+        let _ = (is_extern_linkage, &return_ty); // suppress unused warnings
+        call_dest
     }
 
     /// Allocate memory

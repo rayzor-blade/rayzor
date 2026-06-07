@@ -628,6 +628,7 @@ impl CBackend {
             }
 
             IrInstruction::Copy { dest, src }
+            | IrInstruction::SsaBarrier { dest, src, .. }
             | IrInstruction::Move { dest, src }
             | IrInstruction::Clone { dest, src }
             | IrInstruction::BorrowImmutable { dest, src, .. }

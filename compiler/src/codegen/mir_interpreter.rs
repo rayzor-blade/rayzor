@@ -544,8 +544,12 @@ pub enum Opcode {
     // Ownership analysis hints (no runtime effect)
     MarkMoved = 56,
     CheckLive = 57,
+    // SSA barrier — value-flow identity that no optimizer may
+    // look through. Same handler as Copy in the interpreter (just
+    // copy the value); backends emit a real instruction.
+    SsaBarrier = 58,
     // Sentinel for table size
-    _Count = 58,
+    _Count = 59,
 }
 
 impl Opcode {
@@ -555,6 +559,7 @@ impl Opcode {
         match instr {
             IrInstruction::Const { .. } => Opcode::Const,
             IrInstruction::Copy { .. } => Opcode::Copy,
+            IrInstruction::SsaBarrier { .. } => Opcode::SsaBarrier,
             IrInstruction::Move { .. } => Opcode::Move,
             IrInstruction::BinOp { .. } => Opcode::BinOp,
             IrInstruction::UnOp { .. } => Opcode::UnOp,
@@ -1321,6 +1326,15 @@ impl MirInterpreter {
 
             IrInstruction::Copy { dest, src } => {
                 // NanBoxedValue is Copy - no clone needed!
+                let val = self.current_frame().registers.get(*src);
+                self.current_frame_mut().registers.set(*dest, val);
+            }
+
+            IrInstruction::SsaBarrier { dest, src, ty: _ } => {
+                // Interpreter is single-threaded with no optimizer
+                // looking through this — just a value copy. The
+                // barrier semantics only matter at the JIT codegen
+                // layer where Cranelift/LLVM might fold or elide it.
                 let val = self.current_frame().registers.get(*src);
                 self.current_frame_mut().registers.set(*dest, val);
             }

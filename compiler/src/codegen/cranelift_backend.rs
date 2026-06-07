@@ -2431,6 +2431,20 @@ impl CraneliftBackend {
                 // Note: src remains valid after copy
             }
 
+            IrInstruction::SsaBarrier { dest, src, ty: _ } => {
+                // SsaBarrier is emitted as a passthrough at this level
+                // because the actual opacity primitive for extern call
+                // results is inserted in-place by the CallDirect handler
+                // (which knows the call's actual Cranelift type and so
+                // can pick a class-correct primitive). Future MIR passes
+                // that emit SsaBarrier directly should rely on the
+                // ssa_barrier_value helper instead.
+                let src_value = *value_map
+                    .get(src)
+                    .ok_or_else(|| format!("SsaBarrier src {:?} not found", src))?;
+                value_map.insert(*dest, src_value);
+            }
+
             IrInstruction::Move { dest, src } => {
                 // Move: Transfer ownership - move the value and invalidate source
                 let src_value = *value_map
@@ -2966,7 +2980,8 @@ impl CraneliftBackend {
 
                     if let Some(result) = intrinsic_result {
                         if let Some(dest_reg) = dest {
-                            value_map.insert(*dest_reg, result);
+                            let opaque = Self::ssa_barrier_value(builder, result);
+                            value_map.insert(*dest_reg, opaque);
                         }
                     } else {
                         // Make the call
@@ -2976,7 +2991,13 @@ impl CraneliftBackend {
                         if let Some(dest_reg) = dest {
                             let results = builder.inst_results(call_inst);
                             if !results.is_empty() {
-                                value_map.insert(*dest_reg, results[0]);
+                                // Wrap extern-call result in an SSA barrier
+                                // that the Cranelift egraph cannot elaborate
+                                // through. Closes the bug class documented in
+                                // bugs_sys_getenv_in_ctor_residual + the
+                                // companion Sys-call-in-generate hang.
+                                let opaque = Self::ssa_barrier_value(builder, results[0]);
+                                value_map.insert(*dest_reg, opaque);
                             }
                         }
                     }
@@ -4697,6 +4718,41 @@ impl CraneliftBackend {
         };
 
         Ok(cl_value)
+    }
+
+    /// Wrap a value in an SSA barrier that the Cranelift egraph cannot
+    /// elaborate through. Used on extern-call results to keep effectful
+    /// callees from being hoisted across `if`/`else` boundaries during
+    /// elaboration (see bugs_sys_getenv_in_ctor_residual). Choice of
+    /// opacity primitive is type-driven because the aarch64 backend
+    /// asserts on register-class consistency in `gen_move`:
+    ///   - Float: `fadd(v, +0.0)`. Egraph does NOT fold `x + 0.0 → x`
+    ///     because of the `-0.0 + 0.0 = +0.0` rule under default FP.
+    ///   - Int / ptr / bool: stack slot store + load. Egraph leaves
+    ///     this path alone for I8/I16/I32/I64.
+    ///   - Other (vector etc.): pass through unmodified.
+    fn ssa_barrier_value(builder: &mut FunctionBuilder, value: Value) -> Value {
+        let ty = builder.func.dfg.value_type(value);
+        if ty.is_float() {
+            let zero = if ty == types::F32 {
+                builder.ins().f32const(0.0)
+            } else {
+                builder.ins().f64const(0.0)
+            };
+            builder.ins().fadd(value, zero)
+        } else if ty.is_int() {
+            let bytes = (ty.bits() / 8).max(1) as u32;
+            let align = (bytes.ilog2() as u8).min(3);
+            let slot = builder.create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                bytes,
+                align,
+            ));
+            builder.ins().stack_store(value, slot, 0);
+            builder.ins().stack_load(ty, slot, 0)
+        } else {
+            value
+        }
     }
 
     /// Convert MIR type to Cranelift type (static version for use without self)
