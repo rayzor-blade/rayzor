@@ -1,0 +1,6 @@
+[project]
+name = "imported-module-enum-payload"
+entry = "Main.hx"
+
+[build]
+class-paths = ["."]

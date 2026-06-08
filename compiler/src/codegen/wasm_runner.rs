@@ -292,6 +292,25 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         }
     }
 
+    fn wasm_addr(raw: i32) -> u32 {
+        raw as u32
+    }
+
+    fn wasm_addr_usize(raw: i32) -> usize {
+        wasm_addr(raw) as usize
+    }
+
+    fn looks_like_wasm_ptr(raw: i32) -> bool {
+        wasm_addr(raw) > 65536
+    }
+
+    fn ret_ptr(ptr: i32, ty: &ValType) -> Val {
+        match ty {
+            ValType::I64 => Val::I64(wasm_addr(ptr) as i64),
+            _ => Val::I32(ptr),
+        }
+    }
+
     /// Return an integer in whatever type the WASM import expects.
     fn ret_int(val: i32, ty: &ValType) -> Val {
         match ty {
@@ -363,12 +382,13 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
     fn unbox_int_from_memory(caller: &mut Caller<'_, WasmState>, raw: i32) -> i32 {
         // Heuristic: DynamicValue pointers are heap-allocated (> 64KB) and 4-byte aligned.
         // DynamicValue = { type_id: u32 (0-5), value_ptr: u32 }
-        if raw > 65536 && (raw & 3) == 0 {
-            if let Some(dv) = read_wasm_mem(caller, raw as usize, 8) {
+        let addr = wasm_addr(raw);
+        if addr > 65536 && (addr & 3) == 0 {
+            if let Some(dv) = read_wasm_mem(caller, addr as usize, 8) {
                 let type_id = u32::from_le_bytes(dv[0..4].try_into().unwrap());
                 let value_ptr = u32::from_le_bytes(dv[4..8].try_into().unwrap()) as usize;
                 // Valid DynamicValue type_ids: 0=Void, 1=Null, 2=Bool, 3=Int, 4=Float, 5=String
-                if matches!(type_id, 2 | 3) && value_ptr > 0 && value_ptr < 0x10000000 {
+                if matches!(type_id, 2 | 3) && value_ptr > 0 {
                     if let Some(vb) = read_wasm_mem(caller, value_ptr, 4) {
                         return i32::from_le_bytes(vb[0..4].try_into().unwrap());
                     }
@@ -430,11 +450,12 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
     }
 
     fn unbox_f64_from_memory(caller: &mut Caller<'_, WasmState>, raw: i32) -> f64 {
-        if raw > 65536 && (raw & 3) == 0 {
-            if let Some(dv) = read_wasm_mem(caller, raw as usize, 8) {
+        let addr = wasm_addr(raw);
+        if addr > 65536 && (addr & 3) == 0 {
+            if let Some(dv) = read_wasm_mem(caller, addr as usize, 8) {
                 let type_id = u32::from_le_bytes(dv[0..4].try_into().unwrap());
                 let value_ptr = u32::from_le_bytes(dv[4..8].try_into().unwrap()) as usize;
-                if type_id == 4 && value_ptr > 0 && value_ptr < 0x10000000 {
+                if type_id == 4 && value_ptr > 0 {
                     if let Some(vb) = read_wasm_mem(caller, value_ptr, 8) {
                         return f64::from_le_bytes(vb[0..8].try_into().unwrap());
                     }
@@ -596,20 +617,86 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         dv_addr as i32
     }
 
+    fn box_dynamic_header_in_wasm(
+        caller: &mut Caller<'_, WasmState>,
+        type_id: u32,
+        value_ptr: u32,
+    ) -> i32 {
+        let dv_addr = host_alloc(caller, 8);
+        write_wasm_mem(caller, dv_addr, &type_id.to_le_bytes());
+        write_wasm_mem(caller, dv_addr + 4, &value_ptr.to_le_bytes());
+        dv_addr as i32
+    }
+
+    fn box_int_quiet_in_wasm(caller: &mut Caller<'_, WasmState>, val: i32) -> i32 {
+        let val_addr = host_alloc(caller, 4);
+        write_wasm_mem(caller, val_addr, &val.to_le_bytes());
+        box_dynamic_header_in_wasm(caller, 3, val_addr)
+    }
+
+    fn box_bool_quiet_in_wasm(caller: &mut Caller<'_, WasmState>, val: bool) -> i32 {
+        let val_addr = host_alloc(caller, 4);
+        let raw = if val { 1i32 } else { 0i32 };
+        write_wasm_mem(caller, val_addr, &raw.to_le_bytes());
+        box_dynamic_header_in_wasm(caller, 2, val_addr)
+    }
+
+    fn read_haxe_string_raw(caller: &mut Caller<'_, WasmState>, ptr: i32) -> Option<String> {
+        let addr = wasm_addr(ptr);
+        if addr == 0 {
+            return None;
+        }
+        let header = read_wasm_mem(caller, addr as usize, 8)?;
+        let data_ptr = u32::from_le_bytes(header[0..4].try_into().ok()?) as usize;
+        let len = u32::from_le_bytes(header[4..8].try_into().ok()?) as usize;
+        if len == 0 {
+            return Some(String::new());
+        }
+        if len > 64 * 1024 * 1024 || data_ptr == 0 {
+            return None;
+        }
+        let bytes = read_wasm_mem(caller, data_ptr, len)?;
+        Some(String::from_utf8_lossy(&bytes).to_string())
+    }
+
     /// Read a HaxeString { data_ptr: u32, len: u32 } from WASM memory → Rust String.
     fn read_haxe_string(caller: &mut Caller<'_, WasmState>, str_ptr: i32) -> String {
-        let ptr = unbox_int_from_memory(caller, str_ptr) as usize;
-        if ptr == 0 {
-            return String::new();
-        }
-        if let Some(header) = read_wasm_mem(caller, ptr, 8) {
-            let data_ptr = u32::from_le_bytes(header[0..4].try_into().unwrap()) as usize;
-            let len = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
-            if let Some(bytes) = read_wasm_mem(caller, data_ptr, len) {
-                return String::from_utf8_lossy(&bytes).to_string();
+        let ptr = unbox_int_from_memory(caller, str_ptr);
+        read_haxe_string_raw(caller, ptr).unwrap_or_default()
+    }
+
+    fn format_std_string_ptr(caller: &mut Caller<'_, WasmState>, raw: i32) -> String {
+        let addr = wasm_addr(raw);
+        if addr > 65536 && (addr & 3) == 0 {
+            if let Some(dv) = read_wasm_mem(caller, addr as usize, 8) {
+                let type_id = u32::from_le_bytes(dv[0..4].try_into().unwrap());
+                let value_ptr = u32::from_le_bytes(dv[4..8].try_into().unwrap()) as i32;
+                match type_id {
+                    1 => return "null".to_string(),
+                    2 => return (unbox_int_from_memory(caller, raw) != 0).to_string(),
+                    3 => return unbox_int_from_memory(caller, raw).to_string(),
+                    4 => {
+                        if value_ptr > 0 {
+                            if let Some(bytes) = read_wasm_mem(caller, value_ptr as usize, 8) {
+                                let mut arr = [0u8; 8];
+                                arr.copy_from_slice(&bytes);
+                                return f64::from_le_bytes(arr).to_string();
+                            }
+                        }
+                    }
+                    5 => {
+                        if let Some(s) = read_haxe_string_raw(caller, value_ptr) {
+                            return s;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(s) = read_haxe_string_raw(caller, raw) {
+                return s;
             }
         }
-        String::new()
+        raw.to_string()
     }
 
     /// Write a Rust string into WASM memory as HaxeString { data_ptr, len, cap }.
@@ -681,10 +768,11 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         caller: &mut Caller<'_, WasmState>,
         header_ptr: i32,
     ) -> Option<(u32, u32, u32)> {
-        if header_ptr <= 0 {
+        let addr = wasm_addr(header_ptr);
+        if addr == 0 {
             return None;
         }
-        let hdr = read_wasm_mem(caller, header_ptr as usize, 12)?;
+        let hdr = read_wasm_mem(caller, addr as usize, 12)?;
         let data_ptr = u32::from_le_bytes(hdr[0..4].try_into().ok()?);
         let len = u32::from_le_bytes(hdr[4..8].try_into().ok()?);
         let cap = u32::from_le_bytes(hdr[8..12].try_into().ok()?);
@@ -700,7 +788,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         pos: usize,
         len: usize,
     ) -> Vec<u8> {
-        if handle > 65536 {
+        if looks_like_wasm_ptr(handle) {
             if let Some((data_addr, total_len, _)) = read_haxe_bytes_header(caller, handle) {
                 let end = pos.saturating_add(len).min(total_len as usize);
                 if pos < end {
@@ -733,7 +821,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
     /// Dual-mode write of a byte slice into a bytes handle.
     /// Silently truncates if `pos + data.len()` exceeds the bytes' length.
     fn write_bytes_slice(caller: &mut Caller<'_, WasmState>, handle: i32, pos: usize, data: &[u8]) {
-        if handle > 65536 {
+        if looks_like_wasm_ptr(handle) {
             if let Some((data_addr, total_len, _)) = read_haxe_bytes_header(caller, handle) {
                 let end = pos.saturating_add(data.len()).min(total_len as usize);
                 if pos < end {
@@ -758,7 +846,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         len: usize,
         val: u8,
     ) {
-        if handle > 65536 {
+        if looks_like_wasm_ptr(handle) {
             if let Some((data_addr, total_len, _)) = read_haxe_bytes_header(caller, handle) {
                 let end = pos.saturating_add(len).min(total_len as usize);
                 if pos < end {
@@ -778,7 +866,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
 
     /// Dual-mode total length of a bytes handle.
     fn bytes_total_len(caller: &mut Caller<'_, WasmState>, handle: i32) -> usize {
-        if handle > 65536 {
+        if looks_like_wasm_ptr(handle) {
             return read_haxe_bytes_header(caller, handle)
                 .map(|(_, len, _)| len as usize)
                 .unwrap_or(0);
@@ -804,12 +892,13 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         data_ptr: i32,
         len: i32,
     ) -> Vec<i32> {
-        if data_ptr <= 0 || len <= 0 {
+        let addr = wasm_addr(data_ptr);
+        if addr == 0 || len <= 0 {
             return vec![];
         }
         let stride = 8usize;
         let total = len as usize * stride;
-        if let Some(data) = read_wasm_mem(caller, data_ptr as usize, total) {
+        if let Some(data) = read_wasm_mem(caller, addr as usize, total) {
             return (0..len as usize)
                 .map(|i| {
                     i32::from_le_bytes(
@@ -830,12 +919,13 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         data_ptr: i32,
         len: i32,
     ) -> Vec<f64> {
-        if data_ptr <= 0 || len <= 0 {
+        let addr = wasm_addr(data_ptr);
+        if addr == 0 || len <= 0 {
             return vec![];
         }
         let stride = 8usize;
         let total = len as usize * stride;
-        if let Some(data) = read_wasm_mem(caller, data_ptr as usize, total) {
+        if let Some(data) = read_wasm_mem(caller, addr as usize, total) {
             return (0..len as usize)
                 .map(|i| {
                     f64::from_le_bytes(
@@ -850,7 +940,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
     }
 
     fn read_haxe_array_i32(caller: &mut Caller<'_, WasmState>, arr_ptr: i32) -> Vec<i32> {
-        let ptr = unbox_int_from_memory(caller, arr_ptr) as usize;
+        let ptr = wasm_addr_usize(unbox_int_from_memory(caller, arr_ptr));
         if ptr == 0 {
             return vec![];
         }
@@ -880,7 +970,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
     /// HaxeArray layout (32 bytes, MIR i64 stride):
     /// ptr at offset 0, len at offset 8, cap at offset 16, elem_size at offset 24
     fn read_haxe_array_f64(caller: &mut Caller<'_, WasmState>, arr_ptr: i32) -> Vec<f64> {
-        let ptr = unbox_int_from_memory(caller, arr_ptr) as usize;
+        let ptr = wasm_addr_usize(unbox_int_from_memory(caller, arr_ptr));
         if ptr == 0 {
             return vec![];
         }
@@ -1065,7 +1155,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let size = val_i32(&params[0]).max(0) as usize;
                             let header_ptr =
                                 write_haxe_bytes_in_wasm(&mut caller, &vec![0u8; size]);
-                            results[0] = ret_int(header_ptr, &rt);
+                            results[0] = ret_ptr(header_ptr, &rt);
                             Ok(())
                         },
                     )
@@ -1099,7 +1189,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         name,
                         func_ty.clone(),
                         move |mut caller, params, results| {
-                            let str_ptr = val_i32(&params[0]) as usize;
+                            let str_ptr = wasm_addr_usize(val_i32(&params[0]));
                             // Read HaxeString { data_ptr: i32, len: i32, cap: i32 } via
                             // the read_wasm_mem helper so we transparently pick up
                             // either exported or imported-shared linear memory.
@@ -1114,7 +1204,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                 vec![]
                             };
                             let header_ptr = write_haxe_bytes_in_wasm(&mut caller, &bytes);
-                            results[0] = ret_int(header_ptr, &rt);
+                            results[0] = ret_ptr(header_ptr, &rt);
                             Ok(())
                         },
                     )
@@ -1218,6 +1308,14 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let pos = val_i32(&params[1]) as usize;
                             let buf = read_bytes_slice(&mut caller, h, pos, 4);
                             let val = i32::from_le_bytes(buf[0..4].try_into().unwrap());
+                            if std::env::var_os("RAYZOR_WASM_TRACE_BYTES").is_some()
+                                && pos <= 24
+                            {
+                                let header = read_haxe_bytes_header(&mut caller, h);
+                                eprintln!(
+                                    "[wasm-runner] bytes.getInt32 h={h:#x} pos={pos} header={header:?} buf={buf:02x?} -> {val}"
+                                );
+                            }
                             results[0] = ret_int(val, &rt);
                             Ok(())
                         },
@@ -1478,7 +1576,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let abs = base.wrapping_add(off_lo | (off_hi << 32)) as usize;
                             // wasm-memory backed source: no copy, just a new
                             // header pointing at src.data + abs.
-                            if h > 65536 {
+                            if looks_like_wasm_ptr(h) {
                                 if let Some((data_addr, total_len, _)) =
                                     read_haxe_bytes_header(&mut caller, h)
                                 {
@@ -1489,7 +1587,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                         data_addr + abs as u32,
                                         view_len as u32,
                                     );
-                                    results[0] = ret_int(header_ptr, &rt);
+                                    results[0] = ret_ptr(header_ptr, &rt);
                                     return Ok(());
                                 }
                             }
@@ -1510,7 +1608,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                 })
                                 .unwrap_or_else(|| vec![0u8; len]);
                             let header_ptr = write_haxe_bytes_in_wasm(&mut caller, &sub);
-                            results[0] = ret_int(header_ptr, &rt);
+                            results[0] = ret_ptr(header_ptr, &rt);
                             Ok(())
                         },
                     )
@@ -1535,7 +1633,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let bytes = read_bytes_slice(&mut caller, h, 0, total);
                             let s = String::from_utf8_lossy(&bytes).into_owned();
                             let ptr = write_haxe_string(&mut caller, &s);
-                            results[0] = ret_int(ptr, &rt);
+                            results[0] = ret_ptr(ptr, &rt);
                             Ok(())
                         },
                     )
@@ -1558,7 +1656,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let len = unbox_int_from_memory(&mut caller, raw_len) as usize;
                             // wasm-memory backed source: no copy, just a new
                             // header pointing at src.data + pos.
-                            if h > 65536 {
+                            if looks_like_wasm_ptr(h) {
                                 if let Some((data_addr, total_len, _)) =
                                     read_haxe_bytes_header(&mut caller, h)
                                 {
@@ -1569,7 +1667,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                         data_addr + pos as u32,
                                         view_len as u32,
                                     );
-                                    results[0] = ret_int(header_ptr, &rt);
+                                    results[0] = ret_ptr(header_ptr, &rt);
                                     return Ok(());
                                 }
                             }
@@ -1587,7 +1685,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                 })
                                 .unwrap_or_else(|| vec![0u8; len]);
                             let header_ptr = write_haxe_bytes_in_wasm(&mut caller, &sub);
-                            results[0] = ret_int(header_ptr, &rt);
+                            results[0] = ret_ptr(header_ptr, &rt);
                             Ok(())
                         },
                     )
@@ -1634,7 +1732,15 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                     // linear memory so the runtime-wasm cdylib can dereference
                     // the handle as `*const HaxeBytes`.
                     let header_ptr = write_haxe_bytes_in_wasm(&mut caller, &data);
-                    results[0] = ret_int(header_ptr, &rt);
+                    if std::env::var_os("RAYZOR_WASM_TRACE_BYTES").is_some() {
+                        let prefix_len = data.len().min(24);
+                        eprintln!(
+                            "[wasm-runner] haxe_file_get_bytes path={path:?} len={} header={header_ptr:#x} first={:02x?}",
+                            data.len(),
+                            &data[..prefix_len]
+                        );
+                    }
+                    results[0] = ret_ptr(header_ptr, &rt);
                     Ok(())
                 },
             )
@@ -1698,7 +1804,75 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                     write_wasm_mem(&mut caller, header_addr + 20, &0u32.to_le_bytes());
                     write_wasm_mem(&mut caller, header_addr + 24, &8u32.to_le_bytes());
                     write_wasm_mem(&mut caller, header_addr + 28, &0u32.to_le_bytes());
-                    results[0] = ret_int(header_addr as i32, &rt);
+                    results[0] = ret_ptr(header_addr as i32, &rt);
+                    Ok(())
+                },
+            )
+            .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+        registered.insert(name.clone());
+    }
+
+    // -- Register typed Dynamic boxing host stub --
+    //
+    // Generic Optional<T> lowering uses this helper after monomorphization
+    // fills in the concrete type tag. The runtime-wasm cdylib does not yet
+    // export it, so leaving it to the generic zero stub makes nullable
+    // generic values collapse to null. GGUF metadata uses StringMap<MetaValue>,
+    // which exercises that path during lookup.
+    for (name, func_ty) in &rayzor_imports {
+        if registered.contains(name) {
+            continue;
+        }
+        if name != "haxe_box_typed_ptr" {
+            continue;
+        }
+        let rt = func_ty.results().next().unwrap_or(ValType::I32);
+        linker
+            .func_new(
+                "rayzor",
+                name,
+                func_ty.clone(),
+                move |mut caller, params, results| {
+                    let value = match params.first() {
+                        Some(Val::I64(x)) => *x as u64,
+                        Some(Val::I32(x)) => *x as u32 as u64,
+                        Some(Val::F64(x)) => *x,
+                        Some(Val::F32(x)) => *x as u64,
+                        _ => 0,
+                    };
+                    let type_tag = params.get(1).map(val_i32).unwrap_or(0);
+                    let out_ptr = match type_tag {
+                        // Tags match runtime/src/type_system.rs:
+                        // 1=Int, 2=Bool, 4=Float, 5=String, 6=Reference.
+                        1 => box_int_quiet_in_wasm(&mut caller, value as i32),
+                        2 => box_bool_quiet_in_wasm(&mut caller, value != 0),
+                        4 => box_float_in_wasm(&mut caller, f64::from_bits(value)),
+                        5 => {
+                            if value == 0 {
+                                box_dynamic_header_in_wasm(&mut caller, 1, 0)
+                            } else {
+                                box_dynamic_header_in_wasm(&mut caller, 5, value as u32)
+                            }
+                        }
+                        6 => {
+                            if value == 0 {
+                                box_dynamic_header_in_wasm(&mut caller, 1, 0)
+                            } else {
+                                box_dynamic_header_in_wasm(&mut caller, 6, value as u32)
+                            }
+                        }
+                        _ => box_int_quiet_in_wasm(&mut caller, value as i32),
+                    };
+                    if std::env::var_os("RAYZOR_WASM_TRACE_DYNAMIC").is_some() {
+                        eprintln!(
+                            "[wasm-runner] haxe_box_typed_ptr value={:#x} tag={} -> {:#x}",
+                            value, type_tag, out_ptr
+                        );
+                    }
+                    results[0] = match rt {
+                        ValType::I64 => Val::I64(out_ptr as u32 as i64),
+                        _ => Val::I32(out_ptr),
+                    };
                     Ok(())
                 },
             )
@@ -1750,6 +1924,9 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                 s.stringmap_handles.insert(id, BTreeMap::new());
                                 id
                             };
+                            if std::env::var_os("RAYZOR_WASM_TRACE_STRINGMAP").is_some() {
+                                eprintln!("[wasm-runner] stringmap.new -> h={id}");
+                            }
                             results[0] = ret_int(id, &rt);
                         }
                         "set" => {
@@ -1767,6 +1944,9 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             } else {
                                 0
                             };
+                            if std::env::var_os("RAYZOR_WASM_TRACE_STRINGMAP").is_some() {
+                                eprintln!("[wasm-runner] stringmap.set h={h} key={key:?} v={v:#x}");
+                            }
                             if let Some(map) = caller.data_mut().stringmap_handles.get_mut(&h) {
                                 map.insert(key, v);
                             }
@@ -1781,6 +1961,11 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                 .and_then(|m| m.get(&key))
                                 .copied()
                                 .unwrap_or(0);
+                            if std::env::var_os("RAYZOR_WASM_TRACE_STRINGMAP").is_some() {
+                                eprintln!(
+                                    "[wasm-runner] stringmap.get h={h} key={key:?} -> {val:#x}"
+                                );
+                            }
                             // Return either i32 or i64 depending on the
                             // declared result type.
                             match rt {
@@ -1797,6 +1982,11 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                 .get(&h)
                                 .map(|m| m.contains_key(&key))
                                 .unwrap_or(false);
+                            if std::env::var_os("RAYZOR_WASM_TRACE_STRINGMAP").is_some() {
+                                eprintln!(
+                                    "[wasm-runner] stringmap.exists h={h} key={key:?} -> {yes}"
+                                );
+                            }
                             results[0] = ret_int(if yes { 1 } else { 0 }, &rt);
                         }
                         "remove" => {
@@ -1808,6 +1998,11 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                 .get_mut(&h)
                                 .map(|m| m.remove(&key).is_some())
                                 .unwrap_or(false);
+                            if std::env::var_os("RAYZOR_WASM_TRACE_STRINGMAP").is_some() {
+                                eprintln!(
+                                    "[wasm-runner] stringmap.remove h={h} key={key:?} -> {removed}"
+                                );
+                            }
                             results[0] = ret_int(if removed { 1 } else { 0 }, &rt);
                         }
                         "keys" => {
@@ -1840,7 +2035,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             write_wasm_mem(&mut caller, header + 20, &0u32.to_le_bytes());
                             write_wasm_mem(&mut caller, header + 24, &8u32.to_le_bytes());
                             write_wasm_mem(&mut caller, header + 28, &0u32.to_le_bytes());
-                            results[0] = ret_int(header as i32, &rt);
+                            results[0] = ret_ptr(header as i32, &rt);
                         }
                         _ => {}
                     }
@@ -1891,7 +2086,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                 None => String::new(),
                             };
                             let ptr = write_haxe_string(&mut caller, &s);
-                            results[0] = ret_int(ptr, &rt);
+                            results[0] = ret_ptr(ptr, &rt);
                         }
                         _ => {}
                     }
@@ -1916,6 +2111,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             "haxe_std_parse_int" => "parse_int",
             "haxe_std_parse_float" => "parse_float",
             "haxe_std_string" => "string",
+            "haxe_std_string_ptr" => "string_ptr",
             _ => continue,
         };
         let rt = func_ty.results().next().unwrap_or(ValType::I32);
@@ -1967,7 +2163,12 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                 _ => String::new(),
                             };
                             let ptr = write_haxe_string(&mut caller, &formatted);
-                            results[0] = ret_int(ptr, &rt);
+                            results[0] = ret_ptr(ptr, &rt);
+                        }
+                        "string_ptr" => {
+                            let formatted = format_std_string_ptr(&mut caller, val_i32(&params[0]));
+                            let ptr = write_haxe_string(&mut caller, &formatted);
+                            results[0] = ret_ptr(ptr, &rt);
                         }
                         _ => {}
                     }
@@ -2008,7 +2209,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             match std::env::var(&key) {
                                 Ok(v) => {
                                     let ptr = write_haxe_string(&mut caller, &v);
-                                    results[0] = ret_int(ptr, &rt);
+                                    results[0] = ret_ptr(ptr, &rt);
                                 }
                                 Err(_) => {
                                     // Null pointer — Haxe's `Sys.getEnv` returns
