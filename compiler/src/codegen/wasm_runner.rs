@@ -2059,6 +2059,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         }
         let kind = match name.as_str() {
             "haxe_string_char_code_at" => "char_code_at",
+            "haxe_string_char_code_at_ptr" => "char_code_at",
             "haxe_string_from_char_code" => "from_char_code",
             _ => continue,
         };
