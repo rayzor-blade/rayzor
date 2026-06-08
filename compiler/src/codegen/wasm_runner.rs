@@ -787,6 +787,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             "haxe_bytes_blit" => Some("haxe_bytes_blit"),
             "haxe_bytes_compare" => Some("haxe_bytes_compare"),
             "haxe_bytes_sub" => Some("haxe_bytes_sub"),
+            "haxe_bytes_sub_base_u64lh" => Some("haxe_bytes_sub_base_u64lh"),
             "haxe_bytes_to_string" => Some("haxe_bytes_to_string"),
             // Bare names (from runtime-wasm module imports surviving linker merge)
             "alloc" => Some("haxe_bytes_alloc"),
@@ -1343,6 +1344,61 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                 a.cmp(b) as i32
                             };
                             results[0] = ret_int(cmp, &rt);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
+            // -- subWithBase(handle, base, offLo, offHi, len) -> handle --
+            //
+            // Wide-offset variant of `bytes.sub` for files > 2 GiB. The
+            // combined `base + (offHi << 32) + offLo` can exceed i32 range,
+            // which is why GGUFReader splits the u64 offset into two i32
+            // halves and passes both. Used by `tensorBytes(info)` to slice
+            // each Q4_K_M / Q6_K weight tensor out of the mmapped GGUF.
+            // See bugs_gguf_tensor_decode_crash for the historical fix.
+            "haxe_bytes_sub_base_u64lh" => {
+                let rt = ret_ty.clone();
+                linker
+                    .func_new(
+                        "rayzor",
+                        name,
+                        func_ty.clone(),
+                        move |mut caller, params, results| {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let base =
+                                unbox_int_from_memory(&mut caller, val_i32(&params[1])) as u64;
+                            let off_lo =
+                                unbox_int_from_memory(&mut caller, val_i32(&params[2])) as u64
+                                    & 0xFFFF_FFFF;
+                            let off_hi =
+                                unbox_int_from_memory(&mut caller, val_i32(&params[3])) as u64
+                                    & 0xFFFF_FFFF;
+                            let len =
+                                unbox_int_from_memory(&mut caller, val_i32(&params[4])) as usize;
+                            let abs = base.wrapping_add(off_lo | (off_hi << 32)) as usize;
+                            let sub = caller
+                                .data()
+                                .bytes_handles
+                                .get(&h)
+                                .map(|v| {
+                                    let end = abs.saturating_add(len).min(v.len());
+                                    if abs < end {
+                                        v[abs..end].to_vec()
+                                    } else {
+                                        vec![0u8; len]
+                                    }
+                                })
+                                .unwrap_or_else(|| vec![0u8; len]);
+                            let id = {
+                                let s = caller.data_mut();
+                                let id = s.next_bytes_id;
+                                s.next_bytes_id += 1;
+                                s.bytes_handles.insert(id, sub);
+                                id
+                            };
+                            results[0] = ret_int(id, &rt);
                             Ok(())
                         },
                     )
