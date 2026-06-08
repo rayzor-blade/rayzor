@@ -22,6 +22,7 @@ fn resolve_wasm_entry(
 ) -> Result<(PathBuf, Option<compiler::workspace::Project>), String> {
     match file {
         Some(file) => {
+            let file = normalize_entry_path(file)?;
             let project = find_project_for_file(&file);
             Ok((file, project))
         }
@@ -40,6 +41,17 @@ fn resolve_wasm_entry(
             Ok((entry, Some(project)))
         }
     }
+}
+
+fn normalize_entry_path(file: PathBuf) -> Result<PathBuf, String> {
+    let abs = if file.is_absolute() {
+        file
+    } else {
+        std::env::current_dir()
+            .map_err(|e| format!("failed to get cwd: {}", e))?
+            .join(file)
+    };
+    Ok(std::fs::canonicalize(&abs).unwrap_or(abs))
 }
 
 fn find_project_for_file(file: &Path) -> Option<compiler::workspace::Project> {
