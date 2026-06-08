@@ -8,6 +8,7 @@
 //! this is Step 3 (types + block ops; SDOT kernels land in Step 4).
 
 pub mod int8;
+pub mod matmul;
 pub mod q4_k_m;
 pub mod q6_k;
 pub mod q8_k;
