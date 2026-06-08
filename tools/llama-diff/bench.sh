@@ -145,6 +145,14 @@ bench_rayzor() {
     local failed=0
 
     for i in $(seq 1 "$RUNS"); do
+        # Optional thermal-cooldown between runs. M1 Pro decode tok/s is
+        # sensitive to package temperature — back-to-back runs after a
+        # release build can heat the cores enough that the first 1-2
+        # readings are 5-15% below steady state. Set BENCH_RUN_SPACING
+        # (seconds) to insert a sleep before each run except the first.
+        if [ "$i" -gt 1 ] && [ -n "${BENCH_RUN_SPACING:-}" ]; then
+            sleep "$BENCH_RUN_SPACING"
+        fi
         local line
         line=$(run_rayzor_once "$i")
         local tok decode n load wall
