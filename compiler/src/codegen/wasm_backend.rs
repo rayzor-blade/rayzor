@@ -342,6 +342,25 @@ impl CompileCtx {
         (params, results)
     }
 
+    fn sig_to_wasm_named(name: &str, sig: &IrFunctionSignature) -> (Vec<ValType>, Vec<ValType>) {
+        match name {
+            // Anonymous-object slots store raw Haxe Dynamic payload bits. Keep the
+            // value lane as i64 so F64/String/handle payloads round-trip through
+            // set/get without wasm32 Int narrowing.
+            "rayzor_anon_set_field_by_index" => {
+                (vec![ValType::I32, ValType::I32, ValType::I64], vec![])
+            }
+            "rayzor_anon_get_field_by_index" => {
+                (vec![ValType::I32, ValType::I32], vec![ValType::I64])
+            }
+            "rayzor_anon_new" => (vec![ValType::I32, ValType::I32], vec![ValType::I32]),
+            "rayzor_ensure_shape" => (vec![ValType::I32, ValType::I32], vec![]),
+            "rayzor_anon_clone" | "rayzor_anon_copy" => (vec![ValType::I32], vec![ValType::I32]),
+            "rayzor_anon_drop" => (vec![ValType::I32], vec![]),
+            _ => Self::sig_to_wasm(sig),
+        }
+    }
+
     // ------------------------------------------------------------------
     // Phase 1a -- imports (extern functions that have NO internal body)
     // ------------------------------------------------------------------
@@ -418,13 +437,13 @@ impl CompileCtx {
                         bare_to_qualified.insert(ext.name.clone(), qname.clone());
                         import_entries
                             .entry(qname)
-                            .or_insert_with(|| Self::sig_to_wasm(&ext.signature));
+                            .or_insert_with(|| Self::sig_to_wasm_named(&ext.name, &ext.signature));
                         continue;
                     }
                 }
                 import_entries
                     .entry(ext.name.clone())
-                    .or_insert_with(|| Self::sig_to_wasm(&ext.signature));
+                    .or_insert_with(|| Self::sig_to_wasm_named(&ext.name, &ext.signature));
             }
         }
 
@@ -470,9 +489,9 @@ impl CompileCtx {
                         let qualified_import = qn.replace('.', "_").to_lowercase();
                         if qualified_import != func.name {
                             bare_to_qualified.insert(func.name.clone(), qualified_import.clone());
-                            import_entries
-                                .entry(qualified_import)
-                                .or_insert_with(|| Self::sig_to_wasm(&func.signature));
+                            import_entries.entry(qualified_import).or_insert_with(|| {
+                                Self::sig_to_wasm_named(&func.name, &func.signature)
+                            });
                             continue;
                         }
                     }
@@ -491,15 +510,15 @@ impl CompileCtx {
                     };
                     if let Some(qname) = qualified {
                         bare_to_qualified.insert(func.name.clone(), qname.clone());
-                        import_entries
-                            .entry(qname)
-                            .or_insert_with(|| Self::sig_to_wasm(&func.signature));
+                        import_entries.entry(qname).or_insert_with(|| {
+                            Self::sig_to_wasm_named(&func.name, &func.signature)
+                        });
                         continue;
                     }
                 }
                 import_entries
                     .entry(func.name.clone())
-                    .or_insert_with(|| Self::sig_to_wasm(&func.signature));
+                    .or_insert_with(|| Self::sig_to_wasm_named(&func.name, &func.signature));
             }
         }
 
@@ -536,7 +555,7 @@ impl CompileCtx {
                 let resolved_name = bare_to_qualified.get(&ext.name).unwrap_or(&ext.name);
                 if let Some(&idx) = name_to_idx.get(resolved_name) {
                     self.ir_func_to_idx.entry(ext.id).or_insert(idx);
-                    let (params, _) = Self::sig_to_wasm(&ext.signature);
+                    let (params, _) = Self::sig_to_wasm_named(&ext.name, &ext.signature);
                     let ret = if let Some((_, results)) = import_entries.get(resolved_name) {
                         if results.is_empty() {
                             ValType::I32
@@ -683,7 +702,7 @@ impl CompileCtx {
 
             // @:jsImport functions become WASM imports from a named JS module
             if let Some((ref js_module, ref js_name)) = func.js_import {
-                let (params, results) = Self::sig_to_wasm(&func.signature);
+                let (params, results) = Self::sig_to_wasm_named(&func.name, &func.signature);
                 let type_idx = self.intern_type(params, results);
                 let func_idx = self.next_func_idx;
                 self.next_func_idx += 1;
@@ -733,7 +752,7 @@ impl CompileCtx {
                     }
                 }
             }
-            let (params, results) = Self::sig_to_wasm(&func.signature);
+            let (params, results) = Self::sig_to_wasm_named(&func.name, &func.signature);
             let type_idx = self.intern_type(params, results);
             let func_idx = self.next_func_idx;
             self.next_func_idx += 1;
@@ -1308,7 +1327,8 @@ impl CompileCtx {
                     });
                 if let Some(import_idx) = import_idx {
                     // Generate a thin forwarder that calls the import with type coercion.
-                    let (stub_params, stub_results) = Self::sig_to_wasm(&ir_func.signature);
+                    let (stub_params, stub_results) =
+                        Self::sig_to_wasm_named(&ir_func.name, &ir_func.signature);
                     let (import_params, import_results) =
                         if (import_idx as usize) < self.imports.len() {
                             let imp = &self.imports[import_idx as usize];
