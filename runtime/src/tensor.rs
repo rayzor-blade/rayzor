@@ -17,6 +17,13 @@ extern "C" {
     fn free(ptr: *mut u8);
 }
 
+// Pure-compute tensor helpers shared with `rayzor-runtime-wasm`. Currently
+// just the topk repetition-window scan; `flash_attn_decode_one_qhead`
+// stays native until runtime-core has a hardware-accelerated exp/expf path
+// (libm::expf under no_std is slower than the macOS Accelerate-tuned
+// libsystem_m route llvm picks for `f32::exp()` under std).
+use rayzor_runtime_core::tensor::topk::recent_contains;
+
 // =============================================================================
 // Tensor-data alloc counters. The global TrackingAllocator (`#[global_allocator]`)
 // only sees Rust's GlobalAlloc traffic; tensor data buffers go through
@@ -1493,45 +1500,6 @@ pub unsafe extern "C" fn rayzor_tensor_topk_scan(
     }
 
     sz as i64
-}
-
-/// Linear "is `target` in `recent`?" check. The Haxe-side window is a
-/// 64-element ring buffer; on aarch64 we walk it 8 elements at a time
-/// via vceqq_s64 + horizontal OR, then a scalar tail for the remainder.
-#[inline(always)]
-unsafe fn recent_contains(recent: &[i64], target: i64) -> bool {
-    #[cfg(all(target_arch = "aarch64", target_feature = "neon"))]
-    {
-        use std::arch::aarch64::*;
-        let target_v = vdupq_n_s64(target);
-        let mut i = 0;
-        let n = recent.len();
-        let ptr = recent.as_ptr();
-        while i + 8 <= n {
-            let r0 = vld1q_s64(ptr.add(i));
-            let r1 = vld1q_s64(ptr.add(i + 2));
-            let r2 = vld1q_s64(ptr.add(i + 4));
-            let r3 = vld1q_s64(ptr.add(i + 6));
-            let m0 = vceqq_s64(r0, target_v);
-            let m1 = vceqq_s64(r1, target_v);
-            let m2 = vceqq_s64(r2, target_v);
-            let m3 = vceqq_s64(r3, target_v);
-            let combined = vorrq_u64(vorrq_u64(m0, m1), vorrq_u64(m2, m3));
-            if vmaxvq_u32(vreinterpretq_u32_u64(combined)) != 0 {
-                return true;
-            }
-            i += 8;
-        }
-        while i < n {
-            if *ptr.add(i) == target {
-                return true;
-            }
-            i += 1;
-        }
-        return false;
-    }
-    #[allow(unreachable_code)]
-    recent.contains(&target)
 }
 
 /// tensor.get(indices_ptr, ndim) -> f64
@@ -3041,6 +3009,15 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode(
 /// arithmetic — sequential and parallel produce bit-equal outputs
 /// because each q_head's three passes are independent and write a
 /// disjoint output band.
+///
+/// Stays native (rather than moving to runtime-core alongside the other
+/// pure-compute helpers) because the softmax denominator uses
+/// `f32::exp()`, which routes through macOS Accelerate-tuned
+/// libsystem_m. A `no_std` port would have to fall back to `libm::expf`,
+/// a pure-Rust polynomial approximation that is measurably slower on the
+/// hot path (cache_len × n_q_heads × n_layers × tokens expf calls per
+/// decode). Migrate once `runtime-core` exposes a hardware-exp shim
+/// (function pointer set by `runtime/` at init).
 #[inline]
 #[allow(clippy::too_many_arguments)] // hot decode kernel; bundling into a struct would add a load on the inner loop
 #[allow(clippy::needless_range_loop)] // index drives three independent pointers (k, v, scores)

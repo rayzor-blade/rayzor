@@ -27,3 +27,4 @@ extern crate alloc;
 pub mod floats;
 pub mod quant;
 pub mod simd;
+pub mod tensor;
