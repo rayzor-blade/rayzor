@@ -78,6 +78,7 @@ impl WasmBackend {
     ) -> Result<Vec<u8>, String> {
         let mut ctx = CompileCtx::new();
         ctx.collect_imports(modules);
+        ctx.collect_indirect_targets(modules);
         ctx.collect_functions(modules);
         // Build qualified_to_import from the method map
         for (qualified, native) in qualified_method_map {
@@ -145,6 +146,7 @@ impl WasmBackend {
                 .insert(func_name.clone(), (module_name.clone(), func_name.clone()));
         }
         ctx.collect_imports(modules);
+        ctx.collect_indirect_targets(modules);
         ctx.collect_functions(modules);
         // Build fallback map: scan ALL functions for CallDirect targets not in ir_func_to_idx,
         // resolve them by name from extern_functions/functions across all modules.
@@ -283,6 +285,10 @@ struct CompileCtx {
     table_entries: BTreeMap<u32, u32>,
     /// Next available table slot.
     next_table_slot: u32,
+    /// MIR functions that are used as closure/function-reference targets.
+    indirect_target_functions: BTreeSet<IrFunctionId>,
+    /// MIR functions whose WASM signature was widened with a hidden env pointer.
+    functions_with_env: BTreeSet<IrFunctionId>,
     /// Qualified name → import index. Maps "rayzor.gpu.Surface.getFormat" → import idx for
     /// "rayzor_gpu_gfx_surface_get_format". Built from extern function qualified_name fields.
     qualified_to_import: BTreeMap<String, u32>,
@@ -313,6 +319,8 @@ impl CompileCtx {
             qualified_to_import: BTreeMap::new(),
             table_entries: BTreeMap::new(),
             next_table_slot: 1, // slot 0 is reserved (null)
+            indirect_target_functions: BTreeSet::new(),
+            functions_with_env: BTreeSet::new(),
         }
     }
 
@@ -358,6 +366,53 @@ impl CompileCtx {
             "rayzor_anon_clone" | "rayzor_anon_copy" => (vec![ValType::I32], vec![ValType::I32]),
             "rayzor_anon_drop" => (vec![ValType::I32], vec![]),
             _ => Self::sig_to_wasm(sig),
+        }
+    }
+
+    fn already_has_env_param(func: &IrFunction) -> bool {
+        func.signature
+            .parameters
+            .first()
+            .map_or(false, |p| p.name == "env")
+    }
+
+    fn needs_implicit_env(&self, func_id: &IrFunctionId, func: &IrFunction) -> bool {
+        self.indirect_target_functions.contains(func_id)
+            && !Self::already_has_env_param(func)
+            && func.signature.calling_convention != crate::ir::CallingConvention::C
+            && !func.cfg.blocks.is_empty()
+    }
+
+    fn wasm_sig_for_internal(
+        &mut self,
+        func_id: &IrFunctionId,
+        func: &IrFunction,
+    ) -> (Vec<ValType>, Vec<ValType>) {
+        let (mut params, results) = Self::sig_to_wasm_named(&func.name, &func.signature);
+        if self.needs_implicit_env(func_id, func) {
+            params.insert(0, ValType::I32);
+            self.functions_with_env.insert(*func_id);
+        }
+        (params, results)
+    }
+
+    fn collect_indirect_targets(&mut self, modules: &[&IrModule]) {
+        use crate::ir::IrInstruction;
+
+        for module in modules {
+            for func in module.functions.values() {
+                for block in func.cfg.blocks.values() {
+                    for inst in &block.instructions {
+                        match inst {
+                            IrInstruction::FunctionRef { func_id, .. }
+                            | IrInstruction::MakeClosure { func_id, .. } => {
+                                self.indirect_target_functions.insert(*func_id);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -674,22 +729,12 @@ impl CompileCtx {
                             (p, ir_type_to_wasm(&func.signature.return_type))
                         })
                 } else {
-                    let p: Vec<ValType> = func
-                        .signature
-                        .parameters
-                        .iter()
-                        .map(|p| ir_type_to_wasm(&p.ty))
-                        .collect();
-                    (p, ir_type_to_wasm(&func.signature.return_type))
+                    let (p, r) = self.wasm_sig_for_internal(func_id, func);
+                    (p, r.first().copied().unwrap_or(ValType::I32))
                 }
             } else {
-                let p: Vec<ValType> = func
-                    .signature
-                    .parameters
-                    .iter()
-                    .map(|p| ir_type_to_wasm(&p.ty))
-                    .collect();
-                (p, ir_type_to_wasm(&func.signature.return_type))
+                let (p, r) = self.wasm_sig_for_internal(func_id, func);
+                (p, r.first().copied().unwrap_or(ValType::I32))
             };
             self.func_return_types.insert(*func_id, ret_vt);
             self.func_param_types.insert(*func_id, param_vts);
@@ -752,7 +797,7 @@ impl CompileCtx {
                     }
                 }
             }
-            let (params, results) = Self::sig_to_wasm_named(&func.name, &func.signature);
+            let (params, results) = self.wasm_sig_for_internal(func_id, func);
             let type_idx = self.intern_type(params, results);
             let func_idx = self.next_func_idx;
             self.next_func_idx += 1;
@@ -1423,6 +1468,8 @@ struct FunctionLowerer<'a> {
 
     /// Number of WASM parameters (locals 0..param_count-1).
     param_count: u32,
+    /// Whether local 0 is an implicit closure env pointer, not a MIR parameter.
+    has_implicit_env_param: bool,
 
     /// Next available local index.
     next_local: u32,
@@ -1435,13 +1482,16 @@ struct FunctionLowerer<'a> {
 
 impl<'a> FunctionLowerer<'a> {
     fn lower(ctx: &'a CompileCtx, ir_func: &'a IrFunction) -> Result<Function, String> {
-        let param_count = ir_func.signature.parameters.len() as u32;
+        let has_implicit_env_param = ctx.functions_with_env.contains(&ir_func.id);
+        let param_offset = if has_implicit_env_param { 1 } else { 0 };
+        let param_count = ir_func.signature.parameters.len() as u32 + param_offset;
         let mut low = Self {
             ctx,
             ir_func,
             reg_to_local: BTreeMap::new(),
             local_types: Vec::new(),
             param_count,
+            has_implicit_env_param,
             next_local: param_count,
             block_order: Vec::new(),
             block_index: BTreeMap::new(),
@@ -1454,7 +1504,7 @@ impl<'a> FunctionLowerer<'a> {
 
         // Map parameter registers.
         for (i, param) in ir_func.signature.parameters.iter().enumerate() {
-            low.reg_to_local.insert(param.reg, i as u32);
+            low.reg_to_local.insert(param.reg, i as u32 + param_offset);
         }
 
         // Pre-allocate locals for every register used in the function.
@@ -1715,7 +1765,15 @@ impl<'a> FunctionLowerer<'a> {
     fn local_type_of(&self, id: IrId) -> Option<ValType> {
         let &local_idx = self.reg_to_local.get(&id)?;
         if local_idx < self.param_count {
+            if self.has_implicit_env_param && local_idx == 0 {
+                return Some(ValType::I32);
+            }
             let param_idx = local_idx as usize;
+            let param_idx = if self.has_implicit_env_param {
+                param_idx.saturating_sub(1)
+            } else {
+                param_idx
+            };
             self.ir_func
                 .signature
                 .parameters
@@ -2515,11 +2573,16 @@ impl<'a> FunctionLowerer<'a> {
             } => {
                 // Load args with type coercion to match callee signature
                 let callee_params = self.ctx.func_param_types.get(func_id);
+                let has_implicit_env = self.ctx.functions_with_env.contains(func_id);
+                let param_offset = if has_implicit_env { 1 } else { 0 };
+                if has_implicit_env {
+                    f.instruction(&Instruction::I32Const(0));
+                }
                 for (i, arg) in args.iter().enumerate() {
                     self.get_reg(f, *arg);
                     let arg_ty = self.reg_wasm_type(*arg);
                     if let Some(params) = callee_params {
-                        if let Some(&expected) = params.get(i) as Option<&ValType> {
+                        if let Some(&expected) = params.get(i + param_offset) as Option<&ValType> {
                             self.emit_type_coerce(f, arg_ty, expected);
                         }
                     }
@@ -2574,7 +2637,7 @@ impl<'a> FunctionLowerer<'a> {
                             .cloned()
                     };
                     if let Some((expected_params, expected_results)) = &callee_sig {
-                        let pushed = args.len();
+                        let pushed = args.len() + param_offset;
                         // Adjust params: drop extra or push zeros
                         if pushed > expected_params.len() {
                             for _ in 0..(pushed - expected_params.len()) {
@@ -2624,16 +2687,12 @@ impl<'a> FunctionLowerer<'a> {
                 signature,
                 ..
             } => {
-                for arg in args {
-                    self.get_reg(f, *arg);
-                }
-                self.get_reg(f, *func_ptr);
-                let actual_params: Vec<ValType> =
+                let actual_user_params: Vec<ValType> =
                     args.iter().map(|a| self.reg_wasm_type(*a)).collect();
                 let actual_results = dest
                     .map(|d| vec![self.reg_wasm_type(d)])
                     .unwrap_or_default();
-                let (mut params, mut results) = match signature {
+                let (user_params, mut results) = match signature {
                     IrType::Function {
                         params,
                         return_type,
@@ -2647,26 +2706,52 @@ impl<'a> FunctionLowerer<'a> {
                         };
                         (p, r)
                     }
-                    _ => (actual_params.clone(), actual_results.clone()),
+                    _ => (actual_user_params.clone(), actual_results.clone()),
                 };
-                if params.len() != actual_params.len() {
-                    params = actual_params.clone();
-                }
                 if dest.is_some() && results != actual_results {
                     results = actual_results.clone();
                 }
+
+                let mut params = Vec::with_capacity(user_params.len() + 1);
+                params.push(ValType::I32);
+                params.extend(user_params.iter().copied());
                 let type_idx = self
                     .ctx
                     .type_map
                     .get(&(params.clone(), results.clone()))
                     .copied()
                     .or_else(|| {
+                        let mut actual_params = Vec::with_capacity(actual_user_params.len() + 1);
+                        actual_params.push(ValType::I32);
+                        actual_params.extend(actual_user_params.iter().copied());
                         self.ctx
                             .type_map
-                            .get(&(actual_params, actual_results))
+                            .get(&(actual_params, actual_results.clone()))
                             .copied()
                     })
                     .unwrap_or(0);
+
+                // Stack order for call_indirect is: params..., table_index.
+                // Closure layout is { table_slot: i32, env_ptr: i32 } at offsets 0/8.
+                self.get_reg(f, *func_ptr);
+                f.instruction(&Instruction::I32Load(MemArg {
+                    offset: 8,
+                    align: 2,
+                    memory_index: 0,
+                }));
+                for (i, arg) in args.iter().enumerate() {
+                    self.get_reg(f, *arg);
+                    let arg_ty = self.reg_wasm_type(*arg);
+                    if let Some(&expected) = params.get(i + 1) {
+                        self.emit_type_coerce(f, arg_ty, expected);
+                    }
+                }
+                self.get_reg(f, *func_ptr);
+                f.instruction(&Instruction::I32Load(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
                 f.instruction(&Instruction::CallIndirect {
                     type_index: type_idx,
                     table_index: 0,
@@ -2703,8 +2788,43 @@ impl<'a> FunctionLowerer<'a> {
             // === FunctionRef ===
             IrInstruction::FunctionRef { dest, func_id } => {
                 let idx = self.ctx.ir_func_to_idx.get(func_id).copied().unwrap_or(0);
-                f.instruction(&Instruction::I32Const(idx as i32));
+                // Function values use the same closure-object ABI as lambdas:
+                // { table_slot, env_ptr }. Static function references carry a
+                // null env pointer; indirect calls still pass that env lane.
+                f.instruction(&Instruction::I32Const(16));
+                if let Some(&malloc_idx) = self.ctx.import_name_to_idx.get("malloc") {
+                    f.instruction(&Instruction::Call(malloc_idx));
+                } else if let Some(&malloc_idx) = self.ctx.func_name_to_idx.get("malloc") {
+                    f.instruction(&Instruction::Call(malloc_idx));
+                } else {
+                    f.instruction(&Instruction::Drop);
+                    f.instruction(&Instruction::GlobalGet(STACK_PTR_GLOBAL));
+                    f.instruction(&Instruction::I32Const(16));
+                    f.instruction(&Instruction::I32Sub);
+                    f.instruction(&Instruction::GlobalSet(STACK_PTR_GLOBAL));
+                    f.instruction(&Instruction::GlobalGet(STACK_PTR_GLOBAL));
+                }
                 self.set_reg(f, *dest);
+
+                f.instruction(&Instruction::I32Const(idx as i32));
+                f.instruction(&Instruction::RefFunc(idx));
+                f.instruction(&Instruction::TableSet(0));
+
+                self.get_reg(f, *dest);
+                f.instruction(&Instruction::I32Const(idx as i32));
+                f.instruction(&Instruction::I32Store(MemArg {
+                    offset: 0,
+                    align: 2,
+                    memory_index: 0,
+                }));
+
+                self.get_reg(f, *dest);
+                f.instruction(&Instruction::I32Const(0));
+                f.instruction(&Instruction::I32Store(MemArg {
+                    offset: 8,
+                    align: 2,
+                    memory_index: 0,
+                }));
             }
 
             // === MakeClosure ===
