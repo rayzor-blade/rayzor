@@ -6592,6 +6592,18 @@ impl<'a> HirToMirContext<'a> {
         args
     }
 
+    fn is_enum_symbol_expr(&self, expr: &HirExpr) -> bool {
+        match &expr.kind {
+            HirExprKind::Variable { symbol, .. } => self
+                .symbol_table
+                .get_symbol(*symbol)
+                .map(|sym| sym.kind == crate::tast::symbols::SymbolKind::Enum)
+                .unwrap_or(false),
+            HirExprKind::Cast { expr: inner, .. } => self.is_enum_symbol_expr(inner),
+            _ => false,
+        }
+    }
+
     /// Param-count aware static stdlib lookup.
     ///
     /// Prefer this where call argument count is known to avoid collisions such as
@@ -7197,6 +7209,54 @@ impl<'a> HirToMirContext<'a> {
             .build_bitcast(tag_gep, IrType::Ptr(Box::new(IrType::I32)))?;
         let tag_val = self.builder.build_const(IrValue::I32(tag_idx))?;
         self.builder.build_store(tag_ptr, tag_val)?;
+        self.builder.build_bitcast(ptr, IrType::I64)
+    }
+
+    /// Allocate a boxed enum struct with payload fields.
+    /// Layout: [tag:i32][pad:i32][field0:i64][field1:i64]...
+    fn build_boxed_enum_with_fields(
+        &mut self,
+        tag_idx: i32,
+        field_count: usize,
+        constructor_args: &[HirExpr],
+    ) -> Option<IrId> {
+        let struct_size = 8 + 8 * field_count;
+        let size_const = self.builder.build_const(IrValue::I64(struct_size as i64))?;
+        let alloc_func = self.get_or_register_extern_function(
+            "malloc",
+            vec![IrType::I64],
+            IrType::Ptr(Box::new(IrType::I8)),
+        );
+        let ptr = self.builder.build_call_direct(
+            alloc_func,
+            vec![size_const],
+            IrType::Ptr(Box::new(IrType::I8)),
+        )?;
+
+        let zero_offset = self.builder.build_const(IrValue::I64(0))?;
+        let tag_ptr =
+            self.builder
+                .build_gep(ptr, vec![zero_offset], IrType::Ptr(Box::new(IrType::I8)))?;
+        let tag_ptr_i32 = self
+            .builder
+            .build_bitcast(tag_ptr, IrType::Ptr(Box::new(IrType::I32)))?;
+        let tag_val = self.builder.build_const(IrValue::I32(tag_idx))?;
+        self.builder.build_store(tag_ptr_i32, tag_val)?;
+
+        for (i, arg) in constructor_args.iter().take(field_count).enumerate() {
+            let arg_reg = self.lower_expression(arg)?;
+            let field_offset = self.builder.build_const(IrValue::I64((8 + i * 8) as i64))?;
+            let field_ptr = self.builder.build_gep(
+                ptr,
+                vec![field_offset],
+                IrType::Ptr(Box::new(IrType::I8)),
+            )?;
+            let field_ptr_i64 = self
+                .builder
+                .build_bitcast(field_ptr, IrType::Ptr(Box::new(IrType::I64)))?;
+            self.builder.build_store(field_ptr_i64, arg_reg)?;
+        }
+
         self.builder.build_bitcast(ptr, IrType::I64)
     }
 
@@ -11760,6 +11820,68 @@ impl<'a> HirToMirContext<'a> {
                                                 expected_return_type.clone(),
                                             );
                                             return call_result;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Enum constructors can arrive as field callees for imported
+                // modules, e.g. `ForeignMetaish.U32(2048)`. Lower those here
+                // before the callee expression itself turns `Enum.Variant`
+                // into a tag-only value and drops the payload arguments.
+                if let HirExprKind::Field { object, field } = &callee.kind {
+                    if let HirExprKind::Variable {
+                        symbol: enum_symbol,
+                        ..
+                    } = &object.kind
+                    {
+                        if let Some(enum_sym) = self.symbol_table.get_symbol(*enum_symbol) {
+                            if enum_sym.kind == crate::tast::SymbolKind::Enum {
+                                let field_sym = self.symbol_table.get_symbol(*field);
+                                let field_name = field_sym
+                                    .and_then(|s| self.string_interner.get(s.name))
+                                    .unwrap_or("");
+
+                                if let Some(variants) =
+                                    self.symbol_table.get_enum_variants(*enum_symbol)
+                                {
+                                    for (idx, variant_id) in variants.iter().enumerate() {
+                                        let variant_sym = self.symbol_table.get_symbol(*variant_id);
+                                        let variant_name = variant_sym
+                                            .and_then(|s| self.string_interner.get(s.name))
+                                            .unwrap_or("");
+                                        let id_match = *variant_id == *field;
+                                        let name_match = !id_match && variant_name == field_name;
+
+                                        if id_match || name_match {
+                                            let field_count = self
+                                                .get_enum_variant_field_count(*enum_symbol, idx);
+                                            if field_count == 0 {
+                                                if self.enum_is_boxed(*enum_symbol) {
+                                                    return self
+                                                        .build_boxed_enum_tag_only(idx as i32);
+                                                }
+                                                return self
+                                                    .builder
+                                                    .build_const(IrValue::I64(idx as i64));
+                                            }
+
+                                            let constructor_args = if *is_method
+                                                && !args.is_empty()
+                                                && self.is_enum_symbol_expr(&args[0])
+                                            {
+                                                &args[1..]
+                                            } else {
+                                                args
+                                            };
+                                            return self.build_boxed_enum_with_fields(
+                                                idx as i32,
+                                                field_count,
+                                                constructor_args,
+                                            );
                                         }
                                     }
                                 }
@@ -31111,13 +31233,25 @@ impl<'a> HirToMirContext<'a> {
                     // No pattern means default case
                     self.builder.build_bool(true)
                 } else if case.patterns.len() == 1 {
-                    self.lower_pattern_test(scrut_val, &case.patterns[0])
+                    self.lower_pattern_test_with_scrutinee_type(
+                        scrut_val,
+                        &case.patterns[0],
+                        Some(scrutinee.ty),
+                    )
                 } else {
                     // Multiple patterns per case: OR them all together
-                    let mut result = self.lower_pattern_test(scrut_val, &case.patterns[0]);
+                    let mut result = self.lower_pattern_test_with_scrutinee_type(
+                        scrut_val,
+                        &case.patterns[0],
+                        Some(scrutinee.ty),
+                    );
                     for pat in &case.patterns[1..] {
                         if let Some(prev) = result {
-                            if let Some(pat_match) = self.lower_pattern_test(scrut_val, pat) {
+                            if let Some(pat_match) = self.lower_pattern_test_with_scrutinee_type(
+                                scrut_val,
+                                pat,
+                                Some(scrutinee.ty),
+                            ) {
                                 result = self.builder.build_binop(BinaryOp::Or, prev, pat_match);
                             }
                         }
@@ -31258,6 +31392,15 @@ impl<'a> HirToMirContext<'a> {
     }
 
     fn lower_pattern_test(&mut self, scrutinee: IrId, pattern: &HirPattern) -> Option<IrId> {
+        self.lower_pattern_test_with_scrutinee_type(scrutinee, pattern, None)
+    }
+
+    fn lower_pattern_test_with_scrutinee_type(
+        &mut self,
+        scrutinee: IrId,
+        pattern: &HirPattern,
+        scrutinee_type: Option<TypeId>,
+    ) -> Option<IrId> {
         // Test if scrutinee matches pattern
         // Returns a boolean IrId indicating match success
         match pattern {
@@ -31296,7 +31439,11 @@ impl<'a> HirToMirContext<'a> {
             } => {
                 // Constructor pattern: check enum tag and optionally extract fields.
                 // Resolve whether this enum uses boxed or unboxed representation.
-                let enum_symbol = self.resolve_enum_symbol(*enum_type);
+                let effective_enum_type = scrutinee_type
+                    .filter(|t| *t != TypeId::invalid())
+                    .filter(|t| self.resolve_enum_symbol(*t).is_some())
+                    .unwrap_or(*enum_type);
+                let enum_symbol = self.resolve_enum_symbol(effective_enum_type);
                 let mut is_boxed = enum_symbol.map_or(false, |s| self.enum_is_boxed(s));
 
                 // Override boxed/unboxed based on scrutinee register type:
@@ -31310,7 +31457,8 @@ impl<'a> HirToMirContext<'a> {
                 }
 
                 let variant_discriminant = self
-                    .resolve_enum_variant_discriminant(*enum_type, *variant)
+                    .resolve_enum_variant_discriminant(effective_enum_type, *variant)
+                    .or_else(|| self.resolve_enum_variant_discriminant(*enum_type, *variant))
                     .unwrap_or(0);
 
                 if !is_boxed {
@@ -31618,7 +31766,7 @@ impl<'a> HirToMirContext<'a> {
             HirPattern::Typed { pattern, ty } => {
                 // Typed pattern: check type and test inner pattern
                 // TODO: Implement type checking
-                self.lower_pattern_test(scrutinee, pattern)
+                self.lower_pattern_test_with_scrutinee_type(scrutinee, pattern, scrutinee_type)
             }
 
             HirPattern::Or(patterns) => {
@@ -31626,9 +31774,17 @@ impl<'a> HirToMirContext<'a> {
                 if patterns.is_empty() {
                     return self.builder.build_bool(false);
                 }
-                let mut result = self.lower_pattern_test(scrutinee, &patterns[0])?;
+                let mut result = self.lower_pattern_test_with_scrutinee_type(
+                    scrutinee,
+                    &patterns[0],
+                    scrutinee_type,
+                )?;
                 for pat in &patterns[1..] {
-                    let pat_match = self.lower_pattern_test(scrutinee, pat)?;
+                    let pat_match = self.lower_pattern_test_with_scrutinee_type(
+                        scrutinee,
+                        pat,
+                        scrutinee_type,
+                    )?;
                     result = self.builder.build_binop(BinaryOp::Or, result, pat_match)?;
                 }
                 Some(result)
@@ -31636,7 +31792,11 @@ impl<'a> HirToMirContext<'a> {
 
             HirPattern::Guard { pattern, condition } => {
                 // Guard pattern: test pattern then condition
-                let pattern_match = self.lower_pattern_test(scrutinee, pattern)?;
+                let pattern_match = self.lower_pattern_test_with_scrutinee_type(
+                    scrutinee,
+                    pattern,
+                    scrutinee_type,
+                )?;
                 let guard_val = self.lower_expression(condition)?;
                 // AND the pattern match with the guard
                 self.builder
