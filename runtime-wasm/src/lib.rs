@@ -8,6 +8,7 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+pub mod qtensor;
 pub mod tensor;
 
 use core::slice;

@@ -23,7 +23,7 @@ use half::f16;
 use crate::floats::roundf;
 use crate::simd::tensor_f32::axpy_slice;
 
-use super::types::{Q4KBlock, Q4KMBlock, Q4_K_M_BLOCK_BYTES, Q4_K_M_BLOCK_SIZE};
+use super::types::{Q4KBlock, Q4KMBlock, Q8KBlock, Q4_K_M_BLOCK_BYTES, Q4_K_M_BLOCK_SIZE};
 
 /// Decode the 12-byte (scales, mins) header of a Q4_K_M block.
 ///
@@ -207,6 +207,56 @@ pub fn pack_q4_k_scales(sc6: &[u8; 8], mn6: &[u8; 8]) -> [u8; 12] {
         h[j] |= ((mn6[j] >> 4) & 0x03) << 6;
     }
     h
+}
+
+/// `vec_dot_q4_K_q8_K` scalar reference — single-super-block dot product
+/// between a Q4_K_M weight block and a Q8_K activation block. Portable, no
+/// SDOT, no architecture-specific intrinsics. Mirrors llama.cpp's
+/// `ggml_vec_dot_q4_K_q8_K` arithmetic exactly:
+///
+/// ```text
+/// Σ_i w[i] * x[i]
+///   = Σ_{s=0..8} (d * sc6[s] * Σ_{i∈sub_s} q4[i] * x_q8[i]
+///                 - dmin * mn6[s] * Σ_{i∈sub_s} x_q8[i])
+///   = x.d * Σ_{s=0..8} (d * sc6[s] * sdot_s
+///                       - dmin * mn6[s] * (bsums[2s] + bsums[2s+1]))
+/// ```
+///
+/// On native aarch64+dotprod builds this is the slow path — the SDOT
+/// kernels in `quant::sdot` are 2–3x faster on M1. It's the production
+/// path for:
+///   - wasm32 (no SDOT instruction available, no FMA-on-i8)
+///   - aarch64 builds without `target-feature=+dotprod`
+///   - x86_64 (until we wire AVX-VNNI)
+///   - the per-ULP ground truth in the native unit tests
+#[allow(non_snake_case)] // matches llama.cpp's `ggml_vec_dot_q4_K_q8_K` symbol
+pub fn vec_dot_q4_K_q8_K_scalar(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
+    let mut acc = 0.0f32;
+    // Decode the 12-byte header into 8 (sc6, mn6) pairs.
+    let d = f16::from_bits(weight.d).to_f32();
+    let dmin = f16::from_bits(weight.dmin).to_f32();
+    let header = weight.scales;
+    for s in 0..8 {
+        let (sc6, mn6) = q4_k_get_scale_min(s, &header);
+        let sub_scale = d * sc6 as f32;
+        let sub_min = dmin * mn6 as f32;
+        // Sub-block s spans elements s*32 .. (s+1)*32. Within the 128-byte
+        // qs, the low-nibble/high-nibble pairing matches dequant_q4_k_block:
+        // bytes [p*32 .. p*32+32] hold sub-blocks 2p (low nibbles) and
+        // 2p+1 (high nibbles).
+        let p = s / 2;
+        let is_hi = s & 1 == 1;
+        let mut sdot: i32 = 0;
+        for i in 0..32 {
+            let byte = weight.qs[p * 32 + i];
+            let q = if is_hi { byte >> 4 } else { byte & 0x0F } as i32;
+            sdot += q * x.qs[s * 32 + i] as i32;
+        }
+        // bsums[2s] + bsums[2s+1] == sum of 32 x-quants in sub_s.
+        let bsum32 = x.bsums[2 * s] as i32 + x.bsums[2 * s + 1] as i32;
+        acc += sub_scale * (sdot as f32) - sub_min * (bsum32 as f32);
+    }
+    x.d * acc
 }
 
 /// Encode 256 f32 weights into a single Q4_K_M super-block.
