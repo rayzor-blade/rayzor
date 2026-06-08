@@ -9,6 +9,7 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 [dependencies]
 inventory = "0.3"
 rayzor-plugin = { path = "../plugin" }
+rayzor-runtime-core = { path = "../runtime-core" }
 lazy_static = "1.4"
 libc = "0.2"
 chrono = "0.4"

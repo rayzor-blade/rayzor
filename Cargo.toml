@@ -5,6 +5,7 @@ members = [
     "diagnostics",
     "source_map",
     "runtime",
+    "runtime-core",
     "gpu",
     "window",
     "lsp",
@@ -46,8 +47,20 @@ anyhow = "1"
 walkdir = "2"
 libc = "0.2"
 
-# Workaround for LLVM optimizer bug that causes infinite loops in release builds
-# when lowering TAST expressions. Using opt-level=2 instead of 3 prevents the bug.
+# Workspace release profile. `lto = "thin"` enables cross-crate inlining so
+# `rayzor-runtime` hot-path callsites continue to inline through the per-arch
+# SIMD primitives now hosted in `rayzor-runtime-core`. Without this, the
+# function-call boundary across crates costs ~8% on Llama 3.2 1B Q4_K_M
+# decode. Thin LTO adds ~20% to release build time; full LTO would be cleaner
+# but adds another ~30%. The existing [profile.release] blocks inside per-crate
+# Cargo.toml files are silently ignored by cargo (see the workspace warning);
+# this is the only place release-profile changes take effect.
+[profile.release]
+opt-level = 3
+lto = "thin"
+
+# Compiler crate stays at opt-level=2: workaround for an LLVM optimizer bug
+# that causes infinite loops in release builds when lowering TAST expressions.
 [profile.release.package.compiler]
 opt-level = 2
 

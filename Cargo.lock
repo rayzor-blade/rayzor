@@ -2904,10 +2904,18 @@ dependencies = [
  "log",
  "parking_lot",
  "rayzor-plugin",
+ "rayzor-runtime-core",
  "regex",
  "rustls",
  "rustls-pemfile",
  "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "rayzor-runtime-core"
+version = "0.1.0"
+dependencies = [
+ "half",
 ]
 
 [[package]]
