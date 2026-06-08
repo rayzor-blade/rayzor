@@ -1,11 +1,10 @@
 //! WASM-side `Tensor` lifetime + F32 matmul_t.
 //!
 //! Phase 2 of the WASM parity arc (docs/design/wasm_runtime_parity.md).
-//! Mirrors the first six fields of `rayzor-runtime::tensor::RayzorTensor`
-//! so consumers that read the wrapper (Haxe extern code, future plugins)
-//! see the same layout. Refcount, parent-view, device, and numa_node
-//! are omitted from this v1 — they migrate when the native side moves
-//! `RayzorTensor` into `rayzor-runtime-core`.
+//! Mirrors the native `rayzor-runtime::tensor::RayzorTensor` header so
+//! consumers that read the wrapper (Haxe extern code, future plugins) see the
+//! same layout: data/shape/strides, dtype, ownership, device tags, ARC
+//! refcount, and view parent backpointer.
 //!
 //! Allocation goes through `std::alloc::{alloc, dealloc}` which on
 //! `wasm32-wasip1[-threads]` resolves to dlmalloc — no platform FFI.
@@ -16,17 +15,25 @@
 //! `rayzor_tensor_simd_*` family in this crate.
 
 use core::slice;
+use half::{bf16, f16};
 use rayzor_runtime_core::quant::matmul::dot_f32_simd;
 use std::alloc::{alloc, dealloc, Layout};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// Dtype tags — mirror `rayzor-runtime::tensor::DTYPE_*` (only the subset
-/// Phase 2 cares about). Phase 3 will bring F16 / BF16 / I8 paths over.
+/// Dtype tags — mirror `rayzor-runtime::tensor::DTYPE_*`.
 pub const DTYPE_F32: u8 = 0;
+pub const DTYPE_F16: u8 = 1;
+pub const DTYPE_BF16: u8 = 2;
+pub const DTYPE_I32: u8 = 3;
+pub const DTYPE_I8: u8 = 4;
+pub const DTYPE_U8: u8 = 5;
+pub const DTYPE_FP8_E4M3: u8 = 6;
+pub const DTYPE_FP8_E5M2: u8 = 7;
+
+pub(crate) const DEVICE_CPU: u8 = 0;
 
 /// Minimal Tensor wrapper. `#[repr(C)]` so the layout matches the native
-/// runtime's first six fields exactly — any reader that inspects the
-/// wrapper sees the same offsets for `data`, `shape`, `strides`, `ndim`,
-/// `numel`, `dtype`.
+/// runtime header exactly.
 #[repr(C)]
 pub struct Tensor {
     pub data: *mut u8,
@@ -36,26 +43,165 @@ pub struct Tensor {
     pub numel: usize,
     pub dtype: u8,
     pub owns_data: bool,
+    pub device: u8,
+    pub numa_node: i32,
+    pub refcount: AtomicUsize,
+    pub parent: *mut Tensor,
 }
 
 fn dtype_size(dtype: u8) -> usize {
     match dtype {
         DTYPE_F32 => 4,
+        DTYPE_F16 | DTYPE_BF16 => 2,
+        DTYPE_I32 => 4,
+        DTYPE_I8 | DTYPE_U8 | DTYPE_FP8_E4M3 | DTYPE_FP8_E5M2 => 1,
         _ => 4,
     }
 }
 
-fn compute_strides(shape: &[usize]) -> std::vec::Vec<usize> {
-    let ndim = shape.len();
-    if ndim == 0 {
-        return std::vec![];
+impl Tensor {
+    fn compute_strides(shape: &[usize]) -> std::vec::Vec<usize> {
+        let ndim = shape.len();
+        if ndim == 0 {
+            return std::vec![];
+        }
+        let mut strides = std::vec![0usize; ndim];
+        strides[ndim - 1] = 1;
+        for i in (0..ndim - 1).rev() {
+            strides[i] = strides[i + 1] * shape[i + 1];
+        }
+        strides
     }
-    let mut strides = std::vec![0usize; ndim];
-    strides[ndim - 1] = 1;
-    for i in (0..ndim - 1).rev() {
-        strides[i] = strides[i + 1] * shape[i + 1];
+
+    pub fn is_contiguous(&self) -> bool {
+        if self.ndim == 0 {
+            return true;
+        }
+        let shape = unsafe { slice::from_raw_parts(self.shape, self.ndim) };
+        let strides = unsafe { slice::from_raw_parts(self.strides, self.ndim) };
+        let mut expected = 1usize;
+        for axis in (0..self.ndim).rev() {
+            if strides[axis] != expected {
+                return false;
+            }
+            expected = expected.saturating_mul(shape[axis]);
+        }
+        true
     }
-    strides
+}
+
+pub(crate) unsafe fn load_f32_at(data: *const u8, idx: usize, dtype: u8) -> f32 {
+    match dtype {
+        DTYPE_F32 => *(data as *const f32).add(idx),
+        DTYPE_F16 => f16::from_bits(*(data as *const u16).add(idx)).to_f32(),
+        DTYPE_BF16 => bf16::from_bits(*(data as *const u16).add(idx)).to_f32(),
+        DTYPE_I32 => *(data as *const i32).add(idx) as f32,
+        DTYPE_I8 => *(data as *const i8).add(idx) as f32,
+        DTYPE_U8 => *data.add(idx) as f32,
+        DTYPE_FP8_E4M3 => fp8_e4m3_to_f32(*data.add(idx)),
+        DTYPE_FP8_E5M2 => fp8_e5m2_to_f32(*data.add(idx)),
+        _ => 0.0,
+    }
+}
+
+pub(crate) unsafe fn store_f32_at(data: *mut u8, idx: usize, dtype: u8, value: f32) {
+    match dtype {
+        DTYPE_F32 => *(data as *mut f32).add(idx) = value,
+        DTYPE_F16 => *(data as *mut u16).add(idx) = f16::from_f32(value).to_bits(),
+        DTYPE_BF16 => *(data as *mut u16).add(idx) = bf16::from_f32(value).to_bits(),
+        DTYPE_I32 => *(data as *mut i32).add(idx) = value as i32,
+        DTYPE_I8 => *(data as *mut i8).add(idx) = value as i8,
+        DTYPE_U8 => *data.add(idx) = value as u8,
+        DTYPE_FP8_E4M3 => *data.add(idx) = fp8_e4m3_from_f32(value),
+        DTYPE_FP8_E5M2 => *data.add(idx) = fp8_e5m2_from_f32(value),
+        _ => {}
+    }
+}
+
+fn fp8_e4m3_to_f32(byte: u8) -> f32 {
+    let sign = (byte >> 7) & 1;
+    let exp = (byte >> 3) & 0x0f;
+    let mant = byte & 0x07;
+    if exp == 0 && mant == 0 {
+        return if sign == 1 { -0.0 } else { 0.0 };
+    }
+    if exp == 0x0f && mant == 0x07 {
+        return f32::NAN;
+    }
+    let sign_f = if sign == 1 { -1.0 } else { 1.0 };
+    if exp == 0 {
+        sign_f * ((mant as f32) / 8.0) * 2f32.powi(1 - 7)
+    } else {
+        sign_f * (1.0 + (mant as f32) / 8.0) * 2f32.powi(exp as i32 - 7)
+    }
+}
+
+fn fp8_e5m2_to_f32(byte: u8) -> f32 {
+    let sign = (byte >> 7) & 1;
+    let exp = (byte >> 2) & 0x1f;
+    let mant = byte & 0x03;
+    if exp == 0 && mant == 0 {
+        return if sign == 1 { -0.0 } else { 0.0 };
+    }
+    let sign_f = if sign == 1 { -1.0 } else { 1.0 };
+    if exp == 0x1f {
+        return if mant == 0 {
+            sign_f * f32::INFINITY
+        } else {
+            f32::NAN
+        };
+    }
+    if exp == 0 {
+        sign_f * ((mant as f32) / 4.0) * 2f32.powi(1 - 15)
+    } else {
+        sign_f * (1.0 + (mant as f32) / 4.0) * 2f32.powi(exp as i32 - 15)
+    }
+}
+
+fn fp8_e4m3_from_f32(value: f32) -> u8 {
+    if value.is_nan() {
+        return 0x7f;
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() { 0x80 } else { 0 };
+    }
+    let sign = if value.is_sign_negative() { 0x80 } else { 0 };
+    let v = value.abs().min(448.0);
+    let exp_unbiased = v.log2().floor() as i32;
+    let exp = (exp_unbiased + 7).clamp(0, 15);
+    if exp == 0 {
+        let mant = (v / 2f32.powi(1 - 7) * 8.0).round().clamp(0.0, 7.0) as u8;
+        return sign | mant;
+    }
+    let scale = 2f32.powi(exp_unbiased);
+    let mant = (((v / scale) - 1.0) * 8.0).round().clamp(0.0, 7.0) as u8;
+    sign | ((exp as u8) << 3) | mant
+}
+
+fn fp8_e5m2_from_f32(value: f32) -> u8 {
+    if value.is_nan() {
+        return 0x7f;
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() { 0xfc } else { 0x7c };
+    }
+    if value == 0.0 {
+        return if value.is_sign_negative() { 0x80 } else { 0 };
+    }
+    let sign = if value.is_sign_negative() { 0x80 } else { 0 };
+    let v = value.abs();
+    let exp_unbiased = v.log2().floor() as i32;
+    let exp = (exp_unbiased + 15).clamp(0, 31);
+    if exp == 0 {
+        let mant = (v / 2f32.powi(1 - 15) * 4.0).round().clamp(0.0, 3.0) as u8;
+        return sign | mant;
+    }
+    if exp == 31 {
+        return sign | 0x7c;
+    }
+    let scale = 2f32.powi(exp_unbiased);
+    let mant = (((v / scale) - 1.0) * 4.0).round().clamp(0.0, 3.0) as u8;
+    sign | ((exp as u8) << 2) | mant
 }
 
 unsafe fn alloc_tensor(shape: &[usize], dtype: u8) -> *mut Tensor {
@@ -92,7 +238,7 @@ unsafe fn alloc_tensor(shape: &[usize], dtype: u8) -> *mut Tensor {
         dealloc(shape_ptr as *mut u8, shape_layout);
         return core::ptr::null_mut();
     }
-    let stride_vec = compute_strides(shape);
+    let stride_vec = Tensor::compute_strides(shape);
     core::ptr::copy_nonoverlapping(stride_vec.as_ptr(), strides_ptr, ndim);
 
     let wrapper_layout = Layout::new::<Tensor>();
@@ -113,6 +259,10 @@ unsafe fn alloc_tensor(shape: &[usize], dtype: u8) -> *mut Tensor {
             numel,
             dtype,
             owns_data: true,
+            device: DEVICE_CPU,
+            numa_node: -1,
+            refcount: AtomicUsize::new(1),
+            parent: core::ptr::null_mut(),
         },
     );
     wrapper
@@ -129,7 +279,7 @@ pub unsafe extern "C" fn rayzor_tensor_zeros(shape_ptr: i32, ndim: i32, dtype: i
     alloc_tensor(shape, dtype as u8) as i32
 }
 
-/// `Tensor.full(shape, ndim, value, dtype)`. F32 only in this phase.
+/// `Tensor.full(shape, ndim, value, dtype)`.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_full(
     shape_ptr: i32,
@@ -142,8 +292,13 @@ pub unsafe extern "C" fn rayzor_tensor_full(
         return 0;
     }
     let tr = &*(t as *const Tensor);
-    let dst = slice::from_raw_parts_mut(tr.data as *mut f32, tr.numel);
-    dst.fill(value);
+    if value == 0.0 {
+        core::ptr::write_bytes(tr.data, 0, tr.numel * dtype_size(tr.dtype));
+    } else {
+        for i in 0..tr.numel {
+            store_f32_at(tr.data, i, tr.dtype, value);
+        }
+    }
     t
 }
 
@@ -169,11 +324,7 @@ pub unsafe extern "C" fn rayzor_tensor_from_floats(
         rayzor_tensor_free(t);
         return 0;
     }
-    core::ptr::copy_nonoverlapping(
-        data_ptr as *const f32,
-        tr.data as *mut f32,
-        len as usize,
-    );
+    core::ptr::copy_nonoverlapping(data_ptr as *const f32, tr.data as *mut f32, len as usize);
     t
 }
 
@@ -227,10 +378,10 @@ pub unsafe extern "C" fn rayzor_tensor_get_flat_f32(t: i32, idx: i32) -> f32 {
         return 0.0;
     }
     let tr = &*(t as *const Tensor);
-    if idx < 0 || idx as usize >= tr.numel || tr.dtype != DTYPE_F32 {
+    if idx < 0 || idx as usize >= tr.numel {
         return 0.0;
     }
-    *(tr.data as *const f32).add(idx as usize)
+    load_f32_at(tr.data, idx as usize, tr.dtype)
 }
 
 /// `Y = X @ W^T` where X is `[M, K]` and W is `[N, K]` (stored as if not
@@ -281,15 +432,76 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_t(x: i32, w: i32) -> i32 {
     y as i32
 }
 
-/// Release a tensor wrapper + its owned shape/strides/data buffers. View
-/// tensors (`owns_data == false`) only release the wrapper. v1 has no
-/// refcount; Phase 4 will mirror the native ARC wiring.
+/// Atomic-refcount clone: bump `src`'s refcount and return the same pointer.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_arc_clone(src: i32) -> i32 {
+    if src == 0 {
+        return 0;
+    }
+    let s = &*(src as *const Tensor);
+    s.refcount.fetch_add(1, Ordering::Relaxed);
+    src
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_clone(src: i32) -> i32 {
+    rayzor_tensor_arc_clone(src)
+}
+
+/// Disjoint-storage deep clone. Materialises a fresh owning contiguous tensor.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_deep_clone(src: i32) -> i32 {
+    if src == 0 {
+        return 0;
+    }
+    let s = &*(src as *const Tensor);
+    let shape = slice::from_raw_parts(s.shape, s.ndim);
+    let dst = alloc_tensor(shape, s.dtype);
+    if dst.is_null() {
+        return 0;
+    }
+    let elem_size = dtype_size(s.dtype);
+    let bytes = s.numel * elem_size;
+    if bytes > 0 && !s.data.is_null() {
+        if s.is_contiguous() {
+            core::ptr::copy_nonoverlapping(s.data, (*dst).data, bytes);
+        } else {
+            let src_strides = slice::from_raw_parts(s.strides, s.ndim);
+            let mut idx = std::vec![0usize; s.ndim];
+            for linear in 0..s.numel {
+                let mut src_elem_off = 0usize;
+                for axis in 0..s.ndim {
+                    src_elem_off += idx[axis] * src_strides[axis];
+                }
+                core::ptr::copy_nonoverlapping(
+                    s.data.add(src_elem_off * elem_size),
+                    (*dst).data.add(linear * elem_size),
+                    elem_size,
+                );
+                for axis in (0..s.ndim).rev() {
+                    idx[axis] += 1;
+                    if idx[axis] < shape[axis] {
+                        break;
+                    }
+                    idx[axis] = 0;
+                }
+            }
+        }
+    }
+    dst as i32
+}
+
+/// Release a tensor wrapper + its owned shape/strides/data buffers.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_free(t: i32) {
     if t == 0 {
         return;
     }
     let tr = &*(t as *const Tensor);
+    let prev = tr.refcount.fetch_sub(1, Ordering::AcqRel);
+    if prev != 1 {
+        return;
+    }
     let dtype = tr.dtype;
     let numel = tr.numel;
     let ndim = tr.ndim;
@@ -297,6 +509,7 @@ pub unsafe extern "C" fn rayzor_tensor_free(t: i32) {
     let data = tr.data;
     let shape = tr.shape;
     let strides = tr.strides;
+    let parent = tr.parent;
 
     if owns {
         if !data.is_null() {
@@ -312,10 +525,22 @@ pub unsafe extern "C" fn rayzor_tensor_free(t: i32) {
             let strides_layout = Layout::array::<usize>(ndim.max(1)).unwrap();
             dealloc(strides as *mut u8, strides_layout);
         }
+    } else {
+        if !shape.is_null() {
+            let shape_layout = Layout::array::<usize>(ndim.max(1)).unwrap();
+            dealloc(shape as *mut u8, shape_layout);
+        }
+        if !strides.is_null() {
+            let strides_layout = Layout::array::<usize>(ndim.max(1)).unwrap();
+            dealloc(strides as *mut u8, strides_layout);
+        }
     }
 
     let wrapper_layout = Layout::new::<Tensor>();
     dealloc(t as *mut u8, wrapper_layout);
+    if !parent.is_null() {
+        rayzor_tensor_free(parent as i32);
+    }
 }
 
 #[cfg(test)]
@@ -332,10 +557,43 @@ mod tests {
             assert_eq!(tr.ndim, 2);
             assert_eq!(tr.numel, 12);
             assert_eq!(tr.dtype, DTYPE_F32);
+            assert_eq!(tr.device, DEVICE_CPU);
+            assert_eq!(tr.numa_node, -1);
+            assert_eq!(tr.refcount.load(Ordering::Relaxed), 1);
             for i in 0..12 {
                 assert_eq!(*(tr.data as *const f32).add(i), 0.0);
             }
             rayzor_tensor_free(t as i32);
+        }
+    }
+
+    #[test]
+    fn f16_full_round_trips_through_get_flat() {
+        unsafe {
+            let shape = [1usize, 2];
+            let t = rayzor_tensor_full(shape.as_ptr() as i32, 2, 1.5, DTYPE_F16 as i32);
+            assert!(t != 0);
+            let tr = &*(t as *const Tensor);
+            assert_eq!(tr.dtype, DTYPE_F16);
+            assert!((rayzor_tensor_get_flat_f32(t, 0) - 1.5).abs() < 1e-3);
+            assert!((rayzor_tensor_get_flat_f32(t, 1) - 1.5).abs() < 1e-3);
+            rayzor_tensor_free(t);
+        }
+    }
+
+    #[test]
+    fn arc_clone_defers_physical_free_until_last_drop() {
+        unsafe {
+            let shape = [2usize, 2];
+            let t = alloc_tensor(&shape, DTYPE_F32);
+            assert!(!t.is_null());
+            let h = t as i32;
+            let c = rayzor_tensor_arc_clone(h);
+            assert_eq!(c, h);
+            assert_eq!((&*t).refcount.load(Ordering::Relaxed), 2);
+            rayzor_tensor_free(c);
+            assert_eq!((&*t).refcount.load(Ordering::Relaxed), 1);
+            rayzor_tensor_free(h);
         }
     }
 
@@ -359,18 +617,10 @@ mod tests {
 
             let x_shape = [4usize, 3];
             let w_shape = [5usize, 3];
-            let xt = rayzor_tensor_from_floats(
-                x_data.as_ptr() as i32,
-                12,
-                x_shape.as_ptr() as i32,
-                2,
-            );
-            let wt = rayzor_tensor_from_floats(
-                w_data.as_ptr() as i32,
-                15,
-                w_shape.as_ptr() as i32,
-                2,
-            );
+            let xt =
+                rayzor_tensor_from_floats(x_data.as_ptr() as i32, 12, x_shape.as_ptr() as i32, 2);
+            let wt =
+                rayzor_tensor_from_floats(w_data.as_ptr() as i32, 15, w_shape.as_ptr() as i32, 2);
             assert!(xt != 0 && wt != 0);
 
             let yt = rayzor_tensor_matmul_t(xt, wt);
@@ -392,7 +642,13 @@ mod tests {
             }
             let got = slice::from_raw_parts(yr.data as *const f32, 20);
             for i in 0..20 {
-                assert!((got[i] - want[i]).abs() < 1e-5, "mismatch at {}: got {} want {}", i, got[i], want[i]);
+                assert!(
+                    (got[i] - want[i]).abs() < 1e-5,
+                    "mismatch at {}: got {} want {}",
+                    i,
+                    got[i],
+                    want[i]
+                );
             }
 
             rayzor_tensor_free(yt);
