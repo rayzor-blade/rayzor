@@ -650,6 +650,10 @@ impl LinkerCtx {
                             .get(&imp.type_idx)
                             .copied()
                             .unwrap_or(0);
+                        eprintln!(
+                            "[wasm-linker] ERROR: signature mismatch for rayzor::{} (user type {}, runtime type {})",
+                            imp.name, user_type, rt_type
+                        );
                         self.unresolved_imports
                             .push(format!("{}(sig mismatch)", imp.name));
                         user_import_kinds.push(UserImportKind::Stub(merged_type_idx));

@@ -940,7 +940,7 @@ pub extern "C" fn rayzor_update_call_frame_location(_line: i32, _col: i32) {
 
 /// Throw a typed exception. In WASM, this traps (unreachable).
 #[no_mangle]
-pub extern "C" fn rayzor_throw_typed(_ptr: i32) {
+pub extern "C" fn rayzor_throw_typed(_exception_value: i32, _type_id: u32) {
     #[cfg(target_arch = "wasm32")]
     {
         core::arch::wasm32::unreachable();

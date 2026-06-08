@@ -1897,6 +1897,17 @@ impl<'a> FunctionLowerer<'a> {
             IrTerminator::Return { value } => {
                 if let Some(v) = value {
                     self.get_reg(f, *v);
+                    if matches!(self.ir_func.signature.return_type, IrType::Void) {
+                        f.instruction(&Instruction::Drop);
+                    } else {
+                        let actual_ty = self
+                            .local_type_of(*v)
+                            .unwrap_or_else(|| self.reg_wasm_type(*v));
+                        let return_ty = ir_type_to_wasm(&self.ir_func.signature.return_type);
+                        emit_bitcast(f, actual_ty, return_ty);
+                    }
+                } else if !matches!(self.ir_func.signature.return_type, IrType::Void) {
+                    emit_zero(f, ir_type_to_wasm(&self.ir_func.signature.return_type));
                 }
                 f.instruction(&Instruction::Return);
             }
@@ -1926,6 +1937,17 @@ impl<'a> FunctionLowerer<'a> {
             IrTerminator::Return { value } => {
                 if let Some(v) = value {
                     self.get_reg(f, *v);
+                    if matches!(self.ir_func.signature.return_type, IrType::Void) {
+                        f.instruction(&Instruction::Drop);
+                    } else {
+                        let actual_ty = self
+                            .local_type_of(*v)
+                            .unwrap_or_else(|| self.reg_wasm_type(*v));
+                        let return_ty = ir_type_to_wasm(&self.ir_func.signature.return_type);
+                        emit_bitcast(f, actual_ty, return_ty);
+                    }
+                } else if !matches!(self.ir_func.signature.return_type, IrType::Void) {
+                    emit_zero(f, ir_type_to_wasm(&self.ir_func.signature.return_type));
                 }
                 f.instruction(&Instruction::Return);
                 true
@@ -2331,7 +2353,16 @@ impl<'a> FunctionLowerer<'a> {
                         .get(value)
                         .unwrap_or(&IrType::I32),
                 );
+                let value_ty = self
+                    .ir_func
+                    .register_types
+                    .get(value)
+                    .unwrap_or(&IrType::I32);
                 let vt = ir_type_to_wasm(actual_ty);
+                let value_vt = self
+                    .local_type_of(*value)
+                    .unwrap_or_else(|| ir_type_to_wasm(value_ty));
+                emit_bitcast(f, value_vt, vt);
                 match vt {
                     ValType::I32 => match actual_ty {
                         IrType::I8 | IrType::U8 | IrType::Bool => {
@@ -2515,7 +2546,12 @@ impl<'a> FunctionLowerer<'a> {
                         let imp = &self.ctx.imports[idx as usize];
                         self.ctx.types.get(imp.type_idx as usize).cloned()
                     } else {
-                        None
+                        self.ctx
+                            .internals
+                            .iter()
+                            .find(|internal| internal.func_idx == idx)
+                            .and_then(|internal| self.ctx.types.get(internal.type_idx as usize))
+                            .cloned()
                     };
                     if let Some((expected_params, expected_results)) = &callee_sig {
                         let pushed = args.len();
@@ -2572,7 +2608,12 @@ impl<'a> FunctionLowerer<'a> {
                     self.get_reg(f, *arg);
                 }
                 self.get_reg(f, *func_ptr);
-                let (params, results) = match signature {
+                let actual_params: Vec<ValType> =
+                    args.iter().map(|a| self.reg_wasm_type(*a)).collect();
+                let actual_results = dest
+                    .map(|d| vec![self.reg_wasm_type(d)])
+                    .unwrap_or_default();
+                let (mut params, mut results) = match signature {
                     IrType::Function {
                         params,
                         return_type,
@@ -2586,19 +2627,25 @@ impl<'a> FunctionLowerer<'a> {
                         };
                         (p, r)
                     }
-                    _ => {
-                        let p: Vec<ValType> = args.iter().map(|a| self.reg_wasm_type(*a)).collect();
-                        let r = dest
-                            .map(|d| vec![self.reg_wasm_type(d)])
-                            .unwrap_or_default();
-                        (p, r)
-                    }
+                    _ => (actual_params.clone(), actual_results.clone()),
                 };
+                if params.len() != actual_params.len() {
+                    params = actual_params.clone();
+                }
+                if dest.is_some() && results != actual_results {
+                    results = actual_results.clone();
+                }
                 let type_idx = self
                     .ctx
                     .type_map
-                    .get(&(params, results))
+                    .get(&(params.clone(), results.clone()))
                     .copied()
+                    .or_else(|| {
+                        self.ctx
+                            .type_map
+                            .get(&(actual_params, actual_results))
+                            .copied()
+                    })
                     .unwrap_or(0);
                 f.instruction(&Instruction::CallIndirect {
                     type_index: type_idx,
@@ -2606,6 +2653,8 @@ impl<'a> FunctionLowerer<'a> {
                 });
                 if let Some(d) = dest {
                     self.set_reg(f, *d);
+                } else if !results.is_empty() {
+                    f.instruction(&Instruction::Drop);
                 }
             }
 
@@ -2794,6 +2843,17 @@ impl<'a> FunctionLowerer<'a> {
             IrInstruction::Return { value } => {
                 if let Some(v) = value {
                     self.get_reg(f, *v);
+                    if matches!(self.ir_func.signature.return_type, IrType::Void) {
+                        f.instruction(&Instruction::Drop);
+                    } else {
+                        let actual_ty = self
+                            .local_type_of(*v)
+                            .unwrap_or_else(|| self.reg_wasm_type(*v));
+                        let return_ty = ir_type_to_wasm(&self.ir_func.signature.return_type);
+                        emit_bitcast(f, actual_ty, return_ty);
+                    }
+                } else if !matches!(self.ir_func.signature.return_type, IrType::Void) {
+                    emit_zero(f, ir_type_to_wasm(&self.ir_func.signature.return_type));
                 }
                 f.instruction(&Instruction::Return);
             }
