@@ -47,6 +47,9 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         /// Host-side bump allocator: allocates downward from top of WASM memory.
         /// Used to write DynamicValue return structs into WASM linear memory.
         host_alloc_ptr: u32,
+        /// Low watermark protecting the host-allocation region from being
+        /// reused after a grow.
+        host_alloc_low_bound: u32,
         /// The shared linear memory we defined as `env.memory`. Kept here
         /// so host functions can read/write it directly when `caller
         /// .get_export("memory")` doesn't surface the import (wasmtime
@@ -441,7 +444,11 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         raw as f64
     }
 
-    /// Allocate `size` bytes from the host-side bump allocator (top of WASM memory, grows down).
+    /// Allocate `size` bytes in WASM linear memory. Prefer the merged
+    /// runtime-wasm allocator so host-created Haxe objects live in the same
+    /// heap as runtime-created objects. Fall back to the runner's top-down
+    /// bump region only when the runtime export is unavailable.
+    ///
     /// Returns the WASM linear memory address.
     ///
     /// If the would-be allocation underflows past the application heap region
@@ -451,14 +458,19 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
     /// gap between the previous top and the new top is left unused (small —
     /// bounded by `(size + slack)` rounded up to one page).
     fn host_alloc(caller: &mut Caller<'_, WasmState>, size: u32) -> u32 {
-        const APP_HEAP_RESERVE: u32 = 4 * 1024 * 1024; // leave 4 MiB for app heap
+        let size = size.max(1);
+        if let Some(ptr) = runtime_malloc(caller, size) {
+            return ptr;
+        }
+
         const PAGE: u32 = 65536;
         let mut ptr = caller.data().host_alloc_ptr;
-        if ptr <= size.saturating_add(APP_HEAP_RESERVE) {
-            // Grow by enough pages for `size` plus 16 MiB slack. Try exported
-            // memory first; fall back to the imported SharedMemory we stashed
-            // on WasmState (which is the actual backing for runtime-wasm
-            // builds that import `env.memory`).
+        let low_bound = caller.data().host_alloc_low_bound;
+        let would_underflow = ptr < size || (ptr - size) < low_bound;
+        if would_underflow {
+            // Protect the region allocated so far. After growing, the newly
+            // added pages above the old top become the next working region.
+            let new_low_bound = ptr;
             let slack: u32 = 16 * 1024 * 1024;
             let need_bytes = size.saturating_add(slack);
             let delta_pages = ((need_bytes as u64 + PAGE as u64 - 1) / PAGE as u64) as u64;
@@ -475,14 +487,31 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                     if shared.grow(delta_pages).is_ok() {
                         let new_size = shared.data_size() as u32;
                         caller.data_mut().host_alloc_ptr = new_size - 16;
+                        grew = true;
                     }
                 }
+            }
+            if grew {
+                caller.data_mut().host_alloc_low_bound = new_low_bound;
             }
             ptr = caller.data().host_alloc_ptr;
         }
         let new_ptr = ptr.wrapping_sub(size) & !3;
         caller.data_mut().host_alloc_ptr = new_ptr;
         new_ptr
+    }
+
+    fn runtime_malloc(caller: &mut Caller<'_, WasmState>, size: u32) -> Option<u32> {
+        let func = caller
+            .get_export("rayzor_malloc")
+            .and_then(|export| export.into_func())?;
+        let malloc = func.typed::<i32, i32>(&*caller).ok()?;
+        let ptr = malloc.call(&mut *caller, size as i32).ok()?;
+        if ptr > 0 {
+            Some(ptr as u32)
+        } else {
+            None
+        }
     }
 
     /// Write bytes into WASM linear memory at `addr`.
@@ -936,6 +965,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             ctx
         },
         host_alloc_ptr: 0,
+        host_alloc_low_bound: 4 * 1024 * 1024, // reserve bottom 4 MiB for app heap
         shared_memory: None,
         program_args: program_args.to_vec(),
         stringmap_handles: BTreeMap::new(),
