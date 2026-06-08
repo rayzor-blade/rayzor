@@ -2916,6 +2916,7 @@ name = "rayzor-runtime-core"
 version = "0.1.0"
 dependencies = [
  "half",
+ "libm",
 ]
 
 [[package]]

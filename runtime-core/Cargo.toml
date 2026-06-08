@@ -10,4 +10,10 @@ description = "Architecture-portable compute kernels shared by rayzor-runtime (n
 # Half-precision floats (IEEE f16 + brain float bf16). no_std-compatible with
 # default-features disabled. Mirrors the version pinned in rayzor-runtime.
 half = { version = "2", default-features = false }
+# Pure-Rust math primitives that the std `f32::round` / `f32::sin` family
+# are forbidden to use under `no_std`. We pull in only the few we need from
+# this crate (roundf, sinf, cosf, sqrtf, expf, logf) and route the
+# corresponding std calls through a `floats::*` shim so the kernels remain
+# free of conditional std/libm imports.
+libm = "0.2"
 # Release profile inherited from the workspace root (see top-level Cargo.toml).
