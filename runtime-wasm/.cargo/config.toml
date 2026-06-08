@@ -30,6 +30,9 @@ rustflags = [
     "-C", "target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128,+relaxed-simd",
     "-C", "link-arg=--shared-memory",
     "-C", "link-arg=--import-memory",
-    "-C", "link-arg=--max-memory=1073741824",  # 1 GiB
+    # 4 GiB (wasm32 cap). A 770 MB GGUF needs to sit in linear memory
+    # alongside the runtime-wasm QTensor allocations (each Q6_K weight
+    # copies its block buffer), pushing peak usage past the old 1 GiB cap.
+    "-C", "link-arg=--max-memory=4294967296",  # 4 GiB
     "-C", "link-arg=--initial-memory=16777216", # 16 MiB
 ]

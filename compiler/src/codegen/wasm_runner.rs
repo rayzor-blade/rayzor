@@ -443,11 +443,44 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
 
     /// Allocate `size` bytes from the host-side bump allocator (top of WASM memory, grows down).
     /// Returns the WASM linear memory address.
+    ///
+    /// If the would-be allocation underflows past the application heap region
+    /// (`host_alloc_ptr < size`), grows the exported `memory` by enough pages
+    /// to fit `size` plus a small slack, then re-seats `host_alloc_ptr` at the
+    /// new top so the next decrement lands in the freshly-mapped region. The
+    /// gap between the previous top and the new top is left unused (small —
+    /// bounded by `(size + slack)` rounded up to one page).
     fn host_alloc(caller: &mut Caller<'_, WasmState>, size: u32) -> u32 {
-        let ptr = caller.data().host_alloc_ptr;
-        let new_ptr = ptr.wrapping_sub(size);
-        // Align down to 4 bytes
-        let new_ptr = new_ptr & !3;
+        const APP_HEAP_RESERVE: u32 = 4 * 1024 * 1024; // leave 4 MiB for app heap
+        const PAGE: u32 = 65536;
+        let mut ptr = caller.data().host_alloc_ptr;
+        if ptr <= size.saturating_add(APP_HEAP_RESERVE) {
+            // Grow by enough pages for `size` plus 16 MiB slack. Try exported
+            // memory first; fall back to the imported SharedMemory we stashed
+            // on WasmState (which is the actual backing for runtime-wasm
+            // builds that import `env.memory`).
+            let slack: u32 = 16 * 1024 * 1024;
+            let need_bytes = size.saturating_add(slack);
+            let delta_pages = ((need_bytes as u64 + PAGE as u64 - 1) / PAGE as u64) as u64;
+            let mut grew = false;
+            if let Some(mem) = caller.get_export("memory").and_then(|e| e.into_memory()) {
+                if mem.grow(&mut *caller, delta_pages).is_ok() {
+                    let new_size = mem.data_size(&*caller) as u32;
+                    caller.data_mut().host_alloc_ptr = new_size - 16;
+                    grew = true;
+                }
+            }
+            if !grew {
+                if let Some(shared) = caller.data().shared_memory.clone() {
+                    if shared.grow(delta_pages).is_ok() {
+                        let new_size = shared.data_size() as u32;
+                        caller.data_mut().host_alloc_ptr = new_size - 16;
+                    }
+                }
+            }
+            ptr = caller.data().host_alloc_ptr;
+        }
+        let new_ptr = ptr.wrapping_sub(size) & !3;
         caller.data_mut().host_alloc_ptr = new_ptr;
         new_ptr
     }
@@ -561,6 +594,172 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         write_wasm_mem(caller, struct_addr + 4, &(bytes.len() as u32).to_le_bytes());
         write_wasm_mem(caller, struct_addr + 8, &(bytes.len() as u32).to_le_bytes());
         struct_addr as i32
+    }
+
+    /// Write the canonical 40-byte `HaxeBytes` header at `addr` so that the
+    /// runtime-wasm cdylib (`runtime-wasm/src/qtensor.rs`, `tensor.rs`) can
+    /// dereference it as `*const HaxeBytes` and find `{ptr, len, cap}` at the
+    /// expected offsets. Trailing fields (kind/owner/refcount/fd) are set to
+    /// a benign default; runtime-wasm only reads `ptr` and `len` in the
+    /// no-copy code paths we care about.
+    fn write_haxe_bytes_header(
+        caller: &mut Caller<'_, WasmState>,
+        header_addr: u32,
+        data_addr: u32,
+        len: u32,
+        cap: u32,
+    ) {
+        write_wasm_mem(caller, header_addr, &data_addr.to_le_bytes());
+        write_wasm_mem(caller, header_addr + 4, &len.to_le_bytes());
+        write_wasm_mem(caller, header_addr + 8, &cap.to_le_bytes());
+        write_wasm_mem(caller, header_addr + 12, &[0u8; 8]);
+        write_wasm_mem(caller, header_addr + 20, &0u32.to_le_bytes());
+        write_wasm_mem(caller, header_addr + 24, &1i64.to_le_bytes());
+        write_wasm_mem(caller, header_addr + 32, &(-1i32).to_le_bytes());
+        write_wasm_mem(caller, header_addr + 36, &0u32.to_le_bytes());
+    }
+
+    /// Allocate a HaxeBytes header + owned data block in wasm linear memory.
+    /// Returns the header pointer (used as the "handle" by Haxe code).
+    fn write_haxe_bytes_in_wasm(caller: &mut Caller<'_, WasmState>, data: &[u8]) -> i32 {
+        let data_addr = host_alloc(caller, data.len().max(1) as u32);
+        if !data.is_empty() {
+            write_wasm_mem(caller, data_addr, data);
+        }
+        let header_addr = host_alloc(caller, 40);
+        write_haxe_bytes_header(
+            caller,
+            header_addr,
+            data_addr,
+            data.len() as u32,
+            data.len() as u32,
+        );
+        header_addr as i32
+    }
+
+    /// Allocate a HaxeBytes header that shares data with an existing buffer
+    /// (no copy). Used for `sub` / `subWithBase` so a 200MB GGUF doesn't
+    /// duplicate per tensor.
+    fn make_haxe_bytes_view(caller: &mut Caller<'_, WasmState>, data_addr: u32, len: u32) -> i32 {
+        let header_addr = host_alloc(caller, 40);
+        write_haxe_bytes_header(caller, header_addr, data_addr, len, len);
+        header_addr as i32
+    }
+
+    /// Read `{data_ptr, len, cap}` from a HaxeBytes header. Returns None on
+    /// bad reads (e.g. address out of memory range).
+    fn read_haxe_bytes_header(
+        caller: &mut Caller<'_, WasmState>,
+        header_ptr: i32,
+    ) -> Option<(u32, u32, u32)> {
+        if header_ptr <= 0 {
+            return None;
+        }
+        let hdr = read_wasm_mem(caller, header_ptr as usize, 12)?;
+        let data_ptr = u32::from_le_bytes(hdr[0..4].try_into().ok()?);
+        let len = u32::from_le_bytes(hdr[4..8].try_into().ok()?);
+        let cap = u32::from_le_bytes(hdr[8..12].try_into().ok()?);
+        Some((data_ptr, len, cap))
+    }
+
+    /// Dual-mode read of a byte slice from a bytes handle:
+    /// - If handle is a wasm pointer (> 65536), read via HaxeBytes header.
+    /// - Otherwise, fall back to the legacy host-side `bytes_handles` table.
+    fn read_bytes_slice(
+        caller: &mut Caller<'_, WasmState>,
+        handle: i32,
+        pos: usize,
+        len: usize,
+    ) -> Vec<u8> {
+        if handle > 65536 {
+            if let Some((data_addr, total_len, _)) = read_haxe_bytes_header(caller, handle) {
+                let end = pos.saturating_add(len).min(total_len as usize);
+                if pos < end {
+                    if let Some(v) = read_wasm_mem(caller, data_addr as usize + pos, end - pos) {
+                        let mut out = v;
+                        out.resize(len, 0);
+                        return out;
+                    }
+                }
+            }
+            return vec![0u8; len];
+        }
+        caller
+            .data()
+            .bytes_handles
+            .get(&handle)
+            .map(|v| {
+                let end = pos.saturating_add(len).min(v.len());
+                if pos < end {
+                    let mut out = v[pos..end].to_vec();
+                    out.resize(len, 0);
+                    out
+                } else {
+                    vec![0u8; len]
+                }
+            })
+            .unwrap_or_else(|| vec![0u8; len])
+    }
+
+    /// Dual-mode write of a byte slice into a bytes handle.
+    /// Silently truncates if `pos + data.len()` exceeds the bytes' length.
+    fn write_bytes_slice(caller: &mut Caller<'_, WasmState>, handle: i32, pos: usize, data: &[u8]) {
+        if handle > 65536 {
+            if let Some((data_addr, total_len, _)) = read_haxe_bytes_header(caller, handle) {
+                let end = pos.saturating_add(data.len()).min(total_len as usize);
+                if pos < end {
+                    write_wasm_mem(caller, data_addr + pos as u32, &data[..end - pos]);
+                }
+            }
+            return;
+        }
+        if let Some(v) = caller.data_mut().bytes_handles.get_mut(&handle) {
+            let end = pos.saturating_add(data.len()).min(v.len());
+            if pos < end {
+                v[pos..end].copy_from_slice(&data[..end - pos]);
+            }
+        }
+    }
+
+    /// Dual-mode fill of a byte range with `val`.
+    fn fill_bytes_slice(
+        caller: &mut Caller<'_, WasmState>,
+        handle: i32,
+        pos: usize,
+        len: usize,
+        val: u8,
+    ) {
+        if handle > 65536 {
+            if let Some((data_addr, total_len, _)) = read_haxe_bytes_header(caller, handle) {
+                let end = pos.saturating_add(len).min(total_len as usize);
+                if pos < end {
+                    let buf = vec![val; end - pos];
+                    write_wasm_mem(caller, data_addr + pos as u32, &buf);
+                }
+            }
+            return;
+        }
+        if let Some(v) = caller.data_mut().bytes_handles.get_mut(&handle) {
+            let end = pos.saturating_add(len).min(v.len());
+            if pos < end {
+                v[pos..end].fill(val);
+            }
+        }
+    }
+
+    /// Dual-mode total length of a bytes handle.
+    fn bytes_total_len(caller: &mut Caller<'_, WasmState>, handle: i32) -> usize {
+        if handle > 65536 {
+            return read_haxe_bytes_header(caller, handle)
+                .map(|(_, len, _)| len as usize)
+                .unwrap_or(0);
+        }
+        caller
+            .data()
+            .bytes_handles
+            .get(&handle)
+            .map(|v| v.len())
+            .unwrap_or(0)
     }
 
     /// Read a HaxeArray of i32 values from WASM memory.
@@ -834,14 +1033,9 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         func_ty.clone(),
                         move |mut caller, params, results| {
                             let size = val_i32(&params[0]).max(0) as usize;
-                            let id = {
-                                let s = caller.data_mut();
-                                let id = s.next_bytes_id;
-                                s.next_bytes_id += 1;
-                                s.bytes_handles.insert(id, vec![0u8; size]);
-                                id
-                            };
-                            results[0] = ret_int(id, &rt);
+                            let header_ptr =
+                                write_haxe_bytes_in_wasm(&mut caller, &vec![0u8; size]);
+                            results[0] = ret_int(header_ptr, &rt);
                             Ok(())
                         },
                     )
@@ -858,12 +1052,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         func_ty.clone(),
                         move |mut caller, params, results| {
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
-                            let len = caller
-                                .data()
-                                .bytes_handles
-                                .get(&h)
-                                .map(|v| v.len() as i32)
-                                .unwrap_or(0);
+                            let len = bytes_total_len(&mut caller, h) as i32;
                             results[0] = ret_int(len, &rt);
                             Ok(())
                         },
@@ -894,14 +1083,8 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             } else {
                                 vec![]
                             };
-                            let id = {
-                                let s = caller.data_mut();
-                                let id = s.next_bytes_id;
-                                s.next_bytes_id += 1;
-                                s.bytes_handles.insert(id, bytes);
-                                id
-                            };
-                            results[0] = ret_int(id, &rt);
+                            let header_ptr = write_haxe_bytes_in_wasm(&mut caller, &bytes);
+                            results[0] = ret_int(header_ptr, &rt);
                             Ok(())
                         },
                     )
@@ -922,14 +1105,8 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         move |mut caller, params, results| {
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                             let pos = val_i32(&params[1]) as usize;
-                            let val = caller
-                                .data()
-                                .bytes_handles
-                                .get(&h)
-                                .and_then(|v| v.get(pos))
-                                .copied()
-                                .unwrap_or(0) as i32;
-                            results[0] = ret_int(val, &rt);
+                            let buf = read_bytes_slice(&mut caller, h, pos, 1);
+                            results[0] = ret_int(buf[0] as i32, &rt);
                             Ok(())
                         },
                     )
@@ -947,11 +1124,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                             let pos = val_i32(&params[1]) as usize;
                             let val = val_i32(&params[2]) as u8;
-                            if let Some(v) = caller.data_mut().bytes_handles.get_mut(&h) {
-                                if pos < v.len() {
-                                    v[pos] = val;
-                                }
-                            }
+                            write_bytes_slice(&mut caller, h, pos, &[val]);
                             if !results.is_empty() {
                                 results[0] = Val::I32(0);
                             }
@@ -972,19 +1145,8 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         move |mut caller, params, results| {
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                             let pos = val_i32(&params[1]) as usize;
-                            let val = caller
-                                .data()
-                                .bytes_handles
-                                .get(&h)
-                                .map(|v| {
-                                    if pos + 2 <= v.len() {
-                                        i16::from_le_bytes(v[pos..pos + 2].try_into().unwrap())
-                                            as i32
-                                    } else {
-                                        0
-                                    }
-                                })
-                                .unwrap_or(0);
+                            let buf = read_bytes_slice(&mut caller, h, pos, 2);
+                            let val = i16::from_le_bytes(buf[0..2].try_into().unwrap()) as i32;
                             results[0] = ret_int(val, &rt);
                             Ok(())
                         },
@@ -1003,11 +1165,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                             let pos = val_i32(&params[1]) as usize;
                             let val = val_i32(&params[2]) as i16;
-                            if let Some(v) = caller.data_mut().bytes_handles.get_mut(&h) {
-                                if pos + 2 <= v.len() {
-                                    v[pos..pos + 2].copy_from_slice(&val.to_le_bytes());
-                                }
-                            }
+                            write_bytes_slice(&mut caller, h, pos, &val.to_le_bytes());
                             if !results.is_empty() {
                                 results[0] = Val::I32(0);
                             }
@@ -1028,18 +1186,8 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         move |mut caller, params, results| {
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                             let pos = val_i32(&params[1]) as usize;
-                            let val = caller
-                                .data()
-                                .bytes_handles
-                                .get(&h)
-                                .map(|v| {
-                                    if pos + 4 <= v.len() {
-                                        i32::from_le_bytes(v[pos..pos + 4].try_into().unwrap())
-                                    } else {
-                                        0
-                                    }
-                                })
-                                .unwrap_or(0);
+                            let buf = read_bytes_slice(&mut caller, h, pos, 4);
+                            let val = i32::from_le_bytes(buf[0..4].try_into().unwrap());
                             results[0] = ret_int(val, &rt);
                             Ok(())
                         },
@@ -1058,11 +1206,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                             let pos = val_i32(&params[1]) as usize;
                             let val = val_i32(&params[2]);
-                            if let Some(v) = caller.data_mut().bytes_handles.get_mut(&h) {
-                                if pos + 4 <= v.len() {
-                                    v[pos..pos + 4].copy_from_slice(&val.to_le_bytes());
-                                }
-                            }
+                            write_bytes_slice(&mut caller, h, pos, &val.to_le_bytes());
                             if !results.is_empty() {
                                 results[0] = Val::I32(0);
                             }
@@ -1083,18 +1227,8 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         move |mut caller, params, results| {
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                             let pos = val_i32(&params[1]) as usize;
-                            let val = caller
-                                .data()
-                                .bytes_handles
-                                .get(&h)
-                                .map(|v| {
-                                    if pos + 8 <= v.len() {
-                                        i64::from_le_bytes(v[pos..pos + 8].try_into().unwrap())
-                                    } else {
-                                        0
-                                    }
-                                })
-                                .unwrap_or(0);
+                            let buf = read_bytes_slice(&mut caller, h, pos, 8);
+                            let val = i64::from_le_bytes(buf[0..8].try_into().unwrap());
                             results[0] = match &rt {
                                 ValType::I64 => Val::I64(val),
                                 _ => ret_int(val as i32, &rt),
@@ -1116,11 +1250,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                             let pos = val_i32(&params[1]) as usize;
                             let val = val_i64(&params[2]);
-                            if let Some(v) = caller.data_mut().bytes_handles.get_mut(&h) {
-                                if pos + 8 <= v.len() {
-                                    v[pos..pos + 8].copy_from_slice(&val.to_le_bytes());
-                                }
-                            }
+                            write_bytes_slice(&mut caller, h, pos, &val.to_le_bytes());
                             if !results.is_empty() {
                                 results[0] = Val::I32(0);
                             }
@@ -1141,18 +1271,8 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         move |mut caller, params, results| {
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                             let pos = val_i32(&params[1]) as usize;
-                            let val = caller
-                                .data()
-                                .bytes_handles
-                                .get(&h)
-                                .map(|v| {
-                                    if pos + 4 <= v.len() {
-                                        f32::from_le_bytes(v[pos..pos + 4].try_into().unwrap())
-                                    } else {
-                                        0.0
-                                    }
-                                })
-                                .unwrap_or(0.0);
+                            let buf = read_bytes_slice(&mut caller, h, pos, 4);
+                            let val = f32::from_le_bytes(buf[0..4].try_into().unwrap());
                             results[0] = ret_f32(val, &rt);
                             Ok(())
                         },
@@ -1171,11 +1291,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                             let pos = val_i32(&params[1]) as usize;
                             let val = val_f32(&params[2]);
-                            if let Some(v) = caller.data_mut().bytes_handles.get_mut(&h) {
-                                if pos + 4 <= v.len() {
-                                    v[pos..pos + 4].copy_from_slice(&val.to_le_bytes());
-                                }
-                            }
+                            write_bytes_slice(&mut caller, h, pos, &val.to_le_bytes());
                             if !results.is_empty() {
                                 results[0] = Val::I32(0);
                             }
@@ -1196,18 +1312,8 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         move |mut caller, params, results| {
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                             let pos = val_i32(&params[1]) as usize;
-                            let val = caller
-                                .data()
-                                .bytes_handles
-                                .get(&h)
-                                .map(|v| {
-                                    if pos + 8 <= v.len() {
-                                        f64::from_le_bytes(v[pos..pos + 8].try_into().unwrap())
-                                    } else {
-                                        0.0
-                                    }
-                                })
-                                .unwrap_or(0.0);
+                            let buf = read_bytes_slice(&mut caller, h, pos, 8);
+                            let val = f64::from_le_bytes(buf[0..8].try_into().unwrap());
                             results[0] = ret_f64(val, &rt);
                             Ok(())
                         },
@@ -1226,11 +1332,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                             let pos = val_i32(&params[1]) as usize;
                             let val = val_f64(&params[2]);
-                            if let Some(v) = caller.data_mut().bytes_handles.get_mut(&h) {
-                                if pos + 8 <= v.len() {
-                                    v[pos..pos + 8].copy_from_slice(&val.to_le_bytes());
-                                }
-                            }
+                            write_bytes_slice(&mut caller, h, pos, &val.to_le_bytes());
                             if !results.is_empty() {
                                 results[0] = Val::I32(0);
                             }
@@ -1255,12 +1357,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
                             let len = unbox_int_from_memory(&mut caller, raw_len) as usize;
                             let val = unbox_int_from_memory(&mut caller, raw_val) as u8;
-                            if let Some(v) = caller.data_mut().bytes_handles.get_mut(&h) {
-                                let end = (pos + len).min(v.len());
-                                if pos < end {
-                                    v[pos..end].fill(val);
-                                }
-                            }
+                            fill_bytes_slice(&mut caller, h, pos, len, val);
                             if !results.is_empty() {
                                 results[0] = Val::I32(0);
                             }
@@ -1287,28 +1384,8 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                 unbox_int_from_memory(&mut caller, raw_dest_pos) as usize;
                             let src_pos = unbox_int_from_memory(&mut caller, raw_src_pos) as usize;
                             let len = unbox_int_from_memory(&mut caller, raw_len) as usize;
-                            // Copy src bytes first (to handle overlapping handles)
-                            let src_bytes: Vec<u8> = caller
-                                .data()
-                                .bytes_handles
-                                .get(&src_h)
-                                .map(|v| {
-                                    let end = (src_pos + len).min(v.len());
-                                    if src_pos < end {
-                                        v[src_pos..end].to_vec()
-                                    } else {
-                                        vec![]
-                                    }
-                                })
-                                .unwrap_or_default();
-                            if let Some(dest) = caller.data_mut().bytes_handles.get_mut(&dest_h) {
-                                let copy_len =
-                                    src_bytes.len().min(dest.len().saturating_sub(dest_pos));
-                                if copy_len > 0 {
-                                    dest[dest_pos..dest_pos + copy_len]
-                                        .copy_from_slice(&src_bytes[..copy_len]);
-                                }
-                            }
+                            let src_bytes = read_bytes_slice(&mut caller, src_h, src_pos, len);
+                            write_bytes_slice(&mut caller, dest_h, dest_pos, &src_bytes);
                             if !results.is_empty() {
                                 results[0] = Val::I32(0);
                             }
@@ -1329,21 +1406,11 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         move |mut caller, params, results| {
                             let a_h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
                             let b_h = unbox_int_from_memory(&mut caller, val_i32(&params[1]));
-                            let cmp = {
-                                let s = caller.data();
-                                let a = s
-                                    .bytes_handles
-                                    .get(&a_h)
-                                    .map(|v| v.as_slice())
-                                    .unwrap_or(&[]);
-                                let b = s
-                                    .bytes_handles
-                                    .get(&b_h)
-                                    .map(|v| v.as_slice())
-                                    .unwrap_or(&[]);
-                                a.cmp(b) as i32
-                            };
-                            results[0] = ret_int(cmp, &rt);
+                            let a_len = bytes_total_len(&mut caller, a_h);
+                            let b_len = bytes_total_len(&mut caller, b_h);
+                            let a = read_bytes_slice(&mut caller, a_h, 0, a_len);
+                            let b = read_bytes_slice(&mut caller, b_h, 0, b_len);
+                            results[0] = ret_int(a.as_slice().cmp(b.as_slice()) as i32, &rt);
                             Ok(())
                         },
                     )
@@ -1366,18 +1433,39 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         name,
                         func_ty.clone(),
                         move |mut caller, params, results| {
-                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
-                            let base =
-                                unbox_int_from_memory(&mut caller, val_i32(&params[1])) as u64;
-                            let off_lo =
-                                unbox_int_from_memory(&mut caller, val_i32(&params[2])) as u64
-                                    & 0xFFFF_FFFF;
-                            let off_hi =
-                                unbox_int_from_memory(&mut caller, val_i32(&params[3])) as u64
-                                    & 0xFFFF_FFFF;
-                            let len =
-                                unbox_int_from_memory(&mut caller, val_i32(&params[4])) as usize;
+                            // All five params are primitive i32 from Haxe (handle,
+                            // base, offLo, offHi, len). They are NOT boxed
+                            // DynamicValues, so skip unbox_int_from_memory which
+                            // would mis-interpret a large primitive (e.g. a 215MB
+                            // tensor length) as a Dynamic pointer and dereference
+                            // garbage out of the wasm memory region holding the
+                            // mmap'd GGUF file.
+                            let h = val_i32(&params[0]);
+                            let base = val_i32(&params[1]) as u64;
+                            let off_lo = val_i32(&params[2]) as u64 & 0xFFFF_FFFF;
+                            let off_hi = val_i32(&params[3]) as u64 & 0xFFFF_FFFF;
+                            let len = val_i32(&params[4]) as usize;
                             let abs = base.wrapping_add(off_lo | (off_hi << 32)) as usize;
+                            // wasm-memory backed source: no copy, just a new
+                            // header pointing at src.data + abs.
+                            if h > 65536 {
+                                if let Some((data_addr, total_len, _)) =
+                                    read_haxe_bytes_header(&mut caller, h)
+                                {
+                                    let end = abs.saturating_add(len).min(total_len as usize);
+                                    let view_len = if abs < end { end - abs } else { 0 };
+                                    let header_ptr = make_haxe_bytes_view(
+                                        &mut caller,
+                                        data_addr + abs as u32,
+                                        view_len as u32,
+                                    );
+                                    results[0] = ret_int(header_ptr, &rt);
+                                    return Ok(());
+                                }
+                            }
+                            // Legacy host-side path: materialize a fresh copy
+                            // in wasm memory so the new header is usable by
+                            // runtime-wasm.
                             let sub = caller
                                 .data()
                                 .bytes_handles
@@ -1391,14 +1479,8 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                     }
                                 })
                                 .unwrap_or_else(|| vec![0u8; len]);
-                            let id = {
-                                let s = caller.data_mut();
-                                let id = s.next_bytes_id;
-                                s.next_bytes_id += 1;
-                                s.bytes_handles.insert(id, sub);
-                                id
-                            };
-                            results[0] = ret_int(id, &rt);
+                            let header_ptr = write_haxe_bytes_in_wasm(&mut caller, &sub);
+                            results[0] = ret_int(header_ptr, &rt);
                             Ok(())
                         },
                     )
@@ -1419,12 +1501,8 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         func_ty.clone(),
                         move |mut caller, params, results| {
                             let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
-                            let bytes = caller
-                                .data()
-                                .bytes_handles
-                                .get(&h)
-                                .cloned()
-                                .unwrap_or_default();
+                            let total = bytes_total_len(&mut caller, h);
+                            let bytes = read_bytes_slice(&mut caller, h, 0, total);
                             let s = String::from_utf8_lossy(&bytes).into_owned();
                             let ptr = write_haxe_string(&mut caller, &s);
                             results[0] = ret_int(ptr, &rt);
@@ -1448,6 +1526,23 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                             let raw_len = val_i32(&params[2]);
                             let pos = unbox_int_from_memory(&mut caller, raw_pos) as usize;
                             let len = unbox_int_from_memory(&mut caller, raw_len) as usize;
+                            // wasm-memory backed source: no copy, just a new
+                            // header pointing at src.data + pos.
+                            if h > 65536 {
+                                if let Some((data_addr, total_len, _)) =
+                                    read_haxe_bytes_header(&mut caller, h)
+                                {
+                                    let end = pos.saturating_add(len).min(total_len as usize);
+                                    let view_len = if pos < end { end - pos } else { 0 };
+                                    let header_ptr = make_haxe_bytes_view(
+                                        &mut caller,
+                                        data_addr + pos as u32,
+                                        view_len as u32,
+                                    );
+                                    results[0] = ret_int(header_ptr, &rt);
+                                    return Ok(());
+                                }
+                            }
                             let sub = caller
                                 .data()
                                 .bytes_handles
@@ -1461,14 +1556,8 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                                     }
                                 })
                                 .unwrap_or_else(|| vec![0u8; len]);
-                            let id = {
-                                let s = caller.data_mut();
-                                let id = s.next_bytes_id;
-                                s.next_bytes_id += 1;
-                                s.bytes_handles.insert(id, sub);
-                                id
-                            };
-                            results[0] = ret_int(id, &rt);
+                            let header_ptr = write_haxe_bytes_in_wasm(&mut caller, &sub);
+                            results[0] = ret_int(header_ptr, &rt);
                             Ok(())
                         },
                     )
@@ -1496,10 +1585,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         if name != "haxe_file_get_bytes" {
             continue;
         }
-        let rt = func_ty
-            .results()
-            .next()
-            .unwrap_or(ValType::I32);
+        let rt = func_ty.results().next().unwrap_or(ValType::I32);
         linker
             .func_new(
                 "rayzor",
@@ -1514,14 +1600,11 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         );
                         Vec::new()
                     });
-                    let id = {
-                        let s = caller.data_mut();
-                        let id = s.next_bytes_id;
-                        s.next_bytes_id += 1;
-                        s.bytes_handles.insert(id, data);
-                        id
-                    };
-                    results[0] = ret_int(id, &rt);
+                    // Allocate the file contents + HaxeBytes header in WASM
+                    // linear memory so the runtime-wasm cdylib can dereference
+                    // the handle as `*const HaxeBytes`.
+                    let header_ptr = write_haxe_bytes_in_wasm(&mut caller, &data);
+                    results[0] = ret_int(header_ptr, &rt);
                     Ok(())
                 },
             )
@@ -1551,10 +1634,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         if name != "haxe_sys_args" {
             continue;
         }
-        let rt = func_ty
-            .results()
-            .next()
-            .unwrap_or(ValType::I32);
+        let rt = func_ty.results().next().unwrap_or(ValType::I32);
         linker
             .func_new(
                 "rayzor",
@@ -1623,10 +1703,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             "haxe_stringmap_keys" => "keys",
             _ => continue,
         };
-        let rt = func_ty
-            .results()
-            .next()
-            .unwrap_or(ValType::I32);
+        let rt = func_ty.results().next().unwrap_or(ValType::I32);
         let func_ty_clone = func_ty.clone();
         linker
             .func_new(
@@ -1760,10 +1837,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             "haxe_string_from_char_code" => "from_char_code",
             _ => continue,
         };
-        let rt = func_ty
-            .results()
-            .next()
-            .unwrap_or(ValType::I32);
+        let rt = func_ty.results().next().unwrap_or(ValType::I32);
         linker
             .func_new(
                 "rayzor",
@@ -1814,10 +1888,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             "haxe_std_string" => "string",
             _ => continue,
         };
-        let rt = func_ty
-            .results()
-            .next()
-            .unwrap_or(ValType::I32);
+        let rt = func_ty.results().next().unwrap_or(ValType::I32);
         linker
             .func_new(
                 "rayzor",
@@ -1840,10 +1911,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         "parse_int" => {
                             let s = read_haxe_string(&mut caller, val_i32(&params[0]));
                             let trimmed = s.trim();
-                            let parsed: i32 = trimmed
-                                .parse::<i64>()
-                                .map(|v| v as i32)
-                                .unwrap_or(0);
+                            let parsed: i32 = trimmed.parse::<i64>().map(|v| v as i32).unwrap_or(0);
                             results[0] = ret_int(parsed, &rt);
                         }
                         "parse_float" => {
@@ -1891,10 +1959,7 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
             "haxe_sys_exit" => "exit",
             _ => continue,
         };
-        let rt = func_ty
-            .results()
-            .next()
-            .unwrap_or(ValType::I32);
+        let rt = func_ty.results().next().unwrap_or(ValType::I32);
         linker
             .func_new(
                 "rayzor",
@@ -4072,7 +4137,10 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
     // heap; max=16384 pages / 1 GiB to match the runtime linker config).
     {
         use wasmtime::{MemoryType, SharedMemory};
-        let mem_ty = MemoryType::shared(512, 16384);
+        // Bumped from 16384 → 65536 pages (1 GiB → 4 GiB wasm32 cap) so a
+        // ~770 MB GGUF can sit in linear memory alongside the runtime-wasm
+        // QTensor allocations (each Q6_K weight copies its block buffer).
+        let mem_ty = MemoryType::shared(512, 65536);
         let shared = SharedMemory::new(&engine, mem_ty)
             .map_err(|e| format!("Failed to create shared memory: {}", e))?;
         // Clone into WasmState so host functions can read/write it directly:

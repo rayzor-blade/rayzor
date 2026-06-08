@@ -204,7 +204,11 @@ pub fn cmd_build_wasm(
                 .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
         }
         Err(e) => {
-            println!("  note: component encoding skipped ({}) — wrote core module to {}", e, out_path.display());
+            println!(
+                "  note: component encoding skipped ({}) — wrote core module to {}",
+                e,
+                out_path.display()
+            );
             std::fs::write(&out_path, &linked_wasm)
                 .map_err(|err| format!("failed to write {}: {}", out_path.display(), err))?;
         }
