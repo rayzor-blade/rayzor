@@ -182,10 +182,11 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_qt_t_f32(x: i32, qt: i32) -> i32 {
     // Allocate output Tensor via the public Tensor allocator. The wasm-side
     // tensor module owns its own dlmalloc-backed alloc path.
     let y_shape: [usize; 2] = [m, n_out];
-    let y = crate::tensor::rayzor_tensor_zeros(y_shape.as_ptr() as i32, 2, DTYPE_F32 as i32);
-    if y == 0 {
+    let y = crate::tensor::alloc_tensor(&y_shape, DTYPE_F32);
+    if y.is_null() {
         return 0;
     }
+    let y = y as i32;
     let yr = &*(y as *const Tensor);
     let y_data = yr.data as *mut f32;
 

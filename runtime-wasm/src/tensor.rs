@@ -99,7 +99,10 @@ fn read_shape(shape_ptr: i32, ndim: usize) -> std::vec::Vec<usize> {
     if shape_ptr == 0 || ndim == 0 {
         return std::vec![];
     }
-    unsafe { slice::from_raw_parts(shape_ptr as *const usize, ndim).to_vec() }
+    unsafe {
+        let data = shape_ptr as *const i64;
+        (0..ndim).map(|idx| *data.add(idx) as usize).collect()
+    }
 }
 
 unsafe fn alloc_usize_array(values: &[usize]) -> *mut usize {
@@ -228,7 +231,7 @@ fn fp8_e5m2_from_f32(value: f32) -> u8 {
     sign | ((exp as u8) << 2) | mant
 }
 
-unsafe fn alloc_tensor(shape: &[usize], dtype: u8) -> *mut Tensor {
+pub(crate) unsafe fn alloc_tensor(shape: &[usize], dtype: u8) -> *mut Tensor {
     let ndim = shape.len();
     let mut numel: usize = 1;
     for &d in shape {
@@ -299,8 +302,19 @@ pub unsafe extern "C" fn rayzor_tensor_zeros(shape_ptr: i32, ndim: i32, dtype: i
     if shape_ptr == 0 || ndim < 0 || ndim > 16 {
         return 0;
     }
-    let shape = slice::from_raw_parts(shape_ptr as *const usize, ndim as usize);
-    alloc_tensor(shape, dtype as u8) as i32
+    let shape = read_shape(shape_ptr, ndim as usize);
+    alloc_tensor(&shape, dtype as u8) as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_ones(shape_ptr: i32, ndim: i32, dtype: i32) -> i32 {
+    rayzor_tensor_full(shape_ptr, ndim, 1.0, dtype)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_rand(shape_ptr: i32, ndim: i32, dtype: i32) -> i32 {
+    // Deterministic placeholder until wasm RNG parity lands.
+    rayzor_tensor_zeros(shape_ptr, ndim, dtype)
 }
 
 /// `Tensor.full(shape, ndim, value, dtype)`.
@@ -327,6 +341,25 @@ pub unsafe extern "C" fn rayzor_tensor_full(
     t
 }
 
+/// `Tensor.fromArray(data_ptr, data_len, dtype)`.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_from_array(data_ptr: i32, data_len: i32, dtype: i32) -> i32 {
+    if data_ptr == 0 || data_len < 0 {
+        return 0;
+    }
+    let shape = [data_len as usize];
+    let t = alloc_tensor(&shape, dtype as u8) as i32;
+    if t == 0 {
+        return 0;
+    }
+    let tr = &*(t as *const Tensor);
+    let src = slice::from_raw_parts(data_ptr as *const f64, data_len as usize);
+    for (idx, &value) in src.iter().enumerate() {
+        store_f32_at(tr.data, idx, tr.dtype, value as f32);
+    }
+    t
+}
+
 /// `Tensor.from_floats(data, len, shape, ndim)` — copy `len` f32 values from
 /// `data` into a fresh tensor with the given shape (must satisfy
 /// `prod(shape) == len`).
@@ -337,10 +370,11 @@ pub unsafe extern "C" fn rayzor_tensor_from_floats(
     shape_ptr: i32,
     ndim: i32,
 ) -> i32 {
-    if data_ptr == 0 || len <= 0 {
+    if data_ptr == 0 || len <= 0 || shape_ptr == 0 || ndim < 0 || ndim > 16 {
         return 0;
     }
-    let t = rayzor_tensor_zeros(shape_ptr, ndim, DTYPE_F32 as i32);
+    let shape = slice::from_raw_parts(shape_ptr as *const usize, ndim as usize).to_vec();
+    let t = alloc_tensor(&shape, DTYPE_F32) as i32;
     if t == 0 {
         return 0;
     }
@@ -381,6 +415,22 @@ pub unsafe extern "C" fn rayzor_tensor_dtype(t: i32) -> i32 {
 }
 
 #[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_device(t: i32) -> i32 {
+    if t == 0 {
+        return 0;
+    }
+    (*(t as *const Tensor)).device as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_numa_node(t: i32) -> i32 {
+    if t == 0 {
+        return -1;
+    }
+    (*(t as *const Tensor)).numa_node
+}
+
+#[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_data(t: i32) -> i32 {
     if t == 0 {
         return 0;
@@ -396,6 +446,41 @@ pub unsafe extern "C" fn rayzor_tensor_shape_ptr(t: i32) -> i32 {
     (*(t as *const Tensor)).shape as i32
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_shape_ndim(t: i32) -> i32 {
+    rayzor_tensor_ndim(t)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_shape(t: i32) -> i32 {
+    if t == 0 {
+        return 0;
+    }
+    let tr = &*(t as *const Tensor);
+    let shape = slice::from_raw_parts(tr.shape, tr.ndim);
+    let header_layout = Layout::from_size_align(32, 8).unwrap();
+    let header = alloc(header_layout);
+    if header.is_null() {
+        return 0;
+    }
+    core::ptr::write_bytes(header, 0, 32);
+    let data_layout = Layout::from_size_align((tr.ndim * 8).max(1), 8).unwrap();
+    let data = alloc(data_layout);
+    if data.is_null() {
+        dealloc(header, header_layout);
+        return 0;
+    }
+    for (idx, &dim) in shape.iter().enumerate() {
+        *(data as *mut i64).add(idx) = dim as i64;
+    }
+    let h = header as *mut u32;
+    *h = data as u32;
+    *h.add(2) = tr.ndim as u32;
+    *h.add(4) = tr.ndim as u32;
+    *h.add(6) = 8;
+    header as i32
+}
+
 /// Read one f32 element by flat index.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_get_flat_f32(t: i32, idx: i32) -> f32 {
@@ -407,6 +492,57 @@ pub unsafe extern "C" fn rayzor_tensor_get_flat_f32(t: i32, idx: i32) -> f32 {
         return 0.0;
     }
     load_f32_at(tr.data, idx as usize, tr.dtype)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_get_flat(t: i32, idx: i32) -> f64 {
+    rayzor_tensor_get_flat_f32(t, idx) as f64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_get(t: i32, indices_ptr: i32, ndim: i32) -> f64 {
+    if t == 0 || indices_ptr == 0 || ndim < 0 {
+        return 0.0;
+    }
+    let tr = &*(t as *const Tensor);
+    if ndim as usize != tr.ndim {
+        return 0.0;
+    }
+    let indices = slice::from_raw_parts(indices_ptr as *const i64, ndim as usize);
+    let shape = slice::from_raw_parts(tr.shape, tr.ndim);
+    let strides = slice::from_raw_parts(tr.strides, tr.ndim);
+    let mut off = 0usize;
+    for axis in 0..tr.ndim {
+        let idx = indices[axis];
+        if idx < 0 || idx as usize >= shape[axis] {
+            return 0.0;
+        }
+        off += idx as usize * strides[axis];
+    }
+    load_f32_at(tr.data, off, tr.dtype) as f64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_set(t: i32, indices_ptr: i32, ndim: i32, value: f64) {
+    if t == 0 || indices_ptr == 0 || ndim < 0 {
+        return;
+    }
+    let tr = &*(t as *const Tensor);
+    if ndim as usize != tr.ndim {
+        return;
+    }
+    let indices = slice::from_raw_parts(indices_ptr as *const i64, ndim as usize);
+    let shape = slice::from_raw_parts(tr.shape, tr.ndim);
+    let strides = slice::from_raw_parts(tr.strides, tr.ndim);
+    let mut off = 0usize;
+    for axis in 0..tr.ndim {
+        let idx = indices[axis];
+        if idx < 0 || idx as usize >= shape[axis] {
+            return;
+        }
+        off += idx as usize * strides[axis];
+    }
+    store_f32_at(tr.data, off, tr.dtype, value as f32);
 }
 
 /// `Y = X @ W^T` where X is `[M, K]` and W is `[N, K]` (stored as if not
@@ -455,6 +591,237 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_t(x: i32, w: i32) -> i32 {
     }
 
     y as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_matmul(a: i32, b: i32) -> i32 {
+    if a == 0 || b == 0 {
+        return 0;
+    }
+    let ar = &*(a as *const Tensor);
+    let br = &*(b as *const Tensor);
+    if ar.ndim != 2 || br.ndim != 2 || ar.dtype != DTYPE_F32 || br.dtype != DTYPE_F32 {
+        return 0;
+    }
+    let a_shape = slice::from_raw_parts(ar.shape, 2);
+    let b_shape = slice::from_raw_parts(br.shape, 2);
+    let m = a_shape[0];
+    let k = a_shape[1];
+    let k2 = b_shape[0];
+    let n = b_shape[1];
+    if k != k2 {
+        return 0;
+    }
+    let y_shape = [m, n];
+    let y = alloc_tensor(&y_shape, DTYPE_F32);
+    if y.is_null() {
+        return 0;
+    }
+    let a_data = ar.data as *const f32;
+    let b_data = br.data as *const f32;
+    let y_data = (*y).data as *mut f32;
+    for i in 0..m {
+        for j in 0..n {
+            let mut sum = 0.0f32;
+            for p in 0..k {
+                sum += *a_data.add(i * k + p) * *b_data.add(p * n + j);
+            }
+            *y_data.add(i * n + j) = sum;
+        }
+    }
+    y as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_matmul_t_threaded(a: i32, b: i32, _threads: i32) -> i32 {
+    rayzor_tensor_matmul_t(a, b)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_bmm(a: i32, b: i32) -> i32 {
+    rayzor_tensor_matmul(a, b)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_bmm_threaded(a: i32, b: i32, _threads: i32) -> i32 {
+    rayzor_tensor_bmm(a, b)
+}
+
+unsafe fn tensor_unary<F: Fn(f32) -> f32>(t: i32, f: F) -> i32 {
+    if t == 0 {
+        return 0;
+    }
+    let tr = &*(t as *const Tensor);
+    let shape = slice::from_raw_parts(tr.shape, tr.ndim);
+    let y = alloc_tensor(shape, tr.dtype);
+    if y.is_null() {
+        return 0;
+    }
+    let yr = &*y;
+    for idx in 0..tr.numel {
+        store_f32_at(
+            yr.data,
+            idx,
+            tr.dtype,
+            f(load_f32_at(tr.data, idx, tr.dtype)),
+        );
+    }
+    y as i32
+}
+
+unsafe fn tensor_binary<F: Fn(f32, f32) -> f32>(a: i32, b: i32, f: F) -> i32 {
+    if a == 0 || b == 0 {
+        return 0;
+    }
+    let ar = &*(a as *const Tensor);
+    let br = &*(b as *const Tensor);
+    if ar.ndim != br.ndim || ar.numel != br.numel {
+        return 0;
+    }
+    let a_shape = slice::from_raw_parts(ar.shape, ar.ndim);
+    let b_shape = slice::from_raw_parts(br.shape, br.ndim);
+    if a_shape != b_shape {
+        return 0;
+    }
+    let y = alloc_tensor(a_shape, ar.dtype);
+    if y.is_null() {
+        return 0;
+    }
+    let yr = &*y;
+    for idx in 0..ar.numel {
+        let av = load_f32_at(ar.data, idx, ar.dtype);
+        let bv = load_f32_at(br.data, idx, br.dtype);
+        store_f32_at(yr.data, idx, yr.dtype, f(av, bv));
+    }
+    y as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_add(a: i32, b: i32) -> i32 {
+    tensor_binary(a, b, |x, y| x + y)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_sub(a: i32, b: i32) -> i32 {
+    tensor_binary(a, b, |x, y| x - y)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_mul(a: i32, b: i32) -> i32 {
+    tensor_binary(a, b, |x, y| x * y)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_div(a: i32, b: i32) -> i32 {
+    tensor_binary(a, b, |x, y| x / y)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_sqrt(t: i32) -> i32 {
+    tensor_unary(t, libm::sqrtf)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_exp(t: i32) -> i32 {
+    tensor_unary(t, libm::expf)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_log(t: i32) -> i32 {
+    tensor_unary(t, libm::logf)
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_relu(t: i32) -> i32 {
+    tensor_unary(t, |x| x.max(0.0))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_gelu(t: i32) -> i32 {
+    tensor_unary(t, |x| {
+        0.5 * x * (1.0 + libm::tanhf(0.7978846 * (x + 0.044715 * x * x * x)))
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_silu(t: i32) -> i32 {
+    tensor_unary(t, |x| x / (1.0 + libm::expf(-x)))
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_sum(t: i32) -> f64 {
+    if t == 0 {
+        return 0.0;
+    }
+    let tr = &*(t as *const Tensor);
+    let mut sum = 0.0f64;
+    for idx in 0..tr.numel {
+        sum += load_f32_at(tr.data, idx, tr.dtype) as f64;
+    }
+    sum
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_mean(t: i32) -> f64 {
+    if t == 0 {
+        return 0.0;
+    }
+    let tr = &*(t as *const Tensor);
+    if tr.numel == 0 {
+        0.0
+    } else {
+        rayzor_tensor_sum(t) / tr.numel as f64
+    }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_max(t: i32) -> f64 {
+    if t == 0 {
+        return 0.0;
+    }
+    let tr = &*(t as *const Tensor);
+    if tr.numel == 0 {
+        return 0.0;
+    }
+    let mut best = load_f32_at(tr.data, 0, tr.dtype);
+    for idx in 1..tr.numel {
+        best = best.max(load_f32_at(tr.data, idx, tr.dtype));
+    }
+    best as f64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_min(t: i32) -> f64 {
+    if t == 0 {
+        return 0.0;
+    }
+    let tr = &*(t as *const Tensor);
+    if tr.numel == 0 {
+        return 0.0;
+    }
+    let mut best = load_f32_at(tr.data, 0, tr.dtype);
+    for idx in 1..tr.numel {
+        best = best.min(load_f32_at(tr.data, idx, tr.dtype));
+    }
+    best as f64
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_dot(a: i32, b: i32) -> f64 {
+    if a == 0 || b == 0 {
+        return 0.0;
+    }
+    let ar = &*(a as *const Tensor);
+    let br = &*(b as *const Tensor);
+    if ar.numel != br.numel {
+        return 0.0;
+    }
+    let mut sum = 0.0f64;
+    for idx in 0..ar.numel {
+        sum +=
+            load_f32_at(ar.data, idx, ar.dtype) as f64 * load_f32_at(br.data, idx, br.dtype) as f64;
+    }
+    sum
 }
 
 /// Copy rows from `src` into `dst` along axis 0 starting at `dst_row_offset`.
@@ -772,7 +1139,7 @@ mod tests {
     #[test]
     fn f16_full_round_trips_through_get_flat() {
         unsafe {
-            let shape = [1usize, 2];
+            let shape = [1i64, 2];
             let t = rayzor_tensor_full(shape.as_ptr() as i32, 2, 1.5, DTYPE_F16 as i32);
             assert!(t != 0);
             let tr = &*(t as *const Tensor);
@@ -780,6 +1147,61 @@ mod tests {
             assert!((rayzor_tensor_get_flat_f32(t, 0) - 1.5).abs() < 1e-3);
             assert!((rayzor_tensor_get_flat_f32(t, 1) - 1.5).abs() < 1e-3);
             rayzor_tensor_free(t);
+        }
+    }
+
+    #[test]
+    fn native_named_tensor_exports_cover_tensor_demo_path() {
+        unsafe {
+            let shape_2x3 = [2i64, 3];
+            let zero_idx_2d = [0i64, 0];
+            let a = rayzor_tensor_ones(shape_2x3.as_ptr() as i32, 2, DTYPE_F32 as i32);
+            let b = rayzor_tensor_full(shape_2x3.as_ptr() as i32, 2, 2.0, DTYPE_F32 as i32);
+            assert!(a != 0 && b != 0);
+            assert_eq!(rayzor_tensor_numel(a), 6);
+            assert_eq!(rayzor_tensor_get(b, zero_idx_2d.as_ptr() as i32, 2), 2.0);
+
+            let c = rayzor_tensor_add(a, b);
+            assert!(c != 0);
+            assert_eq!(rayzor_tensor_get(c, zero_idx_2d.as_ptr() as i32, 2), 3.0);
+            assert_eq!(rayzor_tensor_sum(a), 6.0);
+            assert_eq!(rayzor_tensor_mean(b), 2.0);
+
+            let v1_data = [1.0f64, 2.0, 3.0];
+            let v2_data = [4.0f64, 5.0, 6.0];
+            let v1 = rayzor_tensor_from_array(v1_data.as_ptr() as i32, 3, DTYPE_F32 as i32);
+            let v2 = rayzor_tensor_from_array(v2_data.as_ptr() as i32, 3, DTYPE_F32 as i32);
+            assert!(v1 != 0 && v2 != 0);
+            assert_eq!(rayzor_tensor_dot(v1, v2), 32.0);
+
+            let m_shape = [2i64, 2];
+            let m1_data = [1.0f64, 2.0, 3.0, 4.0];
+            let m2_data = [5.0f64, 6.0, 7.0, 8.0];
+            let m1_base = rayzor_tensor_from_array(m1_data.as_ptr() as i32, 4, DTYPE_F32 as i32);
+            let m2_base = rayzor_tensor_from_array(m2_data.as_ptr() as i32, 4, DTYPE_F32 as i32);
+            let m1 = rayzor_tensor_reshape(m1_base, m_shape.as_ptr() as i32, 2);
+            let m2 = rayzor_tensor_reshape(m2_base, m_shape.as_ptr() as i32, 2);
+            let m3 = rayzor_tensor_matmul(m1, m2);
+            assert!(m3 != 0);
+            assert_eq!(rayzor_tensor_get(m3, [0i64, 0].as_ptr() as i32, 2), 19.0);
+            assert_eq!(rayzor_tensor_get(m3, [0i64, 1].as_ptr() as i32, 2), 22.0);
+            assert_eq!(rayzor_tensor_get(m3, [1i64, 0].as_ptr() as i32, 2), 43.0);
+            assert_eq!(rayzor_tensor_get(m3, [1i64, 1].as_ptr() as i32, 2), 50.0);
+
+            let sq_data = [1.0f64, 4.0, 9.0, 16.0];
+            let vals = rayzor_tensor_from_array(sq_data.as_ptr() as i32, 4, DTYPE_F32 as i32);
+            let sq = rayzor_tensor_sqrt(vals);
+            assert!(sq != 0);
+            for (idx, want) in [1.0, 2.0, 3.0, 4.0].iter().enumerate() {
+                assert_eq!(
+                    rayzor_tensor_get(sq, [idx as i64].as_ptr() as i32, 1),
+                    *want
+                );
+            }
+
+            for h in [sq, vals, m3, m2, m1, m2_base, m1_base, v2, v1, c, b, a] {
+                rayzor_tensor_free(h);
+            }
         }
     }
 
@@ -836,8 +1258,8 @@ mod tests {
     #[test]
     fn append_slice_and_reshape_back_kv_cache_rows() {
         unsafe {
-            let cache_shape = [2048usize, 64];
-            let row_shape = [1usize, 64];
+            let cache_shape = [2048i64, 64];
+            let row_shape = [1i64, 64];
             let cache = rayzor_tensor_zeros(cache_shape.as_ptr() as i32, 2, DTYPE_F32 as i32);
             assert!(cache != 0);
 
@@ -861,7 +1283,7 @@ mod tests {
                 2
             );
 
-            let flat_shape = [10usize, 64];
+            let flat_shape = [10i64, 64];
             let reshaped = rayzor_tensor_reshape(view, flat_shape.as_ptr() as i32, 2);
             assert!(reshaped != 0);
             let reshaped_ref = &*(reshaped as *const Tensor);
