@@ -6,4 +6,5 @@
 //! lives here is per-element compute that operates on raw pointers + length
 //! contracts.
 
+pub mod flash_attn;
 pub mod topk;

@@ -3004,23 +3004,16 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode(
 }
 
 /// Inner per-q_head body shared between the sequential and parallel
-/// dispatch paths of `rayzor_tensor_flash_attn_decode`. Pulls the
-/// existing three-pass kernel out so both paths run byte-identical
-/// arithmetic — sequential and parallel produce bit-equal outputs
-/// because each q_head's three passes are independent and write a
-/// disjoint output band.
+/// dispatch paths of `rayzor_tensor_flash_attn_decode`.
 ///
-/// Stays native (rather than moving to runtime-core alongside the other
-/// pure-compute helpers) because the softmax denominator uses
-/// `f32::exp()`, which routes through macOS Accelerate-tuned
-/// libsystem_m. A `no_std` port would have to fall back to `libm::expf`,
-/// a pure-Rust polynomial approximation that is measurably slower on the
-/// hot path (cache_len × n_q_heads × n_layers × tokens expf calls per
-/// decode). Migrate once `runtime-core` exposes a hardware-exp shim
-/// (function pointer set by `runtime/` at init).
+/// The math lives in `rayzor_runtime_core::tensor::flash_attn`; this thin
+/// wrapper picks `f32::exp` (Accelerate-routed on macOS, fast libm
+/// elsewhere) as the softmax exponential. The WASM crate uses the same
+/// runtime-core kernel with `libm::expf` — see
+/// `docs/design/runtime_core_extraction.md` and
+/// `docs/design/wasm_runtime_parity.md`.
 #[inline]
 #[allow(clippy::too_many_arguments)] // hot decode kernel; bundling into a struct would add a load on the inner loop
-#[allow(clippy::needless_range_loop)] // index drives three independent pointers (k, v, scores)
 unsafe fn flash_attn_decode_one_qhead(
     q_head: usize,
     group: usize,
@@ -3034,44 +3027,20 @@ unsafe fn flash_attn_decode_one_qhead(
     out_data: *mut f32,
     scores: &mut [f32],
 ) {
-    let kv_head = q_head / group;
-    let q_row = std::slice::from_raw_parts(q_data.add(q_head * head_dim), head_dim);
-
-    // First pass: scores[l] = (Q[h] · K[l, kv_head, :]) * scale.
-    let mut max_score = f32::NEG_INFINITY;
-    for l in 0..cache_len {
-        let k_row = std::slice::from_raw_parts(
-            k_data.add(l * kv_row_stride + kv_head * head_dim),
-            head_dim,
-        );
-        let s = crate::tensor_simd::dot_slice_f32(q_row, k_row) * scale_f32;
-        scores[l] = s;
-        if s > max_score {
-            max_score = s;
-        }
-    }
-
-    // Second pass: softmax denominator, in the standard max-shifted
-    // form (matches `Tensor.softmax`'s reduction order).
-    let mut denom = 0.0f32;
-    for l in 0..cache_len {
-        let e = (scores[l] - max_score).exp();
-        scores[l] = e;
-        denom += e;
-    }
-    let inv_denom = 1.0 / denom;
-
-    // Third pass: context[q_head, :] = Σ_l (softmax[l] * V[l, kv_head, :]).
-    let out_row = std::slice::from_raw_parts_mut(out_data.add(q_head * head_dim), head_dim);
-    out_row.fill(0.0);
-    for l in 0..cache_len {
-        let w = scores[l] * inv_denom;
-        let v_row = std::slice::from_raw_parts(
-            v_data.add(l * kv_row_stride + kv_head * head_dim),
-            head_dim,
-        );
-        crate::tensor_simd::axpy_slice(out_row, w, v_row);
-    }
+    rayzor_runtime_core::tensor::flash_attn::flash_attn_decode_one_qhead(
+        q_head,
+        group,
+        head_dim,
+        cache_len,
+        kv_row_stride,
+        scale_f32,
+        q_data,
+        k_data,
+        v_data,
+        out_data,
+        scores,
+        |x| x.exp(),
+    );
 }
 
 /// Generate the RoPE cos/sin tables for a given head dimension and maximum
