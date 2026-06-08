@@ -1897,11 +1897,15 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                 move |mut caller, params, results| {
                     match kind {
                         "int" => {
-                            // Param may be f64 or boxed Float. The wasm
-                            // calling convention surfaces f64 directly.
+                            // Param may be f64 or boxed Float. wasmtime's
+                            // `Val::F64(u64)` / `Val::F32(u32)` carry the
+                            // raw BIT PATTERN, not the float value — use
+                            // `from_bits` to recover the float before
+                            // truncating to i32. Otherwise `Std.int(64.0)`
+                            // reads 0x4050_0000_0000_0000's low 32 bits = 0.
                             let v = match &params[0] {
-                                Val::F64(x) => *x as i64 as i32,
-                                Val::F32(x) => *x as i32,
+                                Val::F64(x) => f64::from_bits(*x) as i32,
+                                Val::F32(x) => f32::from_bits(*x) as i32,
                                 Val::I32(x) => *x,
                                 Val::I64(x) => *x as i32,
                                 _ => 0,
@@ -1923,9 +1927,11 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                         "string" => {
                             // Polymorphic over input; for the load+decode path
                             // the most common callsite is Std.string(Float).
+                            // Same Val::F64/F32 bit-pattern caveat as `int`
+                            // above — decode via from_bits before printing.
                             let formatted = match &params[0] {
-                                Val::F64(x) => format!("{}", x),
-                                Val::F32(x) => format!("{}", x),
+                                Val::F64(x) => format!("{}", f64::from_bits(*x)),
+                                Val::F32(x) => format!("{}", f32::from_bits(*x)),
                                 Val::I32(x) => format!("{}", x),
                                 Val::I64(x) => format!("{}", x),
                                 _ => String::new(),
