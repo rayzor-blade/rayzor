@@ -85,6 +85,11 @@ extern "C" {
     fn free(ptr: *mut u8);
 }
 
+// `f16` was previously used inline by `vec_dot_q4_K_q8_K`'s scalar fallback.
+// That fallback now delegates to `rayzor_runtime_core::quant::q4_k_m`, so the
+// import is only needed inside the in-crate tests. Gating with `#[cfg(test)]`
+// keeps clippy quiet without losing the test scaffold.
+#[cfg(test)]
 use half::f16;
 
 // Pure-compute block layouts + encode/decode/dequant helpers live in the
@@ -96,10 +101,7 @@ use half::f16;
 use rayzor_runtime_core::quant::{
     int8::{int8_matmul_f32, quantise_int8_row},
     matmul::{dot_f32_simd, prepare_x_q8k_blocks_into},
-    q4_k_m::{
-        decode_q4_k_block, dequant_q4_k_block, q4_k_get_scale_min, q4_k_m_matmul_f32,
-        quantize_block_q4_k_m,
-    },
+    q4_k_m::{decode_q4_k_block, dequant_q4_k_block, q4_k_m_matmul_f32, quantize_block_q4_k_m},
     q6_k::dequant_q6_k_block,
     q8_k::x_q8_cache_get,
 };
@@ -295,42 +297,10 @@ pub fn vec_dot_q4_K_q8_K(weight: &Q4KMBlock, x: &Q8KBlock) -> f32 {
         }
     }
 
-    // Portable scalar reference. Used on:
-    //  - non-aarch64 targets
-    //  - aarch64 builds without `target-feature=+dotprod` (Cortex-A53
-    //    et al — the SDOT helper isn't compiled in that configuration)
-    //  - aarch64 + `+dotprod` where the runtime probe failed (running
-    //    on a pre-ARMv8.2 core via SDK pinning) or RAYZOR_USE_SDOT=0
-    //
-    // Also the per-ULP ground truth in the unit tests below.
-    {
-        let mut acc = 0.0f32;
-        // Decode the 12-byte header into 8 (sc6, mn6) pairs.
-        let d = f16::from_bits(weight.d).to_f32();
-        let dmin = f16::from_bits(weight.dmin).to_f32();
-        let header = weight.scales;
-        for s in 0..8 {
-            let (sc6, mn6) = q4_k_get_scale_min(s, &header);
-            let sub_scale = d * sc6 as f32;
-            let sub_min = dmin * mn6 as f32;
-            // Sub-block s spans elements s*32 .. (s+1)*32. Within the
-            // 128-byte qs, the low-nibble/high-nibble pairing matches
-            // dequant_q4_k_block: bytes [p*32 .. p*32+32] hold sub-blocks
-            // 2p (low nibbles) and 2p+1 (high nibbles).
-            let p = s / 2;
-            let is_hi = s & 1 == 1;
-            let mut sdot: i32 = 0;
-            for i in 0..32 {
-                let byte = weight.qs[p * 32 + i];
-                let q = if is_hi { byte >> 4 } else { byte & 0x0F } as i32;
-                sdot += q * x.qs[s * 32 + i] as i32;
-            }
-            // bsums[2s] + bsums[2s+1] == sum of 32 x-quants in sub_s.
-            let bsum32 = x.bsums[2 * s] as i32 + x.bsums[2 * s + 1] as i32;
-            acc += sub_scale * (sdot as f32) - sub_min * (bsum32 as f32);
-        }
-        x.d * acc
-    }
+    // Portable scalar reference used on non-aarch64 targets, aarch64
+    // without dotprod, and the runtime-disabled SDOT path. Lives in
+    // rayzor-runtime-core so the WASM crate consumes the same kernel.
+    rayzor_runtime_core::quant::q4_k_m::vec_dot_q4_K_q8_K_scalar(weight, x)
 }
 
 // `pack_q4_k_scales`, `quantize_block_q4_k_m`, and `q4_k_m_matmul_f32` live
