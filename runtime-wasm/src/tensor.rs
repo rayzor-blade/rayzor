@@ -59,6 +59,11 @@ fn dtype_size(dtype: u8) -> usize {
     }
 }
 
+#[cfg(test)]
+static TEST_PHYSICAL_RELEASES: AtomicUsize = AtomicUsize::new(0);
+#[cfg(test)]
+static TEST_TRACKED_RELEASE_PTR: AtomicUsize = AtomicUsize::new(0);
+
 impl Tensor {
     fn compute_strides(shape: &[usize]) -> std::vec::Vec<usize> {
         let ndim = shape.len();
@@ -88,6 +93,25 @@ impl Tensor {
         }
         true
     }
+}
+
+fn read_shape(shape_ptr: i32, ndim: usize) -> std::vec::Vec<usize> {
+    if shape_ptr == 0 || ndim == 0 {
+        return std::vec![];
+    }
+    unsafe { slice::from_raw_parts(shape_ptr as *const usize, ndim).to_vec() }
+}
+
+unsafe fn alloc_usize_array(values: &[usize]) -> *mut usize {
+    let layout = Layout::array::<usize>(values.len().max(1)).unwrap();
+    let ptr = alloc(layout) as *mut usize;
+    if ptr.is_null() {
+        return core::ptr::null_mut();
+    }
+    if !values.is_empty() {
+        core::ptr::copy_nonoverlapping(values.as_ptr(), ptr, values.len());
+    }
+    ptr
 }
 
 pub(crate) unsafe fn load_f32_at(data: *const u8, idx: usize, dtype: u8) -> f32 {
@@ -432,6 +456,170 @@ pub unsafe extern "C" fn rayzor_tensor_matmul_t(x: i32, w: i32) -> i32 {
     y as i32
 }
 
+/// Copy rows from `src` into `dst` along axis 0 starting at `dst_row_offset`.
+///
+/// Both tensors must be F32, same rank, and have identical trailing axes.
+/// Returns `0` on success and `-1` on validation failure, mirroring native.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_append_along_0_f32(
+    dst_ptr: i32,
+    src_ptr: i32,
+    dst_row_offset: i32,
+) -> i32 {
+    if dst_ptr == 0 || src_ptr == 0 || dst_row_offset < 0 {
+        return -1;
+    }
+    let dst = &*(dst_ptr as *const Tensor);
+    let src = &*(src_ptr as *const Tensor);
+    if dst.dtype != DTYPE_F32 || src.dtype != DTYPE_F32 {
+        return -1;
+    }
+    if dst.ndim == 0 || src.ndim == 0 || dst.ndim != src.ndim {
+        return -1;
+    }
+    if !dst.is_contiguous() || !src.is_contiguous() {
+        return -1;
+    }
+    let dst_shape = slice::from_raw_parts(dst.shape, dst.ndim);
+    let src_shape = slice::from_raw_parts(src.shape, src.ndim);
+    for axis in 1..dst.ndim {
+        if dst_shape[axis] != src_shape[axis] {
+            return -1;
+        }
+    }
+    let row_stride: usize = dst_shape[1..].iter().product();
+    let rows = src_shape[0];
+    let offset = dst_row_offset as usize;
+    if offset + rows > dst_shape[0] {
+        return -1;
+    }
+    let byte_count = rows * row_stride * dtype_size(DTYPE_F32);
+    let dst_offset = offset * row_stride * dtype_size(DTYPE_F32);
+    core::ptr::copy_nonoverlapping(src.data, dst.data.add(dst_offset), byte_count);
+    0
+}
+
+/// Contiguous-only reshape. Returns a zero-copy view with canonical strides.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_reshape(tensor_ptr: i32, shape_ptr: i32, ndim: i32) -> i32 {
+    if tensor_ptr == 0 || ndim < 0 || ndim > 16 || (ndim > 0 && shape_ptr == 0) {
+        return 0;
+    }
+    let t = &*(tensor_ptr as *const Tensor);
+    if !t.is_contiguous() {
+        return 0;
+    }
+    let new_shape = read_shape(shape_ptr, ndim as usize);
+    let new_numel: usize = new_shape.iter().product();
+    if new_numel != t.numel {
+        return 0;
+    }
+    let new_strides = Tensor::compute_strides(&new_shape);
+    let shape = alloc_usize_array(&new_shape);
+    if shape.is_null() {
+        return 0;
+    }
+    let strides = alloc_usize_array(&new_strides);
+    if strides.is_null() {
+        let layout = Layout::array::<usize>(new_shape.len().max(1)).unwrap();
+        dealloc(shape as *mut u8, layout);
+        return 0;
+    }
+    let wrapper = alloc(Layout::new::<Tensor>()) as *mut Tensor;
+    if wrapper.is_null() {
+        let layout = Layout::array::<usize>(new_shape.len().max(1)).unwrap();
+        dealloc(shape as *mut u8, layout);
+        dealloc(strides as *mut u8, layout);
+        return 0;
+    }
+    core::ptr::write(
+        wrapper,
+        Tensor {
+            data: t.data,
+            shape,
+            strides,
+            ndim: new_shape.len(),
+            numel: new_numel,
+            dtype: t.dtype,
+            owns_data: false,
+            device: t.device,
+            numa_node: t.numa_node,
+            refcount: AtomicUsize::new(1),
+            parent: tensor_ptr as *mut Tensor,
+        },
+    );
+    t.refcount.fetch_add(1, Ordering::Relaxed);
+    wrapper as i32
+}
+
+/// Slice along one axis. Returns a zero-copy view with the same strides.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_slice(
+    tensor_ptr: i32,
+    axis: i32,
+    start: i32,
+    end: i32,
+) -> i32 {
+    if tensor_ptr == 0 || axis < 0 {
+        return 0;
+    }
+    let t = &*(tensor_ptr as *const Tensor);
+    let axis = axis as usize;
+    if axis >= t.ndim {
+        return 0;
+    }
+    let old_shape = slice::from_raw_parts(t.shape, t.ndim);
+    let old_strides = slice::from_raw_parts(t.strides, t.ndim);
+    let dim = old_shape[axis];
+    let s = start.max(0) as usize;
+    let e = (end.max(0) as usize).min(dim);
+    if s >= e {
+        return 0;
+    }
+
+    let mut new_shape = old_shape.to_vec();
+    new_shape[axis] = e - s;
+    let new_strides = old_strides.to_vec();
+    let new_numel: usize = new_shape.iter().product();
+
+    let shape = alloc_usize_array(&new_shape);
+    if shape.is_null() {
+        return 0;
+    }
+    let strides = alloc_usize_array(&new_strides);
+    if strides.is_null() {
+        let layout = Layout::array::<usize>(new_shape.len().max(1)).unwrap();
+        dealloc(shape as *mut u8, layout);
+        return 0;
+    }
+    let wrapper = alloc(Layout::new::<Tensor>()) as *mut Tensor;
+    if wrapper.is_null() {
+        let layout = Layout::array::<usize>(new_shape.len().max(1)).unwrap();
+        dealloc(shape as *mut u8, layout);
+        dealloc(strides as *mut u8, layout);
+        return 0;
+    }
+    let byte_offset = s * old_strides[axis] * dtype_size(t.dtype);
+    core::ptr::write(
+        wrapper,
+        Tensor {
+            data: t.data.add(byte_offset),
+            shape,
+            strides,
+            ndim: t.ndim,
+            numel: new_numel,
+            dtype: t.dtype,
+            owns_data: false,
+            device: t.device,
+            numa_node: t.numa_node,
+            refcount: AtomicUsize::new(1),
+            parent: tensor_ptr as *mut Tensor,
+        },
+    );
+    t.refcount.fetch_add(1, Ordering::Relaxed);
+    wrapper as i32
+}
+
 /// Atomic-refcount clone: bump `src`'s refcount and return the same pointer.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_arc_clone(src: i32) -> i32 {
@@ -537,6 +725,12 @@ pub unsafe extern "C" fn rayzor_tensor_free(t: i32) {
     }
 
     let wrapper_layout = Layout::new::<Tensor>();
+    #[cfg(test)]
+    {
+        if TEST_TRACKED_RELEASE_PTR.load(Ordering::Relaxed) == t as usize {
+            TEST_PHYSICAL_RELEASES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
     dealloc(t as *mut u8, wrapper_layout);
     if !parent.is_null() {
         rayzor_tensor_free(parent as i32);
@@ -584,16 +778,96 @@ mod tests {
     #[test]
     fn arc_clone_defers_physical_free_until_last_drop() {
         unsafe {
+            TEST_PHYSICAL_RELEASES.store(0, Ordering::Relaxed);
             let shape = [2usize, 2];
             let t = alloc_tensor(&shape, DTYPE_F32);
             assert!(!t.is_null());
             let h = t as i32;
+            TEST_TRACKED_RELEASE_PTR.store(h as usize, Ordering::Relaxed);
             let c = rayzor_tensor_arc_clone(h);
             assert_eq!(c, h);
             assert_eq!((&*t).refcount.load(Ordering::Relaxed), 2);
             rayzor_tensor_free(c);
             assert_eq!((&*t).refcount.load(Ordering::Relaxed), 1);
+            assert_eq!(TEST_PHYSICAL_RELEASES.load(Ordering::Relaxed), 0);
             rayzor_tensor_free(h);
+            assert_eq!(TEST_PHYSICAL_RELEASES.load(Ordering::Relaxed), 1);
+            TEST_TRACKED_RELEASE_PTR.store(0, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn arc_clone_three_times_releases_on_fourth_free() {
+        unsafe {
+            TEST_PHYSICAL_RELEASES.store(0, Ordering::Relaxed);
+            let shape = [1usize, 4];
+            let t = alloc_tensor(&shape, DTYPE_F32);
+            let h = t as i32;
+            TEST_TRACKED_RELEASE_PTR.store(h as usize, Ordering::Relaxed);
+            let c1 = rayzor_tensor_arc_clone(h);
+            let c2 = rayzor_tensor_arc_clone(h);
+            let c3 = rayzor_tensor_arc_clone(h);
+            assert_eq!(c1, h);
+            assert_eq!(c2, h);
+            assert_eq!(c3, h);
+            assert_eq!((&*t).refcount.load(Ordering::Relaxed), 4);
+
+            rayzor_tensor_free(c1);
+            assert_eq!(TEST_PHYSICAL_RELEASES.load(Ordering::Relaxed), 0);
+            rayzor_tensor_free(c2);
+            assert_eq!(TEST_PHYSICAL_RELEASES.load(Ordering::Relaxed), 0);
+            rayzor_tensor_free(c3);
+            assert_eq!(TEST_PHYSICAL_RELEASES.load(Ordering::Relaxed), 0);
+            assert_eq!((&*t).refcount.load(Ordering::Relaxed), 1);
+            rayzor_tensor_free(h);
+            assert_eq!(TEST_PHYSICAL_RELEASES.load(Ordering::Relaxed), 1);
+            TEST_TRACKED_RELEASE_PTR.store(0, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn append_slice_and_reshape_back_kv_cache_rows() {
+        unsafe {
+            let cache_shape = [2048usize, 64];
+            let row_shape = [1usize, 64];
+            let cache = rayzor_tensor_zeros(cache_shape.as_ptr() as i32, 2, DTYPE_F32 as i32);
+            assert!(cache != 0);
+
+            for row in 0..10 {
+                let src =
+                    rayzor_tensor_full(row_shape.as_ptr() as i32, 2, row as f32, DTYPE_F32 as i32);
+                assert!(src != 0);
+                assert_eq!(rayzor_tensor_append_along_0_f32(cache, src, row), 0);
+                rayzor_tensor_free(src);
+            }
+
+            let view = rayzor_tensor_slice(cache, 0, 0, 10);
+            assert!(view != 0);
+            let view_ref = &*(view as *const Tensor);
+            assert!(!view_ref.owns_data);
+            assert_eq!(view_ref.parent, cache as *mut Tensor);
+            assert_eq!(
+                (&*(cache as *const Tensor))
+                    .refcount
+                    .load(Ordering::Relaxed),
+                2
+            );
+
+            let flat_shape = [10usize, 64];
+            let reshaped = rayzor_tensor_reshape(view, flat_shape.as_ptr() as i32, 2);
+            assert!(reshaped != 0);
+            let reshaped_ref = &*(reshaped as *const Tensor);
+            assert!(!reshaped_ref.owns_data);
+            assert_eq!(reshaped_ref.numel, 640);
+
+            let data = reshaped_ref.data as *const f32;
+            for col in 0..64 {
+                assert_eq!(*data.add(9 * 64 + col), 9.0);
+            }
+
+            rayzor_tensor_free(reshaped);
+            rayzor_tensor_free(view);
+            rayzor_tensor_free(cache);
         }
     }
 
