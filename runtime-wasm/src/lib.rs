@@ -793,6 +793,50 @@ unsafe fn array_ensure_capacity(arr: i32) {
     *h.add(4) = new_cap; // cap at offset 16 (8-byte stride * 2)
 }
 
+/// Ensure the array length is at least `new_len`, growing capacity and
+/// zero-filling any gap. Mirrors native Haxe array indexed-assignment semantics.
+unsafe fn array_ensure_len(arr: i32, new_len: u32) -> bool {
+    let (data_ptr, len, cap, elem_size) = read_array(arr);
+    if new_len <= len {
+        return true;
+    }
+
+    let es = if elem_size == 0 { 8 } else { elem_size };
+    let h = arr as *mut u32;
+    if elem_size == 0 {
+        *h.add(6) = es;
+    }
+
+    let mut current_data = data_ptr;
+    if new_len > cap || data_ptr == 0 {
+        let mut new_cap = if cap == 0 { ARRAY_INITIAL_CAP } else { cap };
+        while new_cap < new_len {
+            new_cap *= 2;
+        }
+
+        let old_size = (cap * es) as usize;
+        let new_size = (new_cap * es) as usize;
+        let new_data = rt_alloc(new_size);
+        if new_data == 0 {
+            return false;
+        }
+        if data_ptr != 0 && old_size > 0 {
+            core::ptr::copy_nonoverlapping(data_ptr as *const u8, new_data as *mut u8, old_size);
+        }
+        current_data = new_data as u32;
+        *h = current_data;
+        *h.add(4) = new_cap;
+    }
+
+    let start = (len * es) as usize;
+    let bytes = ((new_len - len) * es) as usize;
+    if bytes > 0 {
+        core::ptr::write_bytes((current_data as *mut u8).add(start), 0, bytes);
+    }
+    *h.add(2) = new_len;
+    true
+}
+
 /// Push an i32 value onto the array.
 /// Note: signature is (i32, i32) to match MIR's `(I32 from Ptr, I32 from I64)`.
 /// On WASM32, MIR's IrType::I64 lowers to WASM i32, so we receive only the
@@ -1411,12 +1455,17 @@ pub extern "C" fn haxe_array_set_i64(arr: i32, idx: i32, val: i32) -> i32 {
         return 0;
     }
     unsafe {
-        let (data_ptr, len, _, _) = read_array(arr);
         let index = idx as u32;
-        if index >= len {
+        if !array_ensure_len(arr, index + 1) {
             return arr;
         }
-        *(data_ptr as *mut i32).add(index as usize) = val;
+        let (data_ptr, _, _, elem_size) = read_array(arr);
+        let es = if elem_size == 0 { 8 } else { elem_size };
+        let slot_addr = data_ptr + index * es;
+        *(slot_addr as *mut i32) = val;
+        if es >= 8 {
+            *((slot_addr + 4) as *mut i32) = 0;
+        }
     }
     arr
 }
@@ -1429,16 +1478,18 @@ pub extern "C" fn haxe_array_get_f64(arr: i32, idx: i32) -> f64 {
         return 0.0;
     }
     unsafe {
-        let (data_ptr, len, _, _) = read_array(arr);
+        let (data_ptr, len, _, elem_size) = read_array(arr);
         let index = idx as u32;
         if index >= len {
             return 0.0;
         }
-        // Read i32 from slot, reinterpret bits as f32, then promote to f64.
-        // For proper f64 storage, the compiler stores as two slots or uses i32-punned values.
-        // Simple approach: read the i32 slot value and convert to f64.
-        let val = *(data_ptr as *const i32).add(index as usize);
-        val as f64
+        let es = if elem_size == 0 { 8 } else { elem_size };
+        let slot_addr = data_ptr + index * es;
+        if es >= 8 {
+            *(slot_addr as *const f64)
+        } else {
+            *(slot_addr as *const f32) as f64
+        }
     }
 }
 
@@ -1449,13 +1500,18 @@ pub extern "C" fn haxe_array_set_f64(arr: i32, idx: i32, val: f64) -> i32 {
         return 0;
     }
     unsafe {
-        let (data_ptr, len, _, _) = read_array(arr);
         let index = idx as u32;
-        if index >= len {
+        if !array_ensure_len(arr, index + 1) {
             return arr;
         }
-        // Store f64 as i32 (matching get_f64 convention).
-        *(data_ptr as *mut i32).add(index as usize) = val as i32;
+        let (data_ptr, _, _, elem_size) = read_array(arr);
+        let es = if elem_size == 0 { 8 } else { elem_size };
+        let slot_addr = data_ptr + index * es;
+        if es >= 8 {
+            *(slot_addr as *mut f64) = val;
+        } else {
+            *(slot_addr as *mut f32) = val as f32;
+        }
     }
     arr
 }
@@ -2312,7 +2368,7 @@ pub extern "C" fn haxe_array_get_ptr(arr: i32, idx: i32) -> i32 {
         if index >= len {
             return 0;
         }
-        let es = if elem_size == 0 { 4 } else { elem_size };
+        let es = if elem_size == 0 { 8 } else { elem_size };
         (data_ptr + index * es) as i32
     }
 }
