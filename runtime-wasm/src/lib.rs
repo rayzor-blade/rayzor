@@ -8,6 +8,8 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+pub mod tensor;
+
 use core::slice;
 use std::alloc::{alloc, dealloc, realloc, Layout};
 use std::ptr;
