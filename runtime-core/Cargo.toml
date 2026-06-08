@@ -1,0 +1,13 @@
+[package]
+name = "rayzor-runtime-core"
+version = "0.1.0"
+edition = "2021"
+description = "Architecture-portable compute kernels shared by rayzor-runtime (native) and rayzor-runtime-wasm. no_std + alloc."
+
+[lib]
+
+[dependencies]
+# Half-precision floats (IEEE f16 + brain float bf16). no_std-compatible with
+# default-features disabled. Mirrors the version pinned in rayzor-runtime.
+half = { version = "2", default-features = false }
+# Release profile inherited from the workspace root (see top-level Cargo.toml).
