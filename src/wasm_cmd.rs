@@ -4,56 +4,211 @@
 //! pre-built runtime-wasm library, runs inside embedded wasmtime, and emits
 //! an ES6 harness plus thread/worker runtime scripts for browser deploy.
 
-use std::path::PathBuf;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::{Path, PathBuf};
 
-use crate::compile_helpers::{compile_haxe_to_mir, compile_haxe_to_mir_with_defines};
+use crate::compile_helpers::compile_haxe_to_mir_with_defines;
+
+struct WasmCompileInputs {
+    compiler_plugins: Vec<Box<dyn compiler::compiler_plugin::CompilerPlugin>>,
+    source_dirs: Vec<PathBuf>,
+    loaded_rpkgs: Vec<compiler::rpkg::install::RpkgPlugin>,
+    loaded_native_libs: Vec<libloading::Library>,
+}
+
+fn resolve_wasm_entry(
+    file: Option<PathBuf>,
+    command_name: &str,
+) -> Result<(PathBuf, Option<compiler::workspace::Project>), String> {
+    match file {
+        Some(file) => {
+            let project = find_project_for_file(&file);
+            Ok((file, project))
+        }
+        None => {
+            let cwd = std::env::current_dir().map_err(|e| format!("failed to get cwd: {}", e))?;
+            let root = compiler::workspace::find_project_root(&cwd).ok_or_else(|| {
+                format!(
+                    "file path required for {command_name}; no rayzor.toml found in {} or its parents",
+                    cwd.display()
+                )
+            })?;
+            let project = compiler::workspace::load_project(&root)?;
+            let entry = project.entry_path().ok_or_else(|| {
+                "No entry point in rayzor.toml. Set [project] entry = \"Main.hx\"".to_string()
+            })?;
+            Ok((entry, Some(project)))
+        }
+    }
+}
+
+fn find_project_for_file(file: &Path) -> Option<compiler::workspace::Project> {
+    let dir = file.parent()?;
+    let abs = if dir.is_absolute() {
+        dir.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(dir)
+    };
+    let root = compiler::workspace::find_project_root(&abs)?;
+    compiler::workspace::load_project(&root).ok()
+}
+
+fn prepare_wasm_compile_inputs(
+    project: &Option<compiler::workspace::Project>,
+    rpkg_files: Vec<PathBuf>,
+) -> Result<WasmCompileInputs, String> {
+    let mut compiler_plugins: Vec<Box<dyn compiler::compiler_plugin::CompilerPlugin>> = Vec::new();
+    let mut source_dirs: Vec<PathBuf> = project
+        .as_ref()
+        .map(|p| p.resolved_class_paths())
+        .unwrap_or_default();
+    let mut loaded_rpkgs = Vec::new();
+
+    let mut effective_rpkg_files = if let Some(project) = project.as_ref() {
+        compiler::workspace::resolve_dependencies(&project.manifest, &project.root)?
+    } else {
+        Vec::new()
+    };
+    effective_rpkg_files.extend(rpkg_files);
+
+    for rpkg_path in &effective_rpkg_files {
+        let mut rpkg = compiler::rpkg::install::RpkgPlugin::load(rpkg_path)?;
+        if !rpkg.haxe_sources.is_empty() {
+            let tmp_dir = std::env::temp_dir().join(format!(
+                "rpkg_hx_{}_{}",
+                rpkg.package_name,
+                std::process::id()
+            ));
+            for (module_path, source) in &rpkg.haxe_sources {
+                let dest = tmp_dir.join(module_path);
+                if let Some(parent) = dest.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(&dest, source);
+            }
+            source_dirs.push(tmp_dir);
+        }
+        if let Some(cp) = rpkg.compiler_plugin.take() {
+            compiler_plugins.push(Box::new(cp));
+        }
+        loaded_rpkgs.push(rpkg);
+    }
+
+    let mut loaded_native_libs = Vec::new();
+    if let Some(project) = project.as_ref() {
+        for lib_path in project.resolved_native_libs() {
+            match crate::native_libs::load_manifest_native_lib(&lib_path) {
+                Ok((lib, plugin, _runtime_symbols)) => {
+                    loaded_native_libs.push(lib);
+                    compiler_plugins.push(Box::new(plugin));
+                }
+                Err(e) => {
+                    eprintln!(
+                        "warning: failed to load native lib {}: {}",
+                        lib_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+    }
+
+    Ok(WasmCompileInputs {
+        compiler_plugins,
+        source_dirs,
+        loaded_rpkgs,
+        loaded_native_libs,
+    })
+}
+
+fn wasm_defines(project: Option<&compiler::workspace::Project>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut defines = Vec::new();
+    for define in ["wasm"] {
+        seen.insert(define.to_string());
+        defines.push(define.to_string());
+    }
+    if let Some(project) = project {
+        for (key, _value) in project.defines() {
+            if seen.insert(key.clone()) {
+                defines.push(key);
+            }
+        }
+    }
+    defines
+}
+
+fn collect_wasm_host_functions(
+    project: Option<&compiler::workspace::Project>,
+    log: bool,
+) -> BTreeMap<String, String> {
+    let config_hosts = project.map(|p| p.resolved_wasm_hosts()).unwrap_or_default();
+    let mut map = BTreeMap::new();
+    for (module_name, js_path) in &config_hosts {
+        if let Ok(js_source) = std::fs::read_to_string(js_path) {
+            let exports = compiler::codegen::wasm_linker::WasmLinker::scan_js_exports(&js_source);
+            if log {
+                println!(
+                    "  host: {} ({} exports from {})",
+                    module_name,
+                    exports.len(),
+                    js_path.display()
+                );
+            }
+            for name in exports {
+                map.insert(name, module_name.clone());
+            }
+        }
+    }
+    map
+}
 
 pub fn cmd_run_wasm(
     file: Option<PathBuf>,
-    _rpkg_files: Vec<PathBuf>,
+    rpkg_files: Vec<PathBuf>,
     safety_warnings: bool,
     program_args: Vec<String>,
 ) -> Result<(), String> {
-    let file = file.ok_or_else(|| "file path required for --wasm".to_string())?;
+    let (file, project) = resolve_wasm_entry(file, "run --wasm")?;
     let source = std::fs::read_to_string(&file)
         .map_err(|e| format!("failed to read {}: {}", file.display(), e))?;
 
     eprintln!("Compiling {} [wasm]...", file.display());
 
-    // Resolve workspace class-paths from rayzor.toml
-    let extra_source_dirs: Vec<PathBuf> = {
-        let file_dir = file.parent().and_then(|p| {
-            let abs = if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                std::env::current_dir().unwrap_or_default().join(p)
-            };
-            compiler::workspace::find_project_root(&abs)
-        });
-        file_dir
-            .and_then(|root| compiler::workspace::load_project(&root).ok())
-            .map(|p| p.resolved_class_paths())
-            .unwrap_or_default()
-    };
+    let compile_inputs = prepare_wasm_compile_inputs(&project, rpkg_files)?;
+    let define_strings = wasm_defines(project.as_ref());
+    let define_refs: Vec<&str> = define_strings.iter().map(String::as_str).collect();
 
     // Compile Haxe → MIR → WASM
-    let (mir_module, _diagnostics) = compile_haxe_to_mir(
+    let mir_result = compile_haxe_to_mir_with_defines(
         &source,
         file.to_str().unwrap_or("unknown"),
-        Vec::new(),
-        &extra_source_dirs,
+        compile_inputs.compiler_plugins,
+        &compile_inputs.source_dirs,
         safety_warnings,
+        &define_refs,
     )?;
 
-    let user_wasm =
-        compiler::codegen::wasm_backend::WasmBackend::compile(&[&mir_module], Some("main"))?;
+    let _loaded_rpkgs = compile_inputs.loaded_rpkgs;
+    let _loaded_native_libs = compile_inputs.loaded_native_libs;
+
+    let user_wasm = compiler::codegen::wasm_backend::WasmBackend::compile_with_method_map(
+        &[&mir_result.module],
+        Some("main"),
+        &mir_result.qualified_method_map,
+    )?;
+    let host_functions = collect_wasm_host_functions(project.as_ref(), true);
 
     // Link with runtime
     let runtime_path = find_wasm_runtime();
     let linked_wasm = if let Some(rt_path) = &runtime_path {
         let rt_bytes =
             std::fs::read(rt_path).map_err(|e| format!("failed to read runtime: {}", e))?;
-        compiler::codegen::wasm_linker::WasmLinker::link(&user_wasm, &rt_bytes)?
+        compiler::codegen::wasm_linker::WasmLinker::link_with_hosts(
+            &user_wasm,
+            &rt_bytes,
+            &host_functions,
+        )?
     } else {
         user_wasm
     };
@@ -72,27 +227,9 @@ pub fn cmd_build_wasm(
     target: String,
     browser: bool,
 ) -> Result<(), String> {
-    let file = file.ok_or_else(|| "file path required for WASM build".to_string())?;
+    let (file, project) = resolve_wasm_entry(file, "build --target wasm")?;
     let source = std::fs::read_to_string(&file)
         .map_err(|e| format!("failed to read {}: {}", file.display(), e))?;
-
-    // Resolve workspace project for class-paths and default output directory
-    let project = {
-        let file_dir = file.parent().and_then(|p| {
-            let abs = if p.is_absolute() {
-                p.to_path_buf()
-            } else {
-                std::env::current_dir().unwrap_or_default().join(p)
-            };
-            compiler::workspace::find_project_root(&abs)
-        });
-        file_dir.and_then(|root| compiler::workspace::load_project(&root).ok())
-    };
-
-    let extra_source_dirs: Vec<PathBuf> = project
-        .as_ref()
-        .map(|p| p.resolved_class_paths())
-        .unwrap_or_default();
 
     // Default output: .rayzor/build/<name>.wasm (relative to project root or cwd)
     let output = output.or_else(|| {
@@ -106,15 +243,22 @@ pub fn cmd_build_wasm(
 
     println!("Building {} [target: {}]...", file.display(), target);
 
+    let compile_inputs = prepare_wasm_compile_inputs(&project, Vec::new())?;
+    let define_strings = wasm_defines(project.as_ref());
+    let define_refs: Vec<&str> = define_strings.iter().map(String::as_str).collect();
+
     // Use the full compile pipeline with "wasm" define for conditional compilation
     let mir_result = compile_haxe_to_mir_with_defines(
         &source,
         file.to_str().unwrap_or("unknown"),
-        Vec::new(),
-        &extra_source_dirs,
+        compile_inputs.compiler_plugins,
+        &compile_inputs.source_dirs,
         false,
-        &["wasm"],
+        &define_refs,
     )?;
+
+    let _loaded_rpkgs = compile_inputs.loaded_rpkgs;
+    let _loaded_native_libs = compile_inputs.loaded_native_libs;
 
     let user_wasm = compiler::codegen::wasm_backend::WasmBackend::compile_with_method_map(
         &[&mir_result.module],
@@ -123,31 +267,7 @@ pub fn cmd_build_wasm(
     )?;
     let _ = std::fs::write("/tmp/rayzor_prelink.wasm", &user_wasm);
 
-    // Build host function map from rayzor.toml [wasm] hosts:
-    // Scan each JS host file for `export function` names and map them to the module name.
-    let host_functions: std::collections::BTreeMap<String, String> = {
-        let config_hosts = project
-            .as_ref()
-            .map(|p| p.resolved_wasm_hosts())
-            .unwrap_or_default();
-        let mut map = std::collections::BTreeMap::new();
-        for (module_name, js_path) in &config_hosts {
-            if let Ok(js_source) = std::fs::read_to_string(js_path) {
-                let exports =
-                    compiler::codegen::wasm_linker::WasmLinker::scan_js_exports(&js_source);
-                println!(
-                    "  host: {} ({} exports from {})",
-                    module_name,
-                    exports.len(),
-                    js_path.display()
-                );
-                for name in exports {
-                    map.insert(name, module_name.clone());
-                }
-            }
-        }
-        map
-    };
+    let host_functions = collect_wasm_host_functions(project.as_ref(), true);
 
     // Link with pre-built WASM runtime (if available)
     let runtime_wasm_path = find_wasm_runtime();
