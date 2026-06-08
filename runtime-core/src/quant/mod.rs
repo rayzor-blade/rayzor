@@ -11,6 +11,7 @@ pub mod int8;
 pub mod q4_k_m;
 pub mod q6_k;
 pub mod q8_k;
+pub mod sdot;
 pub mod types;
 
 pub use types::{

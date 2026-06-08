@@ -1,4 +1,8 @@
-#![cfg_attr(target_arch = "aarch64", feature(stdarch_neon_dotprod))]
+// `stdarch_neon_dotprod` is enabled at the rayzor-runtime-core crate root
+// where the SDOT inner kernels live (Step 4 of the runtime-core extraction
+// — see docs/design/runtime_core_extraction.md). This crate consumes them
+// through re-imports and no longer needs the feature gate.
+
 // Doc comments throughout describe Haxe-side types using shorthand like
 // `Vec<u8>`, `Array<T>`, `Map<String, Dynamic>` — rustdoc parses these as
 // HTML / intra-doc-links and complains. They're descriptive prose, not
