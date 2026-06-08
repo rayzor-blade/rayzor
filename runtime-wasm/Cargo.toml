@@ -8,6 +8,7 @@ description = "Rayzor runtime for WebAssembly — pure Rust, no platform deps"
 crate-type = ["cdylib"]
 
 [dependencies]
+half = "2"
 libm = "0.2"  # Pure-Rust math functions (sin, cos, sqrt, etc.) for wasm32
 # Shared compute kernels (tensor_simd::tensor_f32, quant::{types, q4_k_m, q6_k,
 # q8_k, matmul}). The aarch64-only SDOT module (`quant::sdot`) is `#![cfg]`-gated

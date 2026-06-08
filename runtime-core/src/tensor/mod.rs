@@ -8,5 +8,6 @@
 
 pub mod flash_attn;
 pub mod rms_norm;
+pub mod rope;
 pub mod softmax;
 pub mod topk;
