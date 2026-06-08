@@ -16,6 +16,7 @@ pub mod tensor;
 use core::slice;
 use std::alloc::{alloc, dealloc, realloc, Layout};
 use std::ptr;
+use std::sync::Mutex;
 
 // ============================================================================
 // WASI Imports
@@ -57,7 +58,11 @@ fn rt_alloc(size: usize) -> i32 {
     unsafe {
         let layout = Layout::from_size_align_unchecked(size, 8);
         let ptr = alloc(layout);
-        if ptr.is_null() { 0 } else { ptr as i32 }
+        if ptr.is_null() {
+            0
+        } else {
+            ptr as i32
+        }
     }
 }
 
@@ -524,12 +529,20 @@ pub extern "C" fn haxe_math_positive_infinity() -> f64 {
 
 #[no_mangle]
 pub extern "C" fn haxe_math_is_nan(x: f64) -> i32 {
-    if x.is_nan() { 1 } else { 0 }
+    if x.is_nan() {
+        1
+    } else {
+        0
+    }
 }
 
 #[no_mangle]
 pub extern "C" fn haxe_math_is_finite(x: f64) -> i32 {
-    if x.is_finite() { 1 } else { 0 }
+    if x.is_finite() {
+        1
+    } else {
+        0
+    }
 }
 
 // ============================================================================
@@ -769,19 +782,15 @@ unsafe fn array_ensure_capacity(arr: i32) {
 
     // Copy old data to new buffer
     if data_ptr != 0 && old_size > 0 {
-        core::ptr::copy_nonoverlapping(
-            data_ptr as *const u8,
-            new_data as *mut u8,
-            old_size,
-        );
+        core::ptr::copy_nonoverlapping(data_ptr as *const u8, new_data as *mut u8, old_size);
     }
 
     // Zero the new portion
     core::ptr::write_bytes((new_data as *mut u8).add(old_size), 0, new_size - old_size);
 
     let h = arr as *mut u32;
-    *h = new_data as u32;      // ptr at offset 0
-    *h.add(4) = new_cap;       // cap at offset 16 (8-byte stride * 2)
+    *h = new_data as u32; // ptr at offset 0
+    *h.add(4) = new_cap; // cap at offset 16 (8-byte stride * 2)
 }
 
 /// Push an i32 value onto the array.
@@ -884,7 +893,11 @@ pub extern "C" fn haxe_object_is_instance(ptr: i32, type_id: i32) -> i32 {
         return 0;
     }
     let actual = haxe_object_get_type_id(ptr);
-    if actual == type_id { 1 } else { 0 }
+    if actual == type_id {
+        1
+    } else {
+        0
+    }
 }
 
 /// Allocate an anonymous object with `n_fields` slots.
@@ -1357,9 +1370,7 @@ pub extern "C" fn haxe_string_split_array(s: i32, delimiter: i32) -> i32 {
         while start <= s_len as usize {
             // Find next occurrence of delimiter
             let remaining = &haystack[start..];
-            let found = remaining
-                .windows(d_len as usize)
-                .position(|w| w == needle);
+            let found = remaining.windows(d_len as usize).position(|w| w == needle);
 
             match found {
                 Some(offset) => {
@@ -1539,7 +1550,11 @@ pub extern "C" fn haxe_array_index_of(arr: i32, val: i32, start: i32) -> i32 {
     unsafe {
         let (data_ptr, len, _, _) = read_array(arr);
         let data = data_ptr as *const i32;
-        let from = if start < 0 { 0u32 } else { (start as u32).min(len) };
+        let from = if start < 0 {
+            0u32
+        } else {
+            (start as u32).min(len)
+        };
         for i in from..len {
             if *data.add(i as usize) == val {
                 return i as i32;
@@ -1580,7 +1595,11 @@ pub extern "C" fn haxe_array_last_index_of(arr: i32, val: i32, start: i32) -> i3
 /// Check if array contains `val`. Returns 1 (true) or 0 (false).
 #[no_mangle]
 pub extern "C" fn haxe_array_contains(arr: i32, val: i32) -> i32 {
-    if haxe_array_index_of(arr, val, 0) >= 0 { 1 } else { 0 }
+    if haxe_array_index_of(arr, val, 0) >= 0 {
+        1
+    } else {
+        0
+    }
 }
 
 /// Slice array from `start` to `end` (exclusive). Writes result into `out`.
@@ -1601,8 +1620,16 @@ pub extern "C" fn haxe_array_slice(out: i32, arr: i32, start: i32, end: i32) {
         let slen = len as i32;
 
         // Resolve negative indices
-        let s = if start < 0 { (slen + start).max(0) } else { start.min(slen) };
-        let e = if end < 0 { (slen + end).max(0) } else { end.min(slen) };
+        let s = if start < 0 {
+            (slen + start).max(0)
+        } else {
+            start.min(slen)
+        };
+        let e = if end < 0 {
+            (slen + end).max(0)
+        } else {
+            end.min(slen)
+        };
 
         if s < e {
             let data = data_ptr as *const i32;
@@ -1709,7 +1736,11 @@ pub extern "C" fn haxe_array_resize(arr: i32, new_len: i32) {
         let (data_ptr2, _, _, _) = read_array(arr);
         let fill_start = (len * elem_size) as usize;
         let fill_end = (nl * elem_size) as usize;
-        ptr::write_bytes((data_ptr2 as *mut u8).add(fill_start), 0, fill_end - fill_start);
+        ptr::write_bytes(
+            (data_ptr2 as *mut u8).add(fill_start),
+            0,
+            fill_end - fill_start,
+        );
 
         let h = arr as *mut u32;
         *h.add(2) = nl;
@@ -1846,7 +1877,11 @@ pub extern "C" fn haxe_array_splice(out: i32, arr: i32, pos: i32, len: i32) {
         let (data_ptr, arr_len, _, _) = read_array(arr);
         let slen = arr_len as i32;
 
-        let actual_pos = if pos < 0 { (slen + pos).max(0) } else { pos.min(slen) };
+        let actual_pos = if pos < 0 {
+            (slen + pos).max(0)
+        } else {
+            pos.min(slen)
+        };
         let actual_len = len.min(slen - actual_pos);
 
         if actual_len <= 0 {
@@ -1953,40 +1988,155 @@ pub extern "C" fn haxe_unbox_bool_ptr(ptr: i32) -> i32 {
 // Section 13: Anonymous Object Functions
 // ============================================================================
 
-/// Allocate an anonymous object with `n_fields` slots, each 8 bytes (zeroed).
-/// Returns pointer to allocated memory.
-#[no_mangle]
-pub extern "C" fn rayzor_anon_new(n_fields: i32, _dummy: i32) -> i32 {
-    if n_fields <= 0 {
-        return rt_alloc(8); // minimum allocation
+const ANON_HEADER_BYTES: usize = 8;
+static ANON_SHAPES: Mutex<Vec<Option<Vec<String>>>> = Mutex::new(Vec::new());
+
+#[inline]
+unsafe fn anon_shape_id(obj: i32) -> u32 {
+    *(obj as *const u32)
+}
+
+#[inline]
+unsafe fn anon_field_count(obj: i32) -> u32 {
+    *((obj as usize + 4) as *const u32)
+}
+
+#[inline]
+unsafe fn anon_slot_ptr(obj: i32, idx: u32) -> *mut i64 {
+    (obj as usize + ANON_HEADER_BYTES + (idx as usize * 8)) as *mut i64
+}
+
+unsafe fn haxe_string_to_string(s: i32) -> Option<String> {
+    let (ptr, len, _) = read_haxe_string(s);
+    if ptr == 0 {
+        return None;
     }
-    let size = (n_fields as u32) * 8;
+    let bytes = core::slice::from_raw_parts(ptr as *const u8, len as usize);
+    core::str::from_utf8(bytes).ok().map(|s| s.to_string())
+}
+
+/// Register an anonymous-object shape descriptor.
+#[no_mangle]
+pub extern "C" fn rayzor_ensure_shape(shape_id: i32, descriptor: i32) {
+    if shape_id < 0 {
+        return;
+    }
+    let shape_id = shape_id as usize;
+    let Some(desc) = (unsafe { haxe_string_to_string(descriptor) }) else {
+        return;
+    };
+
+    let fields = desc
+        .split(',')
+        .filter_map(|part| part.split_once(':').map(|(name, _)| name.to_string()))
+        .collect::<Vec<_>>();
+
+    let mut shapes = ANON_SHAPES.lock().unwrap();
+    if shapes.len() <= shape_id {
+        shapes.resize_with(shape_id + 1, || None);
+    }
+    if shapes[shape_id].is_none() {
+        shapes[shape_id] = Some(fields);
+    }
+}
+
+/// Allocate an anonymous object with a fixed shape and 8-byte value slots.
+#[no_mangle]
+pub extern "C" fn rayzor_anon_new(shape_id: i32, field_count: i32) -> i32 {
+    if shape_id < 0 || field_count < 0 {
+        return 0;
+    }
+    let field_count = field_count as usize;
+    let size = ANON_HEADER_BYTES + field_count.saturating_mul(8);
+    let obj = rt_alloc(size.max(ANON_HEADER_BYTES));
+    if obj == 0 {
+        return 0;
+    }
     unsafe {
-        let layout = Layout::from_size_align_unchecked(size as usize, 4);
-        let ptr = alloc(layout);
-        if ptr.is_null() {
+        ptr::write_bytes(obj as *mut u8, 0, size.max(ANON_HEADER_BYTES));
+        *(obj as *mut u32) = shape_id as u32;
+        *((obj as usize + 4) as *mut u32) = field_count as u32;
+    }
+    obj
+}
+
+/// Clone an anonymous object into an independent wasm-linear-memory object.
+#[no_mangle]
+pub extern "C" fn rayzor_anon_clone(obj: i32) -> i32 {
+    if obj == 0 {
+        return 0;
+    }
+    unsafe {
+        let field_count = anon_field_count(obj) as usize;
+        let size = ANON_HEADER_BYTES + field_count.saturating_mul(8);
+        let clone = rt_alloc(size);
+        if clone == 0 {
             return 0;
         }
-        ptr::write_bytes(ptr, 0, size as usize);
-        ptr as i32
+        ptr::copy_nonoverlapping(obj as *const u8, clone as *mut u8, size);
+        clone
     }
 }
 
-/// Ensure an object matches a given shape. Stub — no-op.
 #[no_mangle]
-pub extern "C" fn rayzor_ensure_shape(_obj: i32, _shape: i32) {
-    // no-op
+pub extern "C" fn rayzor_anon_copy(obj: i32) -> i32 {
+    rayzor_anon_clone(obj)
 }
 
-/// Set a field by index on an anonymous object (8-byte slot stride).
 #[no_mangle]
-pub extern "C" fn rayzor_anon_set_field_by_index(obj: i32, idx: i32, val: i32) {
+pub extern "C" fn rayzor_anon_drop(_obj: i32) {
+    // rt_alloc is currently arena-style for wasm; keep drops as no-ops.
+}
+
+/// Get a field by index from an anonymous object.
+#[no_mangle]
+pub extern "C" fn rayzor_anon_get_field_by_index(obj: i32, idx: i32) -> i64 {
+    if obj == 0 || idx < 0 {
+        return 0;
+    }
+    unsafe {
+        let idx = idx as u32;
+        if idx >= anon_field_count(obj) {
+            return 0;
+        }
+        *anon_slot_ptr(obj, idx)
+    }
+}
+
+/// Set a field by index on an anonymous object.
+#[no_mangle]
+pub extern "C" fn rayzor_anon_set_field_by_index(obj: i32, idx: i32, val: i64) {
     if obj == 0 || idx < 0 {
         return;
     }
     unsafe {
-        let slot = (obj as *mut i32).add((idx * 2) as usize); // 8-byte stride, i32 ptr offset
-        *slot = val;
+        let idx = idx as u32;
+        if idx < anon_field_count(obj) {
+            *anon_slot_ptr(obj, idx) = val;
+        }
+    }
+}
+
+/// Check whether a shaped anonymous object contains a named field.
+#[no_mangle]
+pub extern "C" fn haxe_reflect_has_field(obj: i32, name: i32) -> i32 {
+    if obj == 0 || name == 0 {
+        return 0;
+    }
+    let Some(name) = (unsafe { haxe_string_to_string(name) }) else {
+        return 0;
+    };
+    let shape_id = unsafe { anon_shape_id(obj) as usize };
+    let shapes = ANON_SHAPES.lock().unwrap();
+    let found = shapes
+        .get(shape_id)
+        .and_then(|shape| shape.as_ref())
+        .map(|fields| fields.iter().any(|field| field == &name))
+        .unwrap_or(false);
+    if found {
+        1
+    } else {
+        0
     }
 }
 
@@ -1999,20 +2149,30 @@ pub extern "C" fn rayzor_anon_set_field_by_index(obj: i32, idx: i32, val: i32) {
 pub extern "C" fn haxe_file_read(path: i32, _dummy: i32) -> i32 {
     unsafe {
         let (p, plen, _) = read_haxe_string(path);
-        if p == 0 || plen == 0 { return 0; }
+        if p == 0 || plen == 0 {
+            return 0;
+        }
         let path_bytes = core::slice::from_raw_parts(p as *const u8, plen as usize);
         let path_str = match core::str::from_utf8(path_bytes) {
-            Ok(s) => s, Err(_) => return 0,
+            Ok(s) => s,
+            Err(_) => return 0,
         };
         match std::fs::read(path_str) {
             Ok(contents) => {
                 let str_data = rt_alloc(contents.len() + 1);
-                if str_data == 0 { return 0; }
+                if str_data == 0 {
+                    return 0;
+                }
                 core::ptr::copy_nonoverlapping(
-                    contents.as_ptr(), str_data as *mut u8, contents.len());
+                    contents.as_ptr(),
+                    str_data as *mut u8,
+                    contents.len(),
+                );
                 *((str_data as usize + contents.len()) as *mut u8) = 0;
                 let hs = rt_alloc(12);
-                if hs == 0 { return 0; }
+                if hs == 0 {
+                    return 0;
+                }
                 let h = hs as *mut u32;
                 *h = str_data as u32;
                 *h.add(1) = contents.len() as u32;
@@ -2030,11 +2190,19 @@ pub extern "C" fn haxe_file_write(path: i32, data: i32) -> i32 {
     unsafe {
         let (pp, plen, _) = read_haxe_string(path);
         let (dp, dlen, _) = read_haxe_string(data);
-        if pp == 0 || dp == 0 { return -1; }
+        if pp == 0 || dp == 0 {
+            return -1;
+        }
         let ps = core::slice::from_raw_parts(pp as *const u8, plen as usize);
         let ds = core::slice::from_raw_parts(dp as *const u8, dlen as usize);
-        let path_str = match core::str::from_utf8(ps) { Ok(s) => s, Err(_) => return -1 };
-        match std::fs::write(path_str, ds) { Ok(()) => 0, Err(_) => -1 }
+        let path_str = match core::str::from_utf8(ps) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
+        match std::fs::write(path_str, ds) {
+            Ok(()) => 0,
+            Err(_) => -1,
+        }
     }
 }
 
@@ -2044,13 +2212,25 @@ pub extern "C" fn haxe_file_append(path: i32, data: i32) -> i32 {
     unsafe {
         let (pp, plen, _) = read_haxe_string(path);
         let (dp, dlen, _) = read_haxe_string(data);
-        if pp == 0 || dp == 0 { return -1; }
+        if pp == 0 || dp == 0 {
+            return -1;
+        }
         let ps = core::slice::from_raw_parts(pp as *const u8, plen as usize);
         let ds = core::slice::from_raw_parts(dp as *const u8, dlen as usize);
-        let path_str = match core::str::from_utf8(ps) { Ok(s) => s, Err(_) => return -1 };
+        let path_str = match core::str::from_utf8(ps) {
+            Ok(s) => s,
+            Err(_) => return -1,
+        };
         use std::io::Write;
-        match std::fs::OpenOptions::new().append(true).create(true).open(path_str) {
-            Ok(mut f) => { let _ = f.write_all(ds); 0 }
+        match std::fs::OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(path_str)
+        {
+            Ok(mut f) => {
+                let _ = f.write_all(ds);
+                0
+            }
             Err(_) => -1,
         }
     }
@@ -2105,8 +2285,14 @@ pub extern "C" fn haxe_trace_int(val: i32) {
 /// Trace a bool value to stdout.
 #[no_mangle]
 pub extern "C" fn haxe_trace_bool(val: i32) {
-    let s: &[u8] = if val != 0 { b"trace: true\n" } else { b"trace: false\n" };
-    unsafe { wasi_write(1, s.as_ptr(), s.len()); }
+    let s: &[u8] = if val != 0 {
+        b"trace: true\n"
+    } else {
+        b"trace: false\n"
+    };
+    unsafe {
+        wasi_write(1, s.as_ptr(), s.len());
+    }
 }
 
 // ============================================================================
@@ -2162,7 +2348,10 @@ pub extern "C" fn rayzor_simd4f_splat(v: f32) -> i32 {
         }
         #[cfg(not(target_feature = "simd128"))]
         {
-            *ptr = v; *ptr.add(1) = v; *ptr.add(2) = v; *ptr.add(3) = v;
+            *ptr = v;
+            *ptr.add(1) = v;
+            *ptr.add(2) = v;
+            *ptr.add(3) = v;
         }
     }
     ptr as i32
@@ -2179,7 +2368,10 @@ pub extern "C" fn rayzor_simd4f_make(x: f32, y: f32, z: f32, w: f32) -> i32 {
         }
         #[cfg(not(target_feature = "simd128"))]
         {
-            *ptr = x; *ptr.add(1) = y; *ptr.add(2) = z; *ptr.add(3) = w;
+            *ptr = x;
+            *ptr.add(1) = y;
+            *ptr.add(2) = z;
+            *ptr.add(3) = w;
         }
     }
     ptr as i32
@@ -2259,8 +2451,13 @@ pub extern "C" fn rayzor_simd4f_min(a: i32, b: i32) -> i32 {
         }
         #[cfg(not(target_feature = "simd128"))]
         {
-            let pa = a as *const f32; let pb = b as *const f32;
-            for i in 0..4 { let av = *pa.add(i); let bv = *pb.add(i); *ptr.add(i) = if av < bv { av } else { bv }; }
+            let pa = a as *const f32;
+            let pb = b as *const f32;
+            for i in 0..4 {
+                let av = *pa.add(i);
+                let bv = *pb.add(i);
+                *ptr.add(i) = if av < bv { av } else { bv };
+            }
         }
     }
     ptr as i32
@@ -2278,8 +2475,13 @@ pub extern "C" fn rayzor_simd4f_max(a: i32, b: i32) -> i32 {
         }
         #[cfg(not(target_feature = "simd128"))]
         {
-            let pa = a as *const f32; let pb = b as *const f32;
-            for i in 0..4 { let av = *pa.add(i); let bv = *pb.add(i); *ptr.add(i) = if av > bv { av } else { bv }; }
+            let pa = a as *const f32;
+            let pb = b as *const f32;
+            for i in 0..4 {
+                let av = *pa.add(i);
+                let bv = *pb.add(i);
+                *ptr.add(i) = if av > bv { av } else { bv };
+            }
         }
     }
     ptr as i32
@@ -2299,7 +2501,9 @@ macro_rules! simd4f_unary {
                 #[cfg(not(target_feature = "simd128"))]
                 {
                     let pa = a as *const f32;
-                    for i in 0..4 { *ptr.add(i) = libm::sqrtf(*pa.add(i)); } // placeholder
+                    for i in 0..4 {
+                        *ptr.add(i) = libm::sqrtf(*pa.add(i));
+                    } // placeholder
                 }
             }
             ptr as i32
@@ -2319,7 +2523,9 @@ pub extern "C" fn rayzor_simd4f_sqrt(a: i32) -> i32 {
         #[cfg(not(target_feature = "simd128"))]
         {
             let pa = a as *const f32;
-            for i in 0..4 { *ptr.add(i) = libm::sqrtf(*pa.add(i)); }
+            for i in 0..4 {
+                *ptr.add(i) = libm::sqrtf(*pa.add(i));
+            }
         }
     }
     ptr as i32
@@ -2337,7 +2543,9 @@ pub extern "C" fn rayzor_simd4f_abs(a: i32) -> i32 {
         #[cfg(not(target_feature = "simd128"))]
         {
             let pa = a as *const f32;
-            for i in 0..4 { *ptr.add(i) = libm::fabsf(*pa.add(i)); }
+            for i in 0..4 {
+                *ptr.add(i) = libm::fabsf(*pa.add(i));
+            }
         }
     }
     ptr as i32
@@ -2355,7 +2563,9 @@ pub extern "C" fn rayzor_simd4f_neg(a: i32) -> i32 {
         #[cfg(not(target_feature = "simd128"))]
         {
             let pa = a as *const f32;
-            for i in 0..4 { *ptr.add(i) = -*pa.add(i); }
+            for i in 0..4 {
+                *ptr.add(i) = -*pa.add(i);
+            }
         }
     }
     ptr as i32
@@ -2373,7 +2583,9 @@ pub extern "C" fn rayzor_simd4f_ceil(a: i32) -> i32 {
         #[cfg(not(target_feature = "simd128"))]
         {
             let pa = a as *const f32;
-            for i in 0..4 { *ptr.add(i) = libm::ceilf(*pa.add(i)); }
+            for i in 0..4 {
+                *ptr.add(i) = libm::ceilf(*pa.add(i));
+            }
         }
     }
     ptr as i32
@@ -2391,7 +2603,9 @@ pub extern "C" fn rayzor_simd4f_floor(a: i32) -> i32 {
         #[cfg(not(target_feature = "simd128"))]
         {
             let pa = a as *const f32;
-            for i in 0..4 { *ptr.add(i) = libm::floorf(*pa.add(i)); }
+            for i in 0..4 {
+                *ptr.add(i) = libm::floorf(*pa.add(i));
+            }
         }
     }
     ptr as i32
@@ -2409,7 +2623,9 @@ pub extern "C" fn rayzor_simd4f_nearest(a: i32) -> i32 {
         #[cfg(not(target_feature = "simd128"))]
         {
             let pa = a as *const f32;
-            for i in 0..4 { *ptr.add(i) = libm::roundf(*pa.add(i)); }
+            for i in 0..4 {
+                *ptr.add(i) = libm::roundf(*pa.add(i));
+            }
         }
     }
     ptr as i32
@@ -2434,13 +2650,17 @@ pub extern "C" fn rayzor_simd4f_dot(a: i32, b: i32) -> f32 {
             let vb = v128_load(pb as *const v128);
             let prod = f32x4_mul(va, vb);
             // Horizontal sum: extract all 4 lanes and add
-            f32x4_extract_lane::<0>(prod) + f32x4_extract_lane::<1>(prod) +
-            f32x4_extract_lane::<2>(prod) + f32x4_extract_lane::<3>(prod)
+            f32x4_extract_lane::<0>(prod)
+                + f32x4_extract_lane::<1>(prod)
+                + f32x4_extract_lane::<2>(prod)
+                + f32x4_extract_lane::<3>(prod)
         }
         #[cfg(not(target_feature = "simd128"))]
         {
-            (*pa) * (*pb) + (*pa.add(1)) * (*pb.add(1)) +
-            (*pa.add(2)) * (*pb.add(2)) + (*pa.add(3)) * (*pb.add(3))
+            (*pa) * (*pb)
+                + (*pa.add(1)) * (*pb.add(1))
+                + (*pa.add(2)) * (*pb.add(2))
+                + (*pa.add(3)) * (*pb.add(3))
         }
     }
 }
@@ -2453,7 +2673,9 @@ pub extern "C" fn rayzor_simd4f_length(a: i32) -> f32 {
 #[no_mangle]
 pub extern "C" fn rayzor_simd4f_normalize(a: i32) -> i32 {
     let len = rayzor_simd4f_length(a);
-    if len == 0.0 { return rayzor_simd4f_splat(0.0); }
+    if len == 0.0 {
+        return rayzor_simd4f_splat(0.0);
+    }
     let inv = 1.0 / len;
     let inv_vec = rayzor_simd4f_splat(inv);
     rayzor_simd4f_mul(a, inv_vec)
@@ -2513,7 +2735,10 @@ pub extern "C" fn rayzor_tensor_simd_add_f32(dst: i32, a: i32, b: i32, n: i32) {
                 i += 4;
             }
         }
-        while i < count { *pd.add(i) = *pa.add(i) + *pb.add(i); i += 1; }
+        while i < count {
+            *pd.add(i) = *pa.add(i) + *pb.add(i);
+            i += 1;
+        }
     }
 }
 
@@ -2535,7 +2760,10 @@ pub extern "C" fn rayzor_tensor_simd_mul_f32(dst: i32, a: i32, b: i32, n: i32) {
                 i += 4;
             }
         }
-        while i < count { *pd.add(i) = *pa.add(i) * *pb.add(i); i += 1; }
+        while i < count {
+            *pd.add(i) = *pa.add(i) * *pb.add(i);
+            i += 1;
+        }
     }
 }
 
@@ -2567,10 +2795,15 @@ pub extern "C" fn rayzor_tensor_simd_dot_f32(a: i32, b: i32, n: i32) -> f32 {
                 }
                 i += 4;
             }
-            sum = f32x4_extract_lane::<0>(acc) + f32x4_extract_lane::<1>(acc) +
-                  f32x4_extract_lane::<2>(acc) + f32x4_extract_lane::<3>(acc);
+            sum = f32x4_extract_lane::<0>(acc)
+                + f32x4_extract_lane::<1>(acc)
+                + f32x4_extract_lane::<2>(acc)
+                + f32x4_extract_lane::<3>(acc);
         }
-        while i < count { sum += *pa.add(i) * *pb.add(i); i += 1; }
+        while i < count {
+            sum += *pa.add(i) * *pb.add(i);
+            i += 1;
+        }
         sum
     }
 }
@@ -2622,10 +2855,15 @@ pub extern "C" fn rayzor_tensor_simd_sum_f32(a: i32, n: i32) -> f32 {
                 acc = f32x4_add(acc, v128_load(pa.add(i) as *const v128));
                 i += 4;
             }
-            sum = f32x4_extract_lane::<0>(acc) + f32x4_extract_lane::<1>(acc) +
-                  f32x4_extract_lane::<2>(acc) + f32x4_extract_lane::<3>(acc);
+            sum = f32x4_extract_lane::<0>(acc)
+                + f32x4_extract_lane::<1>(acc)
+                + f32x4_extract_lane::<2>(acc)
+                + f32x4_extract_lane::<3>(acc);
         }
-        while i < count { sum += *pa.add(i); i += 1; }
+        while i < count {
+            sum += *pa.add(i);
+            i += 1;
+        }
         sum
     }
 }
