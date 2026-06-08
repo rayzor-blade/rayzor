@@ -6,6 +6,15 @@
 
 #[cfg(feature = "wasm-runtime")]
 pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
+    run_wasm_with_args(wasm_bytes, &[])
+}
+
+/// Variant of `run_wasm` that threads CLI tail args (everything after `--` on
+/// the rayzor invocation) through to the sandbox. The args become visible to
+/// the Haxe program via `Sys.args()`, which lowers to a `haxe_sys_args` import
+/// the runner registers as a host stub.
+#[cfg(feature = "wasm-runtime")]
+pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<(), String> {
     use std::collections::{BTreeMap, BTreeSet};
     use wasmtime::*;
 
@@ -43,6 +52,9 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         /// .get_export("memory")` doesn't surface the import (wasmtime
         /// doesn't expose imported SharedMemory via caller exports).
         shared_memory: Option<wasmtime::SharedMemory>,
+        /// CLI tail args (everything after `--` on the rayzor command line).
+        /// Surfaced to wasm via the `haxe_sys_args` host stub.
+        program_args: Vec<String>,
     }
 
     struct ThreadState {
@@ -719,6 +731,7 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         },
         host_alloc_ptr: 0,
         shared_memory: None,
+        program_args: program_args.to_vec(),
     };
     let mut store = Store::new(&engine, state);
 
@@ -1327,6 +1340,35 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
                     .map_err(|e| format!("Failed to register {}: {}", name, e))?;
             }
 
+            // -- toString(handle) -> HaxeString pointer in WASM memory --
+            // Reads the bytes from the host-side bytes_handles map, UTF-8-decodes
+            // (lossy — invalid sequences become U+FFFD), and writes a HaxeString
+            // {data_ptr, len, cap} into WASM linear memory using the host bump
+            // allocator. Returns the HaxeString struct pointer as i32.
+            "haxe_bytes_to_string" => {
+                let rt = ret_ty.clone();
+                linker
+                    .func_new(
+                        "rayzor",
+                        name,
+                        func_ty.clone(),
+                        move |mut caller, params, results| {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let bytes = caller
+                                .data()
+                                .bytes_handles
+                                .get(&h)
+                                .cloned()
+                                .unwrap_or_default();
+                            let s = String::from_utf8_lossy(&bytes).into_owned();
+                            let ptr = write_haxe_string(&mut caller, &s);
+                            results[0] = ret_int(ptr, &rt);
+                            Ok(())
+                        },
+                    )
+                    .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+            }
+
             // -- sub(handle, pos, len) -> handle --
             "haxe_bytes_sub" => {
                 let rt = ret_ty.clone();
@@ -1371,6 +1413,121 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
             _ => continue,
         }
 
+        registered.insert(name.clone());
+    }
+
+    // -- Register File.getBytes() host stub --
+    //
+    // `File.getBytes(path: String) -> haxe.io.Bytes` is the entrypoint Haxe
+    // code uses to slurp a file into a Bytes handle. The wasm path can't go
+    // through WASI because preopened-dir sandboxing only covers the cwd
+    // subtree (Llama GGUFs live elsewhere). The host stub reads through
+    // `std::fs::read` directly — same trust boundary as `rayzor run --wasm`
+    // already implies (the user picked the source program).
+    for (name, func_ty) in &rayzor_imports {
+        if registered.contains(name) {
+            continue;
+        }
+        if name != "haxe_file_get_bytes" {
+            continue;
+        }
+        let rt = func_ty
+            .results()
+            .next()
+            .unwrap_or(ValType::I32);
+        linker
+            .func_new(
+                "rayzor",
+                name,
+                func_ty.clone(),
+                move |mut caller, params, results| {
+                    let path = read_haxe_string(&mut caller, val_i32(&params[0]));
+                    let data = std::fs::read(&path).unwrap_or_else(|e| {
+                        eprintln!(
+                            "[wasm-runner] haxe_file_get_bytes: read {:?} failed: {}",
+                            path, e
+                        );
+                        Vec::new()
+                    });
+                    let id = {
+                        let s = caller.data_mut();
+                        let id = s.next_bytes_id;
+                        s.next_bytes_id += 1;
+                        s.bytes_handles.insert(id, data);
+                        id
+                    };
+                    results[0] = ret_int(id, &rt);
+                    Ok(())
+                },
+            )
+            .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+        registered.insert(name.clone());
+    }
+
+    // -- Register Sys.args() host stub --
+    //
+    // Sys.args() lowers to a `haxe_sys_args` import that should return a
+    // `Array<String>` of the CLI tail args (everything after `--` on the
+    // rayzor invocation). We build the HaxeArray + each HaxeString inside
+    // WASM linear memory using the host bump allocator so the wasm side can
+    // index it through the standard array_get_i64 / arr.length paths.
+    //
+    // HaxeArray layout (32 bytes — MIR's i64-stride struct):
+    //   offset  0: data_ptr (u32)  + 4 unused
+    //   offset  8: len      (u32)  + 4 unused
+    //   offset 16: cap      (u32)  + 4 unused
+    //   offset 24: elem_size(u32)  + 4 unused (set to 8 for i64-pointer stride)
+    // The data block is `len * 8` bytes; each slot holds a HaxeString pointer
+    // (i32 wasm address) zero-extended into an i64.
+    for (name, func_ty) in &rayzor_imports {
+        if registered.contains(name) {
+            continue;
+        }
+        if name != "haxe_sys_args" {
+            continue;
+        }
+        let rt = func_ty
+            .results()
+            .next()
+            .unwrap_or(ValType::I32);
+        linker
+            .func_new(
+                "rayzor",
+                name,
+                func_ty.clone(),
+                move |mut caller, _params, results| {
+                    let args = caller.data().program_args.clone();
+                    let n = args.len() as u32;
+                    // Allocate per-string HaxeStruct pointers first; we need them
+                    // before we can write the data block.
+                    let mut string_ptrs: Vec<i32> = Vec::with_capacity(n as usize);
+                    for s in &args {
+                        string_ptrs.push(write_haxe_string(&mut caller, s));
+                    }
+                    // Data block: n i64 slots, each holding one HaxeString ptr.
+                    let data_bytes = (n as u32) * 8;
+                    let data_addr = host_alloc(&mut caller, data_bytes.max(1));
+                    for (i, &sptr) in string_ptrs.iter().enumerate() {
+                        let off = data_addr + (i as u32) * 8;
+                        // Low 4 bytes: pointer; high 4 bytes: zero.
+                        write_wasm_mem(&mut caller, off, &(sptr as u32).to_le_bytes());
+                        write_wasm_mem(&mut caller, off + 4, &0u32.to_le_bytes());
+                    }
+                    // HaxeArray header: 32 bytes (i64-stride fields).
+                    let header_addr = host_alloc(&mut caller, 32);
+                    write_wasm_mem(&mut caller, header_addr, &data_addr.to_le_bytes());
+                    write_wasm_mem(&mut caller, header_addr + 4, &0u32.to_le_bytes());
+                    write_wasm_mem(&mut caller, header_addr + 8, &n.to_le_bytes());
+                    write_wasm_mem(&mut caller, header_addr + 12, &0u32.to_le_bytes());
+                    write_wasm_mem(&mut caller, header_addr + 16, &n.to_le_bytes());
+                    write_wasm_mem(&mut caller, header_addr + 20, &0u32.to_le_bytes());
+                    write_wasm_mem(&mut caller, header_addr + 24, &8u32.to_le_bytes());
+                    write_wasm_mem(&mut caller, header_addr + 28, &0u32.to_le_bytes());
+                    results[0] = ret_int(header_addr as i32, &rt);
+                    Ok(())
+                },
+            )
+            .map_err(|e| format!("Failed to register {}: {}", name, e))?;
         registered.insert(name.clone());
     }
 

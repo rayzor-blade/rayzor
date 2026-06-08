@@ -12,6 +12,7 @@ pub fn cmd_run_wasm(
     file: Option<PathBuf>,
     _rpkg_files: Vec<PathBuf>,
     safety_warnings: bool,
+    program_args: Vec<String>,
 ) -> Result<(), String> {
     let file = file.ok_or_else(|| "file path required for --wasm".to_string())?;
     let source = std::fs::read_to_string(&file)
@@ -59,8 +60,10 @@ pub fn cmd_run_wasm(
 
     eprintln!("Running ({:.1} KB)...", linked_wasm.len() as f64 / 1024.0);
 
-    // Execute via embedded wasmtime
-    compiler::codegen::wasm_runner::run_wasm(&linked_wasm)
+    // Execute via embedded wasmtime. `program_args` becomes Sys.args() inside
+    // the wasm sandbox; the runner registers a haxe_sys_args host stub that
+    // returns these as a Haxe Array<String>.
+    compiler::codegen::wasm_runner::run_wasm_with_args(&linked_wasm, &program_args)
 }
 
 pub fn cmd_build_wasm(
