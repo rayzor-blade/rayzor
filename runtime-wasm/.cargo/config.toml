@@ -10,7 +10,12 @@
 #   `+atomics` (plain wasm32-wasip1 fails because its prebuilt errno.c
 #   wasn't compiled with the atomics feature).
 
+# `runner = wasmtime --wasi=threads-yes` lets `cargo test --target
+# wasm32-wasip1-threads` execute the resulting wasm test binary directly.
+# Required for the Phase 2 tensor smoke test (matmul_t parity vs scalar
+# reference, run inside wasmtime as the WASM parity gate).
 [target.wasm32-wasip1-threads]
+runner = ["wasmtime", "-S", "threads", "-W", "threads", "-W", "shared-memory"]
 rustflags = [
     # +simd128: enables the f32x4/i32x4 lane intrinsics — the existing
     #   `#[cfg(target_feature = "simd128")]` guarded paths in this

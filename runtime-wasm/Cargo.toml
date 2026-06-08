@@ -9,6 +9,10 @@ crate-type = ["cdylib"]
 
 [dependencies]
 libm = "0.2"  # Pure-Rust math functions (sin, cos, sqrt, etc.) for wasm32
+# Shared compute kernels (tensor_simd::tensor_f32, quant::{types, q4_k_m, q6_k,
+# q8_k, matmul}). The aarch64-only SDOT module (`quant::sdot`) is `#![cfg]`-gated
+# off on wasm32 so we get the scalar / wasm-simd path automatically.
+rayzor-runtime-core = { path = "../runtime-core" }
 
 [profile.release]
 opt-level = "s"      # Optimize for size (WASM binaries should be small)
