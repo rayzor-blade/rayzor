@@ -308,7 +308,7 @@ pub unsafe extern "C" fn rayzor_tensor_zeros(shape_ptr: i32, ndim: i32, dtype: i
 pub unsafe extern "C" fn rayzor_tensor_full(
     shape_ptr: i32,
     ndim: i32,
-    value: f32,
+    value: f64,
     dtype: i32,
 ) -> i32 {
     let t = rayzor_tensor_zeros(shape_ptr, ndim, dtype);
@@ -316,6 +316,7 @@ pub unsafe extern "C" fn rayzor_tensor_full(
         return 0;
     }
     let tr = &*(t as *const Tensor);
+    let value = value as f32;
     if value == 0.0 {
         core::ptr::write_bytes(tr.data, 0, tr.numel * dtype_size(tr.dtype));
     } else {
@@ -740,6 +741,7 @@ pub unsafe extern "C" fn rayzor_tensor_free(t: i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::mem::{align_of, offset_of};
 
     #[test]
     fn zeros_then_get_flat_returns_zero() {
@@ -759,6 +761,12 @@ mod tests {
             }
             rayzor_tensor_free(t as i32);
         }
+    }
+
+    #[test]
+    fn tensor_refcount_slot_is_aligned() {
+        assert_eq!(offset_of!(Tensor, refcount) % align_of::<AtomicUsize>(), 0);
+        assert_eq!(offset_of!(Tensor, parent) % align_of::<*mut Tensor>(), 0);
     }
 
     #[test]
@@ -835,7 +843,7 @@ mod tests {
 
             for row in 0..10 {
                 let src =
-                    rayzor_tensor_full(row_shape.as_ptr() as i32, 2, row as f32, DTYPE_F32 as i32);
+                    rayzor_tensor_full(row_shape.as_ptr() as i32, 2, row as f64, DTYPE_F32 as i32);
                 assert!(src != 0);
                 assert_eq!(rayzor_tensor_append_along_0_f32(cache, src, row), 0);
                 rayzor_tensor_free(src);
