@@ -177,7 +177,16 @@ pub fn cmd_build_wasm(
     std::fs::write(&core_path, &linked_wasm)
         .map_err(|e| format!("failed to write {}: {}", core_path.display(), e))?;
 
-    // Wrap as WASI P2 Component (non-fatal for browser builds with host imports)
+    // Wrap as WASI P2 Component. This is opportunistic — the shipped
+    // `runtime-wasm` is a hand-rolled wasm32-wasip1-threads module with no
+    // embedded WIT world (no `component-type:` custom section, no
+    // wit-bindgen codegen), and `wit_component::ComponentEncoder::encode`
+    // requires either the module to carry a world descriptor or for the
+    // caller to supply one. Until the runtime grows a WIT world (or a
+    // future `--component` flag asks us to enforce strict mode for CI),
+    // a Component encode failure simply falls back to the linked core
+    // module written above. wasmtime can still run the .core.wasm
+    // directly; the browser harness consumes Main.wasm == core wasm.
     match compiler::codegen::wasm_component::wrap_as_component(
         &linked_wasm,
         compiler::codegen::wasm_component::ComponentKind::Command,
@@ -192,15 +201,9 @@ pub fn cmd_build_wasm(
                 .map_err(|e| format!("failed to write {}: {}", out_path.display(), e))?;
         }
         Err(e) => {
-            if browser {
-                // Browser builds don't need Component Model — core module is sufficient
-                println!("  note: component encoding skipped ({})", e);
-                // Write core module as .wasm too for compatibility
-                std::fs::write(&out_path, &linked_wasm)
-                    .map_err(|err| format!("failed to write {}: {}", out_path.display(), err))?;
-            } else {
-                return Err(format!("Failed to encode WASM Component: {}", e));
-            }
+            println!("  note: component encoding skipped ({}) — wrote core module to {}", e, out_path.display());
+            std::fs::write(&out_path, &linked_wasm)
+                .map_err(|err| format!("failed to write {}: {}", out_path.display(), err))?;
         }
     }
 
