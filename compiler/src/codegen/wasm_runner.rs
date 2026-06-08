@@ -736,6 +736,10 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
             _ => None,
         })
         .collect();
+    let rayzor_import_names: BTreeSet<String> = rayzor_imports
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
 
     // -- Register Bytes host functions --
     // Map bare names to their canonical qualified names
@@ -2132,8 +2136,39 @@ pub fn run_wasm(wasm_bytes: &[u8]) -> Result<(), String> {
         }
     }
 
+    let runtime_tensor_exports_linked = [
+        "rayzor_tensor_zeros",
+        "rayzor_tensor_ones",
+        "rayzor_tensor_full",
+        "rayzor_tensor_from_array",
+        "rayzor_tensor_numel",
+        "rayzor_tensor_get",
+        "rayzor_tensor_add",
+        "rayzor_tensor_sum",
+        "rayzor_tensor_mean",
+        "rayzor_tensor_dot",
+        "rayzor_tensor_matmul",
+        "rayzor_tensor_reshape",
+        "rayzor_tensor_sqrt",
+    ]
+    .iter()
+    .any(|name| !rayzor_import_names.contains(*name));
+    let unresolved_tensor_import_count = rayzor_imports
+        .iter()
+        .filter(|(name, _)| name.starts_with("rayzor_tensor_") || name.starts_with("Tensor_"))
+        .count();
+    if runtime_tensor_exports_linked && unresolved_tensor_import_count > 0 {
+        eprintln!(
+            "[wasm-runner] runtime tensor exports are linked; skipping {} tensor host fallback(s) to avoid split tensor handles",
+            unresolved_tensor_import_count
+        );
+    }
+
     for (name, func_ty) in &rayzor_imports {
         if registered.contains(name) {
+            continue;
+        }
+        if runtime_tensor_exports_linked {
             continue;
         }
         let canon = match canonical_tensor_name(name) {

@@ -151,10 +151,11 @@ pub unsafe extern "C" fn rayzor_tensor_rope(
         return 0;
     }
 
-    let y = crate::tensor::rayzor_tensor_zeros(xr.shape as i32, xr.ndim as i32, DTYPE_F32 as i32);
-    if y == 0 {
+    let y = crate::tensor::alloc_tensor(x_shape, DTYPE_F32);
+    if y.is_null() {
         return 0;
     }
+    let y = y as i32;
     let yr = &*(y as *const Tensor);
     if cr.dtype == DTYPE_F32 && sr.dtype == DTYPE_F32 {
         let out = slice::from_raw_parts_mut(yr.data as *mut f32, yr.numel);
@@ -257,10 +258,11 @@ unsafe fn rope_table<F: Fn(f64) -> f64>(
     let head_dim = head_dim as usize;
     let max_seq_len = max_seq_len as usize;
     let shape = [max_seq_len, head_dim / 2];
-    let t = crate::tensor::rayzor_tensor_zeros(shape.as_ptr() as i32, 2, dtype as i32);
-    if t == 0 {
+    let t = crate::tensor::alloc_tensor(&shape, dtype);
+    if t.is_null() {
         return 0;
     }
+    let t = t as i32;
     let tr = &*(t as *const Tensor);
     if dtype == DTYPE_F32 {
         let out = slice::from_raw_parts_mut(tr.data as *mut f32, tr.numel);
