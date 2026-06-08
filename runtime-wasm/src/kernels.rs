@@ -3,6 +3,7 @@
 //! preferred math primitives (`libm::expf`, `libm::sqrtf`) bound in.
 
 use core::slice;
+use rayzor_runtime_core::tensor::topk::recent_contains;
 use rayzor_runtime_core::tensor::{flash_attn, rms_norm, rope, softmax};
 
 use crate::tensor::{load_f32_at, store_f32_at, Tensor, DTYPE_F16, DTYPE_F32};
@@ -275,6 +276,159 @@ unsafe fn rope_table<F: Fn(f64) -> f64>(
     t
 }
 
+/// Return the index of the maximum F32 value in `data[0..n]`.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_argmax_f32(data: i32, n: i32) -> i32 {
+    if data == 0 || n <= 0 {
+        return -1;
+    }
+    let values = slice::from_raw_parts(data as *const f32, n as usize);
+    let mut best_idx = 0usize;
+    let mut best = values[0];
+    for (idx, &v) in values.iter().enumerate().skip(1) {
+        if v > best {
+            best = v;
+            best_idx = idx;
+        }
+    }
+    best_idx as i32
+}
+
+/// Raw F32 top-k scan used by wasm-side samplers and tests.
+///
+/// Writes descending logits into `out_logits` (`f32*`) and ids into `out_ids`
+/// (`i32*`). `cutoff` is an additional fast-reject threshold; pass
+/// `f32::NEG_INFINITY` to disable it.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_topk_scan_f32(
+    data: i32,
+    n: i32,
+    k: i32,
+    recent_ids: i32,
+    recent_n: i32,
+    rep_penalty: f32,
+    cutoff: f32,
+    out_logits: i32,
+    out_ids: i32,
+) {
+    if data == 0 || n <= 0 || k <= 0 || out_logits == 0 || out_ids == 0 {
+        return;
+    }
+    let n = n as usize;
+    let k = (k as usize).min(n);
+    let values = slice::from_raw_parts(data as *const f32, n);
+    let recent = if recent_ids != 0 && recent_n > 0 && rep_penalty > 1.0 {
+        Some(slice::from_raw_parts(
+            recent_ids as *const i64,
+            recent_n as usize,
+        ))
+    } else {
+        None
+    };
+    let out_logits = out_logits as *mut f32;
+    let out_ids = out_ids as *mut i32;
+    let mut size = 0usize;
+    for (idx, &raw) in values.iter().enumerate() {
+        let mut v = raw;
+        if let Some(recent) = recent {
+            if recent_contains(recent, idx as i64) {
+                v = if v > 0.0 {
+                    v / rep_penalty
+                } else {
+                    v * rep_penalty
+                };
+            }
+        }
+        if v <= cutoff {
+            continue;
+        }
+        if size == k && v <= *out_logits.add(k - 1) {
+            continue;
+        }
+        let end = if size < k {
+            let end = size;
+            size += 1;
+            end
+        } else {
+            k - 1
+        };
+        let mut pos = end;
+        while pos > 0 && *out_logits.add(pos - 1) < v {
+            *out_logits.add(pos) = *out_logits.add(pos - 1);
+            *out_ids.add(pos) = *out_ids.add(pos - 1);
+            pos -= 1;
+        }
+        *out_logits.add(pos) = v;
+        *out_ids.add(pos) = idx as i32;
+    }
+}
+
+/// Native-shaped Tensor top-k scan used by Haxe `Tensor.topkScan`.
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_topk_scan(
+    tensor: i32,
+    out_logits_ptr: i32,
+    out_ids_ptr: i32,
+    k: i32,
+    recent_ids_ptr: i32,
+    recent_len: i32,
+    repetition_penalty: f64,
+) -> i32 {
+    if tensor == 0 || out_logits_ptr == 0 || out_ids_ptr == 0 {
+        return -1;
+    }
+    let t = &*(tensor as *const Tensor);
+    if t.dtype != DTYPE_F32 || !t.is_contiguous() {
+        return -1;
+    }
+    let n = t.numel;
+    let k = (k.max(0) as usize).min(n);
+    if k == 0 {
+        return 0;
+    }
+    let src = slice::from_raw_parts(t.data as *const f32, n);
+    let out_logits = out_logits_ptr as *mut f64;
+    let out_ids = out_ids_ptr as *mut i64;
+    let penalize = repetition_penalty > 1.0 && recent_ids_ptr != 0 && recent_len > 0;
+    let recent = if penalize {
+        Some(slice::from_raw_parts(
+            recent_ids_ptr as *const i64,
+            recent_len as usize,
+        ))
+    } else {
+        None
+    };
+    let rp = repetition_penalty;
+    let mut size = 0usize;
+    for (idx, &raw) in src.iter().enumerate() {
+        let mut v = raw as f64;
+        if let Some(recent) = recent {
+            if recent_contains(recent, idx as i64) {
+                v = if v > 0.0 { v / rp } else { v * rp };
+            }
+        }
+        if size == k && v <= *out_logits.add(k - 1) {
+            continue;
+        }
+        let end = if size < k {
+            let end = size;
+            size += 1;
+            end
+        } else {
+            k - 1
+        };
+        let mut pos = end;
+        while pos > 0 && *out_logits.add(pos - 1) < v {
+            *out_logits.add(pos) = *out_logits.add(pos - 1);
+            *out_ids.add(pos) = *out_ids.add(pos - 1);
+            pos -= 1;
+        }
+        *out_logits.add(pos) = v;
+        *out_ids.add(pos) = idx as i64;
+    }
+    size as i32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,6 +642,67 @@ mod tests {
             crate::tensor::rayzor_tensor_free(y);
             crate::tensor::rayzor_tensor_free(cos);
             crate::tensor::rayzor_tensor_free(sin);
+        }
+    }
+
+    #[test]
+    fn argmax_f32_returns_first_max_index() {
+        let values = [1.0f32, 2.0, 3.0, 2.0, 1.0];
+        unsafe {
+            assert_eq!(rayzor_tensor_argmax_f32(values.as_ptr() as i32, 5), 2);
+        }
+    }
+
+    #[test]
+    fn raw_topk_scan_f32_returns_sorted_ids() {
+        let values = [0.5f32, 0.9, 0.1, 0.7];
+        let mut logits = [0.0f32; 2];
+        let mut ids = [-1i32; 2];
+        unsafe {
+            rayzor_tensor_topk_scan_f32(
+                values.as_ptr() as i32,
+                4,
+                2,
+                0,
+                0,
+                1.0,
+                f32::NEG_INFINITY,
+                logits.as_mut_ptr() as i32,
+                ids.as_mut_ptr() as i32,
+            );
+        }
+        assert_eq!(ids, [1, 3]);
+        assert_eq!(logits, [0.9, 0.7]);
+    }
+
+    #[test]
+    fn tensor_topk_scan_matches_native_shape() {
+        unsafe {
+            let values = [0.5f32, 0.9, 0.1, 0.7];
+            let shape = [4usize];
+            let t = crate::tensor::rayzor_tensor_from_floats(
+                values.as_ptr() as i32,
+                4,
+                shape.as_ptr() as i32,
+                1,
+            );
+            assert!(t != 0);
+            let mut logits = [0.0f64; 2];
+            let mut ids = [-1i64; 2];
+            let written = rayzor_tensor_topk_scan(
+                t,
+                logits.as_mut_ptr() as i32,
+                ids.as_mut_ptr() as i32,
+                2,
+                0,
+                0,
+                1.0,
+            );
+            assert_eq!(written, 2);
+            assert_eq!(ids, [1, 3]);
+            assert!((logits[0] - 0.9).abs() < 1e-6);
+            assert!((logits[1] - 0.7).abs() < 1e-6);
+            crate::tensor::rayzor_tensor_free(t);
         }
     }
 }

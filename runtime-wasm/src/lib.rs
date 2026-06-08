@@ -8,6 +8,7 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+pub mod gguf_wasm;
 pub mod kernels;
 pub mod qtensor;
 pub mod tensor;
