@@ -63,6 +63,76 @@ pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode_f32(
     }
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_flash_attn_decode(
+    q_ptr: i32,
+    k_ptr: i32,
+    v_ptr: i32,
+    scale: f64,
+) -> i32 {
+    if q_ptr == 0 || k_ptr == 0 || v_ptr == 0 {
+        return 0;
+    }
+    let q = &*(q_ptr as *const Tensor);
+    let k = &*(k_ptr as *const Tensor);
+    let v = &*(v_ptr as *const Tensor);
+    if q.dtype != DTYPE_F32 || k.dtype != DTYPE_F32 || v.dtype != DTYPE_F32 {
+        return 0;
+    }
+    if q.ndim != 3 || k.ndim != 3 || v.ndim != 3 {
+        return 0;
+    }
+    let q_shape = slice::from_raw_parts(q.shape, 3);
+    let k_shape = slice::from_raw_parts(k.shape, 3);
+    let v_shape = slice::from_raw_parts(v.shape, 3);
+    let seq_q = q_shape[0];
+    let n_q_heads = q_shape[1];
+    let head_dim = q_shape[2];
+    let cache_len = k_shape[0];
+    let n_kv_heads = k_shape[1];
+    if seq_q != 1
+        || k_shape[2] != head_dim
+        || v_shape[0] != cache_len
+        || v_shape[1] != n_kv_heads
+        || v_shape[2] != head_dim
+        || n_kv_heads == 0
+        || !n_q_heads.is_multiple_of(n_kv_heads)
+    {
+        return 0;
+    }
+    let k_strides = slice::from_raw_parts(k.strides, 3);
+    let v_strides = slice::from_raw_parts(v.strides, 3);
+    let kv_row_stride = n_kv_heads * head_dim;
+    if !q.is_contiguous()
+        || k_strides[0] != kv_row_stride
+        || k_strides[1] != head_dim
+        || k_strides[2] != 1
+        || v_strides[0] != kv_row_stride
+        || v_strides[1] != head_dim
+        || v_strides[2] != 1
+    {
+        return 0;
+    }
+    let out_shape = [1usize, n_q_heads, head_dim];
+    let out = crate::tensor::alloc_tensor(&out_shape, DTYPE_F32);
+    if out.is_null() {
+        return 0;
+    }
+    rayzor_tensor_flash_attn_decode_f32(
+        q.data as i32,
+        k.data as i32,
+        v.data as i32,
+        (*out).data as i32,
+        n_q_heads as i32,
+        (n_q_heads / n_kv_heads) as i32,
+        head_dim as i32,
+        cache_len as i32,
+        kv_row_stride as i32,
+        scale as f32,
+    );
+    out as i32
+}
+
 /// In-place row-wise softmax over an `[n_rows, row_len]` F32 buffer.
 #[no_mangle]
 pub unsafe extern "C" fn rayzor_tensor_softmax_inplace_f32(data: i32, n_rows: i32, row_len: i32) {
@@ -75,6 +145,33 @@ pub unsafe extern "C" fn rayzor_tensor_softmax_inplace_f32(data: i32, n_rows: i3
         let row = slice::from_raw_parts_mut(p.add(r * row_len), row_len);
         softmax::softmax_inplace_f32(row, libm::expf);
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_softmax(t: i32) -> i32 {
+    if t == 0 {
+        return 0;
+    }
+    let tr = &*(t as *const Tensor);
+    if tr.dtype != DTYPE_F32 || tr.ndim == 0 {
+        return 0;
+    }
+    let shape = slice::from_raw_parts(tr.shape, tr.ndim);
+    let out = crate::tensor::alloc_tensor(shape, DTYPE_F32);
+    if out.is_null() {
+        return 0;
+    }
+    core::ptr::copy_nonoverlapping(tr.data, (*out).data, tr.numel * 4);
+    let row_len = *shape.last().unwrap_or(&0);
+    if row_len == 0 {
+        return out as i32;
+    }
+    rayzor_tensor_softmax_inplace_f32(
+        (*out).data as i32,
+        (tr.numel / row_len) as i32,
+        row_len as i32,
+    );
+    out as i32
 }
 
 /// Row-wise RMSNorm over an `[n_rows, hidden_dim]` F32 buffer, writing to
@@ -100,6 +197,88 @@ pub unsafe extern "C" fn rayzor_tensor_rms_norm_f32(
         let out_row = slice::from_raw_parts_mut(out_p.add(r * n), n);
         rms_norm::rms_norm_row_f32(out_row, x_row, w_slice, eps, libm::sqrtf);
     }
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_rms_norm(x: i32, eps: f64) -> i32 {
+    if x == 0 {
+        return 0;
+    }
+    let xr = &*(x as *const Tensor);
+    if xr.dtype != DTYPE_F32 || xr.ndim == 0 {
+        return 0;
+    }
+    let shape = slice::from_raw_parts(xr.shape, xr.ndim);
+    let hidden = *shape.last().unwrap_or(&0);
+    if hidden == 0 {
+        return 0;
+    }
+    let out = crate::tensor::alloc_tensor(shape, DTYPE_F32);
+    if out.is_null() {
+        return 0;
+    }
+    let ones_shape = [hidden];
+    let ones = crate::tensor::alloc_tensor(&ones_shape, DTYPE_F32);
+    if ones.is_null() {
+        crate::tensor::rayzor_tensor_free(out as i32);
+        return 0;
+    }
+    let weights = slice::from_raw_parts_mut((*ones).data as *mut f32, hidden);
+    for w in weights.iter_mut() {
+        *w = 1.0;
+    }
+    rayzor_tensor_rms_norm_f32(
+        (*out).data as i32,
+        xr.data as i32,
+        (*ones).data as i32,
+        eps as f32,
+        (xr.numel / hidden) as i32,
+        hidden as i32,
+    );
+    crate::tensor::rayzor_tensor_free(ones as i32);
+    out as i32
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn rayzor_tensor_layer_norm(x: i32, eps: f64) -> i32 {
+    if x == 0 {
+        return 0;
+    }
+    let xr = &*(x as *const Tensor);
+    if xr.dtype != DTYPE_F32 || xr.ndim == 0 {
+        return 0;
+    }
+    let shape = slice::from_raw_parts(xr.shape, xr.ndim);
+    let hidden = *shape.last().unwrap_or(&0);
+    if hidden == 0 {
+        return 0;
+    }
+    let out = crate::tensor::alloc_tensor(shape, DTYPE_F32);
+    if out.is_null() {
+        return 0;
+    }
+    let rows = xr.numel / hidden;
+    let src = xr.data as *const f32;
+    let dst = (*out).data as *mut f32;
+    let eps = eps as f32;
+    for row in 0..rows {
+        let x_row = slice::from_raw_parts(src.add(row * hidden), hidden);
+        let y_row = slice::from_raw_parts_mut(dst.add(row * hidden), hidden);
+        let mean = x_row.iter().copied().sum::<f32>() / hidden as f32;
+        let var = x_row
+            .iter()
+            .map(|v| {
+                let d = *v - mean;
+                d * d
+            })
+            .sum::<f32>()
+            / hidden as f32;
+        let inv = 1.0 / libm::sqrtf(var + eps);
+        for i in 0..hidden {
+            y_row[i] = (x_row[i] - mean) * inv;
+        }
+    }
+    out as i32
 }
 
 /// Apply interleaved Llama/GGUF RoPE to an F32 tensor of shape
