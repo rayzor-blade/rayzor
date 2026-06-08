@@ -197,7 +197,12 @@ class GGUFReader {
     }
 
     private static inline function blockedSize(nElem:Int, blockElems:Int, blockBytes:Int):Int {
-        var nBlocks = Std.int(nElem / blockElems);
+        // TODO(bugs_wasm_std_int_large_float): on wasm, `Std.int(nElem / 256)`
+        // returns 0 once nElem ≳ 16M (Llama 3.2 1B's 128k×2k token_embd hits
+        // this). blockElems is always 256 in GGUF Q4_K and Q6_K, so a right-
+        // shift produces the correct nBlocks without crossing the broken
+        // Float→Int path. Drop this branch once the compiler bug is fixed.
+        var nBlocks = (blockElems == 256) ? (nElem >> 8) : Std.int(nElem / blockElems);
         if (nElem % blockElems != 0) nBlocks += 1;
         return nBlocks * blockBytes;
     }
