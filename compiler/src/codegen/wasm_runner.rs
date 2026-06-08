@@ -55,6 +55,13 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         /// CLI tail args (everything after `--` on the rayzor command line).
         /// Surfaced to wasm via the `haxe_sys_args` host stub.
         program_args: Vec<String>,
+        /// Haxe StringMap handle table. Each handle is a small integer the wasm
+        /// program holds; the host stores the actual `BTreeMap<String, i64>` so
+        /// every set/get/exists call goes through the host stubs. Values are
+        /// i64 because Haxe StringMap is generic over `V` and the compiler
+        /// emits all calls through the i64-stride MIR slot.
+        stringmap_handles: BTreeMap<i32, BTreeMap<String, i64>>,
+        next_stringmap_id: i32,
     }
 
     struct ThreadState {
@@ -732,6 +739,8 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
         host_alloc_ptr: 0,
         shared_memory: None,
         program_args: program_args.to_vec(),
+        stringmap_handles: BTreeMap::new(),
+        next_stringmap_id: 1,
     };
     let mut store = Store::new(&engine, state);
 
@@ -1524,6 +1533,351 @@ pub fn run_wasm_with_args(wasm_bytes: &[u8], program_args: &[String]) -> Result<
                     write_wasm_mem(&mut caller, header_addr + 24, &8u32.to_le_bytes());
                     write_wasm_mem(&mut caller, header_addr + 28, &0u32.to_le_bytes());
                     results[0] = ret_int(header_addr as i32, &rt);
+                    Ok(())
+                },
+            )
+            .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+        registered.insert(name.clone());
+    }
+
+    // -- Register Haxe StringMap host stubs --
+    //
+    // GGUFReader parses the metadata KV table into a `StringMap<MetaValue>`
+    // via `meta.set(key, value)`, then GGUFLoader.metadataFromReader reads
+    // it back through `meta.get(key)` / `meta.exists(key)`. Without these
+    // four, every metadata read returns a null handle and the program traps
+    // inside the enum switch.
+    //
+    // Storage: `stringmap_handles: BTreeMap<i32, BTreeMap<String, i64>>` on
+    // WasmState. Each new() allocates a fresh map and returns its small-int
+    // handle. set/get/exists key by reading the HaxeString from wasm memory
+    // (via `read_haxe_string`). Values are passed as i64 because the MIR
+    // emits all calls through the i64-stride generic V slot — they end up
+    // holding wasm-side pointers, primitive ints, or boxed Dynamic.
+    for (name, func_ty) in &rayzor_imports {
+        if registered.contains(name) {
+            continue;
+        }
+        let kind = match name.as_str() {
+            "haxe_stringmap_new" => "new",
+            "haxe_stringmap_set" => "set",
+            "haxe_stringmap_get" => "get",
+            "haxe_stringmap_exists" => "exists",
+            "haxe_stringmap_remove" => "remove",
+            "haxe_stringmap_keys" => "keys",
+            _ => continue,
+        };
+        let rt = func_ty
+            .results()
+            .next()
+            .unwrap_or(ValType::I32);
+        let func_ty_clone = func_ty.clone();
+        linker
+            .func_new(
+                "rayzor",
+                name,
+                func_ty_clone,
+                move |mut caller, params, results| {
+                    match kind {
+                        "new" => {
+                            let id = {
+                                let s = caller.data_mut();
+                                let id = s.next_stringmap_id;
+                                s.next_stringmap_id += 1;
+                                s.stringmap_handles.insert(id, BTreeMap::new());
+                                id
+                            };
+                            results[0] = ret_int(id, &rt);
+                        }
+                        "set" => {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let key = read_haxe_string(&mut caller, val_i32(&params[1]));
+                            // Value param may be i32 or i64 depending on the
+                            // emitted call shape. Promote either way to i64.
+                            let v = if params.len() >= 3 {
+                                match &params[2] {
+                                    Val::I32(x) => *x as i64,
+                                    Val::I64(x) => *x,
+                                    Val::F32(_) | Val::F64(_) => 0,
+                                    _ => 0,
+                                }
+                            } else {
+                                0
+                            };
+                            if let Some(map) = caller.data_mut().stringmap_handles.get_mut(&h) {
+                                map.insert(key, v);
+                            }
+                        }
+                        "get" => {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let key = read_haxe_string(&mut caller, val_i32(&params[1]));
+                            let val = caller
+                                .data()
+                                .stringmap_handles
+                                .get(&h)
+                                .and_then(|m| m.get(&key))
+                                .copied()
+                                .unwrap_or(0);
+                            // Return either i32 or i64 depending on the
+                            // declared result type.
+                            match rt {
+                                ValType::I64 => results[0] = Val::I64(val),
+                                _ => results[0] = Val::I32(val as i32),
+                            }
+                        }
+                        "exists" => {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let key = read_haxe_string(&mut caller, val_i32(&params[1]));
+                            let yes = caller
+                                .data()
+                                .stringmap_handles
+                                .get(&h)
+                                .map(|m| m.contains_key(&key))
+                                .unwrap_or(false);
+                            results[0] = ret_int(if yes { 1 } else { 0 }, &rt);
+                        }
+                        "remove" => {
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let key = read_haxe_string(&mut caller, val_i32(&params[1]));
+                            let removed = caller
+                                .data_mut()
+                                .stringmap_handles
+                                .get_mut(&h)
+                                .map(|m| m.remove(&key).is_some())
+                                .unwrap_or(false);
+                            results[0] = ret_int(if removed { 1 } else { 0 }, &rt);
+                        }
+                        "keys" => {
+                            // Returns an Array<String> of the map's keys. We
+                            // build it the same way `haxe_sys_args` does.
+                            let h = unbox_int_from_memory(&mut caller, val_i32(&params[0]));
+                            let keys: Vec<String> = caller
+                                .data()
+                                .stringmap_handles
+                                .get(&h)
+                                .map(|m| m.keys().cloned().collect())
+                                .unwrap_or_default();
+                            let n = keys.len() as u32;
+                            let mut string_ptrs: Vec<i32> = Vec::with_capacity(n as usize);
+                            for k in &keys {
+                                string_ptrs.push(write_haxe_string(&mut caller, k));
+                            }
+                            let data_addr = host_alloc(&mut caller, (n * 8).max(1));
+                            for (i, &sp) in string_ptrs.iter().enumerate() {
+                                let off = data_addr + (i as u32) * 8;
+                                write_wasm_mem(&mut caller, off, &(sp as u32).to_le_bytes());
+                                write_wasm_mem(&mut caller, off + 4, &0u32.to_le_bytes());
+                            }
+                            let header = host_alloc(&mut caller, 32);
+                            write_wasm_mem(&mut caller, header, &data_addr.to_le_bytes());
+                            write_wasm_mem(&mut caller, header + 4, &0u32.to_le_bytes());
+                            write_wasm_mem(&mut caller, header + 8, &n.to_le_bytes());
+                            write_wasm_mem(&mut caller, header + 12, &0u32.to_le_bytes());
+                            write_wasm_mem(&mut caller, header + 16, &n.to_le_bytes());
+                            write_wasm_mem(&mut caller, header + 20, &0u32.to_le_bytes());
+                            write_wasm_mem(&mut caller, header + 24, &8u32.to_le_bytes());
+                            write_wasm_mem(&mut caller, header + 28, &0u32.to_le_bytes());
+                            results[0] = ret_int(header as i32, &rt);
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+        registered.insert(name.clone());
+    }
+
+    // -- Register String byte-codec host stubs --
+    //
+    // BPETokenizer's byteEncoderTable + byteDecode rely on the
+    // codepoint↔string round-trip Haxe's String exposes via
+    // `String.fromCharCode(c)` and `s.charCodeAt(i)`. Rayzor strings are
+    // UTF-8 byte arrays, so charCodeAt returns a raw byte (0..255) — see
+    // `bugs_bpe_utf8_codepoint_walk` for the historic native equivalence.
+    for (name, func_ty) in &rayzor_imports {
+        if registered.contains(name) {
+            continue;
+        }
+        let kind = match name.as_str() {
+            "haxe_string_char_code_at" => "char_code_at",
+            "haxe_string_from_char_code" => "from_char_code",
+            _ => continue,
+        };
+        let rt = func_ty
+            .results()
+            .next()
+            .unwrap_or(ValType::I32);
+        linker
+            .func_new(
+                "rayzor",
+                name,
+                func_ty.clone(),
+                move |mut caller, params, results| {
+                    match kind {
+                        "char_code_at" => {
+                            let s = read_haxe_string(&mut caller, val_i32(&params[0]));
+                            let idx = val_i32(&params[1]) as usize;
+                            let val = s.as_bytes().get(idx).copied().unwrap_or(0) as i32;
+                            results[0] = ret_int(val, &rt);
+                        }
+                        "from_char_code" => {
+                            let code = val_i32(&params[0]);
+                            // Native Haxe semantics: encode the codepoint as
+                            // UTF-8 bytes. For ASCII (0..127) the result is a
+                            // single byte; for higher codepoints it's 2-4 bytes.
+                            let s = match char::from_u32(code as u32) {
+                                Some(c) => c.to_string(),
+                                None => String::new(),
+                            };
+                            let ptr = write_haxe_string(&mut caller, &s);
+                            results[0] = ret_int(ptr, &rt);
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+        registered.insert(name.clone());
+    }
+
+    // -- Register Std type-conversion host stubs --
+    //
+    // `Std.int(f)` truncates Float→Int. `Std.parseInt` / `Std.parseFloat`
+    // parse strings — used by Main.hx CLI parsing. `Std.string(x)` lets
+    // the benchmarking helpers format floats as text.
+    for (name, func_ty) in &rayzor_imports {
+        if registered.contains(name) {
+            continue;
+        }
+        let kind = match name.as_str() {
+            "haxe_std_int" => "int",
+            "haxe_std_parse_int" => "parse_int",
+            "haxe_std_parse_float" => "parse_float",
+            "haxe_std_string" => "string",
+            _ => continue,
+        };
+        let rt = func_ty
+            .results()
+            .next()
+            .unwrap_or(ValType::I32);
+        linker
+            .func_new(
+                "rayzor",
+                name,
+                func_ty.clone(),
+                move |mut caller, params, results| {
+                    match kind {
+                        "int" => {
+                            // Param may be f64 or boxed Float. The wasm
+                            // calling convention surfaces f64 directly.
+                            let v = match &params[0] {
+                                Val::F64(x) => *x as i64 as i32,
+                                Val::F32(x) => *x as i32,
+                                Val::I32(x) => *x,
+                                Val::I64(x) => *x as i32,
+                                _ => 0,
+                            };
+                            results[0] = ret_int(v, &rt);
+                        }
+                        "parse_int" => {
+                            let s = read_haxe_string(&mut caller, val_i32(&params[0]));
+                            let trimmed = s.trim();
+                            let parsed: i32 = trimmed
+                                .parse::<i64>()
+                                .map(|v| v as i32)
+                                .unwrap_or(0);
+                            results[0] = ret_int(parsed, &rt);
+                        }
+                        "parse_float" => {
+                            let s = read_haxe_string(&mut caller, val_i32(&params[0]));
+                            let v: f64 = s.trim().parse().unwrap_or(f64::NAN);
+                            // Result type is always F64 for parse_float.
+                            results[0] = Val::F64(v.to_bits());
+                        }
+                        "string" => {
+                            // Polymorphic over input; for the load+decode path
+                            // the most common callsite is Std.string(Float).
+                            let formatted = match &params[0] {
+                                Val::F64(x) => format!("{}", x),
+                                Val::F32(x) => format!("{}", x),
+                                Val::I32(x) => format!("{}", x),
+                                Val::I64(x) => format!("{}", x),
+                                _ => String::new(),
+                            };
+                            let ptr = write_haxe_string(&mut caller, &formatted);
+                            results[0] = ret_int(ptr, &rt);
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                },
+            )
+            .map_err(|e| format!("Failed to register {}: {}", name, e))?;
+        registered.insert(name.clone());
+    }
+
+    // -- Register Sys host stubs --
+    //
+    // `Sys.getEnv` is the env-var gate LlamaArch.build + GGUFTokenizer use
+    // to opt into RAYZOR_KV_Q8 et al. `Sys.time` is the wall-clock the
+    // benchmark prints. `Sys.println` writes diagnostic trace lines.
+    // `Sys.exit` aborts on bad CLI args.
+    for (name, func_ty) in &rayzor_imports {
+        if registered.contains(name) {
+            continue;
+        }
+        let kind = match name.as_str() {
+            "haxe_sys_get_env" => "get_env",
+            "haxe_sys_time" => "time",
+            "haxe_sys_println" => "println",
+            "haxe_sys_exit" => "exit",
+            _ => continue,
+        };
+        let rt = func_ty
+            .results()
+            .next()
+            .unwrap_or(ValType::I32);
+        linker
+            .func_new(
+                "rayzor",
+                name,
+                func_ty.clone(),
+                move |mut caller, params, results| {
+                    match kind {
+                        "get_env" => {
+                            let key = read_haxe_string(&mut caller, val_i32(&params[0]));
+                            match std::env::var(&key) {
+                                Ok(v) => {
+                                    let ptr = write_haxe_string(&mut caller, &v);
+                                    results[0] = ret_int(ptr, &rt);
+                                }
+                                Err(_) => {
+                                    // Null pointer — Haxe's `Sys.getEnv` returns
+                                    // null when the var is absent.
+                                    results[0] = ret_int(0, &rt);
+                                }
+                            }
+                        }
+                        "time" => {
+                            use std::time::{SystemTime, UNIX_EPOCH};
+                            let secs = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .map(|d| d.as_secs_f64())
+                                .unwrap_or(0.0);
+                            results[0] = Val::F64(secs.to_bits());
+                        }
+                        "println" => {
+                            let s = read_haxe_string(&mut caller, val_i32(&params[0]));
+                            println!("{}", s);
+                        }
+                        "exit" => {
+                            let code = val_i32(&params[0]);
+                            std::process::exit(code);
+                        }
+                        _ => {}
+                    }
                     Ok(())
                 },
             )
