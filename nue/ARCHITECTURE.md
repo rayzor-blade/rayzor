@@ -1,0 +1,410 @@
+# nue Architecture
+
+`nue` is the ML-inference framework that sits on top of Rayzor's compiler and
+runtime. It exists to turn a quantised LLM checkpoint on disk into a stream of
+tokens, with the same Haxe source compiling for native CPU/GPU and (eventually)
+WebGPU+WASM. It is **inference-only** — no autograd, no training. Everything
+above the runtime FFI is pure Haxe.
+
+The current proof point is Llama 3.2 1B Instruct (Q4_K_M GGUF) running through
+`examples/llama-chat/Main.hx` on M1 Pro at ~67 tok/s decode with ~690 MB peak
+RSS (commit `4001079`, session 2026-06-04..2026-06-08).
+
+---
+
+## Design Goals
+
+- **One Haxe source, three deployment targets** — native CPU (Cranelift/LLVM
+  JIT), native GPU (Metal/CUDA/Vulkan via `gpu/`), and browser (WGPU+WASM,
+  in-flight). User code under `nue/` never branches on target.
+- **Format-neutral architecture builders.** Loaders normalise everything to the
+  GGUF tensor naming convention. `LlamaArch.build()` does not care whether the
+  weights came from a GGUF, a safetensors file, or eventually an ONNX bundle.
+- **Quantisation-aware composition without code duplication.** `Linear` and
+  `Embedding` accept either an F32 `Tensor` or a `QTensor` (Q4_K_M, Q6_K) and
+  dispatch through the matching runtime kernel. The arch builder picks the
+  representation once at build time and the rest of the stack stays oblivious.
+- **No autograd by design.** Adding a backward path would extend `Module` with
+  a `backward(grad)` hook; forward semantics would not change. This is a v1
+  scope decision, not a structural limit.
+- **CPU-first, GPU-second, browser-third.** Every kernel exists as a CPU
+  implementation; the GPU and WASM paths are layered as optional dispatchers
+  through Rayzor's existing `gpu/` and `wasm_backend` infrastructure.
+
+---
+
+## Foundations: the Module Protocol
+
+Every learnable layer in nue implements `nue.Module`
+([nue/Module.hx](nue/Module.hx)):
+
+```haxe
+interface Module {
+  function forward(x:Tensor):Tensor;
+  function parameters():Array<NamedTensor>;
+}
+typedef NamedTensor = { name:String, tensor:Tensor }
+```
+
+`parameters()` exists for the loader↔module-tree wiring contract: each
+`NamedTensor` carries a canonical GGUF-style name (e.g. `blk.7.attn_q.weight`)
+that the arch builder uses to fetch the corresponding tensor out of
+[NamedTensorMap](nue/model/NamedTensorMap.hx).
+
+Two model-shape interfaces specialise `Module`:
+
+| Interface | File | Role |
+|---|---|---|
+| `CausalLanguageModel` | [nue/CausalLanguageModel.hx](nue/CausalLanguageModel.hx) | Autoregressive decoders. Adds `forwardIds(Array<Int>)` for token-stream input and `resetCache()` for KV-cache lifecycle across prompts. |
+| `EncoderModel` | [nue/EncoderModel.hx](nue/EncoderModel.hx) | Bidirectional encoders (BERT-family). Adds `encode(Array<Int>)` for full-sequence processing. No cache. |
+
+Concrete root-level implementations:
+
+- [Linear.hx](nue/Linear.hx) — `weight ∈ {Tensor F32, QTensor Q4_K_M}` + optional bias. The
+  quantised path goes through `tensor_matmul_qt_t_f32_threaded`; the F32 path
+  through `tensor_matmul_t`. Bias is added in place. A 1×1 F32 sentinel tensor
+  is held alongside the QTensor in `fromQuant()` to keep class layout stable
+  (works around a JIT bug with null `Tensor` fields in large import graphs).
+- [Embedding.hx](nue/Embedding.hx) — token-lookup table. F32 path uses
+  `tensor_gather_rows`; Q6_K path uses `qtensor_gather_rows_q6_k`, which
+  dequantises **only the rows touched by the prompt** rather than the full
+  `[vocab_size × hidden_dim]` table. `embedTable()` returns `Dynamic` so the LM
+  head can tie weights regardless of whether the embedding is F32 or
+  quantised.
+- [BertModel.hx](nue/BertModel.hx) — full BERT encoder composition. Sole
+  built-in `EncoderModel` concretion; instantiated by `BertArch.build()`.
+
+---
+
+## Subsystem Roles
+
+### `model/` — format-neutral abstractions
+[ModelLoader.hx](nue/model/ModelLoader.hx) is the loader contract:
+`readMetadata()`, `readNamedTensors()`, and a `load()` convenience. It is the
+single interface that `GGUFLoader`, `SafetensorsLoader`, and `ONNXLoader`
+(stub) all implement.
+
+[ModelMetadata.hx](nue/model/ModelMetadata.hx) is a typedef for
+architecture-agnostic hyperparameters: `architecture` name, `hiddenSize`,
+`numLayers`, `numHeads`, `numKvHeads`, `headDim`, `vocabSize`, `maxSeqLen`,
+`normEps`, `ropeBase`, `tieWordEmbeddings`, plus an `extras:Map<String,Dynamic>`
+escape hatch for per-format knobs (quant scheme, op-set version, etc.) that do
+not belong in the core schema.
+
+[NamedTensorMap.hx](nue/model/NamedTensorMap.hx) is the weight dictionary:
+parallel `tensorByName : StringMap<Tensor>` and `qtensorByName :
+StringMap<QTensor>` maps with insertion-order preservation so per-layer
+iteration matches the GGUF tensor index order arch builders expect. The dual
+storage is what makes the quantisation-preserving path work — Q4_K_M and Q6_K
+weights never get dequantised to F32 on the way to module construction.
+
+This subsystem has **zero FFI dependencies**.
+
+### `loader/` — file-format ingestion
+Three concrete `ModelLoader` implementations plus a GGUF tokenizer extractor.
+
+| File | Role |
+|---|---|
+| [GGUFReader.hx](nue/loader/GGUFReader.hx) | Low-level GGUF v3 parser. Reads magic/version, the metadata KV table, and the tensor index. Splits 64-bit file offsets into lo/hi 32-bit pairs (via `Bytes.subWithBase`) to handle >4 GiB files without sign-extension. `TensorInfo` is modelled as a class, not an anon typedef, to dodge a JIT dispatch bug with interface-typed array elements. |
+| [GGUFLoader.hx](nue/loader/GGUFLoader.hx) | High-level GGUF ingestion. Parses metadata into `ModelMetadata`, decodes tensor data per dtype (Q4_K_M/Q6_K → QTensor via `qtensor_from_bytes_*`; F32/F16/Q8_0 → Tensor via `tensor_fromBytes*`), registers everything in `NamedTensorMap`. The `loadWithTokenizer()` convenience returns `{model, tokenizer, metadata}` in one shot. |
+| [GGUFTokenizer.hx](nue/loader/GGUFTokenizer.hx) | Extracts BPE vocab + merges from GGUF metadata (`tokenizer.ggml.tokens`, `tokenizer.ggml.merges`) and constructs a `BPETokenizer`. Knows where to look in the metadata KV table. |
+| [SafetensorsLoader.hx](nue/loader/SafetensorsLoader.hx) | JSON header + binary tensor data. Normalises HuggingFace tensor names (`model.layers.{L}.self_attn.q_proj.weight`) to GGUF canonical (`blk.{L}.attn_q.weight`) on entry, so arch builders see one naming scheme regardless of source format. Reads companion `config.json` for `ModelMetadata`. |
+| [ONNXLoader.hx](nue/loader/ONNXLoader.hx) | Stub. Lowest priority; placeholder so `ArchRegistry` can dispatch on architecture+format without `match` going non-exhaustive once it lands. |
+
+### `tokenizer/` — text ↔ token IDs
+Pure-Haxe BPE implementation. **No FFI calls** — entirely `haxe.io.Bytes` and
+`haxe.ds.StringMap`.
+
+| File | Role |
+|---|---|
+| [Tokenizer.hx](nue/tokenizer/Tokenizer.hx) | Interface: `encode(String):Array<Int>`, `decode(Array<Int>):String`, plus vocab introspection and special-token registry. |
+| [BPETokenizer.hx](nue/tokenizer/BPETokenizer.hx) | Concrete BPE: longest-prefix-first special-token scan (atomic pass-through for `<|begin_of_text|>` etc.), GPT-2-style byte-level encoding through a 256-entry printable-Unicode table, O(1) merge rank lookup via `StringMap<(left,right) → priority>` for the merging hot loop. UTF-8 codepoint decoding is explicit (not `charCodeAt`, which would index bytes). |
+| [Vocab.hx](nue/tokenizer/Vocab.hx) | Bidirectional token-string ↔ id map with optional per-token scores. |
+| [MergeRule.hx](nue/tokenizer/MergeRule.hx) | Single BPE merge rule (left, right, merged, precomputed concatenation key). |
+
+A known gap (flagged in source): there is no regex pre-tokenisation; inputs go
+into the BPE loop as a single chunk. This causes 1–2 token divergence from
+`llama.cpp` on complex prompts (the matter is documented in
+`bugs_llama_chat_match_overstated`).
+
+### `arch/` — architecture builders
+The bridge between format-neutral loaders and instantiated module trees.
+
+```haxe
+interface ArchBuilder {
+  function name():String;
+  function validate(meta:ModelMetadata):Void;     // throws on shape mismatch
+  function build(meta:ModelMetadata, weights:NamedTensorMap):Module;
+}
+```
+
+[ArchRegistry.hx](nue/arch/ArchRegistry.hx) is an **instance-based** registry
+(not static — dodges JIT flakiness with global mutable state). `withDefaults()`
+returns a registry pre-populated with `LlamaArch` and `BertArch`. The internal
+`ArchEntry` caches each builder's `name()` at registration time because
+calling the interface method later (when the receiver is typed as
+`ArchBuilder`, not the concrete class) has hit JIT dispatch bugs in this
+codebase.
+
+| File | Role |
+|---|---|
+| [LlamaArch.hx](nue/arch/LlamaArch.hx) | Wires Llama/Mistral/Qwen2: embedding (Q6_K if available, else F32) + N `TransformerBlock`s containing pre-`RMSNorm` + `GQAttention` + per-layer `KVCache` + pre-`RMSNorm` + `SwiGLU` + residual, then output `RMSNorm` + LM head (weight-tied to embedding when `tie_word_embeddings=true` or `output.weight` is absent). |
+| [BertArch.hx](nue/arch/BertArch.hx) | Wires BERT/RoBERTa/DeBERTa encoders: token + position + segment embeddings, post-`LayerNorm`, N transformer blocks with `MultiHeadAttention` + `GeluFFN`, optional final `LayerNorm`. |
+| [LlamaModel.hx](nue/arch/LlamaModel.hx) | The concrete `CausalLanguageModel` returned by `LlamaArch.build()`. `forwardIds()` routes through embedding lookup → block stack → final norm → LM head, producing `[seq_len, vocab_size]` logits. `resetCache()` walks the block array and resets every layer's `KVCache.currentLen` to 0. |
+
+Two opt-in optimisations are gated by env vars in `LlamaArch`:
+
+- `RAYZOR_KV_Q8=1` → KV cache uses Q8_0 storage (3.76× memory reduction, see
+  `bugs_q8_kv_cache_attempted` for the parity discussion).
+- `RAYZOR_REQUANT_LM_HEAD=1` → when the embedding is Q6_K and the LM head ties
+  to it, build a Q4_K_M view of the table via
+  `qtensor_requant_q6k_to_q4km` so the LM head's SDOT path is faster (Q4_K_M
+  has lower per-block dequant overhead than Q6_K).
+
+### `transformer/` — building blocks
+This is where the kernel-heavy work lives. Every layer here is a `Module`.
+
+| File | Role |
+|---|---|
+| [TransformerBlock.hx](nue/transformer/TransformerBlock.hx) | Generic pre-norm residual block. Parametric over `attn:Module` and `ffn:Module`, so the same container drives Llama (`GQAttention + SwiGLU`) and BERT (`MultiHeadAttention + GeluFFN`) without branches. Residual addition is in-place (`x.addInto(attnOut)`) — saves one `[seq, hidden]` F32 allocation per block per token, but assumes `x` is a fresh owning tensor from upstream. |
+| [GQAttention.hx](nue/transformer/GQAttention.hx) | Decoder attention (Llama-family). Owns `RoPE` tables and a per-layer `KVCache`. Fuses three independent Q/K/V Q4_K_M matmuls into one when all three projections are Q4_K_M (cuts fork-join overhead 3×). Decode-path single-token dispatches go directly to `rayzor_tensor_flashAttnDecode` (or `flashAttnDecodeQ8` when the KV cache is Q8) — this skips the intermediate `expandKvHeadsAxis1` allocation that would otherwise eat ~147 MB/token at 16 layers. Prefill (multi-token) still goes through the unfused `expand → bmm → softmax → bmm` chain. |
+| [MultiHeadAttention.hx](nue/transformer/MultiHeadAttention.hx) | Encoder attention. Strict superset-free of `GQAttention`: no GQA repeat, no causal mask, no KV cache. |
+| [KVCache.hx](nue/transformer/KVCache.hx) | Append-only K/V buffer with dual F32/Q8_0 storage modes (`useQ8` field). Owns the underlying tensors; `currentLen` tracks the row count of valid data. Prefill writes all prompt tokens at once; decode appends one row per step via `rayzor_tensor_appendAlong0`. Never reallocates — buffer size is preallocated to `maxSeqLen` at build time. |
+| [KvCacheQ8.hx](nue/transformer/KvCacheQ8.hx) | Extern opaque class for the Q8_0 storage variant. Dequantisation is either streamed inside `flashAttnDecodeQ8` (decode path) or materialised on demand by callers that need a full F32 view (prefill rarely takes this path). |
+| [RoPE.hx](nue/transformer/RoPE.hx) | Precomputed `cos`/`sin` tables (`rayzor_tensor_ropeCosTable` / `ropeSinTable`), applied per-token to Q and K via `rayzor_tensor_rope`. |
+| [RMSNorm.hx](nue/transformer/RMSNorm.hx), [LayerNorm.hx](nue/transformer/LayerNorm.hx) | Normalisation variants for the two model families. Per-channel learnable gain (and bias for LayerNorm). |
+| [SwiGLU.hx](nue/transformer/SwiGLU.hx), [GeluFFN.hx](nue/transformer/GeluFFN.hx) | The two FFN variants. SwiGLU is three projections (`gate`, `up`, `down`) with `silu(gate(x)) * up(x)` then `down(...)`. GeluFFN is the classical two-projection GELU pattern. |
+
+### `sampling/` — token selection + the generation loop
+
+[Sampler.hx](nue/sampling/Sampler.hx) is the strategy contract:
+`function sample(logits:Tensor):Int`. **Stateless per call** — each invocation
+receives a fresh logits tensor and returns a token id. Stateful sampling
+(repetition penalty, sliding windows) is implemented as a wrapper sampler that
+owns the state, calls into a stateless inner sampler, and mutates the logits
+before delegating. `llama-chat`'s `LocalTempSampler` is an example.
+
+| File | Role |
+|---|---|
+| [ArgmaxSampler.hx](nue/sampling/ArgmaxSampler.hx) | Deterministic greedy max. |
+| [TemperatureSampler.hx](nue/sampling/TemperatureSampler.hx) | Temperature-scaled softmax with an embedded 31-bit LCG RNG state. |
+| [TopKSampler.hx](nue/sampling/TopKSampler.hx) | Selection-sort over logits to the top K candidates, then temperature softmax over the nucleus. |
+| [TopPSampler.hx](nue/sampling/TopPSampler.hx) | Insertion-sort descending by probability, cumulative-mass cutoff. |
+| [GenerationLoop.hx](nue/sampling/GenerationLoop.hx) | The autoregressive driver. Owns the prefill→decode lifecycle, the streaming callback, and the explicit `.free()` calls that prevent logits accumulation across decode steps. Optional wall-time profiling via `RAYZOR_PROFILE_DECODE=1` breaks down `fwd / lastRow / sample / decode_str / free`. |
+
+All three stochastic samplers pre-allocate `Array<Float>` and assign by index
+instead of using `Array.push` because of a Haxe JIT bug in `Array<Float>.push`
+read-back.
+
+---
+
+## End-to-end Runtime Flow
+
+Tracing `examples/llama-chat/Main.hx` from process start to streamed tokens:
+
+| # | Where | What |
+|---:|---|---|
+| 1 | [llama-chat/Main.hx:251](examples/llama-chat/Main.hx#L251) | `GGUFLoader.loadWithTokenizer(path, ctx)` opens the file and returns `{model, tokenizer, metadata}`. |
+| 2 | [GGUFLoader.hx:86-106](nue/loader/GGUFLoader.hx#L86-L106) | `File.getBytes()` mmaps the GGUF; `GGUFReader.parse()` extracts header + tensor index without materialising weights. |
+| 3 | [GGUFLoader.hx:115-148](nue/loader/GGUFLoader.hx#L115-L148) | `metadataFromReader()` reads `general.architecture`, `llama.attention.head_count`, etc., populates `ModelMetadata`. |
+| 4 | [GGUFLoader.hx:150-158](nue/loader/GGUFLoader.hx#L150-L158) | `tensorsFromReader()` iterates the tensor index, decodes each block to `QTensor` (Q4_K_M / Q6_K) or `Tensor` (F32 / F16 / Q8_0), registers in `NamedTensorMap`. |
+| 5 | [GGUFLoader.hx:99-101](nue/loader/GGUFLoader.hx#L99-L101) | `registry.build(metadata, weights)` dispatches to the matching `ArchBuilder`. |
+| 6 | [ArchRegistry.hx:104-114](nue/arch/ArchRegistry.hx#L104-L114) | `get("llama")` returns `LlamaArch`; `validate()` checks shape sanity; `build()` instantiates the model tree. |
+| 7 | [LlamaArch.hx:64-151](nue/arch/LlamaArch.hx#L64-L151) | Wires `Embedding` + N `TransformerBlock`s (each with `RMSNorm` + `GQAttention` + `KVCache` + `SwiGLU`) + output `RMSNorm` + LM head. Returns `LlamaModel`. |
+| 8 | [GGUFLoader.hx:103](nue/loader/GGUFLoader.hx#L103) | `GGUFTokenizer.build(reader)` extracts vocab + merges, returns a configured `BPETokenizer`. |
+| 9 | [llama-chat/Main.hx:336](examples/llama-chat/Main.hx#L336) | `new GenerationLoop(model, tokenizer, sampler, eosId, maxNewTokens)`. |
+| 10 | [llama-chat/Main.hx:353](examples/llama-chat/Main.hx#L353) | `loop.generate(modelPrompt, onToken)` enters the autoregressive loop. |
+| 11 | [GenerationLoop.hx:76-86](nue/sampling/GenerationLoop.hx#L76-L86) | **Prefill**: `model.resetCache()` clears all KV caches; `tokenizer.encode(prompt)` → ids; `model.forwardIds(ids)` runs the full stack. |
+| 12 | [LlamaModel.hx:55-64](nue/arch/LlamaModel.hx#L55-L64) | `embedTokens.lookup(ids)` gathers Q6_K rows; each block does pre-norm + attn (KVCache append) + residual + pre-norm + FFN + residual; output norm; LM head; → logits `[seq, vocab]`. |
+| 13 | [GenerationLoop.hx:84-86](nue/sampling/GenerationLoop.hx#L84-L86) | `lastRow(logits)` slices the final row to `[vocab]`; `sampler.sample(logits)` picks the first generated token; logits are explicitly freed. |
+| 14 | [GenerationLoop.hx:90-145](nue/sampling/GenerationLoop.hx#L90-L145) | **Decode loop**: while `!eos && step < maxNew`, `forwardIds([nextId])` (single-token forward; `KVCache.append` of the new K,V), `lastRow + sample`, `onToken(id, partialText)`, repeat. |
+| 15 | [GenerationLoop.hx:159](nue/sampling/GenerationLoop.hx#L159) | `tokenizer.decode(generated)` converts the accumulated ids back to UTF-8. |
+
+---
+
+## Cross-cutting Concerns
+
+### Quantisation strategy
+`nue` is built around the assumption that quantised weights stay quantised
+end-to-end:
+
+- **Q4_K_M** — projections inside `Linear` (attention QKV, FFN gate/up/down, LM
+  head when re-quantised). The fused kernel is
+  `rayzor_tensor_matmul_qt_t_f32_threaded`; the SDOT inner kernel has been
+  hand-ported from `llama.cpp`'s NEON pattern (commit `c5ab136`).
+- **Q6_K** — token embeddings and (by default) the LM head when tied. Row
+  dequantisation is selective: `qtensor_gather_rows_q6_k` only decodes the
+  rows touched by the prompt, not the full `[vocab, hidden]` table.
+- **Q8_0** — opt-in KV cache storage (`RAYZOR_KV_Q8=1`). The decode path uses
+  `flashAttnDecodeQ8` which dequantises inline; prefill materialises a F32
+  view on demand.
+- **F32 / F16** — fallback path. Used when no quantised weight is present in
+  the file.
+
+The `ModelMetadata.extras` map carries per-format quant hints (GGUF's
+`general.quantization_version`, etc.) so arch builders can specialise without
+schema growth.
+
+### Tensor lifetime and explicit `.free()` calls
+Rayzor's `InsertFreePass` does not currently recognise extern tensor returns
+as owned values that need cleanup. Until it does, every layer that receives a
+tensor from an FFI call is responsible for calling `.free()` on intermediates
+it does not return. The most visible places this shows up:
+
+- `GenerationLoop.generate()` — `logits.free()` per decode step. Without it,
+  ~512 KB × ~600 tokens = ~300 MB of orphaned logits per generation.
+- `GQAttention.forward()` — every intermediate (`q`, `k`, `v`, projected
+  Q/K/V, masked scores, context) is freed after the residual write.
+- `BertModel.encode()`, `Linear.forward()` — clone/free pairs around
+  branching paths so the strict E0382 move checker is satisfied without
+  losing ownership.
+
+This is also why the `bugs_decode_loop_per_step_leak` debugging arc landed
+where it did — the flash-attention fix (commit `7835a26`) was the structural
+fix that removed the largest source of per-token bytes; the spin-pool fix
+(commit `4001079`) removed the residual channel-allocation tail.
+
+### KV cache lifetime
+`KVCache` instances are constructed once per layer inside
+`ArchBuilder.build()` and **stay resident for the life of the model**. They
+are never freed or reallocated mid-run. `currentLen` tracks how many rows are
+valid:
+
+- `GenerationLoop.generate()` calls `model.resetCache()` once at the start.
+  This walks the block array, downcasts each to `TransformerBlock` (an
+  explicit cast, not a `Dynamic` field access — the JIT has historical
+  trouble with the latter on interface-typed arrays), and resets
+  `currentLen` to 0.
+- Prefill: `KVCache.append(newK, newV)` is called once with all prompt
+  K/V tensors.
+- Decode: `KVCache.append(oneK, oneV)` is called once per step with the
+  new single-token K/V.
+
+The cache buffer is sized to `maxSeqLen` from `ModelMetadata` — so the
+maximum context size is fixed at build time, not generation time.
+
+### CPU-only with GPU hooks (deferred)
+Every normalisation, attention, and FFN layer is annotated in source as
+CPU-only and points the reader at `rayzor.gpu.GPUCompute` for the eventual
+GPU dispatcher. The reason GPU module wrappers were deferred is the JIT's
+historical trouble with mixed-typed fields on `@:autoDeref` device-aware
+tensors — a known follow-up for the WebGPU push.
+
+### JIT-driven design constraints
+A handful of code shapes in `nue/` look unusual; they are all documented
+workarounds for compiler/runtime bugs:
+
+- **Sentinel 1×1 F32 placeholder** in quantised `Linear.fromQuant()` and
+  `Embedding.fromQuant()` — keeps class layout stable so the JIT does not
+  trip on null `Tensor` fields in large import graphs.
+- **`ArchEntry` snapshots `name()`** at registration — interface-method
+  dispatch on receiver typed as `ArchBuilder` (rather than the concrete
+  class) has hit JIT bugs.
+- **`TensorInfo` is a class, not an anon typedef** — interface-typed array
+  elements have hit JIT bugs with anon typedefs.
+- **`ArchRegistry` is instance-based** — global mutable static state has hit
+  JIT bugs.
+- **`Array<Float>` index assignment instead of `.push`** in the stochastic
+  samplers — read-back of `Array<Float>.push` has a JIT bug.
+- **Explicit downcast in `LlamaModel.resetCache()`** — `Dynamic` field
+  access through an interface-typed array has hit JIT bugs.
+
+Most of these have linked memory entries under
+`bugs_*` in the project memory; they are tracked as compiler follow-ups, not
+as `nue/` design choices.
+
+### Format-neutral naming
+Every loader normalises to the GGUF canonical name pattern on entry:
+- Embeddings: `token_embd.weight`
+- Per-layer block: `blk.{L}.attn_q.weight`, `blk.{L}.attn_k.weight`,
+  `blk.{L}.attn_v.weight`, `blk.{L}.attn_output.weight`, `blk.{L}.attn_norm.weight`,
+  `blk.{L}.ffn_gate.weight`, `blk.{L}.ffn_up.weight`, `blk.{L}.ffn_down.weight`,
+  `blk.{L}.ffn_norm.weight`
+- Output: `output_norm.weight`, `output.weight` (absent → tied to `token_embd`)
+
+`SafetensorsLoader` does the HuggingFace ↔ GGUF rename on the way in.
+`ArchBuilder` implementations are written against the GGUF names only.
+
+---
+
+## Runtime FFI Surface
+
+Calls into `runtime/` from `nue/`, grouped by purpose. Names without the
+`rayzor_` prefix are the unqualified extern symbols; the runtime exports them
+as `rayzor_tensor_*` / `rayzor_qtensor_*`.
+
+| Group | Symbols |
+|---|---|
+| **Construction / lifetime** | `tensor_zeros`, `tensor_clone`, `tensor_free`, `tensor_numel`, `tensor_get_flat`, `tensor_shape`, `tensor_fromBytesF32`, `tensor_fromBytesF16`, `tensor_fromBytesQ8_0`, `qtensor_from_bytes_q4_k_m`, `qtensor_from_bytes_q6_k`, `qtensor_dequant`, `qtensor_free`, `qtensor_requant_q6k_to_q4km` |
+| **Shape ops** | `tensor_reshape`, `tensor_slice`, `tensor_permute`, `tensor_transposeLast2`, `tensor_appendAlong0` |
+| **Element-wise** | `tensor_add`, `tensor_addInto`, `tensor_mul`, `tensor_scale`, `tensor_silu`, `tensor_gelu`, `tensor_softmax` |
+| **Norms** | `tensor_rmsNorm`, `tensor_layerNorm` |
+| **Positional** | `tensor_rope`, `tensor_ropeCosTable`, `tensor_ropeSinTable` |
+| **Gather** | `tensor_gather_rows`, `qtensor_gather_rows_q6_k` |
+| **Matmul (F32)** | `tensor_matmul_t`, `tensor_bmm`, `tensor_bmmThreaded` |
+| **Matmul (quantised)** | `tensor_matmul_qt_t_f32_threaded`, `qtensor_matmul_xt_q_threaded` |
+| **Attention (fused)** | `tensor_flashAttnDecode`, `tensor_flashAttnDecodeQ8`, `tensor_expandKvHeadsAxis1`, `tensor_causalMask` |
+
+The two big perf wins of the current session live behind these symbols:
+`flashAttnDecode` (commit `7835a26`) collapses the unfused
+expand+bmm+softmax+bmm chain into a single kernel for the decode case;
+`matmul_qt_t_f32_threaded`'s inner SDOT path was hand-ported from
+`llama.cpp`'s NEON kernel (commit `c5ab136`).
+
+---
+
+## Extension Points
+
+### Adding a new architecture
+1. Implement `ArchBuilder` in `nue/arch/MyArch.hx`.
+2. In `name()`, return the architecture string that will appear in
+   `ModelMetadata.architecture` (matched by `ArchRegistry.get()` via exact
+   string match — case-sensitive).
+3. In `validate()`, throw on shape inconsistency (`hiddenSize ≠ numHeads ×
+   headDim`, `numHeads % numKvHeads ≠ 0`, etc.). This runs before any weight
+   wiring, so bad checkpoints fail fast.
+4. In `build()`, fetch weights from `NamedTensorMap` by canonical name,
+   construct the module tree, return a `Module` (or `CausalLanguageModel` /
+   `EncoderModel` as appropriate).
+5. Register in `ArchRegistry.withDefaults()` or, for downstream consumers, on
+   a fresh registry instance.
+
+### Adding a new sampler
+1. Implement `Sampler` in `nue/sampling/MySampler.hx`.
+2. `sample(logits:Tensor):Int` must be **stateless per call**. If you need
+   sliding-window state, repetition tracking, or any cross-call memory, wrap
+   a stateless inner sampler instead.
+3. Use index assignment on pre-allocated arrays, **not** `Array.push`, when
+   working with `Array<Float>` (JIT bug).
+
+### Adding a new file format
+1. Implement `ModelLoader` in `nue/loader/MyFormatLoader.hx`.
+2. `readMetadata()` populates `ModelMetadata` from your file's header; per-format
+   knobs go in `ModelMetadata.extras`.
+3. `readNamedTensors()` decodes raw bytes into `Tensor` / `QTensor` and
+   registers them in `NamedTensorMap` under **GGUF canonical names**. If your
+   format uses a different convention (HuggingFace, ONNX, etc.) do the rename
+   on entry — arch builders must not learn your format.
+
+### Adding a new tokenizer
+1. Implement `Tokenizer` in `nue/tokenizer/MyTokenizer.hx`.
+2. Implement `encode(String):Array<Int>` and `decode(Array<Int>):String`,
+   plus vocab introspection.
+3. If your tokenizer is embedded in a model file, add a `MyFormatTokenizer.hx`
+   extractor under `nue/loader/` mirroring `GGUFTokenizer`.
+
+---
+
+## Non-goals
+
+- **No autograd / no training.** Adding it later is a Phase 10+ project.
+- **No dynamic shapes.** Sequence-length-resizable KV caches would require
+  reallocation paths that the current `appendAlong0` design avoids
+  deliberately.
+- **No quantisation-aware fine-tuning.** Q4_K_M / Q6_K weights are consumed,
+  never produced.
+- **No file-format conversion.** `nue` reads model files; it does not write
+  them. Converting safetensors → GGUF lives outside this tree.
+- **No CUDA/Metal kernels in `nue/`.** All GPU dispatchers belong in
+  Rayzor's `gpu/` crate; `nue/` only sees them via the unified Device-aware
+  `Tensor` once that lands.
