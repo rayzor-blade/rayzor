@@ -23,10 +23,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
-use std::sync::{Arc, Condvar, Mutex, RwLock};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rayon::prelude::*;
 
@@ -469,6 +469,16 @@ impl OptimizationTier {
             OptimizationTier::Standard => "Standard (P2/Cranelift)",
             OptimizationTier::Optimized => "Optimized (P3/Cranelift)",
             OptimizationTier::Maximum => "Maximum (P4/Cranelift+O3)",
+        }
+    }
+
+    fn event_label(&self) -> &'static str {
+        match self {
+            OptimizationTier::Interpreted => "interpreted",
+            OptimizationTier::Baseline => "baseline",
+            OptimizationTier::Standard => "standard",
+            OptimizationTier::Optimized => "optimized",
+            OptimizationTier::Maximum => "maximum",
         }
     }
 }
@@ -930,6 +940,72 @@ type BeadieAdapters = (
     Arc<beadie::BackendAdapter<super::beadie_jit::BeadieJit>>, // optimized
 );
 
+fn tier_event_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("RAYZOR_PROFILE_DECODE").is_some()
+            || std::env::var_os("RAYZOR_PROFILE_TIER_EVENTS").is_some()
+    })
+}
+
+fn tier_event_time_s() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+fn emit_tier_event(
+    kind: &str,
+    func_id: Option<IrFunctionId>,
+    tier: Option<OptimizationTier>,
+    detail: &str,
+) {
+    if !tier_event_enabled() {
+        return;
+    }
+    match (func_id, tier) {
+        (Some(func_id), Some(tier)) => eprintln!(
+            "[tier-event] t={:.6} kind={} func={} tier={}{}{}",
+            tier_event_time_s(),
+            kind,
+            func_id.0,
+            tier.event_label(),
+            if detail.is_empty() { "" } else { " " },
+            detail
+        ),
+        (Some(func_id), None) => eprintln!(
+            "[tier-event] t={:.6} kind={} func={}{}{}",
+            tier_event_time_s(),
+            kind,
+            func_id.0,
+            if detail.is_empty() { "" } else { " " },
+            detail
+        ),
+        (None, Some(tier)) => eprintln!(
+            "[tier-event] t={:.6} kind={} tier={}{}{}",
+            tier_event_time_s(),
+            kind,
+            tier.event_label(),
+            if detail.is_empty() { "" } else { " " },
+            detail
+        ),
+        (None, None) => eprintln!(
+            "[tier-event] t={:.6} kind={}{}{}",
+            tier_event_time_s(),
+            kind,
+            if detail.is_empty() { "" } else { " " },
+            detail
+        ),
+    }
+}
+
+fn sanitize_tier_event_detail(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_whitespace() { '_' } else { c })
+        .collect()
+}
+
 /// Build the per-tier beadie adapters. Step 6 removed the
 /// `enable_beadie_adapter` toggle and the `Option`-of-tuple return:
 /// beadie is now unconditional, the broker thread is always live, and
@@ -1300,6 +1376,7 @@ impl TieredBackend {
         }
         let bound = adapter.register(std::ptr::null_mut(), None);
         beads.insert(func_id, bound);
+        emit_tier_event("beadie_register", Some(func_id), Some(tier), "");
         Ok(())
     }
 
@@ -1342,6 +1419,7 @@ impl TieredBackend {
         let Some(adapter) = self.beadie_adapter_for(target_tier) else {
             return false;
         };
+        emit_tier_event("beadie_route", Some(func_id), Some(target_tier), "");
         if self.ensure_beadie_bead_for(func_id, target_tier).is_err() {
             return false;
         }
@@ -1381,6 +1459,12 @@ impl TieredBackend {
         };
 
         if let Some(ptr) = immediate_ptr {
+            emit_tier_event(
+                "beadie_ready_immediate",
+                Some(func_id),
+                Some(target_tier),
+                "",
+            );
             self.install_beadie_pointer(func_id, ptr as usize, target_tier);
         }
         true
@@ -1417,6 +1501,7 @@ impl TieredBackend {
         }
         if !self.promotion_barrier.request_promotion() {
             // Another promotion is already in flight — retry next call.
+            emit_tier_event("install_barrier_busy", Some(func_id), Some(target_tier), "");
             return;
         }
         if !self
@@ -1424,6 +1509,12 @@ impl TieredBackend {
             .wait_for_drain(Duration::from_secs(1))
         {
             self.promotion_barrier.cancel_promotion();
+            emit_tier_event(
+                "install_barrier_timeout",
+                Some(func_id),
+                Some(target_tier),
+                "",
+            );
             return;
         }
         {
@@ -1433,6 +1524,7 @@ impl TieredBackend {
             ft.insert(func_id, target_tier);
         }
         self.promotion_barrier.complete_promotion();
+        emit_tier_event("beadie_install", Some(func_id), Some(target_tier), "");
         self.beadie_installs.fetch_add(1, Ordering::Relaxed);
         match target_tier {
             OptimizationTier::Standard => {
@@ -1954,6 +2046,10 @@ impl TieredBackend {
         self.profile_data.record_function_call(func_id);
         let count = self.profile_data.get_function_count(func_id);
 
+        if !self.config.enable_tier_promotion {
+            return;
+        }
+
         // Sample promotion checks, not the underlying execution counter.
         let sample_rate = self.profile_data.config().sample_rate.max(1);
         if count % sample_rate != 0 {
@@ -1993,6 +2089,12 @@ impl TieredBackend {
         };
 
         if let Some(target_tier) = should_promote {
+            emit_tier_event(
+                "promote_target",
+                Some(func_id),
+                Some(target_tier),
+                &format!("count={}", count),
+            );
             // Phase B step 5/6: route Standard + Optimized through
             // beadie. The legacy queue + worker infrastructure is
             // gone (step 6 deletion), so there's no fallback for
@@ -2065,7 +2167,19 @@ impl TieredBackend {
 
         let needs_compile = self.function_pointers.read().unwrap().is_empty();
         if needs_compile {
+            emit_tier_event(
+                "baseline_compile_start",
+                Some(func_id),
+                Some(OptimizationTier::Baseline),
+                "",
+            );
             self.compile_all_modules_jit()?;
+            emit_tier_event(
+                "baseline_compile_finish",
+                Some(func_id),
+                Some(OptimizationTier::Baseline),
+                "",
+            );
         }
         self.promote_compiled_functions_to_baseline();
 
@@ -2434,7 +2548,7 @@ impl TieredBackend {
     /// This ensures getName()/getParameters()/trace work correctly at runtime.
     fn register_enum_rtti_from_module(module: &IrModule) {
         use crate::ir::modules::IrTypeDefinition;
-        use rayzor_runtime::type_system::{register_enum_from_mir, ParamType};
+        use rayzor_runtime::type_system::{ParamType, register_enum_from_mir};
 
         for (_id, typedef) in &module.types {
             if let IrTypeDefinition::Enum { variants, .. } = &typedef.definition {
@@ -2515,6 +2629,12 @@ impl TieredBackend {
             return;
         }
 
+        emit_tier_event(
+            "llvm_queue_start",
+            None,
+            Some(OptimizationTier::Maximum),
+            &format!("pending={}", pending.len()),
+        );
         if self.config.verbosity >= 1 {
             debug!(
                 "[TieredBackend] Processing {} LLVM compilation(s) on main thread",
@@ -2546,11 +2666,23 @@ impl TieredBackend {
                             installed_count
                         );
                     }
+                    emit_tier_event(
+                        "llvm_queue_finish",
+                        None,
+                        Some(OptimizationTier::Maximum),
+                        &format!("installed={}", installed_count),
+                    );
                 }
                 Err(e) => {
                     if self.config.verbosity >= 1 {
                         debug!("[TieredBackend] LLVM compilation failed: {}", e);
                     }
+                    emit_tier_event(
+                        "llvm_queue_error",
+                        None,
+                        Some(OptimizationTier::Maximum),
+                        &format!("error={}", sanitize_tier_event_detail(&e)),
+                    );
                 }
             }
         }
@@ -2563,6 +2695,12 @@ impl TieredBackend {
                     pending.len()
                 );
             }
+            emit_tier_event(
+                "llvm_queue_skipped",
+                None,
+                Some(OptimizationTier::Maximum),
+                &format!("pending={}", pending.len()),
+            );
         }
     }
 
@@ -3313,6 +3451,32 @@ mod tests {
         }
 
         assert_eq!(backend.get_statistics().profile_stats.total_executions, 3);
+    }
+
+    #[test]
+    fn record_call_respects_disabled_tier_promotion() {
+        let mut cfg = TieredConfig::default();
+        cfg.enable_tier_promotion = false;
+        cfg.profile_config.sample_rate = 1;
+        cfg.profile_config.interpreter_threshold = 0;
+        cfg.profile_config.warm_threshold = 1;
+        cfg.profile_config.hot_threshold = 1;
+        cfg.profile_config.blazing_threshold = u64::MAX;
+
+        let backend = TieredBackend::new(cfg).expect("tiered backend");
+        let func_id = IrFunctionId(99);
+
+        for _ in 0..3 {
+            backend.record_call(func_id);
+        }
+
+        assert_eq!(backend.get_statistics().profile_stats.total_executions, 3);
+        let beadie = backend.beadie_stats();
+        assert_eq!(beadie.routes_attempted, 0);
+        assert_eq!(beadie.standard_routes_attempted, 0);
+        assert_eq!(beadie.optimized_routes_attempted, 0);
+        assert_eq!(beadie.installs, 0);
+        assert_eq!(backend.function_tier(func_id), None);
     }
 
     #[test]
