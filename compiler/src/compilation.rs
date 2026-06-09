@@ -717,12 +717,20 @@ impl CompilationUnit {
         Some(cache_dir.join(format!("{}.blade", module_name)))
     }
 
-    /// Compute hash of source content for cache validation
-    fn hash_source(source: &str) -> u64 {
+    /// Compute the BLADE source fingerprint for this compilation context.
+    ///
+    /// Source text alone is not enough: `extra_defines` changes `#if`
+    /// lowering, so native and wasm builds of the same file must not share
+    /// the same per-module artifact.
+    fn hash_source_for_config(&self, source: &str) -> u64 {
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
         let mut hasher = DefaultHasher::new();
+        "rayzor-blade-source-v2".hash(&mut hasher);
         source.hash(&mut hasher);
+        let mut defines = self.config.extra_defines.clone();
+        defines.sort();
+        defines.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -744,7 +752,7 @@ impl CompilationUnit {
                 // Validate cache by checking source hash AND compiler
                 // build-id — see save_to_cache / matching check at the
                 // other load site for why both are required.
-                let current_hash = Self::hash_source(source);
+                let current_hash = self.hash_source_for_config(source);
                 let current_build_id = env!("RAYZOR_BUILD_ID");
                 if metadata.source_hash != current_hash {
                     trace!("[BLADE] Cache stale (hash mismatch): {}", source_path);
@@ -805,7 +813,7 @@ impl CompilationUnit {
         let metadata = BladeMetadata {
             name: mir.name.clone(),
             source_path: source_path.to_string(),
-            source_hash: Self::hash_source(source),
+            source_hash: self.hash_source_for_config(source),
             source_timestamp: now, // We use hash for validation, not timestamp
             compile_timestamp: now,
             dependencies,
@@ -3250,7 +3258,7 @@ impl CompilationUnit {
 
         match load_blade(&blade_path) {
             Ok((mir, metadata, symbols, cached_maps)) => {
-                let current_hash = Self::hash_source(source);
+                let current_hash = self.hash_source_for_config(source);
                 let current_build_id = env!("RAYZOR_BUILD_ID");
                 if metadata.source_hash != current_hash {
                     debug!("[BLADE] Cache stale (hash mismatch): {}", source_path);
@@ -6054,6 +6062,16 @@ impl CompilationUnit {
             }
         }
 
+        if let Ok(source) = std::fs::read_to_string(source_path) {
+            let current_hash = self.hash_source_for_config(&source);
+            if metadata.source_hash != current_hash {
+                if self.config.enable_cache {
+                    debug!("Cache source hash mismatch for {:?}", source_path);
+                }
+                return None;
+            }
+        }
+
         // Check compiler version matches
         let current_version = env!("CARGO_PKG_VERSION");
         if metadata.compiler_version != current_version {
@@ -6112,7 +6130,7 @@ impl CompilationUnit {
 
         // Read source for hash computation
         let source_hash = std::fs::read_to_string(source_path)
-            .map(|s| Self::hash_source(&s))
+            .map(|s| self.hash_source_for_config(&s))
             .unwrap_or(0);
 
         let compile_timestamp = SystemTime::now()

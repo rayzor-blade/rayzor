@@ -386,11 +386,19 @@ pub struct TieredBackend {
     /// and Optimized tiers. Includes failures.
     beadie_routes_attempted: Arc<AtomicU64>,
 
+    /// Phase B: route attempts split by Beadie target tier.
+    beadie_standard_routes_attempted: Arc<AtomicU64>,
+    beadie_optimized_routes_attempted: Arc<AtomicU64>,
+
     /// Phase B: counter — number of times `install_beadie_pointer`
     /// actually wrote a new pointer into `function_pointers`, summed
     /// across both Standard and Optimized tiers. Skips idempotent
     /// re-installs of an already-known pointer.
     beadie_installs: Arc<AtomicU64>,
+
+    /// Phase B: pointer installs split by Beadie target tier.
+    beadie_standard_installs: Arc<AtomicU64>,
+    beadie_optimized_installs: Arc<AtomicU64>,
 }
 
 /// Optimization tier level (5-tier system with interpreter)
@@ -753,6 +761,7 @@ impl std::fmt::Display for TierPreset {
 #[serde(default)]
 pub struct TieredConfig {
     /// Profiling configuration
+    #[serde(flatten)]
     pub profile_config: ProfileConfig,
 
     /// Verbosity level (0 = silent, 1 = basic, 2 = detailed)
@@ -897,6 +906,22 @@ pub struct BeadieStats {
     /// promoted `IrFunctionId`). Reaches `installs` once every routed
     /// function has had its pointer installed.
     pub registered_beads: usize,
+    /// Standard-tier route attempts.
+    pub standard_routes_attempted: u64,
+    /// Optimized-tier route attempts.
+    pub optimized_routes_attempted: u64,
+    /// Standard-tier pointer installs.
+    pub standard_installs: u64,
+    /// Optimized-tier pointer installs.
+    pub optimized_installs: u64,
+    /// Distinct Standard-tier beads.
+    pub standard_registered_beads: usize,
+    /// Distinct Optimized-tier beads.
+    pub optimized_registered_beads: usize,
+    /// Standard-tier beads whose broker compile has produced a pointer.
+    pub standard_compiled_beads: usize,
+    /// Optimized-tier beads whose broker compile has produced a pointer.
+    pub optimized_compiled_beads: usize,
 }
 
 /// Per-tier beadie adapters: (Standard, Optimized).
@@ -1041,7 +1066,11 @@ impl TieredBackend {
             beadie_adapter_optimized,
             beadie_beads_optimized: Arc::new(Mutex::new(BTreeMap::new())),
             beadie_routes_attempted: Arc::new(AtomicU64::new(0)),
+            beadie_standard_routes_attempted: Arc::new(AtomicU64::new(0)),
+            beadie_optimized_routes_attempted: Arc::new(AtomicU64::new(0)),
             beadie_installs: Arc::new(AtomicU64::new(0)),
+            beadie_standard_installs: Arc::new(AtomicU64::new(0)),
+            beadie_optimized_installs: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -1103,7 +1132,11 @@ impl TieredBackend {
             beadie_adapter_optimized,
             beadie_beads_optimized: Arc::new(Mutex::new(BTreeMap::new())),
             beadie_routes_attempted: Arc::new(AtomicU64::new(0)),
+            beadie_standard_routes_attempted: Arc::new(AtomicU64::new(0)),
+            beadie_optimized_routes_attempted: Arc::new(AtomicU64::new(0)),
             beadie_installs: Arc::new(AtomicU64::new(0)),
+            beadie_standard_installs: Arc::new(AtomicU64::new(0)),
+            beadie_optimized_installs: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -1144,11 +1177,35 @@ impl TieredBackend {
     /// Used by benchmark harnesses to confirm the integration is
     /// active and to attribute compile counts.
     pub fn beadie_stats(&self) -> BeadieStats {
+        let standard_beads = self.beadie_beads.lock().unwrap();
+        let optimized_beads = self.beadie_beads_optimized.lock().unwrap();
+        let standard_registered_beads = standard_beads.len();
+        let optimized_registered_beads = optimized_beads.len();
+        let standard_compiled_beads = standard_beads
+            .values()
+            .filter(|bound| bound.bead().compiled().is_some())
+            .count();
+        let optimized_compiled_beads = optimized_beads
+            .values()
+            .filter(|bound| bound.bead().compiled().is_some())
+            .count();
         BeadieStats {
             adapter_enabled: true,
             routes_attempted: self.beadie_routes_attempted.load(Ordering::Relaxed),
             installs: self.beadie_installs.load(Ordering::Relaxed),
-            registered_beads: self.beadie_beads.lock().unwrap().len(),
+            registered_beads: standard_registered_beads + optimized_registered_beads,
+            standard_routes_attempted: self
+                .beadie_standard_routes_attempted
+                .load(Ordering::Relaxed),
+            optimized_routes_attempted: self
+                .beadie_optimized_routes_attempted
+                .load(Ordering::Relaxed),
+            standard_installs: self.beadie_standard_installs.load(Ordering::Relaxed),
+            optimized_installs: self.beadie_optimized_installs.load(Ordering::Relaxed),
+            standard_registered_beads,
+            optimized_registered_beads,
+            standard_compiled_beads,
+            optimized_compiled_beads,
         }
     }
 
@@ -1377,6 +1434,17 @@ impl TieredBackend {
         }
         self.promotion_barrier.complete_promotion();
         self.beadie_installs.fetch_add(1, Ordering::Relaxed);
+        match target_tier {
+            OptimizationTier::Standard => {
+                self.beadie_standard_installs
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            OptimizationTier::Optimized => {
+                self.beadie_optimized_installs
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            _ => {}
+        }
         if self.config.verbosity >= 1 {
             eprintln!(
                 "[beadie] installed pointer for {:?} at {} tier (total installs: {})",
@@ -1664,6 +1732,8 @@ impl TieredBackend {
             self.maybe_install_compiled_beadie_pointer(func_id);
         }
 
+        self.maybe_promote_interpreter_threshold_to_baseline(func_id)?;
+
         // Get current tier
         let tier = self
             .function_tiers
@@ -1691,6 +1761,9 @@ impl TieredBackend {
             let needs_compile = self.function_pointers.read().unwrap().is_empty();
             if needs_compile {
                 self.compile_all_modules_jit()?;
+            }
+            if pre_promoted_in_interp_mode {
+                self.promote_compiled_functions_to_baseline();
             }
         }
 
@@ -1733,13 +1806,7 @@ impl TieredBackend {
                     // Promote ALL compiled functions to Baseline tier
                     // This is crucial: without this, the recursive execute_function call
                     // would still think the functions are at Interpreted tier
-                    {
-                        let fp_lock = self.function_pointers.read().unwrap();
-                        let mut tiers = self.function_tiers.write().unwrap();
-                        for func_id in fp_lock.keys() {
-                            tiers.insert(*func_id, OptimizationTier::Baseline);
-                        }
-                    }
+                    self.promote_compiled_functions_to_baseline();
 
                     // Reset interpreter iteration counter
                     {
@@ -1884,13 +1951,14 @@ impl TieredBackend {
     /// Record a function call (for profiling and tier promotion)
     /// This should be called before executing a function
     pub fn record_call(&self, func_id: IrFunctionId) {
-        // Sample based on config to reduce overhead
+        self.profile_data.record_function_call(func_id);
         let count = self.profile_data.get_function_count(func_id);
-        if count % self.profile_data.config().sample_rate != 0 {
+
+        // Sample promotion checks, not the underlying execution counter.
+        let sample_rate = self.profile_data.config().sample_rate.max(1);
+        if count % sample_rate != 0 {
             return;
         }
-
-        self.profile_data.record_function_call(func_id);
 
         // Check if function should be promoted to a higher tier
         // Use count-based promotion that allows skipping tiers if count exceeds multiple thresholds
@@ -1901,7 +1969,6 @@ impl TieredBackend {
                 .copied()
                 .unwrap_or(OptimizationTier::Interpreted);
 
-            let count = self.profile_data.get_function_count(func_id);
             let config = self.profile_data.config();
 
             // Determine target tier based on count (allows skipping tiers)
@@ -1931,11 +1998,8 @@ impl TieredBackend {
             // gone (step 6 deletion), so there's no fallback for
             // those tiers — beadie owns them.
             //
-            // Baseline isn't reached here: count >=
-            // interpreter_threshold sets target_tier to Baseline, but
-            // Baseline is established by `compile_all_modules_jit`
-            // (the JIT-bailout big-bang) rather than by per-function
-            // routing.
+            // Baseline is handled by `execute_function`, where we have
+            // `&mut self` and can invoke `compile_all_modules_jit`.
             //
             // Maximum (LLVM) doesn't go through beadie either — it's
             // user-triggered via `upgrade_to_llvm` and runs on the
@@ -1950,7 +2014,79 @@ impl TieredBackend {
                 OptimizationTier::Standard | OptimizationTier::Optimized
             ) {
                 self.beadie_routes_attempted.fetch_add(1, Ordering::Relaxed);
+                match target_tier {
+                    OptimizationTier::Standard => {
+                        self.beadie_standard_routes_attempted
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    OptimizationTier::Optimized => {
+                        self.beadie_optimized_routes_attempted
+                            .fetch_add(1, Ordering::Relaxed);
+                    }
+                    _ => {}
+                }
                 self.route_through_beadie(func_id, target_tier);
+            }
+        }
+    }
+
+    fn maybe_promote_interpreter_threshold_to_baseline(
+        &mut self,
+        func_id: IrFunctionId,
+    ) -> Result<(), String> {
+        if !self.start_interpreted || !self.config.enable_tier_promotion {
+            return Ok(());
+        }
+
+        let config = self.profile_data.config();
+        if config.interpreter_threshold == u64::MAX
+            || self.profile_data.get_function_count(func_id) < config.interpreter_threshold
+        {
+            return Ok(());
+        }
+
+        let current_tier = self
+            .function_tiers
+            .read()
+            .unwrap()
+            .get(&func_id)
+            .copied()
+            .unwrap_or(OptimizationTier::Interpreted);
+        if current_tier != OptimizationTier::Interpreted {
+            return Ok(());
+        }
+
+        if self.config.verbosity >= 1 {
+            debug!(
+                "[TieredBackend] {:?} crossed interpreter_threshold={} - compiling Baseline tier",
+                func_id, config.interpreter_threshold
+            );
+        }
+
+        let needs_compile = self.function_pointers.read().unwrap().is_empty();
+        if needs_compile {
+            self.compile_all_modules_jit()?;
+        }
+        self.promote_compiled_functions_to_baseline();
+
+        {
+            let mut interp = self.interpreter.lock().unwrap();
+            interp.reset_iteration_count();
+        }
+
+        Ok(())
+    }
+
+    fn promote_compiled_functions_to_baseline(&self) {
+        let fp_lock = self.function_pointers.read().unwrap();
+        let mut tiers = self.function_tiers.write().unwrap();
+        for func_id in fp_lock.keys() {
+            let current = tiers
+                .get(func_id)
+                .copied()
+                .unwrap_or(OptimizationTier::Interpreted);
+            if current < OptimizationTier::Baseline {
+                tiers.insert(*func_id, OptimizationTier::Baseline);
             }
         }
     }
@@ -2483,16 +2619,12 @@ impl TieredBackend {
     #[cfg(feature = "llvm-backend")]
     #[allow(dead_code)]
     fn compile_all_with_llvm(&self) -> Result<BTreeMap<IrFunctionId, usize>, String> {
-        // On x86_64 Linux, use AOT-to-dylib for ~2x better codegen quality.
-        // MCJIT's code generator on x86_64 produces significantly worse code
-        // than the AOT path using the same LLVM IR and optimization passes.
-        #[cfg(all(target_arch = "x86_64", target_os = "linux"))]
-        {
+        // Tiered `rayzor run` must stay in-process. The AOT-to-dylib path shells
+        // out to the system linker, so keep it behind an explicit escape hatch.
+        if Self::llvm_tier_aot_enabled() {
             return self.compile_all_with_llvm_aot();
         }
 
-        // On all other platforms, use MCJIT (stable and performant).
-        #[allow(unreachable_code)]
         self.compile_all_with_llvm_mcjit()
     }
 
@@ -2590,9 +2722,13 @@ impl TieredBackend {
         Ok(resolved_pointers)
     }
 
-    /// Compile with AOT to dylib (for Apple Silicon)
+    /// Compile with AOT to dylib.
     ///
-    /// This avoids MCJIT's MAP_JIT issues on Apple Silicon by:
+    /// This path invokes the system linker and is opt-in for tiered execution via
+    /// RAYZOR_LLVM_TIER_AOT=1. Normal `rayzor run` uses MCJIT to avoid spawning
+    /// clang/gcc/cc during generation.
+    ///
+    /// Flow:
     /// 1. LLVM compiles to object file (.o)
     /// 2. System linker creates dylib (.dylib)
     /// 3. libloading loads the dylib
@@ -2600,6 +2736,14 @@ impl TieredBackend {
     #[cfg(feature = "llvm-backend")]
     #[allow(dead_code)]
     fn compile_all_with_llvm_aot(&self) -> Result<BTreeMap<IrFunctionId, usize>, String> {
+        if !Self::llvm_tier_aot_enabled() {
+            return Err(
+                "LLVM AOT tier is disabled. Set RAYZOR_LLVM_TIER_AOT=1 to allow the tiered \
+                 backend to invoke the system linker."
+                    .to_string(),
+            );
+        }
+
         // Check if THIS instance has already compiled with LLVM
         {
             let llvm_compiled = self.llvm_compiled.lock().unwrap();
@@ -2975,7 +3119,24 @@ impl TieredBackend {
     /// Check if LLVM AOT compilation is available on this system
     #[cfg(feature = "llvm-backend")]
     pub fn is_llvm_aot_available() -> bool {
+        if !Self::llvm_tier_aot_enabled() {
+            return false;
+        }
         Self::find_linker().is_ok()
+    }
+
+    #[cfg(feature = "llvm-backend")]
+    fn llvm_tier_aot_enabled() -> bool {
+        match std::env::var("RAYZOR_LLVM_TIER_AOT") {
+            Ok(value) => {
+                let value = value.trim();
+                !value.is_empty()
+                    && value != "0"
+                    && !value.eq_ignore_ascii_case("false")
+                    && !value.eq_ignore_ascii_case("off")
+            }
+            Err(_) => false,
+        }
     }
 
     /// Legacy single-function compile (returns just one pointer)
@@ -3032,5 +3193,164 @@ impl TieredStatistics {
             self.llvm_functions,
             self.profile_stats.format()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::mir_builder::MirBuilder;
+    use crate::ir::{BinaryOp, IrType};
+
+    fn build_add_module() -> (IrModule, IrFunctionId) {
+        let mut builder = MirBuilder::new("tiered_threshold_test");
+        let func_id = builder
+            .begin_function("add")
+            .param("a", IrType::I64)
+            .param("b", IrType::I64)
+            .returns(IrType::I64)
+            .build();
+        builder.set_current_function(func_id);
+        let entry = builder.create_block("entry");
+        builder.set_insert_point(entry);
+        let a = builder.get_param(0);
+        let b = builder.get_param(1);
+        let sum = builder.bin_op(BinaryOp::Add, a, b);
+        builder.ret(Some(sum));
+        (builder.finish(), func_id)
+    }
+
+    fn build_two_add_module() -> (IrModule, IrFunctionId, IrFunctionId) {
+        let mut builder = MirBuilder::new("tiered_pre_promote_test");
+
+        let first_id = builder
+            .begin_function("add_a")
+            .param("a", IrType::I64)
+            .param("b", IrType::I64)
+            .returns(IrType::I64)
+            .build();
+        builder.set_current_function(first_id);
+        let first_entry = builder.create_block("entry");
+        builder.set_insert_point(first_entry);
+        let a = builder.get_param(0);
+        let b = builder.get_param(1);
+        let sum = builder.bin_op(BinaryOp::Add, a, b);
+        builder.ret(Some(sum));
+
+        let second_id = builder
+            .begin_function("add_b")
+            .param("a", IrType::I64)
+            .param("b", IrType::I64)
+            .returns(IrType::I64)
+            .build();
+        builder.set_current_function(second_id);
+        let second_entry = builder.create_block("entry");
+        builder.set_insert_point(second_entry);
+        let a = builder.get_param(0);
+        let b = builder.get_param(1);
+        let sum = builder.bin_op(BinaryOp::Add, a, b);
+        builder.ret(Some(sum));
+
+        (builder.finish(), first_id, second_id)
+    }
+
+    #[test]
+    fn interpreter_threshold_promotes_to_baseline() {
+        let mut cfg = TieredConfig::default();
+        cfg.start_interpreted = true;
+        cfg.enable_tier_promotion = true;
+        cfg.enable_stack_traces = false;
+        cfg.profile_config.interpreter_threshold = 1;
+        cfg.profile_config.warm_threshold = u64::MAX;
+        cfg.profile_config.hot_threshold = u64::MAX;
+        cfg.profile_config.blazing_threshold = u64::MAX;
+
+        let mut backend = TieredBackend::new(cfg).expect("tiered backend");
+        let (module, func_id) = build_add_module();
+        backend.compile_module(module).expect("module loaded");
+
+        assert_eq!(
+            backend.function_tier(func_id),
+            Some(OptimizationTier::Interpreted)
+        );
+
+        let result = backend
+            .execute_function(func_id, vec![InterpValue::I64(19), InterpValue::I64(23)])
+            .expect("execute add");
+        match result {
+            InterpValue::I64(n) => assert_eq!(n, 42),
+            other => panic!("unexpected result: {:?}", other),
+        }
+
+        assert_eq!(
+            backend.function_tier(func_id),
+            Some(OptimizationTier::Baseline)
+        );
+        assert!(
+            backend.jit_pointer(func_id).is_some(),
+            "threshold promotion should compile a Baseline pointer"
+        );
+
+        let stats = backend.get_statistics();
+        assert_eq!(stats.interpreted_functions, 0);
+        assert_eq!(stats.baseline_functions, 1);
+    }
+
+    #[test]
+    fn sampled_record_call_still_counts_every_call() {
+        let mut cfg = TieredConfig::default();
+        cfg.profile_config.sample_rate = 10;
+        cfg.profile_config.interpreter_threshold = u64::MAX;
+        cfg.profile_config.warm_threshold = u64::MAX;
+        cfg.profile_config.hot_threshold = u64::MAX;
+        cfg.profile_config.blazing_threshold = u64::MAX;
+
+        let backend = TieredBackend::new(cfg).expect("tiered backend");
+        let func_id = IrFunctionId(crate::tast::SymbolId(99).into());
+
+        for _ in 0..3 {
+            backend.record_call(func_id);
+        }
+
+        assert_eq!(backend.get_statistics().profile_stats.total_executions, 3);
+    }
+
+    #[test]
+    fn pre_promoted_baseline_compile_updates_compiled_tiers() {
+        let mut cfg = TieredConfig::default();
+        cfg.start_interpreted = true;
+        cfg.enable_tier_promotion = true;
+        cfg.enable_stack_traces = false;
+        cfg.profile_config.interpreter_threshold = u64::MAX;
+        cfg.profile_config.warm_threshold = u64::MAX;
+        cfg.profile_config.hot_threshold = u64::MAX;
+        cfg.profile_config.blazing_threshold = u64::MAX;
+
+        let mut backend = TieredBackend::new(cfg).expect("tiered backend");
+        let (module, first_id, second_id) = build_two_add_module();
+        backend.compile_module(module).expect("module loaded");
+
+        backend
+            .function_tiers
+            .write()
+            .unwrap()
+            .insert(first_id, OptimizationTier::Baseline);
+        assert_eq!(
+            backend.function_tier(second_id),
+            Some(OptimizationTier::Interpreted)
+        );
+
+        let result = backend
+            .execute_function(first_id, vec![InterpValue::I64(10), InterpValue::I64(32)])
+            .expect("execute pre-promoted add");
+        match result {
+            InterpValue::I64(n) => assert_eq!(n, 42),
+            other => panic!("unexpected result: {:?}", other),
+        }
+
+        assert_eq!(
+            backend.function_tier(second_id),
+            Some(OptimizationTier::Baseline)
+        );
     }
 }
