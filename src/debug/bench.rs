@@ -6,7 +6,7 @@
 //! signal, and report min/median/mean/max + success rate.
 
 use super::DebugCommands;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::ValueEnum;
 use std::path::Path;
 use std::process::Command;
@@ -53,6 +53,7 @@ pub fn execute(cmd: DebugCommands) -> Result<()> {
         tier_sample_rate,
         tier_start_interpreted,
         tier_promotion,
+        decode_profile,
         cooldown_ms,
         program_args,
     } = cmd
@@ -69,6 +70,7 @@ pub fn execute(cmd: DebugCommands) -> Result<()> {
         tier_sample_rate,
         tier_start_interpreted,
         tier_promotion,
+        decode_profile,
         cooldown_ms,
     };
     run_bench_with_options(
@@ -91,6 +93,7 @@ pub(crate) struct BenchOptions {
     pub tier_sample_rate: Option<u64>,
     pub tier_start_interpreted: Option<bool>,
     pub tier_promotion: Option<bool>,
+    pub decode_profile: bool,
     pub cooldown_ms: u64,
 }
 
@@ -103,6 +106,7 @@ impl Default for BenchOptions {
             tier_sample_rate: None,
             tier_start_interpreted: None,
             tier_promotion: None,
+            decode_profile: false,
             cooldown_ms: 0,
         }
     }
@@ -178,6 +182,9 @@ pub(crate) fn run_bench_with_options(
     if let Some(tier_promotion) = options.tier_promotion {
         println!("promote: {tier_promotion}");
     }
+    if options.decode_profile {
+        println!("decode:  tail-latency profile enabled");
+    }
     if options.cooldown_ms > 0 {
         println!("cooldown: {} ms between subprocesses", options.cooldown_ms);
     }
@@ -208,8 +215,15 @@ pub(crate) fn run_bench_with_options(
             );
 
             match outcome {
-                Ok(SingleRunOutcome::Ok { value, label }) => {
+                Ok(SingleRunOutcome::Ok {
+                    value,
+                    label,
+                    profile,
+                }) => {
                     accumulators[idx].samples.push(value);
+                    if let Some(profile) = profile {
+                        accumulators[idx].profiles.push(profile);
+                    }
                     println!(
                         "  run {i:>3}  {:<14} ok       {label}",
                         accumulators[idx].variant.label
@@ -262,6 +276,9 @@ pub(crate) fn run_bench_with_options(
                 summary.stddev,
                 drift(&acc.samples)
             );
+            if options.decode_profile && !acc.profiles.is_empty() {
+                print_profile_summary(&acc.profiles);
+            }
         }
     }
 
@@ -294,6 +311,7 @@ impl BenchVariant {
 struct VariantAccumulator {
     variant: BenchVariant,
     samples: Vec<f64>,
+    profiles: Vec<DecodeProfile>,
     failed: usize,
 }
 
@@ -302,14 +320,21 @@ impl VariantAccumulator {
         Self {
             variant,
             samples: Vec::new(),
+            profiles: Vec::new(),
             failed: 0,
         }
     }
 }
 
 enum SingleRunOutcome {
-    Ok { value: f64, label: String },
-    Fail { why: String },
+    Ok {
+        value: f64,
+        label: String,
+        profile: Option<DecodeProfile>,
+    },
+    Fail {
+        why: String,
+    },
 }
 
 fn bench_variants(options: &BenchOptions) -> Result<Vec<BenchVariant>> {
@@ -369,6 +394,9 @@ fn run_one(
         .arg("--stats")
         .env("RAYZOR_DUMP_ALLOC_AT_EXIT", "1")
         .env("RAYZOR_DUMP_JIT_MAP", "1");
+    if options.decode_profile {
+        child.env("RAYZOR_PROFILE_DECODE", "1");
+    }
 
     if options.preset_override_toml {
         child.arg("--preset-override-toml");
@@ -377,9 +405,7 @@ fn run_one(
         child.arg("--tier-thresholds").arg(spec);
     }
     if let Some(sample_rate) = options.tier_sample_rate {
-        child
-            .arg("--tier-sample-rate")
-            .arg(sample_rate.to_string());
+        child.arg("--tier-sample-rate").arg(sample_rate.to_string());
     }
     if let Some(start_interpreted) = options.tier_start_interpreted {
         child
@@ -421,10 +447,32 @@ fn run_one(
     };
 
     match sample {
-        Some(value) if !died_to_signal => Ok(SingleRunOutcome::Ok {
-            value,
-            label: metric_value_label(metric, value),
-        }),
+        Some(value) if !died_to_signal => {
+            let mut label = metric_value_label(metric, value);
+            let profile = if options.decode_profile {
+                extract_decode_profile(&combined)
+            } else {
+                None
+            };
+            if options.decode_profile {
+                if let Some(profile) = profile {
+                    label.push_str(&format!(
+                        "  p95={:.2}ms p99={:.2}ms max={:.2}ms@{}",
+                        profile.step_p95_ms,
+                        profile.step_p99_ms,
+                        profile.step_max_ms,
+                        profile.step_max_i
+                    ));
+                } else {
+                    label.push_str("  profile=missing");
+                }
+            }
+            Ok(SingleRunOutcome::Ok {
+                value,
+                label,
+                profile,
+            })
+        }
         _ => Ok(SingleRunOutcome::Fail {
             why: failure_reason(&combined, exit_code, died_to_signal),
         }),
@@ -436,6 +484,33 @@ fn metric_value_label(metric: Metric, value: f64) -> String {
         Metric::PeakMem => format!("peak={value:.1} MB"),
         Metric::TokPerS => format!("tok/s={value:.2}"),
         Metric::WallTime => format!("wall={value:.2}s"),
+    }
+}
+
+fn print_profile_summary(profiles: &[DecodeProfile]) {
+    let p95 = summarize(
+        profiles.iter().map(|p| p.step_p95_ms).collect::<Vec<_>>(),
+        0,
+    );
+    let p99 = summarize(
+        profiles.iter().map(|p| p.step_p99_ms).collect::<Vec<_>>(),
+        0,
+    );
+    let worst = profiles
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| {
+            a.step_max_ms
+                .partial_cmp(&b.step_max_ms)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
+        .map(|(i, p)| (i + 1, *p));
+
+    if let Some((run, worst)) = worst {
+        println!(
+            "{:14} profile: p95_med={:.2}ms p95_max={:.2}ms  p99_med={:.2}ms p99_max={:.2}ms  worst={:.2}ms@{} run={}",
+            "", p95.median, p95.max, p99.median, p99.max, worst.step_max_ms, worst.step_max_i, run
+        );
     }
 }
 
@@ -452,6 +527,39 @@ fn failure_reason(combined: &str, exit_code: i32, died_to_signal: bool) -> Strin
     } else {
         format!("no metric in stdout (exit {exit_code})")
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct DecodeProfile {
+    step_p95_ms: f64,
+    step_p99_ms: f64,
+    step_max_ms: f64,
+    step_max_i: i64,
+}
+
+fn extract_decode_profile(out: &str) -> Option<DecodeProfile> {
+    let line = out.lines().find(|l| l.contains("[profile-decode] "))?;
+    let (_, payload) = line.split_once("[profile-decode] ")?;
+    let mut p95 = None;
+    let mut p99 = None;
+    let mut max = None;
+    let mut max_i = None;
+    for part in payload.split_whitespace() {
+        let (key, value) = part.split_once('=')?;
+        match key {
+            "step_p95_ms" => p95 = value.parse::<f64>().ok(),
+            "step_p99_ms" => p99 = value.parse::<f64>().ok(),
+            "step_max_ms" => max = value.parse::<f64>().ok(),
+            "step_max_i" => max_i = value.parse::<i64>().ok(),
+            _ => {}
+        }
+    }
+    Some(DecodeProfile {
+        step_p95_ms: p95?,
+        step_p99_ms: p99?,
+        step_max_ms: max?,
+        step_max_i: max_i?,
+    })
 }
 
 fn drift(samples: &[f64]) -> f64 {

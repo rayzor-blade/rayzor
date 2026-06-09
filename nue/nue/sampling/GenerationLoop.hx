@@ -63,8 +63,9 @@ class GenerationLoop {
         // Per-phase decode timing, env-gated. When `RAYZOR_PROFILE_DECODE`
         // is set we accumulate wall time on each Haxe-source-level phase
         // (forward, lastRow, sample, decode_str, free_logits) and emit a
-        // single `[profile-decode]` line at exit. Cheap when off — just
-        // five constant 0.0 inits and a single getenv probe per call.
+        // single `[profile-decode]` line at exit. When enabled, also
+        // records per-step wall time so long runs can report tail latency
+        // (p50/p95/p99/max) instead of only final tok/s.
         var _profileOn = Sys.getEnv("RAYZOR_PROFILE_DECODE") != null;
         var _pForward = 0.0;
         var _pLastRow = 0.0;
@@ -72,6 +73,16 @@ class GenerationLoop {
         var _pDecodeStr = 0.0;
         var _pFreeLogits = 0.0;
         var _pCount = 0;
+        var _pHistBuckets = 1024;
+        var _pHistScale = 4.0;
+        var _pHistMs = 0.25;
+        var _pStepHist:Array<Int> = null;
+        var _pStepMax = 0.0;
+        var _pStepMaxIdx = -1;
+        if (_profileOn) {
+            _pStepHist = [];
+            for (_ in 0..._pHistBuckets) _pStepHist.push(0);
+        }
 
         model.resetCache();
 
@@ -90,6 +101,9 @@ class GenerationLoop {
         while (true) {
             if (nextId == eosId) break;
             if (maxNewTokens > 0 && step >= maxNewTokens) break;
+
+            var _stepStart = _profileOn ? Sys.time() : 0.0;
+            var _stepIndex = _pCount;
 
             generated.push(nextId);
             ids.push(nextId);
@@ -142,17 +156,54 @@ class GenerationLoop {
             if (_profileOn) _pSample += Sys.time() - _t1;
 
             if (lrN != logits) lrN.free();
+
+            if (_profileOn) {
+                var _stepWall = Sys.time() - _stepStart;
+                var _bucket = Std.int(Math.floor(_stepWall * 1000.0 * _pHistScale));
+                if (_bucket < 0) _bucket = 0;
+                if (_bucket >= _pHistBuckets) _bucket = _pHistBuckets - 1;
+                _pStepHist[_bucket] = _pStepHist[_bucket] + 1;
+                if (_stepWall > _pStepMax) {
+                    _pStepMax = _stepWall;
+                    _pStepMaxIdx = _stepIndex;
+                }
+            }
         }
 
         if (_profileOn && _pCount > 0) {
             var _wall = _pForward + _pLastRow + _pSample + _pDecodeStr + _pFreeLogits;
-            Sys.println("[profile-decode] tokens=" + _pCount
+            var _target50 = Std.int(Math.floor((_pCount - 1) * 0.50)) + 1;
+            var _target95 = Std.int(Math.floor((_pCount - 1) * 0.95)) + 1;
+            var _target99 = Std.int(Math.floor((_pCount - 1) * 0.99)) + 1;
+            var _p50 = 0.0;
+            var _p95 = 0.0;
+            var _p99 = 0.0;
+            var _cum = 0;
+            var _histIdx = 0;
+            while (_histIdx < _pHistBuckets) {
+                _cum += _pStepHist[_histIdx];
+                var _ms = _histIdx * _pHistMs;
+                if (_p50 == 0.0 && _cum >= _target50) _p50 = _ms;
+                if (_p95 == 0.0 && _cum >= _target95) _p95 = _ms;
+                if (_p99 == 0.0 && _cum >= _target99) {
+                    _p99 = _ms;
+                    break;
+                }
+                _histIdx++;
+            }
+            trace("[profile-decode] tokens=" + _pCount
                 + " wall_s=" + _wall
                 + " fwd_s=" + _pForward
                 + " lastRow_s=" + _pLastRow
                 + " sample_s=" + _pSample
                 + " decodeStr_s=" + _pDecodeStr
-                + " free_s=" + _pFreeLogits);
+                + " free_s=" + _pFreeLogits
+                + " step_p50_ms=" + _p50
+                + " step_p95_ms=" + _p95
+                + " step_p99_ms=" + _p99
+                + " step_max_ms=" + (_pStepMax * 1000.0)
+                + " step_max_i=" + _pStepMaxIdx
+                + " step_samples=" + _pCount);
         }
 
         logits.free();
@@ -190,4 +241,5 @@ class GenerationLoop {
         sliced.free();
         return reshaped;
     }
+
 }

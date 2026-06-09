@@ -140,6 +140,10 @@ pub enum DebugCommands {
         #[arg(long, value_name = "BOOL")]
         tier_promotion: Option<bool>,
 
+        /// Enable RAYZOR_PROFILE_DECODE=1 and surface per-token tail latency
+        #[arg(long)]
+        decode_profile: bool,
+
         /// Cooldown between subprocess runs, in milliseconds
         #[arg(long, default_value_t = 0)]
         cooldown_ms: u64,
