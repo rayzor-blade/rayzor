@@ -46,12 +46,43 @@
 //! optimisation that would avoid leaking a fresh backend per
 //! promotion.
 
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use beadie::{BackendAdapter, Bead, CompileError, CompileOutcome, JitBackend, ThresholdPolicy};
 
 use super::cranelift_backend::CraneliftBackend;
 use crate::ir::{IrFunctionId, IrModule};
+
+fn tier_event_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("RAYZOR_PROFILE_DECODE").is_some()
+            || std::env::var_os("RAYZOR_PROFILE_TIER_EVENTS").is_some()
+    })
+}
+
+fn tier_event_time_s() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+fn emit_beadie_compile_event(kind: &str, func_id: IrFunctionId, opt_level: &str, detail: &str) {
+    if !tier_event_enabled() {
+        return;
+    }
+    eprintln!(
+        "[tier-event] t={:.6} kind={} func={} tier=beadie opt={}{}{}",
+        tier_event_time_s(),
+        kind,
+        func_id.0,
+        opt_level,
+        if detail.is_empty() { "" } else { " " },
+        detail
+    );
+}
 
 /// The compile unit beadie hands the backend at dispatch time: the
 /// live module set + the target `IrFunctionId`.
@@ -125,12 +156,29 @@ fn compile_into_fresh_backend(
     symbols: &[(String, usize)],
     opt_level: &str,
 ) -> Result<(usize, CraneliftBackend), String> {
+    let started = Instant::now();
+    emit_beadie_compile_event("beadie_compile_start", def.func_id, opt_level, "");
     // Rebuild the `(name, ptr)` slice cranelift expects.
     let symbols_ref: Vec<(&str, *const u8)> = symbols
         .iter()
         .map(|(name, ptr)| (name.as_str(), *ptr as *const u8))
         .collect();
-    let mut backend = CraneliftBackend::with_symbols_and_opt(opt_level, &symbols_ref)?;
+    let mut backend = match CraneliftBackend::with_symbols_and_opt(opt_level, &symbols_ref) {
+        Ok(backend) => backend,
+        Err(e) => {
+            emit_beadie_compile_event(
+                "beadie_compile_error",
+                def.func_id,
+                opt_level,
+                &format!(
+                    "error={} dur_ms={:.3}",
+                    sanitize_event_detail(&e),
+                    started.elapsed().as_secs_f64() * 1000.0
+                ),
+            );
+            return Err(e);
+        }
+    };
 
     let modules = def.modules.read().unwrap();
     // Verify the target function is actually in some module before
@@ -140,17 +188,79 @@ fn compile_into_fresh_backend(
         .iter()
         .any(|m| m.functions.contains_key(&def.func_id))
     {
-        return Err(format!(
+        let err = format!(
             "BeadieJit: function {:?} not in any loaded module",
             def.func_id
-        ));
+        );
+        emit_beadie_compile_event(
+            "beadie_compile_error",
+            def.func_id,
+            opt_level,
+            &format!(
+                "error={} dur_ms={:.3}",
+                sanitize_event_detail(&err),
+                started.elapsed().as_secs_f64() * 1000.0
+            ),
+        );
+        return Err(err);
     }
     for module in modules.iter() {
-        backend.compile_module_without_finalize(module)?;
+        if let Err(e) = backend.compile_module_without_finalize(module) {
+            emit_beadie_compile_event(
+                "beadie_compile_error",
+                def.func_id,
+                opt_level,
+                &format!(
+                    "error={} dur_ms={:.3}",
+                    sanitize_event_detail(&e),
+                    started.elapsed().as_secs_f64() * 1000.0
+                ),
+            );
+            return Err(e);
+        }
     }
-    backend.finalize()?;
-    let ptr = backend.get_function_ptr(def.func_id)? as usize;
+    if let Err(e) = backend.finalize() {
+        emit_beadie_compile_event(
+            "beadie_compile_error",
+            def.func_id,
+            opt_level,
+            &format!(
+                "error={} dur_ms={:.3}",
+                sanitize_event_detail(&e),
+                started.elapsed().as_secs_f64() * 1000.0
+            ),
+        );
+        return Err(e);
+    }
+    let ptr = match backend.get_function_ptr(def.func_id) {
+        Ok(ptr) => ptr as usize,
+        Err(e) => {
+            emit_beadie_compile_event(
+                "beadie_compile_error",
+                def.func_id,
+                opt_level,
+                &format!(
+                    "error={} dur_ms={:.3}",
+                    sanitize_event_detail(&e),
+                    started.elapsed().as_secs_f64() * 1000.0
+                ),
+            );
+            return Err(e);
+        }
+    };
+    emit_beadie_compile_event(
+        "beadie_compile_finish",
+        def.func_id,
+        opt_level,
+        &format!("dur_ms={:.3}", started.elapsed().as_secs_f64() * 1000.0),
+    );
     Ok((ptr, backend))
+}
+
+fn sanitize_event_detail(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_whitespace() { '_' } else { c })
+        .collect()
 }
 
 impl JitBackend for BeadieJit {

@@ -6,7 +6,7 @@
 //! signal, and report min/median/mean/max + success rate.
 
 use super::DebugCommands;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use clap::ValueEnum;
 use std::path::Path;
 use std::process::Command;
@@ -463,6 +463,22 @@ fn run_one(
                         profile.step_max_ms,
                         profile.step_max_i
                     ));
+                    if profile.tier_events.total > 0 {
+                        label.push_str(&format!(
+                            "  tier_events={} near={} routes={} installs={} compiles={}",
+                            profile.tier_events.total,
+                            profile.tier_events.near_max,
+                            profile.tier_events.routes,
+                            profile.tier_events.installs,
+                            profile.tier_events.compiles
+                        ));
+                    }
+                    if profile.tier_events_all.total > profile.tier_events.total {
+                        label.push_str(&format!(
+                            "  tier_process_events={}",
+                            profile.tier_events_all.total
+                        ));
+                    }
                 } else {
                     label.push_str("  profile=missing");
                 }
@@ -511,6 +527,55 @@ fn print_profile_summary(profiles: &[DecodeProfile]) {
             "{:14} profile: p95_med={:.2}ms p95_max={:.2}ms  p99_med={:.2}ms p99_max={:.2}ms  worst={:.2}ms@{} run={}",
             "", p95.median, p95.max, p99.median, p99.max, worst.step_max_ms, worst.step_max_i, run
         );
+        let events = profiles
+            .iter()
+            .fold(TierEventCounts::default(), |mut acc, p| {
+                acc.total += p.tier_events.total;
+                acc.routes += p.tier_events.routes;
+                acc.registers += p.tier_events.registers;
+                acc.installs += p.tier_events.installs;
+                acc.compiles += p.tier_events.compiles;
+                acc.errors += p.tier_events.errors;
+                acc.near_max += p.tier_events.near_max;
+                acc
+            });
+        if events.total > 0 {
+            println!(
+                "{:14} tier: decode_events={} near_max={} routes={} registers={} installs={} compiles={} errors={}",
+                "",
+                events.total,
+                events.near_max,
+                events.routes,
+                events.registers,
+                events.installs,
+                events.compiles,
+                events.errors
+            );
+        }
+        let all_events = profiles
+            .iter()
+            .fold(TierEventCounts::default(), |mut acc, p| {
+                acc.total += p.tier_events_all.total;
+                acc.routes += p.tier_events_all.routes;
+                acc.registers += p.tier_events_all.registers;
+                acc.installs += p.tier_events_all.installs;
+                acc.compiles += p.tier_events_all.compiles;
+                acc.errors += p.tier_events_all.errors;
+                acc.near_max += p.tier_events_all.near_max;
+                acc
+            });
+        if all_events.total > events.total {
+            println!(
+                "{:14} tier-process: events={} routes={} registers={} installs={} compiles={} errors={}",
+                "",
+                all_events.total,
+                all_events.routes,
+                all_events.registers,
+                all_events.installs,
+                all_events.compiles,
+                all_events.errors
+            );
+        }
     }
 }
 
@@ -531,35 +596,136 @@ fn failure_reason(combined: &str, exit_code: i32, died_to_signal: bool) -> Strin
 
 #[derive(Clone, Copy, Debug)]
 struct DecodeProfile {
+    decode_start_s: f64,
+    decode_end_s: f64,
     step_p95_ms: f64,
     step_p99_ms: f64,
     step_max_ms: f64,
     step_max_i: i64,
+    step_max_s: f64,
+    tier_events: TierEventCounts,
+    tier_events_all: TierEventCounts,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct TierEventCounts {
+    total: u64,
+    routes: u64,
+    registers: u64,
+    installs: u64,
+    compiles: u64,
+    errors: u64,
+    near_max: u64,
+}
+
+#[derive(Clone, Debug)]
+struct TierEvent {
+    t: f64,
+    kind: String,
 }
 
 fn extract_decode_profile(out: &str) -> Option<DecodeProfile> {
     let line = out.lines().find(|l| l.contains("[profile-decode] "))?;
     let (_, payload) = line.split_once("[profile-decode] ")?;
+    let mut decode_start_s = None;
+    let mut decode_end_s = None;
     let mut p95 = None;
     let mut p99 = None;
     let mut max = None;
     let mut max_i = None;
+    let mut max_s = None;
     for part in payload.split_whitespace() {
         let (key, value) = part.split_once('=')?;
         match key {
+            "decode_start_s" => decode_start_s = value.parse::<f64>().ok(),
+            "decode_end_s" => decode_end_s = value.parse::<f64>().ok(),
             "step_p95_ms" => p95 = value.parse::<f64>().ok(),
             "step_p99_ms" => p99 = value.parse::<f64>().ok(),
             "step_max_ms" => max = value.parse::<f64>().ok(),
             "step_max_i" => max_i = value.parse::<i64>().ok(),
+            "step_max_s" => max_s = value.parse::<f64>().ok(),
             _ => {}
         }
     }
-    Some(DecodeProfile {
+    let mut profile = DecodeProfile {
+        decode_start_s: decode_start_s.unwrap_or(0.0),
+        decode_end_s: decode_end_s.unwrap_or(0.0),
         step_p95_ms: p95?,
         step_p99_ms: p99?,
         step_max_ms: max?,
         step_max_i: max_i?,
-    })
+        step_max_s: max_s.unwrap_or(0.0),
+        tier_events: TierEventCounts::default(),
+        tier_events_all: TierEventCounts::default(),
+    };
+    let tier_events = extract_tier_events(out);
+    profile.tier_events = correlate_tier_events(&profile, &tier_events);
+    profile.tier_events_all = count_tier_events(&tier_events);
+    Some(profile)
+}
+
+fn extract_tier_events(out: &str) -> Vec<TierEvent> {
+    out.lines()
+        .filter_map(|line| {
+            let (_, payload) = line.split_once("[tier-event] ")?;
+            let mut t = None;
+            let mut kind = None;
+            for part in payload.split_whitespace() {
+                let Some((key, value)) = part.split_once('=') else {
+                    continue;
+                };
+                match key {
+                    "t" => t = value.parse::<f64>().ok(),
+                    "kind" => kind = Some(value.to_string()),
+                    _ => {}
+                }
+            }
+            Some(TierEvent { t: t?, kind: kind? })
+        })
+        .collect()
+}
+
+fn correlate_tier_events(profile: &DecodeProfile, events: &[TierEvent]) -> TierEventCounts {
+    let mut counts = TierEventCounts::default();
+    let has_window = profile.decode_start_s > 0.0 && profile.decode_end_s > profile.decode_start_s;
+    let near_max_window_s = 2.0;
+    for event in events {
+        if has_window && (event.t < profile.decode_start_s || event.t > profile.decode_end_s) {
+            continue;
+        }
+        add_tier_event_count(&mut counts, event);
+        if profile.step_max_s > 0.0 && (event.t - profile.step_max_s).abs() <= near_max_window_s {
+            counts.near_max += 1;
+        }
+    }
+    counts
+}
+
+fn count_tier_events(events: &[TierEvent]) -> TierEventCounts {
+    let mut counts = TierEventCounts::default();
+    for event in events {
+        add_tier_event_count(&mut counts, event);
+    }
+    counts
+}
+
+fn add_tier_event_count(counts: &mut TierEventCounts, event: &TierEvent) {
+    counts.total += 1;
+    if event.kind.contains("route") || event.kind == "promote_target" {
+        counts.routes += 1;
+    }
+    if event.kind.contains("register") {
+        counts.registers += 1;
+    }
+    if event.kind.contains("install") {
+        counts.installs += 1;
+    }
+    if event.kind.contains("compile") || event.kind.contains("llvm") {
+        counts.compiles += 1;
+    }
+    if event.kind.contains("error") || event.kind.contains("timeout") {
+        counts.errors += 1;
+    }
 }
 
 fn drift(samples: &[f64]) -> f64 {

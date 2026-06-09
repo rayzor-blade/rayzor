@@ -79,6 +79,7 @@ class GenerationLoop {
         var _pStepHist:Array<Int> = null;
         var _pStepMax = 0.0;
         var _pStepMaxIdx = -1;
+        var _pStepMaxStart = 0.0;
         if (_profileOn) {
             _pStepHist = [];
             for (_ in 0..._pHistBuckets) _pStepHist.push(0);
@@ -98,6 +99,7 @@ class GenerationLoop {
 
         var generated:Array<Int> = [];
         var step = 0;
+        var _decodeStart = _profileOn ? Sys.time() : 0.0;
         while (true) {
             if (nextId == eosId) break;
             if (maxNewTokens > 0 && step >= maxNewTokens) break;
@@ -166,11 +168,13 @@ class GenerationLoop {
                 if (_stepWall > _pStepMax) {
                     _pStepMax = _stepWall;
                     _pStepMaxIdx = _stepIndex;
+                    _pStepMaxStart = _stepStart;
                 }
             }
         }
 
         if (_profileOn && _pCount > 0) {
+            var _decodeEnd = Sys.time();
             var _wall = _pForward + _pLastRow + _pSample + _pDecodeStr + _pFreeLogits;
             var _target50 = Std.int(Math.floor((_pCount - 1) * 0.50)) + 1;
             var _target95 = Std.int(Math.floor((_pCount - 1) * 0.95)) + 1;
@@ -198,11 +202,14 @@ class GenerationLoop {
                 + " sample_s=" + _pSample
                 + " decodeStr_s=" + _pDecodeStr
                 + " free_s=" + _pFreeLogits
+                + " decode_start_s=" + _decodeStart
+                + " decode_end_s=" + _decodeEnd
                 + " step_p50_ms=" + _p50
                 + " step_p95_ms=" + _p95
                 + " step_p99_ms=" + _p99
                 + " step_max_ms=" + (_pStepMax * 1000.0)
                 + " step_max_i=" + _pStepMaxIdx
+                + " step_max_s=" + _pStepMaxStart
                 + " step_samples=" + _pCount);
         }
 
