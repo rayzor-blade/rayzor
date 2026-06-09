@@ -7,8 +7,8 @@ WebGPU+WASM. It is **inference-only** — no autograd, no training. Everything
 above the runtime FFI is pure Haxe.
 
 The current proof point is Llama 3.2 1B Instruct (Q4_K_M GGUF) running through
-`examples/llama-chat/Main.hx` on M1 Pro at ~67 tok/s decode with ~690 MB peak
-RSS (commit `4001079`, session 2026-06-04..2026-06-08).
+`examples/llama-chat/Main.hx` on M1 Pro at ~73-74 tok/s sustained decode, with
+~690 MB peak RSS in the post-flash-attention / post-Q4_K_M-SDOT path.
 
 ---
 
@@ -30,6 +30,107 @@ RSS (commit `4001079`, session 2026-06-04..2026-06-08).
 - **CPU-first, GPU-second, browser-third.** Every kernel exists as a CPU
   implementation; the GPU and WASM paths are layered as optional dispatchers
   through Rayzor's existing `gpu/` and `wasm_backend` infrastructure.
+
+---
+
+## Throughput Roadmap: Rayzor Tiering + Hybrid Parallelism
+
+`llama-chat` throughput is now less about finding a higher peak and more about
+controlling tail variance. A June 2026 clean benchmark sweep over tier
+promotion thresholds on the long Voronoi prompt, with decode profiling disabled
+and a 30s round-robin cooldown, showed the useful variants clustering around a
+~76 tok/s median.
+
+| Variant (`interpreter/warm/hot`) | n | Mean tok/s | Median tok/s | StdDev | Min | Max | Read |
+|---|---:|---:|---:|---:|---:|---:|---|
+| `1/20/5` | 6 | 75.91 | 76.00 | 0.71 | 74.85 | 76.68 | Stable, no severe tail in this sweep. |
+| `1/20/2` | 6 | 75.80 | 76.49 | 1.48 | 72.77 | 77.02 | Highest peak, worst variance. |
+| `1/30/5` | 6 | 76.24 | 76.44 | 0.64 | 74.94 | 76.81 | Best mean/median/stability balance. |
+
+The practical conclusion is:
+
+- **Default for long decode should prefer stability over the single fastest
+  peak.** `1/30/5` is the current best candidate from this data because it
+  preserves the ~76 tok/s band with the strongest mean/median/stability
+  balance.
+- **Treat tier thresholds as a runtime-stability knob, not a kernel-speed
+  knob.** The heavy math already lives behind FFI kernels (`Q4_K_M` SDOT,
+  fused QKV, flash-attn decode). Thresholds mostly affect Haxe control-flow,
+  bootstrap, callback, sampler, and promotion scheduling.
+- **Keep decode profiling out of throughput sweeps.** `DECODE_PROFILE=true`
+  is useful for tail-latency diagnosis, but its per-token timers are invasive
+  enough that profiled and non-profiled tok/s should not be compared directly.
+- **Do not infer inner-loop promotion from the current top-level stats alone.**
+  In the compiled native path, many direct calls do not re-enter
+  `TieredBackend::record_call`; current stats can show only a few profiled
+  entry functions even while the model is doing hundreds of kernel calls per
+  token. The next benchmark gate must pair tok/s with kernel timing and tier
+  event timestamps.
+
+### Immediate Tiering Work
+
+Before changing the parallel executor, Rayzor should make tiering predictable
+for long-running inference:
+
+1. **Quiesce promotion work before streaming.** Any async Beadie or LLVM work
+   that is launched before `Main.main` reaches the decode loop should either be
+   installed before token streaming starts or explicitly disabled for the run.
+   Pending compiled beads that never install do not help decode throughput, but
+   can still contend with it.
+2. **Separate compiler work from inference workers.** Tier promotion must not
+   borrow the same hot spin workers used by matmul/flash-attn kernels. Compiler
+   tasks belong on a separate low-priority lane or an explicit pre-main warmup
+   phase.
+3. **Measure tail latency, not only final tok/s.** The benchmark harness should
+   continue reporting stddev and drift, and the decode profiler should track
+   p50/p95 per-token latency, tier events, kernel timings, and thermal/run
+   order.
+4. **Keep `start_interpreted=false` as the simple stability lever for
+   production-style decode** when it proves faster on a given machine. Use
+   `start_interpreted=true` only when measuring tier behavior deliberately.
+
+### Hybrid Parallelism Direction
+
+A morsel-driven scheduler is attractive, but only for the part of the workload
+where it fits the tensor shapes.
+
+**Prefill should get morsels first.** Multi-token prompt processing has enough
+rows to amortize task overhead. The promising decomposition is token-row
+morsels, for example 16/32/64 rows at a time, with static task metadata built
+when `LlamaArch.build()` constructs the model. Prefill morsels can eventually
+fuse local work such as:
+
+- Q/K/V projection bands plus RoPE and KV append.
+- FFN `gate` + `up` projection bands, local SiLU/mul, then `down` projection.
+- Per-layer prompt chunks that keep intermediate F32 vectors hot in L1/L2
+  instead of forcing full-tensor barriers between every sub-op.
+
+**Decode should stay on the current fused/spin-pool path.** Single-token
+generation is memory-bandwidth-bound: `[1, hidden]` matmuls and
+`flashAttnDecode` do not have enough independent row work to justify task
+metadata, work stealing, or cache-line contention. For decode, the right
+direction is smaller and more local:
+
+- Keep Q4_K_M/Q6_K weights quantised end-to-end.
+- Keep fused QKV projection and fused flash-attn decode on the fast path.
+- Reuse per-worker scratch buffers inside flash-attn and matmul kernels where
+  practical.
+- Gate parallel flash-attn by cache length, as the runtime already does, so
+  short-context decode stays single-threaded when fork/join overhead would
+  dominate.
+
+### Morsel Runtime Constraints
+
+If/when a prefill morsel runtime lands, keep it deliberately boring from the
+Haxe side:
+
+- Use flat preallocated arrays/classes for task descriptors; avoid anonymous
+  typedef task records and `Dynamic` task payloads.
+- Avoid `Array.push` in hot scheduling paths; fill arrays by index.
+- Build static task topology in the arch builder, then mutate only primitive
+  cursor/range fields at runtime.
+- Expose the runtime as a small set of FFI entry points rather than making
+  every `Module.forward()` allocate scheduler objects.
 
 ---
 
